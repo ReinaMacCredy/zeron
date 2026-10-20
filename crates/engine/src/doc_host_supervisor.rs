@@ -15,10 +15,10 @@ use super::delegation::{WAKE_QUESTION_CHARS, clip, question_lines};
 use super::*;
 use crate::registry::HarnessRegistry;
 use crate::supervisor::{
-    Flush, InterventionRecord, MISSION_SILENT_MS, MissionFacts, Projections, Reply, Stall,
-    StepSnap, StepThread, SupervisorEvent, SupervisorStore, ThreadFacts, WakeEntry, WakeHeader,
-    chips, escalated_item, fold_ms, lead_questions, open_inputs, plan_flush, plan_stalls, utc,
-    wake_text,
+    Asked, Flush, InterventionRecord, MISSION_SILENT_MS, MissionFacts, Projections, Reply, Stall,
+    StallNode, StepSnap, StepThread, SupervisorEvent, SupervisorStore, ThreadFacts, TreeStall,
+    WakeEntry, WakeHeader, chips, escalated_item, fold_ms, lead_questions, open_inputs, plan_flush,
+    plan_stalls, tree_stalls, utc, wake_text,
 };
 use crate::supervisor_resources::{
     CheckOutcome, Contention, PAGE_CHECK_MS, Probe, ResourceMission, find_candidates, run_check,
@@ -49,6 +49,22 @@ fn live(status: SessionStatus) -> bool {
 
 fn ms(at: chrono::DateTime<chrono::Utc>) -> i64 {
     at.timestamp_millis()
+}
+
+/// The one stall discriminator: background work or live sub-agents keep a node busy, even when a Stop left it Idle.
+fn busy(sessions: &[Session], engine: Option<&SessionsEngine>, thread: &str) -> bool {
+    sessions
+        .iter()
+        .find(|session| session.chat_id == thread)
+        .is_some_and(|session| session.running_subagents > 0 || session.held_by_subagents)
+        || engine.is_some_and(|engine| engine.holds_background_work(thread))
+}
+
+fn span(ms: i64) -> String {
+    match ms {
+        60_000.. => format!("{} min", ms / 60_000),
+        _ => format!("{} s", ms.max(0) / 1000),
+    }
 }
 
 fn step_failed(step: &TaskStep) -> bool {
@@ -170,6 +186,7 @@ struct Round {
     step_titles: HashMap<String, String>,
     resources: Vec<ResourceMission>,
     edges: HashSet<String>,
+    stalls: Vec<TreeStall>,
 }
 
 /// What an intervention row needs from before the action: a re-brief's snapshot predates its own edit.
@@ -324,6 +341,14 @@ impl DocHost {
         };
         if asker.is_system() {
             return;
+        }
+        if let Some(store) = self.supervisor() {
+            store.note_asked(Asked {
+                chat_id: asker.id.clone(),
+                request_id: request_id.to_string(),
+                at: now_ms(),
+                approval: questions.iter().any(|q| q.approval),
+            });
         }
         let chats = workspace.watch_chats().borrow().clone();
         let tasks = workspace.watch_tasks().borrow().clone();
@@ -678,6 +703,7 @@ impl DocHost {
         let (ended, edges) = observed.sessions(sessions, now);
         let done = observed.missions_done(tasks);
         let nodes = self.node_events(observed, sessions, &ended, chats, tasks, steps);
+        let stalls = self.tree_facts(store, sessions, chats, tasks, steps);
         if !ended.is_empty() && store.watches_any_tree() {
             store.mark_stale();
         }
@@ -810,7 +836,52 @@ impl DocHost {
             step_titles,
             resources,
             edges,
+            stalls,
         }
+    }
+
+    /// Stall facts of watched nodes only, each carrying its tree so `offer` keys it by root or mission.
+    fn tree_facts(
+        &self,
+        store: &SupervisorStore,
+        sessions: &[Session],
+        chats: &[Chat],
+        tasks: &[Task],
+        steps: &[TaskStep],
+    ) -> Vec<TreeStall> {
+        let engine = self.sessions();
+        let node = |chat: &Chat| {
+            if chat.is_system() || chat.archived || chat.device_id != self.device_id() {
+                return None;
+            }
+            let tree = tree_of(chat, chats, tasks, steps, self.device_id());
+            self.tree_watched(store, &tree).then(|| StallNode {
+                chat_id: chat.id.clone(),
+                root: tree.root,
+                task_id: tree.task_id,
+                busy: busy(sessions, engine.as_ref(), &chat.id),
+            })
+        };
+        let chat = |id: &str| chats.iter().find(|chat| chat.id == id);
+        let (open, gone): (Vec<Asked>, Vec<Asked>) = store.asked().into_iter().partition(|asked| {
+            engine
+                .as_ref()
+                .is_some_and(|engine| engine.awaits_input(&asked.chat_id, &asked.request_id))
+        });
+        store.forget_asked(&gone);
+        let mut stalls = Vec::new();
+        for asked in open {
+            let Some(node) = chat(&asked.chat_id).and_then(node) else {
+                continue;
+            };
+            stalls.push(TreeStall::QuestionWaiting {
+                node,
+                request_id: asked.request_id,
+                asked_at: asked.at,
+                approval: asked.approval,
+            });
+        }
+        stalls
     }
 
     fn node_events(
@@ -833,15 +904,6 @@ impl DocHost {
             .filter(|thread| errored.contains(thread.as_str()))
             .map(|thread| (thread, Kind::NodeFailed));
         let engine = self.sessions();
-        let busy = |thread: &str| {
-            sessions
-                .iter()
-                .find(|session| session.chat_id == thread)
-                .is_some_and(|session| session.running_subagents > 0 || session.held_by_subagents)
-                || engine
-                    .as_ref()
-                    .is_some_and(|engine| engine.holds_background_work(thread))
-        };
         let mut events = Vec::new();
         for (thread, kind) in
             failed.chain(finished.iter().map(|thread| (thread, Kind::NodeFinished)))
@@ -849,7 +911,10 @@ impl DocHost {
             let Some(chat) = chats.iter().find(|chat| &chat.id == thread) else {
                 continue;
             };
-            if chat.is_system() || open_step_of(steps, thread).is_some() || busy(thread) {
+            if chat.is_system()
+                || open_step_of(steps, thread).is_some()
+                || busy(sessions, engine.as_ref(), thread)
+            {
                 continue;
             }
             let tree = tree_of(chat, chats, tasks, steps, self.device_id());
@@ -940,6 +1005,12 @@ impl DocHost {
         for stall in stalls {
             self.supervisor_event(stall_event(stall, &round.step_titles));
         }
+        let (tree_due, tree_next) = tree_stalls(now, std::mem::take(&mut round.stalls), |key| {
+            store.reported(key)
+        });
+        for stall in tree_due {
+            self.supervisor_event(self.tree_stall_event(workspace, stall, now));
+        }
         let settings = registry.supervisor_settings();
         if settings.decide_for_me {
             for plan in &round.plans {
@@ -993,10 +1064,14 @@ impl DocHost {
             ),
             _ => (SupervisorState::Asleep, 0),
         };
-        let next = [refresh, check.as_ref().map(|c| c.at.timestamp_millis())]
-            .into_iter()
-            .flatten()
-            .min();
+        let next = [
+            refresh,
+            check.as_ref().map(|c| c.at.timestamp_millis()),
+            tree_next,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         store.set_next_check(check);
         store.publish(Some(supervisor.id), state, waiting);
         next
@@ -1531,10 +1606,12 @@ impl DocHost {
                             task.plan_pending && !workspace.task_steps_of(&task.id).is_empty()
                         })
             }
-            Kind::NeedsYou => match (&summary.thread_id, &event.request_id) {
-                (Some(thread), Some(request)) => sessions.awaits_input(thread, request),
-                _ => false,
-            },
+            Kind::NeedsYou | Kind::QuestionWaiting => {
+                match (&summary.thread_id, &event.request_id) {
+                    (Some(thread), Some(request)) => sessions.awaits_input(thread, request),
+                    _ => false,
+                }
+            }
             Kind::MissionSilent => {
                 event.since.is_some() && mission.and_then(MissionFacts::quiet_since) == event.since
             }
@@ -1564,8 +1641,62 @@ impl DocHost {
                 .as_deref()
                 .and_then(|thread| sessions.session_status(thread))
                 .is_some_and(|session| session.status == SessionStatus::Errored),
-            Kind::MissionDone | Kind::PlanEdited | Kind::Heartbeat | Kind::NodeFinished => true,
+            Kind::MissionDone
+            | Kind::PlanEdited
+            | Kind::Heartbeat
+            | Kind::NodeFinished
+            | Kind::Dirty
+            | Kind::Unmerged
+            | Kind::LimitIdle
+            | Kind::LostWake
+            | Kind::MergeBlocked => true,
         }
+    }
+
+    fn tree_stall_event(
+        &self,
+        workspace: &WorkspaceHost,
+        stall: TreeStall,
+        now: i64,
+    ) -> SupervisorEvent {
+        let key = stall.key();
+        let node = stall.node().clone();
+        let who = workspace.chat(&node.chat_id).ok().flatten().map_or_else(
+            || format!("Thread {}", node.chat_id),
+            |chat| thread_label(&chat),
+        );
+        let mut event = match stall {
+            TreeStall::QuestionWaiting {
+                request_id,
+                asked_at,
+                approval,
+                ..
+            } => {
+                let what = if approval {
+                    "a tool approval"
+                } else {
+                    "an answer"
+                };
+                let mut event = SupervisorEvent::new(
+                    Kind::QuestionWaiting,
+                    key,
+                    node.task_id.as_deref(),
+                    format!("{who} has waited {} for {what}", span(now - asked_at)),
+                );
+                event.detail = vec![format!(
+                    "Nobody answered it since {}. requestId {request_id}",
+                    utc(asked_at).with_timezone(&chrono::Local).format("%H:%M")
+                )];
+                event.request_id = Some(request_id);
+                event.since = Some(asked_at);
+                event
+            }
+        };
+        event.summary.step_id = open_step_of(&workspace.watch_task_steps().borrow(), &node.chat_id)
+            .map(|step| step.id.clone());
+        event.summary.thread_id = Some(node.chat_id);
+        event.summary.root_chat_id = Some(node.root);
+        event
     }
 
     fn render_wake(

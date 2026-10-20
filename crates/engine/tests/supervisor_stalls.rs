@@ -1,0 +1,427 @@
+//! Stall detectors of watched trees (general-mc U17-U20), on thresholds shortened for the whole
+//! test process, so these tests live apart from thread_tools' wake-count assertions.
+
+use std::sync::{Arc, Mutex, Once};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use futures::StreamExt;
+use futures::stream::BoxStream;
+
+use zeron_doc::{CommandBasedOn, SessionCommandEntry, SessionCommandPayload, SessionCommandStatus};
+use zeron_engine::{EngineCore, HarnessRegistry};
+use zeron_harness::{Harness, HarnessError, RunControls};
+use zeron_proto::supervisor::{SupervisorEventKind, SupervisorEventSummary, SupervisorSnapshot};
+use zeron_proto::{
+    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
+    SteeringMode, ToolCall,
+};
+
+const STALL_MS: u64 = 1_500;
+
+fn init_env() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: set before any engine in this process reads it; every test shares the values.
+        unsafe {
+            std::env::set_var("ZERON_SUPERVISOR_STALL_MS", STALL_MS.to_string());
+            std::env::set_var("ZERON_SUPERVISOR_FOLD_MS", "200");
+        }
+    });
+}
+
+/// Asks on "please ask", writes the named file on "please write <path>", and on "please fan out"
+/// ends its turn with a background sub-agent still running until the run is cancelled.
+struct StallHarness {
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl Harness for StallHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Stall"
+    }
+    fn supports_steering(&self) -> bool {
+        false
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.prompts.lock().unwrap().push(request.prompt.clone());
+        let prompt = request.prompt.clone();
+        let RunControls {
+            request_input,
+            interrupt,
+            ..
+        } = controls;
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(8);
+        tokio::spawn(async move {
+            let _ = tx
+                .send(Ok(AgentEvent::SessionStarted {
+                    harness: HarnessId::Mock,
+                    model: "stall-1".into(),
+                    tools: vec![],
+                    cwd: request.cwd.clone(),
+                    session_id: "hs-stall".into(),
+                    assistant_message_id: "a-stall".into(),
+                }))
+                .await;
+            let mut text = "noted".to_string();
+            if prompt.starts_with("please ask") {
+                let answers = (request_input)(vec![zeron_proto::UserInputQuestion {
+                    id: "q-ship".into(),
+                    header: "Agent question".into(),
+                    question: "Ship it?".into(),
+                    options: vec!["Yes".into(), "No".into()],
+                    multi_select: false,
+                    kind: None,
+                    prefill: None,
+                    multiline: false,
+                    approval: false,
+                }])
+                .await
+                .unwrap_or_default();
+                text = answers
+                    .first()
+                    .and_then(|a| a.labels.first().cloned())
+                    .unwrap_or_else(|| "no answer".into());
+            }
+            if let Some(path) = prompt.strip_prefix("please write ") {
+                std::fs::write(path.trim(), "left behind\n").unwrap();
+            }
+            let fans_out = prompt.starts_with("please fan out");
+            if fans_out {
+                for event in [
+                    AgentEvent::ToolCall {
+                        id: "toolu_scout".into(),
+                        call: ToolCall::Unknown {
+                            name: "Agent: scout".into(),
+                            input: Some(
+                                serde_json::json!({ "description": "scout", "prompt": "look" }),
+                            ),
+                        },
+                    },
+                    AgentEvent::ToolResult {
+                        id: "toolu_scout".into(),
+                        is_error: false,
+                        output: None,
+                        diff: None,
+                    },
+                ] {
+                    let _ = tx.send(Ok(event)).await;
+                }
+            }
+            let _ = tx.send(Ok(AgentEvent::TextDelta { text })).await;
+            let _ = tx
+                .send(Ok(AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: Some("hs-stall".into()),
+                }))
+                .await;
+            if fans_out {
+                interrupt.cancelled().await;
+            }
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed())
+    }
+}
+
+struct Rig {
+    core: EngineCore,
+    prompts: Arc<Mutex<Vec<String>>>,
+    dir: tempfile::TempDir,
+}
+
+fn rig() -> Rig {
+    init_env();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(StallHarness {
+        prompts: prompts.clone(),
+    }));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    core.workspace
+        .create_space("space-s", "dev-a", "/tmp", None, false)
+        .expect("space");
+    core.workspace
+        .create_chat("lead", Some("space-s"), None, None, None)
+        .expect("lead chat");
+    core.workspace.rename_chat("lead", "Shop backend").unwrap();
+    Rig { core, prompts, dir }
+}
+
+fn child(rig: &Rig, id: &str, cwd: Option<&str>) {
+    rig.core
+        .workspace
+        .create_chat_from(
+            id,
+            Some("space-s"),
+            None,
+            None,
+            cwd.map(str::to_owned),
+            Some("lead"),
+        )
+        .unwrap();
+    rig.core
+        .workspace
+        .rename_chat(id, &format!("Work {id}"))
+        .unwrap();
+}
+
+async fn call(rig: &Rig, method: &'static str, params: serde_json::Value) -> serde_json::Value {
+    match zeron_rpc::RpcService::handle(&*rig.core.rpc_service(), method, params)
+        .await
+        .unwrap()
+    {
+        zeron_rpc::RpcReply::Value(value) => value,
+        _ => serde_json::Value::Null,
+    }
+}
+
+async fn watch_lead(rig: &Rig) -> String {
+    let ensured = call(
+        rig,
+        zeron_rpc::methods::ENSURE_SUPERVISOR,
+        serde_json::json!({ "config": { "harness": "mock", "sandbox": "workspace-write" } }),
+    )
+    .await;
+    call(
+        rig,
+        zeron_rpc::methods::MUTATE,
+        serde_json::json!({ "op": "setTreeWatched", "rootChatId": "lead", "watched": true }),
+    )
+    .await;
+    snapshot_until(rig, |s| s.watched_roots == ["lead"]).await;
+    ensured["chatId"].as_str().unwrap().to_string()
+}
+
+async fn snapshot_until(
+    rig: &Rig,
+    ready: impl Fn(&SupervisorSnapshot) -> bool,
+) -> SupervisorSnapshot {
+    let zeron_rpc::RpcReply::Stream(mut watch) = zeron_rpc::RpcService::handle(
+        &*rig.core.rpc_service(),
+        zeron_rpc::methods::WATCH_SUPERVISOR,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap() else {
+        panic!("a snapshot stream");
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let item = tokio::time::timeout_at(deadline, watch.next())
+            .await
+            .expect("timed out waiting for the Supervisor snapshot")
+            .unwrap();
+        let snapshot = serde_json::from_value(item).unwrap();
+        if ready(&snapshot) {
+            return snapshot;
+        }
+    }
+}
+
+fn events(snapshot: &SupervisorSnapshot, kind: SupervisorEventKind) -> Vec<SupervisorEventSummary> {
+    snapshot
+        .wakes
+        .iter()
+        .flat_map(|wake| &wake.events)
+        .filter(|event| event.kind == kind)
+        .cloned()
+        .collect()
+}
+
+/// Delivered and dropped alike: an event that reached the router at all.
+fn offered(
+    snapshot: &SupervisorSnapshot,
+    kind: SupervisorEventKind,
+) -> Vec<SupervisorEventSummary> {
+    snapshot
+        .wakes
+        .iter()
+        .flat_map(|wake| wake.events.iter().chain(&wake.dropped))
+        .filter(|event| event.kind == kind)
+        .cloned()
+        .collect()
+}
+
+async fn wait_for<F>(mut predicate: F, what: &str)
+where
+    F: FnMut() -> bool,
+{
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !predicate() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn queue_run(rig: &Rig, chat_id: &str, prompt: &str, cwd: &str) {
+    let handle = rig.core.doc_host.open(chat_id).expect("open chat");
+    handle
+        .doc()
+        .queue_command(&SessionCommandEntry {
+            id: format!("cmd-{chat_id}-{}", rig.prompts.lock().unwrap().len()),
+            payload: SessionCommandPayload::Run {
+                request: RunRequest {
+                    prompt: prompt.into(),
+                    harness: None,
+                    model: None,
+                    reasoning: None,
+                    model_options: Default::default(),
+                    cwd: cwd.into(),
+                    sandbox: SandboxLevel::WorkspaceWrite,
+                    permission_mode: zeron_proto::PermissionMode::Full,
+                    auto_approve: true,
+                    attachments: Vec::new(),
+                    worktree: None,
+                    branch: None,
+                    resume: None,
+                    forked_at: None,
+                    computer_control: false,
+                    mcp: None,
+                    disabled_tools: Vec::new(),
+                },
+                message_id: format!("msg-{chat_id}-{prompt}"),
+            },
+            issued_by: "viewer".into(),
+            issued_at: chrono::Utc::now().timestamp_millis(),
+            based_on: None::<CommandBasedOn>,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+            computer_generation: None,
+        })
+        .expect("queue command");
+}
+
+fn pending_request(rig: &Rig, chat_id: &str) -> Option<String> {
+    let entries = rig
+        .core
+        .doc_host
+        .open(chat_id)
+        .ok()?
+        .doc()
+        .read_entries()
+        .ok()?;
+    entries.iter().rev().find_map(|entry| {
+        entry.parts.iter().find_map(|part| match part {
+            zeron_doc::MessagePart::Input {
+                request_id,
+                resolved: false,
+                ..
+            } => Some(request_id.clone()),
+            _ => None,
+        })
+    })
+}
+
+fn idle(rig: &Rig, chat_id: &str) -> bool {
+    rig.core
+        .sessions
+        .session_status(chat_id)
+        .is_some_and(|s| s.status == zeron_proto::SessionStatus::Idle)
+}
+
+fn wakes_text(rig: &Rig) -> String {
+    rig.prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|prompt| prompt.contains("Supervisor wake"))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test]
+async fn a_watched_question_wakes_once_after_the_threshold_and_never_once_answered() {
+    let rig = rig();
+    watch_lead(&rig).await;
+    child(&rig, "child-a", None);
+    child(&rig, "child-b", None);
+
+    queue_run(&rig, "child-b", "please ask", "/tmp");
+    wait_for(
+        || pending_request(&rig, "child-b").is_some(),
+        "child-b's question",
+    )
+    .await;
+    let answered = pending_request(&rig, "child-b").unwrap();
+    call(
+        &rig,
+        zeron_rpc::methods::QUEUE_COMMAND,
+        serde_json::json!({
+            "chatId": "child-b",
+            "command": {
+                "kind": "respondInput", "requestId": answered,
+                "answers": [{ "questionId": "q-ship", "labels": ["Yes"] }],
+            },
+        }),
+    )
+    .await;
+    wait_for(
+        || pending_request(&rig, "child-b").is_none() && idle(&rig, "child-b"),
+        "the person's answer",
+    )
+    .await;
+
+    queue_run(&rig, "child-a", "please ask", "/tmp");
+    wait_for(
+        || pending_request(&rig, "child-a").is_some(),
+        "child-a's question",
+    )
+    .await;
+    let request = pending_request(&rig, "child-a").unwrap();
+    let snapshot = snapshot_until(&rig, |s| {
+        !events(s, SupervisorEventKind::QuestionWaiting).is_empty()
+    })
+    .await;
+    let [waiting] = events(&snapshot, SupervisorEventKind::QuestionWaiting)
+        .try_into()
+        .unwrap();
+    assert_eq!(waiting.key, format!("question-waiting:child-a:{request}"));
+    assert_eq!(waiting.thread_id.as_deref(), Some("child-a"));
+    assert_eq!(waiting.root_chat_id.as_deref(), Some("lead"));
+
+    tokio::time::sleep(Duration::from_millis(3 * STALL_MS)).await;
+    let snapshot = snapshot_until(&rig, |_| true).await;
+    let waiting = offered(&snapshot, SupervisorEventKind::QuestionWaiting);
+    assert_eq!(
+        waiting.len(),
+        1,
+        "once per request, never for the answered one: {waiting:?}"
+    );
+    wait_for(|| wakes_text(&rig).contains("has waited"), "the wake text").await;
+    let text = wakes_text(&rig);
+    assert!(
+        text.contains("Thread \"Work child-a\" has waited ") && text.contains(" for an answer"),
+        "{text}"
+    );
+    rig.core.shutdown().await;
+}

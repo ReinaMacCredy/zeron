@@ -25,6 +25,12 @@ pub enum SupervisorEventKind {
     Heartbeat,
     NodeFailed,
     NodeFinished,
+    QuestionWaiting,
+    Dirty,
+    Unmerged,
+    LimitIdle,
+    LostWake,
+    MergeBlocked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
