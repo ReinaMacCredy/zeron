@@ -3944,10 +3944,10 @@ impl ComposerInput {
                 && !from_composer
                 && text.chars().count() >= crate::attachments::PASTED_TEXT_MIN_CHARS
                 && zeron_proto::attachment_mentions::attachment_mentions(&text).is_empty()
-                && zeron_proto::invocation::leading_command(
+                && !zeron_proto::invocation::leading_command(
                     &zeron_proto::invocation::invocation_prompt(self.text()),
                 )
-                .is_none()
+                .is_some_and(|(name, _)| zeron_proto::invocation::valid_skill_command_name(name))
             {
                 cx.emit(ComposerInputEvent::PastedLongText(text));
                 return;

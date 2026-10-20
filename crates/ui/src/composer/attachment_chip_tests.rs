@@ -854,6 +854,15 @@ fn a_long_paste_after_a_slash_command_stays_inline(cx: &mut gpui::TestAppContext
     paste_clipboard(&handle, cx, ClipboardItem::new_string(long.clone()));
     assert!(staged_names(&handle, cx).is_empty());
     assert_eq!(text(&handle, cx), format!("/review {long}"));
+
+    edit(&handle, cx, |input| {
+        (
+            0..input.text().len(),
+            "/Users/reina/Code/foo.rs crashed: ".into(),
+        )
+    });
+    paste_clipboard(&handle, cx, ClipboardItem::new_string(long));
+    assert_eq!(staged_names(&handle, cx), ["Pasted text 1.txt"]);
 }
 
 #[gpui::test]
