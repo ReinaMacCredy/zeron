@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    App, ClickEvent, Context, Entity, EventEmitter, Hsla, IntoElement, Render, SharedString,
-    Subscription, Window, div, prelude::*, px,
+    App, ClickEvent, Context, Entity, EventEmitter, Hsla, IntoElement, MouseButton, MouseDownEvent,
+    Pixels, Point, Render, SharedString, Subscription, Window, div, prelude::*, px,
 };
 
 use super::center::TaskCenter;
@@ -12,21 +12,33 @@ use super::tree::{self, Dot, Link, NodeIn, StatsCache, Status, TreeMotion};
 use super::{Selection, chat_brand, linked_chat, rollup, step_chat};
 use crate::icons::{self, icon};
 use crate::motion::{self, Tween};
+use crate::popover::{self, Popup};
 use crate::state::AppState;
 use crate::theme::Theme;
 use crate::typography::ui_rems;
 
-const ROW: f32 = 26.0;
+const ROW: f32 = 30.0;
 const GAP: f32 = 4.0;
-const INDENT: f32 = 22.0;
-const ANCHOR: (f32, f32) = (13.0, 13.0);
+const INDENT: f32 = 24.0;
+const ANCHOR: (f32, f32) = (14.0, 15.0);
 const PAD_X: f32 = 10.0;
 const PAD_BOTTOM: f32 = 10.0;
+const LINK_WIDTH: f32 = 1.75;
+const DOT_RADIUS: f32 = 3.5;
 const LEAD: &str = "lead";
 
 pub(crate) enum StripTreeEvent {
-    Open(Selection),
+    Open {
+        selection: Selection,
+        chat_id: Option<String>,
+    },
     Brief(Selection),
+}
+
+struct RowMenu {
+    selection: Selection,
+    chat_id: Option<String>,
+    position: Point<Pixels>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -53,6 +65,7 @@ struct Row {
     id: String,
     parent: Option<usize>,
     depth: usize,
+    head: Option<&'static str>,
     title: String,
     status: Status,
     word: &'static str,
@@ -73,6 +86,8 @@ pub(crate) struct StripTree {
     since: Instant,
     tick: Option<gpui::Task<()>>,
     host: TreeHost,
+    fold_hover: Option<String>,
+    menu: Popup<RowMenu>,
     _state: Subscription,
 }
 
@@ -94,11 +109,13 @@ impl StripTree {
             folded: HashSet::new(),
             chevrons: HashMap::new(),
             open: Tween::at(f32::from(u8::from(open)), now),
-            motion: TreeMotion::default(),
+            motion: TreeMotion::solid(),
             stats: StatsCache::default(),
             since: now,
             tick: None,
             host,
+            fold_hover: None,
+            menu: Popup::default(),
         }
     }
 
@@ -153,7 +170,8 @@ impl StripTree {
             id: LEAD.into(),
             parent: None,
             depth: 0,
-            title: format!("Lead · {}", TaskCenter::lead_line(task, &plan)),
+            head: Some("Lead"),
+            title: TaskCenter::lead_line(task, &plan),
             status,
             word,
             brand: lead.map(chat_brand),
@@ -169,6 +187,7 @@ impl StripTree {
                 id: row.step.id.clone(),
                 parent: Some(0),
                 depth: 1,
+                head: None,
                 title: crate::transcript::single_line(&row.step.title),
                 status,
                 word,
@@ -233,6 +252,72 @@ impl StripTree {
             .or_insert_with(|| Tween::at(f32::from(u8::from(!folded)), now))
             .retarget(f32::from(u8::from(folded)), tree::CHEVRON, reduced, now);
         cx.notify();
+    }
+
+    fn open(&mut self, selection: Selection, chat_id: Option<String>, cx: &mut Context<Self>) {
+        self.close_menu(cx);
+        cx.emit(StripTreeEvent::Open { selection, chat_id });
+    }
+
+    fn close_menu(&mut self, cx: &mut Context<Self>) {
+        if self.menu.begin_close() {
+            popover::reap_popup(cx, |tree: &mut Self| &mut tree.menu);
+            cx.notify();
+        }
+    }
+
+    fn render_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let menu = self.menu.get()?;
+        let theme = theme.for_popup();
+        let (selection, chat_id) = (menu.selection.clone(), menu.chat_id.clone());
+        let brief = menu.selection.clone();
+        let item = |key: &'static str, label: &'static str, mark: &'static str| {
+            popover::menu_row(&theme, false, key)
+                .id(key)
+                .debug_selector(move || key.into())
+                .role(gpui::Role::MenuItem)
+                .aria_label(label)
+                .child(icon(mark).size(px(15.0)).text_color(theme.text_muted))
+                .child(label)
+        };
+        let card = popover::popover_card(&theme)
+            .w(px(200.0))
+            .flex()
+            .flex_col()
+            .on_mouse_down_out(cx.listener(|tree, _, _, cx| tree.close_menu(cx)))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                if chat_id.is_some() {
+                    item(
+                        "strip-tree-menu-open",
+                        "Open thread",
+                        icons::LUCIDE_ARROW_UP_RIGHT,
+                    )
+                } else {
+                    item(
+                        "strip-tree-menu-open",
+                        "Open in Mission Control",
+                        icons::LUCIDE_CHEVRON_RIGHT,
+                    )
+                }
+                .on_click(cx.listener(move |tree, _: &ClickEvent, _, cx| {
+                    tree.open(selection.clone(), chat_id.clone(), cx)
+                })),
+            )
+            .child(
+                item("strip-tree-menu-brief", "Brief", icons::DOCUMENT).on_click(cx.listener(
+                    move |tree, _: &ClickEvent, _, cx| {
+                        tree.close_menu(cx);
+                        cx.emit(StripTreeEvent::Brief(brief.clone()));
+                    },
+                )),
+            );
+        Some(popover::menu_at(
+            "strip-tree-menu",
+            menu.position,
+            card.into_any_element(),
+            self.menu.closing_since(),
+        ))
     }
 
     fn keep_ticking(&mut self, cx: &mut Context<Self>) {
@@ -338,6 +423,7 @@ impl Render for StripTree {
                 )),
             }
         }
+        let selected = self.state.read(cx).selected_chat.clone();
         let mut sweeping = false;
         let mut elements = Vec::new();
         for (ix, row) in rows.iter().enumerate() {
@@ -345,34 +431,62 @@ impl Render for StripTree {
                 continue;
             };
             let running = row.status == Status::Running;
-            let title = if running && !reduced {
+            let muted = row.status.muted();
+            let title_color = if running || muted {
+                theme.text_muted
+            } else {
+                theme.text
+            };
+            let line_color = if row.head.is_some() {
+                theme.text_muted
+            } else {
+                title_color
+            };
+            let line = if running && !reduced {
                 sweeping = true;
                 crate::transcript::shimmer_label(
                     SharedString::from(row.title.clone()),
                     tree::title_phase(self.since, now),
                     theme.font_sans.clone(),
-                    ui_rems(12.5).into(),
+                    ui_rems(14.0).into(),
                     None,
                     theme.text_muted,
                     theme.text,
                 )
-                .flex_1()
                 .whitespace_nowrap()
                 .text_color(theme.text_muted)
                 .into_any_element()
             } else {
                 div()
-                    .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_color(if running || row.status.muted() {
-                        theme.text_muted
-                    } else {
-                        theme.text
-                    })
+                    .text_color(line_color)
                     .child(row.title.clone())
                     .into_any_element()
             };
+            let title = div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .overflow_hidden()
+                .text_size(ui_rems(14.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .children(row.head.map(|head| {
+                    div()
+                        .flex_none()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(head)
+                }))
+                .children(row.head.map(|_| {
+                    div()
+                        .flex_none()
+                        .text_color(theme.text_muted)
+                        .child("\u{b7}")
+                }))
+                .child(line);
             let group = SharedString::from(format!("strip-tree-row-{}", row.id));
             let kids = rows.iter().filter(|other| other.parent == Some(ix)).count();
             let fold = (kids > 0).then(|| {
@@ -394,6 +508,7 @@ impl Render for StripTree {
                     .get(&row.id)
                     .map_or(f32::from(u8::from(folded)), |tween| tween.value_at(now));
                 let id = row.id.clone();
+                let hover_id = row.id.clone();
                 let selector = format!("strip-tree-fold-{}", row.id);
                 div()
                     .id(SharedString::from(selector.clone()))
@@ -401,19 +516,19 @@ impl Render for StripTree {
                     .role(gpui::Role::Button)
                     .aria_expanded(!folded)
                     .aria_label(if folded {
-                        format!("Show {hidden} under {}", row.title)
+                        format!("Show {hidden} under {}", row.head.unwrap_or(&row.title))
                     } else {
-                        format!("Fold {}", row.title)
+                        format!("Fold {}", row.head.unwrap_or(&row.title))
                     })
                     .flex_none()
                     .flex()
                     .items_center()
                     .gap(px(2.0))
-                    .h(px(20.0))
+                    .h(px(22.0))
                     .pl(px(6.0))
                     .pr(px(4.0))
                     .rounded(px(5.0))
-                    .text_size(ui_rems(11.0))
+                    .text_size(ui_rems(12.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text_muted)
                     .hover(|s| s.bg(theme.wash(0.08)).text_color(theme.text))
@@ -430,33 +545,54 @@ impl Render for StripTree {
                                 -std::f32::consts::FRAC_PI_2 * turn,
                             ))),
                     )
+                    .on_hover(cx.listener(move |tree, hovered: &bool, _, cx| {
+                        let next = hovered.then(|| hover_id.clone());
+                        if tree.fold_hover != next {
+                            tree.fold_hover = next;
+                            cx.notify();
+                        }
+                    }))
                     .on_click(cx.listener(move |tree, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
                         tree.toggle_fold(&id, cx);
                     }))
             });
-            let brief = (self.host == TreeHost::Supervisor).then(|| {
-                let selection = row.selection.clone();
-                let selector = format!("strip-tree-brief-{}", row.id);
+            let current = self.host == TreeHost::Strip
+                && row.chat_id.is_some()
+                && row.chat_id.as_deref() == selected.as_deref();
+            let opens = self.host != TreeHost::Intro && !current;
+            let go = opens.then(|| {
+                let over_fold = self.fold_hover.as_deref() == Some(row.id.as_str());
                 div()
-                    .id(SharedString::from(selector.clone()))
-                    .debug_selector(move || selector.clone())
-                    .role(gpui::Role::Button)
-                    .aria_label(format!("Brief for {}", row.title))
                     .flex_none()
-                    .cursor_pointer()
-                    .text_color(theme.accent)
+                    .size(px(18.0))
+                    .mr(px(-4.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .opacity(0.0)
-                    .group_hover(group.clone(), |s| s.opacity(1.0))
-                    .child("Brief ›")
-                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                        cx.stop_propagation();
-                        cx.emit(StripTreeEvent::Brief(selection.clone()))
-                    }))
+                    .when(!over_fold, |el| {
+                        el.group_hover(group.clone(), |s| s.opacity(1.0))
+                    })
+                    .child(
+                        icon(if row.chat_id.is_some() {
+                            icons::LUCIDE_ARROW_UP_RIGHT
+                        } else {
+                            icons::LUCIDE_CHEVRON_RIGHT
+                        })
+                        .size(px(13.0))
+                        .text_color(theme.text),
+                    )
             });
             let selection = row.selection.clone();
+            let chat_id = row.chat_id.clone();
+            let menu = (opens && self.host == TreeHost::Supervisor)
+                .then(|| (row.selection.clone(), row.chat_id.clone()));
             let selector = format!("strip-tree-row-{}", row.id);
-            let opens = self.host != TreeHost::Intro;
+            let label = match row.head {
+                Some(head) => format!("{head} \u{b7} {}: {}", row.title, row.word),
+                None => format!("{}: {}", row.title, row.word),
+            };
             elements.push(
                 div()
                     .id(SharedString::from(selector.clone()))
@@ -467,7 +603,7 @@ impl Render for StripTree {
                     } else {
                         gpui::Role::ListItem
                     })
-                    .aria_label(format!("{}: {}", row.title, row.word))
+                    .aria_label(label)
                     .absolute()
                     .top(px(*top))
                     .left(px(*left))
@@ -481,43 +617,38 @@ impl Render for StripTree {
                     .pr(px(8.0))
                     .rounded(px(6.0))
                     .when(opens, |el| {
-                        el.cursor_pointer().hover(|s| s.bg(theme.wash(0.05)))
+                        el.cursor_pointer()
+                            .hover(|s| s.bg(theme.wash(0.07)))
+                            .active(|s| s.bg(theme.wash(0.11)))
                     })
-                    .text_size(ui_rems(11.5))
+                    .text_size(ui_rems(12.5))
                     .text_color(theme.text_muted)
                     .child(
                         div()
                             .flex_none()
-                            .size(px(14.0))
+                            .size(px(16.0))
                             .flex()
                             .items_center()
                             .justify_center()
                             .child(tree::glyph(
                                 row.status,
-                                12.0,
+                                14.0,
                                 row.status.tone(&theme),
                                 reduced,
                             )),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .text_size(ui_rems(12.5))
-                            .child(title),
-                    )
+                    .child(title)
                     .children(row.brand.map(|(mark, tint)| {
                         icon(mark)
-                            .size(px(12.0))
+                            .size(px(14.0))
                             .flex_none()
                             .text_color(tint.unwrap_or(theme.text_muted))
                     }))
                     .child(
                         div()
                             .flex_none()
-                            .text_color(if row.status.muted() {
-                                theme.text_muted
+                            .text_color(if muted {
+                                theme.text_faint
                             } else {
                                 row.status.tone(&theme)
                             })
@@ -525,11 +656,26 @@ impl Render for StripTree {
                     )
                     .children(times[ix].clone().map(|time| div().flex_none().child(time)))
                     .children(fold)
-                    .children(brief)
+                    .children(go)
                     .when(opens, |el| {
-                        el.on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                            cx.emit(StripTreeEvent::Open(selection.clone()))
+                        el.on_click(cx.listener(move |tree, _: &ClickEvent, _, cx| {
+                            tree.open(selection.clone(), chat_id.clone(), cx)
                         }))
+                    })
+                    .when_some(menu, |el, (selection, chat_id)| {
+                        el.on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |tree, event: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                window.prevent_default();
+                                tree.menu.open(RowMenu {
+                                    selection: selection.clone(),
+                                    chat_id: chat_id.clone(),
+                                    position: event.position,
+                                });
+                                cx.notify();
+                            }),
+                        )
                     }),
             );
         }
@@ -539,6 +685,7 @@ impl Render for StripTree {
         if rows.iter().any(|row| row.status.live()) {
             self.keep_ticking(cx);
         }
+        let menu = self.render_menu(&theme, cx);
         if self.motion.animating(now) || self.chevrons.values().any(|t| !t.settled_at(now)) {
             window.request_animation_frame();
         }
@@ -552,7 +699,10 @@ impl Render for StripTree {
             .child(tree::links(
                 links,
                 dots.into_iter().map(|(_, dot)| dot).collect(),
+                LINK_WIDTH,
+                DOT_RADIUS,
             ))
+            .children(menu)
             .into_any_element()
     }
 }
@@ -564,6 +714,7 @@ fn sample_rows(rows: &[SampleRow], at: DateTime<Utc>) -> Vec<Row> {
             id: if ix == 0 { LEAD.into() } else { ix.to_string() },
             parent: (ix > 0).then_some(0),
             depth: usize::from(ix > 0),
+            head: (ix == 0).then_some("Lead"),
             title: row.title.into(),
             status: row.status,
             word: row.word,

@@ -188,8 +188,11 @@ impl Shell {
         let events = cx.subscribe(
             &tree,
             move |shell, _, event: &crate::tasks::StripTreeEvent, cx| {
-                if let crate::tasks::StripTreeEvent::Open(selection) = event {
-                    shell.open_mission(task.clone(), selection.clone(), cx);
+                if let crate::tasks::StripTreeEvent::Open { selection, chat_id } = event {
+                    match chat_id {
+                        Some(chat_id) => shell.open_chat(chat_id.clone(), cx),
+                        None => shell.open_mission(task.clone(), selection.clone(), cx),
+                    }
                 }
             },
         );
@@ -232,7 +235,12 @@ impl Shell {
         tween.value_at(now)
     }
 
-    fn open_mission(&mut self, task_id: String, selection: Selection, cx: &mut Context<Self>) {
+    pub(super) fn open_mission(
+        &mut self,
+        task_id: String,
+        selection: Selection,
+        cx: &mut Context<Self>,
+    ) {
         let center = self.task_center_for(task_id.clone(), cx);
         center.update(cx, |center, cx| center.select(selection, cx));
         self.open_task_center(task_id, cx);

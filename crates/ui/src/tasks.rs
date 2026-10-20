@@ -8,6 +8,7 @@ use gpui::{
     Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render,
     SharedString, Subscription, Window, div, prelude::*, px,
 };
+use zeron_proto::supervisor::NeedsYouRow;
 use zeron_proto::{
     ChatIndicator, PlanProgress, StepStatus, TaskMode, TaskPatch, TaskStatus, plan_progress,
     step_status, task_status,
@@ -40,7 +41,7 @@ pub use center::{LiveThread, PlanEdit, Selection, TaskCenter, TaskCenterEvent};
 use logic::COLUMNS;
 use morph::{Key, Morph, Painted, Rects};
 pub(crate) use strip_tree::{SampleRow, StripTree, StripTreeEvent, TreeHost};
-pub(crate) use tree::Status as TreeStatus;
+pub(crate) use tree::{Status as TreeStatus, spinner};
 
 pub(crate) const ADD_PLACEHOLDER: &str = "Add a task, or press Tab to add notes and start it";
 const LIST_MAX_WIDTH: f32 = 640.0;
@@ -122,6 +123,7 @@ pub(crate) struct Rollup {
     pub steps: Vec<StepRow>,
     pub status: TaskStatus,
     pub progress: PlanProgress,
+    pub questions: usize,
 }
 
 impl Rollup {
@@ -1481,11 +1483,25 @@ pub(crate) fn rollup(state: &AppState, task: &zeron_proto::Task, now: DateTime<U
         })
         .collect();
     let statuses: Vec<StepStatus> = steps.iter().map(|row| row.status).collect();
+    let questions = state.supervisor.as_ref().map_or(0, |snapshot| {
+        snapshot
+            .needs_you
+            .iter()
+            .filter(|row| {
+                let task_id = match row {
+                    NeedsYouRow::Item(item) => item.task_id.as_deref(),
+                    NeedsYouRow::Input(input) => input.task_id.as_deref(),
+                };
+                task_id == Some(task.id.as_str())
+            })
+            .count()
+    });
     Rollup {
         lead,
         status: task_status(task, lead, &statuses),
         progress: plan_progress(&statuses),
         steps,
+        questions,
     }
 }
 

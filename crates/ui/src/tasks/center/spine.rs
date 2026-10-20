@@ -1714,9 +1714,16 @@ impl TaskCenter {
                     .child(tree::links(
                         links.into_iter().map(|(_, link)| link).collect(),
                         Vec::new(),
+                        tree::LINK_WIDTH,
+                        tree::DOT_RADIUS,
                     ))
                     .children(cards)
-                    .child(tree::links(Vec::new(), dots))
+                    .child(tree::links(
+                        Vec::new(),
+                        dots,
+                        tree::LINK_WIDTH,
+                        tree::DOT_RADIUS,
+                    ))
                     .children(self.drop_bar(theme))
                     .on_drag_move::<StepDragPayload>(cx.listener(
                         |center, event: &DragMoveEvent<StepDragPayload>, _, cx| {

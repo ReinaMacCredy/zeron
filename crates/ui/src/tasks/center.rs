@@ -1312,19 +1312,41 @@ impl TaskCenter {
 
     pub(super) fn lead_line(task: &zeron_proto::Task, plan: &Rollup) -> String {
         let running = plan.count(StepStatus::Working);
+        let working = plan.lead == Some(ChatIndicator::Working);
         if task.completed_at.is_some() {
             "Done".into()
         } else if plan.lead.is_none() {
             "Not started".into()
-        } else if plan.lead == Some(ChatIndicator::Working) && plan.steps.is_empty() {
+        } else if working && plan.steps.is_empty() {
             "Planning".into()
+        } else if plan.lead == Some(ChatIndicator::Errored) {
+            "Failed".into()
+        } else if let Some(waits) = Self::lead_waits(task, plan).filter(|_| !working) {
+            waits
         } else if running > 0 {
             format!("Watching {running} {}", plural(running, "step", "steps"))
-        } else if plan.lead == Some(ChatIndicator::Working) {
+        } else if working {
             "Working".into()
         } else {
-            "Waiting on you".into()
+            "Idle".into()
         }
+    }
+
+    pub(super) fn lead_waits(task: &zeron_proto::Task, plan: &Rollup) -> Option<String> {
+        let mut waits = Vec::new();
+        if plan.phase(task) == super::PlanPhase::PlanReady {
+            waits.push("Plan review".to_owned());
+        }
+        let questions = plan
+            .questions
+            .max(usize::from(plan.lead == Some(ChatIndicator::AwaitingInput)));
+        if questions > 0 {
+            waits.push(format!(
+                "{questions} {}",
+                plural(questions, "question", "questions")
+            ));
+        }
+        (!waits.is_empty()).then(|| waits.join(", "))
     }
 
     fn render_reads(

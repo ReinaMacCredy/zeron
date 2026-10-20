@@ -293,7 +293,7 @@ fn sample_rows() -> Vec<SampleRow> {
     };
     vec![
         row(
-            "Lead \u{b7} Watching 1 step",
+            "Watching 1 step",
             TreeStatus::Running,
             "Working",
             brand("claude-opus"),

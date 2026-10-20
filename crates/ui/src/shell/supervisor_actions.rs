@@ -245,6 +245,9 @@ impl Shell {
     fn on_supervisor_event(&mut self, event: &SupervisorEvent, cx: &mut Context<Self>) {
         match event {
             SupervisorEvent::OpenTaskCenter(task_id) => self.open_task_center(task_id.clone(), cx),
+            SupervisorEvent::OpenMission(task_id, selection) => {
+                self.open_mission(task_id.clone(), selection.clone(), cx)
+            }
             SupervisorEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             SupervisorEvent::WatchDoc(doc) => self.set_supervisor_doc(doc.clone(), cx),
             SupervisorEvent::Discuss(text) => self.discuss_with_supervisor(text.clone(), cx),
