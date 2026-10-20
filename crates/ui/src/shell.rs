@@ -2725,6 +2725,7 @@ pub struct Shell {
     _accounts_cache: Subscription,
     rail_usage_menu: popover::Popup<HarnessId>,
     rail_usage_hover: app_rail::RingHover,
+    continuing: std::collections::HashSet<String>,
     harnesses_page: Option<Entity<HarnessesPage>>,
     /// Filters the settings nav; cleared when settings close.
     settings_search: Entity<ComposerInput>,
@@ -3460,6 +3461,7 @@ impl Shell {
             _accounts_cache: accounts_cache_observation,
             rail_usage_menu: popover::Popup::default(),
             rail_usage_hover: app_rail::RingHover::default(),
+            continuing: Default::default(),
             harnesses_page: None,
             settings_search,
             _settings_search_sub: settings_search_sub,
@@ -6346,6 +6348,9 @@ impl Shell {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
+        if !self.continuing.insert(source_chat_id.clone()) {
+            return;
+        }
         let host_device_id = self
             .state
             .read(cx)
@@ -6354,7 +6359,7 @@ impl Shell {
             .find(|chat| chat.id == source_chat_id)
             .map(|chat| chat.device_id.clone());
         let mut params = serde_json::json!({
-            "sourceChatId": source_chat_id,
+            "sourceChatId": source_chat_id.clone(),
             "chatId": uuid::Uuid::new_v4().to_string(),
             "targetSpaceId": target_space_id,
         });
@@ -6377,6 +6382,7 @@ impl Shell {
             )
             .await;
             this.update(cx, |shell, cx| {
+                shell.continuing.remove(&source_chat_id);
                 match reply.map_err(|e| e.to_string()).and_then(|value| {
                     serde_json::from_value::<zeron_proto::Chat>(value).map_err(|e| e.to_string())
                 }) {
@@ -6387,7 +6393,12 @@ impl Shell {
                                 cx.notify();
                             }
                         });
-                        shell.open_chat(chat.id, cx);
+                        let source_shown = shell.route == Route::Chat
+                            && shell.state.read(cx).selected_chat.as_deref()
+                                == Some(source_chat_id.as_str());
+                        if source_shown {
+                            shell.open_chat(chat.id, cx);
+                        }
                     }
                     Err(err) => {
                         tracing::warn!(%err, "ContinueInNewThread failed");

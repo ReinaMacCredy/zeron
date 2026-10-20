@@ -356,6 +356,7 @@ impl Shell {
             start["spaceId"] = space_id.into();
         }
         let task_id = task_id.to_string();
+        let route = self.route;
         cx.spawn(async move |this, cx| {
             let saving = update.is_some();
             for (step, params) in update.into_iter().chain([start]).enumerate() {
@@ -398,7 +399,7 @@ impl Shell {
                 let opened = this
                     .update(cx, |shell, cx| {
                         let landed = shell.state.read(cx).chats.iter().any(|c| c.id == chat_id);
-                        if landed {
+                        if landed && shell.route == route {
                             shell.open_chat(chat_id.clone(), cx);
                         }
                         landed
