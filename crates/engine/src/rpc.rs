@@ -1094,24 +1094,12 @@ enum MutateParams {
         from_chat_id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
-    CreateTaskStep {
-        task_id: String,
-        step_id: String,
-        title: String,
-        #[serde(default)]
-        notes: String,
-        #[serde(default)]
-        order_key: Option<String>,
-    },
-    #[serde(rename_all = "camelCase")]
     UpdateTaskStep {
         step_id: String,
         patch: zeron_proto::TaskStepPatch,
         #[serde(default)]
         from_chat_id: Option<String>,
     },
-    #[serde(rename_all = "camelCase")]
-    DeleteTaskStep { step_id: String },
     #[serde(rename_all = "camelCase")]
     ApprovePlan { task_id: String },
     #[serde(rename_all = "camelCase")]
@@ -2451,19 +2439,11 @@ impl EngineRpc {
                 )
                 .map(drop)
             }
-            MutateParams::CreateTaskStep {
-                task_id,
-                step_id,
-                title,
-                notes,
-                order_key,
-            } => self.create_task_step(task_id, step_id, title, notes, order_key, Vec::new()),
             MutateParams::UpdateTaskStep {
                 step_id,
                 patch,
                 from_chat_id,
             } => self.update_task_step(&step_id, &patch, from_chat_id.as_deref()),
-            MutateParams::DeleteTaskStep { step_id } => self.delete_task_step(&step_id),
             MutateParams::ApprovePlan { task_id } => self.approve_plan(&task_id).await,
             MutateParams::RetryTaskStep { step_id } => self.retry_task_step(&step_id).await,
             MutateParams::EditTaskPlan {

@@ -690,9 +690,6 @@ impl EngineRpc {
                 left_out.join(", ")
             ));
         }
-        self.workspace
-            .plan_task_steps(task_id, &steps)
-            .map_err(failed)?;
         let patch = TaskPatch {
             mode: (task.mode != TaskMode::Orchestrated).then_some(TaskMode::Orchestrated),
             plan: overview,
@@ -700,41 +697,12 @@ impl EngineRpc {
             images: (images != task.images).then_some(images),
             ..Default::default()
         };
-        if patch != TaskPatch::default() {
-            self.update_task(task_id, &patch)?;
-        }
+        self.workspace
+            .plan_task_steps(task_id, &steps, &patch)
+            .map_err(failed)?;
         self.doc_host
             .supervisor_replanned(&task, &before, &steps, from_chat_id);
         Ok(moved)
-    }
-
-    pub(super) fn create_task_step(
-        &self,
-        task_id: String,
-        step_id: String,
-        title: String,
-        notes: String,
-        order_key: Option<String>,
-        images: Vec<String>,
-    ) -> Result<(), RpcError> {
-        let now = chrono::Utc::now();
-        self.workspace
-            .create_task_step(&TaskStep {
-                id: step_id,
-                task_id,
-                title,
-                notes,
-                order_key: order_key.unwrap_or_default(),
-                chat_id: None,
-                outcome: None,
-                created_at: now,
-                updated_at: now,
-                deleted: false,
-                turn: None,
-                images,
-            })
-            .map_err(failed)
-            .map(drop)
     }
 
     pub(super) fn update_task_step(
@@ -759,21 +727,6 @@ impl EngineRpc {
             true => Ok(()),
             false => Err(refused("Step no longer exists")),
         }
-    }
-
-    pub(super) fn delete_task_step(&self, step_id: &str) -> Result<(), RpcError> {
-        let Some(step) = self.workspace.task_step(step_id) else {
-            return Ok(());
-        };
-        if let Some(chat_id) = step.chat_id.as_deref()
-            && self.workspace.chat(chat_id).map_err(failed)?.is_some()
-        {
-            return Err(refused("This step has a thread; skip it instead"));
-        }
-        self.workspace
-            .delete_task_step(step_id)
-            .map_err(failed)
-            .map(drop)
     }
 
     pub(super) async fn approve_plan(&self, task_id: &str) -> Result<(), RpcError> {
@@ -938,22 +891,23 @@ impl EngineRpc {
             };
             changes.push(format!("The overview has {what}{note}."));
         }
-        if overview.is_some() || overview_images.is_some() {
-            let patch = TaskPatch {
-                plan: overview,
-                images: overview_images,
-                ..Default::default()
-            };
-            self.update_task(task_id, &patch)?;
-        }
-        if !moves.is_empty() {
-            for (id, key) in &moves {
+        let task_patch = TaskPatch {
+            plan: overview,
+            images: overview_images,
+            ..Default::default()
+        };
+        let mut updates: Vec<(String, TaskStepPatch)> = moves
+            .iter()
+            .map(|(id, key)| {
                 let patch = TaskStepPatch {
                     order_key: Some(key.clone()),
                     ..Default::default()
                 };
-                self.update_task_step(id, &patch, None)?;
-            }
+                (id.clone(), patch)
+            })
+            .collect();
+        let mut creates = Vec::new();
+        if !moves.is_empty() {
             let title = |id: &str| {
                 steps
                     .iter()
@@ -987,14 +941,21 @@ impl EngineRpc {
                     1 => " with 1 image".to_string(),
                     n => format!(" with {n} images"),
                 };
-                self.create_task_step(
-                    task_id.to_string(),
-                    id.clone(),
-                    title.clone(),
-                    edit.notes,
-                    None,
+                let now = chrono::Utc::now();
+                creates.push(TaskStep {
+                    id: id.clone(),
+                    task_id: task_id.to_string(),
+                    title: title.clone(),
+                    notes: edit.notes,
+                    order_key: String::new(),
+                    chat_id: None,
+                    outcome: None,
+                    created_at: now,
+                    updated_at: now,
+                    deleted: false,
+                    turn: None,
                     images,
-                )?;
+                });
                 changes.push(format!("New step \"{title}\" (taskStepId {id}){with}."));
                 continue;
             };
@@ -1030,11 +991,14 @@ impl EngineRpc {
                 (None, Some(note)) => format!("has {note}"),
                 (None, None) => continue,
             };
-            self.update_task_step(&id, &patch, None)?;
+            updates.push((id.clone(), patch));
             changes.push(format!("Step \"{}\" (taskStepId {id}) {what}.", step.title));
         }
+        let deletes: Vec<String> = removed.iter().map(|step| step.id.clone()).collect();
+        self.workspace
+            .edit_task_plan(task_id, &task_patch, &updates, &creates, &deletes)
+            .map_err(failed)?;
         for step in removed {
-            self.delete_task_step(&step.id)?;
             changes.push(format!(
                 "Step \"{}\" (taskStepId {}) is removed.",
                 step.title, step.id

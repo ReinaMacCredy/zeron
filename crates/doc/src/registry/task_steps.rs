@@ -3,7 +3,8 @@ use super::tasks::{
 };
 use super::*;
 use zeron_proto::{
-    StepOutcome, StepTurn, TaskStep, TaskStepPatch, pin_order_key_between, valid_pin_order_key,
+    StepOutcome, StepTurn, TaskPatch, TaskStep, TaskStepPatch, pin_order_key_between,
+    valid_pin_order_key,
 };
 
 #[derive(Debug, Deserialize)]
@@ -181,24 +182,30 @@ impl RegistryDoc {
         Ok(true)
     }
 
-    /// One batch, so a refused step leaves the old plan whole.
-    pub fn plan_task_steps(
+    fn task_patch_op(
+        &mut self,
+        task_id: &str,
+        patch: &TaskPatch,
+        now: DateTime<Utc>,
+    ) -> Result<Option<RowOp>, DocError> {
+        if *patch == TaskPatch::default() {
+            return Ok(None);
+        }
+        self.task_update_op(task_id, patch, now)?
+            .map(Some)
+            .ok_or_else(|| invalid("Task no longer exists"))
+    }
+
+    fn new_step_ops(
         &mut self,
         task_id: &str,
         steps: &[TaskStep],
-        now: DateTime<Utc>,
-    ) -> Result<(), DocError> {
-        if self.task(task_id).is_none() {
-            return Err(invalid("Task no longer exists"));
-        }
-        let mut after = self.last_step_key(task_id);
+        mut after: Option<String>,
+    ) -> Result<Vec<RowOp>, DocError> {
         let mut ops = Vec::new();
         for step in steps {
             if step.task_id != task_id {
                 return Err(invalid("A step belongs to another task"));
-            }
-            if self.overlay_row(KIND_TASK_STEPS, &step.id).is_some() {
-                continue;
             }
             let op = self.step_upsert(step, after.as_deref())?;
             after = op
@@ -209,14 +216,69 @@ impl RegistryDoc {
                 .map(str::to_owned);
             ops.push(op);
         }
+        Ok(ops)
+    }
+
+    /// One batch with the task patch, so a refused row leaves the old plan whole.
+    pub fn plan_task_steps(
+        &mut self,
+        task_id: &str,
+        steps: &[TaskStep],
+        patch: &TaskPatch,
+        now: DateTime<Utc>,
+    ) -> Result<(), DocError> {
+        if self.task(task_id).is_none() {
+            return Err(invalid("Task no longer exists"));
+        }
+        let task_op = self.task_patch_op(task_id, patch, now)?;
+        let ops = self.new_step_ops(task_id, steps, self.last_step_key(task_id))?;
         let hlc = self.next_hlc();
         let dropped = self
             .task_steps_of(task_id)
             .into_iter()
             .filter(|step| step.chat_id.is_none() && step.outcome.is_none())
             .map(|step| flagged_deleted(&step.id, now, hlc.clone()));
-        let mut batch: Vec<RowOp> = dropped.collect();
+        let mut batch: Vec<RowOp> = task_op.into_iter().chain(dropped).collect();
         batch.extend(ops);
+        self.enqueue_ops(batch);
+        Ok(())
+    }
+
+    /// Every row is checked before any is queued, so a refused edit applies nothing.
+    pub fn edit_task_plan(
+        &mut self,
+        task_id: &str,
+        patch: &TaskPatch,
+        updates: &[(String, TaskStepPatch)],
+        creates: &[TaskStep],
+        deletes: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<(), DocError> {
+        if self.task(task_id).is_none() {
+            return Err(invalid("Task no longer exists"));
+        }
+        let mut batch: Vec<RowOp> = self
+            .task_patch_op(task_id, patch, now)?
+            .into_iter()
+            .collect();
+        for (step_id, patch) in updates {
+            let op = self
+                .step_update_op(step_id, patch, now)?
+                .ok_or_else(|| invalid("Step no longer exists"))?;
+            batch.push(op);
+        }
+        let after = updates
+            .iter()
+            .filter_map(|(_, patch)| patch.order_key.clone())
+            .chain(self.last_step_key(task_id))
+            .max();
+        batch.extend(self.new_step_ops(task_id, creates, after)?);
+        for step_id in deletes {
+            if self.task_step(step_id).is_none() {
+                return Err(invalid("Step no longer exists"));
+            }
+            batch.push(flagged_deleted(step_id, now, self.next_hlc()));
+        }
         self.enqueue_ops(batch);
         Ok(())
     }
@@ -227,8 +289,21 @@ impl RegistryDoc {
         patch: &TaskStepPatch,
         now: DateTime<Utc>,
     ) -> Result<bool, DocError> {
-        if self.task_step(step_id).is_none() {
+        let Some(op) = self.step_update_op(step_id, patch, now)? else {
             return Ok(false);
+        };
+        self.enqueue_ops(vec![op]);
+        Ok(true)
+    }
+
+    fn step_update_op(
+        &mut self,
+        step_id: &str,
+        patch: &TaskStepPatch,
+        now: DateTime<Utc>,
+    ) -> Result<Option<RowOp>, DocError> {
+        if self.task_step(step_id).is_none() {
+            return Ok(None);
         }
         let mut set = BTreeMap::new();
         if let Some(title) = &patch.title {
@@ -267,8 +342,7 @@ impl RegistryDoc {
         let row = overlay(self.overlay_row(KIND_TASK_STEPS, step_id).as_ref(), [&op])
             .ok_or_else(|| invalid("Step no longer exists"))?;
         check_row_fits(&row)?;
-        self.enqueue_ops(vec![op]);
-        Ok(true)
+        Ok(Some(op))
     }
 
     /// A flagged row, not a tombstone, so a retried create cannot revive it.

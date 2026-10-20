@@ -171,10 +171,14 @@ fn task_fields(task: &Task, title: String, order_key: String) -> BTreeMap<String
 
 /// A re-seed sends the whole row and its clocks as one op; the room rejects an oversized op's batch.
 pub(super) fn check_row_fits(row: &RegistryRow) -> Result<(), DocError> {
-    if !fits_op_budget(&row_to_seed_op(row)) {
-        return Err(invalid("This task is too large to sync; shorten its notes"));
+    if fits_op_budget(&row_to_seed_op(row)) {
+        return Ok(());
     }
-    Ok(())
+    Err(invalid(if row.kind == KIND_TASK_STEPS {
+        "This step is too large to sync; shorten its spec"
+    } else {
+        "This task is too large to sync: its notes and plan overview share one limit, so shorten one of them"
+    }))
 }
 
 pub fn check_task_syncs(task: &Task) -> Result<(), DocError> {
@@ -254,17 +258,18 @@ impl RegistryDoc {
             task.order_key.clone()
         };
         let set = task_fields(task, title, order_key);
-        self.enqueue_task_op(&task.id, OpKind::Upsert, set, hlc)?;
+        let op = self.task_op(&task.id, OpKind::Upsert, set, hlc)?;
+        self.enqueue_ops(vec![op]);
         Ok(true)
     }
 
-    fn enqueue_task_op(
-        &mut self,
+    fn task_op(
+        &self,
         id: &str,
         op: OpKind,
         set: BTreeMap<String, Value>,
         hlc: String,
-    ) -> Result<(), DocError> {
+    ) -> Result<RowOp, DocError> {
         let op = RowOp {
             kind: KIND_TASKS.into(),
             id: id.into(),
@@ -276,8 +281,7 @@ impl RegistryDoc {
         let row = overlay(self.overlay_row(KIND_TASKS, id).as_ref(), [&op])
             .ok_or_else(|| invalid("Task no longer exists"))?;
         check_row_fits(&row)?;
-        self.enqueue_ops(vec![op]);
-        Ok(())
+        Ok(op)
     }
 
     pub fn update_task(
@@ -286,8 +290,21 @@ impl RegistryDoc {
         patch: &TaskPatch,
         now: DateTime<Utc>,
     ) -> Result<bool, DocError> {
-        let Some(task) = self.task(task_id) else {
+        let Some(op) = self.task_update_op(task_id, patch, now)? else {
             return Ok(false);
+        };
+        self.enqueue_ops(vec![op]);
+        Ok(true)
+    }
+
+    pub(super) fn task_update_op(
+        &mut self,
+        task_id: &str,
+        patch: &TaskPatch,
+        now: DateTime<Utc>,
+    ) -> Result<Option<RowOp>, DocError> {
+        let Some(task) = self.task(task_id) else {
+            return Ok(None);
         };
         let mut set = BTreeMap::new();
         if let Some(title) = &patch.title {
@@ -344,8 +361,7 @@ impl RegistryDoc {
         }
         set.insert("updatedAt".into(), json!(now.timestamp_millis()));
         let hlc = self.next_hlc();
-        self.enqueue_task_op(task_id, OpKind::Update, set, hlc)?;
-        Ok(true)
+        self.task_op(task_id, OpKind::Update, set, hlc).map(Some)
     }
 
     /// A flagged row, not a tombstone, so a retried create cannot revive it.

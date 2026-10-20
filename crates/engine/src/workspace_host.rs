@@ -1378,8 +1378,26 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.create_task_step(step))?)
     }
 
-    pub fn plan_task_steps(&self, task_id: &str, steps: &[TaskStep]) -> Result<(), EngineError> {
-        Ok(self.mutate(|doc| doc.plan_task_steps(task_id, steps, Utc::now()))?)
+    pub fn plan_task_steps(
+        &self,
+        task_id: &str,
+        steps: &[TaskStep],
+        patch: &TaskPatch,
+    ) -> Result<(), EngineError> {
+        Ok(self.mutate(|doc| doc.plan_task_steps(task_id, steps, patch, Utc::now()))?)
+    }
+
+    pub fn edit_task_plan(
+        &self,
+        task_id: &str,
+        patch: &TaskPatch,
+        updates: &[(String, TaskStepPatch)],
+        creates: &[TaskStep],
+        deletes: &[String],
+    ) -> Result<(), EngineError> {
+        Ok(self.mutate(|doc| {
+            doc.edit_task_plan(task_id, patch, updates, creates, deletes, Utc::now())
+        })?)
     }
 
     pub fn update_task_step(
@@ -1388,10 +1406,6 @@ impl WorkspaceHost {
         patch: &TaskStepPatch,
     ) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.update_task_step(step_id, patch, Utc::now()))?)
-    }
-
-    pub fn delete_task_step(&self, step_id: &str) -> Result<bool, EngineError> {
-        Ok(self.mutate(|doc| doc.delete_task_step(step_id, Utc::now()))?)
     }
 
     /// Synced seen marker (any device; LWW + monotonic guard in the doc layer).
