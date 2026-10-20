@@ -471,6 +471,87 @@ impl DocHost {
         Ok(config)
     }
 
+    /// The chat that owns a delegated child or a mission step's thread.
+    pub(crate) fn child_owner(&self, chat_id: &str) -> Option<Chat> {
+        let workspace = self.workspace()?;
+        let owner = match workspace.chat(chat_id).ok()??.delegation {
+            Some(delegation) => delegation.delegated_by_chat_id,
+            None => self.step_lead_of(chat_id)?,
+        };
+        workspace.chat(&owner).ok()?
+    }
+
+    /// Moves a limited child to `to` with a provider divider, records the fallback and resumes it.
+    pub async fn act_on_offer(
+        &self,
+        chat_id: &str,
+        to: &zeron_proto::RouteTarget,
+    ) -> Result<(), EngineError> {
+        let workspace = self.workspace_or_fail()?;
+        let sessions = self
+            .sessions()
+            .ok_or_else(|| failure("orchestration_error", "sessions not wired"))?;
+        let chat = workspace
+            .chat(chat_id)?
+            .ok_or_else(|| failure("thread_not_found", chat_id))?;
+        let Some(mut config) = chat.config.clone() else {
+            return Ok(());
+        };
+        let from = config.harness;
+        if to.harness != from {
+            config.model = None;
+        }
+        config.harness = to.harness;
+        config.model = to.model.clone().or(config.model);
+        config.reasoning = to.reasoning.or(config.reasoning);
+        config.instance_id = None;
+        let note = crate::provider_switch::SystemNote {
+            text: format!(
+                "Provider changed from {} to {}.",
+                from.display_name(),
+                to.harness.display_name()
+            ),
+            hint: Some(format!(
+                "{} hit its usage limit. {} session closed. Handed to {}.",
+                from.display_name(),
+                from.display_name(),
+                to.harness.display_name()
+            )),
+        };
+        crate::provider_switch::apply(self, &sessions, workspace, chat_id, &config, Some(note))
+            .await?;
+        let fell_back = |route: Option<zeron_proto::ChildRoute>| zeron_proto::ChildRoute {
+            source: zeron_proto::ChildRoute::FELL_BACK.to_string(),
+            reason: Some(format!(
+                "{} hit its usage limit mid-run",
+                from.display_name()
+            )),
+            ..route.unwrap_or_default()
+        };
+        if chat.delegation.is_some() {
+            workspace.update_chat_delegation(chat_id, |delegation| {
+                delegation.route = Some(fell_back(delegation.route.take()));
+                true
+            })?;
+        } else if let Some(step) = workspace
+            .read_task_steps()?
+            .into_iter()
+            .find(|step| step.chat_id.as_deref() == Some(chat_id))
+        {
+            workspace.update_task_step(
+                &step.id,
+                &zeron_proto::TaskStepPatch {
+                    route: Some(Some(fell_back(step.route.clone()))),
+                    ..Default::default()
+                },
+            )?;
+        }
+        self.queue_message(chat_id, zeron_proto::RESUME_PROMPT, Vec::new())?;
+        let handle = self.open(chat_id)?;
+        self.drain_queue(&handle).await;
+        Ok(())
+    }
+
     fn workspace_or_fail(&self) -> Result<&WorkspaceHost, EngineError> {
         self.workspace()
             .ok_or_else(|| failure("orchestration_error", "workspace not wired"))
@@ -1503,6 +1584,9 @@ impl DocHost {
                     continue;
                 };
                 if chat.device_id != self.inner.config.device_id || sessions.is_reviving(&chat.id) {
+                    continue;
+                }
+                if !delegation.cancel_requested && sessions.limit_holds(&chat.id) {
                     continue;
                 }
                 let session = sessions.session_status(&chat.id);

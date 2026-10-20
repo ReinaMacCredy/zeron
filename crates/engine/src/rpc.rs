@@ -196,6 +196,13 @@ struct CreateThreadParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ResolveLimitOfferParams {
+    chat_id: String,
+    choice: crate::resume_schedule::OfferResolution,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct StartReviewParams {
     owner_chat_id: String,
     scope: String,
@@ -2873,6 +2880,7 @@ fn forwardable(method: &str) -> bool {
             | methods::GET_ROUTING_SETTINGS
             | methods::SET_ROUTING_SETTINGS
             | methods::PREVIEW_ROUTES
+            | methods::RESOLVE_LIMIT_OFFER
             | methods::GET_COMPACTION_SETTINGS
             | methods::SET_COMPACTION_SETTINGS
             | methods::GET_REVIEW_SETTINGS
@@ -3370,6 +3378,19 @@ impl RpcService for EngineRpc {
             }
             methods::GET_REVIEW_SETTINGS => RpcReply::value(&self.registry.review_settings()),
             methods::GET_ROUTING_SETTINGS => RpcReply::value(&self.registry.routing_settings()),
+            methods::RESOLVE_LIMIT_OFFER => {
+                let p: ResolveLimitOfferParams = parse_params(params)?;
+                let offer = self.sessions.resolve_limit_offer(&p.chat_id, p.choice);
+                if p.choice == crate::resume_schedule::OfferResolution::Switch
+                    && let Some(to) = offer.as_ref().and_then(|offer| offer.to.as_ref())
+                {
+                    self.doc_host
+                        .act_on_offer(&p.chat_id, to)
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                }
+                RpcReply::value(&serde_json::json!({ "changed": offer.is_some() }))
+            }
             methods::PREVIEW_ROUTES => {
                 let p: crate::routing::preview::PreviewParams = if params.is_null() {
                     Default::default()
