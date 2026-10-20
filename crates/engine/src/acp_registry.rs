@@ -14,7 +14,6 @@ const ICON_HOST: &str = "cdn.agentclientprotocol.com";
 const INDEX_MAX_AGE: Duration = Duration::from_secs(300);
 const MAX_INDEX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ICON_BYTES: usize = 64 * 1024;
-const MAX_SEARCH_RESULTS: usize = 20;
 
 #[derive(Debug, Clone, Deserialize)]
 struct Agent {
@@ -396,7 +395,6 @@ fn rank(
     });
     ranked
         .into_iter()
-        .take(MAX_SEARCH_RESULTS)
         .map(|(_, agent, distributions)| AcpRegistryAgent {
             id: agent.id.clone(),
             name: agent.name.clone(),
