@@ -103,6 +103,7 @@ struct HarnessPrefsFile {
     compaction: CompactionSettings,
     tools: zeron_proto::tools::ToolSettings,
     review: Option<crate::review::ReviewSettings>,
+    routing: crate::routing::RoutingSettings,
     sidebar: zeron_proto::SidebarSettings,
     system_prompt: String,
     seen_models: Vec<SeenModels>,
@@ -664,6 +665,22 @@ impl HarnessRegistry {
             return Err("Delegation limits must be at least 1".into());
         }
         self.prefs().delegation = settings;
+        self.persist_prefs();
+        Ok(())
+    }
+
+    pub fn routing_settings(&self) -> crate::routing::RoutingSettings {
+        self.prefs().routing.clone()
+    }
+
+    pub fn set_routing_settings(
+        &self,
+        settings: crate::routing::RoutingSettings,
+    ) -> Result<(), String> {
+        for target in settings.targets() {
+            crate::routing::check_target(target, |id| self.slots().contains_key(&id))?;
+        }
+        self.prefs().routing = settings;
         self.persist_prefs();
         Ok(())
     }
@@ -1706,6 +1723,36 @@ mod tests {
     /// detection-based enablement nothing is enabled to begin with — no
     /// dimmed default toggles to dismiss — and switching an uninstalled
     /// harness "off" is a clean no-op, not an error.
+    #[test]
+    fn routing_settings_persist_and_refuse_unknown_harnesses() {
+        use crate::routing::{Role, RoleRoute, RoutingSettings};
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        test_slot(&registry, HarnessId::Codex, true);
+        let target = |harness| {
+            RoleRoute::Target(zeron_proto::RouteTarget {
+                harness,
+                model: Some("gpt-6-luna".into()),
+                reasoning: None,
+            })
+        };
+        let mut settings = RoutingSettings::default();
+        settings.roles.insert(Role::Worker, target(HarnessId::Grok));
+        assert!(registry.set_routing_settings(settings.clone()).is_err());
+        settings
+            .roles
+            .insert(Role::Worker, target(HarnessId::Codex));
+        registry.set_routing_settings(settings.clone()).unwrap();
+
+        let written = std::fs::read_to_string(dir.path().join("harness-prefs.json")).unwrap();
+        let written: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(written["routing"]["roles"]["worker"]["harness"], "codex");
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        assert_eq!(reloaded.routing_settings(), settings);
+    }
+
     #[test]
     fn machine_without_clis_enables_nothing() {
         let dir = tempfile::tempdir().unwrap();

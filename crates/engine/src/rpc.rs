@@ -1587,7 +1587,7 @@ impl EngineRpc {
                     owner_chat_id: chat.id.clone(),
                     task,
                     title: Some("Review changes".to_string()),
-                    role: Some("review".to_string()),
+                    role: Some("validator".to_string()),
                     harness: reviewer.harness,
                     model: reviewer.model.clone(),
                     reasoning: reviewer.reasoning,
@@ -2852,6 +2852,8 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_PREDICTION_SETTINGS
             | methods::GET_DELEGATION_SETTINGS
             | methods::SET_DELEGATION_SETTINGS
+            | methods::GET_ROUTING_SETTINGS
+            | methods::SET_ROUTING_SETTINGS
             | methods::GET_COMPACTION_SETTINGS
             | methods::SET_COMPACTION_SETTINGS
             | methods::GET_REVIEW_SETTINGS
@@ -3348,6 +3350,14 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&self.registry.delegation_settings())
             }
             methods::GET_REVIEW_SETTINGS => RpcReply::value(&self.registry.review_settings()),
+            methods::GET_ROUTING_SETTINGS => RpcReply::value(&self.registry.routing_settings()),
+            methods::SET_ROUTING_SETTINGS => {
+                let p: crate::routing::RoutingSettings = parse_params(params)?;
+                self.registry
+                    .set_routing_settings(p)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&self.registry.routing_settings())
+            }
             methods::GET_SIDEBAR_SETTINGS => RpcReply::value(&self.registry.sidebar_settings()),
             methods::SET_REVIEW_SETTINGS => {
                 let p: crate::review::ReviewSettings = parse_params(params)?;

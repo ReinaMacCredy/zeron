@@ -50,6 +50,7 @@ pub mod registry;
 pub mod repos;
 pub mod resume_schedule;
 pub mod review;
+pub mod routing;
 pub mod rpc;
 pub mod run_journal;
 pub mod sessions;

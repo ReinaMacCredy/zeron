@@ -22,14 +22,6 @@ Tool names may carry a harness prefix such as `mcp__zeron__delegate_task`; the s
 
 const SUMMARY_CHARS: usize = 600;
 const TITLE_CHARS: usize = 72;
-const ROLES: [&str; 6] = [
-    "implementation",
-    "research",
-    "review",
-    "design",
-    "test",
-    "general",
-];
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -513,19 +505,20 @@ impl DocHost {
         if task.is_empty() {
             return Err(failure("invalid_request", "task is empty"));
         }
-        let role = params
+        let role = match params
             .role
             .as_deref()
             .map(str::trim)
-            .filter(|role| !role.is_empty());
-        if let Some(role) = role
-            && !ROLES.contains(&role)
+            .filter(|role| !role.is_empty())
         {
-            return Err(failure(
-                "invalid_request",
-                format!("role must be one of {}", ROLES.join(", ")),
-            ));
-        }
+            Some(name) => Some(crate::routing::Role::parse(name).ok_or_else(|| {
+                failure(
+                    "invalid_request",
+                    format!("role must be one of {}", crate::routing::Role::names()),
+                )
+            })?),
+            None => None,
+        };
         let workspace = self.workspace_or_fail()?;
         let owner = workspace
             .chat(&params.owner_chat_id)?
@@ -643,7 +636,7 @@ impl DocHost {
         &self,
         params: &DelegateTaskParams,
         task: &str,
-        role: Option<&str>,
+        role: Option<crate::routing::Role>,
         owner_id: &str,
         chat_id: &str,
         anchor: String,
@@ -660,8 +653,11 @@ impl DocHost {
             sessions.bind_delegate(owner_id, &params.task, chat_id);
         }
         let prompt = match role {
-            None | Some("general") => task.to_string(),
-            Some(role) => format!("Act as the {role} sub-agent for this task.\n\n{task}"),
+            None | Some(crate::routing::Role::General) => task.to_string(),
+            Some(role) => format!(
+                "Act as the {} sub-agent for this task.\n\n{task}",
+                role.name()
+            ),
         };
         let handle = self.open(chat_id)?;
         handle.doc.push_queued(&QueuedMessage {

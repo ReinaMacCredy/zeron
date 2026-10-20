@@ -1092,7 +1092,7 @@ async fn a_delegated_child_is_owned_hidden_and_starts_from_the_task_alone() {
     .await;
     assert_eq!(
         rig.prompts.lock().unwrap()[0],
-        "Act as the review sub-agent for this task.\n\naudit the login flow",
+        "Act as the validator sub-agent for this task.\n\naudit the login flow",
         "no owner history and no peer framing"
     );
     rig.core.shutdown().await;
