@@ -3861,7 +3861,6 @@ impl DocHost {
         }
     }
 
-    /// True when the first message waits for the route's reset instead of running now.
     fn defers(&self, chat_id: &str, route: Option<&zeron_proto::ChildRoute>) -> bool {
         route
             .and_then(|route| route.wait_until)

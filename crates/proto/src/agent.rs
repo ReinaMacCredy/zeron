@@ -167,7 +167,6 @@ pub enum OfferChoice {
     Wait,
 }
 
-/// A delegated child's mid-run limit: switch it to `to` or wait for the reset, acting by itself at `act_at`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LimitOffer {

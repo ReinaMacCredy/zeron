@@ -228,7 +228,6 @@ impl ResumeSchedule {
         });
     }
 
-    /// Switch takes the offer and the entry; Wait drops the offer and keeps today's auto-resume; Hold stops the countdown.
     pub fn resolve_offer(&self, chat_id: &str, choice: OfferResolution) -> Option<LimitOffer> {
         let mut taken = None;
         self.update(|stored| {
@@ -254,7 +253,6 @@ impl ResumeSchedule {
         taken
     }
 
-    /// A limited child whose offer or armed auto-resume is still pending has not finished.
     pub fn holds(&self, chat_id: &str, now: i64) -> bool {
         lock(&self.inner.stored).limited.iter().any(|entry| {
             entry.at.chat_id == chat_id
@@ -287,7 +285,6 @@ impl ResumeSchedule {
         });
     }
 
-    /// A child held for its route's reset starts at `at`.
     pub fn defer_start(&self, chat_id: &str, at: i64) {
         self.update(|stored| {
             stored.deferred.retain(|entry| entry.chat_id != chat_id);

@@ -770,7 +770,6 @@ struct Inner {
     cli_overrides: Mutex<HashMap<HarnessId, PathBuf>>,
     instance_launch: Option<zeron_harness::LaunchOverrides>,
     instances: Mutex<HashMap<String, (ProviderInstance, AgentAccounts)>>,
-    /// The live account keys per agent as of the last list, for [`AgentAccounts::cached_quota`].
     active_keys: Mutex<HashMap<HarnessId, std::collections::HashSet<String>>>,
 }
 

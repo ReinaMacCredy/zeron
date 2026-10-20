@@ -252,7 +252,6 @@ pub fn gate(resolved: Resolved, gate: &Gate) -> Gated {
     }
 }
 
-/// The mid-run choice for a delegated child that hit its limit on `child`'s harness.
 pub fn offer(
     settings: &RoutingSettings,
     child: HarnessId,

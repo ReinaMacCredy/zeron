@@ -17,7 +17,6 @@ pub struct SystemNote {
     pub hint: Option<String>,
 }
 
-/// Switch a chat's config, closing the old harness session and writing the divider with the handoff packet.
 pub async fn apply(
     doc_host: &DocHost,
     sessions: &SessionsEngine,

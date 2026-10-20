@@ -471,7 +471,6 @@ impl DocHost {
         Ok(config)
     }
 
-    /// The chat that owns a delegated child or a mission step's thread.
     pub(crate) fn child_owner(&self, chat_id: &str) -> Option<Chat> {
         let workspace = self.workspace()?;
         let owner = match workspace.chat(chat_id).ok()??.delegation {
@@ -481,7 +480,6 @@ impl DocHost {
         workspace.chat(&owner).ok()?
     }
 
-    /// Moves a limited child to `to` with a provider divider, records the fallback and resumes it.
     pub async fn act_on_offer(
         &self,
         chat_id: &str,

@@ -308,7 +308,6 @@ pub enum MessagePart {
         /// the engine — the HTML itself never enters the doc).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         html_render: Option<zeron_proto::html_render::HtmlRenderRef>,
-        /// Where a delegate_task that opened no child went instead (a quota fallback to the agent's native sub-agent).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         delegate_route: Option<zeron_proto::ChildRoute>,
     },
@@ -791,7 +790,6 @@ pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
     }
 }
 
-/// The short ids a few zeron calls keep for the Supervisor, the plan card and a childless delegate row.
 fn zeron_badge(call: &ToolCall) -> Option<serde_json::Value> {
     let (tool, input) = match call {
         ToolCall::Mcp {
