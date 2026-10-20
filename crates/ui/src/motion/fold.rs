@@ -40,7 +40,19 @@ impl Fold {
 }
 
 pub(crate) fn folded(id: String, fold: &Fold, now: Instant, body: impl IntoElement) -> AnyElement {
-    let probe = fold.height.clone();
+    let clip = fold.moving(now).then(|| {
+        let value = fold.value(now);
+        (fold.height.get() * value, value)
+    });
+    clipped(id, fold.height.clone(), clip, body)
+}
+
+pub(crate) fn clipped(
+    id: String,
+    probe: Rc<Cell<f32>>,
+    clip: Option<(f32, f32)>,
+    body: impl IntoElement,
+) -> AnyElement {
     let inner = div().relative().flex_none().w_full().child(body).child(
         canvas(
             move |bounds, _, _| {
@@ -54,18 +66,17 @@ pub(crate) fn folded(id: String, fold: &Fold, now: Instant, body: impl IntoEleme
         .absolute()
         .inset_0(),
     );
-    if !fold.moving(now) {
+    let Some((height, opacity)) = clip else {
         return inner.into_any_element();
-    }
-    let value = fold.value(now);
+    };
     div()
         .id(SharedString::from(id))
         .relative()
         .flex_none()
         .w_full()
         .overflow_hidden()
-        .h(px(fold.height.get() * value))
-        .opacity(value)
+        .h(px(height))
+        .opacity(opacity)
         .child(inner)
         .into_any_element()
 }

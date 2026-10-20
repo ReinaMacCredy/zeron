@@ -2080,7 +2080,7 @@ mod tests {
 mod windows_pulse;
 
 mod fold;
-pub(crate) use fold::{Fold, folded};
+pub(crate) use fold::{Fold, clipped, folded};
 
 /// A bounded activation sheen for Fast service tier; GPUI handles reduced motion.
 pub fn fast_tier(

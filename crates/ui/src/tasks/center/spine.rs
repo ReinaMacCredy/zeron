@@ -1,4 +1,5 @@
 use super::*;
+use crate::motion::Fold;
 use crate::tasks::tree::{self, Dot, Link, NodeIn, Status};
 
 const SPINE: f32 = 64.0;
@@ -13,6 +14,8 @@ const ANCHOR_Y: f32 = 21.0;
 pub(super) const CANVAS_PAD: f32 = 20.0;
 pub(super) const DRAWER_WIDTH: f32 = 440.0;
 const DRAWER: MotionSpec = MotionSpec::new(420, tree::EASE);
+const SPEC_CLOSE: MotionSpec = MotionSpec::new(240, tree::EASE);
+const SWEEP: std::time::Duration = std::time::Duration::from_millis(1400);
 const LEAD: &str = "lead";
 const GHOST: &str = "add";
 const CARD_HEIGHT: f32 = 96.0;
@@ -21,9 +24,57 @@ const LEAD_HEIGHT: f32 = 150.0;
 struct BarRow {
     id: String,
     status: Status,
+    word: &'static str,
     name: String,
     title: String,
     text: Option<String>,
+}
+
+pub(super) struct Facts {
+    rows: Vec<BarRow>,
+    tokens: Vec<Option<u64>>,
+    branch: Option<u64>,
+    live: bool,
+    lead_time: Option<String>,
+    lead_chat: Option<String>,
+    lead_agent: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Body {
+    None,
+    Read,
+    Editor,
+}
+
+pub(super) struct Spec {
+    pub fold: Fold,
+    pub edit: Rc<Cell<f32>>,
+    turn: Tween,
+    drawn: Cell<(Body, Option<f32>)>,
+}
+
+impl Spec {
+    fn closed(now: Instant) -> Self {
+        Self {
+            fold: Fold::at(false, now),
+            edit: Rc::new(Cell::new(0.0)),
+            turn: Tween::at(0.0, now),
+            drawn: Cell::new((Body::None, Some(0.0))),
+        }
+    }
+}
+
+struct Region {
+    body: Body,
+    natural: f32,
+    clip: Option<(f32, f32)>,
+}
+
+impl Region {
+    fn height(&self) -> f32 {
+        self.clip.map_or(self.natural, |(height, _)| height)
+    }
 }
 
 pub(super) struct Pop {
@@ -37,24 +88,26 @@ enum Side {
     Right,
 }
 
-fn span(height: f32) -> usize {
-    ((height + ROW_GAP) / (ROW + ROW_GAP)).ceil().max(2.0) as usize
-}
-
-fn spine_rows(spans: &[usize]) -> (Vec<(Side, usize)>, usize) {
-    let (mut row, mut end) = (0, 0);
-    let rows = spans
+fn spine_tops(heights: &[f32]) -> (Vec<(Side, f32)>, f32) {
+    let pitch = ROW + ROW_GAP;
+    let (mut top, mut bottom) = (0.0_f32, 0.0_f32);
+    let tops = heights
         .iter()
         .enumerate()
-        .map(|(i, span)| {
+        .map(|(i, height)| {
             let side = if i % 2 == 0 { Side::Left } else { Side::Right };
-            let at = (side, row);
-            end = end.max(row + span);
-            row += span - 1;
+            let at = (side, top);
+            bottom = bottom.max(top + height);
+            top += pitch.max(height + ROW_GAP - pitch);
             at
         })
         .collect();
-    (rows, end)
+    let end = if heights.is_empty() {
+        0.0
+    } else {
+        bottom + ROW_GAP + 16.0
+    };
+    (tops, end)
 }
 
 struct Placed {
@@ -62,6 +115,7 @@ struct Placed {
     x: f32,
     y: f32,
     width: f32,
+    height: f32,
     side: Option<Side>,
     frame: tree::Frame,
 }
@@ -102,7 +156,7 @@ impl TaskCenter {
         cx.notify();
     }
 
-    fn toggle_steps(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn toggle_steps(&mut self, cx: &mut Context<Self>) {
         self.folded = !self.folded;
         let now = Instant::now();
         self.fold_turn.retarget(
@@ -140,8 +194,122 @@ impl TaskCenter {
         self.open_drawer(cx);
     }
 
+    pub(super) fn spec_open(&self, id: &str) -> bool {
+        self.expanded
+            .get(id)
+            .is_some_and(|spec| spec.fold.tween.target() == 1.0)
+    }
+
+    pub(super) fn open_spec(&mut self, id: &str, open: bool, reduced: bool, now: Instant) {
+        let spec = self
+            .expanded
+            .entry(id.to_string())
+            .or_insert_with(|| Spec::closed(now));
+        spec.fold.set(
+            open,
+            if open { tree::FOLD } else { SPEC_CLOSE },
+            reduced,
+            now,
+        );
+        let to = f32::from(u8::from(open));
+        if spec.turn.target() != to {
+            spec.turn.retarget(to, tree::CHEVRON, reduced, now);
+        }
+    }
+
+    pub(super) fn last_region(&self, id: &str) -> f32 {
+        let Some(spec) = self.expanded.get(id) else {
+            return 0.0;
+        };
+        match spec.drawn.get() {
+            (_, Some(height)) => height,
+            (Body::Read, None) => spec.fold.height.get(),
+            (Body::Editor, None) => spec.edit.get(),
+            (Body::None, None) => 0.0,
+        }
+    }
+
+    fn region(&self, id: &str, now: Instant) -> Region {
+        let hidden = Region {
+            body: Body::None,
+            natural: 0.0,
+            clip: Some((0.0, 1.0)),
+        };
+        let Some(spec) = self.expanded.get(id) else {
+            return hidden;
+        };
+        if let Some(editor) = self
+            .editor
+            .as_ref()
+            .filter(|editor| matches!(&editor.target, EditTarget::Step(step) if step == id))
+        {
+            let natural = spec.edit.get();
+            let to = if natural > 0.0 { natural } else { editor.from };
+            return Region {
+                body: Body::Editor,
+                natural,
+                clip: (!editor.grow.settled_at(now)).then(|| {
+                    (
+                        motion::lerp(editor.from, to, editor.grow.value_at(now)),
+                        editor.fade.value_at(now),
+                    )
+                }),
+            };
+        }
+        let natural = spec.fold.height.get();
+        if let Some(leave) = self
+            .leaving
+            .as_ref()
+            .filter(|leave| leave.step == id && !leave.grow.settled_at(now))
+        {
+            return Region {
+                body: Body::Read,
+                natural,
+                clip: Some((
+                    motion::lerp(leave.from, natural, leave.grow.value_at(now)),
+                    leave.fade.value_at(now),
+                )),
+            };
+        }
+        if spec.fold.gone(now) {
+            return hidden;
+        }
+        Region {
+            body: Body::Read,
+            natural,
+            clip: spec.fold.moving(now).then(|| {
+                let value = spec.fold.value(now);
+                (natural * value, value)
+            }),
+        }
+    }
+
+    fn sliding(&self, now: Instant) -> bool {
+        self.expanded.values().any(|spec| spec.fold.moving(now))
+            || self.editor.as_ref().is_some_and(|editor| {
+                matches!(editor.target, EditTarget::Step(_)) && !editor.grow.settled_at(now)
+            })
+            || self
+                .leaving
+                .as_ref()
+                .is_some_and(|leave| !leave.grow.settled_at(now))
+    }
+
     pub(super) fn spine_animating(&self, now: Instant) -> bool {
         self.tree.animating(now)
+            || self.sliding(now)
+            || self
+                .expanded
+                .values()
+                .any(|spec| !spec.turn.settled_at(now))
+            || self
+                .editor
+                .as_ref()
+                .is_some_and(|editor| !editor.grow.settled_at(now) || !editor.fade.settled_at(now))
+            || self
+                .leaving
+                .as_ref()
+                .is_some_and(|leave| !leave.fade.settled_at(now))
             || !self.drawer.settled_at(now)
             || !self.overview_turn.settled_at(now)
             || !self.fold_turn.settled_at(now)
@@ -257,7 +425,6 @@ impl TaskCenter {
             .relative()
             .flex()
             .flex_col()
-            .gap(px(6.0))
             .pt(px(10.0))
             .px(px(10.0))
             .pb(px(8.0))
@@ -343,17 +510,10 @@ impl TaskCenter {
         let (brand, agent) = {
             let state = self.state.read(cx);
             let chat = linked_chat(&state.chats, task);
-            let agent = chat.and_then(|chat| chat.config.as_ref()).map(|config| {
-                let harness = config.harness.display_name();
-                match config.model.as_deref() {
-                    Some(model) => format!(
-                        "{harness} · {}",
-                        crate::pickers::model_display_label(config.harness, model, cx)
-                    ),
-                    None => harness.to_string(),
-                }
-            });
-            (chat.map(chat_brand), agent)
+            (
+                chat.map(chat_brand),
+                chat.and_then(|chat| agent_of(chat, cx)),
+            )
         };
         let (status, word) = tree::lead_status(task, plan);
         let planning = plan.phase(task) == super::super::PlanPhase::Planning;
@@ -436,6 +596,7 @@ impl TaskCenter {
             .child(self.amount(tokens, live, time, reduced, theme))
             .children((steps > 0).then(|| self.fold_button(steps, now, theme, cx)));
         self.card(selected, theme)
+            .gap(px(6.0))
             .id("task-center-lead")
             .debug_selector(|| "task-center-lead".into())
             .role(gpui::Role::Button)
@@ -549,15 +710,7 @@ impl TaskCenter {
         if let Some(editor) = editor {
             return Some(
                 section
-                    .child(self.edit_card(
-                        editor,
-                        head.into_any_element(),
-                        0.0,
-                        (12.0, 10.0),
-                        theme,
-                        window,
-                        cx,
-                    ))
+                    .child(self.edit_card(editor, head.into_any_element(), theme, window, cx))
                     .into_any_element(),
             );
         }
@@ -610,6 +763,33 @@ impl TaskCenter {
         )
     }
 
+    fn tool(
+        theme: &Theme,
+        id: String,
+        mark: Option<&'static str>,
+        label: &'static str,
+    ) -> gpui::Stateful<gpui::Div> {
+        let selector = id.clone();
+        div()
+            .id(SharedString::from(id))
+            .debug_selector(move || selector.clone())
+            .role(gpui::Role::Button)
+            .aria_label(label)
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .h(px(22.0))
+            .px(px(8.0))
+            .rounded_full()
+            .cursor_pointer()
+            .text_size(ui_rems(11.5))
+            .text_color(theme.text_muted)
+            .hover(|s| s.bg(theme.wash(0.10)).text_color(theme.text))
+            .children(mark.map(|mark| icon(mark).size(px(12.0)).text_color(theme.text_muted)))
+            .child(label)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_spine_step(
         &self,
@@ -621,6 +801,7 @@ impl TaskCenter {
         editable: bool,
         tokens: Option<u64>,
         reduced: bool,
+        now: Instant,
         theme: &Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -634,60 +815,18 @@ impl TaskCenter {
         let agent = thread
             .and_then(|thread| thread.agent.clone())
             .unwrap_or_else(|| "Not started".into());
-        let avatar = Self::avatar(thread.and(row.brand), theme);
-        if let Some(editor) = self
+        let editor = self
             .editor
             .as_ref()
-            .filter(|editor| editor.target == EditTarget::Step(step_id.clone()))
-        {
-            let head = div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .child(avatar)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_size(ui_rems(11.0))
-                                .text_color(theme.text_muted)
-                                .child(name),
-                        )
-                        .children(editor.title.clone().map(|title| {
-                            div()
-                                .id("task-center-edit-title")
-                                .debug_selector(|| "task-center-edit-title".into())
-                                .min_w_0()
-                                .text_size(ui_rems(13.0))
-                                .text_color(theme.text)
-                                .child(title)
-                        })),
-                );
-            return div()
-                .id(SharedString::from(format!("task-center-step-{step_id}")))
-                .debug_selector(move || format!("task-center-step-{step_id}"))
-                .relative()
-                .child(morph::measure(
-                    &self.painted,
-                    Key::Task(row.step.id.clone()),
-                    Edges::default(),
-                ))
-                .child(self.edit_card(
-                    editor,
-                    head.into_any_element(),
-                    30.0,
-                    (10.0, 10.0),
-                    theme,
-                    window,
-                    cx,
-                ))
-                .into_any_element();
+            .filter(|editor| editor.target == EditTarget::Step(step_id.clone()));
+        let spec = self.expanded.get(&step_id);
+        let region = self.region(&step_id, now);
+        if let Some(spec) = spec {
+            spec.drawn
+                .set((region.body, region.clip.map(|(height, _)| height)));
         }
-        let expanded = self.expanded.contains(&step_id);
+        let open = editor.is_some() || self.spec_open(&step_id);
+        let turn = spec.map_or(0.0, |spec| spec.turn.value_at(now));
         let moved = self.draft.moved.contains(&step_id);
         let registered = tag != Some(Tag::New) && tag != Some(Tag::Removed);
         let retry = registered && row.step.outcome.is_none() && status == Status::Failed;
@@ -703,251 +842,75 @@ impl TaskCenter {
                 || (tag != Some(Tag::Removed)
                     && row.status == StepStatus::Planned
                     && thread.is_none()));
+        let edits = editable && tag != Some(Tag::Removed);
         let struck = row.status == StepStatus::Skipped || tag == Some(Tag::Removed);
         let running = status == Status::Running;
         let title_text = SharedString::from(row.step.title.clone());
-        let title = if running && !reduced {
-            let phase = self.shimmer(true, cx).unwrap_or_default();
-            crate::transcript::shimmer_label(
-                title_text,
-                phase,
-                theme.font_sans.clone(),
-                ui_rems(12.5).into(),
-                None,
-                theme.text_muted,
-                theme.text,
-            )
-            .whitespace_nowrap()
-            .text_color(theme.text_muted)
-            .into_any_element()
-        } else {
-            div()
+        let title = match editor.and_then(|editor| editor.title.clone()) {
+            Some(input) => {
+                let focused = input.focus_handle(cx).is_focused(window);
+                div()
+                    .id("task-center-edit-title")
+                    .debug_selector(|| "task-center-edit-title".into())
+                    .mt(px(-1.0))
+                    .mx(px(-6.0))
+                    .px(px(6.0))
+                    .py(px(3.0))
+                    .rounded(px(6.0))
+                    .bg(theme.input_bg)
+                    .border_1()
+                    .border_color(if focused {
+                        theme.accent.opacity(0.7)
+                    } else {
+                        theme.border_strong
+                    })
+                    .text_size(ui_rems(13.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(crate::composer::growing_field(input, 18.0, 36.0, cx))
+                    .into_any_element()
+            }
+            None if running && !reduced => {
+                let phase = self.shimmer(true, cx).unwrap_or_default();
+                crate::transcript::shimmer_label(
+                    title_text,
+                    phase,
+                    theme.font_sans.clone(),
+                    ui_rems(13.0).into(),
+                    None,
+                    theme.text_muted,
+                    theme.text,
+                )
+                .whitespace_nowrap()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text_muted)
+                .into_any_element()
+            }
+            None => div()
                 .min_w_0()
                 .line_clamp(2)
-                .text_color(if running || status.muted() || struck {
-                    theme.text_muted
-                } else {
-                    theme.text
-                })
+                .text_size(ui_rems(13.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(if struck { theme.text_muted } else { theme.text })
                 .when(struck, |el| el.line_through())
                 .child(title_text)
-                .into_any_element()
+                .into_any_element(),
         };
-        let failure = (status == Status::Failed)
-            .then(|| Self::step_note(row, thread))
-            .flatten()
-            .map(|summary| {
-                div()
-                    .truncate()
-                    .text_size(ui_rems(11.5))
-                    .text_color(theme.danger)
-                    .child(crate::transcript::single_line(&summary))
-            });
-        let mut actions: Vec<AnyElement> = Vec::new();
-        if skip {
-            let id = step_id.clone();
-            actions.push(
-                Self::hover_action(
-                    theme,
-                    format!("task-center-skip-{step_id}"),
-                    "Skip",
-                    index + 1,
-                    group.clone(),
-                )
-                .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
-                    cx.stop_propagation();
-                    center.set_outcome(&id, Some(StepOutcome::Skipped), cx);
-                }))
-                .into_any_element(),
-            );
-        }
-        if reopen {
-            let id = step_id.clone();
-            actions.push(
-                Self::hover_action(
-                    theme,
-                    format!("task-center-reopen-{step_id}"),
-                    "Reopen",
-                    index + 1,
-                    group.clone(),
-                )
-                .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
-                    cx.stop_propagation();
-                    center.set_outcome(&id, None, cx);
-                }))
-                .into_any_element(),
-            );
-        }
-        let side_button = |label: &'static str, selector: String, tone: widgets::ActionTone| {
-            widgets::text_action(theme, tone, label)
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(move || selector.clone())
-                .role(gpui::Role::Button)
-                .aria_label(format!("{label} step {}", index + 1))
-                .flex_none()
-                .min_h(px(22.0))
-                .rounded_full()
-        };
-        if retry {
-            let id = step_id.clone();
-            actions.push(
-                side_button(
-                    "Retry",
-                    format!("task-center-retry-{step_id}"),
-                    widgets::ActionTone::Filled,
-                )
-                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                    cx.stop_propagation();
-                    cx.emit(TaskCenterEvent::RetryStep(id.clone()));
-                }))
-                .into_any_element(),
-            );
-        }
-        if tag == Some(Tag::Removed) {
-            let id = step_id.clone();
-            actions.push(
-                side_button(
-                    "Restore",
-                    format!("task-center-restore-{step_id}"),
-                    widgets::ActionTone::Quiet,
-                )
-                .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
-                    cx.stop_propagation();
-                    center.toggle_remove(&id, cx);
-                }))
-                .into_any_element(),
-            );
-        }
-        let toggle_id = step_id.clone();
-        let spec_toggle = div()
-            .id(SharedString::from(format!("task-center-spec-{step_id}")))
-            .debug_selector({
-                let id = step_id.clone();
-                move || format!("task-center-spec-{id}")
-            })
-            .role(gpui::Role::Button)
-            .aria_label(format!("Spec of step {}", index + 1))
-            .aria_expanded(expanded)
-            .flex_none()
+        let kicker = div()
             .flex()
             .items_center()
-            .gap(px(2.0))
-            .cursor_pointer()
+            .gap(px(4.0))
+            .min_w_0()
             .text_size(ui_rems(11.0))
             .text_color(theme.text_muted)
-            .hover(|s| s.text_color(theme.text))
-            .child("spec")
             .child(
-                icon(if expanded {
-                    icons::LUCIDE_CHEVRON_DOWN
-                } else {
-                    icons::LUCIDE_CHEVRON_RIGHT
-                })
-                .size(px(11.0))
-                .text_color(theme.text_muted),
-            )
-            .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
-                cx.stop_propagation();
-                center.toggle_spec(&toggle_id, cx);
-            }));
-        let time = tree::thread_time(status, thread.and_then(|t| t.since), None)
-            .filter(|_| status.live())
-            .or_else(|| {
-                let state = self.state.read(cx);
-                let stats = row
-                    .step
-                    .chat_id
-                    .as_deref()
-                    .filter(|_| thread.is_some())
-                    .and_then(|id| self.stats.get(state, id));
-                tree::thread_time(status, None, stats.as_ref())
-            });
-        let meta = div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .min_h(px(20.0))
-            .child(self.amount(tokens, running, time, reduced, theme))
-            .children(tag.map(|tag| Self::tag_pill(tag, theme)))
-            .children(moved.then(|| Self::tag_pill(Tag::Moved, theme)))
-            .children(actions)
-            .child(spec_toggle);
-        let panel = expanded.then(|| {
-            let spec = if row.step.notes.trim().is_empty() {
                 div()
-                    .text_size(ui_rems(12.5))
-                    .text_color(theme.text_muted)
-                    .child("No spec yet.")
-                    .into_any_element()
-            } else {
-                Self::markdown(
-                    format!("task-center-spec-body-{step_id}"),
-                    &row.step.notes,
-                    theme,
-                    window,
-                )
-            };
-            let thumbs = (!row.step.images.is_empty()).then(|| {
-                let paths = row.step.images.clone();
-                images::strip(
-                    &format!("task-center-spec-{step_id}"),
-                    &row.step.images,
-                    images::SPEC_THUMB,
-                    &self.state,
-                    theme,
-                    move |center: &mut Self, ix, _, cx| center.open_images(paths.clone(), ix, cx),
-                    None::<fn(&mut Self, usize, &mut Window, &mut Context<Self>)>,
-                    cx,
-                )
-            });
-            let edit = (editable && tag != Some(Tag::Removed)).then(|| {
-                let id = step_id.clone();
-                side_button(
-                    "Edit",
-                    format!("task-center-edit-{step_id}"),
-                    widgets::ActionTone::Quiet,
-                )
-                .on_click(cx.listener(
-                    move |center, _: &ClickEvent, window, cx| {
-                        cx.stop_propagation();
-                        center.start_edit(EditTarget::Step(id.clone()), window, cx)
-                    },
-                ))
-            });
-            let remove = removable.then(|| {
-                let id = step_id.clone();
-                side_button(
-                    "Remove",
-                    format!("task-center-remove-{step_id}"),
-                    widgets::ActionTone::Quiet,
-                )
-                .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
-                    cx.stop_propagation();
-                    center.toggle_remove(&id, cx)
-                }))
-            });
-            div()
-                .debug_selector({
-                    let id = step_id.clone();
-                    move || format!("task-center-spec-panel-{id}")
-                })
-                .pl(px(10.0))
-                .border_l_2()
-                .border_color(theme.border)
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .child(spec)
-                .children(thumbs)
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(4.0))
-                        .ml(px(-8.0))
-                        .children(edit)
-                        .children(remove),
-                )
-        });
+                    .flex_none()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(name),
+            )
+            .child(div().min_w_0().truncate().child(format!("· {agent}")));
         let movable = editable && tag != Some(Tag::Removed) && range.is_some();
         let grip = movable.then(|| {
             let payload = StepDragPayload {
@@ -992,10 +955,406 @@ impl TaskCenter {
                 .on_click(|_, _, cx| cx.stop_propagation())
                 .on_drag(payload, |_, _, _, cx| cx.new(|_| StepDragGhost))
         });
+        let head = div()
+            .flex()
+            .items_start()
+            .gap(px(8.0))
+            .child(
+                Self::avatar(thread.and(row.brand), theme)
+                    .mt(px(1.0))
+                    .relative()
+                    .children(grip),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(kicker)
+                    .child(title),
+            )
+            .child(Self::chip(status, word, reduced, theme));
+        let side_button = |label: &'static str, selector: String, tone: widgets::ActionTone| {
+            widgets::text_action(theme, tone, label)
+                .id(SharedString::from(selector.clone()))
+                .debug_selector(move || selector.clone())
+                .role(gpui::Role::Button)
+                .aria_label(format!("{label} step {}", index + 1))
+                .flex_none()
+                .min_h(px(22.0))
+                .rounded_full()
+        };
+        let line = matches!(status, Status::Waiting | Status::Failed).then(|| {
+            let tone = status.tone(theme);
+            let waiting = status == Status::Waiting;
+            let text = Self::step_note(row, thread)
+                .map(|text| crate::transcript::single_line(&text))
+                .unwrap_or_else(|| {
+                    if waiting {
+                        "This step is waiting for you.".into()
+                    } else {
+                        "This step stopped before it finished.".into()
+                    }
+                });
+            let action = if waiting {
+                let id = step_id.clone();
+                Some(
+                    side_button(
+                        "Answer",
+                        format!("task-center-answer-{step_id}"),
+                        widgets::ActionTone::Solid,
+                    )
+                    .on_click(cx.listener(
+                        move |center, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            center.pick(Selection::Step(id.clone()), cx);
+                        },
+                    )),
+                )
+            } else if retry {
+                let id = step_id.clone();
+                Some(
+                    side_button(
+                        "Retry",
+                        format!("task-center-retry-{step_id}"),
+                        widgets::ActionTone::Filled,
+                    )
+                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        cx.emit(TaskCenterEvent::RetryStep(id.clone()));
+                    })),
+                )
+            } else {
+                None
+            };
+            div()
+                .debug_selector({
+                    let id = step_id.clone();
+                    move || format!("task-center-step-note-{id}")
+                })
+                .mt(px(7.0))
+                .ml(px(30.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .pl(px(9.0))
+                .pr(px(6.0))
+                .py(px(6.0))
+                .rounded(px(8.0))
+                .bg(tone.opacity(0.10))
+                .text_size(ui_rems(12.0))
+                .text_color(theme.text)
+                .child(tree::glyph(status, 13.0, tone, reduced))
+                .child(div().flex_1().min_w_0().line_clamp(2).child(text))
+                .children(action)
+        });
+        let mut actions: Vec<AnyElement> = Vec::new();
+        if skip {
+            let id = step_id.clone();
+            actions.push(
+                Self::hover_action(
+                    theme,
+                    format!("task-center-skip-{step_id}"),
+                    "Skip",
+                    index + 1,
+                    group.clone(),
+                )
+                .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    center.set_outcome(&id, Some(StepOutcome::Skipped), cx);
+                }))
+                .into_any_element(),
+            );
+        }
+        if reopen {
+            let id = step_id.clone();
+            actions.push(
+                Self::hover_action(
+                    theme,
+                    format!("task-center-reopen-{step_id}"),
+                    "Reopen",
+                    index + 1,
+                    group.clone(),
+                )
+                .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    center.set_outcome(&id, None, cx);
+                }))
+                .into_any_element(),
+            );
+        }
+        if tag == Some(Tag::Removed) {
+            let id = step_id.clone();
+            actions.push(
+                side_button(
+                    "Restore",
+                    format!("task-center-restore-{step_id}"),
+                    widgets::ActionTone::Quiet,
+                )
+                .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    center.toggle_remove(&id, cx);
+                }))
+                .into_any_element(),
+            );
+        }
+        let images = row.step.images.len();
+        let empty = row.step.notes.trim().is_empty() && images == 0;
+        let toggle_id = step_id.clone();
+        let spec_button = div()
+            .id(SharedString::from(format!("task-center-spec-{step_id}")))
+            .debug_selector({
+                let id = step_id.clone();
+                move || format!("task-center-spec-{id}")
+            })
+            .role(gpui::Role::Button)
+            .aria_label(format!("Spec of step {}", index + 1))
+            .aria_expanded(open)
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .h(px(22.0))
+            .pl(px(8.0))
+            .pr(px(6.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .text_size(ui_rems(11.5))
+            .text_color(if open { theme.text } else { theme.text_muted })
+            .when(open, |el| el.bg(theme.wash(0.08)))
+            .hover(|s| s.bg(theme.wash(0.08)).text_color(theme.text))
+            .child(if empty && edits { "Add spec" } else { "Spec" })
+            .children((images > 0).then(|| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.0))
+                    .text_color(theme.text_faint)
+                    .child(
+                        icon(icons::GALLERY)
+                            .size(px(11.0))
+                            .text_color(theme.text_faint),
+                    )
+                    .child(images.to_string())
+            }))
+            .child(
+                icon(icons::LUCIDE_CHEVRON_RIGHT)
+                    .size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                        std::f32::consts::FRAC_PI_2 * turn,
+                    ))),
+            )
+            .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                center.toggle_spec(&toggle_id, cx);
+            }));
+        let time = tree::thread_time(status, thread.and_then(|t| t.since), None)
+            .filter(|_| status.live())
+            .or_else(|| {
+                let state = self.state.read(cx);
+                let stats = row
+                    .step
+                    .chat_id
+                    .as_deref()
+                    .filter(|_| thread.is_some())
+                    .and_then(|id| self.stats.get(state, id));
+                tree::thread_time(status, None, stats.as_ref())
+            });
+        let footer = div()
+            .mt(px(7.0))
+            .ml(px(30.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .min_h(px(22.0))
+            .child(self.amount(tokens, running, time, reduced, theme))
+            .children(tag.map(|tag| Self::tag_pill(tag, theme)))
+            .children(moved.then(|| Self::tag_pill(Tag::Moved, theme)))
+            .children(actions)
+            .child(spec_button);
+        let thread_chat = thread.and(row.step.chat_id.clone());
+        let body = match (region.body, editor) {
+            (Body::Editor, Some(editor)) => Some(
+                div()
+                    .debug_selector(|| "task-center-editor".into())
+                    .ml(px(30.0))
+                    .mb(px(2.0))
+                    .pt(px(10.0))
+                    .px(px(12.0))
+                    .pb(px(8.0))
+                    .rounded(px(8.0))
+                    .bg(theme.input_bg)
+                    .border_1()
+                    .border_color(theme.accent.opacity(0.55))
+                    .shadow(vec![gpui::BoxShadow {
+                        color: theme.accent.opacity(0.14),
+                        offset: gpui::point(px(0.0), px(0.0)),
+                        blur_radius: px(0.0),
+                        spread_radius: px(3.0),
+                        inset: false,
+                    }])
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(self.edit_notes(editor, 54.0, theme, cx))
+                    .child(self.edit_tray(editor, theme, cx))
+                    .child(self.edit_footer(theme, cx).mr(px(-4.0)).pt(px(7.0)))
+                    .into_any_element(),
+            ),
+            (Body::Read, _) => {
+                let spec = if row.step.notes.trim().is_empty() {
+                    div()
+                        .text_size(ui_rems(12.5))
+                        .text_color(theme.text_muted)
+                        .child("No spec yet. The lead writes one when it plans the step.")
+                        .into_any_element()
+                } else {
+                    Self::markdown(
+                        format!("task-center-spec-body-{step_id}"),
+                        &row.step.notes,
+                        theme,
+                        window,
+                    )
+                };
+                let thumbs = (images > 0).then(|| {
+                    let paths = row.step.images.clone();
+                    images::strip(
+                        &format!("task-center-spec-{step_id}"),
+                        &row.step.images,
+                        images::SPEC_THUMB,
+                        &self.state,
+                        theme,
+                        move |center: &mut Self, ix, _, cx| {
+                            center.open_images(paths.clone(), ix, cx)
+                        },
+                        None::<fn(&mut Self, usize, &mut Window, &mut Context<Self>)>,
+                        cx,
+                    )
+                });
+                let mut tools: Vec<AnyElement> = Vec::new();
+                if edits {
+                    let id = step_id.clone();
+                    tools.push(
+                        Self::tool(
+                            theme,
+                            format!("task-center-edit-{step_id}"),
+                            Some(icons::LUCIDE_PENCIL),
+                            "Edit",
+                        )
+                        .on_click(cx.listener(move |center, _: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            center.start_edit(EditTarget::Step(id.clone()), window, cx)
+                        }))
+                        .into_any_element(),
+                    );
+                    let id = step_id.clone();
+                    tools.push(
+                        Self::tool(
+                            theme,
+                            format!("task-center-add-image-{step_id}"),
+                            Some(icons::GALLERY),
+                            "Add image",
+                        )
+                        .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            center.pick_images(Some(id.clone()), cx)
+                        }))
+                        .into_any_element(),
+                    );
+                }
+                if removable {
+                    let id = step_id.clone();
+                    tools.push(
+                        Self::tool(
+                            theme,
+                            format!("task-center-remove-{step_id}"),
+                            None,
+                            "Remove",
+                        )
+                        .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            center.toggle_remove(&id, cx)
+                        }))
+                        .into_any_element(),
+                    );
+                }
+                let open_thread = thread_chat.clone().map(|chat| {
+                    Self::tool(
+                        theme,
+                        format!("task-center-spec-open-{step_id}"),
+                        None,
+                        "Open thread",
+                    )
+                    .child(
+                        icon(icons::LUCIDE_ARROW_UP_RIGHT)
+                            .size(px(12.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        cx.emit(TaskCenterEvent::OpenChat(chat.clone()))
+                    }))
+                });
+                let toolbar = (!tools.is_empty() || open_thread.is_some()).then(|| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(2.0))
+                        .ml(px(-8.0))
+                        .mr(px(-6.0))
+                        .pt(px(5.0))
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .children(tools)
+                        .child(div().flex_1())
+                        .children(open_thread)
+                });
+                Some(
+                    div()
+                        .debug_selector({
+                            let id = step_id.clone();
+                            move || format!("task-center-spec-panel-{id}")
+                        })
+                        .ml(px(30.0))
+                        .mb(px(2.0))
+                        .pt(px(10.0))
+                        .px(px(12.0))
+                        .pb(px(6.0))
+                        .rounded(px(8.0))
+                        .bg(theme.wash(0.05))
+                        .border_1()
+                        .border_color(theme.border)
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .child(spec)
+                        .children(thumbs)
+                        .children(toolbar)
+                        .into_any_element(),
+                )
+            }
+            _ => None,
+        };
+        let well = body.zip(spec).map(|(body, spec)| {
+            let probe = if region.body == Body::Editor {
+                spec.edit.clone()
+            } else {
+                spec.fold.height.clone()
+            };
+            motion::clipped(
+                format!("task-center-spec-clip-{step_id}"),
+                probe,
+                region.clip,
+                div().pt(px(7.0)).child(body),
+            )
+        });
         let actions = StepActions {
             step_id: step_id.clone(),
-            edit: editable && tag != Some(Tag::Removed),
-            thread: thread.and(row.step.chat_id.clone()),
+            edit: edits,
+            thread: thread_chat,
             up: editable
                 && range.is_some_and(|(lo, hi)| index >= 1 && (lo..=hi).contains(&(index - 1))),
             down: editable && range.is_some_and(|(lo, hi)| (lo..=hi).contains(&(index + 1))),
@@ -1010,43 +1369,44 @@ impl TaskCenter {
         };
         let select_id = step_id.clone();
         let aria = format!("Step {}: {}", index + 1, row.step.title);
-        self.card(selected, theme)
+        let editing = editor.is_some();
+        let card = self
+            .card(selected, theme)
             .id(SharedString::from(format!("task-center-step-{step_id}")))
             .debug_selector(move || format!("task-center-step-{step_id}"))
             .group(group)
             .role(gpui::Role::ListItem)
             .aria_label(aria)
             .aria_selected(selected)
+            .when(editing, |el| {
+                el.border_color(motion::mix(theme.border, theme.accent, 0.35))
+                    .cursor_default()
+            })
             .child(morph::measure(
                 &self.painted,
                 Key::Task(row.step.id.clone()),
                 Edges::default(),
             ))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(avatar.relative().children(grip))
-                    .child(Self::who(name, agent, theme))
-                    .child(Self::chip(status, word, reduced, theme)),
-            )
-            .child(div().text_size(ui_rems(12.5)).child(title))
-            .children(failure)
-            .child(meta)
-            .children(panel)
+            .child(head)
+            .children(line)
+            .child(footer)
+            .children(well)
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |center, event: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
                     window.prevent_default();
-                    center.open_menu(actions.clone(), event.position, window, cx);
+                    center.open_menu(MenuFor::Step(actions.clone()), event.position, window, cx);
                 }),
-            )
-            .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
+            );
+        if editing {
+            self.edit_events(card, theme, cx).into_any_element()
+        } else {
+            card.on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
                 center.pick(Selection::Step(select_id.clone()), cx)
             }))
             .into_any_element()
+        }
     }
 
     fn render_ghost(&self, theme: &Theme) -> AnyElement {
@@ -1081,57 +1441,56 @@ impl TaskCenter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn render_steps_bar(
+    fn status_pill(
         &self,
-        rows: &[BarRow],
-        total: Option<u64>,
-        live: bool,
+        facts: &Facts,
+        status: Status,
+        label: String,
+        pop: Option<Status>,
         reduced: bool,
         now: Instant,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let steps = rows.iter().filter(|row| row.id != LEAD).count();
-        let running = rows
-            .iter()
-            .filter(|row| row.id != LEAD && row.status == Status::Running)
-            .count();
-        let count = |kind: Status| rows.iter().filter(|row| row.status == kind).count();
-        let (waiting, failed) = (count(Status::Waiting), count(Status::Failed));
-        let button = |kind: Status, n: usize, label: &str, cx: &mut Context<Self>| {
-            let tone = kind.tone(theme);
-            let open = self.pop.as_ref().is_some_and(|pop| pop.kind == kind);
-            let selector = format!(
-                "task-center-pop-{}",
-                if kind == Status::Waiting {
-                    "waiting"
-                } else {
-                    "failed"
-                }
-            );
-            div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(move || selector.clone())
+        let tone = status.tone(theme);
+        let (bg, fg) = if status.muted() {
+            (theme.wash(0.08), theme.text_muted)
+        } else {
+            (tone.opacity(0.15), tone)
+        };
+        let open = pop.is_some_and(|kind| self.pop.as_ref().is_some_and(|pop| pop.kind == kind));
+        let selector = match pop {
+            Some(Status::Waiting) => "task-center-pop-waiting",
+            Some(_) => "task-center-pop-failed",
+            None => "task-center-status",
+        };
+        let pill = div()
+            .id(selector)
+            .debug_selector(move || selector.into())
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .h(px(28.0))
+            .pl(px(10.0))
+            .pr(px(if pop.is_some() { 8.0 } else { 12.0 }))
+            .rounded_full()
+            .bg(bg)
+            .text_size(ui_rems(12.5))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(fg)
+            .child(tree::glyph(status, 13.0, fg, reduced))
+            .child(label.clone());
+        let pill = match pop {
+            Some(kind) => pill
                 .role(gpui::Role::Button)
-                .aria_label(format!("{n} {label}"))
+                .aria_label(label)
                 .aria_expanded(open)
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(2.0))
-                .h(px(22.0))
-                .pl(px(7.0))
-                .pr(px(4.0))
-                .rounded(px(5.0))
-                .bg(tone.opacity(0.15))
-                .text_color(tone)
-                .font_weight(gpui::FontWeight::MEDIUM)
                 .cursor_pointer()
-                .child(format!("{n} {label}"))
                 .child(
                     icon(icons::LUCIDE_CHEVRON_DOWN)
                         .size(px(12.0))
-                        .text_color(tone)
+                        .text_color(fg)
                         .when(open, |el| {
                             el.with_transformation(gpui::Transformation::rotate(gpui::radians(
                                 std::f32::consts::PI,
@@ -1141,57 +1500,413 @@ impl TaskCenter {
                 .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
                     cx.stop_propagation();
                     center.toggle_pop(kind, cx)
-                }))
+                })),
+            None => pill,
         };
-        let phase = (live && !reduced).then(|| tree::amount::phase(self.shimmer_since, now));
-        let mut summary = div()
-            .flex_1()
-            .min_w_0()
+        div()
+            .relative()
+            .flex_none()
+            .child(pill)
+            .children(
+                open.then(|| self.render_pop(&facts.rows, now, theme, cx))
+                    .flatten(),
+            )
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn render_header(
+        &self,
+        task: &zeron_proto::Task,
+        plan: &Rollup,
+        facts: &Facts,
+        reduced: bool,
+        now: Instant,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let done = task.completed_at.is_some();
+        let steps: Vec<&BarRow> = facts.rows.iter().filter(|row| row.id != LEAD).collect();
+        let count = |kind: Status| facts.rows.iter().filter(|row| row.status == kind).count();
+        let (waiting, failed) = (count(Status::Waiting), count(Status::Failed));
+        let running = steps
+            .iter()
+            .filter(|row| row.status == Status::Running)
+            .count();
+        let PlanProgress {
+            done: finished,
+            total,
+        } = plan.progress;
+        let review = facts
+            .rows
+            .iter()
+            .any(|row| row.id == LEAD && row.status == Status::Waiting && row.text.is_some());
+        let mut pills = Vec::new();
+        if done {
+            pills.push(self.status_pill(
+                facts,
+                Status::Done,
+                "Done".into(),
+                None,
+                reduced,
+                now,
+                theme,
+                cx,
+            ));
+        } else {
+            if waiting > 0 {
+                let questions = waiting - usize::from(review);
+                let mut parts = Vec::new();
+                if review {
+                    parts.push("plan review".to_string());
+                }
+                if questions > 0 {
+                    parts.push(format!(
+                        "{questions} {}",
+                        plural(questions, "question", "questions")
+                    ));
+                }
+                pills.push(self.status_pill(
+                    facts,
+                    Status::Waiting,
+                    format!("Needs you · {}", parts.join(", ")),
+                    Some(Status::Waiting),
+                    reduced,
+                    now,
+                    theme,
+                    cx,
+                ));
+            }
+            if failed > 0 {
+                pills.push(self.status_pill(
+                    facts,
+                    Status::Failed,
+                    format!("{failed} {} failed", plural(failed, "step", "steps")),
+                    Some(Status::Failed),
+                    reduced,
+                    now,
+                    theme,
+                    cx,
+                ));
+            }
+            if pills.is_empty() {
+                let (status, word) = tree::lead_status(task, plan);
+                pills.push(self.status_pill(
+                    facts,
+                    status,
+                    word.into(),
+                    None,
+                    reduced,
+                    now,
+                    theme,
+                    cx,
+                ));
+            }
+        }
+        let button = |label: SharedString, selector: &'static str, tone: widgets::ActionTone| {
+            widgets::text_action(theme, tone, label.clone())
+                .id(selector)
+                .debug_selector(move || selector.into())
+                .role(gpui::Role::Button)
+                .aria_label(label)
+                .flex_none()
+                .min_h(px(28.0))
+                .rounded_full()
+        };
+        let primary = if done {
+            None
+        } else if let Some(row) = facts.rows.iter().find(|row| row.status == Status::Waiting) {
+            if row.id == LEAD && row.text.is_some() {
+                Some(
+                    button(
+                        "Approve and run".into(),
+                        "task-center-header-approve",
+                        widgets::ActionTone::Solid,
+                    )
+                    .on_click(cx.listener(|center, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        center.send_edits(true, cx)
+                    })),
+                )
+            } else {
+                let selection = if row.id == LEAD {
+                    Selection::Lead
+                } else {
+                    Selection::Step(row.id.clone())
+                };
+                Some(
+                    button(
+                        "Answer".into(),
+                        "task-center-header-answer",
+                        widgets::ActionTone::Solid,
+                    )
+                    .on_click(cx.listener(
+                        move |center, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            center.pick(selection.clone(), cx)
+                        },
+                    )),
+                )
+            }
+        } else {
+            steps
+                .iter()
+                .find(|row| row.status == Status::Failed)
+                .map(|row| {
+                    let id = row.id.clone();
+                    button(
+                        format!("Retry {}", row.name.to_lowercase()).into(),
+                        "task-center-header-retry",
+                        widgets::ActionTone::Solid,
+                    )
+                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        cx.emit(TaskCenterEvent::RetryStep(id.clone()))
+                    }))
+                })
+        };
+        let task_id = task.id.clone();
+        let toggle_label = if done { "Reopen" } else { "Mark as done" };
+        let toggle = button(
+            toggle_label.into(),
+            "task-center-toggle-done",
+            widgets::ActionTone::Filled,
+        )
+        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+            cx.emit(TaskCenterEvent::Update {
+                task_id: task_id.clone(),
+                patch: TaskPatch {
+                    completed: Some(!done),
+                    ..Default::default()
+                },
+            });
+        }));
+        let lead = facts.lead_chat.clone();
+        let more = div()
+            .id("task-center-more")
+            .debug_selector(|| "task-center-more".into())
+            .role(gpui::Role::Button)
+            .aria_label("More")
+            .flex_none()
+            .size(px(28.0))
+            .rounded_full()
             .flex()
-            .flex_wrap()
-            .justify_end()
             .items_center()
-            .gap(px(8.0))
+            .justify_center()
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.wash(0.08)))
+            .child(
+                icon(icons::LUCIDE_ELLIPSIS)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            )
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |center, event: &ClickEvent, window, cx| {
+                cx.stop_propagation();
+                center.open_menu(
+                    MenuFor::Mission { lead: lead.clone() },
+                    event.position(),
+                    window,
+                    cx,
+                );
+            }));
+        let local = |at: chrono::DateTime<Utc>| {
+            let at = at.with_timezone(&chrono::Local);
+            if at.date_naive() == chrono::Local::now().date_naive() {
+                at.format("%H:%M").to_string()
+            } else {
+                at.format("%b %-d %H:%M").to_string()
+            }
+        };
+        let mut sub = vec!["Lead".to_string()];
+        sub.extend(facts.lead_agent.clone());
+        sub.push(match task.completed_at {
+            Some(at) => format!("finished {}", local(at)),
+            None => format!("started {}", local(task.created_at)),
+        });
+        let elapsed = tree::fmt_time(
+            (task.completed_at.unwrap_or_else(Utc::now) - task.created_at)
+                .num_milliseconds()
+                .max(0) as u64,
+        );
+        let sweep = (running > 0 && !reduced).then(|| {
+            self.shimmer(true, cx);
+            let period = SWEEP.mul_f32(motion::speed_scale()).as_secs_f32();
+            (now.saturating_duration_since(self.shimmer_since)
+                .as_secs_f32()
+                / period)
+                .fract()
+        });
+        let segments = steps.iter().map(|row| {
+            let id = row.id.clone();
+            let selector = format!("task-center-segment-{id}");
+            let color = self.tree.tint(&row.id, now, |status| match status {
+                Status::Queued => theme.wash(0.10),
+                Status::Stopped => theme.text_faint.opacity(0.35),
+                Status::Running => status.tone(theme).opacity(0.45),
+                _ => status.tone(theme),
+            });
+            let lit = motion::mix(color, theme.text, 0.2);
+            let tone = row.status.tone(theme);
+            let shine = sweep
+                .filter(|_| row.status == Status::Running)
+                .map(|phase| {
+                    let band = |from: Hsla, to: Hsla| {
+                        div().h_full().flex_1().bg(gpui::linear_gradient(
+                            90.0,
+                            gpui::linear_color_stop(from, 0.0),
+                            gpui::linear_color_stop(to, 1.0),
+                        ))
+                    };
+                    div()
+                        .absolute()
+                        .top_0()
+                        .h_full()
+                        .w_full()
+                        .left(relative(-1.0 + 2.0 * phase))
+                        .flex()
+                        .child(band(tone.opacity(0.0), tone))
+                        .child(band(tone, tone.opacity(0.0)))
+                });
+            div()
+                .id(SharedString::from(selector.clone()))
+                .debug_selector(move || selector.clone())
+                .group(SharedString::from(format!("task-center-segment-{id}")))
+                .role(gpui::Role::Button)
+                .aria_label(format!("{}: {}", row.name, row.title))
+                .flex_1()
+                .min_w_0()
+                .py(px(6.0))
+                .cursor_pointer()
+                .tooltip(widgets::text_tooltip(format!(
+                    "{} · {} · {}",
+                    row.name, row.title, row.word
+                )))
+                .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
+                    center.pick(Selection::Step(id.clone()), cx)
+                }))
+                .child(
+                    div()
+                        .relative()
+                        .h(px(6.0))
+                        .rounded(px(3.0))
+                        .overflow_hidden()
+                        .bg(color)
+                        .group_hover(
+                            SharedString::from(format!("task-center-segment-{}", row.id)),
+                            |s| s.bg(lit),
+                        )
+                        .children(shine),
+                )
+        });
+        let live = facts.live && !done;
+        let phase = (live && !reduced).then(|| tree::amount::phase(self.shimmer_since, now));
+        let mut totals = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
             .text_size(ui_rems(12.0))
             .text_color(theme.text_muted)
-            .child(format!("{steps} {}", plural(steps, "step", "steps")));
-        if running > 0 {
-            summary = summary.child(
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(format!("{finished}/{total}")),
+            );
+        if !done {
+            totals = totals.child("done");
+        }
+        if running > 0 && !done {
+            totals = totals.child("·").child(
                 div()
                     .text_color(Status::Running.tone(theme))
                     .child(format!("{running} working")),
             );
         }
-        if waiting > 0 {
-            summary = summary.child(button(Status::Waiting, waiting, "needs you", cx));
+        if let Some(label) = tree::amount::label(facts.branch, phase, ui_rems(12.0), theme) {
+            totals = totals.child("·").child(label);
         }
-        if failed > 0 {
-            summary = summary.child(button(Status::Failed, failed, "failed", cx));
-        }
-        summary = summary.children(tree::amount::label(total, phase, ui_rems(12.0), theme));
+        totals = totals.child("·").child(if done {
+            format!("took {elapsed}")
+        } else {
+            elapsed
+        });
         div()
-            .id("task-center-steps-bar")
-            .debug_selector(|| "task-center-steps-bar".into())
-            .relative()
+            .id("task-center-header")
+            .debug_selector(|| "task-center-header".into())
+            .flex_none()
+            .px(px(20.0))
+            .py(px(12.0))
+            .border_b_1()
+            .border_color(theme.border)
             .flex()
-            .items_center()
-            .gap(px(8.0))
-            .mb(px(16.0))
+            .flex_col()
+            .gap(px(6.0))
             .child(
-                icon(icons::MISSION_CONTROL)
-                    .size(px(13.0))
-                    .text_color(theme.text_muted),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(28.0))
+                            .rounded(px(8.0))
+                            .border_1()
+                            .border_color(theme.border)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                icon(icons::MISSION_CONTROL)
+                                    .size(px(14.0))
+                                    .text_color(theme.text_muted),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(ui_rems(18.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(task.title.clone())),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(ui_rems(12.0))
+                                    .text_color(theme.text_muted)
+                                    .child(sub.join(" · ")),
+                            ),
+                    )
+                    .children(pills)
+                    .children(primary)
+                    .child(toggle)
+                    .child(more),
             )
             .child(
                 div()
-                    .flex_none()
-                    .text_size(ui_rems(12.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text_muted)
-                    .child("Steps"),
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .debug_selector(|| "task-center-progress".into())
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .gap(px(3.0))
+                            .children(segments),
+                    )
+                    .child(totals),
             )
-            .child(summary)
-            .children(self.render_pop(rows, now, theme, cx))
             .into_any_element()
     }
 
@@ -1216,6 +1931,7 @@ impl TaskCenter {
                 name,
                 title,
                 text,
+                ..
             } = row;
             let lead = id == LEAD;
             let action = |label: &'static str, primary: bool, key: String| {
@@ -1339,7 +2055,7 @@ impl TaskCenter {
             .id("task-center-pop")
             .debug_selector(|| "task-center-pop".into())
             .absolute()
-            .top(px(30.0 - 4.0 * (1.0 - shown)))
+            .top(px(34.0 - 4.0 * (1.0 - shown)))
             .right_0()
             .w(px(300.0))
             .opacity(shown)
@@ -1357,24 +2073,21 @@ impl TaskCenter {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn render_spine(
+    pub(super) fn facts(
         &mut self,
         task: &zeron_proto::Task,
         plan: &Rollup,
         shown: &[(StepRow, Option<Tag>, Option<Thread>)],
-        editable: bool,
-        reduced: bool,
-        now: Instant,
-        theme: &Theme,
-        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let slots = Self::slots(shown);
+    ) -> Facts {
         let state = self.state.clone();
-        let lead_chat = {
+        let (lead_chat, lead_agent) = {
             let state = state.read(cx);
-            linked_chat(&state.chats, task).map(|chat| chat.id.clone())
+            let chat = linked_chat(&state.chats, task);
+            (
+                chat.map(|chat| chat.id.clone()),
+                chat.and_then(|chat| agent_of(chat, cx)),
+            )
         };
         let mut chat_ids: Vec<String> = shown
             .iter()
@@ -1384,17 +2097,18 @@ impl TaskCenter {
         chat_ids.extend(lead_chat.clone());
         self.stats
             .refresh(&state, chat_ids, |center: &mut Self| &mut center.stats, cx);
-        let (lead_status, _) = tree::lead_status(task, plan);
+        let (lead_status, lead_word) = tree::lead_status(task, plan);
         let mut rows = vec![BarRow {
             id: LEAD.to_string(),
             status: lead_status,
+            word: lead_word,
             name: "Lead".into(),
             title: task.title.clone(),
             text: (plan.phase(task) == super::super::PlanPhase::PlanReady)
                 .then(|| "Plan ready: approve to start running the steps.".to_string()),
         }];
         rows.extend(shown.iter().enumerate().map(|(ix, (row, _, thread))| {
-            let (status, _) = Status::of_step(
+            let (status, word) = Status::of_step(
                 row,
                 thread
                     .as_ref()
@@ -1404,6 +2118,7 @@ impl TaskCenter {
             BarRow {
                 id: row.step.id.clone(),
                 status,
+                word,
                 name: format!("Step {}", ix + 1),
                 title: row.step.title.clone(),
                 text: text.map(|text| crate::transcript::single_line(&text)),
@@ -1425,7 +2140,7 @@ impl TaskCenter {
             )
         };
         let branch = tree::amount::branch(lead_tokens, tokens.iter().copied());
-        let any_running = plan.count(StepStatus::Working) > 0
+        let live = plan.count(StepStatus::Working) > 0
             || (plan.lead == Some(ChatIndicator::Working) && task.completed_at.is_none());
         let lead_time = {
             let state = state.read(cx);
@@ -1443,6 +2158,46 @@ impl TaskCenter {
                 stats.as_ref(),
             )
         };
+        if self
+            .pop
+            .as_ref()
+            .is_some_and(|pop| !rows.iter().any(|row| row.status == pop.kind))
+        {
+            self.pop = None;
+        }
+        if self.leaving.as_ref().is_some_and(|leave| {
+            leave.grow.settled_at(Instant::now()) && leave.fade.settled_at(Instant::now())
+        }) {
+            self.leaving = None;
+        }
+        Facts {
+            rows,
+            tokens,
+            branch,
+            live,
+            lead_time,
+            lead_chat,
+            lead_agent,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn render_spine(
+        &mut self,
+        task: &zeron_proto::Task,
+        plan: &Rollup,
+        shown: &[(StepRow, Option<Tag>, Option<Thread>)],
+        facts: &Facts,
+        editable: bool,
+        reduced: bool,
+        now: Instant,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let slots = Self::slots(shown);
+        let rows = &facts.rows;
+        let lead_status = rows[0].status;
 
         let mut nodes = vec![NodeIn {
             id: LEAD,
@@ -1488,17 +2243,25 @@ impl TaskCenter {
         let visible: Vec<usize> = (0..shown.len())
             .filter(|ix| self.tree.shown(&shown[*ix].0.step.id))
             .collect();
-        let spans: Vec<usize> = visible
+        let heights: Vec<f32> = visible
             .iter()
             .map(|ix| {
-                span(height_of(
-                    &Key::Task(shown[*ix].0.step.id.clone()),
-                    CARD_HEIGHT,
-                ))
+                let id = &shown[*ix].0.step.id;
+                let painted = self
+                    .painted
+                    .borrow()
+                    .get(&Key::Task(id.clone()))
+                    .map(|rect| f32::from(rect.size.height));
+                match painted {
+                    Some(painted) => {
+                        (painted - self.last_region(id) + self.region(id, now).height()).max(0.0)
+                    }
+                    None => CARD_HEIGHT,
+                }
             })
             .collect();
-        let (places, end) = spine_rows(&spans);
-        let pitch = ROW + ROW_GAP;
+        let (tops, end) = spine_tops(&heights);
+        let snap = reduced || !known || self.sliding(now);
         let lifted = self.drag.as_ref().map(|drag| (drag.id.clone(), drag.dy));
         let mut placed: Vec<Placed> = Vec::new();
         let mut place = |tree: &mut tree::TreeMotion,
@@ -1506,18 +2269,20 @@ impl TaskCenter {
                          x: f32,
                          y: f32,
                          width: f32,
+                         height: f32,
                          side: Option<Side>| {
             let extra = lifted
                 .as_ref()
                 .filter(|(lifted, _)| lifted == id)
                 .map_or((0.0, 0.0), |(_, dy)| (0.0, *dy));
-            let (gx, gy) = tree.place(id, (x, y), extra, reduced || !known, now);
+            let (gx, gy) = tree.place(id, (x, y), extra, snap, now);
             let frame = tree.frame(id, now);
             placed.push(Placed {
                 id: id.to_string(),
                 x: x + gx + extra.0,
                 y: y + gy + extra.1 + frame.y,
                 width,
+                height,
                 side,
                 frame,
             });
@@ -1528,10 +2293,11 @@ impl TaskCenter {
             center - lead_width / 2.0,
             0.0,
             lead_width,
+            lead_height,
             None,
         );
         for (k, ix) in visible.iter().enumerate() {
-            let (side, row) = places[k];
+            let (side, top) = tops[k];
             let x = match side {
                 Side::Left => center - SPINE / 2.0 - column,
                 Side::Right => center + SPINE / 2.0,
@@ -1540,8 +2306,9 @@ impl TaskCenter {
                 &mut self.tree,
                 &shown[*ix].0.step.id,
                 x,
-                body + row as f32 * pitch,
+                body + top,
                 column,
+                heights[k],
                 Some(side),
             );
         }
@@ -1551,24 +2318,15 @@ impl TaskCenter {
                 &mut self.tree,
                 GHOST,
                 center - ghost_width / 2.0,
-                body + end as f32 * pitch,
+                body + end,
                 ghost_width,
+                height_of(&Key::Add, 44.0),
                 None,
             );
         }
-        let ghost_height = height_of(&Key::Add, 44.0);
         let bottom = placed
             .iter()
-            .map(|placed| {
-                let height = if placed.id == LEAD {
-                    lead_height
-                } else if placed.id == GHOST {
-                    ghost_height
-                } else {
-                    height_of(&Key::Task(placed.id.clone()), CARD_HEIGHT)
-                };
-                placed.y + height
-            })
+            .map(|placed| placed.y + placed.height)
             .fold(0.0, f32::max);
 
         let lead = placed.iter().find(|placed| placed.id == LEAD);
@@ -1628,8 +2386,8 @@ impl TaskCenter {
                     task,
                     plan,
                     editable,
-                    branch,
-                    lead_time.clone(),
+                    facts.branch,
+                    facts.lead_time.clone(),
                     reduced,
                     theme,
                     window,
@@ -1649,8 +2407,9 @@ impl TaskCenter {
                     *tag,
                     move_range(&slots, ix),
                     editable,
-                    tokens[ix],
+                    facts.tokens[ix],
                     reduced,
+                    now,
                     theme,
                     window,
                     cx,
@@ -1679,18 +2438,9 @@ impl TaskCenter {
                 wrapper.into_any_element()
             });
         }
-        if self
-            .pop
-            .as_ref()
-            .is_some_and(|pop| !rows.iter().any(|row| row.status == pop.kind))
-        {
-            self.pop = None;
-        }
-        let bar = self.render_steps_bar(&rows, branch, any_running, reduced, now, theme, cx);
         div()
             .flex()
             .flex_col()
-            .child(bar)
             .child(
                 div()
                     .id("task-center-steps")
@@ -1847,18 +2597,34 @@ mod tests {
 
     #[test]
     fn cards_alternate_sides_one_row_apart_and_a_tall_card_pushes_the_rest() {
-        let (rows, end) = spine_rows(&[2, 2, 5, 2]);
+        let heights = [96.0, 96.0, 300.0, 96.0, 150.5];
+        let (tops, end) = spine_tops(&heights);
         assert_eq!(
-            rows,
+            tops,
             [
-                (Side::Left, 0),
-                (Side::Right, 1),
-                (Side::Left, 2),
-                (Side::Right, 6)
+                (Side::Left, 0.0),
+                (Side::Right, 64.0),
+                (Side::Left, 128.0),
+                (Side::Right, 376.0),
+                (Side::Left, 440.0),
             ]
         );
-        assert_eq!(end, 8, "the ghost sits under the lowest card");
-        assert_eq!(span(96.0), 2);
-        assert_eq!(span(200.0), 4);
+        for i in 0..heights.len() - 2 {
+            assert!(
+                tops[i + 2].1 >= tops[i].1 + heights[i] + ROW_GAP,
+                "card {i} ends above the next card on its side"
+            );
+        }
+        assert_eq!(
+            end,
+            440.0 + 150.5 + ROW_GAP + 16.0,
+            "the ghost sits under the lowest card"
+        );
+        let (_, grown) = spine_tops(&[96.0, 96.0, 96.4, 96.0]);
+        let (_, more) = spine_tops(&[96.0, 96.0, 140.0, 96.0]);
+        assert!(
+            more > grown,
+            "a growing card moves what follows without row steps"
+        );
     }
 }
