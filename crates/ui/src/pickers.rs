@@ -2706,6 +2706,12 @@ impl Pickers {
             self.ensure_models(harness, force, cx);
         }
         for instance in self.instance_sources(cx) {
+            // Reopening the picker re-probes a failed agent, not every working one.
+            let force = force
+                && matches!(
+                    self.instance_models.get(&instance.id),
+                    Some(Loadable::Error(_))
+                );
             self.ensure_instance_models(&instance.id, force, cx);
         }
     }
