@@ -3852,6 +3852,7 @@ impl RpcService for EngineRpc {
                         Some(from)
                             if self.supervisor_gate(Some(from), |s| s.message_threads, supervisor::MESSAGE_OFF)? =>
                         {
+                            self.supervisor_may_answer(from, &p.chat_id)?;
                             let text: Vec<String> = answers
                                 .iter()
                                 .map(|answer| format!("{}: {}", answer.question_id, answer.labels.join(", ")))

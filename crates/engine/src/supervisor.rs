@@ -1113,9 +1113,10 @@ fn authority_footer(settings: SupervisorSettings, permission: PermissionMode) ->
         decides.push_str("\nThe person sees each of these decisions with your reason and may change it, so give a reason they can check.");
     }
     format!(
-        "Read more with read_thread, list_threads, or the tasks tool (action \"list\", taskId). What you may do now:\n- message leads and step threads with send_message_to_thread: {}\n- answer their questions and tool approvals with respond_to_input: {}{approvals}\n- re-brief a step's title and spec through its lead with the supervisor tool, action \"rebrief\": {}{resources}\n- start a mission whose plan the person reviews with the supervisor tool, action \"start\" (create_thread and delegate_task go with it): {}{decides}\n{goal}\nIf nothing needs doing, reply in one line.",
+        "Read more with read_thread, list_threads, or the tasks tool (action \"list\", taskId). What you may do now:\n- message leads and step threads with send_message_to_thread: {}\n- answer their questions and tool approvals with respond_to_input: {}{approvals}\n- answer the questions of a watched tree without a plan with respond_to_input (Decide for me): {}; decide, approve, goal, re-brief and pause apply once a tree has a plan\n- re-brief a step's title and spec through its lead with the supervisor tool, action \"rebrief\": {}{resources}\n- start a mission whose plan the person reviews with the supervisor tool, action \"start\" (create_thread and delegate_task go with it): {}{decides}\n{goal}\nIf nothing needs doing, reply in one line.",
         on(settings.message_threads),
         on(settings.message_threads),
+        on(settings.message_threads && settings.decide_for_me),
         on(settings.rebrief),
         on(settings.start_missions),
     )

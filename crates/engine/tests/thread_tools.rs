@@ -3842,7 +3842,7 @@ async fn a_watched_trees_question_reaches_the_supervisor_and_an_unwatched_trees_
     .unwrap() else {
         panic!("a chat id");
     };
-    assert!(ensured["chatId"].as_str().is_some());
+    let supervisor = ensured["chatId"].as_str().unwrap().to_string();
     let workspace = &rig.core.workspace;
     workspace.rename_chat("lead", "Shop backend").unwrap();
     workspace
@@ -3941,6 +3941,75 @@ async fn a_watched_trees_question_reaches_the_supervisor_and_an_unwatched_trees_
         .await
         .unwrap();
     supervisor_until(&rpc, |s| !s.watch_everything && asks_from(s).is_empty()).await;
+
+    mutate(serde_json::json!({ "op": "setTreeWatched", "rootChatId": "lead", "watched": true }))
+        .await
+        .unwrap();
+    let answer = |thread: &str, request: &str| {
+        call(
+            zeron_rpc::methods::QUEUE_COMMAND,
+            serde_json::json!({
+                "chatId": thread,
+                "fromChatId": supervisor,
+                "command": {
+                    "kind": "respondInput", "requestId": request,
+                    "answers": [{ "questionId": "q-curl", "labels": ["Yes, proceed"] }],
+                },
+            }),
+        )
+    };
+    let refusal = |reply: Result<zeron_rpc::RpcReply, zeron_rpc::RpcError>| match reply {
+        Err(err) => err.to_string(),
+        Ok(_) => panic!("the Supervisor's answer is refused"),
+    };
+    let request_b = pending_request(&rig.core, "child-b").unwrap();
+    assert!(
+        refusal(answer("child-a", &request).await).contains("Decide for me is off"),
+        "a tree without a plan needs Decide for me"
+    );
+    call(
+        zeron_rpc::methods::SET_SUPERVISOR_SETTINGS,
+        serde_json::json!({ "decideForMe": true }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        refusal(answer("child-b", &request_b).await).contains("does not watch this thread's tree"),
+        "an unwatched tree's question stays the person's"
+    );
+    call(
+        zeron_rpc::methods::SET_SUPERVISOR_SETTINGS,
+        serde_json::json!({ "decideForMe": true, "goalAndSpend": true }),
+    )
+    .await
+    .unwrap();
+    for action in [
+        serde_json::json!({ "action": "approve", "taskId": "lead", "reason": "fine" }),
+        serde_json::json!({ "action": "goal", "taskId": "lead", "title": "Shop", "reason": "shorter" }),
+    ] {
+        let mut params = action.clone();
+        params["fromChatId"] = serde_json::json!(supervisor);
+        let err = refusal(call(zeron_rpc::methods::SUPERVISOR_ACT, params).await);
+        assert!(
+            err.starts_with("Applies once this tree has a plan"),
+            "{action}: {err}"
+        );
+    }
+    answer("child-a", &request).await.unwrap();
+    wait_for(
+        || pending_request(&rig.core, "child-a").is_none(),
+        "the Supervisor's answer",
+    )
+    .await;
+    let snapshot = supervisor_until(&rpc, |s| !s.interventions.is_empty()).await;
+    let respond = &snapshot.interventions[0];
+    assert_eq!(
+        respond.kind,
+        zeron_proto::supervisor::InterventionKind::Respond
+    );
+    assert_eq!(respond.target.as_deref(), Some("child-a"));
+    assert_eq!(respond.request_id.as_deref(), Some(request.as_str()));
+    assert!(pending_request(&rig.core, "child-b").is_some());
     rig.core.shutdown().await;
 }
 
