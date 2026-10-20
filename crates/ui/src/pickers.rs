@@ -775,6 +775,8 @@ struct ModelRowData {
     harness_name: SharedString,
     model: Model,
     selected_only: bool,
+    /// The instance's models failed to load: the row shows why, and picking it retries.
+    failed: bool,
     /// Another listed row of the same harness shares this label, so the
     /// row shows its description to tell them apart.
     ambiguous: bool,
@@ -3901,6 +3903,30 @@ impl Pickers {
             }
             Some(rows)
         };
+        let failed_instance_row = |instance: &ProviderInstance| {
+            let Some(Loadable::Error(message)) = self.instance_models.get(&instance.id) else {
+                return None;
+            };
+            let lowered = query.to_lowercase();
+            if !instance.label.to_lowercase().contains(&lowered) {
+                return None;
+            }
+            Some(vec![ModelRowData {
+                harness: instance.driver,
+                instance: Some(instance.id.clone()),
+                harness_name: instance.label.clone().into(),
+                selected_only: false,
+                failed: true,
+                ambiguous: false,
+                model: Model {
+                    id: String::new(),
+                    label: instance.label.clone(),
+                    description: Some(catalog_error_text(message).to_string()),
+                    reasoning_levels: vec![],
+                    options: vec![],
+                },
+            }])
+        };
         let instances = self.instance_sources(cx);
         let mut rows = match viewed_instance
             .as_deref()
@@ -3927,7 +3953,9 @@ impl Pickers {
                 );
                 if self.model_rail == ModelRail::All {
                     for instance in &instances {
-                        let Some(extra) = instance_rows(instance, ModelRail::All) else {
+                        let Some(extra) = instance_rows(instance, ModelRail::All)
+                            .or_else(|| failed_instance_row(instance))
+                        else {
                             continue;
                         };
                         let at = rows
@@ -3975,6 +4003,7 @@ impl Pickers {
                             .provider_label(harness, effective_instance.as_deref())
                             .into(),
                         selected_only: true,
+                        failed: false,
                         ambiguous: false,
                         model: Model {
                             id: id.into(),
@@ -4058,6 +4087,12 @@ impl Pickers {
             return;
         };
         if row.selected_only {
+            return;
+        }
+        if row.failed {
+            if let Some(id) = row.instance {
+                self.ensure_instance_models(&id, true, cx);
+            }
             return;
         }
         if self.effective_harness(cx) != Some(row.harness)
@@ -6851,7 +6886,9 @@ impl Pickers {
             .as_deref()
             .map(str::trim)
             .filter(|d| {
-                row.ambiguous && !d.is_empty() && !d.eq_ignore_ascii_case(harness_name.as_ref())
+                (row.ambiguous || row.failed)
+                    && !d.is_empty()
+                    && !d.eq_ignore_ascii_case(harness_name.as_ref())
             })
             .map(|d| SharedString::from(d.to_owned()));
         let compact = self.model_rail == ModelRail::Harness;
@@ -8816,6 +8853,7 @@ fn scoped_model_rows<'a>(
         harness_name: SharedString::from(descriptor.name.clone()),
         model: model.clone(),
         selected_only: false,
+        failed: false,
         ambiguous: false,
     };
     let in_scope = |descriptor: &HarnessDescriptor, model: &Model| match rail {
@@ -14384,6 +14422,24 @@ mod tests {
             let resolved = pickers.resolved(cx);
             assert_eq!(resolved.harness, Some(HarnessId::Codex));
             assert_eq!(resolved.instance_id, None);
+
+            pickers.instance_models.insert(
+                "acp_kimchi".into(),
+                Loadable::Error("model discovery auth_required: Kimchi isn't signed in".into()),
+            );
+            pickers.catalog_rev += 1;
+            pickers.model_rail = ModelRail::All;
+            let rows = pickers.model_rows(cx);
+            let failed = rows
+                .iter()
+                .position(|row| row.failed)
+                .expect("a failed instance keeps a row in the All list");
+            assert_eq!(
+                rows[failed].model.description.as_deref(),
+                Some("Kimchi isn't signed in")
+            );
+            pickers.activate_model_index(failed, cx);
+            assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::Codex));
         });
     }
 

@@ -178,7 +178,7 @@ impl Pickers {
             .description
             .as_deref()
             .map(str::trim)
-            .filter(|d| row.ambiguous && !d.is_empty())
+            .filter(|d| (row.ambiguous || row.failed) && !d.is_empty())
             .map(|d| SharedString::from(d.to_owned()));
         let hovered = self.active == ix;
         let details: SharedString = match row.model.description.as_deref() {
