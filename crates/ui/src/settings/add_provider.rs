@@ -533,7 +533,10 @@ impl AddProviderDialog {
         }
     }
 
-    fn close(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close(&mut self, cx: &mut Context<Self>) {
+        if self.saving {
+            return;
+        }
         self.cancel_login(cx);
         cx.emit(AddProviderEvent::Close);
     }
