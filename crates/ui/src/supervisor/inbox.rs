@@ -464,10 +464,10 @@ impl SupervisorPage {
         let key = group.key();
         let mission = group
             .task
-            .and_then(|task| missions.iter().find(|m| m.row.task_id == task));
+            .and_then(|task| missions.iter().find(|m| m.plan && m.key == task));
         let title = match (group.task, mission) {
             (None, _) => "Supervisor and shared".to_owned(),
-            (Some(_), Some(mission)) => mission.row.title.clone(),
+            (Some(_), Some(mission)) => mission.title.clone(),
             (Some(task), None) => {
                 mission_title(self.state.read(cx), Some(task)).unwrap_or_else(|| "A mission".into())
             }

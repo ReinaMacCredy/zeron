@@ -86,41 +86,6 @@ impl TaskCenter {
         })
     }
 
-    pub(super) fn kind_badge(mission: bool, theme: &Theme) -> AnyElement {
-        let (mark, label, fg, bg) = if mission {
-            (
-                icons::MISSION_CONTROL,
-                "Mission",
-                motion::mix(theme.accent, theme.text, 0.2),
-                theme.accent.opacity(0.14),
-            )
-        } else {
-            (
-                icons::LUCIDE_LIST_TREE,
-                "Tree",
-                theme.text_muted,
-                theme.wash(0.07),
-            )
-        };
-        div()
-            .debug_selector(move || format!("task-center-kind-{label}"))
-            .flex_none()
-            .h(px(18.0))
-            .pl(px(5.0))
-            .pr(px(6.0))
-            .rounded(px(5.0))
-            .bg(bg)
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .text_size(ui_rems(11.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(fg)
-            .child(icon(mark).size(px(11.0)).text_color(fg))
-            .child(label)
-            .into_any_element()
-    }
-
     fn pill(status: Status, label: String, reduced: bool, theme: &Theme) -> AnyElement {
         let tone = status.tone(theme);
         let (bg, fg) = if status.muted() {
@@ -276,6 +241,16 @@ impl TaskCenter {
                 .num_milliseconds()
                 .max(0) as u64,
         );
+        let title = crate::transcript::single_line(&crate::home::chat_title(root));
+        let watch = self.render_watch_button(
+            super::watch_sheet::WatchTarget {
+                root: &root.id,
+                task: None,
+                title: &title,
+            },
+            theme,
+            cx,
+        );
         let segments = kids.iter().map(|node| {
             let color = match node.status {
                 Status::Queued => theme.wash(0.10),
@@ -386,11 +361,9 @@ impl TaskCenter {
                                             .text_size(ui_rems(18.0))
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
                                             .text_color(theme.text)
-                                            .child(crate::transcript::single_line(
-                                                &crate::home::chat_title(root),
-                                            )),
+                                            .child(title),
                                     )
-                                    .child(Self::kind_badge(false, theme)),
+                                    .child(tree::kind_badge(false, theme)),
                             )
                             .child(
                                 div()
@@ -400,6 +373,7 @@ impl TaskCenter {
                                     .child(sub.join(" \u{b7} ")),
                             ),
                     )
+                    .children(watch)
                     .child(Self::pill(status, word, reduced, theme))
                     .children(add_plan)
                     .child(toggle)

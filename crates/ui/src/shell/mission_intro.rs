@@ -130,6 +130,10 @@ impl Shell {
 
     fn try_mission_control(&mut self, cx: &mut Context<Self>) {
         self.close_mission_intro(cx);
+        self.new_mission(cx);
+    }
+
+    pub(super) fn new_mission(&mut self, cx: &mut Context<Self>) {
         self.open_new_session(None, cx);
         self.composer.update(cx, |composer, cx| {
             composer.mission_pending = true;

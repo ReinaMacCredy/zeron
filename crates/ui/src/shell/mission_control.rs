@@ -39,6 +39,7 @@ impl Shell {
 
     fn on_mission_index_event(&mut self, event: &MissionIndexEvent, cx: &mut Context<Self>) {
         match event {
+            MissionIndexEvent::NewMission => self.new_mission(cx),
             MissionIndexEvent::OpenTree(root) => self.open_task_center(root.clone(), cx),
             MissionIndexEvent::OpenTreeAt(root, selection) => {
                 let center = self.task_center_for(root.clone(), cx);

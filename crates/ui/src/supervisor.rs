@@ -27,7 +27,6 @@ use zeron_proto::{
 use zeron_rpc::methods;
 
 use crate::composer::Composer;
-use crate::home::MissionRow;
 use crate::icons::{self, icon};
 use crate::motion::{self, CubicBezier, Fold, MotionSpec, Tween, folded};
 use crate::pickers::Pickers;
@@ -324,6 +323,30 @@ pub(crate) fn watch_of(
         (Some(host), Some(local)) if host != local => Watch::Elsewhere(host.to_owned()),
         _ if unwatched.iter().any(|id| id == task_id) => Watch::Unwatched,
         _ => Watch::Watched,
+    }
+}
+
+pub(crate) fn tree_watch(state: &AppState, root: &str) -> Watch {
+    let host = state
+        .chats
+        .iter()
+        .find(|chat| chat.id == root)
+        .map(|chat| chat.device_id.as_str());
+    let local = state.local_device_id.as_deref();
+    let snapshot = state.supervisor.as_ref();
+    if let Some(task) = crate::tasks::plan_led_by(&state.tasks, root) {
+        let unwatched = snapshot.map_or(&[][..], |snapshot| snapshot.unwatched.as_slice());
+        return watch_of(&task.id, host, local, unwatched);
+    }
+    match (host, local) {
+        (Some(host), Some(local)) if host != local => Watch::Elsewhere(host.to_owned()),
+        _ if snapshot.is_some_and(|snapshot| {
+            snapshot.watch_everything || snapshot.watched_roots.iter().any(|id| id == root)
+        }) =>
+        {
+            Watch::Watched
+        }
+        _ => Watch::Unwatched,
     }
 }
 
@@ -915,15 +938,23 @@ fn profile_config(profile: &AgentProfile) -> ChatConfig {
 }
 
 struct Mission {
-    row: MissionRow,
+    key: String,
+    root: Option<String>,
+    plan: bool,
+    title: String,
+    progress: PlanProgress,
+    status: TaskStatus,
     watch: Watch,
     current: String,
     done_at: Option<DateTime<Utc>>,
+    starts_open: bool,
 }
+
+const RAIL_OPEN_TREES: usize = 4;
 
 impl Mission {
     fn fraction(&self) -> f32 {
-        let PlanProgress { done, total } = self.row.progress;
+        let PlanProgress { done, total } = self.progress;
         if self.done_at.is_some() {
             1.0
         } else if total == 0 {
@@ -945,53 +976,109 @@ fn missions(state: &AppState, now: DateTime<Utc>) -> Vec<Mission> {
     let done = crate::home::done_today_rows(state, now)
         .into_iter()
         .map(|row| (row, true));
-    active
-        .chain(done)
-        .map(|(row, done)| {
-            let task = state.tasks.iter().find(|task| task.id == row.task_id);
-            let done_at = task.and_then(|task| task.completed_at).filter(|_| done);
-            let host = task
-                .and_then(|task| linked_chat(&state.chats, task))
-                .map(|chat| chat.device_id.as_str());
-            let watch = watch_of(
-                &row.task_id,
-                host,
-                state.local_device_id.as_deref(),
-                unwatched,
-            );
-            let current = match done_at {
-                Some(at) => format!(
-                    "Done · {} of {} · {}",
-                    row.progress.done,
-                    row.progress.total,
-                    clock(at)
-                ),
-                None => task
-                    .map(|task| rollup(state, task, now))
-                    .and_then(|plan| {
-                        let step = plan
-                            .steps
-                            .iter()
-                            .find(|step| {
-                                !matches!(step.status, StepStatus::Done | StepStatus::Skipped)
-                            })
-                            .or(plan.steps.last())?;
-                        Some(format!(
-                            "{} · {}",
-                            plan.step_label(&step.step.id)?,
-                            step.step.title
-                        ))
-                    })
-                    .unwrap_or_else(|| row.label.clone()),
-            };
+    let plans = active.chain(done).map(|(row, done)| {
+        let task = state.tasks.iter().find(|task| task.id == row.task_id);
+        let done_at = task.and_then(|task| task.completed_at).filter(|_| done);
+        let lead = task.and_then(|task| linked_chat(&state.chats, task));
+        let watch = watch_of(
+            &row.task_id,
+            lead.map(|chat| chat.device_id.as_str()),
+            state.local_device_id.as_deref(),
+            unwatched,
+        );
+        let current = match done_at {
+            Some(at) => format!(
+                "Done · {} of {} · {}",
+                row.progress.done,
+                row.progress.total,
+                clock(at)
+            ),
+            None => task
+                .map(|task| rollup(state, task, now))
+                .and_then(|plan| {
+                    let step = plan
+                        .steps
+                        .iter()
+                        .find(|step| !matches!(step.status, StepStatus::Done | StepStatus::Skipped))
+                        .or(plan.steps.last())?;
+                    Some(format!(
+                        "{} · {}",
+                        plan.step_label(&step.step.id)?,
+                        step.step.title
+                    ))
+                })
+                .unwrap_or_else(|| row.label.clone()),
+        };
+        Mission {
+            root: task.and_then(|task| task.chat_id.clone()),
+            plan: true,
+            title: row.title,
+            progress: row.progress,
+            status: row.status,
+            key: row.task_id,
+            watch,
+            current,
+            done_at,
+            starts_open: false,
+        }
+    });
+    let index = crate::tasks::index_rows(state, now);
+    let trees = index
+        .running
+        .into_iter()
+        .chain(index.done_today)
+        .filter(|row| row.kind == crate::tasks::IndexKind::Tree)
+        .filter(|row| tree_watch(state, &row.root) == Watch::Watched)
+        .map(|row| {
+            let done = row
+                .segments
+                .iter()
+                .filter(|status| **status == crate::tasks::TreeStatus::Done)
+                .count();
             Mission {
-                row,
-                watch,
-                current,
-                done_at,
+                root: Some(row.root.clone()),
+                plan: false,
+                title: row.title,
+                progress: PlanProgress {
+                    done,
+                    total: row.segments.len(),
+                },
+                status: if row.asks {
+                    TaskStatus::NeedsYou
+                } else if row.ended.is_some() {
+                    TaskStatus::Done
+                } else if row.status.live() {
+                    TaskStatus::Working
+                } else {
+                    TaskStatus::ToDo
+                },
+                key: row.root,
+                watch: Watch::Watched,
+                current: row.line,
+                done_at: row.ended,
+                starts_open: false,
             }
-        })
-        .collect()
+        });
+    let mut all: Vec<Mission> = plans.chain(trees).collect();
+    let running = all
+        .iter()
+        .filter(|mission| mission.done_at.is_none())
+        .count();
+    for mission in &mut all {
+        mission.starts_open = mission.done_at.is_none() && running <= RAIL_OPEN_TREES;
+    }
+    all
+}
+
+fn watch_params(mission: &Mission, on: bool) -> serde_json::Value {
+    match (&mission.root, mission.plan) {
+        (Some(root), false) => serde_json::json!({
+            "op": "setTreeWatched", "rootChatId": root, "watched": on,
+        }),
+        _ => serde_json::json!({
+            "op": "setMissionSupervised", "taskId": mission.key, "supervised": on,
+        }),
+    }
 }
 
 fn model_label(chat: &Chat, cx: &App) -> Option<String> {
@@ -1703,17 +1790,21 @@ impl SupervisorPage {
         cx.notify();
     }
 
-    fn set_supervised(&mut self, task_id: String, supervised: bool, cx: &mut Context<Self>) {
+    fn set_watch_everything(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.send_watch(
+            serde_json::json!({ "op": "setWatchEverything", "on": on }),
+            cx,
+        );
+    }
+
+    fn send_watch(&mut self, params: serde_json::Value, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let params = serde_json::json!({
-            "op": "setMissionSupervised", "taskId": task_id, "supervised": supervised,
-        });
         cx.spawn(async move |page, cx| {
             if let Err(err) = engine.client().call(methods::MUTATE, params).await {
                 page.update(cx, |page, cx| {
-                    page.settings_error = Some(format!("Could not change the mission: {err}"));
+                    page.settings_error = Some(format!("Could not change what it watches: {err}"));
                     cx.notify();
                 })
                 .ok();
@@ -1922,7 +2013,16 @@ impl SupervisorPage {
     }
 
     fn mission_open(&self, mission: &Mission) -> bool {
-        (mission.done_at.is_none()) != self.toggled.contains(&mission.row.task_id)
+        mission.starts_open != self.toggled.contains(&mission.key)
+    }
+
+    fn watched_by_everything(&self, mission: &Mission, cx: &App) -> bool {
+        let snapshot = self.state.read(cx).supervisor.as_ref();
+        mission.root.as_ref().is_some_and(|root| {
+            snapshot.is_some_and(|snapshot| {
+                snapshot.watch_everything && !snapshot.watched_roots.contains(root)
+            })
+        })
     }
 
     fn toggle_earlier(&mut self, cx: &mut Context<Self>) {
@@ -2168,7 +2268,7 @@ impl SupervisorPage {
         let rows = &self.rows;
         self.chips.retain(|key, _| rows.contains_key(key));
         for mission in missions {
-            let id = &mission.row.task_id;
+            let id = &mission.key;
             let (open, fill) = (self.mission_open(mission), mission.fraction());
             let turn = if open { 1.0 } else { 0.0 };
             match self.missions.get_mut(id) {
@@ -2194,7 +2294,7 @@ impl SupervisorPage {
             }
         }
         self.missions
-            .retain(|id, _| missions.iter().any(|mission| &mission.row.task_id == id));
+            .retain(|id, _| missions.iter().any(|mission| &mission.key == id));
     }
 
     fn sync_rail(&mut self, now: Instant, reduced: bool) -> rail::RailFrame {
@@ -2460,7 +2560,7 @@ impl SupervisorPage {
                 Mode::Watching => (
                     (
                         "Watching",
-                        format!("{watched} {}", plural(watched, "mission", "missions")),
+                        format!("{watched} {}", plural(watched, "tree", "trees")),
                     ),
                     Some(format!(
                         "{} of {WAKES_PER_HOUR} wakes this hour",
@@ -2509,7 +2609,7 @@ impl SupervisorPage {
                         vec![text(match (&self.ensure, snapshot) {
                             (_, None) => "Waiting for the engine to report the Supervisor.",
                             (Ensure::Running, _) => "Starting the Supervisor…",
-                            _ => "No Supervisor thread. Missions run unwatched.",
+                            _ => "No Supervisor thread. Missions and trees run unwatched.",
                         })],
                     )],
                 ),
@@ -2874,7 +2974,7 @@ impl SupervisorPage {
             .into_any_element()
     }
 
-    fn render_switch(
+    pub(crate) fn render_switch(
         theme: &Theme,
         key: String,
         label: SharedString,
@@ -2984,11 +3084,32 @@ impl SupervisorPage {
                 ..s
             },
         ));
+        let everything = self
+            .state
+            .read(cx)
+            .supervisor
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.watch_everything);
         let mut list = div()
             .id("supervisor-authority")
             .debug_selector(|| "supervisor-authority".into())
             .flex()
-            .flex_col();
+            .flex_col()
+            .child(
+                row().child("Watch everything").child(
+                    Self::render_switch(
+                        theme,
+                        "supervisor-auth-everything".into(),
+                        "Watch everything".into(),
+                        everything,
+                    )
+                    .on_click(cx.listener(
+                        move |page, _: &ClickEvent, _, cx| {
+                            page.set_watch_everything(!everything, cx)
+                        },
+                    )),
+                ),
+            );
         for (key, text, on, set) in toggles {
             list = list.child(row().child(text).child(
                 Self::render_switch(theme, key.into(), text.into(), on).on_click(cx.listener(
@@ -3072,30 +3193,21 @@ impl SupervisorPage {
     }
 
     fn sync_trees(&mut self, missions: &[Mission], now: Instant, cx: &mut Context<Self>) {
-        let open: HashSet<String> = missions
+        let open: Vec<(String, String, bool)> = missions
             .iter()
-            .map(|mission| mission.row.task_id.clone())
-            .filter(|id| {
+            .filter(|mission| {
                 self.missions
-                    .get(id)
+                    .get(&mission.key)
                     .is_some_and(|motion| !motion.fold.gone(now))
             })
+            .filter_map(|mission| Some((mission.key.clone(), mission.root.clone()?, mission.plan)))
             .collect();
-        self.trees.retain(|id, _| open.contains(id));
-        for task_id in open {
-            if self.trees.contains_key(&task_id) {
+        self.trees
+            .retain(|id, _| open.iter().any(|(key, _, _)| key == id));
+        for (key, root, plan) in open {
+            if self.trees.contains_key(&key) {
                 continue;
             }
-            let Some(root) = self
-                .state
-                .read(cx)
-                .tasks
-                .iter()
-                .find(|task| task.id == task_id)
-                .and_then(|task| task.chat_id.clone())
-            else {
-                continue;
-            };
             let state = self.state.clone();
             let tree = cx.new(|cx| {
                 crate::tasks::StripTree::new(
@@ -3107,7 +3219,7 @@ impl SupervisorPage {
                     cx,
                 )
             });
-            let id = task_id.clone();
+            let id = key.clone();
             let events = cx.subscribe(
                 &tree,
                 move |page, _, event: &crate::tasks::StripTreeEvent, cx| match event {
@@ -3122,6 +3234,7 @@ impl SupervisorPage {
                     crate::tasks::StripTreeEvent::OpenNative { parent_chat_id, .. } => {
                         cx.emit(SupervisorEvent::OpenChat(parent_chat_id.clone()))
                     }
+                    crate::tasks::StripTreeEvent::Brief(_) if !plan => {}
                     crate::tasks::StripTreeEvent::Brief(selection) => {
                         let step_id = match selection {
                             crate::tasks::Selection::Step(step) => Some(step.clone()),
@@ -3137,7 +3250,7 @@ impl SupervisorPage {
                     }
                 },
             );
-            self.trees.insert(task_id, (tree, events));
+            self.trees.insert(key, (tree, events));
         }
     }
 
@@ -3573,7 +3686,7 @@ fn needs_tone(theme: &Theme) -> Hsla {
     theme.warning
 }
 
-fn ok_tone(theme: &Theme) -> Hsla {
+pub(crate) fn ok_tone(theme: &Theme) -> Hsla {
     crate::shell::chat_status_tone(ChatIndicator::Completed, theme).2
 }
 
@@ -3660,11 +3773,14 @@ fn calm_line(
         );
     }
     let line = match (missions, watched) {
-        (0, _) => "No missions running. Start one from Tasks or the composer.".into(),
-        (_, 0) => "No mission is watched. Turn Watched on for one below.".into(),
+        (0, _) => {
+            "Nothing watched is running. Start a mission, or Watch a tree in Mission Control."
+                .into()
+        }
+        (_, 0) => "No tree is watched. Turn Watched on for one below.".into(),
         (_, n) => format!(
             "Watching {n} {}. A mission's open decisions arrive here as one sheet.",
-            plural(n, "mission", "missions")
+            plural(n, "tree", "trees")
         ),
     };
     (head, line)
@@ -4007,6 +4123,53 @@ mod tests {
             ]
         );
         assert_eq!(watched_count(&watches), 3);
+    }
+
+    #[test]
+    fn a_plain_tree_is_watched_only_when_picked_or_everything_is_on() {
+        let chat = |id: &str, device: &str| -> Chat {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "title": id, "deviceId": device, "archived": false,
+                "createdAt": Utc::now(),
+            }))
+            .unwrap()
+        };
+        let mut state = AppState::new();
+        state.local_device_id = Some("mac".into());
+        state.chats = vec![
+            chat("picked", "mac"),
+            chat("other", "mac"),
+            chat("lead", "mac"),
+        ];
+        state.chats.push(chat("remote", "pc"));
+        state.tasks = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "t", "title": "t", "mode": "orchestrated", "chatId": "lead",
+                "createdAt": Utc::now(), "updatedAt": Utc::now(),
+            }))
+            .unwrap(),
+        ];
+        assert_eq!(
+            tree_watch(&state, "picked"),
+            Watch::Unwatched,
+            "no Supervisor yet"
+        );
+        state.supervisor = Some(SupervisorSnapshot {
+            watched_roots: vec!["picked".into(), "remote".into()],
+            unwatched: vec!["t".into()],
+            ..Default::default()
+        });
+        assert_eq!(tree_watch(&state, "picked"), Watch::Watched);
+        assert_eq!(tree_watch(&state, "other"), Watch::Unwatched);
+        assert_eq!(tree_watch(&state, "remote"), Watch::Elsewhere("pc".into()));
+        assert_eq!(tree_watch(&state, "lead"), Watch::Unwatched);
+        state.supervisor.as_mut().unwrap().watch_everything = true;
+        assert_eq!(tree_watch(&state, "other"), Watch::Watched);
+        assert_eq!(
+            tree_watch(&state, "lead"),
+            Watch::Unwatched,
+            "a mission left off stays off under Watch everything"
+        );
     }
 
     #[test]

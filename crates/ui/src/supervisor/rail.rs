@@ -81,7 +81,7 @@ impl RailMotion {
 
 pub(super) fn mission_tone(mission: &Mission, theme: &Theme) -> Hsla {
     let tone = |indicator| crate::shell::chat_status_tone(indicator, theme).2;
-    match mission.row.status {
+    match mission.status {
         TaskStatus::NeedsYou => tone(ChatIndicator::AwaitingInput),
         TaskStatus::Working => tone(ChatIndicator::Working),
         _ => tone(ChatIndicator::Completed),
@@ -219,7 +219,7 @@ impl SupervisorPage {
             .iter()
             .filter(|mission| mission.done_at.is_none())
             .map(|mission| {
-                let id = mission.row.task_id.clone();
+                let id = mission.key.clone();
                 let open = feed
                     .open
                     .iter()
@@ -236,8 +236,8 @@ impl SupervisorPage {
                     .id(SharedString::from(selector.clone()))
                     .debug_selector(move || selector.clone())
                     .role(gpui::Role::Button)
-                    .aria_label(format!("{}, {open} to answer", mission.row.title))
-                    .tooltip(widgets::text_tooltip(mission.row.title.clone()))
+                    .aria_label(format!("{}, {open} to answer", mission.title))
+                    .tooltip(widgets::text_tooltip(mission.title.clone()))
                     .relative()
                     .cursor_pointer()
                     .child(crate::loaders::upload_progress_arc(
@@ -298,7 +298,7 @@ impl SupervisorPage {
                     .id("supervisor-strip-status")
                     .tooltip(widgets::text_tooltip(format!(
                         "Watching {watched} {}",
-                        plural(watched, "mission", "missions")
+                        plural(watched, "tree", "trees")
                     )))
                     .child(self.render_dot(&mode, tone, theme, now, cx)),
             )
@@ -314,7 +314,7 @@ impl SupervisorPage {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let task_id = mission.row.task_id.as_str();
+        let task_id = mission.key.as_str();
         let tree = self.trees.get(task_id).map(|(tree, _)| tree.clone());
         let open_id = task_id.to_owned();
         let open_key = format!("supervisor-open-center-{task_id}");
@@ -346,7 +346,7 @@ impl SupervisorPage {
                 .text_color(theme.text_muted)
         };
         let watch = match &mission.watch {
-            _ if mission.done_at.is_some() => div()
+            _ if mission.plan && mission.done_at.is_some() => div()
                 .min_w_0()
                 .truncate()
                 .child("Done · the Supervisor stopped watching it"),
@@ -359,9 +359,14 @@ impl SupervisorPage {
                     .to_owned();
                 div().child(format!("on {name}, not watched"))
             }
+            Watch::Watched if !mission.plan && self.watched_by_everything(mission, cx) => div()
+                .debug_selector(|| "supervisor-watch-everything-note".into())
+                .min_w_0()
+                .truncate()
+                .child("Watched \u{b7} Watch everything is on"),
             watch => {
                 let on = *watch == Watch::Watched;
-                let id = task_id.to_owned();
+                let params = watch_params(mission, !on);
                 div()
                     .flex()
                     .items_center()
@@ -375,13 +380,13 @@ impl SupervisorPage {
                         Self::render_switch(
                             theme,
                             format!("supervisor-watch-{task_id}"),
-                            format!("Watch {}", mission.row.title).into(),
+                            format!("Watch {}", mission.title).into(),
                             on,
                         )
                         .on_click(cx.listener(
                             move |page, _: &ClickEvent, _, cx| {
                                 cx.stop_propagation();
-                                page.set_supervised(id.clone(), !on, cx);
+                                page.send_watch(params.clone(), cx);
                             },
                         )),
                     )
@@ -416,16 +421,16 @@ impl SupervisorPage {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let row = &mission.row;
+        let key = &mission.key;
         let arc = mission_tone(mission, theme);
-        let motion = self.missions.get(&row.task_id);
+        let motion = self.missions.get(key);
         let fill = motion.map_or(mission.fraction(), |motion| motion.fill.value_at(now));
         let turn = motion.map_or(0.0, |motion| motion.chevron.value_at(now));
         let expanded = self.mission_open(mission);
-        let lit = self.hovered.as_deref() == Some(row.task_id.as_str());
+        let lit = self.hovered.as_deref() == Some(key.as_str());
         let glow = self
             .glows
-            .get(&row.task_id)
+            .get(key)
             .filter(|tween| !tween.settled_at(now))
             .map(|tween| tween.value_at(now));
         let unwatched = match &mission.watch {
@@ -440,13 +445,13 @@ impl SupervisorPage {
                     .unwrap_or("another device")
             )),
         };
-        let header_key = format!("supervisor-mission-{}", row.task_id);
-        let toggle_id = row.task_id.clone();
+        let header_key = format!("supervisor-mission-{}", key);
+        let toggle_id = key.clone();
         let header = div()
             .id(SharedString::from(header_key.clone()))
             .debug_selector(move || header_key.clone())
             .role(gpui::Role::Button)
-            .aria_label(row.title.clone())
+            .aria_label(mission.title.clone())
             .aria_expanded(expanded)
             .flex()
             .items_center()
@@ -464,20 +469,24 @@ impl SupervisorPage {
             .child(
                 div()
                     .min_w_0()
+                    .when(narrow, |el| el.flex_1())
                     .truncate()
                     .text_size(ui_rems(13.0))
                     .text_color(theme.text)
-                    .child(row.title.clone()),
+                    .child(mission.title.clone()),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(ui_rems(11.5))
-                    .text_color(theme.text_muted)
-                    .when(!narrow, |el| el.child(mission.current.clone())),
-            )
+            .child(crate::tasks::kind_badge(mission.plan, theme))
+            .when(!narrow, |el| {
+                el.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(ui_rems(11.5))
+                        .text_color(theme.text_muted)
+                        .child(mission.current.clone()),
+                )
+            })
             .children(unwatched.map(|label| {
                 div()
                     .flex_none()
@@ -503,7 +512,7 @@ impl SupervisorPage {
             .filter(|motion| !motion.fold.gone(now))
             .map(|motion| {
                 folded(
-                    format!("supervisor-mission-fold-{}", row.task_id),
+                    format!("supervisor-mission-fold-{}", key),
                     &motion.fold,
                     now,
                     div()
@@ -512,7 +521,7 @@ impl SupervisorPage {
                 )
             });
         let amber = needs_tone(theme);
-        let selector = format!("supervisor-mission-card-{}", row.task_id);
+        let selector = format!("supervisor-mission-card-{}", key);
         div()
             .debug_selector(move || selector.clone())
             .relative()
@@ -586,7 +595,7 @@ impl SupervisorPage {
             .gap(px(7.0));
         if !active.is_empty() {
             block = block
-                .child(caps_label(theme, format!("Missions · {}", active.len())))
+                .child(caps_label(theme, format!("Trees · {}", active.len())))
                 .children(
                     active
                         .iter()

@@ -199,16 +199,8 @@ fn index_row(
         },
         |task| task.created_at,
     );
-    let watched = task.is_some_and(|task| {
-        state.supervisor.as_ref().is_some_and(|snapshot| {
-            crate::supervisor::watch_of(
-                &task.id,
-                Some(chat.device_id.as_str()),
-                state.local_device_id.as_deref(),
-                &snapshot.unwatched,
-            ) == crate::supervisor::Watch::Watched
-        })
-    });
+    let watched = state.supervisor.is_some()
+        && crate::supervisor::tree_watch(state, &chat.id) == crate::supervisor::Watch::Watched;
     IndexRow {
         root: chat.id.clone(),
         title: match task {
@@ -261,6 +253,7 @@ impl Filter {
 }
 
 pub(crate) enum MissionIndexEvent {
+    NewMission,
     OpenTree(String),
     OpenTreeAt(String, super::Selection),
     Tree(StripTreeEvent),
@@ -322,39 +315,6 @@ impl MissionIndex {
             .or_insert_with(|| Tween::at(f32::from(u8::from(!open)), now))
             .retarget(f32::from(u8::from(open)), tree::CHEVRON, reduced, now);
         cx.notify();
-    }
-
-    fn kind_badge(kind: Kind, theme: &Theme) -> AnyElement {
-        let (mark, label, fg, bg) = match kind {
-            Kind::Mission => (
-                icons::MISSION_CONTROL,
-                "Mission",
-                motion::mix(theme.accent, theme.text, 0.2),
-                theme.accent.opacity(0.14),
-            ),
-            Kind::Tree => (
-                icons::LUCIDE_LIST_TREE,
-                "Tree",
-                theme.text_muted,
-                theme.wash(0.07),
-            ),
-        };
-        div()
-            .flex_none()
-            .h(px(18.0))
-            .pl(px(5.0))
-            .pr(px(6.0))
-            .rounded(px(5.0))
-            .bg(bg)
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .text_size(ui_rems(11.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(fg)
-            .child(icon(mark).size(px(11.0)).text_color(fg))
-            .child(label)
-            .into_any_element()
     }
 
     fn segment_color(status: Status, theme: &Theme) -> Hsla {
@@ -482,7 +442,7 @@ impl MissionIndex {
                                         .text_color(theme.text)
                                         .child(row.title.clone()),
                                 )
-                                .child(Self::kind_badge(row.kind, theme)),
+                                .child(tree::kind_badge(row.kind == Kind::Mission, theme)),
                         )
                         .child(
                             div()
@@ -720,6 +680,30 @@ impl Render for MissionIndex {
             .into_iter()
             .map(|(filter, label, n)| self.filter_chip(filter, label, n, &theme, cx))
             .collect();
+        let watching = self.state.read(cx).supervisor.is_some().then(|| {
+            let watched = rows.running.iter().filter(|row| row.watched).count();
+            div()
+                .debug_selector(|| "mission-index-watching".into())
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .text_size(ui_rems(12.0))
+                .text_color(theme.text_muted)
+                .child(
+                    icon(icons::LUCIDE_SHIELD)
+                        .size(px(13.0))
+                        .text_color(theme.text_muted),
+                )
+                .child("Supervisor")
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(format!("watching {watched}")),
+                )
+                .child(format!("of {} running", rows.running.len()))
+        });
         let filter = self.filter;
         let mut body: Vec<AnyElement> = Vec::new();
         let mut moving = false;
@@ -811,6 +795,27 @@ impl Render for MissionIndex {
                                                 "Every chat that started other agents, and every mission.",
                                             ),
                                     ),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                widgets::action_button(&theme, widgets::ActionTone::Solid)
+                                    .id("mission-index-new")
+                                    .debug_selector(|| "mission-index-new".into())
+                                    .role(gpui::Role::Button)
+                                    .aria_label("New mission")
+                                    .flex_none()
+                                    .min_h(px(28.0))
+                                    .rounded_full()
+                                    .gap(px(6.0))
+                                    .child(
+                                        icon(icons::PLUS)
+                                            .size(px(13.0))
+                                            .text_color(theme.on_solid),
+                                    )
+                                    .child("New mission")
+                                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                                        cx.emit(MissionIndexEvent::NewMission)
+                                    })),
                             ),
                     )
                     .child(
@@ -819,7 +824,9 @@ impl Render for MissionIndex {
                             .flex()
                             .items_center()
                             .gap(px(8.0))
-                            .children(chips),
+                            .children(chips)
+                            .child(div().flex_1())
+                            .children(watching),
                     )
                     .children(body),
             )

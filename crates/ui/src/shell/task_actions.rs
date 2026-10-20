@@ -1260,6 +1260,21 @@ impl Shell {
                 );
             }
             TaskCenterEvent::AddPlan(chat_id) => return self.add_plan(chat_id, cx),
+            TaskCenterEvent::Watch {
+                task_id: Some(task_id),
+                on,
+                ..
+            } => {
+                serde_json::json!({ "op": "setMissionSupervised", "taskId": task_id, "supervised": on })
+            }
+            TaskCenterEvent::Watch {
+                root,
+                task_id: None,
+                on,
+            } => {
+                serde_json::json!({ "op": "setTreeWatched", "rootChatId": root, "watched": on })
+            }
+            TaskCenterEvent::OpenSupervisor => return self.open_supervisor(cx),
             TaskCenterEvent::Settle { chat_id, settled } => {
                 return self.set_chat_settled(chat_id.clone(), *settled, cx);
             }

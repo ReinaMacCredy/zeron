@@ -33,6 +33,7 @@ mod outline;
 mod spine;
 mod timeline;
 mod view_morph;
+mod watch_sheet;
 
 const EDIT_GROW: MotionSpec = MotionSpec::new(280, motion::EASE_DRAWER);
 const EDIT_LEAVE: MotionSpec = MotionSpec::new(220, motion::EASE_DRAWER);
@@ -63,6 +64,12 @@ pub enum TaskCenterEvent {
         frozen: bool,
     },
     AddPlan(String),
+    Watch {
+        root: String,
+        task_id: Option<String>,
+        on: bool,
+    },
+    OpenSupervisor,
     Settle {
         chat_id: String,
         settled: bool,
@@ -412,6 +419,10 @@ pub struct TaskCenter {
     painted: Painted,
     scroll: ScrollHandle,
     menu: popover::Popup<StepMenu>,
+    watch: popover::Popup<()>,
+    watch_focus: FocusHandle,
+    authority: popover::Loadable<zeron_proto::supervisor::SupervisorSettings>,
+    authority_task: Option<gpui::Task<()>>,
     drag: Option<StepDrag>,
     press: f32,
     gallery: Entity<ImageGallery>,
@@ -477,6 +488,10 @@ impl TaskCenter {
             painted: Painted::default(),
             scroll: ScrollHandle::new(),
             menu: popover::Popup::default(),
+            watch: popover::Popup::default(),
+            watch_focus: cx.focus_handle(),
+            authority: popover::Loadable::Idle,
+            authority_task: None,
             drag: None,
             press: 0.0,
             focus: cx.focus_handle(),

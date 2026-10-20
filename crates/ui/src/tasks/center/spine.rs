@@ -1747,6 +1747,17 @@ impl TaskCenter {
                     }))
                 })
         };
+        let watch = facts.lead_chat.as_deref().and_then(|root| {
+            self.render_watch_button(
+                super::watch_sheet::WatchTarget {
+                    root,
+                    task: Some(task),
+                    title: &task.title,
+                },
+                theme,
+                cx,
+            )
+        });
         let task_id = task.id.clone();
         let toggle_label = if done { "Reopen" } else { "Mark as done" };
         let toggle = button(
@@ -1972,7 +1983,7 @@ impl TaskCenter {
                                             .text_color(theme.text)
                                             .child(SharedString::from(task.title.clone())),
                                     )
-                                    .child(Self::kind_badge(true, theme)),
+                                    .child(tree::kind_badge(true, theme)),
                             )
                             .child(
                                 div()
@@ -1982,6 +1993,7 @@ impl TaskCenter {
                                     .child(sub.join(" · ")),
                             ),
                     )
+                    .children(watch)
                     .children(pills)
                     .children(primary)
                     .child(toggle)

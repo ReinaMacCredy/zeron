@@ -12,6 +12,7 @@ use crate::icons::{self, icon};
 use crate::motion::{self, CubicBezier, MotionSpec, Tween};
 use crate::state::AppState;
 use crate::theme::{Appearance, Theme};
+use crate::typography::ui_rems;
 
 pub(crate) const EASE: CubicBezier = CubicBezier::new(0.32, 0.72, 0.24, 1.0);
 pub(crate) const RISE: MotionSpec = MotionSpec::new(360, EASE);
@@ -552,6 +553,41 @@ pub(crate) fn spinner(diameter: f32, color: Hsla, reduced: bool) -> impl IntoEle
     )
     .flex_none()
     .size(px(diameter))
+}
+
+pub(crate) fn kind_badge(mission: bool, theme: &Theme) -> AnyElement {
+    let (mark, label, fg, bg) = if mission {
+        (
+            icons::MISSION_CONTROL,
+            "Mission",
+            motion::mix(theme.accent, theme.text, 0.2),
+            theme.accent.opacity(0.14),
+        )
+    } else {
+        (
+            icons::LUCIDE_LIST_TREE,
+            "Tree",
+            theme.text_muted,
+            theme.wash(0.07),
+        )
+    };
+    div()
+        .debug_selector(move || format!("kind-badge-{label}"))
+        .flex_none()
+        .h(px(18.0))
+        .pl(px(5.0))
+        .pr(px(6.0))
+        .rounded(px(5.0))
+        .bg(bg)
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .text_size(ui_rems(11.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(fg)
+        .child(icon(mark).size(px(11.0)).text_color(fg))
+        .child(label)
+        .into_any_element()
 }
 
 pub(crate) fn glyph(status: Status, diameter: f32, color: Hsla, reduced: bool) -> AnyElement {
