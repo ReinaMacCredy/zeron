@@ -15,7 +15,7 @@ It acts through the missions' leads, within the switches under **Authority**:
 - It messages a lead or a step's thread, and answers their questions and tool approvals.
 - It re-briefs a step: it rewrites that step's title and spec, and the lead gets one message saying what changed and why. It never changes the plan's overview and never adds or removes a step.
 - It pauses a step that blocks a shared resource, and resumes it later. A pause needs a contention Zeron verified on this Mac (see **Resources** below): it stops the step's thread, no thread can run that step again or message its thread until it is resumed, and the lead gets one message each time. You can resume it yourself from the Pause row.
-- It starts a new mission. The new lead writes a plan that you review before any step runs.
+- It starts a new mission. The new lead runs with the Supervisor's agent, model and permission, and writes a plan that you review before any step runs.
 - It asks you. A change to a mission's goal or spend, or a decision it should not make alone, becomes a **Needs you** card.
 
 A mission's lead can bring a decision to you too. When a decision changes the goal, costs money you have not approved, or cannot be settled from the plan, the lead escalates it as a **Needs you** card and keeps working on what does not depend on it. A lead escalates even when its mission is not watched; only the Supervisor's wake is skipped.
