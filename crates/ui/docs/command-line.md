@@ -44,6 +44,8 @@ Running `zeron` with no command opens the desktop app. One engine serves each ma
 - `Engine:` `running (pid N)` or `not running`.
 - `IPC:` whether something listens on the engine port.
 
+![zeron status in a terminal](command-line-status.jpg)
+
 It exits with an error only when a synced workspace has a problem: the saved session is no longer valid, or no workspace is selected. Both tell you to run `zeron login`. Being signed out in local-only mode is normal.
 
 ### Sync

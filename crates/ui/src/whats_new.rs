@@ -239,6 +239,42 @@ const IMAGES: &[(&str, &[u8])] = &[
         "split-view.jpg",
         include_bytes!("../assets/whats_new/split-view.jpg"),
     ),
+    (
+        "computer-use-consent.jpg",
+        include_bytes!("../assets/whats_new/computer-use-consent.jpg"),
+    ),
+    (
+        "computer-use-settings.jpg",
+        include_bytes!("../assets/whats_new/computer-use-settings.jpg"),
+    ),
+    (
+        "browser-annotate.jpg",
+        include_bytes!("../assets/whats_new/browser-annotate.jpg"),
+    ),
+    (
+        "browser-html-card.jpg",
+        include_bytes!("../assets/whats_new/browser-html-card.jpg"),
+    ),
+    (
+        "appshots-settings.jpg",
+        include_bytes!("../assets/whats_new/appshots-settings.jpg"),
+    ),
+    (
+        "device-hub-device.jpg",
+        include_bytes!("../assets/whats_new/device-hub-device.jpg"),
+    ),
+    (
+        "notifications-settings.jpg",
+        include_bytes!("../assets/whats_new/notifications-settings.jpg"),
+    ),
+    (
+        "devices-settings.jpg",
+        include_bytes!("../assets/whats_new/devices-settings.jpg"),
+    ),
+    (
+        "command-line-status.jpg",
+        include_bytes!("../assets/whats_new/command-line-status.jpg"),
+    ),
 ];
 
 pub struct Picture {

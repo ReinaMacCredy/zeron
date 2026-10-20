@@ -21,6 +21,8 @@ In a chat, click **+** in the right pane and choose **Device**, or click **Devic
 
 Click and drag on the live screen to touch it, and type to send keys. While an iOS simulator's screen has focus, Cmd+R goes to the simulator instead of toggling the right pane; on an Android emulator's screen it does nothing. The rail beside it has **Home**, **Rotate device**, **Save screenshot**, and **Device tools**, a drawer with settings such as **Appearance** and **Text size**, plus app launching and location. **Color filter** is there for iOS simulators only. **More device actions** has **Float device over chat** and **Close device panel**, plus **Power off device** for simulators and emulators (not physical devices).
 
+![An iOS simulator in the right pane](device-hub-device.jpg)
+
 To rename a device tab, double-click it, or right-click it and choose **Rename**.
 
 A floating preview stays over the chat. Closing the right pane while a device tab is showing floats that device too. Use **Open in right panel** to dock it again, or **Close floating preview**.
