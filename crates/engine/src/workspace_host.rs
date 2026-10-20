@@ -895,7 +895,7 @@ impl WorkspaceHost {
                     self.inner.config.settle_after_days,
                 )
             })
-                .map_err(EngineError::from)
+            .map_err(EngineError::from)
         });
         if let Err(err) = result {
             tracing::warn!(chat = %chat_id, error = %err, "registry last-message write failed");
@@ -1082,6 +1082,7 @@ impl WorkspaceHost {
                 last_seen_at: None,
                 sidechat_source_chat_id: None,
                 created_by_chat_id: created_by_chat_id.map(str::to_string),
+                forked_from_chat_id: None,
                 previous_harnesses: Vec::new(),
                 delegation,
                 settle: None,
@@ -1138,6 +1139,7 @@ impl WorkspaceHost {
             last_seen_at: None,
             sidechat_source_chat_id: Some(source_chat_id.to_string()),
             created_by_chat_id: None,
+            forked_from_chat_id: None,
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
@@ -1195,6 +1197,7 @@ impl WorkspaceHost {
             last_seen_at: None,
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
+            forked_from_chat_id: Some(source.id.clone()),
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
@@ -1253,6 +1256,7 @@ impl WorkspaceHost {
             last_seen_at: None,
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
+            forked_from_chat_id: None,
             previous_harnesses,
             delegation: None,
             settle: None,

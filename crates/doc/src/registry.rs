@@ -1279,6 +1279,10 @@ impl RegistryDoc {
                 "createdByChatId",
                 opt_str(chat.created_by_chat_id.as_deref()),
             ),
+            (
+                "forkedFromChatId",
+                opt_str(chat.forked_from_chat_id.as_deref()),
+            ),
             ("previousHarnesses", json!(chat.previous_harnesses)),
             (
                 "delegation",
@@ -1792,6 +1796,10 @@ impl RegistryDoc {
                     (
                         "createdByChatId",
                         opt_str(chat.created_by_chat_id.as_deref()),
+                    ),
+                    (
+                        "forkedFromChatId",
+                        opt_str(chat.forked_from_chat_id.as_deref()),
                     ),
                     ("previousHarnesses", json!(chat.previous_harnesses)),
                     (

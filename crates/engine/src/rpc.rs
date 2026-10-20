@@ -3949,6 +3949,8 @@ impl RpcService for EngineRpc {
                 let mut chat = source.clone();
                 chat.id = p.chat_id;
                 chat.created_by_chat_id = Some(created_by_chat_id);
+                chat.forked_from_chat_id = Some(source.id.clone());
+                chat.delegation = None;
                 chat.title = None; // First side-chat turn receives its own generated title.
                 chat.archived = false;
                 chat.created_at = chrono::Utc::now();
