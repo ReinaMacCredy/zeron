@@ -102,6 +102,23 @@ impl Harness for StallHarness {
             }
             if let Some(path) = prompt.strip_prefix("please write ") {
                 std::fs::write(path.trim(), "left behind\n").unwrap();
+                for event in [
+                    AgentEvent::ToolCall {
+                        id: "toolu_write".into(),
+                        call: ToolCall::WriteFile {
+                            path: path.trim().into(),
+                            content: None,
+                        },
+                    },
+                    AgentEvent::ToolResult {
+                        id: "toolu_write".into(),
+                        is_error: false,
+                        output: None,
+                        diff: None,
+                    },
+                ] {
+                    let _ = tx.send(Ok(event)).await;
+                }
             }
             let fans_out = prompt.starts_with("please fan out");
             if fans_out {
@@ -422,6 +439,136 @@ async fn a_watched_question_wakes_once_after_the_threshold_and_never_once_answer
     assert!(
         text.contains("Thread \"Work child-a\" has waited ") && text.contains(" for an answer"),
         "{text}"
+    );
+    rig.core.shutdown().await;
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-C"])
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A repository on `main` with one commit, plus a worktree per branch name in `branches`.
+fn repo(rig: &Rig, branches: &[&str]) -> std::path::PathBuf {
+    let main = rig.dir.path().join("repo");
+    std::fs::create_dir_all(&main).unwrap();
+    git(&main, &["init", "-q", "-b", "main"]);
+    std::fs::write(main.join("README.md"), "repo\n").unwrap();
+    std::fs::write(main.join("shared.rs"), "fn shared() {}\n").unwrap();
+    git(&main, &["add", "-A"]);
+    git(&main, &["commit", "-q", "-m", "init"]);
+    for branch in branches {
+        let tree = rig.dir.path().join(branch);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                tree.to_str().unwrap(),
+            ],
+        );
+    }
+    main
+}
+
+fn path(dir: &std::path::Path) -> &str {
+    dir.to_str().unwrap()
+}
+
+#[tokio::test]
+async fn a_watched_turn_that_leaves_files_or_an_unmerged_branch_wakes_once_per_head() {
+    let rig = rig();
+    watch_lead(&rig).await;
+    let main = repo(&rig, &["clean", "feat"]);
+    let (clean, feat) = (rig.dir.path().join("clean"), rig.dir.path().join("feat"));
+    std::fs::write(feat.join("feature.rs"), "fn feature() {}\n").unwrap();
+    git(&feat, &["add", "-A"]);
+    git(&feat, &["commit", "-q", "-m", "feature"]);
+    child(&rig, "child-dirty", Some(path(&main)));
+    child(&rig, "child-clean", Some(path(&clean)));
+    child(&rig, "child-feat", Some(path(&feat)));
+
+    let notes = main.join("notes.txt");
+    queue_run(
+        &rig,
+        "child-dirty",
+        &format!("please write {}", path(&notes)),
+        path(&main),
+    );
+    queue_run(&rig, "child-clean", "just work", path(&clean));
+    queue_run(&rig, "child-feat", "just work", path(&feat));
+    let snapshot = snapshot_until(&rig, |s| {
+        !events(s, SupervisorEventKind::Dirty).is_empty()
+            && !events(s, SupervisorEventKind::Unmerged).is_empty()
+    })
+    .await;
+    let [dirty] = events(&snapshot, SupervisorEventKind::Dirty)
+        .try_into()
+        .unwrap();
+    assert_eq!(dirty.thread_id.as_deref(), Some("child-dirty"));
+    assert_eq!(dirty.root_chat_id.as_deref(), Some("lead"));
+    assert_eq!(
+        dirty.label,
+        "Thread \"Work child-dirty\" left 1 uncommitted file"
+    );
+    let [unmerged] = events(&snapshot, SupervisorEventKind::Unmerged)
+        .try_into()
+        .unwrap();
+    assert_eq!(unmerged.thread_id.as_deref(), Some("child-feat"));
+    assert_eq!(
+        unmerged.label,
+        "Thread \"Work child-feat\" left branch feat unmerged into main"
+    );
+
+    queue_run(&rig, "child-dirty", "just work", path(&main));
+    wait_for(
+        || {
+            rig.prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| *p == "just work")
+                .count()
+                == 3
+        },
+        "the second turn",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(3 * STALL_MS)).await;
+    let snapshot = snapshot_until(&rig, |_| true).await;
+    for kind in [SupervisorEventKind::Dirty, SupervisorEventKind::Unmerged] {
+        assert_eq!(
+            offered(&snapshot, kind).len(),
+            1,
+            "{kind:?} once per head sha"
+        );
+    }
+    let clean_events: Vec<_> = snapshot
+        .wakes
+        .iter()
+        .flat_map(|wake| wake.events.iter().chain(&wake.dropped))
+        .filter(|event| event.thread_id.as_deref() == Some("child-clean"))
+        .collect();
+    assert!(
+        clean_events.is_empty(),
+        "a clean merged checkout: {clean_events:?}"
+    );
+    assert!(
+        wakes_text(&rig).contains("left 1 uncommitted file"),
+        "{}",
+        wakes_text(&rig)
     );
     rig.core.shutdown().await;
 }

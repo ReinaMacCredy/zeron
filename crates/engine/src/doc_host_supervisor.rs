@@ -16,9 +16,9 @@ use super::*;
 use crate::registry::HarnessRegistry;
 use crate::supervisor::{
     Asked, Flush, InterventionRecord, MISSION_SILENT_MS, MissionFacts, Projections, Reply, Stall,
-    StallNode, StepSnap, StepThread, SupervisorEvent, SupervisorStore, ThreadFacts, TreeStall,
-    WakeEntry, WakeHeader, chips, escalated_item, fold_ms, lead_questions, open_inputs, plan_flush,
-    plan_stalls, tree_stalls, utc, wake_text,
+    StallNode, StepSnap, StepThread, SupervisorEvent, SupervisorStore, TURN_QUIET_MS, ThreadFacts,
+    TreeStall, WakeEntry, WakeHeader, chips, escalated_item, fold_ms, lead_questions, open_inputs,
+    plan_flush, plan_stalls, stall_ms, tree_stalls, utc, wake_text,
 };
 use crate::supervisor_resources::{
     CheckOutcome, Contention, PAGE_CHECK_MS, Probe, ResourceMission, find_candidates, run_check,
@@ -81,6 +81,7 @@ struct Observed {
     last_live: HashMap<String, i64>,
     open: Option<HashSet<String>>,
     delegations: Option<HashMap<String, DelegationStatus>>,
+    quiet: HashMap<String, i64>,
 }
 
 impl Observed {
@@ -89,10 +90,17 @@ impl Observed {
         for session in sessions.iter().filter(|session| live(session.status)) {
             live_now.insert(session.chat_id.clone());
             self.last_live.insert(session.chat_id.clone(), now);
+            self.quiet.remove(&session.chat_id);
         }
         let ended: Vec<String> = self.live.difference(&live_now).cloned().collect();
         for thread in &ended {
             self.last_live.insert(thread.clone(), now);
+            let idle = sessions
+                .iter()
+                .any(|session| &session.chat_id == thread && session.status == SessionStatus::Idle);
+            if idle {
+                self.quiet.insert(thread.clone(), now);
+            }
         }
         let edges = self.live.symmetric_difference(&live_now).cloned().collect();
         self.live = live_now;
@@ -187,6 +195,15 @@ struct Round {
     resources: Vec<ResourceMission>,
     edges: HashSet<String>,
     stalls: Vec<TreeStall>,
+    checks: Vec<Checkout>,
+    quiet_until: Option<i64>,
+}
+
+/// A watched node whose turn ended quietly; its checkout is read off the router loop.
+struct Checkout {
+    node: StallNode,
+    cwd: std::path::PathBuf,
+    checkout_id: String,
 }
 
 /// What an intervention row needs from before the action: a re-brief's snapshot predates its own edit.
@@ -703,7 +720,8 @@ impl DocHost {
         let (ended, edges) = observed.sessions(sessions, now);
         let done = observed.missions_done(tasks);
         let nodes = self.node_events(observed, sessions, &ended, chats, tasks, steps);
-        let stalls = self.tree_facts(store, sessions, chats, tasks, steps);
+        let (stalls, checks, quiet_until) =
+            self.tree_facts(store, observed, now, sessions, chats, tasks, steps);
         if !ended.is_empty() && store.watches_any_tree() {
             store.mark_stale();
         }
@@ -837,18 +855,23 @@ impl DocHost {
             resources,
             edges,
             stalls,
+            checks,
+            quiet_until,
         }
     }
 
     /// Stall facts of watched nodes only, each carrying its tree so `offer` keys it by root or mission.
+    #[allow(clippy::too_many_arguments)]
     fn tree_facts(
         &self,
         store: &SupervisorStore,
+        observed: &mut Observed,
+        now: i64,
         sessions: &[Session],
         chats: &[Chat],
         tasks: &[Task],
         steps: &[TaskStep],
-    ) -> Vec<TreeStall> {
+    ) -> (Vec<TreeStall>, Vec<Checkout>, Option<i64>) {
         let engine = self.sessions();
         let node = |chat: &Chat| {
             if chat.is_system() || chat.archived || chat.device_id != self.device_id() {
@@ -881,7 +904,36 @@ impl DocHost {
                 approval: asked.approval,
             });
         }
-        stalls
+        let quiet_ms = stall_ms(TURN_QUIET_MS);
+        let mut checks = Vec::new();
+        let mut quiet_until: Option<i64> = None;
+        observed.quiet.retain(|thread, ended| {
+            let Some(chat) = chat(thread) else {
+                return false;
+            };
+            let cwd = chat.cwd.as_deref().map(std::path::Path::new);
+            let (Some(node), Some(cwd)) = (node(chat), cwd.filter(|cwd| cwd.is_absolute())) else {
+                return false;
+            };
+            let due = *ended + quiet_ms;
+            if due > now {
+                quiet_until = Some(quiet_until.map_or(due, |at| at.min(due)));
+                return true;
+            }
+            if node.busy {
+                return true;
+            }
+            checks.push(Checkout {
+                checkout_id: chat
+                    .checkout_id
+                    .clone()
+                    .unwrap_or_else(|| cwd.to_string_lossy().into_owned()),
+                cwd: cwd.to_path_buf(),
+                node,
+            });
+            false
+        });
+        (stalls, checks, quiet_until)
     }
 
     fn node_events(
@@ -1011,6 +1063,9 @@ impl DocHost {
         for stall in tree_due {
             self.supervisor_event(self.tree_stall_event(workspace, stall, now));
         }
+        for check in std::mem::take(&mut round.checks) {
+            self.spawn_checkout_check(check);
+        }
         let settings = registry.supervisor_settings();
         if settings.decide_for_me {
             for plan in &round.plans {
@@ -1068,6 +1123,7 @@ impl DocHost {
             refresh,
             check.as_ref().map(|c| c.at.timestamp_millis()),
             tree_next,
+            round.quiet_until,
         ]
         .into_iter()
         .flatten()
@@ -1645,12 +1701,99 @@ impl DocHost {
             | Kind::PlanEdited
             | Kind::Heartbeat
             | Kind::NodeFinished
-            | Kind::Dirty
-            | Kind::Unmerged
             | Kind::LimitIdle
             | Kind::LostWake
             | Kind::MergeBlocked => true,
+            Kind::Dirty | Kind::Unmerged => summary
+                .thread_id
+                .as_deref()
+                .is_some_and(|thread| !sessions.turn_in_flight(thread)),
         }
+    }
+
+    fn spawn_checkout_check(&self, check: Checkout) {
+        let host = self.clone();
+        self.spawn_worker(async move {
+            for event in host.checkout_stalls(check).await {
+                host.supervisor_event(event);
+            }
+        });
+    }
+
+    /// Keyed by head sha: the same uncommitted or unmerged state is reported once.
+    async fn checkout_stalls(&self, check: Checkout) -> Vec<SupervisorEvent> {
+        let Checkout {
+            node,
+            cwd,
+            checkout_id,
+        } = check;
+        let read = tokio::time::timeout(
+            crate::working_tree::READ_TIMEOUT,
+            crate::working_tree::read(&cwd, &checkout_id),
+        )
+        .await;
+        let tree = match read {
+            Ok(Ok(tree)) => tree,
+            Ok(Err(err)) => {
+                tracing::debug!(chat = %node.chat_id, error = %err, "stall check read no checkout");
+                return Vec::new();
+            }
+            Err(_) => return Vec::new(),
+        };
+        let who = self.who(&node.chat_id);
+        let head = tree.head_sha.clone().unwrap_or_else(|| "unborn".into());
+        let mut events = Vec::new();
+        if !tree.files.is_empty() {
+            let n = tree.files.len();
+            let mut event = node_event(
+                Kind::Dirty,
+                format!("dirty:{}:{head}", node.chat_id),
+                &node,
+                format!("{who} left {}", plural(n, "uncommitted file")),
+            );
+            let mut paths: Vec<&str> = tree.files.iter().map(|f| f.path.as_str()).collect();
+            paths.truncate(MAX_PATHS);
+            event.detail = vec![format!(
+                "In {} after its turn ended: {}{}",
+                tree.root,
+                paths.join(", "),
+                if n > MAX_PATHS { ", ..." } else { "" }
+            )];
+            events.push(event);
+        }
+        let Some(branch) = tree.branch.clone() else {
+            return events;
+        };
+        let Some(main) = crate::working_tree::main_branch(&cwd).await else {
+            return events;
+        };
+        let ahead = match branch == main {
+            true => None,
+            false => crate::working_tree::commits_ahead(&cwd, &main)
+                .await
+                .filter(|ahead| *ahead > 0),
+        };
+        if let Some(ahead) = ahead {
+            let mut event = node_event(
+                Kind::Unmerged,
+                format!("unmerged:{}:{head}", node.chat_id),
+                &node,
+                format!("{who} left branch {branch} unmerged into {main}"),
+            );
+            event.detail = vec![format!(
+                "{} on {branch} that {main} does not have, in {}.",
+                plural(ahead as usize, "commit"),
+                tree.root
+            )];
+            events.push(event);
+        }
+        events
+    }
+
+    fn who(&self, chat_id: &str) -> String {
+        self.workspace()
+            .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
+            .map_or_else(|| format!("Thread {chat_id}"), |chat| thread_label(&chat))
     }
 
     fn tree_stall_event(
@@ -1661,10 +1804,7 @@ impl DocHost {
     ) -> SupervisorEvent {
         let key = stall.key();
         let node = stall.node().clone();
-        let who = workspace.chat(&node.chat_id).ok().flatten().map_or_else(
-            || format!("Thread {}", node.chat_id),
-            |chat| thread_label(&chat),
-        );
+        let who = self.who(&node.chat_id);
         let mut event = match stall {
             TreeStall::QuestionWaiting {
                 request_id,
@@ -1677,10 +1817,10 @@ impl DocHost {
                 } else {
                     "an answer"
                 };
-                let mut event = SupervisorEvent::new(
+                let mut event = node_event(
                     Kind::QuestionWaiting,
                     key,
-                    node.task_id.as_deref(),
+                    &node,
                     format!("{who} has waited {} for {what}", span(now - asked_at)),
                 );
                 event.detail = vec![format!(
@@ -1694,8 +1834,6 @@ impl DocHost {
         };
         event.summary.step_id = open_step_of(&workspace.watch_task_steps().borrow(), &node.chat_id)
             .map(|step| step.id.clone());
-        event.summary.thread_id = Some(node.chat_id);
-        event.summary.root_chat_id = Some(node.root);
         event
     }
 
@@ -1804,6 +1942,22 @@ impl DocHost {
         self.save_snapshot(&handle);
         true
     }
+}
+
+const MAX_PATHS: usize = 10;
+
+fn plural(n: usize, what: &str) -> String {
+    match n {
+        1 => format!("1 {what}"),
+        n => format!("{n} {what}s"),
+    }
+}
+
+fn node_event(kind: Kind, key: String, node: &StallNode, label: String) -> SupervisorEvent {
+    let mut event = SupervisorEvent::new(kind, key, node.task_id.as_deref(), label);
+    event.summary.thread_id = Some(node.chat_id.clone());
+    event.summary.root_chat_id = Some(node.root.clone());
+    event
 }
 
 fn thread_label(chat: &Chat) -> String {

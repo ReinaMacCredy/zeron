@@ -34,6 +34,7 @@ pub(crate) use zeron_proto::supervisor::WAKES_PER_HOUR;
 pub(crate) const MISSION_SILENT_MS: i64 = 30 * 60 * 1000;
 pub(crate) const LEAD_SILENT_MS: i64 = 10 * 60 * 1000;
 pub(crate) const QUESTION_WAITING_MS: i64 = 20 * 60 * 1000;
+pub(crate) const TURN_QUIET_MS: i64 = 2 * 60 * 1000;
 
 pub(crate) fn stall_ms(default: i64) -> i64 {
     std::env::var("ZERON_SUPERVISOR_STALL_MS")
