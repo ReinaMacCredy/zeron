@@ -1213,6 +1213,7 @@ impl NavHistory {
     /// equivalent of a `replace: true` navigation (zeron's boot redirect from
     /// `/` into the last-used chat leaves no dead Back target behind).
     pub fn replace(&mut self, entry: NavEntry) {
+        self.entries.truncate(self.index + 1);
         self.entries[self.index] = entry;
     }
 
@@ -22124,6 +22125,14 @@ mod tests {
         assert_eq!(nav.len(), 1);
         assert_eq!(*nav.current(), chat("boot"));
         assert!(!nav.can_back());
+
+        let mut nav = NavHistory::new(chat("a"));
+        nav.push(NavEntry::Draft("d1".into()));
+        nav.push(chat("b"));
+        nav.back();
+        nav.replace(chat("x"));
+        assert!(!nav.can_forward(), "a replaced entry drops what was ahead");
+        assert_eq!(nav.back(), Some(chat("a")));
     }
 
     #[test]
