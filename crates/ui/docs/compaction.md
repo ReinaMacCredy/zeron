@@ -67,7 +67,7 @@ The carried turns are your message and the agent's final reply for each of the l
 
 With **Agent model**, a **Same task** answer gets a second look that can only change it to **Carry over**. After three **Same task** answers in a row while the context keeps growing, the next check carries over without asking. If the classifier gives no answer, the chat is not compacted, and it tries again on a later message.
 
-For an agent that cannot compact, a **New task** or **Carry over** answer starts a fresh session instead. The earlier conversation goes along as text; tool results and file contents do not.
+For an agent that cannot compact, a **New task** or **Carry over** answer starts a fresh session instead. The earlier conversation goes along as text, the most recent 24,000 characters of it; tool results and file contents do not.
 
 ## Which messages are checked
 

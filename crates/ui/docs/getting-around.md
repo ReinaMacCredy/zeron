@@ -16,7 +16,7 @@ The narrow strip on the left switches between Zeron's pages. Hover a button to s
 Further down the rail:
 
 - **Usage rings** show how much of your plan's limits are left, one ring per agent account, at most two. The outer ring is the week and the inner ring the current session. Hover for details. Click a ring to list that provider's accounts, with the one in use marked **In use**; click another to switch, or click **Open Usage**.
-- A microphone button for voice mode, when Codex is installed. See [Voice and dictation](zeron://docs/voice).
+- A microphone button for voice mode, when Codex is installed and turned on in [Settings > Providers](zeron://settings/providers). See [Voice and dictation](zeron://docs/voice).
 - Your **account** button, with your initial. Its menu starts with your name and email (or **Local** when you are not signed in), then a **Usage · this device** section with each provider's plan and meters (**Refresh** updates them), **Usage** to open the Usage page, and one sync row: **Enable sync**, **Sync setup in progress**, **Finish sync setup**, or **Sign out**. On Windows and Linux it also has **Check for updates**. To sync with your other devices, see [Devices](zeron://docs/devices).
 - **Help**: recent releases, the full changelog, keybindings, and these docs. See [Updates and what's new](zeron://docs/updates).
 - A download button, when an app update is available.
@@ -34,7 +34,7 @@ With the sidebar hidden, move the pointer just right of the app rail and it slid
 
 ## Going back and forward
 
-Zeron keeps a history of where you have been: chats, drafts, Settings pages, Inbox, Tasks, Supervisor, Usage, pull requests, and these docs. To walk it:
+Zeron keeps a history of where you have been: chats, drafts, Settings pages, Inbox, Tasks, a task's Mission Control page, Supervisor, Usage, pull requests, and these docs. To walk it:
 
 - Click the **Back** and **Forward** arrows in the titlebar.
 - Press the back and forward buttons on your mouse.

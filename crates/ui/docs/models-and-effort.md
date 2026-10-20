@@ -34,6 +34,6 @@ Levels depend on the model. They range from **Minimal** or **Low** up to **High*
 Your pick applies to the chat you are in. Clicking another agent's tab only browses; nothing changes until you pick a model.
 
 - **Same agent, new model**: if the chat has history, Zeron asks **Switch model?** The next response is slower and uses more tokens, because the full history is re-read. Choose **Yes, switch to …** or **No, go back** (press 1 or 2). A divider in the transcript marks the change.
-- **Different agent or instance**: Zeron asks **Switch provider?** The old session is closed, and on your next message the conversation so far is handed to the new agent as plain text. Tool results, open files, and the old agent's cache are not carried over.
+- **Different agent or instance**: Zeron asks **Switch provider?** The old session is closed, and on your next message the conversation so far is handed to the new agent as plain text, the most recent 48,000 characters of what you and the agent wrote. Tool results, open files, and the old agent's cache are not carried over.
 
 New chats start with the model you picked last for each agent.
