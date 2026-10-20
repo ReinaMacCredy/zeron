@@ -303,6 +303,7 @@ const CHAT_MENU_ROW_DELETE: u8 = 4;
 const CHAT_MENU_ROW_TAB: u8 = 5;
 const CHAT_MENU_ROW_SETTLE: u8 = 9;
 const CHAT_MENU_ROW_STEPS: u8 = 10;
+const CHAT_MENU_ROW_PLAN: u8 = 11;
 
 #[derive(Clone, Copy)]
 enum TabCloseAction {
@@ -15845,7 +15846,15 @@ impl Shell {
                 && !chat_id.is_empty()
                 && self.sidebar_has_step_threads(&chat_id, cx))
             .then(|| self.sidebar_lead_collapsed(&chat_id));
+            let can_plan = !chat_id.is_empty() && {
+                let state = self.state.read(cx);
+                state
+                    .chats
+                    .iter()
+                    .any(|chat| chat.id == chat_id && crate::tasks::can_add_plan(state, chat))
+            };
             let rename_id = chat_id.clone();
+            let plan_id = chat_id.clone();
             let steps_id = chat_id.clone();
             let pin_id = chat_id.clone();
             let settle_id = chat_id.clone();
@@ -15884,6 +15893,25 @@ impl Shell {
                     .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
                     .child(SharedString::from("Rename"));
                 let menu = menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_RENAME, rename, cx));
+                let menu = if can_plan {
+                    let plan =
+                        popover::menu_row(&theme, false, format!("chat-menu-plan-{chat_id}"))
+                            .id("chat-menu-plan")
+                            .debug_selector(|| "chat-menu-plan".into())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.close_chat_menu(cx);
+                                this.add_plan(&plan_id, cx);
+                            }))
+                            .child(
+                                icon(icons::MISSION_CONTROL)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(SharedString::from("Add plan"));
+                    menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_PLAN, plan, cx))
+                } else {
+                    menu
+                };
                 let menu = if is_side_chat {
                     menu
                 } else {

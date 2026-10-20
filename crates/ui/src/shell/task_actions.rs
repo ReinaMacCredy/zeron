@@ -79,6 +79,9 @@ enum TaskOrigin {
         start: crate::composer::MissionStart,
         create: serde_json::Value,
     },
+    Plan {
+        create: serde_json::Value,
+    },
 }
 
 impl TaskOrigin {
@@ -87,7 +90,7 @@ impl TaskOrigin {
             Self::Card { patch, .. } => patch.as_ref().map(
                 |patch| serde_json::json!({ "op": "updateTask", "taskId": task_id, "patch": patch }),
             ),
-            Self::Mission { create, .. } => Some(create.clone()),
+            Self::Mission { create, .. } | Self::Plan { create } => Some(create.clone()),
         }
     }
 }
@@ -200,6 +203,29 @@ impl Shell {
         }
     }
 
+    pub(super) fn add_plan(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let Some(chat) = state
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id && crate::tasks::can_add_plan(state, chat))
+        else {
+            return;
+        };
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let title = crate::home::chat_title(chat);
+        let create = Self::create_task_params(&task_id, &title, "", chat.space_id.clone(), None);
+        let lead = crate::tasks::Orchestrate::default();
+        self.assign_task(
+            TaskOrigin::Plan { create },
+            &task_id,
+            chat_id,
+            true,
+            Some(lead),
+            cx,
+        );
+    }
+
     fn task_origin_failed(
         &mut self,
         origin: &TaskOrigin,
@@ -223,6 +249,11 @@ impl Shell {
                 }
                 self.composer
                     .update(cx, |composer, cx| composer.mission_failed(start, cx));
+            }
+            TaskOrigin::Plan { .. } => {
+                if !save_failed {
+                    self.delete_task(task_id, cx);
+                }
             }
         }
     }
@@ -325,6 +356,7 @@ impl Shell {
                             shell.open_task_center(task_id.clone(), cx)
                         }
                     },
+                    TaskOrigin::Plan { .. } => {}
                 })
                 .ok();
                 return;
@@ -370,6 +402,7 @@ impl Shell {
             "approvePlan": lead.is_none_or(|lead| lead.approve_plan),
             "sameAgents": lead.is_some_and(|lead| lead.same_agents),
             "planDoc": lead.is_some_and(|lead| lead.plan_doc),
+            "attachPlan": matches!(origin, TaskOrigin::Plan { .. }),
         });
         let task_id = task_id.to_string();
         cx.spawn(async move |this, cx| {

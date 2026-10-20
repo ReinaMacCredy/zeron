@@ -1572,6 +1572,16 @@ pub(crate) fn mission_thread(
     })
 }
 
+pub(crate) fn can_add_plan(state: &AppState, chat: &zeron_proto::Chat) -> bool {
+    state.local_device_id.as_deref() == Some(chat.device_id.as_str())
+        && !chat.archived
+        && !chat.is_system()
+        && chat.sidechat_source_chat_id.is_none()
+        && !state.is_hidden_chat(&chat.id)
+        && !state.is_draft(&chat.id)
+        && zeron_proto::plan_of_chat(&state.tasks, &chat.id).is_none()
+}
+
 /// The open plan, else the one that finished last, so a done lead keeps its strip.
 pub(crate) fn plan_led_by<'a>(
     tasks: &'a [zeron_proto::Task],
