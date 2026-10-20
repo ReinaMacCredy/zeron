@@ -597,6 +597,8 @@ impl EngineRpc {
             {
                 let cleared = TaskPatch {
                     chat_id: Some(None),
+                    space_id: task.space_id.is_none().then_some(None),
+                    send_error: task.send_error.clone().map(Some),
                     mode: lead.map(|_| task.mode),
                     plan_pending: lead.map(|_| task.plan_pending),
                     plan_doc: lead.map(|_| task.plan_doc),
