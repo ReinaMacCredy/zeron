@@ -8,7 +8,7 @@ Ask in your own words, and name the agent and model you want when it matters:
 - "Have Grok review this diff while you keep going."
 - "Run the migration with a Claude Code child on its strongest model, and wait for it."
 
-Without a name, the child runs on this chat's agent, model and reasoning level.
+Without a name, the child runs where [Settings > Routing](zeron://settings/routing) sends its role, or, when that role is **Off**, on this chat's agent, model and reasoning level. The agent gives each child a role: **worker** to write and change code, **validator** to review and test, **research** to read and report, **design** to shape an approach, or **general**. See [Routing](zeron://docs/routing).
 
 The agent looks up what it can use with Zeron's `orchestrator_capabilities` tool: every agent installed and turned on in [Settings > Providers](zeron://settings/providers), with its current models from the same list as the model picker, your agent profiles, and the limits below. An agent that is not installed or is turned off cannot run a child. When the agent picks another agent without naming a model, the child gets that agent's default model; a model that agent does not offer is refused.
 
