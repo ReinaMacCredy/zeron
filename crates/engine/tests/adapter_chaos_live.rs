@@ -12,8 +12,9 @@
 //!   the user did not cause; every requested sentinel present at the end.
 //! - Never stuck: every scenario settles Idle.
 //! - Every routed message is delivered (one steer boundary each).
-//! - One process for the chat's life, except after the user's Stop.
-//! - Nothing the agent started outlives a Stop.
+//! - One process for the chat's life, except after a teardown Stop.
+//! - Nothing the agent started outlives a teardown Stop (the Supervisor's
+//!   pause; the user's Stop ends only the turn).
 //!
 //! `ZERON_TEST_HARNESS`: claude | codex | cursor | opencode | grok | devin |
 //! pi | hermes | antigravity. `restart_durability` covers quitting and
@@ -314,7 +315,7 @@ impl Chat<'_> {
             .doc_host
             .queue_command(
                 &self.id,
-                SessionCommandPayload::Interrupt { teardown: false },
+                SessionCommandPayload::Interrupt { teardown: true },
             )
             .unwrap();
     }

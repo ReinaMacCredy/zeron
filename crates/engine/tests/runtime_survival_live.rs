@@ -1,7 +1,8 @@
 //! Opt-in real-model checks. A chat's agent process — and the background
-//! work it holds — survives everything but the user's Stop: a follow-up with
+//! work it holds — survives everything but a teardown Stop: a follow-up with
 //! an image, another client's spelling of the same options, a steer into a
-//! long command, a model switch. Stop tears all of it down
+//! long command, a model switch, the user's Stop. A teardown Stop (the
+//! Supervisor's pause) tears all of it down
 //! (`stop_tears_down_all_agent_work`), and a resumed process never reads
 //! as done before its reply.
 //!
@@ -567,7 +568,7 @@ async fn resume_after_killed_background_work_is_not_done_early() {
         .status();
 }
 
-/// Stop is a hard boundary: the Stop button ends the turn AND everything the
+/// A teardown Stop is a hard boundary: it ends the turn AND everything the
 /// agent runs — background subagents, background shells, the foreground
 /// command — while sends, steers and model switches never touch them (see
 /// `agent_process_survives_sends_and_cancel`). The next message resumes the
@@ -678,7 +679,7 @@ async fn stop_tears_down_all_agent_work() {
     )
     .await;
     core.doc_host
-        .queue_command(CHAT, SessionCommandPayload::Interrupt { teardown: false })
+        .queue_command(CHAT, SessionCommandPayload::Interrupt { teardown: true })
         .unwrap();
     wait(
         &core,
