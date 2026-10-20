@@ -25,7 +25,7 @@ The **Pull requests** and **Git activity** widgets have a project filter. **All 
 
 Click **Customize** at the right of the grid header to switch widgets on or off, and to choose what **Running services** lists:
 
-- **By Zeron** lists servers running inside your Zeron projects and worktrees.
+- **By Zeron** (the default) lists servers running inside your Zeron projects and worktrees.
 - **All ports** adds every other listening process on this Mac.
 
 **All Home settings** at the bottom opens [Settings > Home](zeron://settings/home), which has the same switches under **Widgets** and the same port choice under **Running services** (**Show ports**). Changes save right away.

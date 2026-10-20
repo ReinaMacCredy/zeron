@@ -7,16 +7,28 @@ Open [Settings > Agent profiles](zeron://settings/agent-profiles) and click **Ne
 | Field | What it sets |
 | --- | --- |
 | **Name** | The name shown in the picker and on the chip. |
-| **Agent**, **Model**, **Mode**, **Effort** | The setup to apply. **Keep current** leaves that setting as it is. |
-| **Tools** | Which Zeron tools, built-in tools, and MCP servers stay on. |
+| **Agent** | The agent the profile runs. A profile always sets its agent; changing **Agent** clears **Model** and the model's options. |
+| **Model**, **Mode**, **Effort** | The rest of the setup. **Keep current** leaves that setting as it is. |
+| Model options | Some models offer extra choices, each with its own row under **Effort**. **Keep current** leaves it as it is. |
+| **Tools** | Which tools stay on. The row reads **All tools on** or how many are off; click it to open the list. |
 | **Instructions** | Added to the agent's system prompt on every run of a chat using this profile. |
 | **When to use** | A note agents read to pick a profile when they delegate a task. |
 
-**Mode** is **Ask**, **Auto**, or **Full**, the same choices as the permission chip. Click **Save** to keep it. To delete a profile, open it with **Edit**, click **Remove**, then **Confirm remove**. The arrow buttons on each row change the order.
+**Mode** is **Ask**, **Auto**, or **Full**, the same choices as the permission chip.
+
+The **Tools** list has these groups:
+
+- **Zeron tools**: the groups from [Settings > Tools](zeron://settings/tools), each with a switch and its single tools. A tool or group that is off in Settings > Tools shows **off in Settings** and cannot be turned on here.
+- **Claude built-in** and **MCP servers**: only when **Agent** is Claude Code. Zeron asks Claude Code for its built-in tools and reads the MCP servers from your Claude config.
+- **Not found**: tools the profile turns off that no list has any more, marked **not found · turn on to remove**. Switch one on to drop it from the profile.
+
+Click **Save** to keep it. To delete a profile, open it with **Edit**, click **Remove**, then **Confirm remove**. The arrow buttons on each row change the order.
 
 Profiles an agent wrote for you carry a **by agent** badge.
 
-**System prompt**, below the list, is text added to every agent's system prompt on this device, before a profile's own instructions.
+With no profiles yet, the page reads **No profiles yet. Add one to start chats from a saved agent and model.**
+
+**System prompt**, below the list, is text added to every agent's system prompt on this device, before a profile's own instructions. Click its **Save** button after editing; it stays dimmed until the text changes.
 
 ## Apply a profile
 

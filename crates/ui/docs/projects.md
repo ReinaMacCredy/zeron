@@ -20,6 +20,8 @@ In a git project, the checkout chip on the New chat composer offers **Current ch
 
 Worktrees go in `~/.zeron/worktrees/<repository>/` by default. To change that, open [Settings > General](zeron://settings/general), scroll to **Worktrees**, choose a **Device**, and turn on **Custom worktree location**. Each device keeps its own location, and existing worktrees stay where they are.
 
+With the switch on, click **Browse** to pick the folder; on another device you pick it from a folder list of that device, then **Use this folder**. Turning the switch off keeps the folder for next time, and the reset button (tooltip **Reset to default**) forgets it. When the `ZERON_WORKTREES_DIR` environment variable is set on a device, it decides the location there: the row reads **Set by ZERON_WORKTREES_DIR** and cannot be changed.
+
 ## Actions
 
 Actions are saved commands for a project, such as a dev server, a build, or tests. They show in the **Actions** section of the **Live state** column beside a chat, and in the Cmd+K palette.
