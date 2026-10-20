@@ -172,7 +172,7 @@ fn reorder_keys(
         .filter_map(|id| steps.iter().find(|(step, _)| &step.id == id).copied())
         .collect();
     let unique: std::collections::HashSet<&str> = order.iter().map(String::as_str).collect();
-    if listed.len() != steps.len() || unique.len() != steps.len() {
+    if order.len() != steps.len() || listed.len() != steps.len() || unique.len() != steps.len() {
         return Err("The new order must list every remaining step once");
     }
     let key = |step: &TaskStep| (step.order_key.is_empty(), step.order_key.clone());
@@ -1175,5 +1175,7 @@ mod tests {
         assert!(reorder(&plan, &["a"]).is_err());
         assert!(reorder(&plan, &["a", "a"]).is_err());
         assert!(reorder(&plan, &["a", "x"]).is_err());
+        let started = [("s0", false), ("s1", true), ("s2", false)];
+        assert!(reorder(&started, &["s2", "s0", "s0", "x"]).is_err());
     }
 }
