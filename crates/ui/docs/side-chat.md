@@ -19,7 +19,7 @@ The sidechat takes the place of the main composer, marked with a **btw** pill. E
 - **Open in side pane** moves the current sidechat to the right pane, where it gets a **Sidechat** tab.
 - Press Escape, or click the **Esc** chip, to close the panel and return to the main composer.
 
-You can also start one from the right pane's + menu with **New sidechat**. The **Live state** column lists your sidechats under **Side chats**.
+You can also start one from the right pane's + menu with **New sidechat**. The [Live state](zeron://docs/live-state) column lists your sidechats under **Side chats**; click one to open it in the right pane.
 
 ## What the sidechat knows
 
@@ -29,4 +29,14 @@ Images or appshots you attached in the main composer move into the sidechat when
 
 Sidechats drop off the tab after 24 hours and show as **Expired** in the **Live state** column.
 
-> **Fork chat** in the **Live state** column is different: it copies the conversation into a new chat in the right pane that carries on by itself.
+## Sidechats, side chats, and forks
+
+Three similar names do different things:
+
+| Name | Where you start it | What you get |
+| --- | --- | --- |
+| Sidechat | `/btw`, the tab on the composer, or **New sidechat** in the right pane's **+** menu or the **Live state** column | A separate session that answers you about this chat, with a copy of its conversation as reference. In the right pane its tab reads **Sidechat**. |
+| **New side chat** | Hover the **Chats** header in the Files panel, or its empty state | An empty chat beside this one, with the same project, agent, and model but none of its history. Nothing is saved until you send its first message. |
+| **Fork chat** | **Side chats** in the **Live state** column, or **Fork this chat** (**Fork** when empty) in the Files panel's **Chats** section | A copy of this conversation through its latest completed reply, as a new chat that carries on by itself. |
+
+Side chats and forks open in the right pane with their own composer, and the Files panel lists them under **Chats**. See [Right pane](zeron://docs/right-pane).

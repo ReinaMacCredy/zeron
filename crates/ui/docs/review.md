@@ -18,8 +18,8 @@ While the review runs, the chip reads **Reviewing**. Hover it and click **Stop r
 When the review ends, the chip shows the number of findings, **No issues**, or **Review again** if the code changed since. Click the findings count to open the list. Each finding has a severity (**Bug**, **Risk**, or **Nit**), a title, and its file and line.
 
 - **Fix N remaining** adds every open finding to your next message as comments. Send it, and your chat's agent works through them.
-- **Open Changes** opens the Changes pane, where each finding sits as a card on its line with **Fix** and **Dismiss**.
-- **Fix** adds one finding to your next message as a comment. **Dismiss** removes it from the review.
+- **Open Changes** shows the right pane's **Working tree** diff tab, or the first Diffs tab you have open, or opens a new **Working tree** tab. Each finding sits as a card on its line with **Fix** and **Dismiss**, but only in a Diffs tab whose scope matches the review: **Working tree** for **Uncommitted**, **Branch changes** for **Branch vs**, **Latest turn** for **Latest turn**, and that commit's own tab (opened from **History**) for a **Commit** review. A finding whose code has changed since the review gets no card. See [Right pane](zeron://docs/right-pane).
+- **Fix** adds one finding to your next message as a comment. A finding already handed to the agent is not added again. **Dismiss** removes it from the review.
 
 ## Outcomes
 
@@ -30,7 +30,7 @@ After the agent works on findings, each one shows its outcome: **Fixed**, **Skip
 [Settings > Code review](zeron://settings/code-review) sets the default reviewer for every chat:
 
 - **Reviewer**: **Auto** picks a profile named reviewer, otherwise the other agent family from the chat's (Claude reviews Codex work and the reverse).
-- **Model** and **Thinking** for the reviewer.
+- **Model** and **Thinking** for the reviewer. They show only when **Reviewer** is a specific agent, not **Auto** or a profile.
 - **Review instructions**: text added to every review prompt, for example what to focus on. Click **Save** after editing.
 
 > Name an agent profile "reviewer" to make Auto use it.

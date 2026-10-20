@@ -22,6 +22,18 @@ Terminal tabs start in the selected chat's folder, or the selected project, or y
 - Closing a tab in the titlebar, or pressing Cmd+W, hides it but keeps the process running. Click its row under **Terminals** to bring it back.
 - The close button on the sidebar row (tooltip **Close terminal**) ends the process.
 
+## Terminal in the right pane
+
+Click **Terminal** in an empty right pane, or click **+** and choose **Terminal**. Each click opens a new terminal tab for this chat, in the chat's folder and on the chat's device. The **Terminal** row in the [Live state](zeron://docs/live-state) column shows the first one, or opens one when there is none.
+
+It is the same terminal as the drawer's, but it lives by the right pane's rules:
+
+- It has no tab bar of its own: no **+**, **Close terminal**, or **Hide terminal**. Its tabs sit in the right pane's strip with the pane's other tabs. See [Right pane](zeron://docs/right-pane).
+- Closing its tab (the ×, a middle-click, **Close tab**, or Cmd+W) always ends the process. Hiding the right pane keeps it running.
+- Cmd+J does not open or close it.
+- The tab is named after the title the shell sets, or **Terminal 1**, **Terminal 2**, and so on.
+- When the program exits, the tab stays open with a `[process exited N]` line until you close it.
+
 ## Copy, paste, and quoting
 
 Select text with the mouse, then press Cmd+C to copy; Ctrl+C still interrupts the program. Cmd+V pastes. When you finish a drag selection, Zeron also stages the text as a quote in the chat's composer, so you can ask the agent about it.
