@@ -266,7 +266,8 @@ impl RoutePopover {
         } else {
             target_text(ran, cx)
         };
-        if on_parent || self.info.native {
+        if Source::of(&self.info.route) == Some(Source::FellBack) && (on_parent || self.info.native)
+        {
             value.push_str(" (this chat's model)");
         }
         Some(branded(ran, value, theme))

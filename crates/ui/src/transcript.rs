@@ -14539,7 +14539,11 @@ fn delegate_chip(
         .into(),
         _ => delegate_status_text(view.status).into(),
     };
-    let a11y_label = SharedString::from(format!("{label} {} {state}", view.title));
+    let a11y_label = if native {
+        SharedString::from(format!("{label} {}", view.title))
+    } else {
+        SharedString::from(format!("{label} {} {state}", view.title))
+    };
     let model = view.model.as_ref().map(|model| match view.harness {
         Some(harness) => crate::pickers::model_display_label(harness, model, cx),
         None => model.to_string(),
