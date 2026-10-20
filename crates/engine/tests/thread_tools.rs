@@ -3607,6 +3607,98 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
         .unwrap();
         started(run(&steps[1], "task-lead").await);
     }
+
+    let side = rig
+        .core
+        .workspace
+        .create_sidechat("lead", "lead-side")
+        .unwrap()
+        .id;
+    let child = started(
+        call(
+            zeron_rpc::methods::CREATE_THREAD,
+            serde_json::json!({ "fromChatId": "lead", "prompt": "read the logs" }),
+        )
+        .await,
+    );
+    wait_for(
+        || {
+            rig.core
+                .sessions
+                .session_status(&child)
+                .is_some_and(|s| s.last_completed_turn.is_some())
+        },
+        "the child's own turn",
+    )
+    .await;
+    mutate(serde_json::json!({ "op": "createTask", "taskId": "t3", "title": "Ship the shop" }))
+        .await
+        .unwrap();
+    mutate(serde_json::json!({
+        "op": "assignTask", "taskId": "t3", "chatId": "lead", "orchestrate": true, "attachPlan": true,
+    }))
+    .await
+    .unwrap();
+    let attached = "You lead this task (task id t3). This task is a plan for the work this chat is already doing.";
+    wait_for(
+        || !prompts_with(&rig, attached).is_empty(),
+        "the attach brief",
+    )
+    .await;
+    let brief = prompts_with(&rig, attached).remove(0);
+    for line in [
+        "set that step's threadId to the thread's id",
+        "Do a step yourself, or with your own sub-agents, then mark it done",
+        "Then stop. The person reviews the plan",
+    ] {
+        assert!(brief.contains(line), "{line} in {brief}");
+    }
+    let attach = |thread: &str| {
+        serde_json::json!({
+            "op": "planSteps", "taskId": "t3", "fromChatId": "lead",
+            "steps": [{ "title": "Read the logs", "threadId": thread }, { "title": "Fix the bug" }],
+        })
+    };
+    let err = refused(mutate(attach(&side)).await);
+    assert!(err.contains("is a sidechat"), "{err}");
+    let err = refused(mutate(attach("task-lead")).await);
+    assert!(err.contains("is not a thread this chat started"), "{err}");
+    assert!(
+        rig.core.workspace.task_steps_of("t3").is_empty(),
+        "a refused plan writes no steps"
+    );
+    mutate(attach(&child)).await.unwrap();
+    let planned = rig.core.workspace.task_steps_of("t3");
+    assert_eq!(planned[0].chat_id.as_deref(), Some(child.as_str()));
+    assert_eq!(planned[1].chat_id, None);
+    let row = rig.core.workspace.chat(&child).unwrap().unwrap();
+    let link = zeron_proto::thread_link(
+        &row,
+        &rig.core.workspace.read_tasks().unwrap(),
+        &rig.core.workspace.read_task_steps().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        (link.parent.as_str(), link.kind, link.step_id),
+        (
+            "lead",
+            zeron_proto::LinkKind::Delegated,
+            Some(planned[0].id.clone())
+        ),
+        "the bound child now runs its step"
+    );
+    assert_eq!(
+        status(&planned[0].id),
+        (Some(child.clone()), zeron_proto::StepStatus::Done),
+        "a child bound after its turn ended reads that turn"
+    );
+    let err = refused(mutate(attach(&child)).await);
+    assert!(err.contains("already runs step \"Read the logs\""), "{err}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        prompts_with(&rig, &format!("finished a turn on its thread {child}")).is_empty(),
+        "a turn that ended before the bind wakes nobody"
+    );
     rig.core.shutdown().await;
 }
 

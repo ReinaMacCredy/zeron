@@ -1083,6 +1083,8 @@ enum MutateParams {
         same_agents: bool,
         #[serde(default)]
         plan_doc: bool,
+        #[serde(default)]
+        attach_plan: bool,
     },
     #[serde(rename_all = "camelCase")]
     PlanSteps {
@@ -1165,10 +1167,13 @@ fn approve_plan_default() -> bool {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PlannedStep {
     title: String,
     #[serde(default)]
     notes: String,
+    #[serde(default)]
+    thread_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -2450,6 +2455,7 @@ impl EngineRpc {
                     approve_plan,
                     same_agents,
                     plan_doc,
+                    attach: false,
                 });
                 self.start_task(&task_id, &chat_id, space_id, config, lead)
                     .await
@@ -2464,12 +2470,14 @@ impl EngineRpc {
                 approve_plan,
                 same_agents,
                 plan_doc,
+                attach_plan,
             } => {
                 supervisor::refuse_supervisor(from_chat_id.as_deref(), supervisor::GOAL_OR_SPEND)?;
                 let lead = orchestrate.then_some(tasks::Lead {
                     approve_plan,
                     same_agents,
                     plan_doc,
+                    attach: attach_plan,
                 });
                 self.assign_task(&task_id, &chat_id, send, from_chat_id.as_deref(), lead)
                     .await
@@ -2483,7 +2491,7 @@ impl EngineRpc {
             } => {
                 let steps = steps
                     .into_iter()
-                    .map(|step| (step.title, step.notes))
+                    .map(|step| (step.title, step.notes, step.thread_id))
                     .collect();
                 self.plan_steps(
                     &task_id,
@@ -4547,7 +4555,7 @@ impl RpcService for EngineRpc {
                 {
                     let steps = steps
                         .into_iter()
-                        .map(|step| (step.title, step.notes))
+                        .map(|step| (step.title, step.notes, step.thread_id))
                         .collect();
                     let images_moved = self.plan_steps(
                         &task_id,

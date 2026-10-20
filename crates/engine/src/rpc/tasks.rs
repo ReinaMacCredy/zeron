@@ -1,6 +1,6 @@
 use super::*;
 use zeron_proto::supervisor::PlanApproval;
-use zeron_proto::{Task, TaskMode, TaskPatch, TaskStep, TaskStepPatch};
+use zeron_proto::{LinkKind, Task, TaskMode, TaskPatch, TaskStep, TaskStepPatch};
 
 fn refused(message: &str) -> RpcError {
     RpcError::Failed(message.into())
@@ -83,6 +83,7 @@ pub(super) struct Lead {
     pub approve_plan: bool,
     pub same_agents: bool,
     pub plan_doc: bool,
+    pub attach: bool,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -246,14 +247,21 @@ fn lead_brief(task_id: &str, lead: Lead, reads: bool) -> String {
         )
     };
     let mut lines = vec![plan.as_str()];
+    if lead.attach {
+        lines.push(
+            "When a thread you already started with create_thread or delegate_task does a step's work, set that step's threadId to the thread's id so the thread runs the step.",
+        );
+    }
     if lead.approve_plan {
         lines.push(
             "Then stop. The person reviews the plan in Tasks and approves it; you get a message when it is approved.",
         );
     }
-    lines.push(
-        "Run each step on its own thread with create_thread: prompt set to what the step must do, taskStepId set to the step's id, title optional. Steps that do not depend on each other can run at the same time.",
-    );
+    lines.push(if lead.attach {
+        "Do a step yourself, or with your own sub-agents, then mark it done with the tasks tool, action \"step\". Run a step on its own thread with create_thread only when it needs one: prompt set to what the step must do, taskStepId set to the step's id, title optional."
+    } else {
+        "Run each step on its own thread with create_thread: prompt set to what the step must do, taskStepId set to the step's id, title optional. Steps that do not depend on each other can run at the same time."
+    });
     lines.push(if lead.same_agents {
         "Run every step on your own harness and model: do not pass harness or model to create_thread."
     } else {
@@ -278,8 +286,13 @@ fn lead_brief(task_id: &str, lead: Lead, reads: bool) -> String {
         .enumerate()
         .map(|(n, line)| format!("{}. {line}", n + 1))
         .collect();
+    let intro = if lead.attach {
+        "This task is a plan for the work this chat is already doing. Break that work into steps; do a step yourself or run it on a thread."
+    } else {
+        "Break it into steps and run each step on its own thread."
+    };
     format!(
-        "You lead this task (task id {task_id}). Break it into steps and run each step on its own thread.\n\n{}",
+        "You lead this task (task id {task_id}). {intro}\n\n{}",
         steps.join("\n")
     )
 }
@@ -386,6 +399,73 @@ impl EngineRpc {
             return Err(refused("This chat already leads a mission"));
         }
         Ok(())
+    }
+
+    fn check_step_threads(&self, task: &Task, threads: &[Option<String>]) -> Result<(), RpcError> {
+        if threads.iter().all(Option::is_none) {
+            return Ok(());
+        }
+        let lead = task
+            .chat_id
+            .as_deref()
+            .ok_or_else(|| refused("This task has no lead thread"))?;
+        let tasks = self.workspace.read_tasks().map_err(failed)?;
+        let steps = self.workspace.read_task_steps().map_err(failed)?;
+        for (n, thread) in threads.iter().enumerate() {
+            let Some(thread) = thread.as_deref() else {
+                continue;
+            };
+            if threads[..n].iter().flatten().any(|seen| seen == thread) {
+                return Err(refused(&format!("threadId {thread} is on two steps")));
+            }
+            let chat = self
+                .workspace
+                .chat(thread)
+                .map_err(failed)?
+                .ok_or_else(|| refused(&format!("threadId {thread} no longer exists")))?;
+            match zeron_proto::thread_link(&chat, &tasks, &steps) {
+                Some(link)
+                    if link.parent == lead
+                        && matches!(link.kind, LinkKind::Delegated | LinkKind::OpenedFrom) => {}
+                Some(link) if link.kind == LinkKind::SidechatOf => {
+                    return Err(refused(&format!(
+                        "threadId {thread} is a sidechat; a step runs on a thread this chat started"
+                    )));
+                }
+                Some(link) if link.kind == LinkKind::ForkedFrom => {
+                    return Err(refused(&format!(
+                        "threadId {thread} is a fork; a step runs on a thread this chat started"
+                    )));
+                }
+                _ => {
+                    return Err(refused(&format!(
+                        "threadId {thread} is not a thread this chat started"
+                    )));
+                }
+            }
+            if let Some(holder) = steps.iter().find(|step| {
+                !step.deleted && step.outcome.is_none() && step.chat_id.as_deref() == Some(thread)
+            }) {
+                return Err(refused(&format!(
+                    "threadId {thread} already runs step \"{}\"",
+                    holder.title
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Recorded at bind, so settle_task_steps never wakes the lead for a turn that ended before.
+    fn ended_turn(&self, thread: &str) -> Option<zeron_proto::StepTurn> {
+        use zeron_proto::{SessionStatus, StepTurn, StepTurnEnd};
+        let session = self.sessions.session_status(thread)?;
+        let ended = match session.status {
+            SessionStatus::Working | SessionStatus::AwaitingInput => return None,
+            SessionStatus::Errored => StepTurnEnd::Failed,
+            SessionStatus::Idle => StepTurnEnd::Completed,
+        };
+        let turn = session.last_completed_turn;
+        (ended == StepTurnEnd::Failed || turn.is_some()).then_some(StepTurn { ended, turn })
     }
 
     fn check_context_chats(&self, context: &[String]) -> Result<(), RpcError> {
@@ -645,7 +725,7 @@ impl EngineRpc {
     pub(super) fn plan_steps(
         &self,
         task_id: &str,
-        steps: Vec<(String, String)>,
+        steps: Vec<(String, String, Option<String>)>,
         overview: Option<String>,
         resources: Option<Vec<String>>,
         from_chat_id: Option<&str>,
@@ -660,6 +740,8 @@ impl EngineRpc {
                 ..Default::default()
             },
         )?;
+        let threads: Vec<Option<String>> = steps.iter().map(|(_, _, id)| id.clone()).collect();
+        self.check_step_threads(&task, &threads)?;
         let resources = resources
             .map(|keys| crate::supervisor_resources::checked_keys(&keys))
             .transpose()
@@ -669,18 +751,18 @@ impl EngineRpc {
         let now = chrono::Utc::now();
         let mut steps: Vec<TaskStep> = steps
             .into_iter()
-            .map(|(title, notes)| TaskStep {
+            .map(|(title, notes, thread)| TaskStep {
                 id: crate::new_id(),
                 task_id: task_id.to_string(),
                 title,
                 notes,
                 order_key: String::new(),
-                chat_id: None,
+                turn: thread.as_deref().and_then(|id| self.ended_turn(id)),
+                chat_id: thread,
                 outcome: None,
                 created_at: now,
                 updated_at: now,
                 deleted: false,
-                turn: None,
                 images: Vec::new(),
             })
             .collect();

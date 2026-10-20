@@ -361,6 +361,7 @@ impl EngineRpc {
                     approve_plan: true,
                     same_agents: false,
                     plan_doc,
+                    attach: false,
                 };
                 let message_id = match self
                     .start_task(&task_id, &lead, project_id, config, Some(lead_brief))

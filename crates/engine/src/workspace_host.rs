@@ -1361,6 +1361,10 @@ impl WorkspaceHost {
         self.read(|doc| doc.task_step(step_id))
     }
 
+    pub fn read_task_steps(&self) -> Result<Vec<TaskStep>, EngineError> {
+        Ok(self.read(|doc| doc.read_task_steps())?)
+    }
+
     pub fn task_steps_of(&self, task_id: &str) -> Vec<TaskStep> {
         self.read(|doc| doc.task_steps_of(task_id))
     }
