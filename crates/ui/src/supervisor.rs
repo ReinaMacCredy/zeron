@@ -1018,6 +1018,7 @@ pub struct SupervisorPage {
     pane: Option<Pane>,
     replies: HashMap<String, Reply>,
     picks: HashMap<String, HashMap<String, Vec<String>>>,
+    corrections: HashMap<String, Option<String>>,
     filter: Filter,
     list_filter: Filter,
     list_switch: Option<Instant>,
@@ -1089,6 +1090,7 @@ impl SupervisorPage {
             pane: None,
             replies: HashMap::new(),
             picks: HashMap::new(),
+            corrections: HashMap::new(),
             filter: Filter::All,
             list_filter: Filter::All,
             list_switch: None,
@@ -1483,6 +1485,38 @@ impl SupervisorPage {
                         };
                     }
                 }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn correct(&mut self, item_id: String, choice: String, cx: &mut Context<Self>) {
+        if matches!(self.corrections.get(&item_id), Some(None)) {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.corrections.insert(item_id.clone(), None);
+        cx.spawn(async move |page, cx| {
+            let sent = engine
+                .client()
+                .call(
+                    methods::MUTATE,
+                    serde_json::json!({
+                        "op": "resolveSupervisorItems",
+                        "answers": [{ "itemId": item_id, "choice": choice }],
+                    }),
+                )
+                .await;
+            page.update(cx, |page, cx| {
+                match sent {
+                    Ok(_) => page.corrections.remove(&item_id),
+                    Err(error) => page.corrections.insert(item_id, Some(error.to_string())),
+                };
                 cx.notify();
             })
             .ok();
@@ -2693,12 +2727,33 @@ impl SupervisorPage {
                             .text_color(theme.text)
                             .child("Supervisor"),
                     )
+                    .children(self.full_authority().then(|| {
+                        div()
+                            .id("supervisor-full-authority")
+                            .debug_selector(|| "supervisor-full-authority".into())
+                            .flex_none()
+                            .px(px(6.0))
+                            .py(px(1.0))
+                            .rounded(px(5.0))
+                            .border_1()
+                            .border_color(theme.border)
+                            .text_size(ui_rems(11.0))
+                            .text_color(theme.text_muted)
+                            .tooltip(widgets::text_tooltip(
+                                "The Supervisor decides for you; change it under Authority",
+                            ))
+                            .child("Full authority")
+                    }))
                     .child(div().flex_1())
                     .child(gear),
             )
             .children(status.map(|status| div().mt(px(14.0)).child(status)))
             .child(tabs)
             .into_any_element()
+    }
+
+    fn full_authority(&self) -> bool {
+        matches!(&self.settings, Loadable::Ready(settings) if settings.full_authority())
     }
 
     fn render_gear_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -2829,6 +2884,24 @@ impl SupervisorPage {
                 ..s
             },
         ));
+        toggles.push((
+            "supervisor-auth-decide",
+            "Decide for me",
+            settings.decide_for_me,
+            |s, on| SupervisorSettings {
+                decide_for_me: on,
+                ..s
+            },
+        ));
+        toggles.push((
+            "supervisor-auth-goal",
+            "Change a mission's goal or spend",
+            settings.goal_and_spend,
+            |s, on| SupervisorSettings {
+                goal_and_spend: on,
+                ..s
+            },
+        ));
         let mut list = div()
             .id("supervisor-authority")
             .debug_selector(|| "supervisor-authority".into())
@@ -2843,18 +2916,6 @@ impl SupervisorPage {
         }
         let weak = cx.entity().downgrade();
         list.child(
-            row()
-                .debug_selector(|| "supervisor-auth-goal".into())
-                .child("Change a mission's goal or spend")
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(ui_rems(11.0))
-                        .text_color(theme.text_faint)
-                        .child("always asks you"),
-                ),
-        )
-        .child(
             row()
                 .flex_col()
                 .items_start()

@@ -134,6 +134,19 @@ fn time_cell(theme: &Theme, text: String) -> gpui::Div {
         .child(text)
 }
 
+#[derive(Clone)]
+enum Pick {
+    Stage {
+        key: String,
+        group: String,
+        question: String,
+        multi: bool,
+    },
+    Correct {
+        item_id: String,
+    },
+}
+
 fn faint(theme: &Theme, text: String) -> gpui::Div {
     div()
         .flex_1()
@@ -645,13 +658,10 @@ impl SupervisorPage {
 
     fn render_segments(
         &self,
-        key: &str,
         selector: &str,
-        question_id: &str,
         options: &[String],
-        multi: bool,
         picked: &[String],
-        group: &str,
+        pick: Pick,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
@@ -671,12 +681,7 @@ impl SupervisorPage {
                 let next_chosen = options
                     .get(ix + 1)
                     .is_some_and(|next| picked.contains(next));
-                let (key, qid, option_value, group) = (
-                    key.to_owned(),
-                    question_id.to_owned(),
-                    option.clone(),
-                    group.to_owned(),
-                );
+                let (pick, option_value) = (pick.clone(), option.clone());
                 let id = format!("{selector}-option-{ix}");
                 let sel = id.clone();
                 div()
@@ -714,17 +719,28 @@ impl SupervisorPage {
                         )
                     })
                     .child(option.clone())
-                    .on_click(cx.listener(move |page, _: &ClickEvent, window, cx| {
-                        page.stage(
-                            key.clone(),
-                            group.clone(),
-                            qid.clone(),
-                            option_value.clone(),
-                            multi,
-                            window,
-                            cx,
-                        )
-                    }))
+                    .on_click(
+                        cx.listener(move |page, _: &ClickEvent, window, cx| match &pick {
+                            Pick::Stage {
+                                key,
+                                group,
+                                question,
+                                multi,
+                            } => page.stage(
+                                key.clone(),
+                                group.clone(),
+                                question.clone(),
+                                option_value.clone(),
+                                *multi,
+                                window,
+                                cx,
+                            ),
+                            Pick::Correct { item_id } if !chosen => {
+                                page.correct(item_id.clone(), option_value.clone(), cx)
+                            }
+                            Pick::Correct { .. } => {}
+                        }),
+                    )
             }))
     }
 
@@ -799,17 +815,13 @@ impl SupervisorPage {
         let mission_name = mission_title(self.state.read(cx), item.task_id.as_deref());
         let title = strip_mission(&item.title, mission_name.as_deref());
         let quote = item_quote(item, mission_name.as_deref());
-        let segments = self.render_segments(
-            key,
-            &sel,
-            "",
-            &item.options,
-            false,
-            &picked,
-            &group,
-            theme,
-            cx,
-        );
+        let pick = Pick::Stage {
+            key: key.to_owned(),
+            group,
+            question: String::new(),
+            multi: false,
+        };
+        let segments = self.render_segments(&sel, &item.options, &picked, pick, theme, cx);
         let tools = self.hover_tools(key, &sel, quote, None, clock(item.at), theme, cx);
         let failed = self.failure(key);
         div()
@@ -895,14 +907,17 @@ impl SupervisorPage {
                 (true, false) => (header.to_owned(), asked),
                 (true, true) => (format!("Question {}", qx + 1), asked),
             };
+            let pick = Pick::Stage {
+                key: key.to_owned(),
+                group: group.clone(),
+                question: question.id.clone(),
+                multi: question.multi_select,
+            };
             let segments = self.render_segments(
-                key,
                 &format!("{sel}-q{qx}"),
-                &question.id,
                 &question.options,
-                question.multi_select,
                 &picked,
-                &group,
+                pick,
                 theme,
                 cx,
             );
@@ -1332,25 +1347,61 @@ impl SupervisorPage {
         } else {
             text.clone()
         };
+        let decision = row
+            .item
+            .as_ref()
+            .filter(|_| row.kind == InterventionKind::Decide)
+            .and_then(|item| Some((item, item.answer.as_ref()?)));
+        let detail = match decision {
+            Some((item, answer)) => {
+                let chose = match &answer.supervisor {
+                    Some(decided) if answer.corrected() => format!(
+                        "{} → {} (you changed it from {})",
+                        item.title, answer.choice, decided.choice
+                    ),
+                    _ => format!("{} → {}", item.title, answer.choice),
+                };
+                format!("{chose} · {detail}")
+            }
+            None => detail,
+        };
+        let correction = decision.map(|(item, answer)| {
+            let sel = format!("supervisor-intervention-{}-choice", row.id);
+            let pick = Pick::Correct {
+                item_id: item.id.clone(),
+            };
+            let picked = std::slice::from_ref(&answer.choice);
+            self.render_segments(&sel, &item.options, picked, pick, theme, cx)
+        });
+        let failed = decision
+            .and_then(|(item, _)| self.corrections.get(&item.id).cloned().flatten())
+            .map(|error| format!("Could not send the correction: {error}"));
         let face = (!done).then(|| chip_face(row, utc)).flatten();
         let label = match &face {
-            Some(face) => format!("{action}: {text} · {}", face.label),
-            None => format!("{action}: {text}"),
+            Some(face) => format!("{action}: {detail} · {}", face.label),
+            None => format!("{action}: {detail}"),
         };
-        self.other_shell(
-            key,
-            format!("supervisor-intervention-{}", row.id),
-            label,
-            icons::LUCIDE_CORNER_DOWN_RIGHT,
-            kind_tone(theme, Kind::Intervention),
-            done,
-            theme,
-        )
-        .child(dim(theme, action))
-        .child(faint(theme, clip(&detail)))
-        .children(face.map(|face| self.render_chip(key, &face, now, theme)))
-        .child(time_cell(theme, clock(row.at)))
-        .into_any_element()
+        let shell = self
+            .other_shell(
+                key,
+                format!("supervisor-intervention-{}", row.id),
+                label,
+                icons::LUCIDE_CORNER_DOWN_RIGHT,
+                kind_tone(theme, Kind::Intervention),
+                done,
+                theme,
+            )
+            .child(dim(theme, action))
+            .child(faint(theme, clip(&detail)))
+            .children(correction)
+            .children(face.map(|face| self.render_chip(key, &face, now, theme)))
+            .child(time_cell(theme, clock(row.at)));
+        div()
+            .flex()
+            .flex_col()
+            .child(shell)
+            .children(failed.map(|error| self.failure_line(error, theme)))
+            .into_any_element()
     }
 
     fn render_resource(

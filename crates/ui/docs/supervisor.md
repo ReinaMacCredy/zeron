@@ -8,14 +8,15 @@ The Supervisor's chat never shows in the sidebar or under **Archived**, and it n
 
 ## What wakes it and what it can do
 
-Zeron wakes the Supervisor when something happens in a watched mission: a step fails, a step or the lead waits on you, the mission finishes, the mission goes quiet for 30 minutes, the lead stays quiet for 10 minutes after a step failed, the plan is edited after the mission started, the lead escalates, or two missions contend for a shared resource. Events that arrive within a minute of each other come as one wake, and it wakes at most 12 times an hour.
+Zeron wakes the Supervisor when something happens in a watched mission: a step fails, a step or the lead waits on you, the mission finishes, the mission goes quiet for 30 minutes, the lead stays quiet for 10 minutes after a step failed, the plan is edited after the mission started, the lead escalates, or two missions contend for a shared resource. With **Decide for me** on, a plan that waits for review wakes it too. Events that arrive within a minute of each other come as one wake, and it wakes at most 12 times an hour.
 
 It acts through the missions' leads, within the switches under **Authority**:
 
 - It messages a lead or a step's thread, and answers their questions and tool approvals.
 - It re-briefs a step: it rewrites that step's title and spec, and the lead gets one message saying what changed and why. It never changes the plan's overview and never adds or removes a step.
 - It pauses a step that blocks a shared resource, and resumes it later. A pause needs a contention Zeron verified on this Mac (see **Resources** below): it stops the step's thread, the lead cannot run that step again until it is resumed, and the lead gets one message each time.
-- It starts a new mission. The new lead writes a plan that you review before any step runs.
+- It starts a new mission. The new lead writes a plan that you review before any step runs, or that the Supervisor approves when **Decide for me** is on.
+- It decides for you, when you turn on **Decide for me** under **Authority**: it answers the leads' decisions and approves plans that wait for review. With **Change a mission's goal or spend** on too, it also decides goal and spend decisions and can change a mission's title and notes.
 - It asks you. A change to a mission's goal or spend, or a decision it should not make alone, becomes a decision in the inbox.
 
 A mission's lead can bring a decision to you too. When a decision changes the goal, costs money you have not approved, or cannot be settled from the plan, the lead escalates it as a decision in the inbox and keeps working on what does not depend on it. A lead escalates even when its mission is not watched; only the Supervisor's wake is skipped.
@@ -24,7 +25,7 @@ A mission's lead can bring a decision to you too. When a decision changes the go
 
 The page has two columns. On the left are the header, the inbox and the composer. On the right, the missions rail holds the Supervisor's status card and the tree of every mission.
 
-The header shows the shield, **Supervisor**, a gear button, and the filter tabs. The rail's status card says whether the Supervisor is on, what it last did, and what it checks next:
+The header shows the shield, **Supervisor**, a gear button, and the filter tabs. While either full-authority switch is on, **Full authority** shows next to **Supervisor**. The rail's status card says whether the Supervisor is on, what it last did, and what it checks next:
 
 - **Watching 2 missions**, with a green dot that breathes, when it has nothing to do but still watches. **Last** names the last wake, its reason and what the Supervisor did about it, for example **14:06 · step failed → messaged the Lead · Lead ran a turn**. **Next** names the next scheduled check, for example **silence check on Checkout at 14:36 if it stays quiet**, a check-in, or held events and when they wake it. On the right, **3 of 12 wakes this hour**.
 - **Working on a wake**, with a spinner and how long the turn has run, while it handles a wake (**Woke** names the time, the reason and the mission), or **Working on a message** while it answers you. **Open the conversation** opens the conversation above the composer.
@@ -82,7 +83,9 @@ A question moves to **Earlier** once it is settled, with its answer: **by the Le
 
 ### Interventions
 
-An intervention is something the Supervisor did through its tools: a message to a lead or a step, an answer to a thread's question, a re-brief, a step it paused or resumed, or a mission it started. Its row says what it did (**Messaged the Lead**), the Supervisor's own words, and the time.
+An intervention is something the Supervisor did through its tools: a message to a lead or a step, an answer to a thread's question, a re-brief, a step it paused or resumed, a mission it started, a decision it made for you, a plan it approved, or a goal it changed. Its row says what it did (**Messaged the Lead**), the Supervisor's own words, and the time.
+
+A decision the Supervisor made reads **Decided for the Lead**, then the question, the option it chose and its reason, for example **Who reviews hello.txt? → Codex · Codex reviewed the last diffs**, with the options beside it and its choice filled. Click another option to change it: the lead gets your answer as a correction, the same way your own answer reaches it, and the Supervisor hears that you changed it. If the lead already acted on the Supervisor's choice, the correction asks it to undo or adjust what depends on it where it can and to tell you what could not be undone; Zeron undoes nothing by itself. The row then reads **(you changed it from Codex)**. An approved plan reads **Approved the plan of the Lead** with the Supervisor's reason; to take an approval back, edit the plan in Mission Control or message the lead.
 
 The colored words on the right show only what has happened since, and change as it happens:
 
@@ -137,8 +140,10 @@ Click the gear in the header to open **Authority** and the **Wake log**. Click o
 - **Re-brief a step, through its Lead**
 - **Pause a step that blocks a shared resource**: on by default, and only usable when Zeron has verified a contention. Not shown on Windows.
 - **Start a new mission**: off by default. While it is off, the Supervisor cannot start new threads either.
+- **Decide for me**: off by default. The Supervisor decides the leads' decisions whose reason is **Decision**, choosing one of the options and saying why, and approves a plan that waits for review, the way your **Approve** does. Each one shows under **Interventions**, where you can change it. Turning it on wakes the Supervisor for the decisions already waiting that it now covers.
+- **Change a mission's goal or spend**: off by default, separate from **Decide for me**. The Supervisor also decides the leads' **Goal** and **Spend** decisions, and can change a mission's title and notes; the lead gets one message about it. It never deletes or reassigns a mission.
 
-**Change a mission's goal or spend** has no switch: the Supervisor always asks you. **Check in on its own** wakes it every 30 or 60 minutes while a watched mission runs; it is **Off** by default. Your choices are saved on this Mac and stay after a restart.
+With both off, the Supervisor brings these to you as before. It never decides a question it raised itself, or anything in a mission it does not watch. **Check in on its own** wakes it every 30 or 60 minutes while a watched mission runs; it is **Off** by default. Your choices are saved on this Mac and stay after a restart.
 
 The **Wake log** lists the recent wakes, newest first. Each shows its time, the events it carried, and how it reached the Supervisor: **Started a turn**, **Steered its turn**, **Held for turn end**, **Held by your Stop**, or **Failed** with the reason. Events that went stale before they were sent are listed as **Dropped**.
 
