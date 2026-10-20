@@ -23,6 +23,8 @@ pub enum SupervisorEventKind {
     PlanEdited,
     Resource,
     Heartbeat,
+    NodeFailed,
+    NodeFinished,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +38,8 @@ pub struct SupervisorEventSummary {
     pub step_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_chat_id: Option<String>,
     pub label: String,
     pub at: DateTime<Utc>,
 }
@@ -149,6 +153,7 @@ pub enum InputAsker {
     Lead,
     Step,
     Supervisor,
+    Thread,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -312,6 +317,10 @@ pub struct SupervisorSnapshot {
     pub wakes: Vec<SupervisorWake>,
     #[serde(default)]
     pub unwatched: Vec<String>,
+    #[serde(default)]
+    pub watched_roots: Vec<String>,
+    #[serde(default)]
+    pub watch_everything: bool,
     #[serde(default)]
     pub needs_you: Vec<NeedsYouRow>,
     #[serde(default)]

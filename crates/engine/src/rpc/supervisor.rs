@@ -18,6 +18,10 @@ const GOAL_OFF: &str = "Changing a mission's goal or spend is off in the Supervi
 const TAKEN_BACK: &str =
     "The person took back your approval of this plan, so its review is theirs.";
 const UNWATCHED: &str = "The person turned off the Supervisor's watch on this mission, so its decisions stay with the person.";
+const NO_PLAN: &str = "Applies once this tree has a plan: decide, approve and goal act on a mission's plan, and this thread's tree has none.";
+const TREE_UNWATCHED: &str =
+    "The Supervisor does not watch this thread's tree, so its questions are the person's.";
+const TREE_DECIDE_OFF: &str = "Decide for me is off in the Supervisor's Authority: in a tree without a plan the person answers the questions. Raise it with the supervisor tool, action \"ask\", if it needs them.";
 const MAX_OPTIONS: usize = 3;
 
 #[derive(Debug, Deserialize)]
@@ -436,10 +440,35 @@ impl EngineRpc {
         }
     }
 
+    pub(super) fn supervisor_may_answer(&self, from: &str, chat_id: &str) -> Result<(), RpcError> {
+        let chat = self
+            .workspace
+            .chat(chat_id)
+            .map_err(failed)?
+            .ok_or_else(|| refused("No thread has that id"))?;
+        let tree = self.doc_host.tree_of_chat(&chat).map_err(failed)?;
+        if tree.task_id.is_some() || tree.root == from {
+            return Ok(());
+        }
+        if !self.doc_host.tree_watched(self.supervisor_store()?, &tree) {
+            return Err(refused(TREE_UNWATCHED));
+        }
+        if !self.registry.supervisor_settings().decide_for_me {
+            return Err(refused(TREE_DECIDE_OFF));
+        }
+        Ok(())
+    }
+
     fn watched_mission(&self, task_id: &str) -> Result<(zeron_proto::Task, String), RpcError> {
-        let task = self.task_or_refuse(task_id)?;
+        let Some(task) = self.workspace.task(task_id) else {
+            let thread = self.workspace.chat(task_id).map_err(failed)?;
+            return Err(refused(match thread {
+                Some(_) => NO_PLAN,
+                None => "Task no longer exists",
+            }));
+        };
         if !task.has_plan() {
-            return Err(refused("That task is not a Mission Control mission"));
+            return Err(refused(NO_PLAN));
         }
         if self.supervisor_store()?.is_unwatched(&task.id) {
             return Err(refused(UNWATCHED));
@@ -984,6 +1013,31 @@ impl EngineRpc {
                     .join("; "),
             )),
         }
+    }
+
+    pub(super) fn set_tree_watched(&self, chat_id: &str, watched: bool) -> Result<(), RpcError> {
+        let chat = self
+            .workspace
+            .chat(chat_id)
+            .map_err(failed)?
+            .ok_or_else(|| refused("No thread has that id"))?;
+        let root = self.doc_host.tree_of_chat(&chat).map_err(failed)?.root;
+        if zeron_proto::supervisor::is_supervisor_chat(&root)
+            || zeron_proto::voice::is_orchestrator_chat(&root)
+        {
+            return Err(refused(
+                "System threads and the threads they open are never a watched tree",
+            ));
+        }
+        self.supervisor_store()?
+            .set_tree_watched(&root, watched)
+            .map_err(failed)
+    }
+
+    pub(super) fn set_watch_everything(&self, on: bool) -> Result<(), RpcError> {
+        self.supervisor_store()?
+            .set_watch_everything(on)
+            .map_err(failed)
     }
 
     pub(super) fn set_mission_supervised(

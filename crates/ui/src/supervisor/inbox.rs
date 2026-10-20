@@ -15,6 +15,7 @@ pub(super) enum Dest {
     Lead,
     Step,
     Supervisor,
+    Thread,
 }
 
 impl Dest {
@@ -22,6 +23,7 @@ impl Dest {
         match self {
             Dest::Lead => "the Lead",
             Dest::Step => "the step",
+            Dest::Thread => "the thread",
             Dest::Supervisor => "the Supervisor",
         }
     }
@@ -34,6 +36,7 @@ pub(super) fn dest(row: &NeedsYouRow) -> Dest {
         NeedsYouRow::Input(input) => match input.asker {
             InputAsker::Lead => Dest::Lead,
             InputAsker::Step => Dest::Step,
+            InputAsker::Thread => Dest::Thread,
             InputAsker::Supervisor => Dest::Supervisor,
         },
     }

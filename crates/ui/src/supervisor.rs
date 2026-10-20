@@ -421,6 +421,8 @@ fn kind_word(kind: SupervisorEventKind) -> &'static str {
         SupervisorEventKind::PlanEdited => "plan edited",
         SupervisorEventKind::Resource => "resource contention",
         SupervisorEventKind::Heartbeat => "check-in",
+        SupervisorEventKind::NodeFailed => "thread failed",
+        SupervisorEventKind::NodeFinished => "delegated task ended",
     }
 }
 
@@ -577,6 +579,7 @@ fn asker_name(input: &NeedsYouInput, state: &AppState, now: DateTime<Utc>) -> St
         input.step_id.as_deref(),
     ) {
         (InputAsker::Supervisor, _, _) => return "Supervisor".into(),
+        (InputAsker::Thread, _, _) => thread_name(state, &input.chat_id, now),
         (InputAsker::Step, Some(task_id), Some(step_id)) => {
             step_name(state, task_id, step_id, now).unwrap_or_else(|| "A step".into())
         }

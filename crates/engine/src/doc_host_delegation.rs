@@ -253,6 +253,25 @@ fn input_wake_text(
     text
 }
 
+fn person_message_text(child: &Chat, task: bool, message: &str) -> String {
+    let title = clip(child.title.as_deref().unwrap_or("Untitled"), TITLE_CHARS);
+    let (who, read) = if task {
+        (
+            format!("delegated task {} (\"{title}\")", child.id),
+            format!("task_status with taskId {}", child.id),
+        )
+    } else {
+        (
+            format!("step thread {} (\"{title}\")", child.id),
+            format!("read_thread with threadId {}", child.id),
+        )
+    };
+    format!(
+        "The person wrote directly in your {who}, so its work may change course. Their message, quoted:\n{}\nNo reply is needed; {read} shows where it stands.",
+        crate::supervisor::quoted(&clip(message, WAKE_QUESTION_CHARS))
+    )
+}
+
 pub(super) fn question_lines(questions: &[UserInputQuestion]) -> Vec<String> {
     questions
         .iter()
@@ -1305,7 +1324,7 @@ impl DocHost {
                 let task = owner.as_deref() == Some(target.as_str());
                 let text = input_wake_text(&asker, task, &request_id, &questions);
                 if let Err(err) = host
-                    .queue_input_wake(&target, &asker.id, &request_id, text)
+                    .queue_wake_note(&target, &asker.id, Some(&request_id), text)
                     .await {
                     tracing::warn!(chat = %target, from = %asker.id, error = %err, "input wake failed");
                 }
@@ -1313,11 +1332,65 @@ impl DocHost {
         });
     }
 
-    async fn queue_input_wake(
+    pub(crate) fn offer_person_message_wake(
+        &self,
+        chat_id: &str,
+        message_id: Option<&str>,
+        message: &str,
+    ) {
+        let Some(child) = self
+            .workspace()
+            .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
+        else {
+            return;
+        };
+        if child
+            .delegation
+            .as_ref()
+            .is_some_and(|d| Some(d.anchor.as_str()) == message_id)
+        {
+            return;
+        }
+        let owner = child
+            .delegation
+            .as_ref()
+            .filter(|d| d.is_running() && d.wake != DelegationWake::Never)
+            .map(|d| d.delegated_by_chat_id.clone());
+        let mut targets: Vec<String> = owner.iter().cloned().collect();
+        if let Some(lead) = self.step_lead_of(chat_id)
+            && !targets.contains(&lead)
+        {
+            targets.push(lead);
+        }
+        targets.retain(|target| target != chat_id);
+        if targets.is_empty() {
+            return;
+        }
+        let host = self.clone();
+        let message = message.to_string();
+        self.spawn_worker(async move {
+            for target in targets {
+                let live = host
+                    .workspace()
+                    .and_then(|workspace| workspace.chat(&target).ok().flatten())
+                    .is_some_and(|chat| !chat.archived && chat.device_id == child.device_id);
+                if !live {
+                    continue;
+                }
+                let task = owner.as_deref() == Some(target.as_str());
+                let text = person_message_text(&child, task, &message);
+                if let Err(err) = host.queue_wake_note(&target, &child.id, None, text).await {
+                    tracing::warn!(chat = %target, from = %child.id, error = %err, "person-message note failed");
+                }
+            }
+        });
+    }
+
+    async fn queue_wake_note(
         &self,
         target: &str,
         from: &str,
-        request_id: &str,
+        request_id: Option<&str>,
         text: String,
     ) -> Result<(), EngineError> {
         let handle = self.open(target)?;
@@ -1327,7 +1400,7 @@ impl DocHost {
                 issued_at: now_ms(),
                 computer_generation: Some(handle.doc.computer_generation()),
                 from_chat_id: Some(from.to_string()),
-                input_request: Some(request_id.to_string()),
+                input_request: request_id.map(str::to_owned),
                 ..QueuedMessage::new(new_id(), text, self.inner.config.device_id.clone())
             };
             let slot = handle.steer_slot(&row.id)?;
