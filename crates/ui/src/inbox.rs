@@ -67,7 +67,8 @@ pub struct InboxPage {
     prs_fetched: Option<Instant>,
     prs_task: Option<Task<()>>,
     projects_seen: Vec<String>,
-    runs: Option<Result<TodayRuns, String>>,
+    runs: Option<TodayRuns>,
+    runs_failed: bool,
     runs_fetched: Option<Instant>,
     runs_updated: Option<DateTime<Local>>,
     runs_task: Option<Task<()>>,
@@ -133,6 +134,7 @@ impl InboxPage {
             prs_task: None,
             projects_seen: Vec::new(),
             runs: None,
+            runs_failed: false,
             runs_fetched: None,
             runs_updated: None,
             runs_task: None,
@@ -297,10 +299,11 @@ impl InboxPage {
             this.update(cx, |this, cx| {
                 this.runs_task = None;
                 this.runs_fetched = Some(Instant::now());
-                if result.is_ok() {
+                this.runs_failed = result.is_err();
+                if let Ok(runs) = result {
                     this.runs_updated = Some(Local::now());
+                    this.runs = Some(runs);
                 }
-                this.runs = Some(result);
                 cx.notify();
             })
             .ok();
@@ -966,10 +969,7 @@ impl InboxPage {
         now: DateTime<Local>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let runs: &[TodayRun] = match &self.runs {
-            Some(Ok(runs)) => &runs.runs,
-            _ => &[],
-        };
+        let runs: &[TodayRun] = self.runs.as_ref().map_or(&[], |runs| &runs.runs);
         let slots = day_slots(runs, now);
         let (open, done, overdue) = {
             let state = self.state.read(cx);
@@ -996,16 +996,22 @@ impl InboxPage {
             .text_size(ui_rems(12.5))
             .text_color(theme.text_muted)
             .child("Your day so far")
-            .children(self.runs_updated.map(|at| {
-                div().opacity(0.8).child(SharedString::from(format!(
-                    "Updated {}",
-                    at.format("%I:%M %p")
-                )))
-            }));
+            .children(
+                match (self.runs_updated, self.runs_failed) {
+                    (Some(at), false) => Some(format!("Updated {}", at.format("%I:%M %p"))),
+                    (Some(at), true) => {
+                        Some(format!("Updated {}, refresh failed", at.format("%I:%M %p")))
+                    }
+                    (None, true) => Some("Runs did not load".to_string()),
+                    (None, false) => None,
+                }
+                .map(|label| div().opacity(0.8).child(SharedString::from(label))),
+            );
         let body = if sentences.is_empty() {
-            let copy = match &self.runs {
-                Some(Err(_)) => "Today’s runs did not load.",
-                _ => "Nothing ran yet today. This fills in as your agents work.",
+            let copy = if self.runs_failed && self.runs.is_none() {
+                "Today’s runs did not load."
+            } else {
+                "Nothing ran yet today. This fills in as your agents work."
             };
             div()
                 .text_size(ui_rems(16.0))
