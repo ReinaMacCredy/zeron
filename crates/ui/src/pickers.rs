@@ -3124,9 +3124,7 @@ impl Pickers {
         }
         self.config.harness = Some(harness);
         self.config.instance_id = None;
-        // D3: `acp` names no agent on its own, so it is never the default harness.
-        if self.title.is_none() && !self.detached && harness != HarnessId::Acp {
-            self.defaults.harness = Some(harness);
+        if self.title.is_none() && !self.detached && self.defaults.remember_harness(harness) {
             self.save_defaults();
         }
         self.model_scroll_base().set_offset(gpui::Point::default());
@@ -14370,6 +14368,13 @@ mod tests {
                 pickers.defaults.harness,
                 Some(HarnessId::Codex),
                 "a bare `acp` default would start the next chat with no agent"
+            );
+            pickers.activate_model_index(0, cx);
+            assert_eq!(pickers.config.model.as_deref(), Some("kimchi-1"));
+            assert_eq!(pickers.defaults.harness, Some(HarnessId::Codex));
+            assert!(
+                pickers.defaults.model_for(HarnessId::Acp).is_none(),
+                "another ACP instance would inherit kimchi-1"
             );
 
             pickers.pick_harness(HarnessId::Codex, cx);
