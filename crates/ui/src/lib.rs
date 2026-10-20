@@ -54,6 +54,7 @@ pub mod icons;
 pub(crate) mod image_media;
 pub(crate) mod image_viewer;
 pub mod links;
+mod limit_card;
 pub mod loaders;
 pub mod markdown;
 pub mod motion;

@@ -4291,6 +4291,11 @@ pub struct Transcript {
     html_files: HashMap<std::path::PathBuf, HtmlFileState>,
     html_pages: html_card::HtmlPages,
     plan_previews: HashMap<SharedString, PlanPreview>,
+    limit_choices: HashMap<String, zeron_proto::OfferChoice>,
+    limit_spans: HashMap<String, (i64, i64)>,
+    limit_rows: HashMap<SharedString, usize>,
+    limit_live: bool,
+    limit_tick: Option<Task<()>>,
     html_apps: Option<Arc<Vec<crate::html_open::AppChoice>>>,
     html_apps_task: Option<Task<()>>,
     html_menu: Option<SharedString>,
@@ -4471,6 +4476,7 @@ impl Transcript {
             elapsed_secs: None,
             role: route.role.clone().map(SharedString::from),
             route: Some(route.clone()),
+            limited: false,
         };
         let badge = route_badge::route_badge(
             SharedString::from(format!("{row_id}-route")),
@@ -4642,6 +4648,124 @@ impl Transcript {
                 _fetch: fetch,
             },
         );
+    }
+
+    fn render_limit_card(
+        &mut self,
+        row_id: &SharedString,
+        child: &SharedString,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use zeron_proto::OfferChoice;
+        let state = self.state.read(cx);
+        let (device, limit) = state.limit_resume(child)?;
+        let offer = limit.offer.clone()?;
+        let device = device.to_string();
+        let resets_at = limit.resets_at;
+        let engine = state.engine().cloned()?;
+        let harness = state
+            .chats
+            .iter()
+            .find(|chat| chat.id == child.as_ref())
+            .and_then(|chat| chat.config.as_ref())
+            .map(|config| config.harness);
+        let now = chrono::Utc::now().timestamp_millis();
+        let countdown = offer.act_at.filter(|at| *at > now).map(|at| {
+            let span = self
+                .limit_spans
+                .entry(child.to_string())
+                .or_insert((at, at - now));
+            if span.0 != at {
+                *span = (at, at - now);
+            }
+            let left = at - now;
+            ((left + 999) / 1000, left as f32 / span.1.max(1) as f32)
+        });
+        if countdown.is_some() {
+            self.limit_live = true;
+            self.ensure_limit_tick(cx);
+        }
+        let selected = match self.limit_choices.get(child.as_ref()).copied() {
+            _ if offer.to.is_none() => OfferChoice::Wait,
+            Some(choice) => choice,
+            None => offer.preselect,
+        };
+        let transcript = cx.weak_entity();
+        let on_select = {
+            let child = child.to_string();
+            let engine = engine.clone();
+            let device = device.clone();
+            let counting = offer.act_at.is_some();
+            let preselect = offer.preselect;
+            Rc::new(move |choice: OfferChoice, _: &mut Window, cx: &mut gpui::App| {
+                if counting && choice != preselect {
+                    crate::limit_card::resolve_offer(
+                        engine.clone(),
+                        child.clone(),
+                        device.clone(),
+                        "hold",
+                        cx,
+                    );
+                }
+                transcript
+                    .update(cx, |this, cx| {
+                        this.limit_choices.insert(child.clone(), choice);
+                        cx.notify();
+                    })
+                    .ok();
+            })
+        };
+        let on_resolve = {
+            let child = child.to_string();
+            Rc::new(move |choice: &'static str, _: &mut Window, cx: &mut gpui::App| {
+                crate::limit_card::resolve_offer(
+                    engine.clone(),
+                    child.clone(),
+                    device.clone(),
+                    choice,
+                    cx,
+                );
+            })
+        };
+        Some(crate::limit_card::limit_card(
+            crate::limit_card::LimitCard {
+                id: SharedString::from(format!("{row_id}-limit-{child}")),
+                harness,
+                offer: &offer,
+                resets_at,
+                selected,
+                countdown,
+                on_select,
+                on_resolve,
+            },
+            theme,
+            cx,
+        ))
+    }
+
+    fn ensure_limit_tick(&mut self, cx: &mut Context<Self>) {
+        if self.limit_tick.is_some() {
+            return;
+        }
+        self.limit_tick = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let live = this
+                    .update(cx, |this, cx| {
+                        let live = std::mem::take(&mut this.limit_live);
+                        if !live {
+                            this.limit_tick = None;
+                        }
+                        cx.notify();
+                        live
+                    })
+                    .unwrap_or(false);
+                if !live {
+                    break;
+                }
+            }
+        }));
     }
 
     fn route_links(&self, cx: &Context<Self>) -> route_badge::OnRouteLink {
@@ -5088,6 +5212,11 @@ impl Transcript {
             html_files: HashMap::new(),
             html_pages: html_card::HtmlPages::new(cx),
             plan_previews: HashMap::new(),
+            limit_choices: HashMap::new(),
+            limit_spans: HashMap::new(),
+            limit_rows: HashMap::new(),
+            limit_live: false,
+            limit_tick: None,
             html_apps: None,
             html_apps_task: None,
             html_menu: None,
@@ -11993,8 +12122,12 @@ impl Transcript {
                     .clone()
                     .filter(|_| tool.call.is_delegate_task())
                 {
-                    let chats = &self.state.read(cx).chats;
-                    let view = delegate_view(chats, &child);
+                    let state = self.state.read(cx);
+                    let chats = &state.chats;
+                    let mut view = delegate_view(chats, &child);
+                    view.limited = state
+                        .limit_resume(&child)
+                        .is_some_and(|(_, limit)| limit.offer.is_some());
                     let badge = view
                         .route
                         .clone()
@@ -12290,6 +12423,26 @@ impl Transcript {
                 .into_any_element()
         };
 
+        let limit_cards: Vec<AnyElement> = if collapses {
+            Vec::new()
+        } else {
+            tools
+                .iter()
+                .filter(|tool| tool.call.is_delegate_task() || is_thread_link(tool))
+                .filter_map(|tool| tool.subagent_ref.clone())
+                .filter_map(|child| self.render_limit_card(row_id, &child, theme, cx))
+                .collect()
+        };
+        let layout = limit_cards.len();
+        if self.limit_rows.get(row_id).copied().unwrap_or(0) != layout {
+            self.limit_rows.insert(row_id.clone(), layout);
+            let row = row_id.clone();
+            cx.spawn(async move |this, cx| {
+                this.update(cx, |this, cx| this.diagram_layout_changed(&[row], cx))
+                    .ok();
+            })
+            .detach();
+        }
         let view = cx.entity_id();
         div()
             .relative()
@@ -12306,6 +12459,7 @@ impl Transcript {
                 ))
             })
             .child(body)
+            .children(limit_cards)
             .when(motion_active || animate_worked, |group| {
                 group.child(
                     canvas(
@@ -14380,6 +14534,7 @@ pub(crate) struct DelegateView {
     pub elapsed_secs: Option<i64>,
     pub role: Option<SharedString>,
     pub route: Option<zeron_proto::ChildRoute>,
+    pub limited: bool,
 }
 
 pub(crate) fn delegate_view(chats: &[zeron_proto::Chat], child_id: &str) -> DelegateView {
@@ -14404,6 +14559,7 @@ pub(crate) fn delegate_view(chats: &[zeron_proto::Chat], child_id: &str) -> Dele
             .and_then(|d| d.route.as_ref()?.role.clone())
             .map(SharedString::from),
         route: delegation.and_then(|d| d.route.clone()),
+        limited: false,
     }
 }
 
@@ -14531,6 +14687,7 @@ fn delegate_chip(
         harness.into()
     };
     let state: SharedString = match (running, view.elapsed_secs) {
+        _ if view.limited => "Hit usage limit".into(),
         (false, Some(secs)) => format!(
             "{} in {}",
             delegate_status_text(view.status),
@@ -14619,6 +14776,8 @@ fn delegate_chip(
                     .text_size(px(11.0))
                     .text_color(if failed {
                         theme.danger
+                    } else if view.limited {
+                        theme.warning
                     } else {
                         theme.text_faint
                     })
@@ -19077,6 +19236,7 @@ mod tests {
             elapsed_secs: Some(3),
             role: None,
             route: None,
+            limited: false,
         };
         use zeron_proto::DelegationStatus::*;
         assert_eq!(
