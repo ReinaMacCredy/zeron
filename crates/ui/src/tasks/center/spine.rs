@@ -1240,8 +1240,15 @@ impl TaskCenter {
             } else {
                 Selection::Step(id.clone())
             };
-            let (first, second): (AnyElement, AnyElement) = if pop.kind == Status::Waiting {
-                let open = selection.clone();
+            let open_thread = |selection: Selection, cx: &Context<Self>| {
+                action("Open thread", false, format!("task-center-pop-open-{id}"))
+                    .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
+                        center.pop = None;
+                        center.pick(selection.clone(), cx)
+                    }))
+                    .into_any_element()
+            };
+            let (first, second): (AnyElement, Option<AnyElement>) = if pop.kind == Status::Waiting {
                 let answer = selection.clone();
                 let primary = if lead && text.is_some() {
                     action(
@@ -1262,15 +1269,9 @@ impl TaskCenter {
                         }))
                         .into_any_element()
                 };
-                (
-                    action("Open thread", false, format!("task-center-pop-open-{id}"))
-                        .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
-                            center.pop = None;
-                            center.pick(open.clone(), cx)
-                        }))
-                        .into_any_element(),
-                    primary,
-                )
+                (open_thread(selection, cx), Some(primary))
+            } else if lead {
+                (open_thread(selection, cx), None)
             } else {
                 let skip = id.clone();
                 let retry = id.clone();
@@ -1281,12 +1282,14 @@ impl TaskCenter {
                             center.set_outcome(&skip, Some(StepOutcome::Skipped), cx)
                         }))
                         .into_any_element(),
-                    action("Retry", true, format!("task-center-pop-retry-{id}"))
-                        .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
-                            center.pop = None;
-                            cx.emit(TaskCenterEvent::RetryStep(retry.clone()))
-                        }))
-                        .into_any_element(),
+                    Some(
+                        action("Retry", true, format!("task-center-pop-retry-{id}"))
+                            .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
+                                center.pop = None;
+                                cx.emit(TaskCenterEvent::RetryStep(retry.clone()))
+                            }))
+                            .into_any_element(),
+                    ),
                 )
             };
             div()
@@ -1332,7 +1335,7 @@ impl TaskCenter {
                         .gap(px(6.0))
                         .mt(px(4.0))
                         .child(first)
-                        .child(second),
+                        .children(second),
                 )
         });
         let card = popover::popover_card(&popup)
