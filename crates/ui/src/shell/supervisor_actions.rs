@@ -5,18 +5,10 @@ use zeron_proto::supervisor::NeedsYouRow;
 #[derive(Default)]
 pub(super) struct SupervisorShell {
     page: Option<(Entity<SupervisorPage>, Subscription)>,
-    pane: Option<SupervisorPane>,
+    pane: Option<super::task_actions::DocPane>,
     doc: Option<String>,
     seen: Option<std::collections::HashSet<String>>,
     badge: Option<(usize, crate::motion::Tween)>,
-}
-
-pub(super) struct SupervisorPane {
-    chat_id: String,
-    transcript: Entity<Transcript>,
-    composer: Entity<Composer>,
-    _events: Subscription,
-    _composer_events: Subscription,
 }
 
 impl SupervisorShell {
@@ -31,8 +23,7 @@ impl SupervisorShell {
     pub(super) fn composer_for(&self, transcript: &Entity<Transcript>) -> Option<Entity<Composer>> {
         self.pane
             .as_ref()
-            .filter(|pane| &pane.transcript == transcript)
-            .map(|pane| pane.composer.clone())
+            .and_then(|pane| pane.composer_for(transcript))
     }
 }
 
@@ -109,95 +100,17 @@ impl Shell {
         chat_id: String,
         cx: &mut Context<Self>,
     ) {
-        let transcript =
-            cx.new(|cx| Transcript::for_doc(self.state.clone(), chat_id.clone(), true, cx));
-        let links = Self::session_links(Some(chat_id.clone()), cx);
-        transcript.update(cx, |transcript, _| {
-            transcript.set_workspace_link_handler(links)
-        });
-        let events = cx.subscribe(&transcript, Self::on_transcript_event);
-        self.state
-            .update(cx, |s, cx| s.watch_subagent_doc(chat_id.clone(), cx));
-        let composer = cx.new(|cx| {
-            let mut composer = Composer::for_chat(self.state.clone(), chat_id.clone(), cx);
-            composer.set_full_chat(cx);
-            composer.set_idle_placeholder(crate::supervisor::PLACEHOLDER, cx);
-            composer
-        });
-        let composer_events = cx.subscribe(&composer, {
-            let transcript = transcript.clone();
-            let chat_id = chat_id.clone();
-            move |this: &mut Shell, composer, event: &ComposerEvent, cx| {
-                this.on_supervisor_composer_event(&chat_id, &composer, &transcript, event, cx)
-            }
-        });
+        let pane = self.open_doc_pane(chat_id, Some(crate::supervisor::PLACEHOLDER), false, cx);
         page.update(cx, |page, cx| {
             page.set_pane(
                 Some(Pane {
-                    transcript: transcript.clone(),
-                    composer: composer.clone(),
+                    transcript: pane.transcript.clone(),
+                    composer: pane.composer.clone(),
                 }),
                 cx,
             )
         });
-        self.supervisor.pane = Some(SupervisorPane {
-            chat_id,
-            transcript,
-            composer,
-            _events: events,
-            _composer_events: composer_events,
-        });
-    }
-
-    fn on_supervisor_composer_event(
-        &mut self,
-        chat_id: &str,
-        composer: &Entity<Composer>,
-        transcript: &Entity<Transcript>,
-        event: &ComposerEvent,
-        cx: &mut Context<Self>,
-    ) {
-        use crate::composer::WorkspaceCommand;
-        match event {
-            ComposerEvent::OpenSidechat {
-                source_chat_id,
-                prompt,
-                staged,
-            } => {
-                self.open_chat(source_chat_id.clone(), cx);
-                self.open_sidechat(source_chat_id.clone(), prompt.clone(), staged.clone(), cx);
-            }
-            ComposerEvent::WorkspaceCommand(command) => match command {
-                WorkspaceCommand::Stop => {
-                    composer.update(cx, |composer, cx| composer.interrupt_selected(cx))
-                }
-                WorkspaceCommand::Model => {
-                    let composer = composer.clone();
-                    self.defer_in_active_window(cx, move |_, window, cx| {
-                        composer.update(cx, |composer, cx| composer.open_model_menu(window, cx))
-                    });
-                }
-                WorkspaceCommand::New | WorkspaceCommand::Resume | WorkspaceCommand::Settings => {
-                    self.pending_workspace_command = Some(*command);
-                    cx.notify();
-                }
-                WorkspaceCommand::Terminal
-                | WorkspaceCommand::Diff
-                | WorkspaceCommand::Files
-                | WorkspaceCommand::Rename => {
-                    self.open_chat(chat_id.to_string(), cx);
-                    self.pending_workspace_command = Some(*command);
-                }
-            },
-            ComposerEvent::OpenChat(target) => self.open_chat(target.clone(), cx),
-            ComposerEvent::OpenChanges => {
-                self.open_chat(chat_id.to_string(), cx);
-                self.defer_in_active_window(cx, |shell, window, cx| {
-                    shell.focus_changes(window, cx)
-                });
-            }
-            _ => self.on_pane_composer_event(transcript, event, cx),
-        }
+        self.supervisor.pane = Some(pane);
     }
 
     pub(super) fn render_supervisor_page(
@@ -228,11 +141,6 @@ impl Shell {
             if let Some(chat_id) = target {
                 self.open_supervisor_pane(&page, chat_id, cx);
             }
-        }
-        if let Some(pane) = &self.supervisor.pane {
-            let open = self.panels.get(&pane.chat_id).terminal_open;
-            let pickers = pane.composer.read(cx).pickers().clone();
-            pickers.update(cx, |pickers, cx| pickers.set_terminal_open(Some(open), cx));
         }
         div()
             .flex_1()

@@ -56,15 +56,15 @@ fn slides_under_center(route: Route) -> bool {
     matches!(route, Route::Tasks | Route::Inbox)
 }
 
-pub(super) struct TaskCenterPane {
-    chat_id: String,
-    transcript: Entity<Transcript>,
-    composer: Entity<Composer>,
+pub(super) struct DocPane {
+    pub(super) chat_id: String,
+    pub(super) transcript: Entity<Transcript>,
+    pub(super) composer: Entity<Composer>,
     _events: Subscription,
     _composer_events: Subscription,
 }
 
-impl TaskCenterPane {
+impl DocPane {
     pub(super) fn composer_for(&self, transcript: &Entity<Transcript>) -> Option<Entity<Composer>> {
         (&self.transcript == transcript).then(|| self.composer.clone())
     }
@@ -990,6 +990,27 @@ impl Shell {
         chat_id: String,
         cx: &mut Context<Self>,
     ) {
+        let pane = self.open_doc_pane(chat_id, None, true, cx);
+        center.update(cx, |center, cx| {
+            center.set_live(
+                Some(LiveThread {
+                    chat_id: pane.chat_id.clone(),
+                    transcript: pane.transcript.clone(),
+                    composer: pane.composer.clone(),
+                }),
+                cx,
+            )
+        });
+        self.task_center_pane = Some(pane);
+    }
+
+    pub(super) fn open_doc_pane(
+        &mut self,
+        chat_id: String,
+        placeholder: Option<&'static str>,
+        opens_chat: bool,
+        cx: &mut Context<Self>,
+    ) -> DocPane {
         let transcript =
             cx.new(|cx| Transcript::for_doc(self.state.clone(), chat_id.clone(), true, cx));
         let links = Self::session_links(Some(chat_id.clone()), cx);
@@ -1002,37 +1023,38 @@ impl Shell {
         let composer = cx.new(|cx| {
             let mut composer = Composer::for_chat(self.state.clone(), chat_id.clone(), cx);
             composer.set_full_chat(cx);
+            if let Some(placeholder) = placeholder {
+                composer.set_idle_placeholder(placeholder, cx);
+            }
             composer
         });
         let composer_events = cx.subscribe(&composer, {
             let transcript = transcript.clone();
             let chat_id = chat_id.clone();
             move |this: &mut Shell, composer, event: &ComposerEvent, cx| {
-                this.on_task_center_composer_event(&chat_id, &composer, &transcript, event, cx)
+                this.on_doc_pane_composer_event(
+                    &chat_id,
+                    opens_chat,
+                    &composer,
+                    &transcript,
+                    event,
+                    cx,
+                )
             }
         });
-        center.update(cx, |center, cx| {
-            center.set_live(
-                Some(LiveThread {
-                    chat_id: chat_id.clone(),
-                    transcript: transcript.clone(),
-                    composer: composer.clone(),
-                }),
-                cx,
-            )
-        });
-        self.task_center_pane = Some(TaskCenterPane {
+        DocPane {
             chat_id,
             transcript,
             composer,
             _events: events,
             _composer_events: composer_events,
-        });
+        }
     }
 
-    fn on_task_center_composer_event(
+    fn on_doc_pane_composer_event(
         &mut self,
         chat_id: &str,
+        opens_chat: bool,
         composer: &Entity<Composer>,
         transcript: &Entity<Transcript>,
         event: &ComposerEvent,
@@ -1040,6 +1062,15 @@ impl Shell {
     ) {
         use crate::composer::WorkspaceCommand;
         match event {
+            ComposerEvent::OpenSidechat { .. }
+            | ComposerEvent::WorkspaceCommand(
+                WorkspaceCommand::Terminal
+                | WorkspaceCommand::Diff
+                | WorkspaceCommand::Files
+                | WorkspaceCommand::Rename,
+            )
+            | ComposerEvent::OpenChanges
+                if !opens_chat => {}
             ComposerEvent::OpenSidechat {
                 source_chat_id,
                 prompt,
