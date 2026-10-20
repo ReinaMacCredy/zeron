@@ -47,7 +47,7 @@ pub enum TaskCardEvent {
     Start {
         task_id: String,
         patch: Option<TaskPatch>,
-        space_id: Option<String>,
+        space_id: Option<Option<String>>,
         config: Option<ChatConfig>,
         orchestrate: Option<Orchestrate>,
     },
@@ -665,11 +665,7 @@ impl TaskCard {
         if orchestrate.is_some() && context != saved_context {
             patch.get_or_insert_default().context = Some(context);
         }
-        let space_id = self
-            .open
-            .as_ref()
-            .and_then(|open| open.run_in.clone())
-            .flatten();
+        let space_id = self.open.as_ref().and_then(|open| open.run_in.clone());
         let config = self.agent.read(cx).resolved(cx).chat_config();
         cx.emit(TaskCardEvent::Start {
             task_id,
@@ -2986,6 +2982,40 @@ mod tests {
                 plan_doc: false,
             })]
         );
+    }
+
+    #[gpui::test]
+    fn start_tells_no_project_apart_from_the_tasks_own(cx: &mut gpui::TestAppContext) {
+        let _dir = init(cx);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            let mut plain = task("plain", false);
+            plain.space_id = Some("shop".into());
+            state.tasks = vec![plain];
+        });
+        let (card, cx) = cx.add_window_view(|_, cx| TaskCard::new(state, cx));
+        let starts = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = starts.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&card, move |_, event: &TaskCardEvent, _| {
+                if let TaskCardEvent::Start { space_id, .. } = event {
+                    sink.borrow_mut().push(space_id.clone());
+                }
+            })
+            .detach();
+        });
+        for run_in in [None, Some(None)] {
+            card.update(cx, |card, cx| {
+                card.starting.clear();
+                card.open("plain".into(), None, CardFocus::Title, None, cx);
+                card.open.as_mut().unwrap().run_in = run_in;
+            });
+            cx.run_until_parked();
+            let at = cx.debug_bounds("task-card-start").unwrap().center();
+            cx.simulate_click(at, gpui::Modifiers::none());
+            cx.run_until_parked();
+        }
+        assert_eq!(*starts.borrow(), [None, Some(None)]);
     }
 
     #[gpui::test]

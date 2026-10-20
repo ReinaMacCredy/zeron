@@ -1052,8 +1052,8 @@ enum MutateParams {
     StartTask {
         task_id: String,
         chat_id: String,
-        #[serde(default)]
-        space_id: Option<String>,
+        #[serde(default, deserialize_with = "zeron_proto::present_nullable")]
+        space_id: Option<Option<String>>,
         #[serde(default)]
         config: Option<ChatConfig>,
         #[serde(default)]

@@ -196,7 +196,14 @@ impl Shell {
             Some(chat_id) => {
                 self.assign_task(origin, &task_id, &chat_id, true, Some(orchestrate), cx)
             }
-            None => self.start_task(origin, &task_id, space_id, config, Some(orchestrate), cx),
+            None => self.start_task(
+                origin,
+                &task_id,
+                Some(space_id),
+                config,
+                Some(orchestrate),
+                cx,
+            ),
         }
     }
 
@@ -272,7 +279,7 @@ impl Shell {
         &mut self,
         origin: TaskOrigin,
         task_id: &str,
-        space_id: Option<String>,
+        space_id: Option<Option<String>>,
         config: Option<ChatConfig>,
         orchestrate: Option<crate::tasks::Orchestrate>,
         cx: &mut Context<Self>,
@@ -283,14 +290,16 @@ impl Shell {
         };
         let chat_id = uuid::Uuid::new_v4().to_string();
         let update = origin.first_step(task_id);
-        let start = serde_json::json!({
-            "op": "startTask", "taskId": task_id, "chatId": chat_id,
-            "spaceId": space_id, "config": config,
+        let mut start = serde_json::json!({
+            "op": "startTask", "taskId": task_id, "chatId": chat_id, "config": config,
             "orchestrate": orchestrate.is_some(),
             "approvePlan": orchestrate.is_none_or(|o| o.approve_plan),
             "sameAgents": orchestrate.is_some_and(|o| o.same_agents),
             "planDoc": orchestrate.is_some_and(|o| o.plan_doc),
         });
+        if let Some(space_id) = space_id {
+            start["spaceId"] = space_id.into();
+        }
         let task_id = task_id.to_string();
         cx.spawn(async move |this, cx| {
             let saving = update.is_some();

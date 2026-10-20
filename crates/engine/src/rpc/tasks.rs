@@ -403,7 +403,7 @@ impl EngineRpc {
         &self,
         task_id: &str,
         chat_id: &str,
-        space_id: Option<String>,
+        space_id: Option<Option<String>>,
         config: Option<ChatConfig>,
         lead: Option<Lead>,
     ) -> Result<Option<String>, RpcError> {
@@ -432,7 +432,8 @@ impl EngineRpc {
             return Err(refused("This task already has a chat"));
         }
         let space = match space_id {
-            Some(id) => Some(
+            Some(None) => None,
+            Some(Some(id)) => Some(
                 self.workspace
                     .space(&id)
                     .map_err(failed)?
