@@ -8,7 +8,7 @@ use zeron_proto::supervisor::{
 };
 use zeron_proto::{
     Chat, DelegationDelivery, DelegationStatus, PermissionMode, Session, SessionStatus,
-    StepTurnEnd, Task, TaskPatch, TaskStep, UserInputQuestion,
+    StepTurnEnd, Task, TaskPatch, TaskStep, ToolCall, UserInputQuestion,
 };
 
 use super::delegation::{WAKE_QUESTION_CHARS, clip, question_lines};
@@ -1746,11 +1746,7 @@ impl DocHost {
                 .as_deref()
                 .and_then(|thread| sessions.session_status(thread))
                 .is_some_and(|session| session.status == SessionStatus::Errored),
-            Kind::MissionDone
-            | Kind::PlanEdited
-            | Kind::Heartbeat
-            | Kind::NodeFinished
-            | Kind::MergeBlocked => true,
+            Kind::MissionDone | Kind::PlanEdited | Kind::Heartbeat | Kind::NodeFinished => true,
             Kind::LostWake => summary
                 .thread_id
                 .as_deref()
@@ -1759,7 +1755,7 @@ impl DocHost {
                     d.delivery == Some(DelegationDelivery::Claimed)
                         && !sessions.turn_in_flight(&d.delegated_by_chat_id)
                 }),
-            Kind::Dirty | Kind::Unmerged | Kind::LimitIdle => summary
+            Kind::Dirty | Kind::Unmerged | Kind::MergeBlocked | Kind::LimitIdle => summary
                 .thread_id
                 .as_deref()
                 .is_some_and(|thread| !sessions.turn_in_flight(thread)),
@@ -1841,8 +1837,117 @@ impl DocHost {
                 tree.root
             )];
             events.push(event);
+            let blocked = self
+                .merge_blocked(&node, &who, &cwd, &branch, &main, &head)
+                .await;
+            events.extend(blocked);
         }
         events
+    }
+
+    /// The branch's changes overlap paths left uncommitted in the main checkout, which a merge there would refuse.
+    async fn merge_blocked(
+        &self,
+        node: &StallNode,
+        who: &str,
+        cwd: &std::path::Path,
+        branch: &str,
+        main: &str,
+        head: &str,
+    ) -> Option<SupervisorEvent> {
+        use crate::working_tree::{READ_TIMEOUT, branch_paths, main_checkout, read, toplevel};
+        let (main_root, own) = (main_checkout(cwd).await?, toplevel(cwd).await?);
+        if canonical(&main_root) == canonical(&own) {
+            return None;
+        }
+        let root_id = main_root.to_string_lossy().into_owned();
+        let main_tree = tokio::time::timeout(READ_TIMEOUT, read(&main_root, &root_id))
+            .await
+            .ok()?
+            .ok()?;
+        let changed = branch_paths(cwd, main).await;
+        let mut overlap: Vec<String> = main_tree
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .filter(|path| changed.contains(path))
+            .collect();
+        if overlap.is_empty() {
+            return None;
+        }
+        overlap.sort();
+        overlap.dedup();
+        let digest = sha2::Sha256::digest(overlap.join("\0").as_bytes());
+        let digest: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+        let mut event = node_event(
+            Kind::MergeBlocked,
+            format!("merge-blocked:{}:{head}:{digest}", node.chat_id),
+            node,
+            format!(
+                "{who} cannot merge {branch} into {main}: the main checkout holds uncommitted changes to {}",
+                plural(overlap.len(), "file it also changed")
+            ),
+        );
+        let mut shown = overlap.clone();
+        shown.truncate(MAX_PATHS);
+        event.detail = vec![format!(
+            "Uncommitted in {}: {}{}",
+            main_root.display(),
+            shown.join(", "),
+            if overlap.len() > MAX_PATHS {
+                ", ..."
+            } else {
+                ""
+            }
+        )];
+        event.detail.push(
+            match self.last_writer(&main_root, &overlap, &node.chat_id) {
+                Some(chat) => format!(
+                    "{} (thread {}) changed them last in that checkout.",
+                    thread_label(&chat),
+                    chat.id
+                ),
+                None => "No chat on this device wrote them in that checkout.".to_string(),
+            },
+        );
+        Some(event)
+    }
+
+    /// The local chat in `root` whose transcript wrote one of `paths` most recently.
+    fn last_writer(&self, root: &std::path::Path, paths: &[String], exclude: &str) -> Option<Chat> {
+        let root = canonical(root);
+        let chats = self.workspace()?.watch_chats().borrow().clone();
+        chats
+            .into_iter()
+            .filter(|chat| {
+                chat.id != exclude
+                    && !chat.is_system()
+                    && !chat.archived
+                    && chat.device_id == self.device_id()
+            })
+            .filter_map(|chat| {
+                let cwd = canonical(std::path::Path::new(chat.cwd.as_deref()?));
+                if !cwd.starts_with(&root) {
+                    return None;
+                }
+                let wrote = |part: &MessagePart| match part {
+                    MessagePart::Tool { call, .. } => written_path(call).is_some_and(|path| {
+                        let full = canonical(&cwd.join(path));
+                        full.strip_prefix(&root)
+                            .is_ok_and(|rel| paths.iter().any(|p| std::path::Path::new(p) == rel))
+                    }),
+                    _ => false,
+                };
+                let at = self
+                    .entries_of(&chat.id)
+                    .iter()
+                    .filter(|entry| entry.parts.iter().any(wrote))
+                    .map(|entry| entry.created_at)
+                    .max()?;
+                Some((at, chat))
+            })
+            .max_by_key(|(at, _)| *at)
+            .map(|(_, chat)| chat)
     }
 
     fn who(&self, chat_id: &str) -> String {
@@ -2038,6 +2143,18 @@ impl DocHost {
 }
 
 const MAX_PATHS: usize = 10;
+
+fn canonical(path: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn written_path(call: &ToolCall) -> Option<&str> {
+    match call {
+        ToolCall::WriteFile { path, .. } | ToolCall::EditFile { path, .. } => Some(path),
+        ToolCall::ApplyPatch { path } => path.as_deref(),
+        _ => None,
+    }
+}
 
 fn plural(n: usize, what: &str) -> String {
     match n {

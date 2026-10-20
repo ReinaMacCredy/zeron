@@ -689,3 +689,78 @@ async fn a_limited_chat_idle_past_its_reset_and_a_lost_handback_wake_once_but_a_
     );
     rig.core.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_worktree_branch_overlapping_the_main_checkouts_dirty_files_names_the_file_and_its_writer()
+ {
+    let rig = rig();
+    watch_lead(&rig).await;
+    let main = repo(&rig, &["feat"]);
+    let feat = rig.dir.path().join("feat");
+    std::fs::write(feat.join("shared.rs"), "fn shared() { feat() }\n").unwrap();
+    std::fs::write(feat.join("feature.rs"), "fn feature() {}\n").unwrap();
+    git(&feat, &["add", "-A"]);
+    git(&feat, &["commit", "-q", "-m", "feature"]);
+    rig.core
+        .workspace
+        .create_chat(
+            "peer",
+            Some("space-s"),
+            None,
+            None,
+            Some(path(&main).into()),
+        )
+        .unwrap();
+    rig.core
+        .workspace
+        .rename_chat("peer", "Peer edits")
+        .unwrap();
+    child(&rig, "child-feat", Some(path(&feat)));
+
+    let shared = main.join("shared.rs");
+    queue_run(
+        &rig,
+        "peer",
+        &format!("please write {}", path(&shared)),
+        path(&main),
+    );
+    wait_for(
+        || idle(&rig, "peer") && std::fs::read_to_string(&shared).unwrap() == "left behind\n",
+        "the peer's uncommitted edit",
+    )
+    .await;
+    queue_run(&rig, "child-feat", "just work", path(&feat));
+    let snapshot = snapshot_until(&rig, |s| {
+        !events(s, SupervisorEventKind::MergeBlocked).is_empty()
+    })
+    .await;
+    let [blocked] = events(&snapshot, SupervisorEventKind::MergeBlocked)
+        .try_into()
+        .unwrap();
+    assert_eq!(blocked.thread_id.as_deref(), Some("child-feat"));
+    assert_eq!(blocked.root_chat_id.as_deref(), Some("lead"));
+    assert_eq!(
+        blocked.label,
+        "Thread \"Work child-feat\" cannot merge feat into main: the main checkout holds uncommitted changes to 1 file it also changed"
+    );
+    wait_for(
+        || wakes_text(&rig).contains("cannot merge feat"),
+        "the wake text",
+    )
+    .await;
+    let text = wakes_text(&rig);
+    assert!(text.contains(": shared.rs\n"), "{text}");
+    assert!(
+        text.contains("Thread \"Peer edits\" (thread peer) changed them last in that checkout."),
+        "{text}"
+    );
+    assert!(!text.contains("feature.rs"), "only the overlap: {text}");
+
+    tokio::time::sleep(Duration::from_millis(3 * STALL_MS)).await;
+    let snapshot = snapshot_until(&rig, |_| true).await;
+    assert_eq!(
+        offered(&snapshot, SupervisorEventKind::MergeBlocked).len(),
+        1
+    );
+    rig.core.shutdown().await;
+}

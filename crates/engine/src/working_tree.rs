@@ -1034,6 +1034,38 @@ pub(crate) async fn commits_ahead(root: &Path, base: &str) -> Option<u32> {
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
+/// The repository's first worktree, the checkout every other worktree branched from.
+pub(crate) async fn main_checkout(root: &Path) -> Option<PathBuf> {
+    let out = git(root, &["worktree", "list", "--porcelain"]).await.ok()?;
+    let listing = String::from_utf8_lossy(&out.stdout);
+    let first = listing.lines().next()?.strip_prefix("worktree ")?;
+    Some(PathBuf::from(first))
+}
+
+pub(crate) async fn toplevel(root: &Path) -> Option<PathBuf> {
+    let out = git(root, &["rev-parse", "--show-toplevel"]).await.ok()?;
+    let top = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (!top.is_empty()).then(|| PathBuf::from(top))
+}
+
+/// Paths the branch changed since it left `base`.
+pub(crate) async fn branch_paths(root: &Path, base: &str) -> Vec<String> {
+    let range = format!("{base}...HEAD");
+    git(
+        root,
+        &["diff", "--name-only", "-z", "--no-ext-diff", &range],
+    )
+    .await
+    .map(|out| {
+        out.stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| String::from_utf8_lossy(path).into_owned())
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 async fn checked_branch_name(root: &Path, name: &str) -> Result<(), EngineError> {
     let invalid = || EngineError::Other(format!("{name:?} is not a valid branch name."));
     if name.is_empty()
