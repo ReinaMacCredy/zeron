@@ -1340,6 +1340,82 @@ async fn a_never_wake_child_finishes_without_waking_its_idle_owner() {
     rig.core.shutdown().await;
 }
 
+fn queue_steer(core: &EngineCore, chat_id: &str, command_id: &str, prompt: &str) {
+    core.doc_host
+        .open(chat_id)
+        .expect("open chat")
+        .doc()
+        .queue_command(&SessionCommandEntry {
+            id: command_id.into(),
+            payload: SessionCommandPayload::Steer {
+                prompt: prompt.into(),
+                message_id: Some(format!("msg-{command_id}")),
+            },
+            issued_by: "viewer".into(),
+            issued_at: chrono::Utc::now().timestamp_millis(),
+            based_on: None::<CommandBasedOn>,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+            computer_generation: None,
+        })
+        .expect("queue command");
+}
+
+#[tokio::test]
+async fn the_persons_message_in_a_running_child_tells_its_owner_once_and_a_creator_never() {
+    let rig = rig_with(Duration::from_millis(300), true);
+    let view = rig
+        .core
+        .doc_host
+        .delegate_task(delegate("map the auth flow"), Default::default())
+        .await
+        .expect("delegate");
+    let child = view.task_id.clone();
+    wait_for(|| working(&rig.core, &child), "the child's turn").await;
+    queue_steer(&rig.core, &child, "cmd-p", "also check the refresh token");
+    let note = "The person wrote directly in";
+    wait_for(|| !prompts_with(&rig, note).is_empty(), "the owner's note").await;
+    let sent = prompts_with(&rig, note).remove(0);
+    assert!(
+        sent.contains(&format!("your delegated task {child} (")),
+        "{sent}"
+    );
+    assert!(
+        sent.contains("<agent-response>\nalso check the refresh token\n</agent-response>"),
+        "{sent}"
+    );
+
+    rig.core
+        .workspace
+        .create_chat_from("opened", Some("space-tt"), None, None, None, Some("lead"))
+        .unwrap();
+    queue_human_run(&rig.core, "opened", "cmd-o", "msg-o");
+    wait_for(
+        || delegation(&rig.core, &child).status == zeron_proto::DelegationStatus::Completed,
+        "the child to finish",
+    )
+    .await;
+    wait_for(
+        || {
+            entries(&rig.core, "opened")
+                .iter()
+                .any(|entry| entry.role == MessageRole::Assistant)
+                && idle(&rig.core, "opened")
+                && idle(&rig.core, "lead")
+        },
+        "the opened thread's turn and the owner's",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        prompts_with(&rig, note).len(),
+        1,
+        "one note for the steer, none for the child's own task or an opened thread"
+    );
+    rig.core.shutdown().await;
+}
+
 const REVIEW_REPLY: &str = "Looked it over.\n\n```zeron-review\n[{\"path\":\"src/a.rs\",\"line\":3,\"severity\":\"bug\",\"title\":\"Unwrap panics\"},{\"path\":\"src/b.rs\",\"line\":9,\"severity\":\"risk\",\"title\":\"Leaks a handle\"},{\"path\":\"src/c.rs\",\"line\":1,\"severity\":\"nit\",\"title\":\"Typo\"}]\n```\n";
 
 fn review_rig() -> Rig {
