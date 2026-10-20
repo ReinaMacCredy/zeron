@@ -880,8 +880,8 @@ impl SettingsSection {
                 ("Next session", &["switcher"]),
                 ("Previous session", &["switcher"]),
                 ("Archive session", &[]),
-                ("Capture Appshot", &["screenshot"]),
             ],
+            SettingsSection::Appshots => &[("Hotkey", &["capture appshot", "shortcut", "keyboard"])],
             SettingsSection::Computer => &[
                 ("Computer control", &["computer use", "desktop"]),
                 ("Cursor colors", &["cursor", "color"]),
@@ -889,6 +889,7 @@ impl SettingsSection {
                 ("Placement", &["rail", "floating"]),
                 ("Developer access", &["javascript", "browser"]),
                 ("Always-allowed apps", &["consent", "allow"]),
+                ("Click sounds", &[]),
                 ("Getting started", &[]),
                 ("Recent Computer actions", &["history", "audit"]),
                 ("Advanced", &["permission", "driver"]),
@@ -897,13 +898,14 @@ impl SettingsSection {
                 ("Device hub", &["simulator", "emulator", "version"]),
                 ("Platform support", &["xcode", "android sdk"]),
                 ("Agent device access", &["agent"]),
+                ("Device hosts", &["ssh", "remote"]),
                 ("Auto-show floating preview", &["float"]),
             ],
             SettingsSection::SourceControl => &[
                 ("Instruction", &["commit message", "prompt", "conventional"]),
                 ("Default model", &["commit message", "haiku"]),
-                ("Style", &["mini chat", "floating", "bottom bar"]),
-                ("Chat history", &["mini chat", "keep per pr", "fresh"]),
+                ("Chat history", &["pr chat", "keep per pr", "fresh"]),
+                ("New chat when idle", &["pr chat", "idle", "expiry"]),
                 ("While an agent is running", &["git", "agent", "busy"]),
             ],
             SettingsSection::Home => &[
@@ -20735,8 +20737,22 @@ mod tests {
             vec!["Instruction", "Default model"]
         );
         assert_eq!(
-            SettingsSection::SourceControl.matching_rows("mini chat"),
-            vec!["Style", "Chat history"]
+            SettingsSection::SourceControl.matching_rows("pr chat"),
+            vec!["Chat history", "New chat when idle"]
+        );
+        assert!(
+            SettingsSection::SourceControl
+                .matching_rows("floating")
+                .is_empty()
+        );
+        assert_eq!(
+            SettingsSection::Appshots.matching_rows("capture appshot"),
+            vec!["Hotkey"]
+        );
+        assert!(
+            SettingsSection::Shortcuts
+                .matching_rows("appshot")
+                .is_empty()
         );
     }
 
