@@ -44,7 +44,7 @@ The project's saved Actions, each with **Running**, **Done**, or **Failed** once
 
 ## Subagents
 
-The heading reads **Subagents**, or **Subagents · N running**. Finished agents fold under **Previous agents**. Click a row to open that agent. See [Delegation](zeron://docs/delegation).
+The heading reads **Subagents**, or **Subagents · N running**. Finished agents fold under **Previous agents (N)**. Click a row to open that agent. See [Delegation](zeron://docs/delegation).
 
 ## Sources
 

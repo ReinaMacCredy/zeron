@@ -48,7 +48,7 @@ It exits with an error only when a synced workspace has a problem: the saved ses
 
 ### Sync
 
-`zeron sync` asks the running engine how sync is going: one line for the workspace and one per open chat, each `connected` or `DISCONNECTED`, with when changes were last pushed and acknowledged. A count marked `REJECTED` means the server refused changes. With no engine running it says `no engine listening on 127.0.0.1:<port>`.
+`zeron sync` asks the running engine how sync is going: one line for the workspace and one per open chat, each `connected` or `DISCONNECTED`. The workspace line says when changes were last pushed and acknowledged; a chat line shows how far it has caught up and how many of its changes are still waiting to send. A count marked `REJECTED` means the server refused changes. With no engine running it says `no engine listening on 127.0.0.1:<port>`.
 
 ### Update
 
@@ -72,7 +72,7 @@ It exits with an error only when a synced workspace has a problem: the saved ses
 | `zeron daemon start` / `stop` / `restart` | Controls the installed service. |
 | `zeron daemon status` | Shows whether it is loaded and running. |
 
-`install` copies your `PATH` into the service, along with these variables when they are set in your shell: `ZERON_DATA_DIR`, `ZERON_IPC_PORT`, `ZERON_HARNESS`, `ZERON_DEVICE_NAME`, and `RUST_LOG`. Set them before you install. Other variables reach the service only through `~/.zeron/env`, which the Linux service reads. Logs go to `daemon.log` in the data folder on macOS, and to `journalctl --user -u zeron.service` on Linux.
+`install` copies your `PATH` into the service, along with these variables when they are set in your shell: `ZERON_DATA_DIR`, `ZERON_IPC_PORT`, `ZERON_HARNESS`, `ZERON_DEVICE_NAME`, `RUST_LOG`, and the developer variables for a custom sync server and sign-in (`ZERON_EDGE_URL`, `ZERON_EDGE_TOKEN`, `ZERON_ORG_ID`, `ZERON_WORKOS_CLIENT_ID`, `ZERON_WORKOS_API_BASE`, `ZERON_CALLBACK_PORT`). Set them before you install. Other variables reach the service only through `~/.zeron/env`, which the Linux service reads. Logs go to `daemon.log` in the data folder on macOS, and to `journalctl --user -u zeron.service` on Linux.
 
 When the service is running, the desktop app on the same machine connects to it instead of starting its own engine.
 

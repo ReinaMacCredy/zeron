@@ -35,7 +35,7 @@ Each card shows the last view of that session, its title, project and device, an
 
 [Settings > General](zeron://settings/general) controls the switcher:
 
-- **Session switcher shows**: every session, or only those active within a window from **1h** to **7d**. Sessions open as tabs always appear, whatever the window.
+- **Session switcher shows**: every session, or only those active within a window from **1h** to **7d**. The open session and any tab that is not idle always appear, whatever the window.
 - **Session switcher shows at most**: cap the number of cards at **All** or anywhere from 2 to 50.
 - **Ctrl+Tab cycles tabs**: move straight to the next tab instead of opening the switcher.
 

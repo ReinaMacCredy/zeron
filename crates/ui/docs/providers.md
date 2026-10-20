@@ -22,7 +22,7 @@ The **Accounts** section of an expanded row lists every login you have for that 
 
 Finish signing in on the page that opens in your browser; **Reopen the sign-in page** opens it again. For most agents the new login is saved next to your current one, and nothing changes until you switch. Cursor instead mints a Zeron-named API key you can revoke from Cursor's dashboard, Antigravity just confirms its one login, and Hermes adds the login to its own credential pool. Grok, GitHub Copilot, and Hermes show a code to approve or enter in the browser.
 
-Each account shows its plan usage as the percent **used** in up to two windows, such as the session and the week. A bar turns to a warning color at 80% used and to danger at 95%; hover the meters to see when each window resets. The refresh button beside **Accounts** checks usage again. Antigravity reports no usage.
+Each account shows how much of its plan it has used, as a percent, in up to two windows, such as the session and the week. A bar turns to a warning color at 80% used and to danger at 95%; hover the meters to see when each window resets. The refresh button beside **Accounts** checks usage again. Antigravity reports no usage.
 
 The account in use is marked **In use**. Click another account to switch to it, or use its **…** menu for **Switch to this account** and **Remove account**.
 
