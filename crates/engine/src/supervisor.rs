@@ -982,10 +982,10 @@ fn authority_footer(settings: SupervisorSettings, permission: PermissionMode) ->
     };
     let mut decides = String::new();
     if settings.decide_for_me {
-        decides.push_str("\n- decide a lead's Needs you item whose why is decision with the supervisor tool, action \"decide\" (itemId, choice, reason), and approve a plan that waits for review with action \"approve\" (taskId, reason): on");
+        decides.push_str("\n- decide each lead's Needs you item whose why is decision yourself, in the person's place, with the supervisor tool, action \"decide\" (itemId, choice, reason), and approve a plan that waits for review with action \"approve\" (taskId, reason) when it fits the mission: on");
     }
     let goal = if settings.goal_and_spend {
-        decides.push_str("\n- decide a lead's goal and spend items with action \"decide\", and change a mission's goal, its title and notes, with action \"goal\" (taskId, title, notes, reason): on");
+        decides.push_str("\n- decide each lead's goal and spend items yourself too with action \"decide\", and change a mission's goal, its title and notes, with action \"goal\" (taskId, title, notes, reason): on");
         "Anything else you should not settle alone goes to the person with the supervisor tool, action \"ask\"."
     } else {
         "A change to a mission's goal or spend is the person's decision: raise it with the supervisor tool, action \"ask\"."
@@ -1007,7 +1007,7 @@ const PERSON_ANSWERS: &str =
 
 fn escalation_line(why: ItemWhy, settings: SupervisorSettings) -> &'static str {
     if settings.decides(why) {
-        "You may decide it: the supervisor tool, action \"decide\", with this itemId, one of its options as choice, and your reason. Your choice goes to the lead; the person sees it and may change it."
+        "The person gave you this decision: decide it with the supervisor tool, action \"decide\", this itemId, one of its options as choice, and your reason. Your choice goes to the lead; the person sees it and may change it."
     } else {
         PERSON_ANSWERS
     }

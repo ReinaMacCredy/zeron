@@ -274,7 +274,7 @@ impl EngineRpc {
                     notes,
                     images: None,
                 };
-                let rebrief = tasks::BySupervisor {
+                let rebrief = tasks::Rebrief {
                     supervisor: from,
                     reason: &reason,
                 };
@@ -380,11 +380,7 @@ impl EngineRpc {
                     Some(&lead),
                     None,
                 );
-                let by = tasks::BySupervisor {
-                    supervisor: from,
-                    reason,
-                };
-                let message_id = self.approve_plan(&task.id, Some(by)).await?;
+                let message_id = self.approve_plan(&task.id, Some(reason)).await?;
                 self.doc_host
                     .record_intervention(basis, Some(message_id.clone()), None, reason);
                 Ok(
@@ -474,11 +470,11 @@ impl EngineRpc {
             .answer_item(&item.id, &choice, Some(decided))
             .map_err(failed)?;
         let text = format!(
-            "The Supervisor decided Needs-you item {} \"{}\", raised by the lead: {choice}\n\nWhy: {reason}\n\nApply it to this mission (task id {}). The person may change it; a change reaches you as a correction.",
+            "The Supervisor decided Needs-you item {} \"{}\", raised by the lead: {choice}\n\nWhy: {reason}\n\nThe person gave the Supervisor this decision. Apply it to this mission (task id {}). The person may change it; a change reaches you as a correction.",
             item.id, item.title, task.id
         );
         let message_id = match self
-            .send_to_task_thread(&task, &lead, Some(from), &text, Vec::new())
+            .send_to_task_thread(&task, &lead, None, &text, Vec::new())
             .await
         {
             Ok(id) => id,
@@ -548,13 +544,13 @@ impl EngineRpc {
             },
         )?;
         let text = format!(
-            "The Supervisor changed this mission's goal (task id {}):\n- {}\n\nWhy: {reason}\n\nCheck the plan against it with the tasks tool: action \"list\", taskId \"{}\", and rewrite the steps that no longer fit with action \"plan\". The person may change the goal back.",
+            "The Supervisor changed this mission's goal (task id {}), with the person's leave:\n- {}\n\nWhy: {reason}\n\nCheck the plan against it with the tasks tool: action \"list\", taskId \"{}\", and rewrite the steps that no longer fit with action \"plan\". The person may change the goal back.",
             task.id,
             changes.join("\n- "),
             task.id
         );
         let message_id = self
-            .send_to_task_thread(&task, &lead, Some(from), &text, Vec::new())
+            .send_to_task_thread(&task, &lead, None, &text, Vec::new())
             .await?;
         self.doc_host
             .record_intervention(basis, Some(message_id.clone()), None, reason);

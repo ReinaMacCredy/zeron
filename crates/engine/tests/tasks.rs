@@ -832,12 +832,12 @@ async fn full_authority_lets_the_supervisor_decide_approve_and_change_the_goal_a
         "a spend item stays with the person: {wake}"
     );
     assert!(
-        wake.contains("   You may decide it: the supervisor tool, action \"decide\""),
+        wake.contains("   The person gave you this decision: decide it with the supervisor tool, action \"decide\""),
         "{wake}"
     );
     assert!(
         wake.contains("approve it with the supervisor tool, action \"approve\"")
-            && wake.contains("action \"approve\" (taskId, reason): on")
+            && wake.contains("action \"approve\" (taskId, reason) when it fits the mission: on")
             && wake.contains("A change to a mission's goal or spend is the person's decision"),
         "{wake}"
     );
@@ -874,13 +874,12 @@ async fn full_authority_lets_the_supervisor_decide_approve_and_change_the_goal_a
         "the lead's answer from the Supervisor",
     )
     .await;
-    let to_lead = sent(decided);
-    assert!(
-        to_lead.starts_with(&format!("[Message from thread \"Supervisor\" ({supervisor})."))
-            && to_lead.ends_with(&format!(
-                "\n\n{decided} {decision} \"Who reviews?\", raised by the lead: Codex\n\nWhy: Codex reviewed the last two diffs of this repo\n\nApply it to this mission (task id t1). The person may change it; a change reaches you as a correction."
-            )),
-        "the lead reads who decided, and why: {to_lead}"
+    assert_eq!(
+        sent(decided),
+        format!(
+            "{decided} {decision} \"Who reviews?\", raised by the lead: Codex\n\nWhy: Codex reviewed the last two diffs of this repo\n\nThe person gave the Supervisor this decision. Apply it to this mission (task id t1). The person may change it; a change reaches you as a correction."
+        ),
+        "the lead gets it the way it gets the person's answer, naming who decided and why"
     );
 
     act(json!({ "action": "approve", "taskId": "t1", "reason": "One small step, in scope" }))
@@ -888,7 +887,7 @@ async fn full_authority_lets_the_supervisor_decide_approve_and_change_the_goal_a
         .unwrap();
     assert!(!core.workspace.task("t1").unwrap().plan_pending);
     wait_for(
-        || count("The Supervisor approved the plan. Run it.\n\nWhy: One small step, in scope") == 1,
+        || count("The Supervisor approved the plan; the person gave it this decision. Run it.\n\nWhy: One small step, in scope") == 1,
         "the approval",
     )
     .await;
@@ -975,7 +974,7 @@ async fn full_authority_lets_the_supervisor_decide_approve_and_change_the_goal_a
         "Deep Dive review of the auth diff"
     );
     wait_for(
-        || count("The Supervisor changed this mission's goal (task id t1):\n- The title is now \"Deep Dive review of the auth diff\" (it was \"Deep Dive review\").\n\nWhy: The person said the auth diff is the one that matters") == 1,
+        || count("The Supervisor changed this mission's goal (task id t1), with the person's leave:\n- The title is now \"Deep Dive review of the auth diff\" (it was \"Deep Dive review\").\n\nWhy: The person said the auth diff is the one that matters") == 1,
         "the goal change",
     )
     .await;

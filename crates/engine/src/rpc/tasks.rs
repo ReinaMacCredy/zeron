@@ -229,7 +229,7 @@ fn reorder_keys(
     Ok(moves)
 }
 
-pub(super) struct BySupervisor<'a> {
+pub(super) struct Rebrief<'a> {
     pub supervisor: &'a str,
     pub reason: &'a str,
 }
@@ -778,7 +778,7 @@ impl EngineRpc {
     pub(super) async fn approve_plan(
         &self,
         task_id: &str,
-        by: Option<BySupervisor<'_>>,
+        supervisor_reason: Option<&str>,
     ) -> Result<String, RpcError> {
         let task = self.task_or_refuse(task_id)?;
         if !task.plan_pending {
@@ -793,17 +793,14 @@ impl EngineRpc {
             ..Default::default()
         };
         self.update_task(task_id, &patch)?;
-        let (text, from) = match by {
-            Some(by) => (
-                format!(
-                    "The Supervisor approved the plan. Run it.\n\nWhy: {}",
-                    by.reason.trim()
-                ),
-                Some(by.supervisor),
+        let text = match supervisor_reason {
+            Some(reason) => format!(
+                "The Supervisor approved the plan; the person gave it this decision. Run it.\n\nWhy: {}",
+                reason.trim()
             ),
-            None => ("The plan is approved. Run it.".to_string(), None),
+            None => "The plan is approved. Run it.".to_string(),
         };
-        self.send_to_task_thread(&task, &lead, from, &text, Vec::new())
+        self.send_to_task_thread(&task, &lead, None, &text, Vec::new())
             .await
     }
 
@@ -844,7 +841,7 @@ impl EngineRpc {
         steps: Vec<PlanEdit>,
         remove_step_ids: &[String],
         order: &[String],
-        rebrief: Option<BySupervisor<'_>>,
+        rebrief: Option<Rebrief<'_>>,
     ) -> Result<Option<String>, RpcError> {
         if rebrief.is_some()
             && (overview.is_some()

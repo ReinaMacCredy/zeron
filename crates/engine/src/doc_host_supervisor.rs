@@ -1421,7 +1421,7 @@ fn plan_event(plan: &PendingPlan) -> SupervisorEvent {
         n => format!("{n} steps wait"),
     };
     event.detail = vec![format!(
-        "{steps} for approval. Read the plan with the tasks tool (action \"list\", taskId {}), then approve it with the supervisor tool, action \"approve\" (taskId, reason), or leave it for the person.",
+        "{steps} for approval. Read the plan with the tasks tool (action \"list\", taskId {}), then approve it with the supervisor tool, action \"approve\" (taskId, reason) when it fits the mission, or message the lead what to change.",
         plan.task_id
     )];
     event
