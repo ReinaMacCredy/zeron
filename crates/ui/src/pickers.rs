@@ -1880,10 +1880,7 @@ impl Pickers {
     fn row_icon(&self, harness: HarnessId, instance: Option<&str>) -> InstanceIcon {
         match instance.and_then(|id| self.instances.iter().find(|i| i.id == id)) {
             Some(instance) => InstanceIcon::of(instance),
-            None => {
-                let (mark, tint) = harness_brand_icon(harness);
-                InstanceIcon::Brand(mark, tint)
-            }
+            None => InstanceIcon::harness(harness),
         }
     }
 
