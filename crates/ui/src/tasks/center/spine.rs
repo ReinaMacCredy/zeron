@@ -395,12 +395,14 @@ impl TaskCenter {
         let total = plan.progress.total;
         let approve = (ready && task.completed_at.is_none()).then(|| {
             div()
-                .flex_none()
                 .flex()
                 .items_center()
+                .justify_between()
                 .gap(px(8.0))
                 .child(
                     div()
+                        .min_w_0()
+                        .truncate()
                         .text_size(ui_rems(11.5))
                         .text_color(theme.text_muted)
                         .child(format!(
@@ -413,6 +415,7 @@ impl TaskCenter {
                         .id("task-center-approve")
                         .debug_selector(|| "task-center-approve".into())
                         .role(gpui::Role::Button)
+                        .aria_label("Approve and run")
                         .flex_none()
                         .min_h(px(24.0))
                         .rounded_full()
@@ -431,18 +434,19 @@ impl TaskCenter {
             .gap(px(6.0))
             .min_h(px(20.0))
             .child(self.amount(tokens, live, time, reduced, theme))
-            .children(approve)
             .children((steps > 0).then(|| self.fold_button(steps, now, theme, cx)));
         self.card(selected, theme)
             .id("task-center-lead")
             .debug_selector(|| "task-center-lead".into())
             .role(gpui::Role::Button)
+            .aria_label("Lead")
             .aria_selected(selected)
             .child(morph::measure(&self.painted, Key::Lead, Edges::default()))
             .child(top)
             .child(task_line)
             .children(overview)
             .children(reads)
+            .children(approve)
             .child(meta)
             .on_click(cx.listener(|center, _: &ClickEvent, _, cx| center.pick(Selection::Lead, cx)))
             .into_any_element()
@@ -1227,6 +1231,7 @@ impl TaskCenter {
                 .id(SharedString::from(key.clone()))
                 .debug_selector(move || key.clone())
                 .role(gpui::Role::Button)
+                .aria_label(label)
                 .min_h(px(26.0))
                 .rounded_full()
             };

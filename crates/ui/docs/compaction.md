@@ -61,7 +61,7 @@ The classifier has three answers:
 | **Carry over** | The chat compacts, and the last two turns go along word for word ahead of your message. |
 | **Same task** | Nothing changes. |
 
-A new task needs clear evidence: you name a fresh start or a different task, or ask for a different deliverable right after the agent reported the work finished. Follow-ups, approvals ("ok, do it"), asking to test, merge, or ship what was just done, and reports about it are never a new task. When unsure, it carries over. A message that refers back to something older than the last two turns, or arrives while a build, test, or subagent is still running, stays **Same task**.
+A new task needs clear evidence: you name a fresh start or a different task, or ask for a different deliverable right after the agent reported the work finished. Follow-ups, approvals ("ok, do it"), asking to test, merge, or ship what was just done, and reports about it are never a new task. When unsure, it carries over. A message that refers back to something older than the last two turns, or arrives while a build, test, or subagent is still running, stays **Same task**. So does a message that only asks to commit, push, merge, open a PR for, or release the work the agent just reported done ("commit đi"): that closing step runs at once, and the chat compacts at your next message instead.
 
 The carried turns are your message and the agent's final reply for each of the last two turns, up to 8,000 characters. Tool calls, their output, and thinking are left out. Background shells, subagents, and delegated tasks still running are listed after them, so the agent knows to expect their results.
 
