@@ -714,12 +714,18 @@ impl Inner {
         #[cfg(not(target_os = "macos"))]
         let computer_guidance =
             computer_control.then(crate::computer::tools::guidance::computer_tool_instructions);
+        let delegation_guidance = Some(crate::routing::guidance::guidance(
+            &self.registry.routing_settings(),
+            config.as_ref(),
+        ));
         let blocks: Vec<&str> = [
             Some(instructions).filter(|text| !text.is_empty()),
             computer_guidance
                 .as_deref()
                 .filter(|_| live(ToolGroup::Computer)),
-            live(ToolGroup::Delegation).then_some(crate::doc_host::DELEGATION_GUIDANCE),
+            delegation_guidance
+                .as_deref()
+                .filter(|_| live(ToolGroup::Delegation)),
             live(ToolGroup::Pages).then_some(zeron_proto::html_render::GUIDANCE),
             live(ToolGroup::Devices).then_some(crate::device_hub::DEVICE_TOOL_INSTRUCTIONS),
         ]
@@ -739,6 +745,29 @@ impl Inner {
             env: vec![(zeron_rpc::COMPUTER_RUN_SECRET_ENV.into(), secret.into())],
             guidance,
         })
+    }
+
+    /// Claude Code under native policy Off loses its sub-agent tool while Delegation is live, so it still has a way to delegate.
+    fn apply_native_policy(&self, chat_id: &str, harness: HarnessId, disabled: &mut Vec<String>) {
+        if !crate::routing::guidance::native_tools_off(&self.registry.routing_settings(), harness) {
+            return;
+        }
+        let config = self
+            .workspace()
+            .and_then(|workspace| workspace.chat_config(chat_id));
+        let state = self.registry.tool_settings_state(
+            false,
+            config.as_ref().map_or(&[][..], |c| &c.disabled_tools),
+        );
+        let off = state.disabled.iter().map(String::as_str).collect();
+        if !zeron_proto::tools::group_live(ToolGroup::Delegation, &off) {
+            return;
+        }
+        for tool in crate::routing::guidance::NATIVE_TOOLS {
+            if !disabled.iter().any(|name| name == tool) {
+                disabled.push(tool.to_string());
+            }
+        }
     }
 
     /// The host system prompt, then the chat's own instructions: what a run launches with.
@@ -1374,6 +1403,8 @@ impl SessionsEngine {
         // run spawns, creating a new chat's scratch folder.
         request.cwd = crate::repos::resolve_chat_cwd(&request.cwd, &self.inner.scratch_root())
             .map_err(EngineError::Other)?;
+        self.inner
+            .apply_native_policy(chat_id, harness_id, &mut request.disabled_tools);
         // Native-only catalog entries have no portable file fallback. Reject
         // cross-harness delivery before recording or routing the user turn.
         zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
@@ -3182,6 +3213,8 @@ impl SessionsEngine {
             }
         };
         let harness_id = host.harness_for_request(chat_id, &request);
+        self.inner
+            .apply_native_policy(chat_id, harness_id, &mut request.disabled_tools);
         request.attachments.clear();
         // The checkout the chat runs in already exists; cwd points at it.
         request.worktree = None;
@@ -7581,9 +7614,41 @@ mod tests {
                 text.ends_with(crate::device_hub::DEVICE_TOOL_INSTRUCTIONS),
                 "{text}"
             );
-            assert!(text.contains(crate::doc_host::DELEGATION_GUIDANCE));
+            assert!(text.contains(crate::routing::guidance::BASE));
             assert!(text.contains(zeron_proto::html_render::GUIDANCE));
         }
+    }
+
+    #[test]
+    fn native_policy_off_drops_claudes_sub_agent_tool_only() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(RunJournal::open(dir.path().join("journals")).unwrap());
+        let registry = Arc::new(HarnessRegistry::new());
+        let sessions = SessionsEngine::new("host".into(), journal, registry.clone());
+        let tools = |harness| {
+            let mut disabled = vec!["WebFetch".to_string()];
+            sessions
+                .inner
+                .apply_native_policy("chat", harness, &mut disabled);
+            sessions
+                .inner
+                .apply_native_policy("chat", harness, &mut disabled);
+            disabled
+        };
+        assert_eq!(tools(HarnessId::ClaudeCode), ["WebFetch"]);
+        registry
+            .set_routing_settings(crate::routing::RoutingSettings {
+                native: crate::routing::NativePolicy::Off,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(tools(HarnessId::ClaudeCode), ["WebFetch", "Agent", "Task"]);
+        assert_eq!(tools(HarnessId::Codex), ["WebFetch"]);
+        let mut settings = zeron_proto::tools::ToolSettings::default();
+        settings.set_group(ToolGroup::Delegation, false);
+        registry.set_tool_settings(settings);
+        assert_eq!(tools(HarnessId::ClaudeCode), ["WebFetch"]);
     }
 
     #[test]
@@ -7607,7 +7672,7 @@ mod tests {
             guidance(false),
             Some(format!(
                 "{}\n\n{}",
-                crate::doc_host::DELEGATION_GUIDANCE,
+                crate::routing::guidance::BASE,
                 zeron_proto::html_render::GUIDANCE
             ))
         );
@@ -7616,14 +7681,14 @@ mod tests {
         registry.set_tool_settings(settings.clone());
         assert_eq!(
             guidance(false).as_deref(),
-            Some(crate::doc_host::DELEGATION_GUIDANCE)
+            Some(crate::routing::guidance::BASE)
         );
         settings.set_group(ToolGroup::Delegation, false);
         registry.set_tool_settings(settings.clone());
         assert_eq!(guidance(false), None);
         let computer = guidance(true).unwrap();
         assert!(computer.starts_with("## Zeron computer use\n"));
-        assert!(!computer.contains(crate::doc_host::DELEGATION_GUIDANCE));
+        assert!(!computer.contains(crate::routing::guidance::BASE));
         for name in zeron_proto::computer::ZERON_COMPUTER_TOOL_NAMES {
             settings.set_tool(name, false);
         }

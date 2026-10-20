@@ -51,9 +51,7 @@ mod delegation;
 mod steps;
 #[path = "doc_host_supervisor.rs"]
 mod supervisor_host;
-pub use delegation::{
-    DELEGATION_GUIDANCE, DelegateTaskParams, ProfileParams, ResolveFindingsParams, TaskView,
-};
+pub use delegation::{DelegateTaskParams, ProfileParams, ResolveFindingsParams, TaskView};
 pub(crate) use supervisor_host::newest_supervisor;
 
 /// Debounce window for local snapshot saves after a doc change.

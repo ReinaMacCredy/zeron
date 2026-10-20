@@ -1,3 +1,5 @@
+pub mod guidance;
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -268,7 +270,7 @@ pub fn resolve(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -348,7 +350,7 @@ mod tests {
         }
     }
 
-    fn owner() -> ChatConfig {
+    pub(crate) fn owner() -> ChatConfig {
         ChatConfig {
             harness: HarnessId::Codex,
             model: Some("gpt-5.6-sol".into()),
