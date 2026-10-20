@@ -508,6 +508,25 @@ fn space_on_device(
     Ok(space)
 }
 
+/// Task and step rows sync device-local upload paths; another device's paths cannot be sent.
+pub(crate) fn images_here(text: &str, images: Vec<String>) -> (String, Vec<String>) {
+    let total = images.len();
+    let kept: Vec<String> = images
+        .into_iter()
+        .filter(|path| std::path::Path::new(path).is_file())
+        .collect();
+    let text = match total - kept.len() {
+        0 => text.to_string(),
+        1 => format!(
+            "{text}\n\n1 image on this task is stored on another device and could not be attached."
+        ),
+        n => format!(
+            "{text}\n\n{n} images on this task are stored on another device and could not be attached."
+        ),
+    };
+    (text, kept)
+}
+
 pub(crate) fn queued_message_prompt(text: &str, attachments: &[String]) -> String {
     if attachments.is_empty() {
         return text.to_string();
@@ -4129,8 +4148,9 @@ impl DocHost {
         if let Some(sessions) = self.sessions() {
             sessions.bind_delegate(from_chat_id, prompt, &chat_id);
         }
-        let images = step.map(|step| step.images).unwrap_or_default();
-        self.queue_thread_message_with(&chat_id, Some(from_chat_id), prompt, images)
+        let (prompt, images) =
+            images_here(prompt, step.map(|step| step.images).unwrap_or_default());
+        self.queue_thread_message_with(&chat_id, Some(from_chat_id), &prompt, images)
             .await?;
         Ok(chat_id)
     }

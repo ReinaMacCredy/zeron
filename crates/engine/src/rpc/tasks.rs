@@ -565,9 +565,10 @@ impl EngineRpc {
         text: &str,
         images: Vec<String>,
     ) -> Result<String, RpcError> {
+        let (text, images) = crate::doc_host::images_here(text, images);
         let sent = self
             .doc_host
-            .queue_thread_message_with(chat_id, from_chat_id, text, images)
+            .queue_thread_message_with(chat_id, from_chat_id, &text, images)
             .await;
         let send_error = match &sent {
             Ok(id) if task.send_error.is_none() => return Ok(id.clone()),
@@ -1053,8 +1054,10 @@ impl EngineRpc {
                 ..lead_patch(chat_id, space_id, task, lead)
             },
         )?;
+        let (text, images) =
+            crate::doc_host::images_here(&first_turn(task, lead, reads), task.images.clone());
         self.doc_host
-            .queue_message_detached(chat_id, &first_turn(task, lead, reads), task.images.clone())
+            .queue_message_detached(chat_id, &text, images)
             .map_err(failed)
     }
 }
