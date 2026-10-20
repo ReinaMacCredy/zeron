@@ -38,6 +38,7 @@ mod watch_sheet;
 const EDIT_GROW: MotionSpec = MotionSpec::new(280, motion::EASE_DRAWER);
 const EDIT_LEAVE: MotionSpec = MotionSpec::new(220, motion::EASE_DRAWER);
 const EDIT_FADE: MotionSpec = MotionSpec::new(150, motion::LINEAR);
+const KIND_FADE: MotionSpec = MotionSpec::new(260, motion::EASE);
 
 pub enum TaskCenterEvent {
     Update {
@@ -421,6 +422,7 @@ pub struct TaskCenter {
     menu: popover::Popup<StepMenu>,
     watch: popover::Popup<()>,
     watch_focus: FocusHandle,
+    kind: Option<(bool, Tween)>,
     authority: popover::Loadable<zeron_proto::supervisor::SupervisorSettings>,
     authority_task: Option<gpui::Task<()>>,
     drag: Option<StepDrag>,
@@ -490,6 +492,7 @@ impl TaskCenter {
             menu: popover::Popup::default(),
             watch: popover::Popup::default(),
             watch_focus: cx.focus_handle(),
+            kind: None,
             authority: popover::Loadable::Idle,
             authority_task: None,
             drag: None,
@@ -505,6 +508,48 @@ impl TaskCenter {
 
     pub fn key(&self) -> &str {
         &self.key
+    }
+
+    fn sync_kind(&mut self, mission: bool, reduced: bool, now: Instant) -> bool {
+        match &mut self.kind {
+            Some((was, tween)) if *was != mission => {
+                *was = mission;
+                *tween = Tween::at(0.0, now);
+                tween.retarget(1.0, KIND_FADE, reduced, now);
+            }
+            Some(_) => {}
+            None => self.kind = Some((mission, Tween::at(1.0, now))),
+        }
+        self.kind
+            .as_ref()
+            .is_some_and(|(_, tween)| !tween.settled_at(now))
+    }
+
+    fn kind_badge(&self, theme: &Theme, now: Instant) -> AnyElement {
+        let Some((mission, tween)) = &self.kind else {
+            return super::tree::kind_badge(false, theme);
+        };
+        let t = tween.value_at(now);
+        if tween.settled_at(now) {
+            return super::tree::kind_badge(*mission, theme);
+        }
+        div()
+            .relative()
+            .flex_none()
+            .child(
+                div()
+                    .opacity(t)
+                    .child(super::tree::kind_badge(*mission, theme)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .opacity(1.0 - t)
+                    .child(super::tree::kind_badge(!*mission, theme)),
+            )
+            .into_any_element()
     }
 
     /// The page key is a task id from before trees, or a root chat id; a key that names a
@@ -2183,6 +2228,9 @@ impl Render for TaskCenter {
             self.drag = None;
         }
         let facts = self.facts(&task, &plan, &shown, cx);
+        if self.sync_kind(true, reduced, now) {
+            window.request_animation_frame();
+        }
         if task.completed_at.is_none() && self.clock.as_ref().is_none_or(|(due, _)| now >= *due) {
             let tick = std::time::Duration::from_secs(1);
             self.clock = Some((

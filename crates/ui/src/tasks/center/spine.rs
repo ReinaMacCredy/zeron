@@ -1983,7 +1983,7 @@ impl TaskCenter {
                                             .text_color(theme.text)
                                             .child(SharedString::from(task.title.clone())),
                                     )
-                                    .child(tree::kind_badge(true, theme)),
+                                    .child(self.kind_badge(theme, now)),
                             )
                             .child(
                                 div()

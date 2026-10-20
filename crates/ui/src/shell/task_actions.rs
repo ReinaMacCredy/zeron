@@ -981,7 +981,7 @@ impl Shell {
         self.task_center_pane
             .as_ref()
             .is_some_and(|pane| pane.chat_id == chat_id)
-            || self.task_center_root.as_deref() == Some(chat_id)
+            || self.task_center_docs.iter().any(|id| id == chat_id)
     }
 
     fn other_holds(&self, chat_id: &str) -> bool {
@@ -995,24 +995,26 @@ impl Shell {
             || self.supervisor.holds(chat_id)
     }
 
-    /// The tree page reads native sub-agent chips from its root's doc, whichever row is open.
-    fn watch_task_center_root(&mut self, root: Option<String>, cx: &mut Context<Self>) {
-        if self.task_center_root == root {
+    /// Native sub-agent chips come from the root's doc and each node's that reports running sub-agents.
+    fn watch_task_center_docs(&mut self, docs: Vec<String>, cx: &mut Context<Self>) {
+        if self.task_center_docs == docs {
             return;
         }
-        if let Some(previous) = std::mem::replace(&mut self.task_center_root, root.clone())
-            && !self.other_holds(&previous)
-            && self
-                .task_center_pane
-                .as_ref()
-                .is_none_or(|pane| pane.chat_id != previous)
-        {
-            self.state
-                .update(cx, |state, _| state.unwatch_subagent_doc(&previous));
+        let previous = std::mem::replace(&mut self.task_center_docs, docs.clone());
+        for id in previous.iter().filter(|id| !docs.contains(id)) {
+            let held = self.other_holds(id)
+                || self
+                    .task_center_pane
+                    .as_ref()
+                    .is_some_and(|pane| &pane.chat_id == id);
+            if !held {
+                self.state
+                    .update(cx, |state, _| state.unwatch_subagent_doc(id));
+            }
         }
-        if let Some(root) = root {
+        for id in docs.into_iter().filter(|id| !previous.contains(id)) {
             self.state
-                .update(cx, |state, cx| state.watch_subagent_doc(root, cx));
+                .update(cx, |state, cx| state.watch_subagent_doc(id, cx));
         }
     }
 
@@ -1033,7 +1035,7 @@ impl Shell {
 
     pub(super) fn close_task_center(&mut self, cx: &mut Context<Self>) {
         self.close_task_center_pane(cx);
-        self.watch_task_center_root(None, cx);
+        self.watch_task_center_docs(Vec::new(), cx);
         self.task_center = None;
     }
 
@@ -1044,8 +1046,7 @@ impl Shell {
         if let Some((center, _)) = &self.task_center {
             center.update(cx, |center, cx| center.set_live(None, cx));
         }
-        let held = self.other_holds(&pane.chat_id)
-            || self.task_center_root.as_deref() == Some(pane.chat_id.as_str());
+        let held = self.other_holds(&pane.chat_id) || self.task_center_docs.contains(&pane.chat_id);
         if !held {
             self.state
                 .update(cx, |state, _| state.unwatch_subagent_doc(&pane.chat_id));
@@ -1177,12 +1178,24 @@ impl Shell {
             return div().flex_1().into_any_element();
         };
         let center = self.task_center_for(task_id, cx);
-        let root = center
-            .read(cx)
-            .resolve(self.state.read(cx))
-            .0
-            .map(str::to_owned);
-        self.watch_task_center_root(root, cx);
+        let docs = {
+            let state = self.state.read(cx);
+            let now = chrono::Utc::now();
+            center
+                .read(cx)
+                .resolve(state)
+                .0
+                .map(|root| {
+                    let busy = crate::tasks::tree_rows(state, root, false, now)
+                        .into_iter()
+                        .skip(1)
+                        .filter_map(|node| node.chat_id)
+                        .filter(|id| state.running_subagents_for(id, now) > 0);
+                    std::iter::once(root.to_owned()).chain(busy).collect()
+                })
+                .unwrap_or_default()
+        };
+        self.watch_task_center_docs(docs, cx);
         let target = center.read(cx).live_target(cx);
         if target.as_deref() != center.read(cx).live_chat_id() {
             self.close_task_center_pane(cx);

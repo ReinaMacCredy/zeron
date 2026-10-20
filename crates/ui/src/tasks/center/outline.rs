@@ -363,7 +363,7 @@ impl TaskCenter {
                                             .text_color(theme.text)
                                             .child(title),
                                     )
-                                    .child(tree::kind_badge(false, theme)),
+                                    .child(self.kind_badge(theme, now)),
                             )
                             .child(
                                 div()
@@ -774,6 +774,9 @@ impl TaskCenter {
         self.tick(live, cx);
         if live && !reduced {
             motion::pulse_lease(cx.entity_id(), cx);
+        }
+        if self.sync_kind(false, reduced, now) {
+            window.request_animation_frame();
         }
         let header = self.render_tree_header(&chat, &nodes, reduced, now, theme, cx);
         let view = crate::settings::current(cx).tree_view;
