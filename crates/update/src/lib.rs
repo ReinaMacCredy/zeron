@@ -76,6 +76,7 @@ const STAGED_VERSION_TIMEOUT: Duration = Duration::from_secs(30);
 /// forever or make every local install buffer an unbounded response.
 const RELEASE_METADATA_MAX_BYTES: usize = 1024 * 1024;
 const RELEASE_METADATA_TIMEOUT: Duration = Duration::from_secs(60);
+const RELEASE_ARTIFACT_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Release metadata
@@ -605,9 +606,16 @@ pub async fn download_release_file(
         .await
         .with_context(|| format!("creating {}", partial.display()))?;
     let mut hasher = Sha256::new();
+    let mut written = 0u64;
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("reading download stream")?;
+        written += chunk.len() as u64;
+        if written > RELEASE_ARTIFACT_MAX_BYTES {
+            drop(out);
+            tokio::fs::remove_file(&partial).await.ok();
+            bail!("{file} is larger than {RELEASE_ARTIFACT_MAX_BYTES} bytes");
+        }
         hasher.update(&chunk);
         out.write_all(&chunk).await.context("writing download")?;
     }
