@@ -35,6 +35,8 @@ pub(crate) const MISSION_SILENT_MS: i64 = 30 * 60 * 1000;
 pub(crate) const LEAD_SILENT_MS: i64 = 10 * 60 * 1000;
 pub(crate) const QUESTION_WAITING_MS: i64 = 20 * 60 * 1000;
 pub(crate) const TURN_QUIET_MS: i64 = 2 * 60 * 1000;
+pub(crate) const LIMIT_IDLE_MS: i64 = 5 * 60 * 1000;
+pub(crate) const LOST_WAKE_MS: i64 = 5 * 60 * 1000;
 
 pub(crate) fn stall_ms(default: i64) -> i64 {
     std::env::var("ZERON_SUPERVISOR_STALL_MS")
@@ -1053,12 +1055,23 @@ pub(crate) enum TreeStall {
         asked_at: i64,
         approval: bool,
     },
+    LimitIdle {
+        node: StallNode,
+        resets_at: i64,
+    },
+    LostWake {
+        node: StallNode,
+        owner: String,
+        completed_at: i64,
+    },
 }
 
 impl TreeStall {
     pub fn node(&self) -> &StallNode {
         match self {
-            Self::QuestionWaiting { node, .. } => node,
+            Self::QuestionWaiting { node, .. }
+            | Self::LimitIdle { node, .. }
+            | Self::LostWake { node, .. } => node,
         }
     }
 
@@ -1067,12 +1080,20 @@ impl TreeStall {
             Self::QuestionWaiting {
                 node, request_id, ..
             } => format!("question-waiting:{}:{request_id}", node.chat_id),
+            Self::LimitIdle { node, resets_at } => {
+                format!("limit-idle:{}:{resets_at}", node.chat_id)
+            }
+            Self::LostWake {
+                node, completed_at, ..
+            } => format!("lost-wake:{}:{completed_at}", node.chat_id),
         }
     }
 
     fn due_at(&self) -> i64 {
         match self {
             Self::QuestionWaiting { asked_at, .. } => asked_at + stall_ms(QUESTION_WAITING_MS),
+            Self::LimitIdle { resets_at, .. } => resets_at + stall_ms(LIMIT_IDLE_MS),
+            Self::LostWake { completed_at, .. } => completed_at + stall_ms(LOST_WAKE_MS),
         }
     }
 }
@@ -1840,7 +1861,16 @@ mod tests {
             asked_at,
             approval: false,
         };
-        let cases: [(&str, TreeStall, bool, bool, Option<i64>); 4] = [
+        let limit = |resets_at, busy| TreeStall::LimitIdle {
+            node: node(busy),
+            resets_at,
+        };
+        let lost = |completed_at, busy| TreeStall::LostWake {
+            node: node(busy),
+            owner: "lead".into(),
+            completed_at,
+        };
+        let cases: [(&str, TreeStall, bool, bool, Option<i64>); 10] = [
             (
                 "asked 21 min ago",
                 question(now - 21 * MIN, false),
@@ -1863,6 +1893,42 @@ mod tests {
                 Some(now + 15 * MIN),
             ),
             ("busy", question(now - 21 * MIN, true), false, false, None),
+            (
+                "reset 6 min ago",
+                limit(now - 6 * MIN, false),
+                false,
+                true,
+                None,
+            ),
+            (
+                "reset 2 min ago",
+                limit(now - 2 * MIN, false),
+                false,
+                false,
+                Some(now + 3 * MIN),
+            ),
+            (
+                "stopped with a background sub-agent",
+                limit(now - 6 * MIN, true),
+                false,
+                false,
+                None,
+            ),
+            (
+                "handback claimed 6 min",
+                lost(now - 6 * MIN, false),
+                false,
+                true,
+                None,
+            ),
+            (
+                "handback reported",
+                lost(now - 6 * MIN, false),
+                true,
+                false,
+                None,
+            ),
+            ("owner busy", lost(now - 6 * MIN, true), false, false, None),
         ];
         for (name, stall, reported, fires, next) in cases {
             let (due, deadline) = tree_stalls(now, vec![stall.clone()], |_| reported);

@@ -31,24 +31,29 @@ fn init_env() {
 }
 
 /// Asks on "please ask", writes the named file on "please write <path>", and on "please fan out"
-/// ends its turn with a background sub-agent still running until the run is cancelled.
+/// ends its turn with a background sub-agent still running until the run is cancelled. Only a
+/// steerable run parks after its turn, so fanning out runs on the steerable `Pi` id.
 struct StallHarness {
     prompts: Arc<Mutex<Vec<String>>>,
+    id: HarnessId,
 }
 
 #[async_trait]
 impl Harness for StallHarness {
     fn id(&self) -> HarnessId {
-        HarnessId::Mock
+        self.id
     }
     fn display_name(&self) -> &str {
         "Stall"
     }
     fn supports_steering(&self) -> bool {
-        false
+        self.id != HarnessId::Mock
     }
     fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::TurnBoundary
+        match self.supports_steering() {
+            true => SteeringMode::StepBoundary,
+            false => SteeringMode::TurnBoundary,
+        }
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[]
@@ -66,6 +71,7 @@ impl Harness for StallHarness {
         let RunControls {
             request_input,
             interrupt,
+            turn,
             ..
         } = controls;
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(8);
@@ -141,6 +147,7 @@ impl Harness for StallHarness {
                 ] {
                     let _ = tx.send(Ok(event)).await;
                 }
+                turn.set_background(1);
             }
             let _ = tx.send(Ok(AgentEvent::TextDelta { text })).await;
             let _ = tx
@@ -174,9 +181,12 @@ fn rig() -> Rig {
     std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
     let prompts = Arc::new(Mutex::new(Vec::new()));
     let registry = HarnessRegistry::new();
-    registry.register(Arc::new(StallHarness {
-        prompts: prompts.clone(),
-    }));
+    for id in [HarnessId::Mock, HarnessId::Pi] {
+        registry.register(Arc::new(StallHarness {
+            prompts: prompts.clone(),
+            id,
+        }));
+    }
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
         .expect("engine core assembles");
     core.workspace
@@ -299,6 +309,10 @@ where
 }
 
 fn queue_run(rig: &Rig, chat_id: &str, prompt: &str, cwd: &str) {
+    queue_run_on(rig, chat_id, prompt, cwd, None);
+}
+
+fn queue_run_on(rig: &Rig, chat_id: &str, prompt: &str, cwd: &str, harness: Option<HarnessId>) {
     let handle = rig.core.doc_host.open(chat_id).expect("open chat");
     handle
         .doc()
@@ -307,7 +321,7 @@ fn queue_run(rig: &Rig, chat_id: &str, prompt: &str, cwd: &str) {
             payload: SessionCommandPayload::Run {
                 request: RunRequest {
                     prompt: prompt.into(),
-                    harness: None,
+                    harness,
                     model: None,
                     reasoning: None,
                     model_options: Default::default(),
@@ -569,6 +583,109 @@ async fn a_watched_turn_that_leaves_files_or_an_unmerged_branch_wakes_once_per_h
         wakes_text(&rig).contains("left 1 uncommitted file"),
         "{}",
         wakes_text(&rig)
+    );
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_limited_chat_idle_past_its_reset_and_a_lost_handback_wake_once_but_a_busy_one_never() {
+    let rig = rig();
+    watch_lead(&rig).await;
+    child(&rig, "child-limited", None);
+    child(&rig, "child-busy", None);
+
+    queue_run_on(
+        &rig,
+        "child-busy",
+        "please fan out",
+        "/tmp",
+        Some(HarnessId::Pi),
+    );
+    wait_for(
+        || idle(&rig, "child-busy") && rig.core.sessions.holds_background_work("child-busy"),
+        "a turn that ended with its sub-agent still running",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let now = chrono::Utc::now().timestamp_millis();
+    for chat in ["child-limited", "child-busy"] {
+        rig.core
+            .resume_schedule
+            .note_limit(chat, Some(now - 200), None, now);
+    }
+
+    let view = rig
+        .core
+        .doc_host
+        .delegate_task(
+            serde_json::from_value(
+                serde_json::json!({ "ownerChatId": "lead", "task": "count the tests" }),
+            )
+            .unwrap(),
+            Default::default(),
+        )
+        .await
+        .expect("delegate");
+    let delegated = view.task_id.clone();
+    let delivered = || {
+        rig.core
+            .workspace
+            .chat(&delegated)
+            .unwrap()
+            .and_then(|chat| chat.delegation)
+            .is_some_and(|d| d.delivery == Some(zeron_proto::DelegationDelivery::Delivered))
+    };
+    wait_for(
+        || delivered() && idle(&rig, "lead"),
+        "the owner's handback turn",
+    )
+    .await;
+    rig.core
+        .workspace
+        .update_chat_delegation(&delegated, |d| {
+            d.delivery = Some(zeron_proto::DelegationDelivery::Claimed);
+            true
+        })
+        .unwrap();
+
+    let snapshot = snapshot_until(&rig, |s| {
+        !events(s, SupervisorEventKind::LimitIdle).is_empty()
+            && !events(s, SupervisorEventKind::LostWake).is_empty()
+    })
+    .await;
+    let [limit] = events(&snapshot, SupervisorEventKind::LimitIdle)
+        .try_into()
+        .unwrap();
+    assert_eq!(limit.thread_id.as_deref(), Some("child-limited"));
+    assert_eq!(limit.root_chat_id.as_deref(), Some("lead"));
+    let [lost] = events(&snapshot, SupervisorEventKind::LostWake)
+        .try_into()
+        .unwrap();
+    assert_eq!(lost.thread_id.as_deref(), Some(delegated.as_str()));
+    assert_eq!(lost.root_chat_id.as_deref(), Some("lead"));
+
+    tokio::time::sleep(Duration::from_millis(3 * STALL_MS)).await;
+    assert!(
+        rig.core.sessions.holds_background_work("child-busy"),
+        "the sub-agent still runs"
+    );
+    let snapshot = snapshot_until(&rig, |_| true).await;
+    let limits = offered(&snapshot, SupervisorEventKind::LimitIdle);
+    assert_eq!(
+        limits.len(),
+        1,
+        "once, and never for the chat whose sub-agent runs: {limits:?}"
+    );
+    assert_eq!(offered(&snapshot, SupervisorEventKind::LostWake).len(), 1);
+    let text = wakes_text(&rig);
+    assert!(
+        text.contains("Thread \"Work child-limited\" is still idle")
+            && text.contains("after its usage limit reset"),
+        "{text}"
+    );
+    assert!(
+        text.contains("and its owner never got the result"),
+        "{text}"
     );
     rig.core.shutdown().await;
 }

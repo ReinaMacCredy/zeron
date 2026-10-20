@@ -967,6 +967,10 @@ impl SessionsEngine {
         let _ = self.inner.resume_schedule.set(schedule);
     }
 
+    pub(crate) fn resume_schedule(&self) -> Option<&crate::resume_schedule::ResumeSchedule> {
+        self.inner.resume_schedule.get()
+    }
+
     pub fn set_turn_listener(&self, listener: TurnListener) {
         let _ = self.inner.turn_listener.set(listener);
     }

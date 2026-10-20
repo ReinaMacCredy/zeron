@@ -7,8 +7,8 @@ use zeron_proto::supervisor::{
     SupervisorIntervention, SupervisorItem, SupervisorState, SupervisorWake, WakeDelivery,
 };
 use zeron_proto::{
-    Chat, DelegationStatus, PermissionMode, Session, SessionStatus, StepTurnEnd, Task, TaskPatch,
-    TaskStep, UserInputQuestion,
+    Chat, DelegationDelivery, DelegationStatus, PermissionMode, Session, SessionStatus,
+    StepTurnEnd, Task, TaskPatch, TaskStep, UserInputQuestion,
 };
 
 use super::delegation::{WAKE_QUESTION_CHARS, clip, question_lines};
@@ -673,6 +673,7 @@ impl DocHost {
             let mut chats = workspace.watch_chats();
             let mut tasks = workspace.watch_tasks();
             let mut steps = workspace.watch_task_steps();
+            let mut limits = sessions.resume_schedule().map(|schedule| schedule.watch());
             let mut observed = Observed::default();
             let started = now_ms();
             loop {
@@ -699,6 +700,12 @@ impl DocHost {
                     changed = chats.changed() => if changed.is_err() { return },
                     changed = tasks.changed() => if changed.is_err() { return },
                     changed = steps.changed() => if changed.is_err() { return },
+                    changed = async {
+                        match limits.as_mut() {
+                            Some(limits) => limits.changed().await,
+                            None => std::future::pending().await,
+                        }
+                    } => if changed.is_err() { return },
                     () = store.poked() => {}
                     () = tokio::time::sleep(nap.unwrap_or_default()), if nap.is_some() => {}
                 }
@@ -903,6 +910,48 @@ impl DocHost {
                 asked_at: asked.at,
                 approval: asked.approval,
             });
+        }
+        let is_live = |id: &str| {
+            sessions
+                .iter()
+                .any(|session| session.chat_id == id && live(session.status))
+        };
+        let resets = engine
+            .as_ref()
+            .and_then(|engine| engine.resume_schedule())
+            .map(|schedule| schedule.past_resets(now))
+            .unwrap_or_default();
+        for (thread, resets_at) in resets {
+            let ran_since = observed
+                .last_live
+                .get(&thread)
+                .is_some_and(|at| *at > resets_at);
+            if is_live(&thread) || ran_since {
+                continue;
+            }
+            if let Some(node) = chat(&thread).and_then(node) {
+                stalls.push(TreeStall::LimitIdle { node, resets_at });
+            }
+        }
+        for child in chats {
+            let Some(d) = child.delegation.as_ref() else {
+                continue;
+            };
+            let Some(completed_at) = d.completed_at.filter(|_| {
+                d.delivery == Some(DelegationDelivery::Claimed) && !is_live(&d.delegated_by_chat_id)
+            }) else {
+                continue;
+            };
+            if let Some(node) = node(child) {
+                stalls.push(TreeStall::LostWake {
+                    node: StallNode {
+                        busy: busy(sessions, engine.as_ref(), &d.delegated_by_chat_id),
+                        ..node
+                    },
+                    owner: d.delegated_by_chat_id.clone(),
+                    completed_at: ms(completed_at),
+                });
+            }
         }
         let quiet_ms = stall_ms(TURN_QUIET_MS);
         let mut checks = Vec::new();
@@ -1701,10 +1750,16 @@ impl DocHost {
             | Kind::PlanEdited
             | Kind::Heartbeat
             | Kind::NodeFinished
-            | Kind::LimitIdle
-            | Kind::LostWake
             | Kind::MergeBlocked => true,
-            Kind::Dirty | Kind::Unmerged => summary
+            Kind::LostWake => summary
+                .thread_id
+                .as_deref()
+                .and_then(|thread| workspace.chat(thread).ok().flatten()?.delegation)
+                .is_some_and(|d| {
+                    d.delivery == Some(DelegationDelivery::Claimed)
+                        && !sessions.turn_in_flight(&d.delegated_by_chat_id)
+                }),
+            Kind::Dirty | Kind::Unmerged | Kind::LimitIdle => summary
                 .thread_id
                 .as_deref()
                 .is_some_and(|thread| !sessions.turn_in_flight(thread)),
@@ -1829,6 +1884,44 @@ impl DocHost {
                 )];
                 event.request_id = Some(request_id);
                 event.since = Some(asked_at);
+                event
+            }
+            TreeStall::LimitIdle { resets_at, .. } => {
+                let mut event = node_event(
+                    Kind::LimitIdle,
+                    key,
+                    &node,
+                    format!(
+                        "{who} is still idle {} after its usage limit reset",
+                        span(now - resets_at)
+                    ),
+                );
+                event.detail = vec![format!(
+                    "Its limit reset at {}; no auto-resume is pending and nothing has run it since.",
+                    utc(resets_at).with_timezone(&chrono::Local).format("%H:%M")
+                )];
+                event.since = Some(resets_at);
+                event
+            }
+            TreeStall::LostWake {
+                owner,
+                completed_at,
+                ..
+            } => {
+                let mut event = node_event(
+                    Kind::LostWake,
+                    key,
+                    &node,
+                    format!(
+                        "{who} finished {} ago and its owner never got the result",
+                        span(now - completed_at)
+                    ),
+                );
+                event.detail = vec![format!(
+                    "Owner thread {owner} is idle and the handback of delegated task {} is still undelivered.",
+                    node.chat_id
+                )];
+                event.since = Some(completed_at);
                 event
             }
         };
