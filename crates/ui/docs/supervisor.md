@@ -22,14 +22,15 @@ A mission's lead can bring a decision to you too. When a decision changes the go
 
 ## The header
 
-The header shows the shield and **Supervisor**, the Supervisor's state on the right, and a gear button.
+The header shows the shield, **Supervisor** and a gear button. Under it, a status card says whether the Supervisor is on, what it last did, and what it checks next:
 
-- **Awake · watching 2 missions**, with a green dot that breathes, while the Supervisor works, on a wake or on your message.
-- **Asleep · watching 2 missions**, with a grey dot, when it has nothing to do.
-- **Stopped · 2 wakes waiting · send a message to resume**, in amber, after you stop its turn. Wakes queue up while it is stopped; send it a message to resume, and the waiting wakes follow.
-- **Off** before its chat exists.
+- **Watching 2 missions**, with a green dot that breathes, when it has nothing to do but still watches. **Last** names the last wake, its reason and what the Supervisor did about it, for example **14:06 · step failed → messaged the Lead · Lead ran a turn**. **Next** names the next scheduled check, for example **silence check on Checkout at 14:36 if it stays quiet**, a check-in, or held events and when they wake it. On the right, **3 of 12 wakes this hour**.
+- **Working on a wake**, with a spinner and how long the turn has run, while it handles a wake (**Woke** names the time, the reason and the mission), or **Working on a message** while it answers you. **Open the conversation** opens the conversation above the composer.
+- **Stopped by you**, in amber, after you stop its turn. Wakes queue up while it is stopped: **Held** lists their reasons and since when, and the right side counts them. **Resume** sends the waiting wakes; sending it a message resumes it too.
+- **Off** when it has no chat. **Start the Supervisor** starts it.
+- **Couldn't start the Supervisor** with the reason, and **Try again**.
 
-Hover the state to see when it last woke and why, for example **Last woke 14:06 for step failed**. When a wake arrives, the dot flashes amber and settles back.
+When a wake arrives, the dot flashes amber and settles back.
 
 The number on the rail's **Supervisor** item counts the open **Needs you** cards, and it pops when a new one arrives.
 
@@ -99,13 +100,13 @@ A contention wakes the Supervisor once, and again only after it has cleared. Zer
 
 ## Missions
 
-**Missions**, under the feed, lists every Mission Control task that is not done. Each row shows its progress ring, its name, the step it is on (**Step 2 of 5** and its title) and a thin progress bar. A mission the Supervisor does not watch reads **Not watched**; a mission whose lead runs on another device reads **on** that device's name, **not watched**: the Supervisor can only reach threads on its own Mac.
+**Missions**, under the feed, lists every Mission Control task that is not done. Missions finished today stay below under **Done today**, with a full ring and **Done**, the step count and the time it finished, and **Done · the Supervisor stopped watching it** in place of the switch. Each row shows its progress ring, its name, the step it is on (**Step 2 of 5** and its title) and a thin progress bar. A mission the Supervisor does not watch reads **Not watched**; a mission whose lead runs on another device reads **on** that device's name, **not watched**: the Supervisor can only reach threads on its own Mac.
 
-Click a mission to see who works on it, as the same tree the strip at the top of a lead's chat shows: the **Lead** with what it is doing, then each step under it in the order Mission Control numbers them, each with its state, its agent's mark and, while it works, the time so far. The fold button on the lead folds the steps away. Click a row to open Mission Control. **Open Mission Control** opens the mission's page too, described in [Mission Control](zeron://docs/mission-control). **Watched by the Supervisor** at the bottom has a switch: turn it off and that mission stops waking the Supervisor; turn it on again to bring it back.
+Click a mission to see who works on it, as the same tree the strip at the top of a lead's chat shows: the **Lead** with what it is doing, then each step under it in the order Mission Control numbers them, each with its state, its agent's mark and, while it works, the time so far. The lead says what waits on you, such as **Plan review, 1 question**, and reads **Idle** when nothing does. The fold button on the lead folds the steps away. Hover a row to see ↗, and click it to open that thread; a step with no thread yet shows › and opens Mission Control on that step. **Open Mission Control** opens the mission's page too, described in [Mission Control](zeron://docs/mission-control). **Watched by the Supervisor** at the bottom has a switch: turn it off and that mission stops waking the Supervisor; turn it on again to bring it back.
 
 ## Read a brief
 
-Hover the lead or a step and click **Brief** to see what that agent was told, in a drawer that slides in from the right. Its header names the thread, the mission and the model, and the branch and commit the thread started on. Then:
+Right-click the lead or a step and choose **Brief** to see what that agent was told, in a drawer that slides in from the right. Its header names the thread, the mission and the model, and the branch and commit the thread started on. Then:
 
 - **Task**: the mission's title and notes.
 - **Spec**: the plan's overview, and for a step, what the lead wrote for that step.
