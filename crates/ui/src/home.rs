@@ -2442,6 +2442,13 @@ mod tests {
         };
         let mut state = AppState::new();
         state.tasks = vec![
+            task(
+                "older",
+                "0",
+                serde_json::json!({
+                    "chatId": "working-lead", "completedAt": "2026-10-17T00:00:00Z",
+                }),
+            ),
             task("working", "a", serde_json::json!({})),
             task("review", "b", serde_json::json!({ "planPending": true })),
             task("stuck", "c", serde_json::json!({})),

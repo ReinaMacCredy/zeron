@@ -1518,31 +1518,42 @@ pub(crate) struct MissionThread {
     pub progress: PlanProgress,
 }
 
+fn is_mission(task: &zeron_proto::Task) -> bool {
+    task.mode == TaskMode::Orchestrated && !task.deleted
+}
+
+/// A chat can lead a finished mission and a newer one: the open, then the newest, wins.
+fn mission_rank(task: &zeron_proto::Task) -> (bool, DateTime<Utc>) {
+    (task.completed_at.is_none(), task.created_at)
+}
+
+pub(crate) fn lead_task<'a>(state: &'a AppState, chat_id: &str) -> Option<&'a zeron_proto::Task> {
+    state
+        .tasks
+        .iter()
+        .filter(|task| is_mission(task) && task.chat_id.as_deref() == Some(chat_id))
+        .max_by_key(|task| mission_rank(task))
+}
+
 pub(crate) fn mission_thread(
     state: &AppState,
     chat_id: &str,
     now: DateTime<Utc>,
 ) -> Option<MissionThread> {
-    let mission = |task: &&zeron_proto::Task| task.mode == TaskMode::Orchestrated && !task.deleted;
-    let lead = state
-        .tasks
-        .iter()
-        .filter(mission)
-        .find(|task| task.chat_id.as_deref() == Some(chat_id));
-    let (task, step_id) = match lead {
+    let (task, step_id) = match lead_task(state, chat_id) {
         Some(task) => (task, None),
         None => state
             .task_steps
             .iter()
             .filter(|step| !step.deleted && step.chat_id.as_deref() == Some(chat_id))
-            .find_map(|step| {
+            .filter_map(|step| {
                 let task = state
                     .tasks
                     .iter()
-                    .filter(mission)
-                    .find(|task| task.id == step.task_id)?;
+                    .find(|task| is_mission(task) && task.id == step.task_id)?;
                 Some((task, Some(step.id.clone())))
-            })?,
+            })
+            .max_by_key(|(task, _)| mission_rank(task))?,
     };
     let plan = rollup(state, task, now);
     let role = match step_id {

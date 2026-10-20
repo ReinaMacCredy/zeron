@@ -441,11 +441,7 @@ fn thread_name(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> String {
     if is_supervisor_chat(chat_id) {
         return "Supervisor".into();
     }
-    if let Some(task) = state
-        .tasks
-        .iter()
-        .find(|task| task.chat_id.as_deref() == Some(chat_id))
-    {
+    if let Some(task) = crate::tasks::lead_task(state, chat_id) {
         return format!("Lead · {}", task.title);
     }
     if let Some(step) = state
