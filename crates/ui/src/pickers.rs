@@ -5963,6 +5963,12 @@ impl Pickers {
                     .hover(|s| s.bg(theme.element_hover))
                     .on_click(cx.listener(move |this, _, _, cx| match kind {
                         PickerKind::Branch | PickerKind::Checkout => this.ensure_refs(true, cx),
+                        PickerKind::HarnessModel
+                            if this.harnesses.ready().is_some()
+                                && let Some(id) = this.rail_instance(cx) =>
+                        {
+                            this.ensure_instance_models(&id, true, cx);
+                        }
                         PickerKind::HarnessModel => {
                             this.harnesses = Loadable::Idle;
                             this.models.clear();
