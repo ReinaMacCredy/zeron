@@ -200,6 +200,9 @@ impl EngineRpc {
         if let Some(chat) = crate::doc_host::newest_supervisor(&chats, &device) {
             return Ok(chat.id.clone());
         }
+        if let Some(reason) = self.cannot_run(&config) {
+            return Err(refused(&reason));
+        }
         let chat_id = format!("{CHAT_PREFIX}{}", uuid::Uuid::new_v4());
         self.workspace
             .create_chat(&chat_id, None, Some(&device), Some(config), None)
@@ -210,6 +213,28 @@ impl EngineRpc {
         store.set_chat_id(Some(chat_id.clone()));
         store.poke();
         Ok(chat_id)
+    }
+
+    fn cannot_run(&self, config: &ChatConfig) -> Option<String> {
+        if config.instance_id.is_some() {
+            return None;
+        }
+        let name = config.harness.display_name();
+        let other = match &config.profile_id {
+            Some(profile) => format!("give the {profile} profile another agent"),
+            None => "pick another agent".to_string(),
+        };
+        if !self.registry.installed_for(config.harness) {
+            Some(format!(
+                "{name} is not installed on this Mac. Install it, or {other}."
+            ))
+        } else if self.registry.turned_off(config.harness) {
+            Some(format!(
+                "{name} is turned off in Settings > Providers. Turn it on, or {other}."
+            ))
+        } else {
+            None
+        }
     }
 
     async fn supervisor_act(

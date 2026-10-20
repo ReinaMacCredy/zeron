@@ -1071,7 +1071,7 @@ impl SupervisorPage {
             cx.observe(&state, |page, _, cx| page.on_state(cx)),
             cx.observe(&pickers, |page, _, cx| page.try_ensure(cx)),
             cx.observe_global::<crate::agent_profiles::AgentProfilesChanged>(|page, cx| {
-                page.load_profiles(cx)
+                page.load_profiles(false, cx)
             }),
         ];
         let now = Instant::now();
@@ -1133,7 +1133,7 @@ impl SupervisorPage {
             status: None,
             _subscriptions: subscriptions,
         };
-        page.load_profiles(cx);
+        page.load_profiles(false, cx);
         page.load_settings(cx);
         page.on_state(cx);
         page
@@ -1157,7 +1157,7 @@ impl SupervisorPage {
         self.list_switch = None;
         self.hovered = None;
         self.load_settings(cx);
-        self.try_ensure(cx);
+        self.load_profiles(true, cx);
         self.request_check(cx);
     }
 
@@ -1209,7 +1209,7 @@ impl SupervisorPage {
             self.load_settings(cx);
         }
         if matches!(self.profiles, Loadable::Idle) {
-            self.load_profiles(cx);
+            self.load_profiles(false, cx);
         }
         let known = self
             .state
@@ -1544,11 +1544,12 @@ impl SupervisorPage {
             .collect()
     }
 
-    fn load_profiles(&mut self, cx: &mut Context<Self>) {
+    /// A fresh load holds back ensuring: the person may have changed the Supervisor's profile since the last.
+    fn load_profiles(&mut self, fresh: bool, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        if matches!(self.profiles, Loadable::Idle) {
+        if fresh || matches!(self.profiles, Loadable::Idle) {
             self.profiles = Loadable::Loading;
         }
         self.profiles_task = Some(cx.spawn(async move |page, cx| {
@@ -1734,10 +1735,10 @@ impl SupervisorPage {
 
     fn retry_ensure(&mut self, cx: &mut Context<Self>) {
         self.ensure = Ensure::Wanted;
-        self.load_profiles(cx);
+        self.load_profiles(true, cx);
         self.pickers
             .update(cx, |pickers, cx| pickers.ensure_harnesses(true, cx));
-        self.try_ensure(cx);
+        cx.notify();
     }
 
     fn owner_thread(&self, owner: &Owner, cx: &App) -> Option<String> {
@@ -2449,17 +2450,23 @@ impl SupervisorPage {
         let action = matches!(mode, Mode::Stopped | Mode::Off | Mode::Failed(_));
         let tint = |el: gpui::Div| el.when(action, |el| el.bg(tone.opacity(0.05)));
         let line = |key: &str, parts: Vec<Part>| {
-            div()
+            let row = div()
                 .pl(px(28.0))
-                .flex()
+                .text_size(ui_rems(12.0))
+                .line_height(ui_rems(18.0))
+                .text_color(theme.text_muted);
+            if key.is_empty() {
+                return row.children(parts.into_iter().map(|part| match part {
+                    Part::Text(value) | Part::Strong(value) => value,
+                    Part::Chip(face) => face.label,
+                }));
+            }
+            row.flex()
                 .items_center()
                 .gap(px(5.0))
                 .min_w_0()
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .text_size(ui_rems(12.0))
-                .line_height(ui_rems(18.0))
-                .text_color(theme.text_muted)
                 .child(
                     div()
                         .flex_none()
@@ -4172,5 +4179,78 @@ mod tests {
                 assert!(matches!(ensure, Ensure::Failed(_)), "{ensure:?}");
             }
         }
+    }
+
+    #[gpui::test]
+    fn try_again_reads_the_supervisor_profile_again_before_it_starts_the_supervisor(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::pull_request_test_support::{self as fixture, ScriptedRpc};
+        use std::sync::{Arc, Mutex};
+
+        const OFF: &str = "Codex is turned off in Settings > Providers. Turn it on, or give the slp-supervisor profile another agent.";
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let _settings = fixture::settings(cx, crate::settings::UiSettings::default());
+        let harness = Arc::new(Mutex::new("codex"));
+        let ensured = Arc::new(Mutex::new(Vec::new()));
+        let rpc = ScriptedRpc::new({
+            let harness = harness.clone();
+            let ensured = ensured.clone();
+            move |method, params| {
+                let harness = *harness.lock().unwrap();
+                let ensured = ensured.clone();
+                async move {
+                    match method.as_str() {
+                        methods::LIST_AGENT_PROFILES => {
+                            zeron_rpc::RpcReply::value(&serde_json::json!({ "profiles": [{
+                                "id": PROFILE_ID, "name": PROFILE_ID, "harness": harness, "model": "haiku",
+                            }] }))
+                        }
+                        methods::ENSURE_SUPERVISOR if params["config"]["harness"] == "codex" => {
+                            Err(zeron_rpc::RpcError::Failed(OFF.into()))
+                        }
+                        methods::ENSURE_SUPERVISOR => {
+                            ensured.lock().unwrap().push(params["config"].clone());
+                            zeron_rpc::RpcReply::value(
+                                &serde_json::json!({ "chatId": "supervisor-1" }),
+                            )
+                        }
+                        other => Err(zeron_rpc::RpcError::UnknownMethod(other.into())),
+                    }
+                }
+            }
+        });
+        let page = cx.update(|cx| {
+            let state = fixture::state(cx, Some(rpc.client()));
+            state.update(cx, |state, _| {
+                state.supervisor = Some(SupervisorSnapshot::default())
+            });
+            cx.new(|cx| SupervisorPage::new(state, cx))
+        });
+        let settled = |cx: &mut gpui::TestAppContext| {
+            page.read_with(cx, |page, _| {
+                page.ensured.is_some() || matches!(page.ensure, Ensure::Failed(_))
+            })
+        };
+        page.update(cx, |page, cx| page.entered(cx));
+        rpc.settle(cx, &runtime, settled);
+        assert_eq!(
+            page.read_with(cx, |page, _| page.ensure.clone()),
+            Ensure::Failed(OFF.into())
+        );
+        *harness.lock().unwrap() = "claude-code";
+        page.update(cx, |page, cx| page.retry_ensure(cx));
+        rpc.settle(cx, &runtime, settled);
+        assert_eq!(
+            page.read_with(cx, |page, _| page.ensured.clone())
+                .as_deref(),
+            Some("supervisor-1"),
+            "Try again starts the Supervisor from the profile as it is now"
+        );
+        let config: ChatConfig =
+            serde_json::from_value(ensured.lock().unwrap()[0].clone()).unwrap();
+        assert_eq!(config.harness, zeron_proto::HarnessId::ClaudeCode);
+        assert_eq!(config.profile_id.as_deref(), Some(PROFILE_ID));
     }
 }

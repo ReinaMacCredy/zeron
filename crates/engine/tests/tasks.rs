@@ -505,6 +505,19 @@ async fn a_lead_escalation_is_one_item_and_one_wake_and_the_answer_reaches_the_l
             .filter(|prompt| prompt.contains(needle))
             .count()
     };
+    let missing = rpc
+        .handle(
+            methods::ENSURE_SUPERVISOR,
+            json!({ "config": { "harness": "codex", "sandbox": "workspace-write", "profileId": "slp-supervisor" } }),
+        )
+        .await
+        .err()
+        .expect("no Supervisor on an agent this Mac cannot run")
+        .to_string();
+    assert_eq!(
+        missing,
+        "Codex is not installed on this Mac. Install it, or give the slp-supervisor profile another agent."
+    );
     let RpcReply::Value(ensured) = rpc
         .handle(
             methods::ENSURE_SUPERVISOR,
