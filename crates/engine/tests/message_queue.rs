@@ -498,7 +498,7 @@ async fn cancelling_a_turn_freezes_the_queue_until_an_explicit_send() {
         .clone();
 
     core.doc_host
-        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .queue_command(CHAT, SessionCommandPayload::Interrupt { teardown: false })
         .expect("queue interrupt");
     wait_for(
         || !core.sessions.turn_in_flight(CHAT),
@@ -668,7 +668,7 @@ async fn interrupt_bypasses_a_saturated_prompt_command_drain() {
     .await;
     let interrupt = core
         .doc_host
-        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .queue_command(CHAT, SessionCommandPayload::Interrupt { teardown: false })
         .unwrap();
     let handle = core.doc_host.open(CHAT).unwrap();
     wait_for(
@@ -1076,7 +1076,7 @@ async fn steer_now_starts_the_next_turn_when_the_previous_turn_is_already_idle()
     let id = reply["id"].as_str().expect("queue id").to_string();
 
     core.doc_host
-        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .queue_command(CHAT, SessionCommandPayload::Interrupt { teardown: false })
         .expect("queue interrupt");
     wait_for(
         || !core.sessions.turn_in_flight(CHAT),

@@ -3824,7 +3824,7 @@ impl RpcService for EngineRpc {
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
                 let respond = match &p.command {
-                    SessionCommandPayload::Interrupt {} => {
+                    SessionCommandPayload::Interrupt { .. } => {
                         supervisor::refuse_supervisor(p.from_chat_id.as_deref(), supervisor::NO_INTERRUPT)?;
                         None
                     }

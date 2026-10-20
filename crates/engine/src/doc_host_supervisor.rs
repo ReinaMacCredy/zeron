@@ -1040,7 +1040,11 @@ impl DocHost {
         if !sessions.turn_in_flight(thread) && !sessions.holds_background_work(thread) {
             return Ok(false);
         }
-        self.queue_command_with_transfers(thread, SessionCommandPayload::Interrupt {}, Vec::new())?;
+        self.queue_command_with_transfers(
+            thread,
+            SessionCommandPayload::Interrupt { teardown: true },
+            Vec::new(),
+        )?;
         Ok(true)
     }
 

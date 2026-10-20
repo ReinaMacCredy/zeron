@@ -1057,7 +1057,8 @@ impl DocHost {
         if let Some(sessions) = self.sessions()
             && sessions.turn_in_flight(task_id)
         {
-            self.interrupt_and_pause_queue(&sessions, &handle).await?;
+            self.interrupt_and_pause_queue(&sessions, &handle, true)
+                .await?;
         }
         self.settle_delegations(None).await;
         Ok("cancel_requested")

@@ -205,7 +205,7 @@ mod tests {
     fn command(id: &str, status: SessionCommandStatus) -> SessionCommandEntry {
         SessionCommandEntry {
             id: id.into(),
-            payload: SessionCommandPayload::Interrupt {},
+            payload: SessionCommandPayload::Interrupt { teardown: false },
             issued_by: "dev-b".into(),
             issued_at: 9,
             based_on: None,

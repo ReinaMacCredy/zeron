@@ -758,7 +758,7 @@ async fn a_stopped_auto_continue_keeps_its_caption() {
     let row = core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap()[0].id.clone();
     assert!(core.doc_host.steer_queued_now(CHAT, &row).await.expect("steer"));
     core.doc_host
-        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .queue_command(CHAT, SessionCommandPayload::Interrupt { teardown: false })
         .expect("stop");
 
     wait_for(|| entries(&core).iter().any(|e| e.id == row), "the cancelled row's entry").await;
@@ -784,7 +784,7 @@ async fn stop_cancels_the_agents_queued_compaction() {
         .await
         .expect("request compact");
     core.doc_host
-        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .queue_command(CHAT, SessionCommandPayload::Interrupt { teardown: false })
         .expect("stop");
     wait_for(|| !core.sessions.turn_in_flight(CHAT), "the turn stops").await;
     assert_eq!(
