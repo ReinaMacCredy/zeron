@@ -8441,9 +8441,17 @@ impl Composer {
             return;
         }
         let key = self.current_key.clone();
-        self.adopt_staged_attachments(key, vec![attachments::stage_pasted_text(text)], cx);
-        self.focus_pending = true;
-        self.sync_draft(cx);
+        match attachments::stage_pasted_text(text) {
+            Ok(staged) => {
+                self.adopt_staged_attachments(key, vec![staged], cx);
+                self.focus_pending = true;
+                self.sync_draft(cx);
+            }
+            Err(message) => {
+                self.failure = Some(message.into());
+                self.failure_key = Some(key);
+            }
+        }
         cx.notify();
     }
 
