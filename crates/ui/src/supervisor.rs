@@ -3083,12 +3083,22 @@ impl SupervisorPage {
             if self.trees.contains_key(&task_id) {
                 continue;
             }
+            let Some(root) = self
+                .state
+                .read(cx)
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .and_then(|task| task.chat_id.clone())
+            else {
+                continue;
+            };
             let state = self.state.clone();
-            let id = task_id.clone();
             let tree = cx.new(|cx| {
                 crate::tasks::StripTree::new(
                     state,
-                    id,
+                    root,
+                    true,
                     true,
                     crate::tasks::TreeHost::Supervisor,
                     cx,
@@ -3106,10 +3116,13 @@ impl SupervisorPage {
                         selection,
                         chat_id: None,
                     } => cx.emit(SupervisorEvent::OpenMission(id.clone(), selection.clone())),
+                    crate::tasks::StripTreeEvent::OpenNative { parent_chat_id, .. } => {
+                        cx.emit(SupervisorEvent::OpenChat(parent_chat_id.clone()))
+                    }
                     crate::tasks::StripTreeEvent::Brief(selection) => {
                         let step_id = match selection {
-                            crate::tasks::Selection::Lead => None,
                             crate::tasks::Selection::Step(step) => Some(step.clone()),
+                            _ => None,
                         };
                         page.open_drawer(
                             Owner {

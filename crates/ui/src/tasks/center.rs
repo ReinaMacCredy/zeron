@@ -84,6 +84,7 @@ pub struct PlanStepEdit {
 pub enum Selection {
     Lead,
     Step(String),
+    Node(String),
 }
 
 pub struct LiveThread {
@@ -1779,7 +1780,7 @@ impl TaskCenter {
                 .iter()
                 .find(|row| &row.step.id == id)
                 .zip(plan.step_label(id)),
-            Selection::Lead => None,
+            Selection::Lead | Selection::Node(_) => None,
         };
         let live_chat = self.live.as_ref().and_then(|live| {
             let state = self.state.read(cx);

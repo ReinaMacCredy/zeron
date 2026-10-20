@@ -34,6 +34,7 @@ use images::ImageGallery;
 mod logic;
 mod morph;
 mod strip_tree;
+mod thread_tree;
 mod tree;
 
 pub use card::{CardFocus, Orchestrate, TaskCard, TaskCardEvent};

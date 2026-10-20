@@ -7,9 +7,9 @@ use gpui::{
     Pixels, Point, Render, SharedString, Subscription, Window, div, prelude::*, px,
 };
 
-use super::center::TaskCenter;
+use super::Selection;
+use super::thread_tree::{self, Group, NodeKind};
 use super::tree::{self, Dot, Link, NodeIn, StatsCache, Status, TreeMotion};
-use super::{Selection, chat_brand, linked_chat, rollup, step_chat};
 use crate::icons::{self, icon};
 use crate::motion::{self, Tween};
 use crate::popover::{self, Popup};
@@ -18,6 +18,7 @@ use crate::theme::Theme;
 use crate::typography::ui_rems;
 
 const ROW: f32 = 30.0;
+const LABEL_ROW: f32 = 22.0;
 const GAP: f32 = 4.0;
 const INDENT: f32 = 24.0;
 const ANCHOR: (f32, f32) = (14.0, 15.0);
@@ -27,10 +28,17 @@ const LINK_WIDTH: f32 = 1.75;
 const DOT_RADIUS: f32 = 3.5;
 const LEAD: &str = "lead";
 
+#[derive(Clone)]
 pub(crate) enum StripTreeEvent {
     Open {
         selection: Selection,
         chat_id: Option<String>,
+    },
+    OpenNative {
+        parent_chat_id: String,
+        doc_id: String,
+        title: String,
+        frozen: bool,
     },
     Brief(Selection),
 }
@@ -57,7 +65,7 @@ pub(crate) struct SampleRow {
 }
 
 enum Source {
-    Task(String),
+    Tree { root_chat_id: String, native: bool },
     Sample(Vec<SampleRow>, DateTime<Utc>),
 }
 
@@ -73,12 +81,30 @@ struct Row {
     chat_id: Option<String>,
     since: Option<DateTime<Utc>>,
     selection: Selection,
+    label: Option<String>,
+    native_of: Option<String>,
+}
+
+struct Target {
+    selection: Selection,
+    chat_id: Option<String>,
+    native_of: Option<String>,
+    id: String,
+    title: String,
+    frozen: bool,
+}
+
+impl Row {
+    fn height(&self) -> f32 {
+        if self.label.is_some() { LABEL_ROW } else { ROW }
+    }
 }
 
 pub(crate) struct StripTree {
     state: Entity<AppState>,
     source: Source,
     folded: HashSet<String>,
+    seen: HashSet<String>,
     chevrons: HashMap<String, Tween>,
     open: Tween,
     motion: TreeMotion,
@@ -98,7 +124,8 @@ impl EventEmitter<StripTreeEvent> for StripTree {}
 impl StripTree {
     pub fn new(
         state: Entity<AppState>,
-        task_id: String,
+        root_chat_id: String,
+        native: bool,
         open: bool,
         host: TreeHost,
         cx: &mut Context<Self>,
@@ -107,8 +134,12 @@ impl StripTree {
         Self {
             _state: cx.observe(&state, |_, _, cx| cx.notify()),
             state,
-            source: Source::Task(task_id),
+            source: Source::Tree {
+                root_chat_id,
+                native,
+            },
             folded: HashSet::new(),
+            seen: HashSet::new(),
             chevrons: HashMap::new(),
             open: Tween::at(f32::from(u8::from(open)), now),
             motion: TreeMotion::solid(),
@@ -124,14 +155,14 @@ impl StripTree {
     }
 
     pub fn sample(state: Entity<AppState>, rows: Vec<SampleRow>, cx: &mut Context<Self>) -> Self {
-        let mut tree = Self::new(state, String::new(), true, TreeHost::Intro, cx);
+        let mut tree = Self::new(state, String::new(), false, true, TreeHost::Intro, cx);
         tree.source = Source::Sample(rows, Utc::now());
         tree
     }
 
-    pub fn task_id(&self) -> &str {
+    pub fn root_id(&self) -> &str {
         match &self.source {
-            Source::Task(task_id) => task_id,
+            Source::Tree { root_chat_id, .. } => root_chat_id,
             Source::Sample(..) => "",
         }
     }
@@ -166,59 +197,85 @@ impl StripTree {
     }
 
     fn rows(&self, cx: &App) -> Option<Vec<Row>> {
-        let task_id = match &self.source {
-            Source::Task(task_id) => task_id,
+        let (root_chat_id, native) = match &self.source {
+            Source::Tree {
+                root_chat_id,
+                native,
+            } => (root_chat_id, *native),
             Source::Sample(rows, at) => return Some(sample_rows(rows, *at)),
         };
-        let state = self.state.read(cx);
-        let task = state
-            .tasks
-            .iter()
-            .find(|task| task.id == *task_id && !task.deleted)?;
-        let plan = rollup(state, task, Utc::now());
-        let since = |chat: &zeron_proto::Chat| {
-            state
-                .session_for(&chat.id)
-                .and_then(|session| session.started_at)
-                .or(chat.delegation.as_ref().map(|d| d.started_at))
-        };
-        let lead = linked_chat(&state.chats, task);
-        let (status, word) = tree::lead_status(task, &plan);
-        let mut rows = vec![Row {
-            id: LEAD.into(),
-            parent: None,
-            depth: 0,
-            head: Some("Lead"),
-            title: TaskCenter::lead_line(task, &plan),
-            status,
-            word,
-            brand: lead.map(chat_brand),
-            chat_id: lead.map(|chat| chat.id.clone()),
-            since: lead.and_then(since),
-            selection: Selection::Lead,
-        }];
-        rows.extend(plan.steps.iter().map(|row| {
-            let chat = step_chat(&state.chats, &row.step);
-            let delegation = chat.and_then(|chat| chat.delegation.as_ref().map(|d| d.status));
-            let (status, word) = Status::of_step(row, delegation);
-            Row {
-                id: row.step.id.clone(),
-                parent: Some(0),
-                depth: 1,
-                head: None,
-                title: crate::transcript::single_line(&row.step.title),
-                status,
-                word,
-                brand: row.brand,
-                chat_id: chat.map(|chat| chat.id.clone()),
-                since: chat.and_then(since),
-                selection: Selection::Step(row.step.id.clone()),
+        let nodes = thread_tree::tree_rows(self.state.read(cx), root_chat_id, native, Utc::now());
+        if nodes.is_empty() {
+            return None;
+        }
+        let mut rows: Vec<Row> = Vec::with_capacity(nodes.len() + 2);
+        let mut at: Vec<usize> = Vec::with_capacity(nodes.len());
+        for node in &nodes {
+            if let Some(group) = node.group {
+                let label = match group {
+                    Group::Steps(n) => format!("Steps \u{a0}{n}"),
+                    Group::Agents(n) => format!("Agents \u{a0}{n} \u{b7} not in the plan"),
+                };
+                rows.push(Row {
+                    id: format!("label-{}", node.id),
+                    parent: None,
+                    depth: node.depth,
+                    head: None,
+                    title: String::new(),
+                    status: Status::Done,
+                    word: "",
+                    brand: None,
+                    chat_id: None,
+                    since: None,
+                    selection: Selection::Lead,
+                    label: Some(label),
+                    native_of: None,
+                });
             }
-        }));
+            at.push(rows.len());
+            let selection = match (node.kind, &node.step_id) {
+                (NodeKind::Root, _) => Selection::Lead,
+                (NodeKind::Step(_), Some(step_id)) => Selection::Step(step_id.clone()),
+                _ => Selection::Node(node.id.clone()),
+            };
+            rows.push(Row {
+                id: node.id.clone(),
+                parent: node.parent.map(|parent| at[parent]),
+                depth: node.depth,
+                head: (node.kind == NodeKind::Root).then_some("Lead"),
+                title: node.title.clone(),
+                status: node.status,
+                word: node.word,
+                brand: node.brand,
+                chat_id: node.chat_id.clone(),
+                since: node.since,
+                selection,
+                label: None,
+                native_of: (node.kind == NodeKind::Native)
+                    .then(|| node.parent.and_then(|parent| nodes[parent].chat_id.clone()))
+                    .flatten(),
+            });
+        }
         Some(rows)
     }
 
+    fn fold_deep(&mut self, rows: &[Row]) {
+        for (ix, row) in rows.iter().enumerate() {
+            if row.depth >= 2
+                && self.seen.insert(row.id.clone())
+                && rows.iter().any(|other| other.parent == Some(ix))
+            {
+                self.folded.insert(row.id.clone());
+            }
+        }
+    }
+
     fn visible(&self, rows: &[Row], ix: usize) -> bool {
+        if rows[ix].label.is_some() {
+            return rows
+                .get(ix + 1)
+                .is_none_or(|next| self.visible(rows, ix + 1) || next.parent.is_none());
+        }
         let mut parent = rows[ix].parent;
         while let Some(up) = parent {
             if self.folded.contains(&rows[up].id) {
@@ -242,8 +299,12 @@ impl StripTree {
     }
 
     fn content_height(&self, rows: &[Row]) -> f32 {
-        let shown = rows.iter().filter(|row| self.motion.shown(&row.id)).count();
-        ROW + shown.saturating_sub(1) as f32 * (ROW + GAP) + PAD_BOTTOM
+        let shown: f32 = rows
+            .iter()
+            .filter(|row| self.motion.shown(&row.id))
+            .map(|row| row.height() + GAP)
+            .sum();
+        (shown - GAP).max(ROW) + PAD_BOTTOM
     }
 
     pub fn band(&mut self, cx: &mut Context<Self>) -> (f32, bool) {
@@ -251,6 +312,7 @@ impl StripTree {
         let Some(rows) = self.rows(cx) else {
             return (0.0, false);
         };
+        self.fold_deep(&rows);
         self.sync(&rows, motion::reduced_motion(cx), now);
         (
             self.content_height(&rows) * self.open.value_at(now),
@@ -275,6 +337,21 @@ impl StripTree {
     fn open(&mut self, selection: Selection, chat_id: Option<String>, cx: &mut Context<Self>) {
         self.close_menu(cx);
         cx.emit(StripTreeEvent::Open { selection, chat_id });
+    }
+
+    fn open_target(&mut self, target: &Target, cx: &mut Context<Self>) {
+        match &target.native_of {
+            Some(parent) => {
+                self.close_menu(cx);
+                cx.emit(StripTreeEvent::OpenNative {
+                    parent_chat_id: parent.clone(),
+                    doc_id: target.id.clone(),
+                    title: target.title.clone(),
+                    frozen: target.frozen,
+                });
+            }
+            None => self.open(target.selection.clone(), target.chat_id.clone(), cx),
+        }
     }
 
     fn close_menu(&mut self, cx: &mut Context<Self>) {
@@ -364,6 +441,7 @@ impl Render for StripTree {
         let Some(rows) = self.rows(cx) else {
             return div().into_any_element();
         };
+        self.fold_deep(&rows);
         self.sync(&rows, reduced, now);
         let chat_ids: Vec<String> = rows.iter().filter_map(|row| row.chat_id.clone()).collect();
         let state = self.state.clone();
@@ -382,14 +460,14 @@ impl Render for StripTree {
                 .collect()
         };
         let mut placed: Vec<Option<(f32, f32, tree::Frame)>> = Vec::with_capacity(rows.len());
-        let mut k = 0;
+        let mut k = 0.0;
         for row in &rows {
             if !self.motion.shown(&row.id) {
                 placed.push(None);
                 continue;
             }
-            let layout = k as f32 * (ROW + GAP);
-            k += 1;
+            let layout = k;
+            k += row.height() + GAP;
             let (_, glide) = self
                 .motion
                 .place(&row.id, (0.0, layout), (0.0, 0.0), reduced, now);
@@ -448,6 +526,25 @@ impl Render for StripTree {
             let Some((left, top, frame)) = &placed[ix] else {
                 continue;
             };
+            if let Some(label) = &row.label {
+                elements.push(
+                    div()
+                        .absolute()
+                        .top(px(*top))
+                        .left(px(*left + 6.0))
+                        .right(px(PAD_X))
+                        .h(px(LABEL_ROW))
+                        .opacity(frame.opacity)
+                        .flex()
+                        .items_center()
+                        .text_size(ui_rems(11.5))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text_faint)
+                        .child(label.clone())
+                        .into_any_element(),
+                );
+                continue;
+            }
             let running = row.status == Status::Running;
             let muted = row.status.muted();
             let title_color = if running || muted {
@@ -602,8 +699,14 @@ impl Render for StripTree {
                         .text_color(theme.text),
                     )
             });
-            let selection = row.selection.clone();
-            let chat_id = row.chat_id.clone();
+            let target = Target {
+                selection: row.selection.clone(),
+                chat_id: row.chat_id.clone(),
+                native_of: row.native_of.clone(),
+                id: row.id.clone(),
+                title: row.title.clone(),
+                frozen: row.status != Status::Running,
+            };
             let menu = (opens && self.host == TreeHost::Supervisor)
                 .then(|| (row.selection.clone(), row.chat_id.clone()));
             let selector = format!("strip-tree-row-{}", row.id);
@@ -683,7 +786,7 @@ impl Render for StripTree {
                     .children(go)
                     .when(opens, |el| {
                         el.on_click(cx.listener(move |tree, _: &ClickEvent, _, cx| {
-                            tree.open(selection.clone(), chat_id.clone(), cx)
+                            tree.open_target(&target, cx)
                         }))
                     })
                     .when_some(menu, |el, (selection, chat_id)| {
@@ -700,7 +803,8 @@ impl Render for StripTree {
                                 cx.notify();
                             }),
                         )
-                    }),
+                    })
+                    .into_any_element(),
             );
         }
         if sweeping {
@@ -750,6 +854,8 @@ fn sample_rows(rows: &[SampleRow], at: DateTime<Utc>) -> Vec<Row> {
             } else {
                 Selection::Step(ix.to_string())
             },
+            label: None,
+            native_of: None,
         })
         .collect()
 }
