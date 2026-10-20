@@ -101,7 +101,7 @@ Inside a group, each chip names one call. Click a chip to see exactly what ran a
 
 | On a chip | What it does |
 | --- | --- |
-| A file name | Opens the file in the right pane: the **Diff** tab when the file has uncommitted changes, otherwise the file itself. |
+| A file name | Opens the file in the right pane: a **Working tree** Diffs tab scrolled to it when the file has uncommitted changes, otherwise the file itself. |
 | A violet skill name | Opens that skill's `SKILL.md`. See [Commands and mentions](zeron://docs/commands-and-mentions). |
 | **Show full output** / **Show full diff** | Long output is cut short; this loads the rest. The label may include the size, such as **Show full output (12 KB)**. |
 
