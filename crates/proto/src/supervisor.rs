@@ -227,6 +227,19 @@ pub enum InterventionTrigger {
     Person,
 }
 
+/// A Supervisor plan approval reaches the lead at `starts_at`, so the person can take it back first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "state",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum PlanApproval {
+    Held { starts_at: DateTime<Utc> },
+    Sent,
+    TakenBack { at: DateTime<Utc> },
+}
+
 /// Step numbers are 1-based, in the plan's order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -262,6 +275,8 @@ pub struct SupervisorIntervention {
     pub chips: Vec<InterventionChip>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<SupervisorItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<PlanApproval>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

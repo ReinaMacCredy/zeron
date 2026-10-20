@@ -1,4 +1,5 @@
 use super::*;
+use zeron_proto::supervisor::PlanApproval;
 use zeron_proto::{Task, TaskMode, TaskPatch, TaskStep, TaskStepPatch};
 
 fn refused(message: &str) -> RpcError {
@@ -559,23 +560,10 @@ impl EngineRpc {
         text: &str,
         images: Vec<String>,
     ) -> Result<String, RpcError> {
-        let sent = self
-            .doc_host
-            .queue_thread_message_with(chat_id, from_chat_id, text, images)
-            .await;
-        let send_error = match &sent {
-            Ok(id) if task.send_error.is_none() => return Ok(id.clone()),
-            Ok(_) => None,
-            Err(error) => Some(error.to_string()),
-        };
-        let patch = TaskPatch {
-            send_error: Some(send_error),
-            ..Default::default()
-        };
-        self.workspace
-            .update_task(&task.id, &patch)
-            .map_err(failed)?;
-        sent.map_err(failed)
+        self.doc_host
+            .send_to_task_thread(&self.workspace, task, chat_id, from_chat_id, text, images)
+            .await
+            .map_err(failed)
     }
 
     pub(super) fn lead_of(&self, task: &Task) -> Result<String, RpcError> {
@@ -775,11 +763,7 @@ impl EngineRpc {
             .map(drop)
     }
 
-    pub(super) async fn approve_plan(
-        &self,
-        task_id: &str,
-        supervisor_reason: Option<&str>,
-    ) -> Result<String, RpcError> {
+    pub(super) fn plan_awaiting_approval(&self, task_id: &str) -> Result<(Task, String), RpcError> {
         let task = self.task_or_refuse(task_id)?;
         if !task.plan_pending {
             return Err(refused("This plan is not waiting for approval"));
@@ -788,20 +772,66 @@ impl EngineRpc {
         if self.workspace.task_steps_of(task_id).is_empty() {
             return Err(refused("The plan has no steps yet"));
         }
+        Ok((task, lead))
+    }
+
+    pub(super) fn set_plan_pending(&self, task_id: &str, pending: bool) -> Result<(), RpcError> {
         let patch = TaskPatch {
-            plan_pending: Some(false),
+            plan_pending: Some(pending),
             ..Default::default()
         };
-        self.update_task(task_id, &patch)?;
-        let text = match supervisor_reason {
-            Some(reason) => format!(
-                "The Supervisor approved the plan; the person gave it this decision. Run it.\n\nWhy: {}",
-                reason.trim()
-            ),
-            None => "The plan is approved. Run it.".to_string(),
-        };
-        self.send_to_task_thread(&task, &lead, None, &text, Vec::new())
-            .await
+        self.update_task(task_id, &patch)
+    }
+
+    pub(super) async fn approve_plan(&self, task_id: &str) -> Result<String, RpcError> {
+        let (task, lead) = self.plan_awaiting_approval(task_id)?;
+        self.set_plan_pending(task_id, false)?;
+        self.send_to_task_thread(
+            &task,
+            &lead,
+            None,
+            "The plan is approved. Run it.",
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Returns the plan to review while no step has started; the lead hears of it only if the approval reached it.
+    pub(super) async fn take_back_plan_approval(&self, task_id: &str) -> Result<(), RpcError> {
+        let store = self.supervisor_store()?;
+        let approving = store.approving();
+        let _approving = approving.lock().await;
+        let task = self.task_or_refuse(task_id)?;
+        let (id, approval) = store
+            .approval_of(task_id)
+            .ok_or_else(|| refused("The Supervisor has not approved this plan"))?;
+        if matches!(approval, PlanApproval::TakenBack { .. }) {
+            return Err(refused("This approval is already taken back"));
+        }
+        for step in self.workspace.task_steps_of(task_id) {
+            if !self.unstarted(&step)? {
+                return Err(refused(
+                    "A step already started, so the approval stays. Edit the plan in Mission Control or message the lead to change course.",
+                ));
+            }
+        }
+        let lead = self.lead_of(&task)?;
+        self.set_plan_pending(task_id, true)?;
+        store.set_approval(
+            &id,
+            Some(PlanApproval::TakenBack {
+                at: chrono::Utc::now(),
+            }),
+            None,
+        );
+        if approval == PlanApproval::Sent {
+            let text = format!(
+                "The person took back the Supervisor's approval of this plan (task id {task_id}). The plan waits for the person's review again: do not run any step until the approval message comes."
+            );
+            self.send_to_task_thread(&task, &lead, None, &text, Vec::new())
+                .await?;
+        }
+        Ok(())
     }
 
     pub(super) async fn retry_task_step(&self, step_id: &str) -> Result<(), RpcError> {

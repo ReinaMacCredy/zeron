@@ -477,6 +477,7 @@ mod tests {
             text: "Use the mock.".into(),
             trigger: None,
             chips,
+            approval: None,
         }
     }
 

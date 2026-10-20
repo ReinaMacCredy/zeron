@@ -1436,7 +1436,7 @@ impl SupervisorPage {
             self.render_segments(&sel, &item.options, picked, pick, compact, theme, cx)
         });
         let failed = decision
-            .and_then(|(item, _)| self.corrections.get(&item.id).cloned().flatten())
+            .and_then(|(item, _)| self.sends.get(&item.id).cloned().flatten())
             .map(|error| format!("Could not send the correction: {error}"));
         let face = (!done).then(|| chip_face(row, utc)).flatten();
         let label = match &face {
@@ -1471,12 +1471,76 @@ impl SupervisorPage {
                 .children(chip)
                 .child(time_cell(theme, clock(row.at)))
         };
+        let approval = (row.kind == InterventionKind::Approve)
+            .then(|| approval_state(row, self.state.read(cx), utc))
+            .flatten()
+            .map(|approval| self.approval_line(row, approval, theme, cx));
         div()
             .flex()
             .flex_col()
             .child(shell)
+            .children(approval)
             .children(failed.map(|error| self.failure_line(error, theme)))
             .into_any_element()
+    }
+
+    fn approval_line(
+        &self,
+        row: &SupervisorIntervention,
+        approval: ApprovalState,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let task_id = row.task_id.clone().unwrap_or_default();
+        let sent = self.sends.get(&take_back_key(&task_id));
+        let sending = matches!(sent, Some(None));
+        let error = sent.cloned().flatten();
+        let selector = format!("supervisor-take-back-{}", row.id);
+        let take_back = approval.can_take_back().then(|| {
+            widgets::text_action(
+                theme,
+                widgets::ActionTone::Outlined,
+                if sending {
+                    "Taking back…"
+                } else {
+                    "Take back"
+                },
+            )
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector.clone())
+            .role(gpui::Role::Button)
+            .aria_label("Take back")
+            .flex_none()
+            .min_h(px(22.0))
+            .rounded_full()
+            .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                page.take_back(task_id.clone(), cx)
+            }))
+        });
+        div()
+            .pl(px(HAIRLINE_LEFT))
+            .pr(px(10.0))
+            .pb(px(8.0))
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .text_size(ui_rems(11.5))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .min_w_0()
+                    .text_color(theme.text_muted)
+                    .child(div().min_w_0().child(approval.line()))
+                    .children(take_back),
+            )
+            .children(error.map(|error| {
+                div()
+                    .text_color(theme.danger)
+                    .child(format!("Could not take it back: {error}"))
+            }))
     }
 
     fn render_resource(

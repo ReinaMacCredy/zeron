@@ -2,8 +2,8 @@ use super::*;
 use crate::supervisor::{PauseHold, SupervisorStore};
 use crate::supervisor_resources::AFTER_PAUSE_MS;
 use zeron_proto::supervisor::{
-    CHAT_PREFIX, CHAT_TITLE, InterventionKind, ItemWhy, Raiser, ResourceKey, SupervisorChoice,
-    SupervisorItem, SupervisorSettings, is_supervisor_chat,
+    CHAT_PREFIX, CHAT_TITLE, InterventionKind, ItemWhy, PlanApproval, Raiser, ResourceKey,
+    SupervisorChoice, SupervisorItem, SupervisorSettings, is_supervisor_chat,
 };
 
 pub(super) const MESSAGE_OFF: &str = "Messaging leads and step threads is off in the Supervisor's Authority; the person can turn it on on the Supervisor page.";
@@ -15,6 +15,8 @@ pub(super) const GOAL_OR_SPEND: &str = "A task's title, notes and thread are the
 pub(super) const GOAL_ACTION: &str = "The Supervisor changes a mission's title and notes with the supervisor tool, action \"goal\", which tells its lead. It cannot delete or reassign a task.";
 const DECIDE_OFF: &str = "Decide for me is off in the Supervisor's Authority: the person decides the leads' Needs you items and approves plans. Raise it with the supervisor tool, action \"ask\", if it needs them.";
 const GOAL_OFF: &str = "Changing a mission's goal or spend is off in the Supervisor's Authority: it is the person's decision. Raise it with the supervisor tool, action \"ask\".";
+const TAKEN_BACK: &str =
+    "The person took back your approval of this plan, so its review is theirs.";
 const UNWATCHED: &str = "The person turned off the Supervisor's watch on this mission, so its decisions stay with the person.";
 const MAX_OPTIONS: usize = 3;
 
@@ -399,17 +401,23 @@ impl EngineRpc {
                 }
                 let reason = given(&reason, "the lead reads why its plan was approved")?;
                 let (task, lead) = self.watched_mission(&task_id)?;
-                let basis = self.doc_host.intervention_basis(
-                    InterventionKind::Approve,
-                    from,
-                    Some(&lead),
-                    None,
-                );
-                let message_id = self.approve_plan(&task.id, Some(reason)).await?;
-                self.doc_host
-                    .record_intervention(basis, Some(message_id.clone()), None, reason);
+                if matches!(
+                    self.supervisor_store()?.approval_of(&task.id),
+                    Some((_, PlanApproval::TakenBack { .. }))
+                ) {
+                    return Err(refused(TAKEN_BACK));
+                }
+                self.plan_awaiting_approval(&task.id)?;
+                let starts_at = chrono::Utc::now()
+                    + chrono::Duration::milliseconds(crate::supervisor::approval_hold_ms());
+                let basis = self
+                    .doc_host
+                    .intervention_basis(InterventionKind::Approve, from, Some(&lead), None)
+                    .with_approval(PlanApproval::Held { starts_at });
+                self.doc_host.record_intervention(basis, None, None, reason);
+                self.set_plan_pending(&task.id, false)?;
                 Ok(
-                    serde_json::json!({ "taskId": task.id, "leadThreadId": lead, "messageId": message_id }),
+                    serde_json::json!({ "taskId": task.id, "leadThreadId": lead, "startsAt": starts_at }),
                 )
             }
             SupervisorAction::Goal {

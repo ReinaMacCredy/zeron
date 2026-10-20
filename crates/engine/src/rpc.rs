@@ -1117,6 +1117,8 @@ enum MutateParams {
     #[serde(rename_all = "camelCase")]
     ApprovePlan { task_id: String },
     #[serde(rename_all = "camelCase")]
+    TakeBackPlanApproval { task_id: String },
+    #[serde(rename_all = "camelCase")]
     RetryTaskStep { step_id: String },
     #[serde(rename_all = "camelCase")]
     EditTaskPlan {
@@ -2505,8 +2507,9 @@ impl EngineRpc {
                 from_chat_id,
             } => self.update_task_step(&step_id, &patch, from_chat_id.as_deref()),
             MutateParams::DeleteTaskStep { step_id } => self.delete_task_step(&step_id),
-            MutateParams::ApprovePlan { task_id } => {
-                self.approve_plan(&task_id, None).await.map(drop)
+            MutateParams::ApprovePlan { task_id } => self.approve_plan(&task_id).await.map(drop),
+            MutateParams::TakeBackPlanApproval { task_id } => {
+                self.take_back_plan_approval(&task_id).await
             }
             MutateParams::RetryTaskStep { step_id } => self.retry_task_step(&step_id).await,
             MutateParams::EditTaskPlan {

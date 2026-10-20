@@ -1156,6 +1156,9 @@ impl Shell {
             TaskCenterEvent::ApprovePlan(task_id) => {
                 serde_json::json!({ "op": "approvePlan", "taskId": task_id })
             }
+            TaskCenterEvent::TakeBackApproval(task_id) => {
+                serde_json::json!({ "op": "takeBackPlanApproval", "taskId": task_id })
+            }
             TaskCenterEvent::RetryStep(step_id) => {
                 serde_json::json!({ "op": "retryTaskStep", "stepId": step_id })
             }

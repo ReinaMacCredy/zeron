@@ -41,6 +41,7 @@ pub enum TaskCenterEvent {
         patch: TaskPatch,
     },
     ApprovePlan(String),
+    TakeBackApproval(String),
     RetryStep(String),
     UpdateStep {
         step_id: String,

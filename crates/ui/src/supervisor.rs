@@ -15,10 +15,10 @@ use gpui::{
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::supervisor::{
     CheckTool, InputAsker, InterventionChip, InterventionKind, InterventionTrigger, ItemWhy,
-    LeadQuestion, NeedsYouInput, NeedsYouRow, NextCheckKind, QuestionState, Raiser, ResourceState,
-    SettledBy, SharedResource, SupervisorEventKind, SupervisorIntervention, SupervisorItem,
-    SupervisorSettings, SupervisorSnapshot, SupervisorState, SupervisorWake, WAKES_PER_HOUR,
-    WakeDelivery, is_supervisor_chat,
+    LeadQuestion, NeedsYouInput, NeedsYouRow, NextCheckKind, PlanApproval, QuestionState, Raiser,
+    ResourceState, SettledBy, SharedResource, SupervisorEventKind, SupervisorIntervention,
+    SupervisorItem, SupervisorSettings, SupervisorSnapshot, SupervisorState, SupervisorWake,
+    WAKES_PER_HOUR, WakeDelivery, is_supervisor_chat,
 };
 use zeron_proto::{
     AgentProfile, Chat, ChatConfig, ChatIndicator, PermissionMode, PlanProgress, SandboxLevel,
@@ -166,6 +166,77 @@ fn no_effect_since(at: DateTime<Utc>) -> DateTime<Utc> {
 
 pub(crate) fn no_effect_yet(row: &SupervisorIntervention, now: DateTime<Utc>) -> bool {
     matches!(row.chips.as_slice(), [InterventionChip::Sent]) && now > no_effect_since(row.at)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApprovalState {
+    Held { secs: i64 },
+    Sent,
+    Started,
+    TakenBack,
+}
+
+impl ApprovalState {
+    pub(crate) fn line(self) -> String {
+        match self {
+            Self::Held { secs } => format!(
+                "Approved by the Supervisor · starts in {}:{:02}",
+                secs / 60,
+                secs % 60
+            ),
+            Self::Sent => "Approved by the Supervisor · no step has started yet".into(),
+            Self::Started => "Approved by the Supervisor · steps already started. To change course, edit the plan in Mission Control or message the lead.".into(),
+            Self::TakenBack => "You took this approval back · the plan went back to review".into(),
+        }
+    }
+
+    pub(crate) fn can_take_back(self) -> bool {
+        matches!(self, Self::Held { .. } | Self::Sent)
+    }
+}
+
+pub(crate) fn approval_state(
+    row: &SupervisorIntervention,
+    state: &AppState,
+    now: DateTime<Utc>,
+) -> Option<ApprovalState> {
+    let task_id = row.task_id.as_deref()?;
+    let started = || {
+        state.task_steps.iter().any(|step| {
+            step.task_id == task_id
+                && !step.deleted
+                && (step.chat_id.is_some() || step.outcome.is_some())
+        })
+    };
+    Some(match row.approval.as_ref()? {
+        PlanApproval::TakenBack { .. } => ApprovalState::TakenBack,
+        _ if started() => ApprovalState::Started,
+        PlanApproval::Held { starts_at } => ApprovalState::Held {
+            secs: ((*starts_at - now).num_milliseconds().max(0) + 999) / 1000,
+        },
+        PlanApproval::Sent => ApprovalState::Sent,
+    })
+}
+
+/// The Supervisor's newest approval of the mission's plan, as the person can still act on it.
+pub(crate) fn plan_approval(
+    state: &AppState,
+    task_id: &str,
+    now: DateTime<Utc>,
+) -> Option<ApprovalState> {
+    let row = state
+        .supervisor
+        .as_ref()?
+        .interventions
+        .iter()
+        .find(|row| {
+            row.kind == InterventionKind::Approve && row.task_id.as_deref() == Some(task_id)
+        })?;
+    approval_state(row, state, now)
+}
+
+fn take_back_key(task_id: &str) -> String {
+    format!("take-back:{task_id}")
 }
 
 fn next_effect_check(rows: &[SupervisorIntervention], now: DateTime<Utc>) -> Option<DateTime<Utc>> {
@@ -1018,7 +1089,7 @@ pub struct SupervisorPage {
     pane: Option<Pane>,
     replies: HashMap<String, Reply>,
     picks: HashMap<String, HashMap<String, Vec<String>>>,
-    corrections: HashMap<String, Option<String>>,
+    sends: HashMap<String, Option<String>>,
     filter: Filter,
     list_filter: Filter,
     list_switch: Option<Instant>,
@@ -1090,7 +1161,7 @@ impl SupervisorPage {
             pane: None,
             replies: HashMap::new(),
             picks: HashMap::new(),
-            corrections: HashMap::new(),
+            sends: HashMap::new(),
             filter: Filter::All,
             list_filter: Filter::All,
             list_switch: None,
@@ -1283,9 +1354,14 @@ impl SupervisorPage {
             .supervisor
             .as_ref()
             .and_then(|snapshot| {
+                let held = snapshot
+                    .interventions
+                    .iter()
+                    .any(|row| matches!(row.approval, Some(PlanApproval::Held { .. })));
                 [
                     next_effect_check(&snapshot.interventions, now),
                     feed::next_expiry(&snapshot.interventions, now),
+                    held.then_some(now),
                 ]
                 .into_iter()
                 .flatten()
@@ -1494,28 +1570,32 @@ impl SupervisorPage {
     }
 
     fn correct(&mut self, item_id: String, choice: String, cx: &mut Context<Self>) {
-        if matches!(self.corrections.get(&item_id), Some(None)) {
+        let params = serde_json::json!({
+            "op": "resolveSupervisorItems",
+            "answers": [{ "itemId": item_id, "choice": choice }],
+        });
+        self.send_mutation(item_id, params, cx);
+    }
+
+    fn take_back(&mut self, task_id: String, cx: &mut Context<Self>) {
+        let params = serde_json::json!({ "op": "takeBackPlanApproval", "taskId": task_id });
+        self.send_mutation(take_back_key(&task_id), params, cx);
+    }
+
+    fn send_mutation(&mut self, key: String, params: serde_json::Value, cx: &mut Context<Self>) {
+        if matches!(self.sends.get(&key), Some(None)) {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        self.corrections.insert(item_id.clone(), None);
+        self.sends.insert(key.clone(), None);
         cx.spawn(async move |page, cx| {
-            let sent = engine
-                .client()
-                .call(
-                    methods::MUTATE,
-                    serde_json::json!({
-                        "op": "resolveSupervisorItems",
-                        "answers": [{ "itemId": item_id, "choice": choice }],
-                    }),
-                )
-                .await;
+            let sent = engine.client().call(methods::MUTATE, params).await;
             page.update(cx, |page, cx| {
                 match sent {
-                    Ok(_) => page.corrections.remove(&item_id),
-                    Err(error) => page.corrections.insert(item_id, Some(error.to_string())),
+                    Ok(_) => page.sends.remove(&key),
+                    Err(error) => page.sends.insert(key, Some(error.to_string())),
                 };
                 cx.notify();
             })
@@ -3990,6 +4070,7 @@ mod tests {
             text: "Use the mock.".into(),
             trigger: Some(InterventionTrigger::Person),
             chips,
+            approval: None,
         };
         let stale = row(11, vec![InterventionChip::Sent]);
         let fresh = row(9, vec![InterventionChip::Sent]);

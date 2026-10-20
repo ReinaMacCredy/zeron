@@ -591,6 +591,39 @@ impl TaskCenter {
                         })),
                 )
         });
+        let supervisor = (!ready && task.completed_at.is_none())
+            .then(|| crate::supervisor::plan_approval(self.state.read(cx), &task.id, Utc::now()))
+            .flatten()
+            .filter(|approval| *approval != crate::supervisor::ApprovalState::TakenBack)
+            .map(|approval| {
+                let task_id = task.id.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_size(ui_rems(11.5))
+                            .text_color(theme.text_muted)
+                            .child(approval.line()),
+                    )
+                    .children(approval.can_take_back().then(|| {
+                        widgets::text_action(theme, widgets::ActionTone::Outlined, "Take back")
+                            .id("task-center-take-back")
+                            .debug_selector(|| "task-center-take-back".into())
+                            .role(gpui::Role::Button)
+                            .aria_label("Take back")
+                            .flex_none()
+                            .min_h(px(24.0))
+                            .rounded_full()
+                            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                cx.emit(TaskCenterEvent::TakeBackApproval(task_id.clone()))
+                            }))
+                    }))
+            });
         let steps = plan.steps.len() + self.draft.added.len();
         let live = task.completed_at.is_none()
             && (plan.lead == Some(ChatIndicator::Working) || plan.count(StepStatus::Working) > 0);
@@ -614,6 +647,7 @@ impl TaskCenter {
             .children(overview)
             .children(reads)
             .children(approve)
+            .children(supervisor)
             .child(meta)
             .on_click(cx.listener(|center, _: &ClickEvent, _, cx| center.pick(Selection::Lead, cx)))
             .into_any_element()

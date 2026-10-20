@@ -3,11 +3,11 @@ use std::time::Duration;
 
 use zeron_proto::supervisor::{
     InputAsker, InterventionKind, InterventionTrigger, NeedsYouInput, NextCheck, NextCheckKind,
-    Raiser, SupervisorEventKind as Kind, SupervisorEventSummary, SupervisorIntervention,
-    SupervisorItem, SupervisorState, SupervisorWake, WakeDelivery,
+    PlanApproval, Raiser, SupervisorEventKind as Kind, SupervisorEventSummary,
+    SupervisorIntervention, SupervisorItem, SupervisorState, SupervisorWake, WakeDelivery,
 };
 use zeron_proto::{
-    Chat, PermissionMode, Session, SessionStatus, StepTurnEnd, Task, TaskMode, TaskStep,
+    Chat, PermissionMode, Session, SessionStatus, StepTurnEnd, Task, TaskMode, TaskPatch, TaskStep,
     UserInputQuestion,
 };
 
@@ -131,6 +131,7 @@ pub(crate) struct InterventionBasis {
     target: Option<String>,
     trigger: Option<InterventionTrigger>,
     item_id: Option<String>,
+    approval: Option<PlanApproval>,
 }
 
 impl InterventionBasis {
@@ -146,6 +147,11 @@ impl InterventionBasis {
 
     pub(crate) fn with_item(mut self, item_id: &str) -> Self {
         self.item_id = Some(item_id.to_string());
+        self
+    }
+
+    pub(crate) fn with_approval(mut self, approval: PlanApproval) -> Self {
+        self.approval = Some(approval);
         self
     }
 }
@@ -415,6 +421,7 @@ impl DocHost {
             target: target.map(str::to_owned),
             trigger: self.supervisor_trigger(supervisor),
             item_id: None,
+            approval: None,
         }
     }
 
@@ -442,10 +449,87 @@ impl DocHost {
                 trigger: basis.trigger,
                 chips: Vec::new(),
                 item: None,
+                approval: basis.approval,
             },
             steps: basis.steps,
             item_id: basis.item_id,
         });
+    }
+
+    /// A failed send marks the task, so its card says the thread missed the message.
+    pub(crate) async fn send_to_task_thread(
+        &self,
+        workspace: &WorkspaceHost,
+        task: &Task,
+        chat_id: &str,
+        from_chat_id: Option<&str>,
+        text: &str,
+        images: Vec<String>,
+    ) -> Result<String, EngineError> {
+        let sent = self
+            .queue_thread_message_with(chat_id, from_chat_id, text, images)
+            .await;
+        let send_error = match &sent {
+            Ok(id) if task.send_error.is_none() => return Ok(id.clone()),
+            Ok(_) => None,
+            Err(error) => Some(error.to_string()),
+        };
+        let patch = TaskPatch {
+            send_error: Some(send_error),
+            ..Default::default()
+        };
+        workspace.update_task(&task.id, &patch)?;
+        sent
+    }
+
+    /// Sends each held Supervisor approval whose hold ran out; returns when the next one does.
+    async fn release_approvals(
+        &self,
+        store: &SupervisorStore,
+        workspace: &WorkspaceHost,
+        now: i64,
+    ) -> Option<i64> {
+        let mut next = None;
+        for (id, task_id, due, reason) in store.held_approvals() {
+            if due > now {
+                next = Some(next.map_or(due, |next: i64| next.min(due)));
+                continue;
+            }
+            let approving = store.approving();
+            let _approving = approving.lock().await;
+            let still_held = matches!(
+                store.approval_of(&task_id),
+                Some((held, PlanApproval::Held { .. })) if held == id
+            );
+            if !still_held {
+                continue;
+            }
+            let task = workspace
+                .task(&task_id)
+                .filter(|task| !task.deleted && task.completed_at.is_none() && !task.plan_pending);
+            let lead = task.as_ref().and_then(|task| task.chat_id.clone());
+            let (Some(task), Some(lead)) = (task, lead) else {
+                store.set_approval(&id, None, None);
+                continue;
+            };
+            let text = format!(
+                "The Supervisor approved the plan; the person gave it this decision. Run it.\n\nWhy: {}",
+                reason.trim()
+            );
+            match self
+                .send_to_task_thread(workspace, &task, &lead, None, &text, Vec::new())
+                .await
+            {
+                Ok(message_id) => {
+                    store.set_approval(&id, Some(PlanApproval::Sent), Some(message_id))
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, task = %task_id, "sending a held plan approval failed");
+                    store.set_approval(&id, Some(PlanApproval::Sent), None);
+                }
+            }
+        }
+        next
     }
 
     pub(crate) fn supervisor_replanned(
@@ -692,7 +776,8 @@ impl DocHost {
                 supervisor.as_ref().map(|chat| chat.id.as_str()),
             ));
         }
-        let refresh = store.refresh_at();
+        let released = self.release_approvals(store, workspace, now).await;
+        let refresh = [store.refresh_at(), released].into_iter().flatten().min();
         let Some(supervisor) = supervisor else {
             store.take_pending();
             store.set_next_check(None);
@@ -717,7 +802,13 @@ impl DocHost {
         let settings = registry.supervisor_settings();
         if settings.decide_for_me {
             for plan in &round.plans {
-                self.supervisor_event(plan_event(plan));
+                let taken_back = matches!(
+                    store.approval_of(&plan.task_id),
+                    Some((_, PlanApproval::TakenBack { .. }))
+                );
+                if !taken_back {
+                    self.supervisor_event(plan_event(plan));
+                }
             }
         }
         let missions_held = std::mem::take(&mut round.resources);

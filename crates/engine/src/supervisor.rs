@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, watch};
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::supervisor::{
-    InterventionChip, ItemAnswer, ItemWhy, LeadQuestion, NeedsYouInput, NeedsYouRow, NextCheck,
-    NextCheckKind, QuestionState, SettledBy, SupervisorChoice, SupervisorEventKind,
-    SupervisorEventSummary, SupervisorIntervention, SupervisorItem, SupervisorSettings,
-    SupervisorSnapshot, SupervisorState, SupervisorWake,
+    InterventionChip, InterventionKind, ItemAnswer, ItemWhy, LeadQuestion, NeedsYouInput,
+    NeedsYouRow, NextCheck, NextCheckKind, PlanApproval, QuestionState, SettledBy,
+    SupervisorChoice, SupervisorEventKind, SupervisorEventSummary, SupervisorIntervention,
+    SupervisorItem, SupervisorSettings, SupervisorSnapshot, SupervisorState, SupervisorWake,
 };
 use zeron_proto::{PermissionMode, StepTurn, StepTurnEnd, TaskStep, ToolCall, UserInputQuestion};
 
@@ -39,6 +39,13 @@ pub(crate) fn fold_ms() -> i64 {
         .ok()
         .and_then(|ms| ms.parse().ok())
         .unwrap_or(60_000)
+}
+
+pub(crate) fn approval_hold_ms() -> i64 {
+    std::env::var("ZERON_SUPERVISOR_APPROVAL_HOLD_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .unwrap_or(30_000)
 }
 
 pub(crate) fn escalated_item(key: &str) -> Option<&str> {
@@ -252,6 +259,7 @@ struct Inner {
     snapshot: watch::Sender<SupervisorSnapshot>,
     ensuring: Mutex<()>,
     checking: Arc<tokio::sync::Mutex<()>>,
+    approving: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Written only at a flush or a toggle: events arrive on every step turn end and input raise.
@@ -292,6 +300,7 @@ impl SupervisorStore {
                 snapshot,
                 ensuring: Mutex::new(()),
                 checking: Arc::default(),
+                approving: Arc::default(),
             }),
         })
     }
@@ -643,6 +652,64 @@ impl SupervisorStore {
             self.persist(&state);
         }
         self.mark_stale();
+    }
+
+    /// The newest Supervisor approval of the task's plan, when it carries a hold.
+    pub(crate) fn approval_of(&self, task_id: &str) -> Option<(String, PlanApproval)> {
+        let state = lock(&self.inner.state);
+        let record = state.file.interventions.iter().rev().find(|record| {
+            record.row.kind == InterventionKind::Approve
+                && record.row.task_id.as_deref() == Some(task_id)
+        })?;
+        Some((record.row.id.clone(), record.row.approval.clone()?))
+    }
+
+    pub(crate) fn held_approvals(&self) -> Vec<(String, String, i64, String)> {
+        let state = lock(&self.inner.state);
+        state
+            .file
+            .interventions
+            .iter()
+            .filter_map(|record| match (&record.row.approval, &record.row.task_id) {
+                (Some(PlanApproval::Held { starts_at }), Some(task_id)) => Some((
+                    record.row.id.clone(),
+                    task_id.clone(),
+                    starts_at.timestamp_millis(),
+                    record.row.text.clone(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn set_approval(
+        &self,
+        id: &str,
+        approval: Option<PlanApproval>,
+        message_id: Option<String>,
+    ) {
+        {
+            let mut state = lock(&self.inner.state);
+            let Some(record) = state
+                .file
+                .interventions
+                .iter_mut()
+                .find(|record| record.row.id == id)
+            else {
+                return;
+            };
+            record.row.approval = approval;
+            if message_id.is_some() {
+                record.row.message_id = message_id;
+            }
+            self.persist(&state);
+        }
+        self.mark_stale();
+    }
+
+    /// Held across releasing or taking back an approval, so the two never interleave.
+    pub(crate) fn approving(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.inner.approving.clone()
     }
 
     pub(crate) fn interventions(&self) -> Vec<InterventionRecord> {
@@ -1467,6 +1534,7 @@ mod tests {
                 trigger: None,
                 chips: Vec::new(),
                 item: None,
+                approval: None,
             },
             steps: Vec::new(),
             item_id: None,

@@ -61,6 +61,8 @@ impl Harness for Recording {
     }
 }
 
+const APPROVAL_HOLD_MS: &str = "1500";
+
 async fn wait_for(mut predicate: impl FnMut() -> bool, what: &str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while !predicate() {
@@ -736,7 +738,8 @@ async fn a_lead_escalation_is_one_item_and_one_wake_and_the_answer_reaches_the_l
 #[tokio::test]
 async fn full_authority_lets_the_supervisor_decide_approve_and_change_the_goal_and_the_person_corrects_it()
  {
-    use zeron_proto::supervisor::{InterventionKind, NeedsYouRow};
+    use zeron_proto::supervisor::{InterventionKind, NeedsYouRow, PlanApproval};
+    unsafe { std::env::set_var("ZERON_SUPERVISOR_APPROVAL_HOLD_MS", APPROVAL_HOLD_MS) };
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
@@ -895,15 +898,39 @@ async fn full_authority_lets_the_supervisor_decide_approve_and_change_the_goal_a
         "the lead gets it the way it gets the person's answer, naming who decided and why"
     );
 
-    act(json!({ "action": "approve", "taskId": "t1", "reason": "One small step, in scope" }))
-        .await
-        .unwrap();
+    let RpcReply::Value(approved) =
+        act(json!({ "action": "approve", "taskId": "t1", "reason": "One small step, in scope" }))
+            .await
+            .unwrap()
+    else {
+        panic!("an approval")
+    };
+    assert!(approved["startsAt"].is_string(), "{approved}");
     assert!(!core.workspace.task("t1").unwrap().plan_pending);
+    let held = supervisor_snapshot(&rpc, |s| !s.interventions.is_empty()).await;
+    assert!(
+        matches!(
+            held.interventions[0].approval,
+            Some(PlanApproval::Held { .. })
+        ),
+        "{:?}",
+        held.interventions[0]
+    );
+    assert_eq!(
+        count("The Supervisor approved the plan"),
+        0,
+        "the lead hears of a Supervisor approval only once its hold runs out"
+    );
     wait_for(
         || count("The Supervisor approved the plan; the person gave it this decision. Run it.\n\nWhy: One small step, in scope") == 1,
         "the approval",
     )
     .await;
+    let sent = supervisor_snapshot(&rpc, |s| {
+        s.interventions[0].approval == Some(PlanApproval::Sent)
+    })
+    .await;
+    assert!(sent.interventions[0].message_id.is_some());
     assert!(
         act(json!({ "action": "approve", "taskId": "t1", "reason": "again" }))
             .await
@@ -1013,5 +1040,158 @@ async fn full_authority_lets_the_supervisor_decide_approve_and_change_the_goal_a
             InterventionKind::Decide,
         ]
     );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_person_takes_back_a_supervisor_plan_approval_until_a_step_starts() {
+    use zeron_proto::supervisor::PlanApproval;
+    unsafe { std::env::set_var("ZERON_SUPERVISOR_APPROVAL_HOLD_MS", APPROVAL_HOLD_MS) };
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Recording(prompts.clone())));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    let rpc = core.rpc_service();
+    let mutate = |params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move { rpc.handle(methods::MUTATE, params).await }
+    };
+    let count = |needle: &str| {
+        prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|prompt| prompt.contains(needle))
+            .count()
+    };
+    let RpcReply::Value(ensured) = rpc
+        .handle(
+            methods::ENSURE_SUPERVISOR,
+            json!({ "config": { "harness": "mock", "sandbox": "workspace-write" } }),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("a chat id")
+    };
+    let supervisor = ensured["chatId"].as_str().unwrap().to_string();
+    rpc.handle(
+        methods::SET_SUPERVISOR_SETTINGS,
+        json!({ "decideForMe": true }),
+    )
+    .await
+    .unwrap();
+    let approve = |task: &str| {
+        let rpc = rpc.clone();
+        let params = json!({
+            "fromChatId": supervisor, "action": "approve", "taskId": task, "reason": "Small and in scope",
+        });
+        async move { rpc.handle(methods::SUPERVISOR_ACT, params).await }
+    };
+    let approval_of = |task: &'static str| {
+        let rpc = rpc.clone();
+        async move {
+            let snapshot = supervisor_snapshot(&rpc, |_| true).await;
+            snapshot
+                .interventions
+                .into_iter()
+                .find(|row| row.task_id.as_deref() == Some(task))
+                .and_then(|row| row.approval)
+        }
+    };
+    for task in ["t1", "t2", "t3"] {
+        let lead = format!("lead-{task}");
+        mutate(json!({ "op": "createTask", "taskId": task, "title": format!("Mission {task}") }))
+            .await
+            .unwrap();
+        mutate(json!({ "op": "startTask", "taskId": task, "chatId": lead, "orchestrate": true }))
+            .await
+            .unwrap();
+        wait_for(
+            || count(&format!("You lead this task (task id {task})")) == 1,
+            "the lead's brief",
+        )
+        .await;
+        mutate(json!({
+            "op": "planSteps", "taskId": task, "fromChatId": lead,
+            "steps": [{ "title": "Build", "notes": "Write the file" }],
+        }))
+        .await
+        .unwrap();
+    }
+    let approved = "The Supervisor approved the plan";
+    let took_back = "The person took back the Supervisor's approval";
+
+    approve("t1").await.unwrap();
+    assert!(!core.workspace.task("t1").unwrap().plan_pending);
+    assert!(matches!(
+        approval_of("t1").await,
+        Some(PlanApproval::Held { .. })
+    ));
+    mutate(json!({ "op": "takeBackPlanApproval", "taskId": "t1" }))
+        .await
+        .unwrap();
+    assert!(
+        core.workspace.task("t1").unwrap().plan_pending,
+        "the plan waits for review again"
+    );
+    assert!(matches!(
+        approval_of("t1").await,
+        Some(PlanApproval::TakenBack { .. })
+    ));
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    assert_eq!(
+        (count(approved), count(took_back)),
+        (0, 0),
+        "a hold taken back never reaches the lead, so it hears nothing"
+    );
+    let refusal = approve("t1").await.err().expect("refused").to_string();
+    assert!(refusal.contains("took back your approval"), "{refusal}");
+    let again = mutate(json!({ "op": "takeBackPlanApproval", "taskId": "t1" }))
+        .await
+        .err()
+        .expect("refused")
+        .to_string();
+    assert!(again.contains("already taken back"), "{again}");
+
+    approve("t2").await.unwrap();
+    wait_for(
+        || count(approved) == 1,
+        "the approval once the hold runs out",
+    )
+    .await;
+    assert_eq!(approval_of("t2").await, Some(PlanApproval::Sent));
+    mutate(json!({ "op": "takeBackPlanApproval", "taskId": "t2" }))
+        .await
+        .unwrap();
+    assert!(core.workspace.task("t2").unwrap().plan_pending);
+    wait_for(
+        || count(took_back) == 1,
+        "the lead hears the approval is gone",
+    )
+    .await;
+    assert!(
+        prompts.lock().unwrap().iter().any(|prompt| prompt
+            == "The person took back the Supervisor's approval of this plan (task id t2). The plan waits for the person's review again: do not run any step until the approval message comes."),
+    );
+
+    approve("t3").await.unwrap();
+    wait_for(|| count(approved) == 2, "the third approval").await;
+    let step = core.workspace.task_steps_of("t3")[0].id.clone();
+    mutate(json!({ "op": "updateTaskStep", "stepId": step, "patch": { "outcome": "done" } }))
+        .await
+        .unwrap();
+    let late = mutate(json!({ "op": "takeBackPlanApproval", "taskId": "t3" }))
+        .await
+        .err()
+        .expect("refused")
+        .to_string();
+    assert!(late.contains("A step already started"), "{late}");
+    assert!(!core.workspace.task("t3").unwrap().plan_pending);
+    assert_eq!(approval_of("t3").await, Some(PlanApproval::Sent));
     core.shutdown().await;
 }
