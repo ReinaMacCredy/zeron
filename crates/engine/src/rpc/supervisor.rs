@@ -151,6 +151,15 @@ impl EngineRpc {
         )))
     }
 
+    fn refuse_elsewhere(&self, task_id: &str) -> Result<(), RpcError> {
+        if self.doc_host.hosts_mission(&self.workspace, task_id) {
+            return Ok(());
+        }
+        Err(refused(
+            "This mission's lead is archived or runs on another Mac: the Supervisor reaches only threads on its own Mac",
+        ))
+    }
+
     pub(super) fn supervisor_store(&self) -> Result<&SupervisorStore, RpcError> {
         self.doc_host
             .supervisor()
@@ -268,6 +277,7 @@ impl EngineRpc {
                 checked_reason(&reason, "the step changed")?;
                 let step = self.step_or_refuse(&step_id)?;
                 let task = self.task_or_refuse(&step.task_id)?;
+                self.refuse_elsewhere(&task.id)?;
                 let lead = self.lead_of(&task)?;
                 let basis = self.doc_host.intervention_basis(
                     InterventionKind::Rebrief,
@@ -395,6 +405,7 @@ impl EngineRpc {
             return Err(refused("This step is already marked done or skipped"));
         }
         let task = self.task_or_refuse(&step.task_id)?;
+        self.refuse_elsewhere(&task.id)?;
         let lead = self.lead_of(&task)?;
         let store = self.supervisor_store()?;
         if store.hold_of(step_id).is_some() {

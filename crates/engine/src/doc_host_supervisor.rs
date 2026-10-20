@@ -181,7 +181,7 @@ impl DocHost {
         store.offer(event);
     }
 
-    fn hosts_mission(&self, workspace: &WorkspaceHost, task_id: &str) -> bool {
+    pub(crate) fn hosts_mission(&self, workspace: &WorkspaceHost, task_id: &str) -> bool {
         workspace
             .task(task_id)
             .filter(|task| task.mode == TaskMode::Orchestrated && !task.deleted)
