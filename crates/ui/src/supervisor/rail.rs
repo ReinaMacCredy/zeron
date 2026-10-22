@@ -367,6 +367,7 @@ impl SupervisorPage {
             watch => {
                 let on = *watch == Watch::Watched;
                 let params = watch_params(mission, !on);
+                let key = mission.key.clone();
                 div()
                     .flex()
                     .items_center()
@@ -386,7 +387,7 @@ impl SupervisorPage {
                         .on_click(cx.listener(
                             move |page, _: &ClickEvent, _, cx| {
                                 cx.stop_propagation();
-                                page.send_watch(params.clone(), cx);
+                                page.send_watch(key.clone(), params.clone(), cx);
                             },
                         )),
                     )
@@ -410,6 +411,10 @@ impl SupervisorPage {
             .flex_col()
             .children(tree)
             .child(tail)
+            .children(
+                self.watch_error_line(task_id, theme)
+                    .map(|line| line.pl(px(37.0)).pr(px(12.0)).pb(px(7.0))),
+            )
             .into_any_element()
     }
 

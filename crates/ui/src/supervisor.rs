@@ -42,6 +42,8 @@ use rail::{RailMode, RailMotion, mission_tone};
 
 pub(crate) const PLACEHOLDER: &str = "Talk to the Supervisor about architecture and direction…";
 const PROFILE_ID: &str = "slp-supervisor";
+const NOT_CONNECTED: &str = "Not connected to the engine";
+const WATCH_EVERYTHING: &str = "everything";
 const NO_AGENT: &str =
     "no agent is installed and turned on. Turn one on in Settings > Providers, then try again.";
 const HEARTBEATS: [(u32, &str); 3] = [(0, "Off"), (30, "30 min"), (60, "60 min")];
@@ -1185,6 +1187,7 @@ pub struct SupervisorPage {
     profiles: Loadable<Vec<AgentProfile>>,
     settings: Loadable<SupervisorSettings>,
     settings_error: Option<String>,
+    watch_error: Option<(String, String)>,
     ensure: Ensure,
     ensured: Option<String>,
     opened: HashMap<String, bool>,
@@ -1258,6 +1261,7 @@ impl SupervisorPage {
             profiles: Loadable::Idle,
             settings: Loadable::Idle,
             settings_error: None,
+            watch_error: None,
             ensure: Ensure::Idle,
             ensured: None,
             opened: HashMap::new(),
@@ -1596,9 +1600,7 @@ impl SupervisorPage {
 
     fn flush(&mut self, group: &str, cx: &mut Context<Self>) {
         self.batches.remove(group);
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
+        let engine = self.state.read(cx).engine().cloned();
         let held: Vec<NeedsYouRow> = self
             .rows
             .values()
@@ -1636,6 +1638,19 @@ impl SupervisorPage {
             cx.notify();
             return;
         }
+        let Some(engine) = engine else {
+            for key in items
+                .iter()
+                .map(|(key, _)| key)
+                .chain(inputs.iter().map(|(key, ..)| key))
+            {
+                if let Some(reply) = self.replies.get_mut(key) {
+                    reply.stage = Stage::Failed(NOT_CONNECTED.into());
+                }
+            }
+            cx.notify();
+            return;
+        };
         cx.spawn(async move |page, cx| {
             let mut results: Vec<(String, Result<(), String>)> = Vec::new();
             if !items.is_empty() {
@@ -1698,6 +1713,8 @@ impl SupervisorPage {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.sends.insert(key, Some(NOT_CONNECTED.into()));
+            cx.notify();
             return;
         };
         self.sends.insert(key.clone(), None);
@@ -1821,25 +1838,44 @@ impl SupervisorPage {
 
     fn set_watch_everything(&mut self, on: bool, cx: &mut Context<Self>) {
         self.send_watch(
+            WATCH_EVERYTHING.into(),
             serde_json::json!({ "op": "setWatchEverything", "on": on }),
             cx,
         );
     }
 
-    fn send_watch(&mut self, params: serde_json::Value, cx: &mut Context<Self>) {
+    fn send_watch(&mut self, key: String, params: serde_json::Value, cx: &mut Context<Self>) {
+        if self.watch_error.as_ref().is_some_and(|(at, _)| *at == key) {
+            self.watch_error = None;
+        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.watch_error = Some((key, NOT_CONNECTED.into()));
+            cx.notify();
             return;
         };
         cx.spawn(async move |page, cx| {
             if let Err(err) = engine.client().call(methods::MUTATE, params).await {
                 page.update(cx, |page, cx| {
-                    page.settings_error = Some(format!("Could not change what it watches: {err}"));
+                    page.watch_error =
+                        Some((key, format!("Could not change what it watches: {err}")));
                     cx.notify();
                 })
                 .ok();
             }
         })
         .detach();
+        cx.notify();
+    }
+
+    fn watch_error_line(&self, key: &str, theme: &Theme) -> Option<gpui::Div> {
+        let (_, error) = self.watch_error.as_ref().filter(|(at, _)| at == key)?;
+        Some(
+            div()
+                .debug_selector(|| "supervisor-watch-error".into())
+                .text_size(ui_rems(11.5))
+                .text_color(theme.danger)
+                .child(error.clone()),
+        )
     }
 
     fn start_config(&self, cx: &App) -> Option<ChatConfig> {
@@ -3150,6 +3186,10 @@ impl SupervisorPage {
                         },
                     )),
                 ),
+            )
+            .children(
+                self.watch_error_line(WATCH_EVERYTHING, theme)
+                    .map(|line| line.px(px(8.0)).pb(px(4.0))),
             );
         for (key, text, on, set) in toggles {
             list = list.child(row().child(text).child(
