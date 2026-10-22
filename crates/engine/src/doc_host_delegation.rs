@@ -492,6 +492,13 @@ impl DocHost {
         let chat = workspace
             .chat(chat_id)?
             .ok_or_else(|| failure("thread_not_found", chat_id))?;
+        let open = match &chat.delegation {
+            Some(delegation) => delegation.is_running() && !delegation.cancel_requested,
+            None => self.step_lead_of(chat_id).is_some(),
+        };
+        if chat.archived || !open {
+            return Ok(());
+        }
         let Some(mut config) = chat.config.clone() else {
             return Ok(());
         };
@@ -1704,6 +1711,9 @@ impl DocHost {
         if let Err(err) = updated {
             tracing::warn!(task = %child.id, error = %err, "finishing a delegated task failed");
             return;
+        }
+        if let Some(schedule) = sessions.resume_schedule() {
+            schedule.clear(&child.id);
         }
         if offer && let Err(err) = self.offer_wake(&owner_id, &child.id).await {
             tracing::warn!(task = %child.id, error = %err, "waking the owner failed");
