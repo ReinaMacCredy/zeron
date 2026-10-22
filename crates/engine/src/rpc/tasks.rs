@@ -416,6 +416,9 @@ impl EngineRpc {
         else {
             return Ok(());
         };
+        if task.is_open_plan_of(chat_id) {
+            return Ok(());
+        }
         let tasks = self.workspace.read_tasks().map_err(failed)?;
         if tasks
             .iter()

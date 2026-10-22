@@ -395,6 +395,18 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
         err.contains("already leads a mission"),
         "reopening a done plan on a chat that leads another: {err}"
     );
+    let reopen = |completed| zeron_proto::TaskPatch {
+        completed: Some(completed),
+        ..Default::default()
+    };
+    core.workspace.update_task("t5", &reopen(false)).unwrap();
+    mutate(json!({
+        "op": "planSteps", "taskId": "t7", "fromChatId": "talk",
+        "steps": [{ "title": "Build the admin" }],
+    }))
+    .await
+    .expect("a lead re-plans its mission beside a duplicate open plan from before the rule");
+    core.workspace.update_task("t5", &reopen(true)).unwrap();
 
     let unapproved = core.workspace.task("t2").unwrap();
     assert_eq!(unapproved.mode, zeron_proto::TaskMode::Orchestrated);
