@@ -1283,20 +1283,23 @@ impl SupervisorPage {
                     .when(!enabled, |el| el.opacity(0.35))
                     .when(enabled, |el| el.cursor_pointer().hover(|s| s.opacity(0.9)))
                     .child(label)
-                    .when(!compact, |el| {
-                        el.child(
-                            div()
-                                .px(px(4.0))
-                                .rounded(px(4.0))
-                                .border_1()
-                                .border_color(theme.on_solid.opacity(0.5))
-                                .font_family(theme.font_mono.clone())
-                                .text_size(ui_rems(10.5))
-                                .line_height(ui_rems(15.0))
-                                .opacity(0.7)
-                                .child("⌘↵"),
-                        )
-                    })
+                    .when(
+                        !compact && self.last_sheet.as_deref() == Some(group),
+                        |el| {
+                            el.child(
+                                div()
+                                    .px(px(4.0))
+                                    .rounded(px(4.0))
+                                    .border_1()
+                                    .border_color(theme.on_solid.opacity(0.5))
+                                    .font_family(theme.font_mono.clone())
+                                    .text_size(ui_rems(10.5))
+                                    .line_height(ui_rems(15.0))
+                                    .opacity(0.7)
+                                    .child("⌘↵"),
+                            )
+                        },
+                    )
                     .when(enabled, |el| {
                         el.on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
                             page.send_sheet(&send_group, cx)

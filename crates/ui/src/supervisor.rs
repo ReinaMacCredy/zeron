@@ -1735,6 +1735,23 @@ impl SupervisorPage {
         self.send_mutation(take_back_key(&task_id), params, cx);
     }
 
+    fn prune_sends(&mut self, feed: &Feed, state: &AppState, now: DateTime<Utc>) {
+        let mut live = HashSet::new();
+        for row in feed.open.iter().chain(&feed.earlier) {
+            if let Entry::Intervention(intervention) = &row.entry {
+                live.insert(format!("resume:{}", intervention.id));
+                live.extend(intervention.item.as_ref().map(|item| item.id.clone()));
+            }
+        }
+        self.sends.retain(|key, sent| {
+            sent.is_none()
+                || live.contains(key)
+                || key
+                    .strip_prefix("take-back:")
+                    .is_some_and(|task| approval_held(state, task, now))
+        });
+    }
+
     fn send_mutation(&mut self, key: String, params: serde_json::Value, cx: &mut Context<Self>) {
         if matches!(self.sends.get(&key), Some(None)) {
             return;
@@ -4026,7 +4043,7 @@ impl Render for SupervisorPage {
             Some(view) if now < view.built + VIEW_FRESH => view,
             _ => {
                 let state = self.state.read(cx);
-                View {
+                let view = View {
                     built: now,
                     missions: missions(state, utc),
                     feed: state
@@ -4034,7 +4051,9 @@ impl Render for SupervisorPage {
                         .as_ref()
                         .map(|snapshot| feed::feed(snapshot, &self.memory, utc, &root_id(state)))
                         .unwrap_or_default(),
-                }
+                };
+                self.prune_sends(&view.feed, state, utc);
+                view
             }
         };
         let (missions, feed) = (&view.missions, &view.feed);
