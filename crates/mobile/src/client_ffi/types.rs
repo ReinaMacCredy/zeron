@@ -998,12 +998,15 @@ pub struct ModelInfo {
     pub options: Vec<ModelOption>,
     /// The picker's default effort for this model.
     pub default_reasoning: Option<String>,
+    #[uniffi(default = false)]
+    pub is_new: bool,
 }
 
 impl From<zc::catalog::ModelInfo> for ModelInfo {
     fn from(m: zc::catalog::ModelInfo) -> Self {
         Self {
             default_reasoning: zc::catalog::default_reasoning(&m),
+            is_new: m.is_new,
             id: m.id,
             label: m.label,
             description: m.description,

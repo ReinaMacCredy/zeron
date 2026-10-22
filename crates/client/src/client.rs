@@ -1199,8 +1199,7 @@ impl Client {
                     )
                     .await
                     .and_then(|v| {
-                        serde_json::from_value::<Vec<ModelInfo>>(v)
-                            .map_err(|e| ClientError::HostError(e.to_string()))
+                        catalog::decode_models(v).map_err(|e| ClientError::HostError(e.to_string()))
                     });
                 match reply {
                     Ok(list) if !list.is_empty() => {
