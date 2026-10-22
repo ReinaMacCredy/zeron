@@ -2927,8 +2927,7 @@ impl SessionsEngine {
             reservation.run_id = Some(run.run_id.clone());
             runs.insert(chat_id.to_string(), run);
         }
-        self.set_status(chat_id, SessionStatus::Working, true);
-        self.inner.set_compacting(chat_id, true);
+        self.inner.set_working_compacting(chat_id);
 
         let started = match &compaction {
             Compaction::Native => harness.compact(request, controls).await,
@@ -4550,6 +4549,30 @@ impl Inner {
         completed_turn: Option<String>,
         held_by_subagents: bool,
     ) {
+        self.publish_status(
+            chat_id,
+            status,
+            fresh_start,
+            completed_turn,
+            held_by_subagents,
+            false,
+        );
+    }
+
+    /// One publish, so no status watcher reads the compaction's Working as a turn.
+    fn set_working_compacting(&self, chat_id: &str) {
+        self.publish_status(chat_id, SessionStatus::Working, true, None, false, true);
+    }
+
+    fn publish_status(
+        &self,
+        chat_id: &str,
+        status: SessionStatus,
+        fresh_start: bool,
+        completed_turn: Option<String>,
+        held_by_subagents: bool,
+        compacting: bool,
+    ) {
         let now = Utc::now();
         let session = {
             let mut statuses = lock(&self.statuses);
@@ -4583,6 +4606,7 @@ impl Inner {
             }
             entry.status = status;
             entry.held_by_subagents = held_by_subagents;
+            entry.compacting |= compacting;
             entry.updated_at = now;
             match status {
                 SessionStatus::Working if fresh_start || !was_active => {
@@ -6632,9 +6656,10 @@ async fn drive_run(
                 entry_id = new_id();
                 segment_started = now_ms();
                 clock.start(false, std::time::Instant::now());
-                inner.set_status(&chat_id, SessionStatus::Working, true);
+                inner.set_working_compacting(&chat_id);
+            } else {
+                inner.set_compacting(&chat_id, *active);
             }
-            inner.set_compacting(&chat_id, *active);
             continue;
         }
         if let AgentEvent::Compacted {
