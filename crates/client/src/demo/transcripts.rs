@@ -4,7 +4,9 @@
 //! groups, questions, errors, attachments), the synthetic big transcripts
 //! for benchmarks, and the scripted streaming reply.
 
-use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolDiffStat};
+use zeron_doc::{
+    MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus, ToolDiffStat,
+};
 use zeron_proto::computer::ComputerConsentScope;
 use zeron_proto::{
     TodoItem, TodoStatus, ToolCall, UserInputAnswer, UserInputKind, UserInputQuestion,
@@ -805,6 +807,55 @@ fn short(host: &str, now: i64, prompt: &str, reply: &str) -> Vec<SessionMessageE
     ]
 }
 
+fn spawn(id: &str, task: &str, model: Option<&str>, status: SubagentStatus) -> MessagePart {
+    let input = match model {
+        Some(model) => serde_json::json!({ "description": task, "model": model }),
+        None => serde_json::json!({ "description": task }),
+    };
+    let mut part = tool(
+        id,
+        ToolCall::Unknown {
+            name: format!("Agent: {task}"),
+            input: Some(input),
+        },
+        false,
+        None,
+    );
+    if let MessagePart::Tool {
+        subagent_ref,
+        subagent_status,
+        ..
+    } = &mut part
+    {
+        *subagent_ref = Some(format!("sub-{id}"));
+        *subagent_status = Some(status);
+    }
+    part
+}
+
+fn agents(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    vec![
+        user(
+            "m1",
+            now - 300_000,
+            "Fan the parity audit out to one agent per surface.",
+        ),
+        assistant(
+            "m2",
+            host,
+            now - 280_000,
+            vec![
+                text("t0", "Spawning one agent per surface:"),
+                spawn("s1", "Audit the layout cache", Some("claude-haiku-5-5"), SubagentStatus::Done),
+                spawn("s2", "Port the veil to Android", Some("openai/gpt-5.6-sol"), SubagentStatus::Done),
+                spawn("s3", "Review the edge worker", Some("xai/grok-4.5"), SubagentStatus::Running),
+                spawn("s4", "Summarize the CRDT notes", None, SubagentStatus::Done),
+                text("t1", "Four agents reported back."),
+            ],
+        ),
+    ]
+}
+
 /// Fixture transcript for a demo chat (`None` = starts empty).
 pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<SessionMessageEntry> {
     let now = last_activity;
@@ -854,6 +905,7 @@ pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<Sess
             "Presence beats spam the DO.",
             "Batched to one beat per 25s.",
         ),
+        "chat-agents" => agents(host, now),
         _ => Vec::new(),
     }
 }

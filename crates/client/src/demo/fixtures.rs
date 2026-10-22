@@ -254,6 +254,102 @@ pub(crate) fn chats() -> Vec<DemoChat> {
                 "Batched to one beat per 25s.",
             )
         },
+        DemoChat {
+            harness: Opencode,
+            model: "default",
+            last_ago_ms: 2 * HOUR,
+            ..chat(
+                "chat-agents",
+                Some("space-agents"),
+                MAC,
+                "Fan out the parity audit",
+                "Four agents reported back.",
+            )
+        },
+        DemoChat {
+            harness: Cursor,
+            model: "default",
+            last_ago_ms: 4 * HOUR,
+            ..chat(
+                "chat-cursor",
+                Some("space-agents"),
+                MAC,
+                "Tab bar hit targets",
+                "Raised to 44pt.",
+            )
+        },
+        DemoChat {
+            harness: Devin,
+            model: "swe-1-7-medium",
+            last_ago_ms: 6 * HOUR,
+            ..chat(
+                "chat-devin",
+                Some("space-agents"),
+                MAC,
+                "Flaky e2e on CI",
+                "Seeded the clock.",
+            )
+        },
+        DemoChat {
+            harness: Grok,
+            model: "grok-4.5",
+            last_ago_ms: 8 * HOUR,
+            ..chat(
+                "chat-grok",
+                Some("space-agents"),
+                MAC,
+                "Edge cache headers",
+                "Vary on Accept-Encoding.",
+            )
+        },
+        DemoChat {
+            harness: Hermes,
+            model: "hermes-4-70b",
+            last_ago_ms: 10 * HOUR,
+            ..chat(
+                "chat-hermes",
+                Some("space-agents"),
+                MAC,
+                "Changelog draft",
+                "Grouped by surface.",
+            )
+        },
+        DemoChat {
+            harness: Pi,
+            model: "default",
+            last_ago_ms: 12 * HOUR,
+            ..chat(
+                "chat-pi",
+                Some("space-agents"),
+                MAC,
+                "Bench the layout pass",
+                "p95 at 3.1ms.",
+            )
+        },
+        DemoChat {
+            harness: Antigravity,
+            model: "gemini-3.1-pro",
+            last_ago_ms: 14 * HOUR,
+            ..chat(
+                "chat-antigravity",
+                Some("space-agents"),
+                MAC,
+                "Android bindings",
+                "UniFFI Kotlin builds.",
+            )
+        },
+        DemoChat {
+            harness: Acp,
+            model: "default",
+            last_ago_ms: 16 * HOUR,
+            ..chat(
+                "chat-acp",
+                Some("space-agents"),
+                MAC,
+                "Registry agent smoke test",
+                "Handshake ok.",
+            )
+        },
     ]
 }
 
@@ -308,6 +404,14 @@ pub(crate) fn spaces(now: i64) -> Vec<Space> {
             Some("Zeron iOS"),
             true,
             2 * DAY,
+        ),
+        space(
+            "space-agents",
+            MAC,
+            "/Users/dev/agents",
+            Some("Agents"),
+            false,
+            DAY,
         ),
     ]
 }

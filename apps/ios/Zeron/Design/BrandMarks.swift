@@ -59,8 +59,9 @@ enum BrandMark {
         }
     }
 
-    static func forHarness(_ harness: String) -> BrandMark {
+    static func forHarness(_ harness: String) -> BrandMark? {
         switch harness {
+        case "claude-code", "mock": return .claude
         case "codex": return .openai
         case "cursor": return .cursor
         case "devin": return .devin
@@ -69,7 +70,7 @@ enum BrandMark {
         case "pi": return .pi
         case "opencode": return .opencode
         case "antigravity": return .antigravity
-        default: return .claude  // claude-code + mock share the mark, like the desktop
+        default: return nil
         }
     }
 
@@ -381,8 +382,14 @@ enum BrandMarks {
         guard let harness, !harness.isEmpty else { return nil }
         let key = "\(harness)@\(side)"
         if let hit = cache[key] { return hit }
-        let mark = BrandMark.forHarness(harness)
         let rect = CGRect(x: 0, y: 0, width: side, height: side)
+        guard let mark = BrandMark.forHarness(harness) else {
+            let bot = UIImage(named: "tool-bot").map { asset in
+                UIGraphicsImageRenderer(size: rect.size).image { _ in asset.draw(in: rect) }.withRenderingMode(.alwaysTemplate)
+            }
+            cache[key] = bot
+            return bot
+        }
         let path = BrandMarkShape(mark: mark).path(in: rect).cgPath
         let tint = BrandMark.brandTint(for: harness)
         let image = UIGraphicsImageRenderer(size: rect.size).image { ctx in

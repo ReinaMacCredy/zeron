@@ -16,7 +16,7 @@ use zeron_doc::parts::MessagePart;
 use zeron_doc::parts::MessageStatus;
 use zeron_doc::schema::{MessageRole, SessionMessageEntry};
 use zeron_markdown::parser::{IncrementalParser, TopBlock};
-use zeron_proto::UserInputAnswer;
+use zeron_proto::{HarnessId, UserInputAnswer};
 use zeron_text::WhiteSpace;
 
 use super::cards::{Card, consent_row, denied_row, notice_row, place_card};
@@ -56,6 +56,7 @@ pub struct TranscriptInput {
     pub working_since_ms: Option<i64>,
     pub streaming: bool,
     pub input_answers: Arc<HashMap<String, Vec<UserInputAnswer>>>,
+    pub harness: Option<HarnessId>,
 }
 
 pub(crate) fn row_key(id: &str) -> u64 {
@@ -197,6 +198,7 @@ pub(crate) struct RowBuilder {
     /// Visual rows' links to their workers, by visual id (kept across
     /// rebuilds: the worker holds the same slot).
     pub visual_slots: HashMap<String, Arc<crate::visual::VisualSlot>>,
+    pub(crate) harness: Option<HarnessId>,
 }
 
 pub(crate) fn quick_hash(s: &str) -> u64 {
@@ -212,6 +214,10 @@ pub(crate) fn quick_hash(s: &str) -> u64 {
 impl RowBuilder {
     /// Rows for `input`, reusing every row whose source is unchanged.
     pub fn build(&mut self, ctx: &mut Ctx, input: &TranscriptInput) -> Vec<Placed> {
+        if self.harness != input.harness {
+            self.harness = input.harness;
+            self.entries.clear();
+        }
         let mut out: Vec<Placed> = Vec::with_capacity(self.entries.len() * 2 + 4);
         let mut live_entries: HashSet<&str> = HashSet::with_capacity(input.entries.len());
         let mut live_parts: HashSet<String> = HashSet::new();
