@@ -2068,11 +2068,6 @@ impl SessionsEngine {
             .extend(message_ids);
     }
 
-    /// The user's Stop: a hard boundary. The in-flight turn ends `aborted`
-    /// and the runtime goes with it — background subagents, background
-    /// shells, everything the agent runs. The next message resumes the
-    /// conversation in a fresh process. (Sending, steering and switching
-    /// models never come here: they keep the runtime and its work.)
     pub fn working_chats(&self, harnesses: Option<&[HarnessId]>) -> Vec<String> {
         let working: Vec<String> = lock(&self.inner.statuses)
             .values()
@@ -2565,10 +2560,10 @@ impl SessionsEngine {
         unsent
     }
 
-    /// Stop ends everything the agent runs, so its queued compaction and continueWith go too.
+    /// A stopped turn's queued compaction and continueWith go with it, or they would restart the work.
     pub(crate) fn cancel_agent_compact(&self, chat_id: &str) {
         self.inner
-            .cancel_agent_compact(chat_id, "the person pressed Stop");
+            .cancel_agent_compact(chat_id, "this turn was stopped");
     }
 
     pub(crate) fn agent_compact_waiting(&self, chat_id: &str) -> bool {

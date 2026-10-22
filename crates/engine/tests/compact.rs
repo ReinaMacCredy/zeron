@@ -793,6 +793,19 @@ async fn stop_cancels_the_agents_queued_compaction() {
             .and_then(|s| s.compact_plan),
         None
     );
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-3", &tmp.path().to_string_lossy()))
+        .expect("queue third run");
+    wait_for(|| requests.lock().unwrap().len() == 3, "the next message").await;
+    wait_for(|| !core.sessions.turn_in_flight(CHAT), "its turn settles").await;
+    let prompt = requests.lock().unwrap()[2].prompt.clone();
+    assert!(
+        prompt.contains("Your queued compaction was cancelled: this turn was stopped before it ran.")
+            && prompt.contains("Its continueWith was: go on"),
+        "{prompt}"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(requests.lock().unwrap().len(), 3, "no continueWith ran after the stop");
 }
 
 #[tokio::test(flavor = "multi_thread")]

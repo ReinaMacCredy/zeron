@@ -4977,10 +4977,10 @@ impl DocHost {
     /// Stop the active turn without treating the resulting Idle transition as
     /// permission to release the next queued message. The same lock used by
     /// drains closes the race between clicking Cancel and the status watcher.
-    /// The user's Stop ends only the turn: background subagents and shells
-    /// keep running and report back. A `teardown` (the Supervisor's pause)
-    /// also ends a parked runtime still running background work, which the
-    /// idle reaper spares.
+    /// A plain Stop ends only the turn: background subagents and shells
+    /// keep running and report back. A `teardown` (the Supervisor's pause,
+    /// `task_cancel`) also ends a parked runtime still running background
+    /// work, which the idle reaper spares.
     async fn interrupt_and_pause_queue(
         &self,
         sessions: &SessionsEngine,
