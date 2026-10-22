@@ -214,3 +214,32 @@ fn still_frames_come_from_an_online_host_only() {
         None
     );
 }
+
+#[test]
+fn a_turn_parked_on_subagents_is_not_running() {
+    let (client, _dir) = demo(false);
+    let session = client.open_session("chat-veil").unwrap();
+    wait_for("the turn", || session.composer().live.turn_running);
+    wait_for("the turn to end", || !session.composer().live.turn_running);
+    let (state, _) = client.inner.workspace.state();
+    let mut parked = state
+        .sessions
+        .iter()
+        .find(|s| s.chat_id == "chat-veil")
+        .cloned()
+        .unwrap();
+    parked.status = zeron_proto::SessionStatus::Working;
+    parked.held_by_subagents = true;
+    parked.started_at = Some(chrono::Utc::now());
+    parked.updated_at = chrono::Utc::now();
+    client
+        .inner
+        .registry_write(|doc| doc.upsert_session(&parked))
+        .unwrap();
+    let row = || client.inner.workspace.snapshot().session("chat-veil").cloned().unwrap();
+    wait_for("the parked row", || row().held_by_subagents);
+    assert_eq!(row().host_indicator, zeron_proto::ChatIndicator::Working, "the dot still reads Working");
+    session.core.refresh();
+    assert!(!session.composer().live.turn_running);
+    assert!(!session.snapshot().working);
+}
