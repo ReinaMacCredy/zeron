@@ -16,6 +16,7 @@ pub mod device_hub;
 pub mod device_paths;
 pub mod entities;
 pub mod file_mentions;
+pub mod handoff;
 pub mod home;
 pub mod html_render;
 pub mod invocation;

@@ -221,19 +221,9 @@ pub struct ModelSwitchPrompt {
     pub note_hint: String,
 }
 
-#[uniffi::export]
-impl CoreClient {
-    pub fn model_switch_prompt(
-        &self,
-        chat_id: String,
-        to_model: String,
-        from_label: String,
-        to_label: String,
-    ) -> Option<ModelSwitchPrompt> {
-        let p = self
-            .client
-            .model_switch_prompt(&chat_id, &to_model, &from_label, &to_label)?;
-        Some(ModelSwitchPrompt {
+impl From<zeron_proto::model_switch::ModelSwitchPrompt> for ModelSwitchPrompt {
+    fn from(p: zeron_proto::model_switch::ModelSwitchPrompt) -> Self {
+        Self {
             title: p.title,
             lead: p.lead,
             body: p.body,
@@ -243,7 +233,41 @@ impl CoreClient {
             cancel_detail: p.cancel_detail,
             note: p.note,
             note_hint: p.note_hint,
-        })
+        }
+    }
+}
+
+#[uniffi::export]
+impl CoreClient {
+    pub fn model_switch_prompt(
+        &self,
+        chat_id: String,
+        to_model: String,
+        from_label: String,
+        to_label: String,
+    ) -> Option<ModelSwitchPrompt> {
+        self.client
+            .model_switch_prompt(&chat_id, &to_model, &from_label, &to_label)
+            .map(Into::into)
+    }
+
+    pub fn provider_switch_prompt(
+        &self,
+        chat_id: String,
+        from_provider: String,
+        to_provider: String,
+        from_model: String,
+        to_model: String,
+    ) -> Option<ModelSwitchPrompt> {
+        self.client
+            .provider_switch_prompt(
+                &chat_id,
+                &from_provider,
+                &to_provider,
+                &from_model,
+                &to_model,
+            )
+            .map(Into::into)
     }
 
     pub async fn set_session_config_noted(
@@ -465,4 +489,78 @@ pub fn prediction_placeholder(prediction: Option<String>, text: String) -> Optio
     zeron_proto::prediction::prediction_display(prediction.as_deref(), &text)
         .0
         .map(Into::into)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct HandoffTarget {
+    pub harness: String,
+    pub name: String,
+    pub model: String,
+    pub model_label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct HandoffLabels {
+    pub title: String,
+    pub this_thread: String,
+    pub new_thread: String,
+    pub project: String,
+}
+
+#[uniffi::export]
+pub fn handoff_labels() -> HandoffLabels {
+    use zeron_proto::handoff::*;
+    HandoffLabels {
+        title: HAND_OFF_THREAD.into(),
+        this_thread: CONTINUE_IN_THIS_THREAD.into(),
+        new_thread: CONTINUE_IN_A_NEW_THREAD.into(),
+        project: HAND_OFF_TO_PROJECT.into(),
+    }
+}
+
+#[uniffi::export]
+pub fn handoff_failed_message(err: String) -> String {
+    zeron_proto::handoff::handoff_failed_message(&err)
+}
+
+#[uniffi::export]
+impl CoreClient {
+    pub async fn handoff_targets(&self, device_id: String) -> Vec<HandoffTarget> {
+        let client = self.client.clone();
+        on_runtime(async move { Ok(client.handoff_targets(&device_id).await) })
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| HandoffTarget {
+                harness: t.harness,
+                name: t.name,
+                model: t.model,
+                model_label: t.model_label,
+            })
+            .collect()
+    }
+
+    pub async fn continue_in_new_thread(
+        &self,
+        source_chat_id: String,
+        harness: Option<String>,
+        model: Option<String>,
+        target_space_id: Option<String>,
+    ) -> CoreResult<String> {
+        let client = self.client.clone();
+        on_runtime(async move {
+            let target = harness.as_deref().zip(model.as_deref());
+            client
+                .continue_in_new_thread(&source_chat_id, target, target_space_id.as_deref())
+                .await
+        })
+        .await
+    }
+}
+
+#[uniffi::export]
+impl SessionHandle {
+    pub fn handoff_blocked(&self) -> bool {
+        self.inner.handoff_blocked()
+    }
 }

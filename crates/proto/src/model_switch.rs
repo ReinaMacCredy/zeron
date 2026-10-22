@@ -79,6 +79,25 @@ pub fn model_switch_prompt(harness: Option<HarnessId>, from: &str, to: &str) -> 
     }
 }
 
+pub fn provider_switch_prompt(
+    from: &str,
+    to: &str,
+    from_model: &str,
+    to_model: &str,
+) -> ModelSwitchPrompt {
+    ModelSwitchPrompt {
+        title: "Switch provider?".into(),
+        lead: format!("{to_model} starts from a text copy of this chat"),
+        body: provider_switch_warning(from, to),
+        confirm: format!("Yes, switch to {to_model}"),
+        confirm_detail: format!("Same chat, same tab. A divider marks where {from_model} stopped."),
+        cancel: format!("No, keep {from_model}"),
+        cancel_detail: format!("Keep {from_model} for this chat."),
+        note: format!("Provider changed from {from} to {to}."),
+        note_hint: provider_switch_hint(from, to),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,5 +113,14 @@ mod tests {
         assert_eq!(prompt.cancel_detail, "Keep Opus for this chat.");
         assert_eq!(prompt.note, "Model changed from Opus to Sonnet.");
         assert!(prompt.body.contains("Switching to Sonnet"));
+    }
+
+    #[test]
+    fn a_provider_switch_names_both_providers_and_the_new_model() {
+        let prompt = provider_switch_prompt("Claude Code", "Codex", "Opus 5", "GPT-5.5");
+        assert_eq!(prompt.title, "Switch provider?");
+        assert_eq!(prompt.confirm, "Yes, switch to GPT-5.5");
+        assert_eq!(prompt.cancel, "No, keep Opus 5");
+        assert_eq!(prompt.note, "Provider changed from Claude Code to Codex.");
     }
 }

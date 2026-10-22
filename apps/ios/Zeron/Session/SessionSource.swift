@@ -94,6 +94,7 @@ protocol SessionSource: AnyObject {
     var compactBlocked: String? { get }
     func compact(focus: String?)
     func keepFullHistory()
+    func handoffMenu(open: @escaping (String) -> Void) -> UIMenuElement?
 }
 
 extension SessionSource {
@@ -102,6 +103,7 @@ extension SessionSource {
     var compactBlocked: String? { nil }
     func compact(focus: String?) {}
     func keepFullHistory() {}
+    func handoffMenu(open: @escaping (String) -> Void) -> UIMenuElement? { nil }
 }
 
 enum QueueAction {

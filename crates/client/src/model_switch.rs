@@ -1,9 +1,11 @@
 use zeron_doc::{MessagePart, MessageRole};
 use zeron_proto::ChatConfig;
-use zeron_proto::model_switch::{ModelSwitchPrompt, model_switch_prompt, needs_switch_warning};
+use zeron_proto::model_switch::{
+    ModelSwitchPrompt, model_switch_prompt, needs_switch_warning, provider_switch_prompt,
+};
 
-use crate::error::{ClientError, Result};
 use crate::Client;
+use crate::error::{ClientError, Result};
 
 impl Client {
     pub fn model_switch_prompt(
@@ -14,8 +16,24 @@ impl Client {
         to_label: &str,
     ) -> Option<ModelSwitchPrompt> {
         let config = self.session_config(chat_id)?;
-        needs_switch_warning(self.chat_has_history(chat_id), config.model.as_deref(), to_model)
-            .then(|| model_switch_prompt(Some(config.harness), from_label, to_label))
+        needs_switch_warning(
+            self.chat_has_history(chat_id),
+            config.model.as_deref(),
+            to_model,
+        )
+        .then(|| model_switch_prompt(Some(config.harness), from_label, to_label))
+    }
+
+    pub fn provider_switch_prompt(
+        &self,
+        chat_id: &str,
+        from_provider: &str,
+        to_provider: &str,
+        from_model: &str,
+        to_model: &str,
+    ) -> Option<ModelSwitchPrompt> {
+        self.chat_has_history(chat_id)
+            .then(|| provider_switch_prompt(from_provider, to_provider, from_model, to_model))
     }
 
     /// Pending echoes count and an unloaded chat is assumed read: a fresh

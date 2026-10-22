@@ -707,3 +707,26 @@ fn an_open_chat_predicts_the_next_message_only_while_on_screen() {
     session.set_view_attached(false);
     assert_eq!(session.composer().prediction, None);
 }
+
+#[test]
+fn continuing_in_a_new_thread_lands_on_the_picked_agent() {
+    let (client, _dir) = demo(fast());
+    let session = client.open_session("chat-home").unwrap();
+    session.set_view_attached(true);
+    wait_for("hydrated", Duration::from_secs(5), || {
+        session.snapshot().hydrated
+    });
+    assert!(!session.handoff_blocked());
+    let rt = zeron_client::runtime::shared();
+    let id = rt
+        .block_on(client.continue_in_new_thread("chat-home", Some(("codex", "gpt-5.5")), None))
+        .unwrap();
+    assert_ne!(id, "chat-home");
+    let config = client.session_config(&id).expect("the new chat is listed");
+    assert_eq!(config.harness, zeron_proto::HarnessId::Codex);
+    assert_eq!(config.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(
+        client.session_config("chat-home").unwrap().harness,
+        zeron_proto::HarnessId::ClaudeCode
+    );
+}

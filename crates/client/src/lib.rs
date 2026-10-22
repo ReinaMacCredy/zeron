@@ -33,6 +33,7 @@ pub mod config;
 pub mod connectivity;
 mod demo;
 pub mod error;
+pub mod handoff;
 pub mod events;
 pub mod invocations;
 mod live;

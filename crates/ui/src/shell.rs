@@ -6442,7 +6442,7 @@ impl Shell {
                         tracing::warn!(%err, "ContinueInNewThread failed");
                         shell.show_notice(
                             crate::toast::ToastKind::Error,
-                            format!("Couldn't continue in a new thread: {err}"),
+                            zeron_proto::handoff::handoff_failed_message(&err),
                             cx,
                         );
                         cx.notify();

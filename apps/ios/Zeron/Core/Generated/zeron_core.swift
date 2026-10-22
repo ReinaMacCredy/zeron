@@ -1262,9 +1262,15 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func workspaceRevision()  -> UInt64
     
+    func continueInNewThread(sourceChatId: String, harness: String?, model: String?, targetSpaceId: String?) async throws  -> String
+    
+    func handoffTargets(deviceId: String) async  -> [HandoffTarget]
+    
     func invocationCatalog(deviceId: String, harness: String, chatId: String?, spaceId: String?, skill: Bool) async  -> InvocationCatalog
     
     func modelSwitchPrompt(chatId: String, toModel: String, fromLabel: String, toLabel: String)  -> ModelSwitchPrompt?
+    
+    func providerSwitchPrompt(chatId: String, fromProvider: String, toProvider: String, fromModel: String, toModel: String)  -> ModelSwitchPrompt?
     
     func setSessionConfigNoted(chatId: String, config: ChatConfig, note: String, hint: String) async throws 
     
@@ -2107,6 +2113,39 @@ open func workspaceRevision() -> UInt64  {
 })
 }
     
+open func continueInNewThread(sourceChatId: String, harness: String?, model: String?, targetSpaceId: String?)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_continue_in_new_thread(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(sourceChatId),FfiConverterOptionString.lower(harness),FfiConverterOptionString.lower(model),FfiConverterOptionString.lower(targetSpaceId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func handoffTargets(deviceId: String)async  -> [HandoffTarget]  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_handoff_targets(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeHandoffTarget.lift,
+            errorHandler: nil
+            
+        )
+}
+    
 open func invocationCatalog(deviceId: String, harness: String, chatId: String?, spaceId: String?, skill: Bool)async  -> InvocationCatalog  {
     return
         try!  await uniffiRustCallAsync(
@@ -2133,6 +2172,20 @@ open func modelSwitchPrompt(chatId: String, toModel: String, fromLabel: String, 
         FfiConverterString.lower(toModel),
         FfiConverterString.lower(fromLabel),
         FfiConverterString.lower(toLabel),uniffiCallStatus
+    )
+})
+}
+    
+open func providerSwitchPrompt(chatId: String, fromProvider: String, toProvider: String, fromModel: String, toModel: String) -> ModelSwitchPrompt?  {
+    return try!  FfiConverterOptionTypeModelSwitchPrompt.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_provider_switch_prompt(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(chatId),
+        FfiConverterString.lower(fromProvider),
+        FfiConverterString.lower(toProvider),
+        FfiConverterString.lower(fromModel),
+        FfiConverterString.lower(toModel),uniffiCallStatus
     )
 })
 }
@@ -3210,6 +3263,8 @@ public protocol SessionHandleProtocol: AnyObject, Sendable {
     
     func compact(focus: String?) async throws  -> String?
     
+    func handoffBlocked()  -> Bool
+    
     func keepFullHistory() 
     
     func statsView(nowMs: Int64)  -> SessionStatsView?
@@ -3363,6 +3418,15 @@ open func compact(focus: String?)async throws  -> String?  {
             liftFunc: FfiConverterOptionString.lift,
             errorHandler: FfiConverterTypeCoreError_lift
         )
+}
+    
+open func handoffBlocked() -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_sessionhandle_handoff_blocked(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
 }
     
 open func keepFullHistory()  {try! rustCall() {
@@ -7392,6 +7456,130 @@ public func FfiConverterTypeGlyphPrim_lift(_ buf: RustBuffer) throws -> GlyphPri
 #endif
 public func FfiConverterTypeGlyphPrim_lower(_ value: GlyphPrim) -> RustBuffer {
     return FfiConverterTypeGlyphPrim.lower(value)
+}
+
+
+public struct HandoffLabels: Equatable, Hashable {
+    public var title: String
+    public var thisThread: String
+    public var newThread: String
+    public var project: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(title: String, thisThread: String, newThread: String, project: String) {
+        self.title = title
+        self.thisThread = thisThread
+        self.newThread = newThread
+        self.project = project
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension HandoffLabels: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHandoffLabels: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HandoffLabels {
+        return
+            try HandoffLabels(
+                title: FfiConverterString.read(from: &buf), 
+                thisThread: FfiConverterString.read(from: &buf), 
+                newThread: FfiConverterString.read(from: &buf), 
+                project: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HandoffLabels, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.thisThread, into: &buf)
+        FfiConverterString.write(value.newThread, into: &buf)
+        FfiConverterString.write(value.project, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHandoffLabels_lift(_ buf: RustBuffer) throws -> HandoffLabels {
+    return try FfiConverterTypeHandoffLabels.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHandoffLabels_lower(_ value: HandoffLabels) -> RustBuffer {
+    return FfiConverterTypeHandoffLabels.lower(value)
+}
+
+
+public struct HandoffTarget: Equatable, Hashable {
+    public var harness: String
+    public var name: String
+    public var model: String
+    public var modelLabel: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(harness: String, name: String, model: String, modelLabel: String) {
+        self.harness = harness
+        self.name = name
+        self.model = model
+        self.modelLabel = modelLabel
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension HandoffTarget: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHandoffTarget: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HandoffTarget {
+        return
+            try HandoffTarget(
+                harness: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                model: FfiConverterString.read(from: &buf), 
+                modelLabel: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HandoffTarget, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.harness, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.model, into: &buf)
+        FfiConverterString.write(value.modelLabel, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHandoffTarget_lift(_ buf: RustBuffer) throws -> HandoffTarget {
+    return try FfiConverterTypeHandoffTarget.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHandoffTarget_lower(_ value: HandoffTarget) -> RustBuffer {
+    return FfiConverterTypeHandoffTarget.lower(value)
 }
 
 
@@ -17586,6 +17774,31 @@ fileprivate struct FfiConverterSequenceTypeGlyphPrim: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeHandoffTarget: FfiConverterRustBuffer {
+    typealias SwiftType = [HandoffTarget]
+
+    public static func write(_ value: [HandoffTarget], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeHandoffTarget.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [HandoffTarget] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [HandoffTarget]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeHandoffTarget.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeHarnessInfo: FfiConverterRustBuffer {
     typealias SwiftType = [HarnessInfo]
 
@@ -18652,6 +18865,21 @@ public func followUpNotice(queueing: Bool, steer: Bool, canSteer: Bool) -> Strin
     )
 })
 }
+public func handoffFailedMessage(err: String) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_handoff_failed_message(
+        FfiConverterString.lower(err),uniffiCallStatus
+    )
+})
+}
+public func handoffLabels() -> HandoffLabels  {
+    return try!  FfiConverterTypeHandoffLabels_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_handoff_labels(uniffiCallStatus
+    )
+})
+}
 public func nextPastedTextName(staged: [String]) -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
         uniffiCallStatus in
@@ -18954,6 +19182,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_follow_up_notice() != 30722) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_func_handoff_failed_message() != 10353) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_handoff_labels() != 17516) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_func_next_pasted_text_name() != 13940) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19197,10 +19431,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_workspace_revision() != 48105) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_continue_in_new_thread() != 58949) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_handoff_targets() != 35638) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_invocation_catalog() != 5961) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_model_switch_prompt() != 452) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_provider_switch_prompt() != 48492) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_set_session_config_noted() != 45535) {
@@ -19216,6 +19459,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_compact() != 17175) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_sessionhandle_handoff_blocked() != 45811) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_keep_full_history() != 47540) {

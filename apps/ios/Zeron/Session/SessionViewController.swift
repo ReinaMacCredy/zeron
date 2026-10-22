@@ -585,12 +585,13 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             guard let self else { return done([]) }
             let vm = self.app.session(self.chatId)
             let pinned = vm?.pinned ?? false
-            done([
+            let items: [UIMenuElement?] = [
                 UIAction(title: pinned ? "Unpin" : "Pin", image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(self.chatId, !pinned) },
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = self.engine.frame().plainText()
                 },
                 self.compactAction(),
+                self.source.handoffMenu { [weak self] id in self?.router?.openSession(id) },
                 UIAction(title: "Archive", image: UIImage(systemName: "archivebox"), attributes: .destructive) { _ in
                     self.app.archive(self.chatId)
                     // Beside the iPad sidebar there's nothing to pop back to.
@@ -600,7 +601,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                         self.navigationController?.popViewController(animated: true)
                     }
                 },
-            ])
+            ]
+            done(items.compactMap { $0 })
         }])
     }
 }

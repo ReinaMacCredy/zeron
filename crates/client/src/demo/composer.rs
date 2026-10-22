@@ -1,7 +1,13 @@
+use std::sync::Arc;
+
+use serde_json::Value;
 use zeron_doc::{DocError, SessionDoc};
 use zeron_proto::invocation::Skill;
 use zeron_proto::prediction::ComposerPrediction;
-use zeron_proto::{SessionStats, SlashCommand, SlashCommandKind};
+use zeron_proto::{Chat, HarnessId, SessionStats, SlashCommand, SlashCommandKind};
+
+use crate::client::ClientInner;
+use crate::error::ClientError;
 
 pub(super) fn prediction(chat_id: &str) -> Option<ComposerPrediction> {
     (chat_id == "chat-home").then(|| ComposerPrediction {
@@ -80,4 +86,66 @@ pub(super) fn invocation_catalog(method: &str) -> Option<serde_json::Value> {
         .ok(),
         _ => None,
     }
+}
+
+pub(super) fn continue_in_new_thread(
+    client: &Arc<ClientInner>,
+    params: &Value,
+) -> crate::error::Result<Value> {
+    let source_id = params["sourceChatId"].as_str().unwrap_or_default();
+    let source = client
+        .workspace
+        .chat(source_id)
+        .ok_or_else(|| ClientError::NotFound(source_id.to_owned()))?;
+    let mut config = source.config.clone();
+    if let (Some(config), Ok(harness), Some(model)) = (
+        config.as_mut(),
+        serde_json::from_value::<HarnessId>(params["harness"].clone()),
+        params["model"].as_str(),
+    ) {
+        if config.harness != harness {
+            config.reasoning = None;
+            config.model_options.clear();
+        }
+        config.harness = harness;
+        config.model = Some(model.to_owned());
+    }
+    let space = params["targetSpaceId"].as_str().and_then(|id| {
+        client
+            .workspace
+            .snapshot()
+            .projects
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| (p.id.clone(), p.path.clone()))
+    });
+    let seed = source.title.clone().unwrap_or_else(|| "chat".into());
+    let chat = Chat {
+        id: params["chatId"].as_str().unwrap_or_default().to_owned(),
+        title: Some(format!("{seed} (cont.)")),
+        config,
+        last_message_preview: None,
+        last_message_at: None,
+        created_at: chrono::Utc::now(),
+        harness_session_id: None,
+        last_seen_at: None,
+        sidechat_source_chat_id: None,
+        created_by_chat_id: None,
+        forked_from_chat_id: None,
+        delegation: None,
+        settle: None,
+        unsettled_at: None,
+        ..match space {
+            Some((space_id, path)) => Chat {
+                space_id: Some(space_id),
+                cwd: Some(path),
+                branch: None,
+                checkout_id: None,
+                ..source
+            },
+            None => source,
+        }
+    };
+    client.registry_write(|doc| doc.upsert_chat(&chat))?;
+    Ok(serde_json::to_value(chat).unwrap_or_default())
 }

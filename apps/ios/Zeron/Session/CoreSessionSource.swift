@@ -378,18 +378,88 @@ final class CoreSessionSource: SessionSource {
     private func pickModel(_ model: ModelInfo, among models: [ModelInfo]) {
         let current = client.sessionConfig(chatId: chatId)?.model
         let from = models.first { $0.id == current }?.label ?? current ?? ""
-        guard let prompt = client.modelSwitchPrompt(chatId: chatId, toModel: model.id, fromLabel: from, toLabel: model.label) else {
-            return setConfig { $0.model = model.id }
-        }
+        confirmSwitch(client.modelSwitchPrompt(chatId: chatId, toModel: model.id, fromLabel: from, toLabel: model.label)) { $0.model = model.id }
+    }
+
+    private func confirmSwitch(_ prompt: ModelSwitchPrompt?, _ change: @escaping (inout ChatConfig) -> Void) {
+        guard let prompt else { return setConfig(change) }
         let alert = UIAlertController(title: prompt.title, message: "\(prompt.lead).\n\n\(prompt.body)", preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: prompt.cancel, style: .cancel))
         alert.addAction(UIAlertAction(title: prompt.confirm, style: .default) { [weak self] _ in
             guard let self else { return }
-            let config = self.changedConfig { $0.model = model.id }
+            let config = self.changedConfig(change)
             Task { try? await self.client.setSessionConfigNoted(chatId: self.chatId, config: config, note: prompt.note, hint: prompt.noteHint) }
         })
         alert.preferredAction = alert.actions.last
         onPresent?(alert)
+    }
+
+    func handoffMenu(open: @escaping (String) -> Void) -> UIMenuElement? {
+        let labels = handoffLabels()
+        let image = UIImage(systemName: "arrow.left.arrow.right")
+        guard !handle.handoffBlocked() else {
+            return UIAction(title: labels.title, image: image, attributes: .disabled) { _ in }
+        }
+        return UIMenu(title: labels.title, image: image, children: [UIDeferredMenuElement.uncached { [weak self] done in
+            guard let self else { return done([]) }
+            let device = self.hostDevice
+            Task { @MainActor [weak self] in
+                let targets = await self?.client.handoffTargets(deviceId: device) ?? []
+                done(self?.handoffSections(targets, labels: labels, open: open) ?? [])
+            }
+        }])
+    }
+
+    private func handoffSections(_ targets: [HandoffTarget], labels: HandoffLabels, open: @escaping (String) -> Void) -> [UIMenuElement] {
+        let row = app?.row(chatId)
+        let current = client.sessionConfig(chatId: chatId)?.harness ?? row?.harness
+        let title = { (t: HandoffTarget) in "\(t.name) · \(t.modelLabel)" }
+        var sections: [UIMenuElement] = []
+        let inPlace = targets.filter { $0.harness != current }.map { t in
+            UIAction(title: title(t)) { [weak self] _ in self?.handOffInPlace(t, from: row) }
+        }
+        if !inPlace.isEmpty { sections.append(UIMenu(title: labels.thisThread, options: .displayInline, children: inPlace)) }
+        let fresh = targets.map { t in
+            UIAction(title: title(t)) { [weak self] _ in self?.continueInNewThread(harness: t.harness, model: t.model, spaceId: nil, open: open) }
+        }
+        if !fresh.isEmpty { sections.append(UIMenu(title: labels.newThread, options: .displayInline, children: fresh)) }
+        if let row, row.project == nil {
+            let projects = (app?.projectOptions ?? []).filter { $0.device == row.deviceId }.map { p in
+                UIAction(title: p.name, image: UIImage(systemName: "folder")) { [weak self] _ in self?.continueInNewThread(harness: nil, model: nil, spaceId: p.id, open: open) }
+            }
+            if !projects.isEmpty { sections.append(UIMenu(title: labels.project, options: .displayInline, children: projects)) }
+        }
+        return sections
+    }
+
+    private func handOffInPlace(_ target: HandoffTarget, from row: SessionRow?) {
+        let prompt = client.providerSwitchPrompt(
+            chatId: chatId,
+            fromProvider: row?.harnessLabel ?? row?.harness ?? "",
+            toProvider: target.name,
+            fromModel: row?.modelLabel ?? row?.model ?? "",
+            toModel: target.modelLabel)
+        confirmSwitch(prompt) {
+            $0.harness = target.harness
+            $0.model = target.model
+            $0.reasoning = nil
+            $0.modelOptions = [:]
+            $0.profileId = nil
+        }
+    }
+
+    private func continueInNewThread(harness: String?, model: String?, spaceId: String?, open: @escaping (String) -> Void) {
+        let source = chatId
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                open(try await self.client.continueInNewThread(sourceChatId: source, harness: harness, model: model, targetSpaceId: spaceId))
+            } catch {
+                let alert = UIAlertController(title: nil, message: handoffFailedMessage(err: "\(error)"), preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: "OK", style: .default))
+                self.onPresent?(alert)
+            }
+        }
     }
 
     func searchFiles(_ query: String) async -> [FileMatch] {

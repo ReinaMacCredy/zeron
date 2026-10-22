@@ -1006,8 +1006,7 @@ struct PendingModelSwitch {
 }
 
 use zeron_proto::model_switch::{
-    model_switch_prompt, needs_switch_warning, provider_switch_hint, provider_switch_warning,
-    switch_warning,
+    ModelSwitchPrompt, model_switch_prompt, needs_switch_warning, provider_switch_prompt,
 };
 
 pub struct Pickers {
@@ -3241,7 +3240,8 @@ impl Pickers {
         let Some(pending) = self.pending_model_switch.take() else {
             return;
         };
-        let note = self.switch_note(&pending, cx);
+        let prompt = self.switch_prompt(&pending, cx);
+        let note = (prompt.note, prompt.note_hint);
         self.update_chat_config(cx, Some(note), move |config| match pending.profile {
             Some(pick) => pick.write(config),
             None => {
@@ -3256,21 +3256,16 @@ impl Pickers {
         cx.notify();
     }
 
-    fn switch_note(&self, pending: &PendingModelSwitch, cx: &App) -> (String, String) {
+    fn switch_prompt(&self, pending: &PendingModelSwitch, cx: &App) -> ModelSwitchPrompt {
         let harness = self.effective_harness(cx);
         match (harness, pending.harness) {
-            (Some(from), Some(to)) => {
-                let from = self.provider_label(from, self.effective_instance(cx).as_deref());
-                let to = self.provider_label(to, pending.instance.as_deref());
-                (
-                    format!("Provider changed from {from} to {to}."),
-                    provider_switch_hint(&from, &to),
-                )
-            }
-            _ => {
-                let prompt = model_switch_prompt(harness, &pending.from, &pending.to);
-                (prompt.note, prompt.note_hint)
-            }
+            (Some(from), Some(to)) => provider_switch_prompt(
+                &self.provider_label(from, self.effective_instance(cx).as_deref()),
+                &self.provider_label(to, pending.instance.as_deref()),
+                &pending.from,
+                &pending.to,
+            ),
+            _ => model_switch_prompt(harness, &pending.from, &pending.to),
         }
     }
 
@@ -9551,34 +9546,16 @@ impl Pickers {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let provider = pending
-            .harness
-            .and_then(|to| self.effective_harness(cx).map(|from| (from, to)));
-        let body = match provider {
-            Some((from, to)) => provider_switch_warning(
-                &self.provider_label(from, self.effective_instance(cx).as_deref()),
-                &self.provider_label(to, pending.instance.as_deref()),
-            ),
-            None => switch_warning(self.effective_harness(cx), &pending.to),
-        };
-        let model = model_switch_prompt(self.effective_harness(cx), &pending.from, &pending.to);
-        let (title, lead, yes_detail, no_title) = match provider {
-            Some(_) => (
-                "Switch provider?",
-                format!("{} starts from a text copy of this chat", pending.to),
-                format!(
-                    "Same chat, same tab. A divider marks where {} stopped.",
-                    pending.from
-                ),
-                format!("No, keep {}", pending.from),
-            ),
-            None => (
-                "Switch model?",
-                model.lead,
-                model.confirm_detail,
-                model.cancel,
-            ),
-        };
+        let ModelSwitchPrompt {
+            title,
+            lead,
+            body,
+            confirm,
+            confirm_detail,
+            cancel,
+            cancel_detail,
+            ..
+        } = self.switch_prompt(pending, cx);
         let option =
             |number: &'static str, title: String, detail: String, fade_key: &'static str| {
                 popover::menu_row(theme, false, fade_key)
@@ -9608,22 +9585,12 @@ impl Pickers {
                             ),
                     )
             };
-        let yes = option(
-            "1.",
-            format!("Yes, switch to {}", pending.to),
-            yes_detail,
-            "model-switch-yes",
-        )
-        .on_click(cx.listener(|this, _, _, cx| this.confirm_model_switch(cx)));
-        let no = option(
-            "2.",
-            no_title,
-            format!("Keep {} for this chat.", pending.from),
-            "model-switch-no",
-        )
-        .on_click(cx.listener(|this, _, _, cx| this.cancel_model_switch(cx)));
+        let yes = option("1.", confirm, confirm_detail, "model-switch-yes")
+            .on_click(cx.listener(|this, _, _, cx| this.confirm_model_switch(cx)));
+        let no = option("2.", cancel, cancel_detail, "model-switch-no")
+            .on_click(cx.listener(|this, _, _, cx| this.cancel_model_switch(cx)));
         let card = popover::dialog_card(theme)
-            .child(popover::dialog_title(theme, title))
+            .child(popover::dialog_title(theme, &title))
             .child(
                 div()
                     .mt(px(6.0))
@@ -9761,6 +9728,7 @@ impl Pickers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeron_proto::model_switch::{provider_switch_hint, provider_switch_warning, switch_warning};
     use zeron_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
 
     #[test]
@@ -14116,7 +14084,7 @@ mod tests {
                 let pending = pickers.pending_model_switch.clone().expect("dialog");
                 assert_eq!(pending.instance.as_deref(), Some("codex_work"));
                 assert_eq!(
-                    pickers.switch_note(&pending, cx).0,
+                    pickers.switch_prompt(&pending, cx).note,
                     "Provider changed from Claude Code to Codex Work."
                 );
                 pickers.confirm_model_switch(cx);
@@ -14132,7 +14100,7 @@ mod tests {
                 pickers.activate_model_index(0, cx);
                 let pending = pickers.pending_model_switch.clone().expect("dialog");
                 assert_eq!(
-                    pickers.switch_note(&pending, cx).0,
+                    pickers.switch_prompt(&pending, cx).note,
                     "Provider changed from Codex Work to Codex."
                 );
                 pickers.confirm_model_switch(cx);

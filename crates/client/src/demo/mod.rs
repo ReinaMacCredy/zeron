@@ -803,6 +803,9 @@ impl DemoHost {
         if let Some(catalog) = composer::invocation_catalog(method) {
             return Ok(catalog);
         }
+        if method == m::CONTINUE_IN_NEW_THREAD {
+            return composer::continue_in_new_thread(&client, &params);
+        }
         let chat_id = params["chatId"].as_str().unwrap_or_default().to_owned();
         let id = params["id"].as_str().unwrap_or_default().to_owned();
         let core = client
