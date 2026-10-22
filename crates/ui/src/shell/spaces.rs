@@ -2881,16 +2881,17 @@ fn step_live(status: zeron_proto::StepStatus) -> bool {
     )
 }
 
-fn live_plan(
+fn open_plan(
     state: &AppState,
     lead: &zeron_proto::Chat,
     now: DateTime<Utc>,
-) -> Option<crate::tasks::Rollup> {
+) -> Option<(String, crate::tasks::Rollup)> {
     let task = zeron_proto::plan_of_chat(&state.tasks, &lead.id)?;
-    let plan = crate::tasks::rollup(state, task, now);
-    let live = plan.lead == Some(ChatIndicator::Working)
-        || plan.steps.iter().any(|row| step_live(row.status));
-    live.then_some(plan)
+    Some((task.id.clone(), crate::tasks::rollup(state, task, now)))
+}
+
+fn plan_live(plan: &crate::tasks::Rollup) -> bool {
+    plan.lead == Some(ChatIndicator::Working) || plan.steps.iter().any(|row| step_live(row.status))
 }
 
 pub(super) struct SidebarMission {
@@ -5992,7 +5993,7 @@ impl Shell {
     ) -> ChatIndicator {
         if self.settings.sidebar_working_shelf
             && status != ChatIndicator::AwaitingInput
-            && live_plan(state, chat, now).is_some()
+            && open_plan(state, chat, now).is_some_and(|(_, plan)| plan_live(&plan))
         {
             ChatIndicator::Working
         } else {
@@ -6009,8 +6010,8 @@ impl Shell {
         let mut chats = state.sidebar_chats(now, filter);
         let folded: HashSet<String> = chats
             .iter()
-            .filter_map(|(_, chat)| live_plan(state, chat, now))
-            .flat_map(|plan| plan.steps)
+            .filter_map(|(_, chat)| open_plan(state, chat, now))
+            .flat_map(|(_, plan)| plan.steps)
             .filter(|row| !step_live(row.status))
             .filter_map(|row| row.step.chat_id)
             .collect();
@@ -6510,10 +6511,9 @@ impl Shell {
             let missions: std::collections::HashMap<&str, (String, usize)> = rows
                 .iter()
                 .filter_map(|row| {
-                    let task = zeron_proto::plan_of_chat(&state.tasks, &row.chat.id)?;
-                    let plan = live_plan(state, &row.chat, now)?;
+                    let (task_id, plan) = open_plan(state, &row.chat, now)?;
                     let rest = plan.steps.iter().filter(|step| !step_live(step.status));
-                    Some((row.chat.id.as_str(), (task.id.clone(), rest.count())))
+                    Some((row.chat.id.as_str(), (task_id, rest.count())))
                 })
                 .filter(|(_, (_, rest))| *rest > 0)
                 .collect();
