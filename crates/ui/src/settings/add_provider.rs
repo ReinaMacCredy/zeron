@@ -439,7 +439,7 @@ impl AddProviderDialog {
             .map(|i| i.id.clone())
             .filter(|id| Some(id) != own.as_ref())
             .collect();
-        move |id: &str| ids.iter().any(|taken| taken == id)
+        move |id: &str| ids.iter().any(|taken| taken.eq_ignore_ascii_case(id))
     }
 
     fn derived_id(&self, label: &str) -> String {
@@ -533,7 +533,10 @@ impl AddProviderDialog {
         }
     }
 
-    fn close(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close(&mut self, cx: &mut Context<Self>) {
+        if self.saving {
+            return;
+        }
         self.cancel_login(cx);
         cx.emit(AddProviderEvent::Close);
     }
@@ -547,13 +550,16 @@ impl AddProviderDialog {
     }
 
     fn step_reachable(&self, step: Step, cx: &Context<Self>) -> bool {
+        if self.busy() {
+            return false;
+        }
         if self.editing.is_some() {
             return step != Step::Provider;
         }
         if self.acp.is_none() {
             return true;
         }
-        if self.sign_in.is_some() || self.registry.preparing.is_some() || self.saving {
+        if self.sign_in.is_some() {
             return false;
         }
         match step {
@@ -628,14 +634,7 @@ impl AddProviderDialog {
             return;
         };
         let identity = self.identity();
-        let fallback = match (&self.selected, self.acp) {
-            (Some(selected), _) => selected.agent.name.clone(),
-            (None, Some(AcpFlow::Local)) => "Local ACP".to_string(),
-            _ => driver_name(self.driver).to_string(),
-        };
-        let label = Some(identity.label.trim().to_string())
-            .filter(|label| !label.is_empty())
-            .unwrap_or(fallback);
+        let label = self.label_or_default(&identity);
         let instance = ProviderInstance {
             id: self.instance_id(),
             driver: self.driver,
@@ -651,6 +650,17 @@ impl AddProviderDialog {
         self.upsert(instance, after, cx);
     }
 
+    fn label_or_default(&self, identity: &Identity) -> String {
+        let fallback = match (&self.selected, self.acp) {
+            (Some(selected), _) => selected.agent.name.clone(),
+            (None, Some(AcpFlow::Local)) => "Local ACP".to_string(),
+            _ => driver_name(self.driver).to_string(),
+        };
+        Some(identity.label.trim().to_string())
+            .filter(|label| !label.is_empty())
+            .unwrap_or(fallback)
+    }
+
     /// D1: upsert before the login starts, since an upsert during a login kills it.
     fn sign_in(&mut self, cx: &mut Context<Self>) {
         if self.saving {
@@ -664,7 +674,7 @@ impl AddProviderDialog {
                 self.go(Step::Identity, cx);
                 return;
             }
-            (identity.label.trim().to_string(), self.instance_id())
+            (self.label_or_default(&identity), self.instance_id())
         };
         let instance = ProviderInstance {
             id,
@@ -1240,31 +1250,21 @@ impl AddProviderDialog {
                         .child("Next"),
                 });
             }
-            Step::Identity if acp_new => {
-                let label = match (self.acp == Some(AcpFlow::Local), saving) {
-                    (_, true) => "Adding...",
-                    (true, false) => "Add instance",
-                    (false, false) => "Continue to sign-in",
-                };
-                footer = footer.child(
-                    button("add-provider-save", widgets::ActionTone::Solid)
-                        .when(saving, |el| el.opacity(0.5))
-                        .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
-                        .child(label),
-                );
-            }
-            Step::Identity => {
+            Step::Identity if !acp_new => {
                 footer = footer.child(
                     button("add-provider-next", widgets::ActionTone::Solid)
                         .on_click(cx.listener(|this, _, _, cx| this.go(Step::Config, cx)))
                         .child("Next"),
                 );
             }
-            Step::Config | Step::SignIn => {
+            Step::Identity | Step::Config | Step::SignIn => {
                 let label = match (self.editing.is_some(), saving) {
                     (true, true) => "Saving…",
                     (true, false) => "Save",
                     (false, true) => "Adding…",
+                    (false, false) if acp_new && self.acp != Some(AcpFlow::Local) => {
+                        "Continue to sign-in"
+                    }
                     (false, false) => "Add instance",
                 };
                 footer = footer.child(

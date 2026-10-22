@@ -307,6 +307,7 @@ icon_assets![
     (LUCIDE_COLUMNS_2, "lucide-columns-2"),
     (LUCIDE_TEXT_WRAP, "lucide-text-wrap"),
     (LUCIDE_FOLDER_TREE, "lucide-folder-tree"),
+    (LUCIDE_LIST_TREE, "lucide-list-tree"),
     (LUCIDE_SQUARE_PLUS, "lucide-square-plus"),
     (LUCIDE_SQUARE_MINUS, "lucide-square-minus"),
     (LUCIDE_SQUARE_DOT, "lucide-square-dot"),

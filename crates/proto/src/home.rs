@@ -77,6 +77,9 @@ pub struct SystemStats {
 #[serde(rename_all = "camelCase")]
 pub struct TodayRunsRequest {
     pub since_ms: i64,
+    /// Read exactly these chats, whatever their kind or last activity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +87,17 @@ pub struct TodayRunsRequest {
 pub struct TodayRuns {
     #[serde(default)]
     pub runs: Vec<TodayRun>,
+    #[serde(default)]
+    pub waits: Vec<TodayWait>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodayWait {
+    pub chat_id: String,
+    pub started_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

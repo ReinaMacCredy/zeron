@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256, Sha512};
 use tokio::io::AsyncWriteExt;
 
 use crate::HarnessError;
-use crate::adapter_install::{OK_MARKER, adapters_root, install_lock};
+use crate::adapter_install::{OK_MARKER, adapters_root};
 
 /// a pinned archive: where to fetch it and which file inside runs the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,9 +33,14 @@ pub struct ArchivePin {
 /// multi-hundred-megabyte archives outlast any whole-request deadline on a
 /// slow link, so only a stalled stream counts as a failure.
 const STALL_TIMEOUT: Duration = Duration::from_secs(60);
+const MIN_BYTES_PER_STALL_WINDOW: u64 = 64 * 1024;
 const MAX_ARCHIVE_BYTES: u64 = 768 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const MAX_ARCHIVE_ENTRIES: usize = 4_096;
+const MAX_ARCHIVE_ENTRIES: usize = 100_000;
+const UNSUPPORTED_ARCHIVES: &[&str] = &[
+    ".tar.xz", ".txz", ".tar.zst", ".tzst", ".tar.lz", ".xz", ".zst", ".gz", ".bz2", ".7z", ".rar",
+    ".dmg", ".pkg", ".msi",
+];
 
 /// an archive release whose integrity is proven after extraction (by a
 /// vendor code signature) rather than by a digest pinned in zeron's source.
@@ -65,13 +70,16 @@ enum ArchiveKind {
     Raw,
 }
 
+fn url_path(url: &str) -> String {
+    url.split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase()
+}
+
 impl ArchiveKind {
     fn from_url(url: &str) -> Self {
-        let path = url
-            .split(['?', '#'])
-            .next()
-            .unwrap_or(url)
-            .to_ascii_lowercase();
+        let path = url_path(url);
         if path.ends_with(".zip") {
             Self::Zip
         } else if path.ends_with(".tar.gz") || path.ends_with(".tgz") {
@@ -214,6 +222,18 @@ pub async fn install_registry_binary(
         None => format!("unverified:{}", binary.url),
     };
     let sha256 = binary.sha256.map(str::to_ascii_lowercase);
+    let kind = ArchiveKind::from_url(binary.url);
+    let path = url_path(binary.url);
+    if kind == ArchiveKind::Raw
+        && let Some(suffix) = UNSUPPORTED_ARCHIVES
+            .iter()
+            .find(|suffix| path.ends_with(*suffix))
+    {
+        return Err(HarnessError::Install(format!(
+            "{display_name}'s download ({}) is a {suffix} archive, which Zeron cannot unpack",
+            binary.url
+        )));
+    }
     let source = Source {
         name: binary.name,
         version: binary.version,
@@ -221,7 +241,7 @@ pub async fn install_registry_binary(
         entry,
         sha512: None,
         sha256: sha256.as_deref(),
-        kind: ArchiveKind::from_url(binary.url),
+        kind,
         marker: &marker,
     };
     install(source, display_name, |_| async { Ok(()) }).await
@@ -263,7 +283,8 @@ where
     if let Some(entry) = installed() {
         return Ok(entry);
     }
-    let _guard = install_lock().lock().await;
+    let lock = destination_lock(source.name, source.version);
+    let _guard = lock.lock().await;
     if let Some(entry) = installed() {
         return Ok(entry);
     }
@@ -280,6 +301,7 @@ where
     ));
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir)?;
+    let _cleanup = RemoveOnDrop(tmp_dir.clone());
     tracing::info!(
         target: "zeron_harness::adapter_install",
         url = source.url,
@@ -290,21 +312,14 @@ where
         Ok(()) => verify(tmp_dir.clone()).await,
         Err(error) => Err(error),
     };
-    if let Err(error) = prepared {
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        return Err(error);
-    }
+    prepared?;
     std::fs::write(tmp_dir.join(OK_MARKER), format!("{}\n", source.marker))?;
     if let Some(parent) = final_dir.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if std::fs::rename(&tmp_dir, &final_dir).is_err() {
-        if installed().is_none() {
-            let _ = std::fs::remove_dir_all(&final_dir);
-            std::fs::rename(&tmp_dir, &final_dir)?;
-        } else {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
-        }
+    if std::fs::rename(&tmp_dir, &final_dir).is_err() && installed().is_none() {
+        let _ = std::fs::remove_dir_all(&final_dir);
+        std::fs::rename(&tmp_dir, &final_dir)?;
     }
     installed().ok_or_else(|| {
         HarnessError::Install(format!(
@@ -312,6 +327,30 @@ where
             source.version, source.entry
         ))
     })
+}
+
+/// Archive installs of different agents run side by side; a stalled one blocks only its own retry.
+fn destination_lock(name: &str, version: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::LazyLock<
+        std::sync::Mutex<
+            std::collections::HashMap<(String, String), std::sync::Arc<tokio::sync::Mutex<()>>>,
+        >,
+    > = std::sync::LazyLock::new(Default::default);
+    LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry((name.to_owned(), version.to_owned()))
+        .or_default()
+        .clone()
+}
+
+/// Removes a partial install on every exit, a cancelled future included.
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 async fn download_and_extract(
@@ -357,6 +396,18 @@ async fn download(
     };
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
+        .read_timeout(STALL_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                attempt.error("too many redirects")
+            } else if attempt.url().scheme() != "https"
+                && attempt.previous().iter().any(|url| url.scheme() == "https")
+            {
+                attempt.error("the download redirected away from https")
+            } else {
+                attempt.follow()
+            }
+        }))
         .build()
         .map_err(|e| failed(e.to_string()))?;
     let response = client
@@ -377,6 +428,7 @@ async fn download(
     let mut body = response.bytes_stream();
     let mut file = tokio::fs::File::create(dest).await?;
     let mut received = 0_u64;
+    let mut window = (tokio::time::Instant::now(), 0_u64);
     let mut sha512 = source.sha512.map(|_| Sha512::new());
     let mut sha256 = source.sha256.map(|_| Sha256::new());
     loop {
@@ -391,6 +443,17 @@ async fn download(
         match chunk {
             Some(Ok(bytes)) => {
                 received = received.saturating_add(bytes.len() as u64);
+                window.1 = window.1.saturating_add(bytes.len() as u64);
+                if window.0.elapsed() >= STALL_TIMEOUT {
+                    if window.1 < MIN_BYTES_PER_STALL_WINDOW {
+                        return Err(failed(format!(
+                            "under {} KiB in {}s — check your network",
+                            MIN_BYTES_PER_STALL_WINDOW / 1024,
+                            STALL_TIMEOUT.as_secs()
+                        )));
+                    }
+                    window = (tokio::time::Instant::now(), 0);
+                }
                 if received > MAX_ARCHIVE_BYTES {
                     return Err(failed(format!(
                         "archive exceeded the {} MiB limit",
@@ -497,12 +560,24 @@ fn extract_zip_blocking(archive_path: &Path, dest: &Path) -> Result<(), HarnessE
             std::fs::create_dir_all(parent)?;
         }
         let mut output_file = std::fs::File::create(&output)?;
-        let copied = std::io::copy(&mut entry, &mut output_file)?;
-        if copied != entry.size() {
+        let declared = entry.size();
+        let mut capped = Capped {
+            inner: &mut entry,
+            remaining: declared,
+            exceeded: false,
+        };
+        let copied = std::io::copy(&mut capped, &mut output_file);
+        if capped.exceeded {
             return Err(HarnessError::Install(format!(
-                "archive entry {} extracted {copied} bytes but declared {}",
-                output.display(),
-                entry.size()
+                "archive entry {} holds more than the {declared} bytes it declares",
+                output.display()
+            )));
+        }
+        let copied = copied?;
+        if copied != declared {
+            return Err(HarnessError::Install(format!(
+                "archive entry {} extracted {copied} bytes but declared {declared}",
+                output.display()
             )));
         }
         output_file.flush()?;
@@ -573,6 +648,7 @@ fn unpack_tar(reader: impl Read, archive_path: &Path, dest: &Path) -> Result<(),
     let invalid =
         |error: std::io::Error| HarnessError::Install(format!("invalid tar archive: {error}"));
     let mut archive = tar::Archive::new(reader);
+    let mut links = Vec::new();
     for (index, entry) in archive.entries().map_err(invalid)?.enumerate() {
         if index >= MAX_ARCHIVE_ENTRIES {
             return Err(HarnessError::Install(format!(
@@ -608,6 +684,22 @@ fn unpack_tar(reader: impl Read, archive_path: &Path, dest: &Path) -> Result<(),
                 std::io::copy(&mut entry, &mut output_file).map_err(invalid)?;
                 output_file.flush()?;
             }
+            tar::EntryType::Symlink => {
+                let target = entry
+                    .link_name()
+                    .map_err(invalid)?
+                    .map(|target| target.into_owned())
+                    .unwrap_or_default();
+                let relative = output.strip_prefix(dest).unwrap_or(&output).to_owned();
+                if !link_stays_inside(&relative, &target) {
+                    return Err(HarnessError::Install(format!(
+                        "archive link {} -> {} points outside the install",
+                        path.display(),
+                        target.display()
+                    )));
+                }
+                links.push((relative, target));
+            }
             _ => {
                 return Err(HarnessError::Install(format!(
                     "archive entry {} is a link or special file",
@@ -616,7 +708,58 @@ fn unpack_tar(reader: impl Read, archive_path: &Path, dest: &Path) -> Result<(),
             }
         }
     }
+    // Links land last, so no file is ever written through one.
+    for (relative, target) in links {
+        create_link(dest, &relative, &target)?;
+    }
     Ok(())
+}
+
+fn link_stays_inside(link: &Path, target: &Path) -> bool {
+    let mut depth = link.components().count().saturating_sub(1);
+    let mut leading = true;
+    let mut any = false;
+    for component in target.components() {
+        any = true;
+        match component {
+            Component::ParentDir if leading => match depth.checked_sub(1) {
+                Some(up) => depth = up,
+                None => return false,
+            },
+            Component::Normal(_) => leading = false,
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    any
+}
+
+#[cfg(unix)]
+fn create_link(dest: &Path, relative: &Path, target: &Path) -> Result<(), HarnessError> {
+    let mut within = dest.to_path_buf();
+    for component in relative.parent().into_iter().flat_map(Path::components) {
+        within.push(component);
+        if std::fs::symlink_metadata(&within).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(HarnessError::Install(format!(
+                "archive link {} sits under another link",
+                relative.display()
+            )));
+        }
+    }
+    let link = dest.join(relative);
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::os::unix::fs::symlink(target, &link)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_link(_dest: &Path, relative: &Path, _target: &Path) -> Result<(), HarnessError> {
+    Err(HarnessError::Install(format!(
+        "archive entry {} is a link, which installs here do not support",
+        relative.display()
+    )))
 }
 
 /// archives built off-unix can lose the executable bit, and the entry spawns
@@ -674,6 +817,35 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o111, 0o111, "{name} is executable");
         }
+    }
+
+    #[tokio::test]
+    async fn a_zip_entry_cannot_write_more_than_it_declares() {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file(
+            "server",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated),
+        )
+        .unwrap();
+        zip.write_all(&vec![0; 1 << 20]).unwrap();
+        let mut bytes = zip.finish().unwrap().into_inner();
+        for (signature, offset) in [
+            ([0x50, 0x4b, 0x03, 0x04], 22),
+            ([0x50, 0x4b, 0x01, 0x02], 24),
+        ] {
+            let at = bytes.windows(4).position(|w| w == signature).unwrap() + offset;
+            bytes[at..at + 4].copy_from_slice(&10_u32.to_le_bytes());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("bomb.zip");
+        std::fs::write(&archive, bytes).unwrap();
+        let error = extract_zip(&archive, dir.path()).await.unwrap_err();
+        assert!(
+            error.to_string().contains("more than the 10 bytes"),
+            "{error}"
+        );
+        assert!(std::fs::metadata(dir.path().join("server")).unwrap().len() <= 10);
     }
 
     #[tokio::test]
@@ -880,6 +1052,7 @@ mod tests {
         assert_eq!(ArchiveKind::from_url("https://x/a.zip"), ArchiveKind::Zip);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn tar_entries_reject_traversal_links_and_special_files() {
         let regular = |name: &[u8]| {
@@ -920,9 +1093,24 @@ mod tests {
             ),
             ("absolute", regular(b"/tmp/evil"), "unsafe path"),
             (
-                "symlink",
+                "escaping symlink",
                 linked(tar::EntryType::Symlink),
-                "link or special",
+                "points outside",
+            ),
+            (
+                "absolute symlink",
+                symlinks(&[("link", "/etc/passwd")]),
+                "points outside",
+            ),
+            (
+                "symlink climbing back out",
+                symlinks(&[("link", "bin/../..")]),
+                "points outside",
+            ),
+            (
+                "symlink under a symlink",
+                symlinks(&[("a", "."), ("a/link", "..")]),
+                "under another link",
             ),
             ("hardlink", linked(tar::EntryType::Link), "link or special"),
             ("fifo", linked(tar::EntryType::Fifo), "link or special"),
@@ -939,10 +1127,51 @@ mod tests {
             assert!(error.to_string().contains(expected), "{case}: {error}");
             assert!(!root.path().join("evil").exists(), "{case}");
             assert!(
-                !dest.join("link").exists() && !dest.join("pipe").exists(),
+                std::fs::symlink_metadata(dest.join("link")).is_err()
+                    && !dest.join("pipe").exists(),
                 "{case}"
             );
         }
+
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("download.tar");
+        std::fs::write(
+            &archive,
+            tar_bytes(|builder| {
+                let mut file = tar::Header::new_gnu();
+                file.set_mode(0o755);
+                file.set_size(10);
+                builder
+                    .append_data(&mut file, "bin/harn", &b"#!/bin/sh\n"[..])
+                    .unwrap();
+                for (path, target) in [("bin/harn-dap", "harn"), ("lib/Current", "../bin")] {
+                    let mut link = tar::Header::new_gnu();
+                    link.set_entry_type(tar::EntryType::Symlink);
+                    link.set_size(0);
+                    builder.append_link(&mut link, path, target).unwrap();
+                }
+            }),
+        )
+        .unwrap();
+        extract_tar(ArchiveKind::Tar, &archive, root.path())
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("lib/Current/harn-dap")).unwrap(),
+            "#!/bin/sh\n"
+        );
+    }
+
+    #[cfg(unix)]
+    fn symlinks(links: &[(&str, &str)]) -> Vec<u8> {
+        tar_bytes(|builder| {
+            for (path, target) in links {
+                let mut header = tar::Header::new_gnu();
+                header.set_entry_type(tar::EntryType::Symlink);
+                header.set_size(0);
+                builder.append_link(&mut header, path, target).unwrap();
+            }
+        })
     }
 
     #[test]

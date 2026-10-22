@@ -8,16 +8,32 @@ Each row shows the session's status in its top-right corner:
 | --- | --- |
 | **Working** (blue, with a timer) | The agent is running. |
 | **Input** | The agent is waiting for you: a question or an approval. |
-| **Failed** | The run ended with an error. |
+| **Failed** | The run ended with an error, or your message was never delivered. |
 | **Done** | The run finished. |
+| **Queued** (amber) | Your message is waiting to be delivered. |
+| **Expired** | A side chat older than 24 hours. |
 
-An idle session shows how long ago it was active instead. **Done** and **Input** titles stay bright until you open them.
+An idle session shows how long ago it was active instead. While the agent runs background work, **Working** gives way to a count such as "2 subagents · 1 shell". **Done** and **Input** titles stay bright until you open them.
+
+A card row carries more than the title:
+
+- Above the title, the location: the project, or the device for a chat without one (when **Show > Location** is on).
+- Below the title, the branch. A chat that another chat opened shows "↳" and the name of the chat that opened it instead (see [Agents and other threads](zeron://docs/threads)).
+- On the right of that line: the pull request badge, a bot icon with the number of subagents, and a monitor icon when the chat runs on another device.
+- An amber pen and a faint amber wash mean the chat has unsent text in its composer.
 
 ## Row actions
 
-Hover a row to get its quick buttons: **Pin chat** and **Archive session**. Hover longer and a card shows the session's project, device, branch, agent and model, and any pull request.
+Hover a row to get its quick buttons: **Pin chat** and **Archive session**, plus **Settle** in Inbox mode. Hover longer and a card shows the session's project, device, branch, agent and model, which chat opened it, how many subagents are running, and any pull request. **Compact** rows have neither the **Pin chat** button nor the card: hovering shows only the archive button in place of the time.
 
-Right-click a row for the full menu: **Rename**, **Pin** or **Unpin**, **Archive**, **Copy** (the path, a Zeron conversation link, or the agent's session ID), and **Delete…**, which removes the session for good after you confirm. A mission lead's row also has **Collapse step threads** or **Expand step threads**.
+Right-click a row for the full menu: **Rename**, **Pin** or **Unpin**, **Archive**, **Copy**, and **Delete…**, which removes the session for good after you confirm. A mission lead's row also has **Collapse step threads** or **Expand step threads**. A chat that another chat opened, such as a side chat, gets only **Rename** and **Delete…**.
+
+**Copy** has:
+
+- **Path**: the chat's folder, when it is known.
+- **Zeron conversation link**: a `zeron://` link that opens this chat in Zeron. Its format is in [Command line and servers](zeron://docs/command-line).
+- **Codex conversation link**: for Codex chats, a link that opens the conversation in the Codex app.
+- **Harness session ID**: the agent's own session ID.
 
 ## Step threads
 
@@ -29,11 +45,11 @@ Double-click a row, or choose **Rename**. Type the new title, then press Enter o
 
 ## Pinning
 
-Pinned sessions sit in a **Pinned** group at the top. Pin from the hover button or the right-click menu, or drag a row into the group. Drag pinned rows to reorder them.
+Pinned sessions sit in a **Pinned** group at the top. Pin from the hover button or the right-click menu, or drag a row into the group. Drag pinned rows to reorder them, or drag one out to unpin it. You can pin up to 200 sessions. Click the **Pinned** header to collapse the group; it then shows the count.
 
 ## Archiving
 
-Archive with the hover button, the right-click menu, or Cmd+Shift+A for the open session. Archived sessions move to an **Archived** group at the bottom of the sidebar; hover one and click **Unarchive** to bring it back.
+Archive with the hover button, the right-click menu, or Cmd+Shift+A for the open session. Archived sessions move to an **Archived** group at the bottom of the sidebar; hover one and click **Unarchive** to bring it back. The group shows ten rows, then a "Show N more" row loads 25 at a time. It is hidden when **Show > Archived** is off or in Inbox mode.
 
 [Settings > Archived sessions](zeron://settings/archived) lists everything archived, with an **Unarchive** button on each row and **Delete all** to clear them permanently.
 
@@ -43,14 +59,44 @@ Archive with the hover button, the right-click menu, or Cmd+Shift+A for the open
 
 The **…** button at the sidebar's top edge (**Sidebar view options**) changes the layout:
 
-- **Organize**: **By device**, **By project**, **None**, or **Inbox**.
-- **Sort**: **Last updated**, **Created**, or **Active first**.
-- **Show**: which details each row carries, such as **Branch**, **Pull request**, and **Harness**, plus the **Project filter** and the **Archived** group.
-- **Compact**: one-line rows with a colored dot for status instead of cards.
-- **Create Section**: a named group you fill by dragging sessions in.
+- **Organize**: **By device**, **By project**, **None**, or **Inbox**. The default, **None**, lists every session under one **Sessions** header; collapsing that header also takes its rows out of Cmd+1 to Cmd+9. **By device** puts this device's group first. **By project** gives each repository one group, even when it is checked out on several devices, and puts sessions without a project in **Chats** at the top.
+- **Sort**: **Last updated** (the default) or **Created**. **Active first** is a separate check that combines with either and lifts every session showing a status (**Working**, **Input**, **Failed**, or **Done**) above idle ones; it is off by default.
+- **Show**: checkmarks for **Branch**, **Pull request**, **Harness**, **Project icon**, **Location**, **Project filter**, **Working**, and **Archived**. All are on by default except **Working**, which only applies in Inbox mode. Turning off **Pull request** also stops Zeron from looking up pull requests.
+- **Compact**: one-line rows with a status glyph instead of cards. Off by default.
+- **Create Section**: a named group you fill yourself. See Sections below.
+
+![Sidebar view options](sidebar-view-options.jpg)
+
+In Inbox mode, **Sort** and **Show > Archived** do nothing.
+
+### The project filter
+
+The filter button in the sidebar header (tooltip **Filter by project**) opens a list of your projects, with **Search projects…** at the top, **All projects** first, and **New project** at the bottom. A project with no reachable device shows a crossed-out wifi glyph. Pick a project and the session list, **Drafts**, and **Archived** show only its sessions, **By project** grouping turns into one flat list, and the button's tooltip reads **Filter:** and the project name. **Search** then reads "Search" and the project name, but the palette still searches every thread. Pick **All projects** to clear the filter; hiding the button with **Show > Project filter** clears it too. Right-click a project in the list to rename or remove it (see [Projects and worktrees](zeron://docs/projects)).
+
+## Sections
+
+Sections are named groups you build by hand. They sit under Pinned and Drafts, above the rest of your sessions.
+
+1. Open **Sidebar view options** and click **Create Section**.
+2. In the **New section** dialog, type a name (**Section name**, up to 120 characters) and click **Create section**.
+3. Drag sessions onto the section's header or into it. An empty section says "Drop sessions here".
+
+Sessions in a section keep the order you put them in, not activity order. Click the header to collapse the section. Hover the header and click its **…** (**Section options**) for:
+
+- **Edit section**: rename it, then **Save**.
+- **Archive all**: archive every session in it.
+- **Delete**: remove the section. Its sessions go back to the regular list.
+
+With two or more sections, drag a section's header to move it above or below the others.
+
+Sections and pins follow your account in a synced workspace, and stay on this device in a local one.
 
 ## Inbox shelves
 
-With **Organize** set to **Inbox**, the list splits into shelves: **Inbox** for open sessions, **Working** for running ones (when **Show > Working** is on), and **Settled** for sessions you are done with. Click a shelf's header to collapse it. A session with no activity for three days settles on its own; choose **Settle** from the hover button or right-click menu to do it now.
+With **Organize** set to **Inbox**, the list splits into shelves: **Inbox** for open sessions, **Working** for running ones (when **Show > Working** is on), and **Settled** for sessions you are done with. Click a shelf's header to collapse it. A session with no activity for three days settles on its own; choose **Settle** from the hover button or right-click menu to do it now. Sessions that are working or waiting for you never settle. On a settled row, the hover button **Un-settle** takes the place of Archive and brings it back to **Inbox**.
+
+![Sidebar in Inbox mode with a custom section](sidebar-inbox-shelves.jpg)
+
+**Settled** rows are slim one-liners: the shelf shows ten, then a "Show N more" row loads 25 at a time. The **Archived** group is hidden in this mode.
 
 > Unsent drafts wait in a **Drafts** group under Pinned. See [Start a new chat](zeron://docs/new-chat).

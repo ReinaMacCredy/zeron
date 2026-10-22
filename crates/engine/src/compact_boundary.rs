@@ -62,14 +62,6 @@ pub(crate) enum NewMessage<'a> {
     AgentNote(&'a str),
 }
 
-fn clip(text: &str) -> String {
-    if text.chars().count() <= CLIP_CHARS {
-        text.to_string()
-    } else {
-        format!("...{}", tail(text, CLIP_CHARS))
-    }
-}
-
 fn last_text(entry: &SessionMessageEntry) -> Option<&str> {
     entry.parts.iter().rev().find_map(|part| match part {
         MessagePart::Text { text, .. } if !text.trim().is_empty() => Some(text.trim()),
@@ -94,9 +86,9 @@ pub(crate) fn classifier_input(earlier: &[SessionMessageEntry], message: NewMess
     }
     let mut lines = vec!["Recent conversation:".to_string()];
     for (user, agent) in &turns[turns.len().saturating_sub(TURNS)..] {
-        lines.push(format!("user: {}", clip(user)));
+        lines.push(format!("user: {}", clip_start(user, CLIP_CHARS)));
         if let Some(agent) = agent {
-            lines.push(format!("agent: {}", clip(agent)));
+            lines.push(format!("agent: {}", clip_start(agent, CLIP_CHARS)));
         }
     }
     lines.push(String::new());
@@ -290,7 +282,7 @@ fn sender(entry: &SessionMessageEntry, chat_id: &str) -> &'static str {
     }
 }
 
-fn clip_start(text: &str, budget: usize) -> String {
+pub(crate) fn clip_start(text: &str, budget: usize) -> String {
     if text.chars().count() <= budget {
         text.to_string()
     } else {

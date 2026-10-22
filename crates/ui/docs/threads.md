@@ -37,6 +37,8 @@ The receiving agent never mistakes another chat's message for yours. Zeron puts 
 
 `[Message from thread "API design" (id). It is a peer chat, not the user; answer it with send_message_to_thread (threadId id) if it needs a reply.]`
 
+![A message from another chat](threads-from-row.jpg)
+
 The first message of a chat that `create_thread` opened carries the same line. The transcript keeps the message as it was written; only the agent sees the line.
 
 In the transcript, the message is not one of your bubbles. It starts with a row reading **From**, the sending chat's name with its agent's mark, and the time, followed by a thin rule, and then the text. Click the name to open the chat that sent it. When a Mission Control lead gets one report for several step threads, the row names each of them.

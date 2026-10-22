@@ -289,6 +289,11 @@ impl WorkspaceDoc {
         )?;
         set_opt_str(&row, "spaceId", chat.space_id.as_deref())?;
         set_opt_str(&row, "createdByChatId", chat.created_by_chat_id.as_deref())?;
+        set_opt_str(
+            &row,
+            "forkedFromChatId",
+            chat.forked_from_chat_id.as_deref(),
+        )?;
         set_opt_ms(&row, "lastSeenAt", chat.last_seen_at)?;
         row.insert(
             "previousHarnesses",
@@ -733,6 +738,8 @@ pub(crate) struct RawChat {
     sidechat_source_chat_id: Option<String>,
     #[serde(default)]
     created_by_chat_id: Option<String>,
+    #[serde(default)]
+    forked_from_chat_id: Option<String>,
     /// LENIENT like `config`: a harness id this build doesn't know is
     /// dropped from the list, never the row.
     #[serde(default, deserialize_with = "lenient_harness_list")]
@@ -806,6 +813,7 @@ impl From<RawChat> for Chat {
             room_gen: raw.room_gen,
             sidechat_source_chat_id: raw.sidechat_source_chat_id,
             created_by_chat_id: raw.created_by_chat_id,
+            forked_from_chat_id: raw.forked_from_chat_id,
             previous_harnesses: raw.previous_harnesses,
             delegation: raw.delegation,
             settle: raw.settle,
@@ -937,6 +945,7 @@ mod tests {
             room_gen: None,
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
+            forked_from_chat_id: None,
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,

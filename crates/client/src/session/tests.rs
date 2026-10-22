@@ -60,6 +60,8 @@ fn input(request_id: &str, consent: bool) -> MessagePart {
         questions: vec![question("q", consent)],
         resolved: false,
         answers: None,
+        asked_at_ms: None,
+        answered_at_ms: None,
     }
 }
 
@@ -105,7 +107,7 @@ fn generation(session: &SessionHandle, kind: &str) -> Option<Option<u64>> {
                 (SessionCommandPayload::Run { .. }, "run")
                     | (SessionCommandPayload::Steer { .. }, "steer")
                     | (SessionCommandPayload::RespondInput { .. }, "respondInput")
-                    | (SessionCommandPayload::Interrupt {}, "interrupt")
+                    | (SessionCommandPayload::Interrupt { .. }, "interrupt")
             )
         })
         .map(|command| command.computer_generation)

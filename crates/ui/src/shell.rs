@@ -92,6 +92,7 @@ mod file_mutations;
 mod files_panel;
 mod handoff;
 mod harness_updates;
+mod mission_control;
 mod mission_intro;
 mod mission_strip;
 mod navigation_focus;
@@ -303,6 +304,7 @@ const CHAT_MENU_ROW_DELETE: u8 = 4;
 const CHAT_MENU_ROW_TAB: u8 = 5;
 const CHAT_MENU_ROW_SETTLE: u8 = 9;
 const CHAT_MENU_ROW_STEPS: u8 = 10;
+const CHAT_MENU_ROW_PLAN: u8 = 11;
 
 #[derive(Clone, Copy)]
 enum TabCloseAction {
@@ -995,6 +997,7 @@ pub enum Route {
     Settings(SettingsSection),
     Terminal,
     Tasks,
+    MissionControl,
     TaskCenter,
     Supervisor,
     Docs,
@@ -1168,6 +1171,7 @@ pub enum NavEntry {
     Usage,
     Inbox,
     Tasks,
+    MissionControl,
     TaskCenter(String),
     Supervisor,
     Docs(Option<&'static str>),
@@ -2674,10 +2678,12 @@ pub struct Shell {
     _docs_search_sub: Subscription,
     inbox_page: Option<(Entity<crate::inbox::InboxPage>, Subscription)>,
     tasks_page: Option<Entity<crate::tasks::TasksPage>>,
+    mission_index: Option<(Entity<crate::tasks::MissionIndex>, Subscription)>,
     _tasks_events: Option<gpui::Subscription>,
     task_center_task: Option<String>,
     task_center: Option<(Entity<crate::tasks::TaskCenter>, Subscription)>,
     task_center_pane: Option<task_actions::DocPane>,
+    task_center_docs: Vec<String>,
     task_slide: task_actions::TaskSlide,
     mission_tree: Option<(Entity<crate::tasks::StripTree>, Subscription)>,
     closed_mission_trees: std::collections::HashSet<String>,
@@ -3206,6 +3212,7 @@ impl Shell {
             Some("usage") => Route::Usage,
             Some("inbox") => Route::Inbox,
             Some("tasks") => Route::Tasks,
+            Some("mission-control") => Route::MissionControl,
             Some("supervisor") => Route::Supervisor,
             Some(_) if open_task.is_some() => Route::TaskCenter,
             Some(route) if route == "settings" || route.starts_with("settings/") => {
@@ -3254,6 +3261,7 @@ impl Shell {
             Route::Inbox => NavEntry::Inbox,
             Route::Settings(section) => NavEntry::Settings(section),
             Route::Tasks => NavEntry::Tasks,
+            Route::MissionControl => NavEntry::MissionControl,
             Route::TaskCenter => NavEntry::TaskCenter(open_task.clone().unwrap_or_default()),
             Route::Supervisor => NavEntry::Supervisor,
             Route::Docs => NavEntry::Docs(None),
@@ -3406,10 +3414,12 @@ impl Shell {
             _docs_search_sub: docs_search_sub,
             inbox_page: None,
             tasks_page: None,
+            mission_index: None,
             _tasks_events: None,
             task_center_task: open_task.clone(),
             task_center: None,
             task_center_pane: None,
+            task_center_docs: Vec::new(),
             task_slide: task_actions::TaskSlide::resting(route),
             mission_tree: None,
             closed_mission_trees: std::collections::HashSet::new(),
@@ -8702,6 +8712,7 @@ impl Shell {
             NavEntry::Usage => self.enter_usage_route(cx),
             NavEntry::Inbox => self.enter_inbox_route(cx),
             NavEntry::Tasks => self.enter_tasks_route(cx),
+            NavEntry::MissionControl => self.enter_mission_control_route(cx),
             NavEntry::TaskCenter(task_id) => self.enter_task_center_route(task_id, cx),
             NavEntry::Supervisor => self.enter_supervisor_route(cx),
             NavEntry::Docs(article) => self.enter_docs_route(article, cx),
@@ -10501,13 +10512,16 @@ impl Shell {
         }
         if !matches!(
             self.route,
-            Route::Tasks | Route::TaskCenter | Route::PullRequests
+            Route::Tasks | Route::MissionControl | Route::TaskCenter | Route::PullRequests
         ) {
             return self.render_session_title_bar(window, cx);
         }
         self.drop_hidden_chat_action_menus(cx);
         if matches!(self.route, Route::Tasks) {
             return self.render_tasks_title_bar(cx);
+        }
+        if matches!(self.route, Route::MissionControl) {
+            return self.render_mission_control_title_bar(cx);
         }
         if matches!(self.route, Route::TaskCenter) {
             return self.render_task_center_title_bar(cx);
@@ -14331,7 +14345,10 @@ impl Shell {
         match item {
             RailItem::Home => matches!(self.route, Route::Chat | Route::Terminal),
             RailItem::Inbox => matches!(self.route, Route::Inbox),
-            RailItem::Tasks => matches!(self.route, Route::Tasks | Route::TaskCenter),
+            RailItem::Tasks => matches!(self.route, Route::Tasks),
+            RailItem::MissionControl => {
+                matches!(self.route, Route::MissionControl | Route::TaskCenter)
+            }
             RailItem::Supervisor => matches!(self.route, Route::Supervisor),
             RailItem::PullRequests => matches!(self.route, Route::PullRequests),
             RailItem::Usage => matches!(self.route, Route::Usage),
@@ -14359,6 +14376,10 @@ impl Shell {
             RailItem::Tasks => {
                 self.settings_focus_pending = false;
                 self.open_tasks(cx);
+            }
+            RailItem::MissionControl => {
+                self.settings_focus_pending = false;
+                self.open_mission_control(cx);
             }
             RailItem::Supervisor => {
                 self.settings_focus_pending = false;
@@ -15845,7 +15866,15 @@ impl Shell {
                 && !chat_id.is_empty()
                 && self.sidebar_has_step_threads(&chat_id, cx))
             .then(|| self.sidebar_lead_collapsed(&chat_id));
+            let can_plan = !chat_id.is_empty() && {
+                let state = self.state.read(cx);
+                state
+                    .chats
+                    .iter()
+                    .any(|chat| chat.id == chat_id && crate::tasks::can_add_plan(state, chat))
+            };
             let rename_id = chat_id.clone();
+            let plan_id = chat_id.clone();
             let steps_id = chat_id.clone();
             let pin_id = chat_id.clone();
             let settle_id = chat_id.clone();
@@ -15884,6 +15913,25 @@ impl Shell {
                     .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
                     .child(SharedString::from("Rename"));
                 let menu = menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_RENAME, rename, cx));
+                let menu = if can_plan {
+                    let plan =
+                        popover::menu_row(&theme, false, format!("chat-menu-plan-{chat_id}"))
+                            .id("chat-menu-plan")
+                            .debug_selector(|| "chat-menu-plan".into())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.close_chat_menu(cx);
+                                this.add_plan(&plan_id, cx);
+                            }))
+                            .child(
+                                icon(icons::MISSION_CONTROL)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(SharedString::from("Add plan"));
+                    menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_PLAN, plan, cx))
+                } else {
+                    menu
+                };
                 let menu = if is_side_chat {
                     menu
                 } else {
@@ -16496,6 +16544,10 @@ impl Shell {
 
         if matches!(self.route, Route::Tasks) {
             return self.render_tasks_page(window, cx);
+        }
+
+        if matches!(self.route, Route::MissionControl) {
+            return self.render_mission_control_page(cx);
         }
 
         if matches!(self.route, Route::TaskCenter)
@@ -19546,6 +19598,7 @@ impl Render for Shell {
                     | Route::Usage
                     | Route::Inbox
                     | Route::Tasks
+                    | Route::MissionControl
                     | Route::Supervisor
                     | Route::Docs => {}
                 }),
@@ -20100,6 +20153,7 @@ impl Render for Shell {
                             | Route::Usage
                             | Route::Inbox
                             | Route::Tasks
+                            | Route::MissionControl
                             | Route::Supervisor
                             | Route::Docs
                     )
@@ -20637,6 +20691,7 @@ mod tests {
             room_gen: None,
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
+            forked_from_chat_id: None,
             previous_harnesses: Vec::new(),
             delegation: None,
             settle: None,
@@ -23626,6 +23681,7 @@ mod exit_regressions {
                         harness_session_id: None,
                         harness_session_cwd: None,
                         created_by_chat_id: None,
+                        forked_from_chat_id: None,
                         sidechat_source_chat_id: None,
                         previous_harnesses: Vec::new(),
                         delegation: None,
@@ -24690,6 +24746,7 @@ mod right_tab_mouse_regressions {
                     room_gen: None,
                     sidechat_source_chat_id: None,
                     created_by_chat_id: None,
+                    forked_from_chat_id: None,
                     previous_harnesses: Vec::new(),
                     delegation: None,
                     settle: None,
@@ -24826,6 +24883,7 @@ mod right_tab_mouse_regressions {
                 room_gen: None,
                 sidechat_source_chat_id: None,
                 created_by_chat_id: None,
+                forked_from_chat_id: None,
                 previous_harnesses: Vec::new(),
                 delegation: None,
                 settle: None,

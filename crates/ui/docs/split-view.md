@@ -4,6 +4,8 @@ Split view shows two sessions side by side, each with its own live transcript an
 
 Open a session, then drag another session onto the conversation. You can drag a row from the sidebar, a thread row from the Cmd+K palette, or a tab from the titlebar. Two drop zones appear, **Split left** and **Split right**. Drop on one to pair the sessions on that side.
 
+![Two sessions side by side](split-view.jpg)
+
 - Dropping onto the composer instead adds a mention of that thread to your message.
 - Drafts, terminal tabs, and the session you already have open cannot be split; their drop zones dim.
 - Dropping on a side that already holds a session replaces it. Dropping one half onto the other side swaps them.

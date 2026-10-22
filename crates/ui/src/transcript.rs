@@ -2134,6 +2134,7 @@ pub fn rows_for_entry(
                         questions,
                         resolved,
                         answers,
+                        ..
                     } if questions.iter().any(|question| {
                         matches!(
                             question.kind,
@@ -2199,6 +2200,7 @@ pub fn rows_for_entry(
                         questions,
                         resolved,
                         answers,
+                        ..
                     } if consent_question(questions).is_some() => {
                         let question = consent_question(questions).expect("guarded");
                         let outcome = consent_outcome(*resolved, answers.as_deref());
@@ -2746,10 +2748,13 @@ pub(crate) fn shimmer_label(
     // line through narrow moving clips, which is the native equivalent of
     // CSS `background-clip: text` without duplicating accessible text.
     let overlay_text = text.clone();
-    let overlay_font = gpui::font(font_family);
     let overlay = canvas(
         move |bounds, window, _| {
-            let font_size = font_size.to_pixels(window.rem_size());
+            // Shape from the inherited style: a font rebuilt from the family dropped the weight.
+            let style = window.text_style();
+            let overlay_font = style.font();
+            let font_size = style.font_size.to_pixels(window.rem_size());
+            let line_height = style.line_height_in_pixels(window.rem_size());
             let probe = window.text_system().shape_line(
                 overlay_text.clone(),
                 font_size,
@@ -2789,9 +2794,9 @@ pub(crate) fn shimmer_label(
                 );
                 strips.push((left, right, line));
             }
-            strips
+            (strips, line_height)
         },
-        move |bounds, strips, window, cx| {
+        move |bounds, (strips, line_height), window, cx| {
             for (left, right, line) in strips {
                 let mask = ContentMask {
                     bounds: Bounds {
@@ -2802,7 +2807,7 @@ pub(crate) fn shimmer_label(
                 window.with_content_mask(Some(mask), |window| {
                     let _ = line.paint(
                         bounds.origin,
-                        line_height.unwrap_or(bounds.size.height),
+                        line_height,
                         TextAlign::Left,
                         None,
                         window,
@@ -2818,6 +2823,9 @@ pub(crate) fn shimmer_label(
         .relative()
         .min_w_0()
         .overflow_hidden()
+        .font_family(font_family)
+        .text_size(font_size)
+        .when_some(line_height, |el, height| el.line_height(height))
         .child(text)
         .child(overlay)
 }
@@ -11075,11 +11083,13 @@ impl Transcript {
                         ))
                         .children(tokens.map(|tokens| field("Tokens", tokens))),
                 )
-                .child(
-                    div()
-                        .text_color(theme.text_muted)
-                        .child("Sent to the classifier"),
-                )
+                .child(div().text_color(theme.text_muted).child(
+                    if matches!(record.decided_by, DecidedBy::Stage1 | DecidedBy::Stage2) {
+                        "Sent to the classifier"
+                    } else {
+                        "Not sent: decided without asking"
+                    },
+                ))
                 .child(mono_box("input", &record.input, theme.border))
                 .child(match record.stage2_reply.as_deref() {
                     None => div()
@@ -16968,6 +16978,7 @@ mod tests {
                 room_gen: None,
                 sidechat_source_chat_id: None,
                 created_by_chat_id: None,
+                forked_from_chat_id: None,
                 previous_harnesses: Vec::new(),
                 delegation: None,
                 settle: None,
@@ -22474,6 +22485,8 @@ mod computer_tests {
             }],
             resolved,
             answers,
+            asked_at_ms: None,
+            answered_at_ms: None,
         }
     }
 
@@ -22507,6 +22520,8 @@ mod computer_tests {
                     labels: vec![label.into()],
                 }]
             }),
+            asked_at_ms: None,
+            answered_at_ms: None,
         }
     }
 
@@ -22617,6 +22632,8 @@ mod computer_tests {
             }],
             resolved,
             answers: None,
+            asked_at_ms: None,
+            answered_at_ms: None,
         };
         assert!(shows_protected_surface(
             &rows(vec![question(false)]),

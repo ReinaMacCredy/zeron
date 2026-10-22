@@ -4,14 +4,20 @@ Agents sometimes stop to ask you something: a question about the task, or permis
 
 When the agent in the open chat asks, a question panel takes the place of the composer. It shows the question, numbered options, and a text box. With several questions, a counter shows which one you are on.
 
+![Answering an agent's question](agent-questions-panel.jpg)
+
 - Click an option, or press its number (1 to 9). A single-choice question moves on by itself.
 - A question marked **Select one or more options.** lets you pick several before you continue.
 - To answer in your own words, type in the text box instead. Typed text replaces the picked options.
-- Click **Next**, or **Submit** on the last question. Enter does the same. With the text box empty, Escape goes back a question.
+- Click **Next**, or **Submit** on the last question. Enter does the same. From the second question on, **Back** returns to the one before; with the text box empty, Escape does the same.
+
+OpenCode's questions use this panel too. OpenCode 2 asks through a form in its session, and Zeron shows that form here as ordinary questions, single-choice or multiple-choice.
 
 ## Questions from other chats
 
 When an agent in another chat is waiting, a pill appears above the main composer with that chat's name and **Input**, or the number of waiting questions. Click it to open the tray and answer without leaving your chat. **Open thread** jumps to the chat that asked. Closing the tray keeps your picks and text for later.
+
+![A question from another chat](agent-questions-pill.jpg)
 
 ## Approvals and permission modes
 

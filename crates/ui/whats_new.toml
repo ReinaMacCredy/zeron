@@ -8,17 +8,17 @@ hero = "mission-control.jpg"
 
 [[entry.features]]
 id = "mission-control"
-title = "Mission Control runs a task as a plan"
-description = "A lead agent breaks a task into steps and runs each one on its own thread. Approve the plan, edit steps, and follow every step from the mission strip."
+title = "Mission Control follows every agent tree"
+description = "Mission Control in the rail lists every chat that started other agents, and every mission, with who asks you at any depth. Add a plan to any chat and its lead breaks the work into steps you approve, edit and follow, each on its own thread."
 image = "mission-control.jpg"
-details = "Press Shift+Tab in the composer to start a mission, or make a running chat its lead. The Missions widget on Home tracks them all."
+details = "Press Shift+Tab in the composer to start a mission, or click Add plan on a chat you already have; the threads it started become its agents. The Missions widget on Home tracks every mission."
 
 [[entry.features]]
 id = "supervisor"
-title = "A Supervisor that watches your missions"
-description = "It wakes when a step fails, a lead asks, or two missions want the same port, and brings you only what needs you."
+title = "A Supervisor that watches your missions and trees"
+description = "It wakes when a step fails, a thread asks, or two missions want the same port, and brings you only what needs you. Click Watch on any tree to add it, or turn on Watch everything."
 image = "supervisor.jpg"
-details = "Answer from one feed, see what each nudge changed, and set what it may do on its own behind the gear."
+details = "Each mission's decisions form one sheet: pick your answers and one Send takes them all to the lead. Behind the gear, Decide for me lets it answer and approve plans for you, and a second switch lets it change a mission's goal or spend."
 
 [[entry.features]]
 id = "add-provider"
@@ -34,9 +34,14 @@ description = "A classifier reads each message and compacts first when you chang
 details = "Agents can compact themselves, and a switch keeps missions out. Asking to commit, push or merge work that just finished runs it at once instead of compacting first."
 
 [[entry.features]]
+id = "supervisor-stalls"
+title = "The Supervisor notices work that stalled"
+description = "In what it watches, it wakes when a question waits 20 minutes, a finished turn leaves files uncommitted or a branch unmerged, a thread stays idle after its limit reset or a lost report, or a merge is held back by another chat's files."
+
+[[entry.features]]
 id = "child-report-back"
 title = "Child agents report back with their answer"
-description = "When a delegated thread or a step finishes, the wake quotes its reply, and steps that finish together arrive as one message."
+description = "When a delegated thread or a step finishes, the wake quotes its reply, and steps that finish together arrive as one message. When you write to a running child yourself, its parent hears what you said."
 
 [[entry.features]]
 id = "in-app-docs"
@@ -50,14 +55,16 @@ description = "Drag unstarted steps into a new order, right-click a step for its
 
 [[entry.features]]
 id = "mission-tree"
-title = "Follow a mission as a tree"
-description = "The lead's strip draws each step on a branch as it starts, and Mission Control lays the steps around a spine with each step's token count. Click a step to open its thread in a drawer."
-details = "The Supervisor's mission cards use the same tree."
+title = "Spine, Outline and Timeline"
+description = "A tree's page shows its threads at any depth as cards around a spine, as an outline with the selected thread live beside it, or as a timeline of who ran when and who waited on whom. New threads rise in live."
+image = "mission-tree.jpg"
+details = "The lead's strip and the Supervisor's cards use the same tree. A step with no thread yet opens Mission Control on that step."
 
 [[entry.features]]
 id = "task-card-context"
 title = "Start a task where it belongs"
 description = "A task's card starts it in a new chat, hands it to an existing thread, or runs it as a mission. Give a mission up to five chats to read, and its lead reads them before it plans."
+image = "task-card-context.jpg"
 
 [[entry.features]]
 id = "fold-mission-threads"

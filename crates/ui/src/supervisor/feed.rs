@@ -6,7 +6,7 @@ use zeron_proto::supervisor::{
     SharedResource, SupervisorIntervention, SupervisorSnapshot,
 };
 
-use super::{no_effect_yet, row_key};
+use super::{no_effect_yet, row_key, row_origin};
 
 pub(crate) const OPEN_HOURS: i64 = 24;
 const MEMORY_ROWS: usize = 50;
@@ -26,15 +26,6 @@ impl Kind {
             kinds.push(Kind::Resource);
         }
         kinds
-    }
-
-    pub(crate) fn tag(self) -> &'static str {
-        match self {
-            Kind::Needs => "Needs you",
-            Kind::Question => "Question",
-            Kind::Intervention => "Intervention",
-            Kind::Resource => "Resource",
-        }
     }
 
     pub(crate) fn chip(self) -> &'static str {
@@ -116,6 +107,66 @@ impl Feed {
             })
             .chain(self.declared.iter().map(move |row| (2, row, declared)))
     }
+}
+
+pub(crate) fn task_of(entry: &Entry) -> Option<&str> {
+    match entry {
+        Entry::Needs(row) | Entry::Answered(Answered { row, .. }) => row_origin(row).0,
+        Entry::Question(question) => Some(&question.task_id),
+        Entry::Intervention(intervention) => intervention.task_id.as_deref(),
+        Entry::Resource(_) => None,
+    }
+}
+
+pub(crate) struct Group<'a> {
+    pub task: Option<&'a str>,
+    pub rows: Vec<&'a Row>,
+}
+
+impl Group<'_> {
+    pub(crate) fn key(&self) -> String {
+        self.task.unwrap_or_default().to_owned()
+    }
+}
+
+pub(crate) fn grouped<'a>(rows: impl IntoIterator<Item = &'a Row>) -> Vec<Group<'a>> {
+    let mut groups: Vec<Group<'a>> = Vec::new();
+    for row in rows {
+        let task = task_of(&row.entry);
+        match groups.iter_mut().find(|group| group.task == task) {
+            Some(group) => group.rows.push(row),
+            None => groups.push(Group {
+                task,
+                rows: vec![row],
+            }),
+        }
+    }
+    for group in &mut groups {
+        group.rows.sort_by(|a, b| {
+            (a.kind != Kind::Needs, std::cmp::Reverse(a.at), &a.key).cmp(&(
+                b.kind != Kind::Needs,
+                std::cmp::Reverse(b.at),
+                &b.key,
+            ))
+        });
+    }
+    let needs = |group: &Group| group.rows.iter().any(|row| row.kind == Kind::Needs);
+    let newest = |group: &Group| group.rows.iter().map(|row| row.at).max();
+    groups.sort_by(|a, b| {
+        (
+            !needs(a),
+            a.task.is_none(),
+            std::cmp::Reverse(newest(a)),
+            a.task,
+        )
+            .cmp(&(
+                !needs(b),
+                b.task.is_none(),
+                std::cmp::Reverse(newest(b)),
+                b.task,
+            ))
+    });
+    groups
 }
 
 pub(crate) fn needs_at(row: &NeedsYouRow) -> DateTime<Utc> {
@@ -408,9 +459,11 @@ mod tests {
             target: Some("lead".into()),
             message_id: Some("m".into()),
             request_id: None,
+            item: None,
             text: "Use the mock.".into(),
             trigger: None,
             chips,
+            approval: None,
         }
     }
 
@@ -654,6 +707,74 @@ mod tests {
                 .iter()
                 .any(|row| row.kind == Kind::Resource)
         );
+    }
+
+    #[test]
+    fn open_rows_group_by_mission_with_needs_first_and_the_shared_bucket_after_missions() {
+        let now = Utc::now();
+        let on = |row: NeedsYouRow, task: Option<&str>| match row {
+            NeedsYouRow::Item(mut item) => {
+                item.task_id = task.map(str::to_owned);
+                NeedsYouRow::Item(item)
+            }
+            other => other,
+        };
+        let mut quiet = intervention(
+            "quiet",
+            minutes(now, 1),
+            InterventionKind::Send,
+            vec![InterventionChip::Sent],
+        );
+        quiet.task_id = Some("quiet".into());
+        let snapshot = SupervisorSnapshot {
+            needs_you: vec![
+                on(item("old", minutes(now, 30)), Some("a")),
+                on(item("shared", minutes(now, 1)), None),
+                on(item("b", minutes(now, 5)), Some("b")),
+                on(item("new", minutes(now, 2)), Some("a")),
+            ],
+            interventions: vec![
+                intervention(
+                    "i",
+                    minutes(now, 0),
+                    InterventionKind::Send,
+                    vec![InterventionChip::Sent],
+                ),
+                quiet,
+            ],
+            ..Default::default()
+        };
+        let first = feed(&snapshot, &Memory::default(), now);
+        let groups: Vec<(Option<&str>, Vec<&str>)> = grouped(&first.open)
+            .into_iter()
+            .map(|group| (group.task, keys_of(&group.rows)))
+            .collect();
+        assert_eq!(
+            groups,
+            vec![
+                (Some("a"), vec!["item:new", "item:old"]),
+                (Some("b"), vec!["item:b"]),
+                (None, vec!["item:shared"]),
+                (Some("task"), vec!["intervention:i"]),
+                (Some("quiet"), vec!["intervention:quiet"]),
+            ]
+        );
+        let mut snapshot = snapshot;
+        snapshot.interventions[0].task_id = Some("a".into());
+        let second = feed(&snapshot, &Memory::default(), now);
+        let a = grouped(&second.open)
+            .into_iter()
+            .find(|group| group.task == Some("a"))
+            .map(|group| keys_of(&group.rows));
+        assert_eq!(
+            a,
+            Some(vec!["item:new", "item:old", "intervention:i"]),
+            "a mission's decisions come before its updates, however new the update"
+        );
+    }
+
+    fn keys_of<'a>(rows: &[&'a Row]) -> Vec<&'a str> {
+        rows.iter().map(|row| row.key.as_str()).collect()
     }
 
     #[test]

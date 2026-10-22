@@ -153,6 +153,9 @@ impl Shell {
     fn on_supervisor_event(&mut self, event: &SupervisorEvent, cx: &mut Context<Self>) {
         match event {
             SupervisorEvent::OpenTaskCenter(task_id) => self.open_task_center(task_id.clone(), cx),
+            SupervisorEvent::OpenMission(task_id, selection) => {
+                self.open_mission(task_id.clone(), selection.clone(), cx)
+            }
             SupervisorEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             SupervisorEvent::WatchDoc(doc) => self.set_supervisor_doc(doc.clone(), cx),
             SupervisorEvent::Discuss(text) => self.discuss_with_supervisor(text.clone(), cx),
@@ -177,7 +180,13 @@ impl Shell {
         let (task_id, raiser) = crate::supervisor::row_origin(row);
         match self.route {
             Route::Supervisor => true,
-            Route::TaskCenter => task_id.is_some() && self.task_center_task.as_deref() == task_id,
+            Route::TaskCenter => {
+                let state = self.state.read(cx);
+                task_id.is_some_and(|task_id| {
+                    self.task_center_task.as_deref()
+                        == Some(super::task_actions::tree_key(state, task_id).as_str())
+                })
+            }
             Route::Chat => self.state.read(cx).selected_chat.as_deref() == Some(raiser),
             _ => false,
         }

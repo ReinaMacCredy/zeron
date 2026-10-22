@@ -5,6 +5,7 @@ use crate::{UserInputAnswer, UserInputQuestion};
 
 pub const CHAT_PREFIX: &str = "supervisor-";
 pub const CHAT_TITLE: &str = "Supervisor";
+pub const WAKES_PER_HOUR: usize = 12;
 
 pub fn is_supervisor_chat(chat_id: &str) -> bool {
     chat_id.starts_with(CHAT_PREFIX)
@@ -22,6 +23,14 @@ pub enum SupervisorEventKind {
     PlanEdited,
     Resource,
     Heartbeat,
+    NodeFailed,
+    NodeFinished,
+    QuestionWaiting,
+    Dirty,
+    Unmerged,
+    LimitIdle,
+    LostWake,
+    MergeBlocked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +44,8 @@ pub struct SupervisorEventSummary {
     pub step_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_chat_id: Option<String>,
     pub label: String,
     pub at: DateTime<Utc>,
 }
@@ -102,6 +113,25 @@ pub enum Raiser {
 pub struct ItemAnswer {
     pub at: DateTime<Utc>,
     pub choice: String,
+    /// Set when the Supervisor decided; a `choice` that differs is the person's correction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<SupervisorChoice>,
+}
+
+impl ItemAnswer {
+    pub fn corrected(&self) -> bool {
+        self.supervisor
+            .as_ref()
+            .is_some_and(|decided| decided.choice != self.choice)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupervisorChoice {
+    pub at: DateTime<Utc>,
+    pub choice: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +159,7 @@ pub enum InputAsker {
     Lead,
     Step,
     Supervisor,
+    Thread,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -192,6 +223,9 @@ pub enum InterventionKind {
     Start,
     Pause,
     Resume,
+    Decide,
+    Approve,
+    Goal,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +236,19 @@ pub enum InterventionTrigger {
         wake_id: String,
     },
     Person,
+}
+
+/// A Supervisor plan approval reaches the lead at `starts_at`, so the person can take it back first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "state",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum PlanApproval {
+    Held { starts_at: DateTime<Utc> },
+    Sent,
+    TakenBack { at: DateTime<Utc> },
 }
 
 /// Step numbers are 1-based, in the plan's order.
@@ -237,6 +284,29 @@ pub struct SupervisorIntervention {
     pub trigger: Option<InterventionTrigger>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chips: Vec<InterventionChip>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<SupervisorItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<PlanApproval>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NextCheckKind {
+    MissionSilent,
+    LeadSilent,
+    Heartbeat,
+    HeldWake,
+    Resource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NextCheck {
+    pub at: DateTime<Utc>,
+    pub kind: NextCheckKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -247,10 +317,16 @@ pub struct SupervisorSnapshot {
     pub state: SupervisorState,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub waiting: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_check: Option<NextCheck>,
     #[serde(default)]
     pub wakes: Vec<SupervisorWake>,
     #[serde(default)]
     pub unwatched: Vec<String>,
+    #[serde(default)]
+    pub watched_roots: Vec<String>,
+    #[serde(default)]
+    pub watch_everything: bool,
     #[serde(default)]
     pub needs_you: Vec<NeedsYouRow>,
     #[serde(default)]
@@ -394,6 +470,8 @@ pub struct SupervisorSettings {
     pub pause_steps: bool,
     pub start_missions: bool,
     pub heartbeat_minutes: u32,
+    pub decide_for_me: bool,
+    pub goal_and_spend: bool,
 }
 
 impl Default for SupervisorSettings {
@@ -404,6 +482,21 @@ impl Default for SupervisorSettings {
             pause_steps: true,
             start_missions: false,
             heartbeat_minutes: 0,
+            decide_for_me: false,
+            goal_and_spend: false,
         }
+    }
+}
+
+impl SupervisorSettings {
+    pub fn decides(&self, why: ItemWhy) -> bool {
+        match why {
+            ItemWhy::Decision => self.decide_for_me,
+            ItemWhy::Goal | ItemWhy::Spend => self.goal_and_spend,
+        }
+    }
+
+    pub fn full_authority(&self) -> bool {
+        self.decide_for_me || self.goal_and_spend
     }
 }

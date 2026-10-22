@@ -684,6 +684,8 @@ fn consent_part(request_id: &str) -> MessagePart {
         }],
         resolved: false,
         answers: None,
+        asked_at_ms: None,
+        answered_at_ms: None,
     }
 }
 

@@ -325,6 +325,18 @@ impl Shell {
                     }),
                 ),
             )
+            .child(
+                help_row(
+                    theme,
+                    "help-mission-intro",
+                    icons::MISSION_CONTROL,
+                    "Mission Control intro",
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.close_help_menu(cx);
+                    this.reopen_mission_intro(cx);
+                })),
+            )
             .into_any_element();
         trigger
             .child(popover::anchored_menu_right(

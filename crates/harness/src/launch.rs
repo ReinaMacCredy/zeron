@@ -23,6 +23,12 @@ impl LaunchOverrides {
     pub(crate) fn home_or(&self, variable: &str, fallback: PathBuf) -> PathBuf {
         self.home
             .clone()
+            .or_else(|| {
+                self.env
+                    .get(variable)
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+            })
             .unwrap_or_else(|| crate::model_context::root(variable, fallback))
     }
 }

@@ -1,4 +1,6 @@
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
@@ -9,13 +11,13 @@ use gpui::{
     Window, div, prelude::*, px, relative,
 };
 use zeron_proto::{
-    ChatIndicator, DelegationStatus, PlanProgress, StepOutcome, StepStatus, TaskPatch, TaskStatus,
+    ChatIndicator, DelegationStatus, PlanProgress, StepOutcome, StepStatus, TaskPatch,
     TaskStepPatch,
 };
 
 use super::images::{self, ImageGallery};
 use super::morph::{self, Key, Painted};
-use super::{Rollup, StepRow, chat_brand, column_tone, linked_chat, rollup, step_chat};
+use super::{Rollup, StepRow, chat_brand, linked_chat, rollup, step_chat};
 use crate::attachments;
 use crate::composer::{Composer, ComposerInput, ComposerInputEvent, Submit};
 use crate::icons::{self, icon};
@@ -27,10 +29,16 @@ use crate::theme::Theme;
 use crate::transcript::Transcript;
 use crate::typography::ui_rems;
 
+mod outline;
 mod spine;
+mod timeline;
+mod view_morph;
+mod watch_sheet;
 
-const PROGRESS_FILL: MotionSpec = MotionSpec::new(500, motion::EASE_DRAWER);
 const EDIT_GROW: MotionSpec = MotionSpec::new(280, motion::EASE_DRAWER);
+const EDIT_LEAVE: MotionSpec = MotionSpec::new(220, motion::EASE_DRAWER);
+const EDIT_FADE: MotionSpec = MotionSpec::new(150, motion::LINEAR);
+const KIND_FADE: MotionSpec = MotionSpec::new(260, motion::EASE);
 
 pub enum TaskCenterEvent {
     Update {
@@ -38,6 +46,7 @@ pub enum TaskCenterEvent {
         patch: TaskPatch,
     },
     ApprovePlan(String),
+    TakeBackApproval(String),
     RetryStep(String),
     UpdateStep {
         step_id: String,
@@ -49,6 +58,23 @@ pub enum TaskCenterEvent {
         approve: bool,
     },
     OpenChat(String),
+    OpenNative {
+        parent_chat_id: String,
+        doc_id: String,
+        title: String,
+        frozen: bool,
+    },
+    AddPlan(String),
+    Watch {
+        root: String,
+        task_id: Option<String>,
+        on: bool,
+    },
+    OpenSupervisor,
+    Settle {
+        chat_id: String,
+        settled: bool,
+    },
     Selected,
     Back,
 }
@@ -80,6 +106,7 @@ pub struct PlanStepEdit {
 pub enum Selection {
     Lead,
     Step(String),
+    Node(String),
 }
 
 pub struct LiveThread {
@@ -278,8 +305,21 @@ struct Editor {
     started: bool,
     from: f32,
     grow: Tween,
+    fade: Tween,
     uploads: Vec<gpui::Task<()>>,
     _subscriptions: Vec<Subscription>,
+}
+
+enum Ask {
+    Loading { _fetch: gpui::Task<()> },
+    Ready(Vec<String>),
+}
+
+struct Leave {
+    step: String,
+    from: f32,
+    grow: Tween,
+    fade: Tween,
 }
 
 pub struct StepDragPayload {
@@ -326,9 +366,15 @@ struct StepActions {
     remove: bool,
 }
 
+#[derive(Clone)]
+enum MenuFor {
+    Step(StepActions),
+    Mission { lead: Option<String> },
+}
+
 struct StepMenu {
     position: Point<Pixels>,
-    actions: StepActions,
+    of: MenuFor,
 }
 
 #[derive(Clone, Copy)]
@@ -340,6 +386,8 @@ enum MenuAction {
     Down,
     Outcome,
     Remove,
+    OpenLead,
+    FoldSteps,
 }
 
 struct Thread {
@@ -351,15 +399,15 @@ struct Thread {
 
 pub struct TaskCenter {
     state: Entity<AppState>,
-    task_id: String,
+    key: String,
     selected: Selection,
     draft: Draft,
     sent: Option<Draft>,
-    expanded: HashSet<String>,
+    expanded: HashMap<String, spine::Spec>,
     editor: Option<Editor>,
+    leaving: Option<Leave>,
     add: Entity<ComposerInput>,
     live: Option<LiveThread>,
-    fill: Option<Tween>,
     tree: super::tree::TreeMotion,
     stats: super::tree::StatsCache,
     drawer: Tween,
@@ -372,12 +420,22 @@ pub struct TaskCenter {
     painted: Painted,
     scroll: ScrollHandle,
     menu: popover::Popup<StepMenu>,
+    watch: popover::Popup<()>,
+    watch_focus: FocusHandle,
+    kind: Option<(bool, Tween)>,
+    authority: popover::Loadable<zeron_proto::supervisor::SupervisorSettings>,
+    authority_task: Option<gpui::Task<()>>,
     drag: Option<StepDrag>,
     press: f32,
     gallery: Entity<ImageGallery>,
     picking: Option<gpui::Task<()>>,
+    clock: Option<(Instant, gpui::Task<()>)>,
+    asks: HashMap<String, Ask>,
     focus: FocusHandle,
     shimmer_since: Instant,
+    outline: Option<(String, Entity<super::StripTree>, Subscription)>,
+    runs: timeline::RunsCache,
+    views: view_morph::ViewMorph,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -390,7 +448,7 @@ impl Focusable for TaskCenter {
 }
 
 impl TaskCenter {
-    pub fn new(state: Entity<AppState>, task_id: String, cx: &mut Context<Self>) -> Self {
+    pub fn new(state: Entity<AppState>, key: String, cx: &mut Context<Self>) -> Self {
         let add = cx.new(|cx| {
             ComposerInput::new("Add a step", cx)
                 .with_single_line()
@@ -402,21 +460,25 @@ impl TaskCenter {
             }
         });
         let state_changes = cx.observe(&state, |_, _, cx| cx.notify());
+        let settings_changes =
+            cx.observe_global::<crate::settings::SettingsStore>(|_, cx| cx.notify());
         let gallery = cx.new(|cx| ImageGallery::new(state.clone(), cx));
         Self {
             gallery,
             picking: None,
+            clock: None,
+            asks: HashMap::new(),
             state,
-            task_id,
+            key,
             selected: Selection::Lead,
             draft: Draft::default(),
             sent: None,
-            expanded: HashSet::new(),
+            expanded: HashMap::new(),
             editor: None,
+            leaving: None,
             add,
             live: None,
-            fill: None,
-            tree: Default::default(),
+            tree: super::tree::TreeMotion::solid(),
             stats: Default::default(),
             drawer: Tween::at(0.0, Instant::now()),
             drawer_open: false,
@@ -428,16 +490,108 @@ impl TaskCenter {
             painted: Painted::default(),
             scroll: ScrollHandle::new(),
             menu: popover::Popup::default(),
+            watch: popover::Popup::default(),
+            watch_focus: cx.focus_handle(),
+            kind: None,
+            authority: popover::Loadable::Idle,
+            authority_task: None,
             drag: None,
             press: 0.0,
             focus: cx.focus_handle(),
             shimmer_since: Instant::now(),
-            _subscriptions: vec![add_events, state_changes],
+            outline: None,
+            runs: Default::default(),
+            views: Default::default(),
+            _subscriptions: vec![add_events, state_changes, settings_changes],
         }
     }
 
-    pub fn task_id(&self) -> &str {
-        &self.task_id
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    fn sync_kind(&mut self, mission: bool, reduced: bool, now: Instant) -> bool {
+        match &mut self.kind {
+            Some((was, tween)) if *was != mission => {
+                *was = mission;
+                *tween = Tween::at(0.0, now);
+                tween.retarget(1.0, KIND_FADE, reduced, now);
+            }
+            Some(_) => {}
+            None => self.kind = Some((mission, Tween::at(1.0, now))),
+        }
+        self.kind
+            .as_ref()
+            .is_some_and(|(_, tween)| !tween.settled_at(now))
+    }
+
+    fn kind_badge(&self, theme: &Theme, now: Instant) -> AnyElement {
+        let Some((mission, tween)) = &self.kind else {
+            return super::tree::kind_badge(false, theme);
+        };
+        let t = tween.value_at(now);
+        if tween.settled_at(now) {
+            return super::tree::kind_badge(*mission, theme);
+        }
+        div()
+            .relative()
+            .flex_none()
+            .child(
+                div()
+                    .opacity(t)
+                    .child(super::tree::kind_badge(*mission, theme)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .opacity(1.0 - t)
+                    .child(super::tree::kind_badge(!*mission, theme)),
+            )
+            .into_any_element()
+    }
+
+    /// The page key is a task id from before trees, or a root chat id; a key that names a
+    /// task keeps that task even once it is done.
+    pub(crate) fn resolve<'a>(
+        &self,
+        state: &'a AppState,
+    ) -> (Option<&'a str>, Option<&'a zeron_proto::Task>) {
+        match state
+            .tasks
+            .iter()
+            .find(|task| task.id == self.key && !task.deleted)
+        {
+            Some(task) => (task.chat_id.as_deref(), Some(task)),
+            None => (
+                state
+                    .chats
+                    .iter()
+                    .find(|chat| chat.id == self.key)
+                    .map(|chat| chat.id.as_str()),
+                super::plan_led_by(&state.tasks, &self.key),
+            ),
+        }
+    }
+
+    pub fn title(&self, cx: &App) -> Option<String> {
+        let state = self.state.read(cx);
+        match self.resolve(state) {
+            (_, Some(task)) => Some(task.title.clone()),
+            (Some(root), None) => state
+                .chats
+                .iter()
+                .find(|chat| chat.id == root)
+                .map(|chat| crate::transcript::single_line(&crate::home::chat_title(chat))),
+            (None, None) => None,
+        }
+    }
+
+    pub(super) fn plan_id(&self, cx: &App) -> Option<String> {
+        self.resolve(self.state.read(cx))
+            .1
+            .map(|task| task.id.clone())
     }
 
     pub fn select(&mut self, selection: Selection, cx: &mut Context<Self>) {
@@ -450,20 +604,26 @@ impl TaskCenter {
 
     pub fn live_target(&self, cx: &App) -> Option<String> {
         let state = self.state.read(cx);
-        let task = state
-            .tasks
-            .iter()
-            .find(|task| task.id == self.task_id && !task.deleted)?;
-        if let Selection::Step(id) = &self.selected
-            && let Some(chat) = state
-                .task_steps
-                .iter()
-                .find(|step| &step.id == id && !step.deleted)
-                .and_then(|step| step_chat(&state.chats, step))
-        {
-            return Some(chat.id.clone());
+        let (root, _) = self.resolve(state);
+        match &self.selected {
+            Selection::Step(id) => {
+                if let Some(chat) = state
+                    .task_steps
+                    .iter()
+                    .find(|step| &step.id == id && !step.deleted)
+                    .and_then(|step| step_chat(&state.chats, step))
+                {
+                    return Some(chat.id.clone());
+                }
+            }
+            Selection::Node(id) => {
+                if let Some(chat) = state.chats.iter().find(|chat| &chat.id == id) {
+                    return Some(chat.id.clone());
+                }
+            }
+            Selection::Lead => {}
         }
-        linked_chat(&state.chats, task).map(|chat| chat.id.clone())
+        root.map(str::to_owned)
     }
 
     pub fn live_chat_id(&self) -> Option<&str> {
@@ -494,10 +654,8 @@ impl TaskCenter {
 
     fn task_and_plan(&self, cx: &App) -> Option<(zeron_proto::Task, Rollup)> {
         let state = self.state.read(cx);
-        state
-            .tasks
-            .iter()
-            .find(|task| task.id == self.task_id && !task.deleted)
+        self.resolve(state)
+            .1
             .map(|task| (task.clone(), rollup(state, task, Utc::now())))
     }
 
@@ -544,7 +702,8 @@ impl TaskCenter {
         let title = matches!(target, EditTarget::Step(_)).then(|| {
             cx.new(|cx| {
                 let mut input = ComposerInput::new("Step title", cx)
-                    .with_single_line()
+                    .with_wrapping()
+                    .with_text_metrics(13.0, 18.0)
                     .with_max_chars(zeron_doc::TASK_TITLE_MAX_CHARS);
                 input.set_text(text.title.clone(), cx);
                 input
@@ -557,6 +716,9 @@ impl TaskCenter {
         let body = cx.new(|cx| {
             let mut input =
                 ComposerInput::new(placeholder, cx).with_max_chars(zeron_doc::TASK_NOTES_MAX_CHARS);
+            if matches!(target, EditTarget::Step(_)) {
+                input = input.with_text_metrics(12.5, 18.0);
+            }
             input.set_text(text.notes, cx);
             input
         });
@@ -589,23 +751,32 @@ impl TaskCenter {
         };
         let focus = title.as_ref().unwrap_or(&body).focus_handle(cx);
         window.focus(&focus, cx);
-        if let EditTarget::Step(id) = &target {
-            self.expanded.insert(id.clone());
-        }
-        let key = match &target {
-            EditTarget::Overview => Key::Overview,
-            EditTarget::Step(id) => Key::Task(id.clone()),
-        };
-        let from = {
-            let mut painted = self.painted.borrow_mut();
-            painted.remove(&Key::Editor);
-            painted
-                .get(&key)
-                .map_or(0.0, |rect| f32::from(rect.size.height))
-        };
         let now = Instant::now();
-        let mut grow = Tween::at(0.0, now);
-        grow.retarget(1.0, EDIT_GROW, motion::reduced_motion(cx), now);
+        let reduced = motion::reduced_motion(cx);
+        let from = match &target {
+            EditTarget::Overview => {
+                let mut painted = self.painted.borrow_mut();
+                painted.remove(&Key::Editor);
+                painted
+                    .get(&Key::Overview)
+                    .map_or(0.0, |rect| f32::from(rect.size.height))
+            }
+            EditTarget::Step(id) => {
+                let from = self.last_region(id);
+                self.leaving = self.leaving.take().filter(|leave| &leave.step != id);
+                self.open_spec(id, true, reduced, now);
+                if let Some(spec) = self.expanded.get_mut(id) {
+                    spec.fold.tween = Tween::at(1.0, now);
+                    spec.edit.set(0.0);
+                }
+                from
+            }
+        };
+        let run = |spec: MotionSpec| {
+            let mut tween = Tween::at(0.0, now);
+            tween.retarget(1.0, spec, reduced, now);
+            tween
+        };
         self.editor = Some(Editor {
             target,
             title,
@@ -613,7 +784,8 @@ impl TaskCenter {
             images: text.images,
             started,
             from,
-            grow,
+            grow: run(EDIT_GROW),
+            fade: run(EDIT_FADE),
             uploads: Vec::new(),
             _subscriptions: subscriptions,
         });
@@ -700,7 +872,7 @@ impl TaskCenter {
                     } else {
                         center.draft.edited.insert(step_id.clone(), text);
                     }
-                    center.expanded.insert(step_id);
+                    center.open_spec(&step_id, true, motion::reduced_motion(cx), Instant::now());
                     cx.notify();
                 })
                 .ok();
@@ -721,8 +893,28 @@ impl TaskCenter {
             .update(cx, |gallery, cx| gallery.open(paths, index, cx));
     }
 
+    fn end_edit(&mut self, cx: &mut Context<Self>) -> Option<Editor> {
+        let editor = self.editor.take()?;
+        if let EditTarget::Step(id) = &editor.target {
+            let now = Instant::now();
+            let reduced = motion::reduced_motion(cx);
+            let run = |spec: MotionSpec| {
+                let mut tween = Tween::at(0.0, now);
+                tween.retarget(1.0, spec, reduced, now);
+                tween
+            };
+            self.leaving = Some(Leave {
+                step: id.clone(),
+                from: self.last_region(id),
+                grow: run(EDIT_LEAVE),
+                fade: run(EDIT_FADE),
+            });
+        }
+        Some(editor)
+    }
+
     fn commit_edit(&mut self, cx: &mut Context<Self>) {
-        let Some(editor) = self.editor.take() else {
+        let Some(editor) = self.end_edit(cx) else {
             return;
         };
         let notes = editor.body.read(cx).text().to_string();
@@ -774,7 +966,7 @@ impl TaskCenter {
     }
 
     fn cancel_edit(&mut self, cx: &mut Context<Self>) {
-        self.editor = None;
+        self.end_edit(cx);
         cx.notify();
     }
 
@@ -800,9 +992,15 @@ impl TaskCenter {
     }
 
     fn toggle_spec(&mut self, step_id: &str, cx: &mut Context<Self>) {
-        if !self.expanded.remove(step_id) {
-            self.expanded.insert(step_id.to_string());
+        if self
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.target == EditTarget::Step(step_id.to_string()))
+        {
+            return;
         }
+        let open = !self.spec_open(step_id);
+        self.open_spec(step_id, open, motion::reduced_motion(cx), Instant::now());
         cx.notify();
     }
 
@@ -814,20 +1012,20 @@ impl TaskCenter {
 
     fn send_edits(&mut self, approve: bool, cx: &mut Context<Self>) {
         self.commit_edit(cx);
-        let Some((_, plan)) = self.task_and_plan(cx) else {
+        let Some((task, plan)) = self.task_and_plan(cx) else {
             return;
         };
         self.draft.retain_live(&plan);
         if self.draft.count() == 0 {
             if approve {
-                cx.emit(TaskCenterEvent::ApprovePlan(self.task_id.clone()));
+                cx.emit(TaskCenterEvent::ApprovePlan(task.id.clone()));
             }
             return;
         }
         let edit = self.draft.edit(&plan);
         self.sent = Some(std::mem::take(&mut self.draft));
         cx.emit(TaskCenterEvent::EditPlan {
-            task_id: self.task_id.clone(),
+            task_id: task.id.clone(),
             edit,
             approve,
         });
@@ -1037,13 +1235,13 @@ impl TaskCenter {
 
     fn open_menu(
         &mut self,
-        actions: StepActions,
+        of: MenuFor,
         position: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus, cx);
-        self.menu.open(StepMenu { position, actions });
+        self.menu.open(StepMenu { position, of });
         cx.notify();
     }
 
@@ -1055,10 +1253,25 @@ impl TaskCenter {
     }
 
     fn menu_action(&mut self, action: MenuAction, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(actions) = self.menu.as_open().map(|menu| menu.actions.clone()) else {
+        let Some(of) = self.menu.as_open().map(|menu| menu.of.clone()) else {
             return;
         };
         self.close_menu(cx);
+        let actions = match of {
+            MenuFor::Step(actions) => actions,
+            MenuFor::Mission { lead } => {
+                match action {
+                    MenuAction::OpenLead => {
+                        if let Some(chat) = lead {
+                            cx.emit(TaskCenterEvent::OpenChat(chat));
+                        }
+                    }
+                    MenuAction::FoldSteps => self.toggle_steps(cx),
+                    _ => {}
+                }
+                return;
+            }
+        };
         let id = actions.step_id;
         match action {
             MenuAction::Edit => self.start_edit(EditTarget::Step(id), window, cx),
@@ -1076,6 +1289,7 @@ impl TaskCenter {
                 Outcome::Locked => {}
             },
             MenuAction::Remove => self.toggle_remove(&id, cx),
+            MenuAction::OpenLead | MenuAction::FoldSteps => {}
         }
     }
 
@@ -1086,18 +1300,8 @@ impl TaskCenter {
             .map(|row| {
                 let chat = step_chat(&state.chats, &row.step)?;
                 let delegation = chat.delegation.as_ref();
-                let agent = chat.config.as_ref().map(|config| {
-                    let harness = config.harness.display_name();
-                    match config.model.as_deref() {
-                        Some(model) => format!(
-                            "{harness} · {}",
-                            crate::pickers::model_display_label(config.harness, model, cx)
-                        ),
-                        None => harness.to_string(),
-                    }
-                });
                 Some(Thread {
-                    agent,
+                    agent: agent_of(chat, cx),
                     delegation: delegation.map(|d| (d.status, d.summary.clone())),
                     preview: chat.last_message_preview.clone(),
                     since: state
@@ -1109,19 +1313,91 @@ impl TaskCenter {
             .collect()
     }
 
-    fn step_note(row: &StepRow, thread: Option<&Thread>) -> Option<String> {
+    fn question(&self, row: &StepRow) -> Option<(&str, usize)> {
+        let chat = row.step.chat_id.as_deref()?;
+        match self.asks.get(chat)? {
+            Ask::Ready(questions) => questions
+                .first()
+                .map(|first| (first.as_str(), questions.len() - 1)),
+            Ask::Loading { .. } => None,
+        }
+    }
+
+    fn ask_count(&self, row: &StepRow) -> Option<usize> {
+        match row
+            .step
+            .chat_id
+            .as_deref()
+            .and_then(|chat| self.asks.get(chat))
+        {
+            Some(Ask::Ready(questions)) => Some(questions.len().max(1)),
+            Some(Ask::Loading { .. }) => None,
+            None => Some(1),
+        }
+    }
+
+    fn step_note(&self, row: &StepRow, thread: Option<&Thread>) -> Option<String> {
         let delegation = thread.and_then(|t| t.delegation.as_ref());
         let (status, _) = super::tree::Status::of_step(row, delegation.map(|d| d.0));
-        let preview = || thread.and_then(|t| t.preview.clone());
         match status {
             super::tree::Status::Failed => delegation
                 .filter(|(status, _)| retryable(*status))
                 .and_then(|(_, summary)| summary.clone())
-                .or_else(preview),
-            super::tree::Status::Waiting if row.indicator == Some(ChatIndicator::AwaitingInput) => {
-                preview()
-            }
+                .or_else(|| thread.and_then(|t| t.preview.clone())),
+            super::tree::Status::Waiting => self.question(row).map(|(question, more)| match more {
+                0 => question.to_string(),
+                more => format!("{question} +{more}"),
+            }),
             _ => None,
+        }
+    }
+
+    fn sync_asks(
+        &mut self,
+        shown: &[(StepRow, Option<Tag>, Option<Thread>)],
+        cx: &mut Context<Self>,
+    ) {
+        let awaiting: Vec<String> = shown
+            .iter()
+            .filter(|(row, _, thread)| {
+                thread.is_some() && row.indicator == Some(ChatIndicator::AwaitingInput)
+            })
+            .filter_map(|(row, ..)| row.step.chat_id.clone())
+            .collect();
+        self.asks.retain(|chat, _| awaiting.contains(chat));
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        for chat in awaiting {
+            if self.asks.contains_key(&chat) {
+                continue;
+            }
+            let id = chat.clone();
+            let engine = engine.clone();
+            let fetch = cx.spawn(async move |center, cx| {
+                let questions =
+                    crate::composer::pending_questions(&engine, &id, cx.background_executor())
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|question| {
+                            if question.question.trim().is_empty() {
+                                question.header
+                            } else {
+                                question.question
+                            }
+                        })
+                        .collect();
+                center
+                    .update(cx, |center, cx| {
+                        if let Some(ask) = center.asks.get_mut(&id) {
+                            *ask = Ask::Ready(questions);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+            });
+            self.asks.insert(chat, Ask::Loading { _fetch: fetch });
         }
     }
 
@@ -1138,134 +1414,19 @@ impl TaskCenter {
             .gap(px(12.0))
             .text_size(ui_rems(13.0))
             .text_color(theme.text_muted)
-            .child("This task is gone. It was deleted, or it has not synced yet.")
+            .child("This tree is gone. It was deleted, or it has not synced yet.")
             .child(
-                widgets::text_action(theme, widgets::ActionTone::Filled, "Back to Tasks")
-                    .id("task-center-missing-back")
-                    .debug_selector(|| "task-center-missing-back".into())
-                    .role(gpui::Role::Button)
-                    .aria_label("Back to Tasks")
-                    .rounded_full()
-                    .on_click(
-                        cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(TaskCenterEvent::Back)),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn render_header(
-        &self,
-        task: &zeron_proto::Task,
-        plan: &Rollup,
-        fill: f32,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let (label, tone) = plan.label(task);
-        let (_, _, tone) = column_tone(tone, theme);
-        let (_, _, complete) = column_tone(TaskStatus::Done, theme);
-        let done = task.completed_at.is_some();
-        let PlanProgress {
-            done: finished,
-            total,
-        } = plan.progress;
-        let task_id = task.id.clone();
-        let toggle_label = if done { "Reopen" } else { "Mark as done" };
-        let toggle = widgets::text_action(theme, widgets::ActionTone::Filled, toggle_label)
-            .id("task-center-toggle-done")
-            .debug_selector(|| "task-center-toggle-done".into())
-            .role(gpui::Role::Button)
-            .aria_label(toggle_label)
-            .rounded_full()
-            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                cx.emit(TaskCenterEvent::Update {
-                    task_id: task_id.clone(),
-                    patch: TaskPatch {
-                        completed: Some(!done),
-                        ..Default::default()
-                    },
-                });
-            }));
-        div()
-            .id("task-center-header")
-            .debug_selector(|| "task-center-header".into())
-            .flex_none()
-            .px(px(20.0))
-            .pt(px(8.0))
-            .pb(px(12.0))
-            .border_b_1()
-            .border_color(theme.border)
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .child(
-                div()
-                    .debug_selector(|| "task-center-kicker".into())
-                    .mb(px(-6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .text_size(ui_rems(11.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text_muted)
-                    .child(
-                        icon(icons::MISSION_CONTROL)
-                            .size(px(11.0))
-                            .text_color(theme.text_muted),
-                    )
-                    .child("MISSION CONTROL"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(ui_rems(18.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .child(SharedString::from(task.title.clone())),
-                    )
-                    .child(
-                        div()
-                            .debug_selector(|| "task-center-status".into())
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .text_size(ui_rems(12.0))
-                            .text_color(theme.text_muted)
-                            .child(div().size(px(7.0)).rounded_full().bg(tone))
-                            .child(label),
-                    )
-                    .child(toggle),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .child(
-                        div()
-                            .debug_selector(|| "task-center-progress".into())
-                            .flex_1()
-                            .h(px(4.0))
-                            .rounded(px(2.0))
-                            .bg(theme.wash(0.08))
-                            .overflow_hidden()
-                            .child(div().h_full().w(relative(fill)).bg(complete)),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(ui_rems(12.0))
-                            .text_color(theme.text_muted)
-                            .child(format!("{finished}/{total}")),
-                    ),
+                widgets::text_action(
+                    theme,
+                    widgets::ActionTone::Filled,
+                    "Back to Mission Control",
+                )
+                .id("task-center-missing-back")
+                .debug_selector(|| "task-center-missing-back".into())
+                .role(gpui::Role::Button)
+                .aria_label("Back to Mission Control")
+                .rounded_full()
+                .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(TaskCenterEvent::Back))),
             )
             .into_any_element()
     }
@@ -1312,19 +1473,41 @@ impl TaskCenter {
 
     pub(super) fn lead_line(task: &zeron_proto::Task, plan: &Rollup) -> String {
         let running = plan.count(StepStatus::Working);
+        let working = plan.lead == Some(ChatIndicator::Working);
         if task.completed_at.is_some() {
             "Done".into()
         } else if plan.lead.is_none() {
             "Not started".into()
-        } else if plan.lead == Some(ChatIndicator::Working) && plan.steps.is_empty() {
+        } else if working && plan.steps.is_empty() {
             "Planning".into()
+        } else if plan.lead == Some(ChatIndicator::Errored) {
+            "Failed".into()
+        } else if let Some(waits) = Self::lead_waits(task, plan).filter(|_| !working) {
+            waits
         } else if running > 0 {
             format!("Watching {running} {}", plural(running, "step", "steps"))
-        } else if plan.lead == Some(ChatIndicator::Working) {
+        } else if working {
             "Working".into()
         } else {
-            "Waiting on you".into()
+            "Idle".into()
         }
+    }
+
+    pub(super) fn lead_waits(task: &zeron_proto::Task, plan: &Rollup) -> Option<String> {
+        let mut waits = Vec::new();
+        if plan.phase(task) == super::PlanPhase::PlanReady {
+            waits.push("Plan review".to_owned());
+        }
+        let questions = plan
+            .questions
+            .max(usize::from(plan.lead == Some(ChatIndicator::AwaitingInput)));
+        if questions > 0 {
+            waits.push(format!(
+                "{questions} {}",
+                plural(questions, "question", "questions")
+            ));
+        }
+        (!waits.is_empty()).then(|| waits.join(", "))
     }
 
     fn render_reads(
@@ -1445,39 +1628,17 @@ impl TaskCenter {
         crate::markdown::render::render_tree(&tree, &options, theme, window, &|_| None)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn edit_card(
+    fn edit_notes(
         &self,
         editor: &Editor,
-        head: AnyElement,
-        indent: f32,
-        pad: (f32, f32),
+        min: f32,
         theme: &Theme,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let now = Instant::now();
-        let growing = !editor.grow.settled_at(now);
-        if growing {
-            window.request_animation_frame();
-        }
-        let natural = self
-            .painted
-            .borrow()
-            .get(&Key::Editor)
-            .map(|rect| f32::from(rect.size.height));
-        let height = growing.then(|| {
-            motion::lerp(
-                editor.from,
-                natural.unwrap_or(editor.from),
-                editor.grow.value_at(now),
-            )
-        });
         let body = editor.body.clone();
-        let notes = div()
+        div()
             .id("task-center-edit-body")
             .debug_selector(|| "task-center-edit-body".into())
-            .pt(px(8.0))
             .text_size(ui_rems(12.5))
             .text_color(theme.text)
             .capture_action(cx.listener(move |_, _: &Submit, window, cx| {
@@ -1490,15 +1651,18 @@ impl TaskCenter {
             }))
             .child(crate::composer::growing_field(
                 editor.body.clone(),
-                18.0,
+                min,
                 260.0,
                 cx,
-            ));
+            ))
+            .into_any_element()
+    }
+
+    fn edit_tray(&self, editor: &Editor, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
         let paths = editor.images.clone();
         let open_paths = paths.clone();
-        let tray = div()
+        div()
             .debug_selector(|| "task-center-edit-tray".into())
-            .pt(px(10.0))
             .flex()
             .flex_col()
             .gap(px(6.0))
@@ -1533,15 +1697,16 @@ impl TaskCenter {
                         .text_color(theme.text_faint)
                         .child("This step's thread has started, so new images will not reach it."),
                 )
-            });
+            })
+    }
+
+    fn edit_footer(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
         let hint = if cfg!(target_os = "macos") {
             "⌘↵ save · Esc cancel"
         } else {
             "Ctrl+↵ save · Esc cancel"
         };
-        let footer = div()
-            .mt(px(12.0))
-            .pt(px(9.0))
+        div()
             .border_t_1()
             .border_color(theme.border)
             .flex()
@@ -1575,47 +1740,17 @@ impl TaskCenter {
                     .min_h(px(24.0))
                     .rounded_full()
                     .on_click(cx.listener(|center, _: &ClickEvent, _, cx| center.commit_edit(cx))),
-            );
-        let content = div()
-            .relative()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .pl(px(pad.0))
-            .pr(px(12.0))
-            .py(px(pad.1))
-            .child(morph::measure(&self.painted, Key::Editor, Edges::default()))
-            .child(head)
-            .child(
-                div()
-                    .pl(px(indent))
-                    .flex()
-                    .flex_col()
-                    .child(notes)
-                    .child(tray)
-                    .child(footer),
-            );
-        div()
-            .debug_selector(|| "task-center-editor".into())
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .rounded(px(12.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface_card)
-            .shadow(vec![gpui::BoxShadow {
-                color: gpui::black().opacity(0.3),
-                offset: gpui::point(px(0.0), px(10.0)),
-                blur_radius: px(28.0),
-                spread_radius: px(0.0),
-                inset: false,
-            }])
-            .when_some(height, |el, height| el.h(px(height)))
-            .drag_over::<gpui::ExternalPaths>({
-                let accent = theme.accent;
-                move |style, _, _, _| style.border_color(accent)
-            })
+            )
+    }
+
+    fn edit_events<E: InteractiveElement>(
+        &self,
+        el: E,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> E {
+        let accent = theme.accent;
+        el.drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.border_color(accent))
             .on_drop(cx.listener(|center, paths: &gpui::ExternalPaths, _, cx| {
                 cx.stop_propagation();
                 let staged = images::staged_files(paths.paths(), cx);
@@ -1635,6 +1770,68 @@ impl TaskCenter {
                     _ => {}
                 }
             }))
+    }
+
+    fn edit_card(
+        &self,
+        editor: &Editor,
+        head: AnyElement,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let now = Instant::now();
+        let growing = !editor.grow.settled_at(now);
+        if growing {
+            window.request_animation_frame();
+        }
+        let natural = self
+            .painted
+            .borrow()
+            .get(&Key::Editor)
+            .map(|rect| f32::from(rect.size.height));
+        let height = growing.then(|| {
+            motion::lerp(
+                editor.from,
+                natural.unwrap_or(editor.from),
+                editor.grow.value_at(now),
+            )
+        });
+        let content = div()
+            .relative()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .pl(px(12.0))
+            .pr(px(12.0))
+            .py(px(10.0))
+            .child(morph::measure(&self.painted, Key::Editor, Edges::default()))
+            .child(head)
+            .child(
+                div()
+                    .pt(px(8.0))
+                    .child(self.edit_notes(editor, 18.0, theme, cx)),
+            )
+            .child(div().pt(px(10.0)).child(self.edit_tray(editor, theme, cx)))
+            .child(self.edit_footer(theme, cx).mt(px(12.0)).pt(px(9.0)));
+        let card = div()
+            .debug_selector(|| "task-center-editor".into())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_card)
+            .shadow(vec![gpui::BoxShadow {
+                color: gpui::black().opacity(0.3),
+                offset: gpui::point(px(0.0), px(10.0)),
+                blur_radius: px(28.0),
+                spread_radius: px(0.0),
+                inset: false,
+            }])
+            .when_some(height, |el, height| el.h(px(height)));
+        self.edit_events(card, theme, cx)
             .child(content)
             .into_any_element()
     }
@@ -1713,7 +1910,7 @@ impl TaskCenter {
                 .iter()
                 .find(|row| &row.step.id == id)
                 .zip(plan.step_label(id)),
-            Selection::Lead => None,
+            Selection::Lead | Selection::Node(_) => None,
         };
         let live_chat = self.live.as_ref().and_then(|live| {
             let state = self.state.read(cx);
@@ -1839,6 +2036,18 @@ impl TaskCenter {
     }
 }
 
+pub(super) fn agent_of(chat: &zeron_proto::Chat, cx: &App) -> Option<String> {
+    let config = chat.config.as_ref()?;
+    let harness = config.harness.display_name();
+    Some(match config.model.as_deref() {
+        Some(model) => format!(
+            "{harness} · {}",
+            crate::pickers::model_display_label(config.harness, model, cx)
+        ),
+        None => harness.to_string(),
+    })
+}
+
 fn retryable(status: DelegationStatus) -> bool {
     matches!(
         status,
@@ -1848,22 +2057,6 @@ fn retryable(status: DelegationStatus) -> bool {
 
 fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
     if n == 1 { one } else { many }
-}
-
-impl TaskCenter {
-    fn fill_at(&mut self, progress: PlanProgress, reduced: bool, now: Instant) -> (f32, bool) {
-        let PlanProgress { done, total } = progress;
-        let fraction = if total == 0 {
-            0.0
-        } else {
-            done as f32 / total as f32
-        };
-        let fill = self.fill.get_or_insert_with(|| Tween::at(fraction, now));
-        if fill.target() != fraction {
-            fill.retarget(fraction, PROGRESS_FILL, reduced, now);
-        }
-        (fill.value_at(now), !fill.settled_at(now))
-    }
 }
 
 impl TaskCenter {
@@ -1901,83 +2094,111 @@ impl TaskCenter {
     fn render_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.menu.get()?;
         let theme = theme.for_popup();
-        let actions = &menu.actions;
-        let outcome = match actions.outcome {
-            Outcome::Reopen => "Reopen",
-            Outcome::Skip | Outcome::Locked => "Skip",
-        };
         let card = popover::popover_card(&theme)
             .w(px(180.0))
             .flex()
             .flex_col()
             .on_mouse_down_out(cx.listener(|center, _, _, cx| center.close_menu(cx)))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(self.menu_item(
-                &theme,
-                "task-center-menu-edit",
-                "Edit spec",
-                actions.edit,
-                false,
-                MenuAction::Edit,
-                cx,
-            ))
-            .children(actions.thread.is_some().then(|| {
-                self.menu_item(
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        let card = match &menu.of {
+            MenuFor::Mission { lead } => card
+                .children(lead.is_some().then(|| {
+                    self.menu_item(
+                        &theme,
+                        "task-center-menu-open-lead",
+                        "Open lead thread",
+                        true,
+                        false,
+                        MenuAction::OpenLead,
+                        cx,
+                    )
+                }))
+                .child(self.menu_item(
                     &theme,
-                    "task-center-menu-open",
-                    "Open thread",
+                    "task-center-menu-fold",
+                    if self.folded {
+                        "Show the steps"
+                    } else {
+                        "Fold the steps"
+                    },
                     true,
                     false,
-                    MenuAction::Open,
+                    MenuAction::FoldSteps,
                     cx,
-                )
-            }))
-            .child(self.menu_item(
-                &theme,
-                "task-center-menu-add-image",
-                "Add image",
-                actions.edit,
-                false,
-                MenuAction::AddImage,
-                cx,
-            ))
-            .child(self.menu_item(
-                &theme,
-                "task-center-menu-up",
-                "Move up",
-                actions.up,
-                false,
-                MenuAction::Up,
-                cx,
-            ))
-            .child(self.menu_item(
-                &theme,
-                "task-center-menu-down",
-                "Move down",
-                actions.down,
-                false,
-                MenuAction::Down,
-                cx,
-            ))
-            .child(popover::menu_separator())
-            .child(self.menu_item(
-                &theme,
-                "task-center-menu-outcome",
-                outcome,
-                !matches!(actions.outcome, Outcome::Locked),
-                false,
-                MenuAction::Outcome,
-                cx,
-            ))
-            .child(self.menu_item(
-                &theme,
-                "task-center-menu-remove",
-                "Remove",
-                actions.remove,
-                true,
-                MenuAction::Remove,
-                cx,
-            ));
+                )),
+            MenuFor::Step(actions) => {
+                let outcome = match actions.outcome {
+                    Outcome::Reopen => "Reopen",
+                    Outcome::Skip | Outcome::Locked => "Skip",
+                };
+                card.child(self.menu_item(
+                    &theme,
+                    "task-center-menu-edit",
+                    "Edit spec",
+                    actions.edit,
+                    false,
+                    MenuAction::Edit,
+                    cx,
+                ))
+                .children(actions.thread.is_some().then(|| {
+                    self.menu_item(
+                        &theme,
+                        "task-center-menu-open",
+                        "Open thread",
+                        true,
+                        false,
+                        MenuAction::Open,
+                        cx,
+                    )
+                }))
+                .child(self.menu_item(
+                    &theme,
+                    "task-center-menu-add-image",
+                    "Add image",
+                    actions.edit,
+                    false,
+                    MenuAction::AddImage,
+                    cx,
+                ))
+                .child(self.menu_item(
+                    &theme,
+                    "task-center-menu-up",
+                    "Move up",
+                    actions.up,
+                    false,
+                    MenuAction::Up,
+                    cx,
+                ))
+                .child(self.menu_item(
+                    &theme,
+                    "task-center-menu-down",
+                    "Move down",
+                    actions.down,
+                    false,
+                    MenuAction::Down,
+                    cx,
+                ))
+                .child(popover::menu_separator())
+                .child(self.menu_item(
+                    &theme,
+                    "task-center-menu-outcome",
+                    outcome,
+                    !matches!(actions.outcome, Outcome::Locked),
+                    false,
+                    MenuAction::Outcome,
+                    cx,
+                ))
+                .child(self.menu_item(
+                    &theme,
+                    "task-center-menu-remove",
+                    "Remove",
+                    actions.remove,
+                    true,
+                    MenuAction::Remove,
+                    cx,
+                ))
+            }
+        };
         Some(popover::menu_at(
             "task-center-step-menu",
             menu.position,
@@ -1990,16 +2211,13 @@ impl TaskCenter {
 impl Render for TaskCenter {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        let found = {
-            let state = self.state.read(cx);
-            state
-                .tasks
-                .iter()
-                .find(|task| task.id == self.task_id && !task.deleted)
-                .map(|task| (task.clone(), rollup(state, task, Utc::now())))
-        };
+        let found = self.task_and_plan(cx);
         let Some((task, plan)) = found else {
-            return self.render_missing(&theme, cx);
+            let root = self.resolve(self.state.read(cx)).0.map(str::to_owned);
+            return match root {
+                Some(root) => self.render_tree_page(&root, &theme, window, cx),
+                None => self.render_missing(&theme, cx),
+            };
         };
         self.draft.retain_live(&plan);
         let editable = task.completed_at.is_none() && plan.lead.is_some();
@@ -2009,53 +2227,44 @@ impl Render for TaskCenter {
         if self.drag.is_some() && !cx.has_active_drag() {
             self.drag = None;
         }
-        let (fill, filling) = self.fill_at(plan.progress, reduced, now);
-        let canvas = self.render_spine(
-            &task, &plan, &shown, editable, reduced, now, &theme, window, cx,
-        );
-        if filling || self.spine_animating(now) {
+        let facts = self.facts(&task, &plan, &shown, cx);
+        if self.sync_kind(true, reduced, now) {
             window.request_animation_frame();
         }
-        let list = div()
-            .id("task-center-plan")
-            .debug_selector(|| "task-center-plan".into())
-            .absolute()
-            .inset_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .pt(px(14.0))
-            .pb(px(96.0))
-            .pl(px(20.0))
-            .pr(px(self.canvas_pad()))
-            .child(canvas);
-        let live = self.render_live(&task, &plan, &theme, cx);
-        let drawer = self.render_drawer(live, now, &theme, cx);
-        let body = div()
-            .flex_1()
-            .min_h_0()
-            .relative()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .child(morph::measure(&self.painted, Key::Canvas, Edges::default()))
-                    .child(list),
-            )
-            .children(
-                editable
-                    .then(|| self.render_edit_bar(&theme, cx))
-                    .flatten()
-                    .map(|bar| {
-                        div()
-                            .flex_none()
-                            .pr(px(self.canvas_pad() - spine::CANVAS_PAD))
-                            .child(bar)
-                    }),
-            )
-            .children(drawer);
+        if task.completed_at.is_none() && self.clock.as_ref().is_none_or(|(due, _)| now >= *due) {
+            let tick = std::time::Duration::from_secs(1);
+            self.clock = Some((
+                now + tick,
+                cx.spawn(async move |center, cx| {
+                    cx.background_executor().timer(tick).await;
+                    center.update(cx, |_, cx| cx.notify()).ok();
+                }),
+            ));
+        }
+        let view = crate::settings::current(cx).tree_view;
+        let root = self.resolve(self.state.read(cx)).0.map(str::to_owned);
+        let nodes = root
+            .as_deref()
+            .map(|root| super::tree_rows(self.state.read(cx), root, true, Utc::now()))
+            .unwrap_or_default();
+        self.advance_view_morph(view, reduced);
+        let body = match root.filter(|_| view != crate::settings::TreeView::Spine) {
+            Some(root) if !nodes.is_empty() && view == crate::settings::TreeView::Timeline => {
+                self.render_timeline(&root, &nodes, &theme, cx)
+            }
+            Some(root) if !nodes.is_empty() => self.render_split(&root, &nodes, &theme, cx),
+            _ => {
+                let mission = spine::SpineMission {
+                    task: &task,
+                    plan: &plan,
+                    shown: &shown,
+                    facts: &facts,
+                    editable,
+                };
+                self.render_spine_body(Some(mission), &nodes, reduced, now, &theme, window, cx)
+            }
+        };
+        let body = self.morph_body(body, &nodes, &theme, window, cx);
         div()
             .id("task-center")
             .debug_selector(|| "task-center".into())
@@ -2079,11 +2288,83 @@ impl Render for TaskCenter {
             .pt(px(Theme::TITLEBAR_HEIGHT))
             .flex()
             .flex_col()
-            .child(self.render_header(&task, &plan, fill, &theme, cx))
+            .child(self.render_header(&task, &plan, &facts, reduced, now, &theme, cx))
             .children(self.render_send_error(&task, &theme, cx))
             .child(body)
             .children(self.render_menu(&theme, cx))
             .child(div().absolute().size_0().child(self.gallery.clone()))
+            .into_any_element()
+    }
+}
+
+impl TaskCenter {
+    #[allow(clippy::too_many_arguments)]
+    fn render_spine_body(
+        &mut self,
+        mission: Option<spine::SpineMission<'_>>,
+        nodes: &[super::thread_tree::TreeNode],
+        reduced: bool,
+        now: Instant,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let editable = mission.as_ref().is_some_and(|m| m.editable);
+        let detail = match (&self.selected, &mission) {
+            (_, None) | (Selection::Node(_), Some(_)) if !nodes.is_empty() => {
+                let ix = self.picked(nodes);
+                Some(self.render_detail(nodes, ix, reduced, theme, cx))
+            }
+            _ => None,
+        };
+        let live = match (detail, &mission) {
+            (Some(detail), _) => detail,
+            (None, Some(m)) => self.render_live(m.task, m.plan, theme, cx),
+            (None, None) => div().into_any_element(),
+        };
+        let canvas = self.render_spine(mission, nodes, reduced, now, theme, window, cx);
+        if self.spine_animating(now) {
+            window.request_animation_frame();
+        }
+        let list = div()
+            .id("task-center-plan")
+            .debug_selector(|| "task-center-plan".into())
+            .absolute()
+            .inset_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .pt(px(14.0))
+            .pb(px(96.0))
+            .pl(px(20.0))
+            .pr(px(self.canvas_pad()))
+            .child(canvas);
+        let drawer = self.render_drawer(live, now, theme, cx);
+        div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(morph::measure(&self.painted, Key::Canvas, Edges::default()))
+                    .child(list),
+            )
+            .children(
+                editable
+                    .then(|| self.render_edit_bar(theme, cx))
+                    .flatten()
+                    .map(|bar| {
+                        div()
+                            .flex_none()
+                            .pr(px(self.canvas_pad() - spine::CANVAS_PAD))
+                            .child(bar)
+                    }),
+            )
+            .children(drawer)
             .into_any_element()
     }
 }

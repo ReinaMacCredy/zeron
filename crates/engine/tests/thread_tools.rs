@@ -1056,7 +1056,7 @@ fn queue_interrupt(core: &EngineCore, chat_id: &str) {
         .doc()
         .queue_command(&SessionCommandEntry {
             id: "stop-1".into(),
-            payload: SessionCommandPayload::Interrupt {},
+            payload: SessionCommandPayload::Interrupt { teardown: false },
             issued_by: "viewer".into(),
             issued_at: chrono::Utc::now().timestamp_millis(),
             based_on: None::<CommandBasedOn>,
@@ -1337,6 +1337,82 @@ async fn a_never_wake_child_finishes_without_waking_its_idle_owner() {
         .await
         .unwrap();
     assert_eq!(read.summary.as_deref(), Some("noted"));
+    rig.core.shutdown().await;
+}
+
+fn queue_steer(core: &EngineCore, chat_id: &str, command_id: &str, prompt: &str) {
+    core.doc_host
+        .open(chat_id)
+        .expect("open chat")
+        .doc()
+        .queue_command(&SessionCommandEntry {
+            id: command_id.into(),
+            payload: SessionCommandPayload::Steer {
+                prompt: prompt.into(),
+                message_id: Some(format!("msg-{command_id}")),
+            },
+            issued_by: "viewer".into(),
+            issued_at: chrono::Utc::now().timestamp_millis(),
+            based_on: None::<CommandBasedOn>,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+            computer_generation: None,
+        })
+        .expect("queue command");
+}
+
+#[tokio::test]
+async fn the_persons_message_in_a_running_child_tells_its_owner_once_and_a_creator_never() {
+    let rig = rig_with(Duration::from_millis(300), true);
+    let view = rig
+        .core
+        .doc_host
+        .delegate_task(delegate("map the auth flow"), Default::default())
+        .await
+        .expect("delegate");
+    let child = view.task_id.clone();
+    wait_for(|| working(&rig.core, &child), "the child's turn").await;
+    queue_steer(&rig.core, &child, "cmd-p", "also check the refresh token");
+    let note = "The person wrote directly in";
+    wait_for(|| !prompts_with(&rig, note).is_empty(), "the owner's note").await;
+    let sent = prompts_with(&rig, note).remove(0);
+    assert!(
+        sent.contains(&format!("your delegated task {child} (")),
+        "{sent}"
+    );
+    assert!(
+        sent.contains("<agent-response>\nalso check the refresh token\n</agent-response>"),
+        "{sent}"
+    );
+
+    rig.core
+        .workspace
+        .create_chat_from("opened", Some("space-tt"), None, None, None, Some("lead"))
+        .unwrap();
+    queue_human_run(&rig.core, "opened", "cmd-o", "msg-o");
+    wait_for(
+        || delegation(&rig.core, &child).status == zeron_proto::DelegationStatus::Completed,
+        "the child to finish",
+    )
+    .await;
+    wait_for(
+        || {
+            entries(&rig.core, "opened")
+                .iter()
+                .any(|entry| entry.role == MessageRole::Assistant)
+                && idle(&rig.core, "opened")
+                && idle(&rig.core, "lead")
+        },
+        "the opened thread's turn and the owner's",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        prompts_with(&rig, note).len(),
+        1,
+        "one note for the steer, none for the child's own task or an opened thread"
+    );
     rig.core.shutdown().await;
 }
 
@@ -3638,10 +3714,9 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         let err = refused(
-            call(
-                zeron_rpc::methods::RESUME_SUPERVISOR_STEP,
-                serde_json::json!({ "stepId": steps[1].id, "fromChatId": "task-lead" }),
-            )
+            mutate(serde_json::json!({
+                "op": "resumeSupervisorStep", "stepId": steps[1].id, "fromChatId": "task-lead",
+            }))
             .await,
         );
         assert!(err.contains("Only the person"), "{err}");
@@ -3661,6 +3736,98 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
         .unwrap();
         started(run(&steps[1], "task-lead").await);
     }
+
+    let side = rig
+        .core
+        .workspace
+        .create_sidechat("lead", "lead-side")
+        .unwrap()
+        .id;
+    let child = started(
+        call(
+            zeron_rpc::methods::CREATE_THREAD,
+            serde_json::json!({ "fromChatId": "lead", "prompt": "read the logs" }),
+        )
+        .await,
+    );
+    wait_for(
+        || {
+            rig.core
+                .sessions
+                .session_status(&child)
+                .is_some_and(|s| s.last_completed_turn.is_some())
+        },
+        "the child's own turn",
+    )
+    .await;
+    mutate(serde_json::json!({ "op": "createTask", "taskId": "t3", "title": "Ship the shop" }))
+        .await
+        .unwrap();
+    mutate(serde_json::json!({
+        "op": "assignTask", "taskId": "t3", "chatId": "lead", "orchestrate": true, "attachPlan": true,
+    }))
+    .await
+    .unwrap();
+    let attached = "You lead this task (task id t3). This task is a plan for the work this chat is already doing.";
+    wait_for(
+        || !prompts_with(&rig, attached).is_empty(),
+        "the attach brief",
+    )
+    .await;
+    let brief = prompts_with(&rig, attached).remove(0);
+    for line in [
+        "set that step's threadId to the thread's id",
+        "Do a step yourself, or with your own sub-agents, then mark it done",
+        "Then stop. The person reviews the plan",
+    ] {
+        assert!(brief.contains(line), "{line} in {brief}");
+    }
+    let attach = |thread: &str| {
+        serde_json::json!({
+            "op": "planSteps", "taskId": "t3", "fromChatId": "lead",
+            "steps": [{ "title": "Read the logs", "threadId": thread }, { "title": "Fix the bug" }],
+        })
+    };
+    let err = refused(mutate(attach(&side)).await);
+    assert!(err.contains("is a sidechat"), "{err}");
+    let err = refused(mutate(attach("task-lead")).await);
+    assert!(err.contains("is not a thread this chat started"), "{err}");
+    assert!(
+        rig.core.workspace.task_steps_of("t3").is_empty(),
+        "a refused plan writes no steps"
+    );
+    mutate(attach(&child)).await.unwrap();
+    let planned = rig.core.workspace.task_steps_of("t3");
+    assert_eq!(planned[0].chat_id.as_deref(), Some(child.as_str()));
+    assert_eq!(planned[1].chat_id, None);
+    let row = rig.core.workspace.chat(&child).unwrap().unwrap();
+    let link = zeron_proto::thread_link(
+        &row,
+        &rig.core.workspace.read_tasks().unwrap(),
+        &rig.core.workspace.read_task_steps().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        (link.parent.as_str(), link.kind, link.step_id),
+        (
+            "lead",
+            zeron_proto::LinkKind::Delegated,
+            Some(planned[0].id.clone())
+        ),
+        "the bound child now runs its step"
+    );
+    assert_eq!(
+        status(&planned[0].id),
+        (Some(child.clone()), zeron_proto::StepStatus::Done),
+        "a child bound after its turn ended reads that turn"
+    );
+    let err = refused(mutate(attach(&child)).await);
+    assert!(err.contains("already runs step \"Read the logs\""), "{err}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        prompts_with(&rig, &format!("finished a turn on its thread {child}")).is_empty(),
+        "a turn that ended before the bind wakes nobody"
+    );
     rig.core.shutdown().await;
 }
 
@@ -3768,6 +3935,210 @@ async fn a_wake_into_a_supervisor_the_person_stopped_waits_for_their_next_messag
         s.state != zeron_proto::supervisor::SupervisorState::Stopped
     })
     .await;
+    rig.core.shutdown().await;
+}
+
+fn asks_from(snapshot: &zeron_proto::supervisor::SupervisorSnapshot) -> Vec<String> {
+    let mut asks: Vec<String> = snapshot
+        .needs_you
+        .iter()
+        .filter_map(|row| match row {
+            zeron_proto::supervisor::NeedsYouRow::Input(input) => {
+                assert_eq!(input.asker, zeron_proto::supervisor::InputAsker::Thread);
+                Some(input.chat_id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    asks.sort();
+    asks
+}
+
+#[tokio::test]
+async fn a_watched_trees_question_reaches_the_supervisor_and_an_unwatched_trees_does_not() {
+    let rig = asking_rig(false);
+    let rpc = rig.core.rpc_service();
+    let call = |method: &'static str, params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move { zeron_rpc::RpcService::handle(&*rpc, method, params).await }
+    };
+    let mutate = |params| call(zeron_rpc::methods::MUTATE, params);
+    let zeron_rpc::RpcReply::Value(ensured) = call(
+        zeron_rpc::methods::ENSURE_SUPERVISOR,
+        serde_json::json!({ "config": { "harness": "mock", "sandbox": "workspace-write" } }),
+    )
+    .await
+    .unwrap() else {
+        panic!("a chat id");
+    };
+    let supervisor = ensured["chatId"].as_str().unwrap().to_string();
+    let workspace = &rig.core.workspace;
+    workspace.rename_chat("lead", "Shop backend").unwrap();
+    workspace
+        .create_chat("plain-b", Some("space-tt"), None, None, None)
+        .unwrap();
+    for (child, parent) in [("child-a", "lead"), ("child-b", "plain-b")] {
+        workspace
+            .create_chat_from(child, Some("space-tt"), None, None, None, Some(parent))
+            .unwrap();
+        workspace
+            .rename_chat(child, &format!("Ask {child}"))
+            .unwrap();
+    }
+
+    mutate(serde_json::json!({ "op": "setTreeWatched", "rootChatId": "child-a", "watched": true }))
+        .await
+        .unwrap();
+    let snapshot = supervisor_until(&rpc, |s| !s.watched_roots.is_empty()).await;
+    assert_eq!(
+        snapshot.watched_roots,
+        ["lead"],
+        "a child names its tree's root"
+    );
+    assert!(!snapshot.watch_everything);
+
+    queue_run(
+        &rig.core,
+        "child-b",
+        "cmd-b",
+        "msg-b",
+        "please ask about the plan",
+    );
+    wait_for(
+        || pending_request(&rig.core, "child-b").is_some(),
+        "the unwatched tree's question",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    queue_run(
+        &rig.core,
+        "child-a",
+        "cmd-a",
+        "msg-a",
+        "please ask about the plan",
+    );
+    wait_for(
+        || pending_request(&rig.core, "child-a").is_some(),
+        "the watched tree's question",
+    )
+    .await;
+    let request = pending_request(&rig.core, "child-a").unwrap();
+    let snapshot =
+        supervisor_until(&rpc, |s| !s.wakes.is_empty() && !asks_from(s).is_empty()).await;
+    assert_eq!(asks_from(&snapshot), ["child-a"]);
+    let [event] = snapshot.wakes[0].events.as_slice() else {
+        panic!("one event in the wake: {:?}", snapshot.wakes)
+    };
+    assert_eq!(
+        event.kind,
+        zeron_proto::supervisor::SupervisorEventKind::NeedsYou
+    );
+    assert_eq!(event.key, format!("input:child-a:{request}"));
+    assert_eq!(event.root_chat_id.as_deref(), Some("lead"));
+    assert_eq!(event.task_id, None);
+    wait_for(
+        || !prompts_with(&rig, "Supervisor wake").is_empty(),
+        "the Supervisor's wake",
+    )
+    .await;
+    let wake = prompts_with(&rig, "Supervisor wake").remove(0);
+    assert!(
+        wake.contains(
+            "1. Thread \"Ask child-a\" asks a question · tree \"Shop backend\" (root thread lead) · thread child-a"
+        ),
+        "{wake}"
+    );
+    assert!(!wake.contains("child-b"), "{wake}");
+
+    mutate(serde_json::json!({ "op": "setTreeWatched", "rootChatId": "lead", "watched": false }))
+        .await
+        .unwrap();
+    let snapshot = supervisor_until(&rpc, |s| {
+        s.watched_roots.is_empty() && asks_from(s).is_empty()
+    })
+    .await;
+    assert!(!snapshot.watch_everything);
+
+    mutate(serde_json::json!({ "op": "setWatchEverything", "on": true }))
+        .await
+        .unwrap();
+    let snapshot = supervisor_until(&rpc, |s| asks_from(s).len() == 2).await;
+    assert!(snapshot.watch_everything);
+    assert_eq!(asks_from(&snapshot), ["child-a", "child-b"]);
+
+    mutate(serde_json::json!({ "op": "setWatchEverything", "on": false }))
+        .await
+        .unwrap();
+    supervisor_until(&rpc, |s| !s.watch_everything && asks_from(s).is_empty()).await;
+
+    mutate(serde_json::json!({ "op": "setTreeWatched", "rootChatId": "lead", "watched": true }))
+        .await
+        .unwrap();
+    let answer = |thread: &str, request: &str| {
+        call(
+            zeron_rpc::methods::QUEUE_COMMAND,
+            serde_json::json!({
+                "chatId": thread,
+                "fromChatId": supervisor,
+                "command": {
+                    "kind": "respondInput", "requestId": request,
+                    "answers": [{ "questionId": "q-curl", "labels": ["Yes, proceed"] }],
+                },
+            }),
+        )
+    };
+    let refusal = |reply: Result<zeron_rpc::RpcReply, zeron_rpc::RpcError>| match reply {
+        Err(err) => err.to_string(),
+        Ok(_) => panic!("the Supervisor's answer is refused"),
+    };
+    let request_b = pending_request(&rig.core, "child-b").unwrap();
+    assert!(
+        refusal(answer("child-a", &request).await).contains("Decide for me is off"),
+        "a tree without a plan needs Decide for me"
+    );
+    call(
+        zeron_rpc::methods::SET_SUPERVISOR_SETTINGS,
+        serde_json::json!({ "decideForMe": true }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        refusal(answer("child-b", &request_b).await).contains("does not watch this thread's tree"),
+        "an unwatched tree's question stays the person's"
+    );
+    call(
+        zeron_rpc::methods::SET_SUPERVISOR_SETTINGS,
+        serde_json::json!({ "decideForMe": true, "goalAndSpend": true }),
+    )
+    .await
+    .unwrap();
+    for action in [
+        serde_json::json!({ "action": "approve", "taskId": "lead", "reason": "fine" }),
+        serde_json::json!({ "action": "goal", "taskId": "lead", "title": "Shop", "reason": "shorter" }),
+    ] {
+        let mut params = action.clone();
+        params["fromChatId"] = serde_json::json!(supervisor);
+        let err = refusal(call(zeron_rpc::methods::SUPERVISOR_ACT, params).await);
+        assert!(
+            err.starts_with("Applies once this tree has a plan"),
+            "{action}: {err}"
+        );
+    }
+    answer("child-a", &request).await.unwrap();
+    wait_for(
+        || pending_request(&rig.core, "child-a").is_none(),
+        "the Supervisor's answer",
+    )
+    .await;
+    let snapshot = supervisor_until(&rpc, |s| !s.interventions.is_empty()).await;
+    let respond = &snapshot.interventions[0];
+    assert_eq!(
+        respond.kind,
+        zeron_proto::supervisor::InterventionKind::Respond
+    );
+    assert_eq!(respond.target.as_deref(), Some("child-a"));
+    assert_eq!(respond.request_id.as_deref(), Some(request.as_str()));
+    assert!(pending_request(&rig.core, "child-b").is_some());
     rig.core.shutdown().await;
 }
 

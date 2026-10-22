@@ -67,8 +67,6 @@ pub mod methods {
     /// IPC-only like the thread tools: `{fromChatId, action: ask|rebrief|start|pause|resume|check, …}` from the Supervisor's `zeron mcp`.
     pub const SUPERVISOR_ACT: &str = "SupervisorAct";
     pub const REQUEST_SUPERVISOR_CHECK: &str = "RequestSupervisorCheck";
-    /// The person lifts a Supervisor pause: `{stepId}` → `{stepId, leadThreadId, messageId}`.
-    pub const RESUME_SUPERVISOR_STEP: &str = "ResumeSupervisorStep";
     /// Compact a long idle chat before its 1h prompt cache expires. No params /
     /// `CompactionSettingsUpdate` (settings plus a write-only `jevApiKey`) →
     /// `CompactionSettingsState`.

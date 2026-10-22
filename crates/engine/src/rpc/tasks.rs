@@ -1,5 +1,6 @@
 use super::*;
-use zeron_proto::{Task, TaskMode, TaskPatch, TaskStep, TaskStepPatch};
+use zeron_proto::supervisor::PlanApproval;
+use zeron_proto::{LinkKind, Task, TaskMode, TaskPatch, TaskStep, TaskStepPatch};
 
 fn refused(message: &str) -> RpcError {
     RpcError::Failed(message.into())
@@ -82,6 +83,7 @@ pub(super) struct Lead {
     pub approve_plan: bool,
     pub same_agents: bool,
     pub plan_doc: bool,
+    pub attach: bool,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -245,14 +247,21 @@ fn lead_brief(task_id: &str, lead: Lead, reads: bool) -> String {
         )
     };
     let mut lines = vec![plan.as_str()];
+    if lead.attach {
+        lines.push(
+            "When a thread you already started with create_thread or delegate_task does a step's work, set that step's threadId to the thread's id so the thread runs the step.",
+        );
+    }
     if lead.approve_plan {
         lines.push(
             "Then stop. The person reviews the plan in Tasks and approves it; you get a message when it is approved.",
         );
     }
-    lines.push(
-        "Run each step on its own thread with create_thread: prompt set to what the step must do, taskStepId set to the step's id, title optional. Steps that do not depend on each other can run at the same time.",
-    );
+    lines.push(if lead.attach {
+        "Do a step yourself, or with your own sub-agents, then mark it done with the tasks tool, action \"step\". Run a step on its own thread with create_thread only when it needs one: prompt set to what the step must do, taskStepId set to the step's id, title optional."
+    } else {
+        "Run each step on its own thread with create_thread: prompt set to what the step must do, taskStepId set to the step's id, title optional. Steps that do not depend on each other can run at the same time."
+    });
     lines.push(if lead.same_agents {
         "Run every step on your own harness and model: do not pass harness or model to create_thread."
     } else {
@@ -277,8 +286,13 @@ fn lead_brief(task_id: &str, lead: Lead, reads: bool) -> String {
         .enumerate()
         .map(|(n, line)| format!("{}. {line}", n + 1))
         .collect();
+    let intro = if lead.attach {
+        "This task is a plan for the work this chat is already doing. Break that work into steps; do a step yourself or run it on a thread."
+    } else {
+        "Break it into steps and run each step on its own thread."
+    };
     format!(
-        "You lead this task (task id {task_id}). Break it into steps and run each step on its own thread.\n\n{}",
+        "You lead this task (task id {task_id}). {intro}\n\n{}",
         steps.join("\n")
     )
 }
@@ -338,19 +352,120 @@ impl EngineRpc {
     }
 
     pub(super) fn update_task(&self, task_id: &str, patch: &TaskPatch) -> Result<(), RpcError> {
-        if let Some(context) = &patch.context {
+        let leads = patch.chat_id.is_some() || patch.mode.is_some() || patch.completed.is_some();
+        if patch.context.is_some() || leads {
             let task = self.task_or_refuse(task_id)?;
-            if task.mode == TaskMode::Orchestrated && task.chat_id.is_some() {
-                return Err(refused(
-                    "The chats a mission reads are fixed once it starts; write to its lead instead",
-                ));
+            if let Some(context) = &patch.context {
+                if task.has_plan() {
+                    return Err(refused(
+                        "The chats a mission reads are fixed once it starts; write to its lead instead",
+                    ));
+                }
+                self.check_context_chats(context)?;
             }
-            self.check_context_chats(context)?;
+            if leads {
+                self.check_one_plan(&task, patch)?;
+            }
         }
         match self.workspace.update_task(task_id, patch).map_err(failed)? {
             true => Ok(()),
             false => Err(refused("Task no longer exists")),
         }
+    }
+
+    fn check_one_plan(&self, task: &Task, patch: &TaskPatch) -> Result<(), RpcError> {
+        let mut after = task.clone();
+        if let Some(chat_id) = &patch.chat_id {
+            after.chat_id = chat_id.clone();
+        }
+        if let Some(mode) = patch.mode {
+            after.mode = mode;
+        }
+        if let Some(completed) = patch.completed {
+            after.completed_at = completed.then(chrono::Utc::now);
+        }
+        let Some(chat_id) = after
+            .chat_id
+            .as_deref()
+            .filter(|id| after.is_open_plan_of(id))
+        else {
+            return Ok(());
+        };
+        let tasks = self.workspace.read_tasks().map_err(failed)?;
+        if tasks
+            .iter()
+            .any(|other| other.id != task.id && other.is_open_plan_of(chat_id))
+        {
+            return Err(refused("This chat already leads a mission"));
+        }
+        Ok(())
+    }
+
+    fn check_step_threads(&self, task: &Task, threads: &[Option<String>]) -> Result<(), RpcError> {
+        if threads.iter().all(Option::is_none) {
+            return Ok(());
+        }
+        let lead = task
+            .chat_id
+            .as_deref()
+            .ok_or_else(|| refused("This task has no lead thread"))?;
+        let tasks = self.workspace.read_tasks().map_err(failed)?;
+        let steps = self.workspace.read_task_steps().map_err(failed)?;
+        for (n, thread) in threads.iter().enumerate() {
+            let Some(thread) = thread.as_deref() else {
+                continue;
+            };
+            if threads[..n].iter().flatten().any(|seen| seen == thread) {
+                return Err(refused(&format!("threadId {thread} is on two steps")));
+            }
+            let chat = self
+                .workspace
+                .chat(thread)
+                .map_err(failed)?
+                .ok_or_else(|| refused(&format!("threadId {thread} no longer exists")))?;
+            match zeron_proto::thread_link(&chat, &tasks, &steps) {
+                Some(link)
+                    if link.parent == lead
+                        && matches!(link.kind, LinkKind::Delegated | LinkKind::OpenedFrom) => {}
+                Some(link) if link.kind == LinkKind::SidechatOf => {
+                    return Err(refused(&format!(
+                        "threadId {thread} is a sidechat; a step runs on a thread this chat started"
+                    )));
+                }
+                Some(link) if link.kind == LinkKind::ForkedFrom => {
+                    return Err(refused(&format!(
+                        "threadId {thread} is a fork; a step runs on a thread this chat started"
+                    )));
+                }
+                _ => {
+                    return Err(refused(&format!(
+                        "threadId {thread} is not a thread this chat started"
+                    )));
+                }
+            }
+            if let Some(holder) = steps.iter().find(|step| {
+                !step.deleted && step.outcome.is_none() && step.chat_id.as_deref() == Some(thread)
+            }) {
+                return Err(refused(&format!(
+                    "threadId {thread} already runs step \"{}\"",
+                    holder.title
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Recorded at bind, so settle_task_steps never wakes the lead for a turn that ended before.
+    fn ended_turn(&self, thread: &str) -> Option<zeron_proto::StepTurn> {
+        use zeron_proto::{SessionStatus, StepTurn, StepTurnEnd};
+        let session = self.sessions.session_status(thread)?;
+        let ended = match session.status {
+            SessionStatus::Working | SessionStatus::AwaitingInput => return None,
+            SessionStatus::Errored => StepTurnEnd::Failed,
+            SessionStatus::Idle => StepTurnEnd::Completed,
+        };
+        let turn = session.last_completed_turn;
+        (ended == StepTurnEnd::Failed || turn.is_some()).then_some(StepTurn { ended, turn })
     }
 
     fn check_context_chats(&self, context: &[String]) -> Result<(), RpcError> {
@@ -509,21 +624,6 @@ impl EngineRpc {
         if chat.device_id != self.doc_host.device_id() {
             return Err(refused("Assign the task to a thread on this device"));
         }
-        if lead.is_some()
-            && self
-                .workspace
-                .read_tasks()
-                .map_err(failed)?
-                .iter()
-                .any(|other| {
-                    other.id != task_id
-                        && other.completed_at.is_none()
-                        && other.mode == TaskMode::Orchestrated
-                        && other.chat_id.as_deref() == Some(chat_id)
-                })
-        {
-            return Err(refused("This chat already leads a mission"));
-        }
         let send = send || lead.is_some();
         if send && from_chat_id == Some(chat_id) {
             return Err(refused("A thread cannot send a task to itself"));
@@ -559,23 +659,10 @@ impl EngineRpc {
         text: &str,
         images: Vec<String>,
     ) -> Result<String, RpcError> {
-        let sent = self
-            .doc_host
-            .queue_thread_message_with(chat_id, from_chat_id, text, images)
-            .await;
-        let send_error = match &sent {
-            Ok(id) if task.send_error.is_none() => return Ok(id.clone()),
-            Ok(_) => None,
-            Err(error) => Some(error.to_string()),
-        };
-        let patch = TaskPatch {
-            send_error: Some(send_error),
-            ..Default::default()
-        };
-        self.workspace
-            .update_task(&task.id, &patch)
-            .map_err(failed)?;
-        sent.map_err(failed)
+        self.doc_host
+            .send_to_task_thread(&self.workspace, task, chat_id, from_chat_id, text, images)
+            .await
+            .map_err(failed)
     }
 
     pub(super) fn lead_of(&self, task: &Task) -> Result<String, RpcError> {
@@ -631,20 +718,30 @@ impl EngineRpc {
             detail,
             options,
         )?;
-        self.doc_host.supervisor_escalated(&item);
+        self.doc_host.supervisor_escalated(&item, false);
         Ok(item.id)
     }
 
     pub(super) fn plan_steps(
         &self,
         task_id: &str,
-        steps: Vec<(String, String)>,
+        steps: Vec<(String, String, Option<String>)>,
         overview: Option<String>,
         resources: Option<Vec<String>>,
         from_chat_id: Option<&str>,
     ) -> Result<Vec<String>, RpcError> {
         let task = self.task_or_refuse(task_id)?;
         Self::check_lead(&task, from_chat_id, "writes its plan")?;
+        let mode = (task.mode != TaskMode::Orchestrated).then_some(TaskMode::Orchestrated);
+        self.check_one_plan(
+            &task,
+            &TaskPatch {
+                mode,
+                ..Default::default()
+            },
+        )?;
+        let threads: Vec<Option<String>> = steps.iter().map(|(_, _, id)| id.clone()).collect();
+        self.check_step_threads(&task, &threads)?;
         let resources = resources
             .map(|keys| crate::supervisor_resources::checked_keys(&keys))
             .transpose()
@@ -654,18 +751,18 @@ impl EngineRpc {
         let now = chrono::Utc::now();
         let mut steps: Vec<TaskStep> = steps
             .into_iter()
-            .map(|(title, notes)| TaskStep {
+            .map(|(title, notes, thread)| TaskStep {
                 id: crate::new_id(),
                 task_id: task_id.to_string(),
                 title,
                 notes,
                 order_key: String::new(),
-                chat_id: None,
+                turn: thread.as_deref().and_then(|id| self.ended_turn(id)),
+                chat_id: thread,
                 outcome: None,
                 created_at: now,
                 updated_at: now,
                 deleted: false,
-                turn: None,
                 images: Vec::new(),
             })
             .collect();
@@ -693,7 +790,7 @@ impl EngineRpc {
             .plan_task_steps(task_id, &steps)
             .map_err(failed)?;
         let patch = TaskPatch {
-            mode: (task.mode != TaskMode::Orchestrated).then_some(TaskMode::Orchestrated),
+            mode,
             plan: overview,
             resources,
             images: (images != task.images).then_some(images),
@@ -775,7 +872,7 @@ impl EngineRpc {
             .map(drop)
     }
 
-    pub(super) async fn approve_plan(&self, task_id: &str) -> Result<(), RpcError> {
+    pub(super) fn plan_awaiting_approval(&self, task_id: &str) -> Result<(Task, String), RpcError> {
         let task = self.task_or_refuse(task_id)?;
         if !task.plan_pending {
             return Err(refused("This plan is not waiting for approval"));
@@ -784,11 +881,20 @@ impl EngineRpc {
         if self.workspace.task_steps_of(task_id).is_empty() {
             return Err(refused("The plan has no steps yet"));
         }
+        Ok((task, lead))
+    }
+
+    pub(super) fn set_plan_pending(&self, task_id: &str, pending: bool) -> Result<(), RpcError> {
         let patch = TaskPatch {
-            plan_pending: Some(false),
+            plan_pending: Some(pending),
             ..Default::default()
         };
-        self.update_task(task_id, &patch)?;
+        self.update_task(task_id, &patch)
+    }
+
+    pub(super) async fn approve_plan(&self, task_id: &str) -> Result<String, RpcError> {
+        let (task, lead) = self.plan_awaiting_approval(task_id)?;
+        self.set_plan_pending(task_id, false)?;
         self.send_to_task_thread(
             &task,
             &lead,
@@ -797,7 +903,44 @@ impl EngineRpc {
             Vec::new(),
         )
         .await
-        .map(drop)
+    }
+
+    /// Returns the plan to review while no step has started; the lead hears of it only if the approval reached it.
+    pub(super) async fn take_back_plan_approval(&self, task_id: &str) -> Result<(), RpcError> {
+        let store = self.supervisor_store()?;
+        let approving = store.approving();
+        let _approving = approving.lock().await;
+        let task = self.task_or_refuse(task_id)?;
+        let (id, approval) = store
+            .approval_of(task_id)
+            .ok_or_else(|| refused("The Supervisor has not approved this plan"))?;
+        if matches!(approval, PlanApproval::TakenBack { .. }) {
+            return Err(refused("This approval is already taken back"));
+        }
+        for step in self.workspace.task_steps_of(task_id) {
+            if !self.unstarted(&step)? {
+                return Err(refused(
+                    "A step already started, so the approval stays. Edit the plan in Mission Control or message the lead to change course.",
+                ));
+            }
+        }
+        let lead = self.lead_of(&task)?;
+        self.set_plan_pending(task_id, true)?;
+        store.set_approval(
+            &id,
+            Some(PlanApproval::TakenBack {
+                at: chrono::Utc::now(),
+            }),
+            None,
+        );
+        if approval == PlanApproval::Sent {
+            let text = format!(
+                "The person took back the Supervisor's approval of this plan (task id {task_id}). The plan waits for the person's review again: do not run any step until the approval message comes."
+            );
+            self.send_to_task_thread(&task, &lead, None, &text, Vec::new())
+                .await?;
+        }
+        Ok(())
     }
 
     pub(super) async fn retry_task_step(&self, step_id: &str) -> Result<(), RpcError> {

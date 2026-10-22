@@ -347,7 +347,7 @@ impl DemoHost {
                         None,
                     );
                 }
-                SessionCommandPayload::Interrupt {} => {
+                SessionCommandPayload::Interrupt { .. } => {
                     if let Some((_, token)) = lock(&self.turns).remove(chat_id) {
                         token.cancel();
                     } else {
@@ -709,6 +709,8 @@ impl DemoHost {
                         questions,
                         resolved: false,
                         answers: None,
+                        asked_at_ms: None,
+                        answered_at_ms: None,
                     });
                     sync(&parts, &mut written, &mut index);
                     awaiting = true;

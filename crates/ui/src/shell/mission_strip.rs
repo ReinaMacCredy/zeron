@@ -18,11 +18,11 @@ impl Shell {
             let mission = crate::tasks::mission_thread(state, &chat_id, chrono::Utc::now());
             (chat_id, mission)
         };
-        let reveal = self.strip_reveal(chat_id, mission.is_some());
+        let reveal = self.strip_reveal(chat_id.clone(), mission.is_some());
         let tree = mission
             .as_ref()
             .filter(|mission| mission.role == crate::tasks::MissionRole::Lead)
-            .map(|mission| self.mission_tree_for(&mission.task_id, cx));
+            .map(|mission| self.mission_tree_for(&chat_id, &mission.task_id, cx));
         if tree.is_none() {
             self.mission_tree = None;
         }
@@ -170,31 +170,58 @@ impl Shell {
 
     fn mission_tree_for(
         &mut self,
+        lead_chat_id: &str,
         task_id: &str,
         cx: &mut Context<Self>,
     ) -> Entity<crate::tasks::StripTree> {
         if let Some((tree, _)) = &self.mission_tree
-            && tree.read(cx).task_id() == task_id
+            && tree.read(cx).root_id() == lead_chat_id
         {
             return tree.clone();
         }
-        let open = !self.closed_mission_trees.contains(task_id);
+        let open = !self.closed_mission_trees.contains(lead_chat_id);
         let state = self.state.clone();
-        let task = task_id.to_string();
+        let root = lead_chat_id.to_string();
         let tree = cx.new(|cx| {
-            crate::tasks::StripTree::new(state, task, open, crate::tasks::TreeHost::Strip, cx)
+            crate::tasks::StripTree::new(state, root, true, open, crate::tasks::TreeHost::Strip, cx)
         });
         let task = task_id.to_string();
         let events = cx.subscribe(
             &tree,
-            move |shell, _, event: &crate::tasks::StripTreeEvent, cx| {
-                if let crate::tasks::StripTreeEvent::Open(selection) = event {
-                    shell.open_mission(task.clone(), selection.clone(), cx);
-                }
+            move |shell, _, event: &crate::tasks::StripTreeEvent, cx| match event {
+                crate::tasks::StripTreeEvent::Open { selection, chat_id } => match chat_id {
+                    Some(chat_id) => shell.open_chat(chat_id.clone(), cx),
+                    None => shell.open_mission(task.clone(), selection.clone(), cx),
+                },
+                crate::tasks::StripTreeEvent::OpenNative {
+                    parent_chat_id,
+                    doc_id,
+                    title,
+                    frozen,
+                } => shell.open_native(
+                    parent_chat_id.clone(),
+                    doc_id.clone(),
+                    title.clone(),
+                    *frozen,
+                    cx,
+                ),
+                crate::tasks::StripTreeEvent::Brief(_) => {}
             },
         );
         self.mission_tree = Some((tree.clone(), events));
         tree
+    }
+
+    pub(super) fn open_native(
+        &mut self,
+        parent_chat_id: String,
+        doc_id: String,
+        title: String,
+        frozen: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_chat(parent_chat_id.clone(), cx);
+        self.add_subagent_surface(parent_chat_id, doc_id, title, frozen, cx);
     }
 
     fn toggle_mission_tree(
@@ -206,9 +233,9 @@ impl Shell {
             let open = !tree.is_open();
             tree.set_open(open, cx);
             if open {
-                self.closed_mission_trees.remove(tree.task_id());
+                self.closed_mission_trees.remove(tree.root_id());
             } else {
-                self.closed_mission_trees.insert(tree.task_id().to_string());
+                self.closed_mission_trees.insert(tree.root_id().to_string());
             }
         });
         cx.notify();
@@ -232,10 +259,16 @@ impl Shell {
         tween.value_at(now)
     }
 
-    fn open_mission(&mut self, task_id: String, selection: Selection, cx: &mut Context<Self>) {
-        let center = self.task_center_for(task_id.clone(), cx);
+    pub(super) fn open_mission(
+        &mut self,
+        task_id: String,
+        selection: Selection,
+        cx: &mut Context<Self>,
+    ) {
+        let key = super::task_actions::tree_key(self.state.read(cx), &task_id);
+        let center = self.task_center_for(key.clone(), cx);
         center.update(cx, |center, cx| center.select(selection, cx));
-        self.open_task_center(task_id, cx);
+        self.open_task_center(key, cx);
     }
 
     pub(super) fn center_back_chat(&self, cx: &App) -> Option<String> {
@@ -253,7 +286,7 @@ impl Shell {
         if self.center_back_chat(cx).is_some() {
             self.navigate_back(cx);
         } else {
-            self.back_to_tasks(cx);
+            self.back_to_mission_control(cx);
         }
     }
 

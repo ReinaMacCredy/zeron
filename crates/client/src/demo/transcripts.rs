@@ -403,6 +403,8 @@ fn picker(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                         },
                     ],
                     resolved: false, answers: None, 
+                    asked_at_ms: None,
+                    answered_at_ms: None,
                 },
             ],
         ),
@@ -707,6 +709,8 @@ fn consent(
                 labels: vec![label.into()],
             }]
         }),
+        asked_at_ms: None,
+        answered_at_ms: None,
     }
 }
 

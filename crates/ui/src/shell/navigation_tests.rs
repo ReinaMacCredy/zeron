@@ -650,6 +650,14 @@ fn going_back_to_mission_control_finds_the_page_it_left(cx: &mut TestAppContext)
         })
     };
     let page = center(&shell, cx).expect("the center page");
+    shell.read_with(cx, |shell, _| {
+        assert_eq!(
+            shell.task_center_task.as_deref(),
+            Some("parent"),
+            "a task id opens the tree page of its lead chat"
+        );
+        assert_eq!(shell.nav.current(), &NavEntry::TaskCenter("parent".into()));
+    });
 
     shell.update(cx, |shell, cx| shell.open_chat("other".into(), cx));
     settle(cx);
@@ -667,6 +675,15 @@ fn going_back_to_mission_control_finds_the_page_it_left(cx: &mut TestAppContext)
     );
     settle(cx);
     assert_eq!(center(&shell, cx), Some(page), "the same page comes back");
+    shell.update(cx, |shell, cx| {
+        shell.enter_task_center_route("t".into(), cx)
+    });
+    settle(cx);
+    assert_eq!(
+        center(&shell, cx),
+        Some(page),
+        "a saved entry holding the task id reopens the same page"
+    );
 
     shell.update(cx, |shell, cx| {
         shell.open_chat("parent".into(), cx);
