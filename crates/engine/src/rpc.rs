@@ -2605,6 +2605,7 @@ impl EngineRpc {
                     resources,
                     from_chat_id.as_deref(),
                 )
+                .await
                 .map(drop)
             }
             MutateParams::UpdateTaskStep {
@@ -2646,7 +2647,7 @@ impl EngineRpc {
             MutateParams::SetMissionSupervised {
                 task_id,
                 supervised,
-            } => self.set_mission_supervised(&task_id, supervised),
+            } => self.set_mission_supervised(&task_id, supervised).await,
             MutateParams::SetTreeWatched {
                 root_chat_id,
                 watched,
@@ -4639,13 +4640,15 @@ impl RpcService for EngineRpc {
                         .into_iter()
                         .map(|step| (step.title, step.notes, step.thread_id, step.role))
                         .collect();
-                    let images_moved = self.plan_steps(
-                        &task_id,
-                        steps,
-                        overview,
-                        resources,
-                        from_chat_id.as_deref(),
-                    )?;
+                    let images_moved = self
+                        .plan_steps(
+                            &task_id,
+                            steps,
+                            overview,
+                            resources,
+                            from_chat_id.as_deref(),
+                        )
+                        .await?;
                     return RpcReply::value(&serde_json::json!({
                         "ok": true,
                         "task": self.workspace.task(&task_id),

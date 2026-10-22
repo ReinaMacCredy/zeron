@@ -344,6 +344,15 @@ impl SupervisorStore {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => empty_file(),
             Err(err) => return Err(err.into()),
         };
+        let mut file = file;
+        let now = Utc::now();
+        for record in &mut file.interventions {
+            if let Some(PlanApproval::Held { starts_at }) = &mut record.row.approval
+                && *starts_at < now
+            {
+                *starts_at = now + chrono::Duration::milliseconds(approval_hold_ms());
+            }
+        }
         let state = State {
             router: Router {
                 reported: State::reported_keys(&file.wakes),
@@ -766,13 +775,26 @@ impl SupervisorStore {
             .any(|item| item.answer.is_none() && item.task_id.as_deref() == Some(task_id))
     }
 
-    pub(crate) fn reopen_item(&self, item_id: &str) -> Result<(), EngineError> {
+    /// Puts back the answer before `choice`, unless a later answer already replaced it.
+    pub(crate) fn revert_answer(
+        &self,
+        item_id: &str,
+        choice: &str,
+        previous: Option<ItemAnswer>,
+    ) -> Result<(), EngineError> {
         {
             let mut state = lock(&self.inner.state);
             let mut file = state.file.clone();
-            if let Some(item) = file.items.iter_mut().find(|item| item.id == item_id) {
-                item.answer = None;
-            }
+            let Some(item) = file.items.iter_mut().find(|item| {
+                item.id == item_id
+                    && item
+                        .answer
+                        .as_ref()
+                        .is_some_and(|answer| answer.choice == choice)
+            }) else {
+                return Ok(());
+            };
+            item.answer = previous;
             persist_json(&self.inner.path, &file)?;
             state.file = file;
         }
@@ -794,12 +816,20 @@ impl SupervisorStore {
         {
             let mut state = lock(&self.inner.state);
             state.file.interventions.push(record);
-            let excess = state
+            let mut excess = state
                 .file
                 .interventions
                 .len()
                 .saturating_sub(KEPT_INTERVENTIONS);
-            state.file.interventions.drain(..excess);
+            state.file.interventions.retain(|record| {
+                let drop = excess > 0
+                    && !matches!(
+                        record.row.approval,
+                        Some(PlanApproval::Held { .. } | PlanApproval::TakenBack { .. })
+                    );
+                excess -= usize::from(drop);
+                !drop
+            });
             self.persist(&state);
         }
         self.mark_stale();

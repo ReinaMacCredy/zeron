@@ -597,16 +597,23 @@ impl DocHost {
         sent
     }
 
+    /// Held across a take-back's check and write, so no step thread starts between them.
+    pub(crate) async fn step_start_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.inner.delegation_lock.lock().await
+    }
+
     /// Sends each held Supervisor approval whose hold ran out; returns when the next one does.
     async fn release_approvals(
         &self,
         store: &SupervisorStore,
         workspace: &WorkspaceHost,
+        decide_for_me: bool,
         now: i64,
     ) -> Option<i64> {
         let mut next = None;
         for (id, task_id, due, reason) in store.held_approvals() {
-            if due > now {
+            let withdrawn = !decide_for_me || store.is_unwatched(&task_id);
+            if due > now && !withdrawn {
                 next = Some(next.map_or(due, |next: i64| next.min(due)));
                 continue;
             }
@@ -627,20 +634,34 @@ impl DocHost {
                 store.set_approval(&id, None, None);
                 continue;
             };
+            let to_review = || {
+                let patch = TaskPatch {
+                    plan_pending: Some(true),
+                    ..Default::default()
+                };
+                if let Err(err) = workspace.update_task(&task_id, &patch) {
+                    tracing::warn!(error = %err, task = %task_id, "returning a plan to review failed");
+                }
+                store.set_approval(&id, None, None);
+            };
+            if withdrawn {
+                to_review();
+                continue;
+            }
             let text = format!(
                 "The Supervisor approved the plan; the person gave it this decision. Run it.\n\nWhy: {}",
                 reason.trim()
             );
-            match self
+            let sent = self
                 .send_to_task_thread(workspace, &task, &lead, None, &text, Vec::new())
-                .await
-            {
+                .await;
+            match sent {
                 Ok(message_id) => {
                     store.set_approval(&id, Some(PlanApproval::Sent), Some(message_id))
                 }
                 Err(err) => {
                     tracing::warn!(error = %err, task = %task_id, "sending a held plan approval failed");
-                    store.set_approval(&id, Some(PlanApproval::Sent), None);
+                    to_review();
                 }
             }
         }
@@ -1114,7 +1135,10 @@ impl DocHost {
                 supervisor.as_ref().map(|chat| chat.id.as_str()),
             ));
         }
-        let released = self.release_approvals(store, workspace, now).await;
+        let settings = registry.supervisor_settings();
+        let released = self
+            .release_approvals(store, workspace, settings.decide_for_me, now)
+            .await;
         let refresh = [store.refresh_at(), released].into_iter().flatten().min();
         let Some(supervisor) = supervisor else {
             store.take_pending();
@@ -1170,7 +1194,6 @@ impl DocHost {
         for check in std::mem::take(&mut round.checks) {
             self.spawn_checkout_check(check);
         }
-        let settings = registry.supervisor_settings();
         if settings.decide_for_me {
             for plan in &round.plans {
                 let taken_back = matches!(

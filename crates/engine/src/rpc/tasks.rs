@@ -750,7 +750,7 @@ impl EngineRpc {
         Ok(item.id)
     }
 
-    pub(super) fn plan_steps(
+    pub(super) async fn plan_steps(
         &self,
         task_id: &str,
         steps: Vec<(String, String, Option<String>, Option<String>)>,
@@ -833,6 +833,7 @@ impl EngineRpc {
             images: (images != task.images).then_some(images),
             ..Default::default()
         };
+        self.withdraw_held_approval(task_id).await?;
         self.workspace
             .plan_task_steps(task_id, &steps, &patch)
             .map_err(failed)?;
@@ -898,11 +899,27 @@ impl EngineRpc {
         .await
     }
 
+    /// A Supervisor approval still in its hold no longer stands: the plan returns to review, and the lead, never told, hears nothing.
+    pub(super) async fn withdraw_held_approval(&self, task_id: &str) -> Result<bool, RpcError> {
+        let Some(store) = self.doc_host.supervisor() else {
+            return Ok(false);
+        };
+        let approving = store.approving();
+        let _approving = approving.lock().await;
+        let Some((id, PlanApproval::Held { .. })) = store.approval_of(task_id) else {
+            return Ok(false);
+        };
+        self.set_plan_pending(task_id, true)?;
+        store.set_approval(&id, None, None);
+        Ok(true)
+    }
+
     /// Returns the plan to review while no step has started; the lead hears of it only if the approval reached it.
     pub(super) async fn take_back_plan_approval(&self, task_id: &str) -> Result<(), RpcError> {
         let store = self.supervisor_store()?;
         let approving = store.approving();
         let _approving = approving.lock().await;
+        let _starting = self.doc_host.step_start_lock().await;
         let task = self.task_or_refuse(task_id)?;
         let (id, approval) = store
             .approval_of(task_id)
@@ -1197,6 +1214,11 @@ impl EngineRpc {
             }
         }
         let deletes: Vec<String> = removed.iter().map(|step| step.id.clone()).collect();
+        let edits = task_patch != TaskPatch::default()
+            || !updates.is_empty()
+            || !creates.is_empty()
+            || !deletes.is_empty();
+        let withdrawn = edits && self.withdraw_held_approval(task_id).await?;
         self.workspace
             .edit_task_plan(task_id, &task_patch, &updates, &creates, &deletes)
             .map_err(failed)?;
@@ -1209,7 +1231,7 @@ impl EngineRpc {
         if changes.is_empty() {
             return Ok(None);
         }
-        let next = if task.plan_pending {
+        let next = if task.plan_pending || withdrawn {
             "The plan still waits for the person's approval: do not run any step until the approval message comes."
         } else {
             "Run the new and changed steps from this plan, and send a step whose thread is already running what changed with send_message_to_thread."
@@ -1226,7 +1248,11 @@ impl EngineRpc {
             "{who} the plan in Mission Control (task id {task_id}):\n- {}{why}\n\nRead the whole plan with the tasks tool: action \"list\", taskId \"{task_id}\". {next}",
             changes.join("\n- ")
         );
-        self.doc_host.supervisor_plan_edited(&task, &changes, from);
+        let mut noted = changes.clone();
+        if withdrawn {
+            noted.push("This edit withdrew your approval while it was held, so the plan waits for review again: approve it if it still fits.".to_string());
+        }
+        self.doc_host.supervisor_plan_edited(&task, &noted, from);
         self.send_to_task_thread(&task, &lead, from, &text, attached)
             .await
             .map(Some)
