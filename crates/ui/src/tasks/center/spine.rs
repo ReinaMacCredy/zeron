@@ -778,6 +778,7 @@ impl TaskCenter {
                 &text,
                 theme,
                 window,
+                cx,
             )
         } else {
             div()
@@ -1281,6 +1282,7 @@ impl TaskCenter {
                         &row.step.notes,
                         theme,
                         window,
+                        cx,
                     )
                 };
                 let thumbs = (images > 0).then(|| {

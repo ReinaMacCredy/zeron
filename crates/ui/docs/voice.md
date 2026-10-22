@@ -32,7 +32,7 @@ To throw a recording away, click the **×** that replaces the attach button whil
 
 ## Voice mode
 
-Voice mode needs Codex installed on this device. When it is available, a microphone button sits in the lower part of the left rail (tooltip **Start voice · Codex orchestrator**). Click it to start a call. A full-window voice stage opens with the call timer and these controls:
+Voice mode needs Codex installed on this device and turned on in [Settings > Providers](zeron://settings/providers). When it is available, a microphone button sits in the lower part of the left rail (tooltip **Start voice · Codex orchestrator**). Click it to start a call. A full-window voice stage opens with the call timer and these controls:
 
 - **Mute** (or press M)
 - **Transcript** opens the voice session's chat. It shows a dot when Codex is asking you something.

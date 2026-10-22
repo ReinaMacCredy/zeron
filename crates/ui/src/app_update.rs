@@ -307,6 +307,10 @@ impl AppUpdate {
         cx.notify();
     }
 
+    pub fn installs_on_quit(&self) -> bool {
+        self.automatic
+    }
+
     /// The staged update "Restart to update" would install.
     pub fn staged(&self) -> Option<PathBuf> {
         match &self.flow {

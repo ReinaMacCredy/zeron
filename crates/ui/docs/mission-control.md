@@ -83,7 +83,7 @@ The list is fixed once the mission starts, and the Mission Control page shows it
 
 You do not need a task card to start a mission. On the New chat canvas, the **Mission Control** tab starts one from what you type: see [Start a new chat](zeron://docs/new-chat).
 
-In an open chat, press Shift+Tab in the composer, or click **Mission Control** under it, to turn the composer into a mission. Pick **plan.md** or **Steps only**, leave **Review plan first** on or turn it off, type the mission and click **Start mission**. The first line becomes the task's title and the rest its notes. Chats you mention in the text with **@** become the chats the lead reads, up to 5, as on the card; the lead's own chat is left out. A mission started from a composer has no **Step agents** choice: the lead picks per step. Shift+Tab again goes back to the chat, and so does starting the mission. What happens next follows **In a chat, Mission Control** in [Settings > General](zeron://settings/general):
+In an open chat, press Shift+Tab in the composer, or click **Mission Control** under it, to turn the composer into a mission. Pick **plan.md** or **Steps only**, leave **Review plan first** on or turn it off, type the mission and click **Start mission**. The first line becomes the task's title and the rest its notes. Chats you mention in the text with **@** become the chats the lead reads, up to 5, as on the card; the lead's own chat is left out. A mission started from a composer has no **Steps** choice: the lead picks per step. Shift+Tab again goes back to the chat, and so does starting the mission. What happens next follows **In a chat, Mission Control** in [Settings > General](zeron://settings/general):
 
 - **This chat leads**, the default: the chat becomes the mission's lead. It keeps its name and its agent, and the task with the lead's instructions arrives in it as a message, so the agent plans from the conversation you already had. If the agent is working, the message steers its turn instead of stopping it. The step threads show in the sidebar under this chat. A chat leads one unfinished mission at a time: while it still leads one, Zeron refuses a second and gives your text back.
 - **New mission reads this chat**: Zeron starts a new lead with the chat's agent, model, permissions and project, and this chat is the first of the chats the lead reads before it plans. The chat shows **Started mission** with the task's name. Click **Open** for its Mission Control page, or **Dismiss** to hide the notice.
@@ -143,7 +143,7 @@ A mission's overview and a step's spec can carry images, up to 12 each:
 - **Add image** in a step's open spec or its right-click menu adds the picked images to its spec at once.
 - Like any edit, they reach the lead when you click **Send to lead**.
 
-Thumbnails show under the overview and in a step's open spec. Click one to see it large; the left and right arrows, or the ‹ › buttons, move between the images of that overview or step, and Escape or a click outside closes it.
+Thumbnails show under the overview once you click **Overview** to open it, and in a step's open spec. Click one to see it large; the left and right arrows, or the ‹ › buttons, move between the images of that overview or step, and Escape or a click outside closes it.
 
 The images go to the agent that does the work, the same way an image you attach in a chat does: the overview's images with the lead's first message (images added to the overview later go with the **Send to lead** message), and a step's images with the first message of the step's thread. An image added to a step whose thread has already started does not reach that thread; the edit card says so. The overview's images are the task's own, so images the task had before you started the mission show under the overview.
 
@@ -153,7 +153,7 @@ When the lead rewrites the plan, a step that has not started keeps its images if
 
 Steps that do not depend on each other run at the same time. The lead opens a new chat for each step. These are ordinary chats: each shows in the sidebar indented under the lead's chat, and clicking it, or **Open thread** on the task page, opens it like any other chat, where you can write to it. In the lead's chat, each one reads **Started thread** with its name and an **Open** link. **Delegated tasks per chat** in Settings > General caps how many steps one lead runs at once.
 
-A step turns **Done** when its chat finishes a turn, and **Failed** when the chat fails. Zeron tells the lead either way and quotes the chat's last reply, cut short after 4,000 characters. Steps that finish within half a second of each other, or while that message still waits for the lead, share one message. In the lead's chat, the message starts with **From** and the name of each step thread it reports on; click a name to open that thread. Each reply shows as a quote under it. The lead reads the chat, then marks the step done or skipped, sends the chat what is still missing, or runs the step again on a new chat. Hover a step to **Skip** it, or to **Reopen** one that is done or skipped. When a step's chat failed or was stopped, **Retry** asks the lead to look at what happened and fix it or run the step again.
+A step turns **Done** when its chat finishes a turn, and **Failed** when the chat fails. Zeron tells the lead either way and quotes the chat's last reply, cut short after 4,000 characters. Steps that finish within half a second of each other, or while that message still waits for the lead, share one message. In the lead's chat, the message starts with **From** and the name of each step thread it reports on; click a name to open that thread. Each reply shows as a quote under it. The lead reads the chat, then marks the step done or skipped, sends the chat what is still missing, or runs the step again on a new chat. Hover a step that is planned, needs you, or failed, and that the lead has not marked yet, to **Skip** it; hover one the lead has marked done or skipped to **Reopen** it. When a step's chat failed or was stopped, **Retry** asks the lead to look at what happened and fix it or run the step again.
 
 When every step is done, the lead checks the whole result, tells you what was built, and marks the task done.
 
@@ -172,7 +172,7 @@ The lead's chat and the chat of every step show a strip at the top of the conver
 - a bar with the steps done;
 - **Mission Control**.
 
-In the lead's chat, the strip also shows the mission as a tree: the lead with what it is doing, and each step on its own line under it with its state, its agent's mark and, while it works, the time so far. Running steps shimmer; the lines to each step draw themselves in as the plan arrives. The button at the end of the lead's line (**6** with a chevron) folds the steps away; click it again to bring them back. Click the strip's top row to fold the whole tree into the strip, and again to open it. With reduced motion, the tree appears and folds at once.
+In the lead's chat, the strip also shows the mission as a tree: the lead with what it is doing, and each step on its own line under it with its state, its agent's mark and its time: the time so far while it works or waits on you, then the time its agent spent working. Running steps shimmer; the lines to each step draw themselves in as the plan arrives. The button at the end of the lead's line (**6** with a chevron) folds the steps away; click it again to bring them back. Click the strip's top row to fold the whole tree into the strip, and again to open it. With reduced motion, the tree appears and folds at once.
 
 ![The mission strip at the top of a lead's chat](mission-control-strip.jpg)
 
@@ -184,7 +184,7 @@ A lead shows its step threads indented under its row. Hover the lead and click t
 
 ## On the Tasks page
 
-In the list, a Mission Control task has a progress ring in place of its circle, and its line reads **Mission Control** and shows the agents on it, steps done out of all steps, and how many are running or need you. On the board, its card has a bar with one segment per step. A mission lands in **Needs you** while its plan waits for you or a step needs you.
+In the list, a Mission Control task has a progress ring in place of its circle, and its line reads **Mission Control** and shows the agents on it, steps done out of the steps that are not skipped, and how many are running or need you. On the board, its card has a bar with one segment per step that is not skipped. A mission lands in **Needs you** while its plan waits for you, a step needs you or has failed, its lead asks you something or has failed, a message to the lead did not get through, or its lead is idle with no step running.
 
 ## The Supervisor
 

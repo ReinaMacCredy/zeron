@@ -72,7 +72,7 @@ Agents can write tasks too, with Zeron's `tasks` tool: list them, add and edit t
 | --- | --- |
 | **To do** | Tasks with no chat yet |
 | **Working** | Tasks whose agent is working |
-| **Needs you** | Tasks whose agent stopped: finished, failed, or asking you something. A Mission Control task also lands here while its plan waits for you or a step needs you |
+| **Needs you** | Tasks whose agent stopped: finished, failed, or asking you something. A task whose message to its chat did not send (**Not sent**) also lands here. A Mission Control task also lands here while its plan waits for you, or a step needs you or has failed |
 | **Done** | Tasks you marked done |
 
 Drag a card to **Done** to finish it, or from **Done** back to **To do** to reopen it. **Working** and **Needs you** follow the chat, so you cannot drop cards there. A card stays in **Needs you** until you mark it done.

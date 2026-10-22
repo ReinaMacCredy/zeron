@@ -4248,16 +4248,16 @@ impl DocHost {
             now_ms(),
         )?;
         if let Some(space) = &space {
-            self.open(source_chat_id)?.write_system_note(
-                &new_id(),
-                &format!(
-                    "Handed off to {} › {}",
-                    space.display_name(),
-                    chat.title.as_deref().unwrap_or("chat")
-                ),
-                None,
-                now_ms(),
-            )?;
+            let note = format!(
+                "Handed off to {} › {}",
+                space.display_name(),
+                chat.title.as_deref().unwrap_or("chat")
+            );
+            if let Err(err) = self.open(source_chat_id).and_then(|handle| {
+                Ok(handle.write_system_note(&new_id(), &note, None, now_ms())?)
+            }) {
+                tracing::warn!(chat = %source_chat_id, error = %err, "handoff source note failed");
+            }
         }
         Ok(chat)
     }
