@@ -746,6 +746,10 @@ async fn turn_end_and_stop_cancel_the_chats_in_flight_calls() {
     assert!(calls.cancel("other", &McpRequestId::Number(1)));
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "the rig's run cwd and space are the Unix path /tmp, which does not exist on Windows"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_seams_bound_browser_files_to_the_run_cwd_and_read_space_designation_from_the_chat() {
     let backend = Scripted::new(crate::computer::fake_backend::FakeComputerBackendOptions {

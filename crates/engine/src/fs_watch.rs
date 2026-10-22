@@ -609,7 +609,8 @@ mod tests {
     }
 
     async fn expect(rx: &mut UnboundedReceiver<Seen>, want: Seen) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        // FSEvents stream starts and stops take seconds when fseventsd is busy.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
             let got = tokio::time::timeout_at(deadline, rx.recv())
                 .await
@@ -623,12 +624,18 @@ mod tests {
 
     /// Wait for the batch worker, then FSEvents' first deliveries, to settle.
     async fn settle(hub: &FsWatchHub) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(30);
         while lock(&hub.batch).worker {
             assert!(Instant::now() < deadline, "batch worker idles");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    // Concurrent stream starts and stops queue behind each other in fseventsd, past any wait budget.
+    fn os_watch_serial() -> MutexGuard<'static, ()> {
+        static SERIAL: Mutex<()> = Mutex::new(());
+        lock(&SERIAL)
     }
 
     fn tree() -> (tempfile::TempDir, PathBuf) {
@@ -730,6 +737,7 @@ mod tests {
     /// a dropped handle unwatches.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shared_watcher_routes_events_and_unwatches_on_drop() {
+        let _serial = os_watch_serial();
         let (_tmp, root) = tree();
         let (a, b) = (root.join("a"), root.join("b"));
         std::fs::create_dir_all(a.join("deep")).unwrap();
@@ -774,6 +782,7 @@ mod tests {
     /// restart on FSEvents), not one per path.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn registration_burst_applies_in_one_pass() {
+        let _serial = os_watch_serial();
         let (_tmp, root) = tree();
         let hub = FsWatchHub::new();
         let mut watches = Vec::new();
@@ -802,6 +811,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn restart_gap_is_bridged_or_compensated() {
+        let _serial = os_watch_serial();
         let (_tmp, root) = tree();
         let (a, b, c) = (root.join("a"), root.join("b"), root.join("c"));
         for dir in [&a, &b, &c] {
@@ -845,6 +855,7 @@ mod tests {
 
     #[test]
     fn missing_path_is_not_live_and_does_not_block_others() {
+        let _serial = os_watch_serial();
         let (_tmp, root) = tree();
         let hub = FsWatchHub::new();
         let (on_gone, mut gone_rx) = recorder();
@@ -870,6 +881,7 @@ mod tests {
 
     #[test]
     fn overlapping_registrations_share_one_install_until_the_last_drops() {
+        let _serial = os_watch_serial();
         let (_tmp, root) = tree();
         std::fs::create_dir_all(root.join("nested")).unwrap();
         let hub = FsWatchHub::new();
@@ -908,6 +920,7 @@ mod tests {
 
     #[test]
     fn replaced_cover_rescans_the_registration() {
+        let _serial = os_watch_serial();
         let (_tmp, root) = tree();
         std::fs::create_dir_all(root.join("nested")).unwrap();
         for hub in [FsWatchHub::new(), per_root_hub()] {
@@ -938,6 +951,7 @@ mod tests {
 
     #[tokio::test]
     async fn per_root_watchers_route_events_and_close_on_drop() {
+        let _serial = os_watch_serial();
         let (_tmp, root) = tree();
         let (a, b) = (root.join("a"), root.join("b"));
         for dir in [&a, &b] {

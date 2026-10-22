@@ -2842,7 +2842,7 @@ mod tests {
         let bytes = b"\xff\xd8\xffavatar".to_vec();
         let served = bytes.clone();
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
             let mut request = [0_u8; 1024];
             let _ = socket.read(&mut request).await.unwrap();
             socket
@@ -3182,7 +3182,12 @@ tmpfs /run tmpfs rw 0 0
         query: &str,
         featured_paths: &[String],
     ) -> Result<Vec<FileSearchMatch>, EngineError> {
-        super::search_files_blocking(&WorkspaceSearch::new(), root, query, featured_paths)
+        let search = WorkspaceSearch::new();
+        let canonical = super::canonical_search_root(root)?;
+        search.warm(&canonical).unwrap();
+        // A loaded host can outlast the 2s scan budget, which would serve a half-built index.
+        assert!(search.wait_until_indexed(&canonical, Duration::from_secs(30)));
+        super::search_files_blocking(&search, root, query, featured_paths)
     }
 
     #[test]
@@ -3398,6 +3403,13 @@ tmpfs /run tmpfs rw 0 0
         std::fs::write(root.path().join("beta.rs"), "").unwrap();
         let repos =
             Repos::with_worktrees_root(data.path(), "device", data.path().join("worktrees"));
+        let canonical = super::canonical_search_root(root.path()).unwrap();
+        repos.workspace_search().warm(&canonical).unwrap();
+        assert!(
+            repos
+                .workspace_search()
+                .wait_until_indexed(&canonical, Duration::from_secs(30))
+        );
 
         let alpha = repos.search_files(root.path().into(), "alpha".into(), Vec::new());
         let beta = repos.search_files(root.path().into(), "beta".into(), Vec::new());

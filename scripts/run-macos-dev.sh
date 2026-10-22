@@ -93,7 +93,8 @@ if [[ -n "${ZERON_CUA_PROBE:-}" ]]; then
   OPEN_ENV+=(--env "ZERON_CUA_PROBE=$ZERON_CUA_PROBE" --env "ZERON_BUNDLE_ID=sh.zeron.app.dev")
 fi
 for knob in ZERON_CUA_NATIVE_PROBE ZERON_CUA_ESCAPE_PROBE ZERON_CUA_BLOCK_MAIN_MS \
-  $(compgen -A variable ZERON_MOCK_ || true) ZERON_HARNESS ZERON_MOTION_SCALE ZERON_FAKE_QUOTA; do
+  $(compgen -A variable ZERON_MOCK_ || true) ZERON_HARNESS ZERON_MOTION_SCALE ZERON_FAKE_QUOTA \
+  ZERON_SUPERVISOR_STALL_MS; do
   if [[ -n "${!knob:-}" ]]; then
     OPEN_ENV+=(--env "$knob=${!knob}")
   fi

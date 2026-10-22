@@ -525,10 +525,10 @@ mod tests {
     #[test]
     fn an_env_reference_reads_the_environment_and_a_missing_one_fails() {
         let saved = saved();
-        let home = std::env::var("HOME").unwrap();
+        let path = std::env::var("PATH").unwrap();
         assert_eq!(
-            substitute_str("${env.HOME}/x", &saved).unwrap(),
-            format!("{home}/x")
+            substitute_str("${env.PATH}/x", &saved).unwrap(),
+            format!("{path}/x")
         );
         let error = substitute_str("${env.ZERON_SCENARIO_SURELY_UNSET_9}", &saved).unwrap_err();
         assert!(
@@ -649,7 +649,7 @@ mod tests {
         );
         assert_eq!(
             fake.requests[2],
-            json!({ "action": "snapshot", "path": "/out/shots/04-after-key.png" })
+            json!({ "action": "snapshot", "path": Path::new("/out").join("shots/04-after-key.png") })
         );
         assert_eq!(reports[3].shot.as_deref(), Some("shots/04-after-key.png"));
         assert_eq!(
