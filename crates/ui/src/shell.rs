@@ -4865,15 +4865,19 @@ impl Shell {
             return LinkOutcome::Rejected;
         }
         if activation.target.navigation.is_err() {
-            return if matches!(
+            let opens = matches!(
                 activation.action,
                 LinkAction::Primary | LinkAction::Internal
-            ) && self.open_workspace_file_link(
-                &source,
-                &activation.target.original,
-                window,
-                cx,
-            ) {
+            );
+            if opens
+                && let Some(action) = crate::docs::Action::from_link(&activation.target.original)
+            {
+                self.run_docs_action(action, cx);
+                return LinkOutcome::Internal;
+            }
+            return if opens
+                && self.open_workspace_file_link(&source, &activation.target.original, window, cx)
+            {
                 LinkOutcome::Internal
             } else {
                 LinkOutcome::Rejected
