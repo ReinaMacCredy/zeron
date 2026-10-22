@@ -260,6 +260,7 @@ pub struct ComposerState {
     /// Scroll-to-own-send target.
     pub last_submitted_message_id: Option<String>,
     pub context_usage: Option<ContextUsage>,
+    pub limit_pill: Option<crate::layout::LimitPill>,
 }
 
 impl From<&zc::ComposerState> for ComposerState {
@@ -356,6 +357,7 @@ impl From<&zc::ComposerState> for ComposerState {
                 tokens: u.tokens,
                 window: u.window,
             }),
+            limit_pill: c.limit.as_ref().map(crate::layout::limit_pill),
         }
     }
 }
@@ -375,6 +377,13 @@ pub struct TranscriptStatus {
     pub working_since_ms: Option<i64>,
     /// Id of the newest entry (host or echo).
     pub last_entry_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SkillFile {
+    pub path: String,
+    pub text: String,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -666,6 +675,35 @@ impl SessionHandle {
 
     pub fn clear_queue_error(&self) {
         self.inner.clear_queue_error();
+    }
+
+    pub async fn fork_from(&self, entry_id: String) -> CoreResult<String> {
+        let inner = self.inner.clone();
+        on_runtime(async move { inner.fork_from(&entry_id).await }).await
+    }
+
+    pub async fn rewind_to(&self, entry_id: String) -> CoreResult<String> {
+        let inner = self.inner.clone();
+        on_runtime(async move { inner.rewind_to(&entry_id).await }).await
+    }
+
+    pub async fn skill_file(&self, name: String, path: Option<String>) -> CoreResult<SkillFile> {
+        let inner = self.inner.clone();
+        let file =
+            on_runtime(async move { inner.skill_file(&name, path.as_deref()).await }).await?;
+        Ok(SkillFile {
+            path: file.path,
+            text: file.text,
+            truncated: file.truncated,
+        })
+    }
+
+    pub async fn branch_blocked(&self, rewind: bool) -> Option<String> {
+        let inner = self.inner.clone();
+        zc::runtime::run(async move { Ok(inner.branch_blocked(rewind).await) })
+            .await
+            .ok()
+            .flatten()
     }
 
     /// "Not delivered — tap to retry".

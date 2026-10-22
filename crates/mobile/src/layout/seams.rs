@@ -20,6 +20,7 @@ pub struct ChatRef {
     pub status: Option<DelegationStatus>,
     pub elapsed_secs: Option<i64>,
     pub route: Option<ChildRoute>,
+    pub limit: Option<zeron_proto::LimitResume>,
 }
 
 impl ChatRef {
@@ -33,6 +34,7 @@ impl ChatRef {
             status: delegation.map(|d| d.status),
             elapsed_secs: delegation.and_then(|d| Some((d.completed_at? - d.started_at).num_seconds())),
             route: delegation.and_then(|d| d.route.clone()),
+            limit: None,
         }
     }
 }
@@ -91,7 +93,7 @@ pub(crate) fn model_label(harness: Option<HarnessId>, model: &str) -> String {
     }
 }
 
-fn side_detail(harness: HarnessId, model: Option<&str>) -> String {
+pub(crate) fn side_detail(harness: HarnessId, model: Option<&str>) -> String {
     match model {
         Some(model) => format!("{} · {}", harness.display_name(), model_label(Some(harness), model)),
         None => harness.display_name().to_owned(),
@@ -171,7 +173,7 @@ pub(crate) fn peer_header(ctx: &mut Ctx, entry: &SessionMessageEntry, senders: &
     core(format!("{}#from", entry.id), &entry.id, strip, copy)
 }
 
-fn clock(ms: i64) -> Option<String> {
+pub(crate) fn clock(ms: i64) -> Option<String> {
     let utc = chrono::DateTime::from_timestamp_millis(ms).filter(|_| ms > 0)?;
     Some(utc.with_timezone(&chrono::Local).format("%-I:%M %p").to_string())
 }

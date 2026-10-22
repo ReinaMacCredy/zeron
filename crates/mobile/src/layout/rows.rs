@@ -16,11 +16,12 @@ use zeron_doc::parts::MessagePart;
 use zeron_doc::parts::MessageStatus;
 use zeron_doc::schema::{MessageRole, SessionMessageEntry};
 use zeron_markdown::parser::{IncrementalParser, TopBlock};
+use zeron_proto::transcript::CompactionWait;
 use zeron_proto::{HarnessId, UserInputAnswer};
 use zeron_text::WhiteSpace;
 
 use super::cards::{Card, consent_row, denied_row, notice_row, place_card};
-use super::display::{ColorRole, DisplayBuilder, FadeEdge, TextRun, WidgetKind};
+use super::display::{ColorRole, DisplayBuilder, FadeEdge, LinkHit, TextRun, WidgetKind};
 use super::file_icons::file_icon_asset;
 use super::markdown::geom::PARA_GAP;
 use super::markdown::{Ctx, PBlock, PText, Px, place, place_stack, place_text, prepare_block, prepare_plain};
@@ -57,6 +58,8 @@ pub struct TranscriptInput {
     /// A turn is running (drives the tail working indicator).
     pub working: bool,
     pub working_since_ms: Option<i64>,
+    pub token_rate: Option<u32>,
+    pub compaction: Option<(zeron_proto::transcript::CompactionWait, i64)>,
     pub streaming: bool,
     pub input_answers: Arc<HashMap<String, Vec<UserInputAnswer>>>,
     pub harness: Option<HarnessId>,
@@ -88,6 +91,14 @@ pub(crate) struct UserBubble {
     pub pending: bool,
     pub expanded: bool,
     pub more: PText,
+    pub badges: Vec<UserBadge>,
+}
+
+pub(crate) struct UserBadge {
+    pub icon: &'static str,
+    pub title: String,
+    pub label: PText,
+    pub details: Vec<zeron_proto::badges::BadgeDetail>,
 }
 
 pub(crate) struct Chip {
@@ -104,7 +115,7 @@ pub(crate) enum Content {
     Tools(ToolGroup),
     Chip(Chip),
     Image { reference: String },
-    Working { since_ms: Option<i64>, word: &'static str },
+    Working { since_ms: Option<i64>, word: String, rate: Option<u32> },
     Card(Card),
     /// An agent visual: its height comes from its worker.
     Visual(Arc<crate::visual::VisualSlot>),
@@ -155,6 +166,7 @@ pub(crate) mod geom {
     pub const BUBBLE_FOLD_SHOW: usize = 6;
     pub const THUMB: f32 = 76.0;
     pub const FILE_PILL: f32 = 32.0;
+    pub const BADGE: f32 = 26.0;
     pub const CHIP_LINE: f32 = 32.0;
     pub const IMAGE: f32 = 260.0;
     pub const WORKING: f32 = 36.0;
@@ -206,6 +218,26 @@ pub(crate) struct RowBuilder {
     /// rebuilds: the worker holds the same slot).
     pub visual_slots: HashMap<String, Arc<crate::visual::VisualSlot>>,
     pub(crate) harness: Option<HarnessId>,
+    in_fold: bool,
+    pub(crate) blobs: HashMap<String, (Blob, u64)>,
+    pub(crate) blob_clock: u64,
+    pub(crate) chat_id: Option<String>,
+}
+
+pub(crate) enum Blob {
+    Loading,
+    Ready(Arc<str>),
+    Failed,
+}
+
+impl Blob {
+    fn tag(&self) -> u64 {
+        match self {
+            Blob::Loading => 1,
+            Blob::Ready(_) => 2,
+            Blob::Failed => 3,
+        }
+    }
 }
 
 pub(crate) fn quick_hash(s: &str) -> u64 {
@@ -224,6 +256,10 @@ impl RowBuilder {
         if self.harness != input.harness {
             self.harness = input.harness;
             self.entries.clear();
+        }
+        if self.chat_id != input.chat_id {
+            self.chat_id = input.chat_id.clone();
+            self.blobs.clear();
         }
         let mut out: Vec<Placed> = Vec::with_capacity(self.entries.len() * 2 + 4);
         let mut live_entries: HashSet<&str> = HashSet::with_capacity(input.entries.len());
@@ -291,28 +327,36 @@ impl RowBuilder {
         }
         self.pending.retain(|id, _| live_pending.contains(id));
 
-        if input.working {
-            let word = if input.entries.last().is_some_and(|e| zeron_doc::schema::consulting_advisor(e)) {
-                "Consulting advisor"
-            } else if input.streaming {
-                "Writing"
-            } else {
-                "Working"
+        if input.working || input.compaction.is_some() {
+            let (word, since_ms, token_rate) = match &input.compaction {
+                Some((wait, since)) => {
+                    let (lead, tail) = wait.words();
+                    let chip = match wait {
+                        CompactionWait::Classifying { harness, model, .. } => {
+                            Some(format!("· {}", seams::side_detail(*harness, model.as_deref())))
+                        }
+                        _ => None,
+                    };
+                    let word = [Some(lead), chip, tail.map(str::to_owned)].into_iter().flatten().collect::<Vec<_>>().join(" ");
+                    (word, wait.timed().then_some(*since), None)
+                }
+                None if input.entries.last().is_some_and(|e| zeron_doc::schema::consulting_advisor(e)) => {
+                    ("Consulting advisor".to_owned(), input.working_since_ms, input.token_rate)
+                }
+                None if input.streaming => ("Writing".to_owned(), input.working_since_ms, input.token_rate),
+                None => ("Working".to_owned(), input.working_since_ms, input.token_rate),
             };
             let stale = self
                 .working
                 .as_ref()
-                .is_none_or(|w| !matches!(&w.content, Content::Working { since_ms, word: shown } if *since_ms == input.working_since_ms && *shown == word));
+                .is_none_or(|w| !matches!(&w.content, Content::Working { since_ms: shown_since, word: shown, rate } if *shown_since == since_ms && *shown == word && *rate == token_rate));
             if stale {
                 self.working = Some(Arc::new(RowCore {
                     key: row_key("#working"),
                     version: next_version(),
                     kind: RowKind::Working,
                     entry_id: Arc::from(""),
-                    content: Content::Working {
-                        since_ms: input.working_since_ms,
-                        word,
-                    },
+                    content: Content::Working { since_ms, word, rate: token_rate },
                     copy_text: String::new(),
                 }));
             }
@@ -341,6 +385,17 @@ impl RowBuilder {
                 _ => None,
             })
             .fold(gaps, |sig, answers| sig.rotate_left(7) ^ quick_hash(&format!("{answers:?}")));
+        let sig = if self.blobs.is_empty() {
+            sig
+        } else {
+            entry
+                .parts
+                .iter()
+                .flat_map(|p| super::tools::blob_refs(self.chat_id.as_deref(), p))
+                .flatten()
+                .filter_map(|r| self.blobs.get(&r))
+                .fold(sig, |sig, (blob, order)| sig.rotate_left(7) ^ blob.tag() ^ order << 2)
+        };
         let refs = seams::entry_refs(entry);
         let native = entry.parts.iter().any(|p| matches!(p, MessagePart::Tool { delegate_route: Some(_), .. }));
         if refs.is_empty() && !native {
@@ -451,6 +506,14 @@ impl RowBuilder {
             return rows;
         }
         let streaming = entry.status == Some(MessageStatus::Streaming);
+        if !streaming && !self.in_fold {
+            self.in_fold = true;
+            let folded = self.work_fold(ctx, entry, first, prev, input, live_parts);
+            self.in_fold = false;
+            if let Some(rows) = folded {
+                return rows;
+            }
+        }
         let mut tools: Vec<&MessagePart> = Vec::new();
         let mut group_ix = 0usize;
         let flush_tools = |this: &mut Self, ctx: &mut Ctx, rows: &mut Vec<Placed>, tools: &mut Vec<&MessagePart>, group_ix: &mut usize, tail: bool| {
@@ -597,6 +660,59 @@ impl RowBuilder {
         rows
     }
 
+    fn work_fold(
+        &mut self,
+        ctx: &mut Ctx,
+        entry: &SessionMessageEntry,
+        first: bool,
+        prev: Option<MessageRole>,
+        input: &TranscriptInput,
+        live_parts: &mut HashSet<String>,
+    ) -> Option<Vec<Placed>> {
+        let parts = &entry.parts;
+        let prose = |p: &MessagePart| matches!(p, MessagePart::Text { text, .. } if !text.trim().is_empty());
+        let reply_start = parts.iter().rposition(prose).map(|mut start| {
+            while start > 0 && prose(&parts[start - 1]) {
+                start -= 1;
+            }
+            start
+        });
+        let is_work = |ix: usize, part: &MessagePart| match part {
+            MessagePart::Tool { .. } => true,
+            MessagePart::Reasoning { text, .. } => !text.trim().is_empty(),
+            MessagePart::Text { text, .. } => !text.trim().is_empty() && reply_start.is_none_or(|start| ix < start),
+            _ => false,
+        };
+        let first_work = parts.iter().enumerate().position(|(ix, p)| is_work(ix, p))?;
+        let pick = |keep: &dyn Fn(usize, &MessagePart) -> bool| SessionMessageEntry {
+            parts: parts.iter().enumerate().filter(|(ix, p)| keep(*ix, p)).map(|(_, p)| p.clone()).collect(),
+            ..entry.clone()
+        };
+        let before = pick(&|ix, p| ix < first_work && !is_work(ix, p));
+        let work = pick(&|ix, p| is_work(ix, p));
+        let after = pick(&|ix, p| ix > first_work && !is_work(ix, p));
+        let mut rows = if before.parts.is_empty() { Vec::new() } else { self.entry_rows(ctx, &before, first, prev, input, live_parts) };
+        let gap = match (rows.is_empty(), first, prev) {
+            (false, ..) => Gap::Block,
+            (true, true, _) => Gap::First,
+            (true, false, Some(MessageRole::User) | None) => Gap::Reply,
+            (true, false, _) => Gap::Block,
+        };
+        let key = format!("{}#work", entry.id);
+        let open = self.expanded.contains(&row_key(&key));
+        let worked_secs = entry.duration_ms.filter(|ms| *ms > 0).map(|ms| (ms / 1000).max(1));
+        let header = self.work_header(ctx, &entry.id, &key, &work.parts, worked_secs, open);
+        rows.push(Placed { core: Arc::new(header), gap });
+        let settled = Some(MessageRole::Assistant);
+        if open {
+            rows.extend(self.entry_rows(ctx, &work, false, settled, input, live_parts));
+        }
+        if !after.parts.is_empty() {
+            rows.extend(self.entry_rows(ctx, &after, false, settled, input, live_parts));
+        }
+        Some(rows)
+    }
+
     fn text_blocks(&mut self, ctx: &mut Ctx, pkey: &str, text: &str, streaming: bool) -> Vec<(Arc<TopBlock>, Arc<RowCore>)> {
         let hash = quick_hash(text);
         let state = self.parts.entry(pkey.to_owned()).or_insert_with(|| PartState {
@@ -647,7 +763,9 @@ impl RowBuilder {
     fn user_row(&mut self, ctx: &mut Ctx, id: &str, content: &str, pending: bool) -> RowCore {
         let key = row_key(&format!("{id}#u"));
         // Shared parser: strips the image trailer *and* hidden Appshot context.
-        let parsed = zeron_client::attachments::parse_user_message(content);
+        let mut parsed = zeron_client::attachments::parse_user_message(content);
+        let (rest, badges) = zeron_proto::badges::split(&parsed.text);
+        parsed.text = rest;
         let (size, lh) = TYPE.body;
         let style = ctx.typo.style(Family::Sans, Weight::Regular, false, size);
         let lh = ctx.typo.px(lh);
@@ -687,6 +805,15 @@ impl RowBuilder {
                 (file_icon_asset(name), prepare_plain(ctx, name, mstyle, ctx.typo.px(mlh), ColorRole::Text, WhiteSpace::Pre))
             })
             .collect();
+        let badges = badges
+            .into_iter()
+            .map(|badge| UserBadge {
+                icon: badge_icon(badge.kind),
+                label: prepare_plain(ctx, &badge.label, mstyle, ctx.typo.px(mlh), ColorRole::TextSecondary, WhiteSpace::Pre),
+                title: badge.label,
+                details: badge.details,
+            })
+            .collect();
         let expanded = self.expanded.contains(&key);
         let more = prepare_plain(
             ctx,
@@ -709,11 +836,21 @@ impl RowBuilder {
                 pending,
                 expanded,
                 more,
+                badges,
             }),
             copy_text: body,
         }
     }
 
+}
+
+fn badge_icon(kind: zeron_proto::badges::BadgeKind) -> &'static str {
+    use zeron_proto::badges::BadgeKind;
+    match kind {
+        BadgeKind::PullRequest => "arrow.triangle.pull",
+        BadgeKind::Comments => "bubble.left",
+        BadgeKind::Terminal | BadgeKind::Selection => "text.quote",
+    }
 }
 
 /// One chip in a sent prompt: its source range, label and icon, and for an
@@ -956,13 +1093,14 @@ pub(crate) fn place_row(
             }
             h
         }
-        Content::Working { since_ms, word } => {
+        Content::Working { since_ms, word, rate } => {
             let h = px.v(WORKING);
             if let Some(out) = out {
                 out.widget(
                     WidgetKind::Working {
                         since_ms: *since_ms,
-                        word: (*word).to_owned(),
+                        word: word.clone(),
+                        rate: rate.map(|rate| format!("· {rate} tok/s")),
                     },
                     (x, top, cw, h),
                     None,
@@ -1031,7 +1169,11 @@ fn place_user(u: &UserBubble, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
     // Thumbnails row, then one pill per file, stacked above the bubble.
     let files_y = if u.images.is_empty() { 0.0 } else { side + gap };
     let attach_h = (files_y + u.files.len() as f32 * (pill_h + gap) - gap).max(0.0);
-    let thumbs_h = if attach_h > 0.0 { attach_h + if bubble_h > 0.0 { px.v(8.0) } else { 0.0 } } else { 0.0 };
+    let badge_h = px.v(BADGE);
+    let badge_rows = badge_rows(u, px, max_w);
+    let badges_h = (badge_rows.len() as f32 * (badge_h + gap) - gap).max(0.0);
+    let above = attach_h + if attach_h > 0.0 && badges_h > 0.0 { gap } else { 0.0 } + badges_h;
+    let thumbs_h = if above > 0.0 { above + if bubble_h > 0.0 { px.v(8.0) } else { 0.0 } } else { 0.0 };
     let h = thumbs_h + bubble_h;
     let Some(out) = out else { return h };
     // Thumbnails right-aligned above the bubble.
@@ -1054,6 +1196,22 @@ fn place_user(u: &UserBubble, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
         out.widget(WidgetKind::Icon { name: icon.clone(), color: ColorRole::TextSoft }, (fx + px.v(10.0), fy + (pill_h - is) / 2.0, is, is), None);
         place_text_lines(name, fx + inset, fy + (pill_h - name.lh) / 2.0, name_w, 1, px, out);
         fy += pill_h + gap;
+    }
+    let mut by = y + attach_h + if attach_h > 0.0 && badges_h > 0.0 { gap } else { 0.0 };
+    let bs = px.v(12.0);
+    for row in &badge_rows {
+        let mut bx = x + cw - row.iter().map(|(_, w)| w + gap).sum::<f32>() + gap;
+        for &(i, w) in row {
+            let badge = &u.badges[i];
+            out.fill(bx, by, w, badge_h, px.v(8.0), ColorRole::ChipBackground);
+            out.widget(WidgetKind::Icon { name: badge.icon.into(), color: ColorRole::TextTertiary }, (bx + px.v(8.0), by + (badge_h - bs) / 2.0, bs, bs), None);
+            place_text_lines(&badge.label, bx + px.v(26.0), by + (badge_h - badge.label.lh) / 2.0, w - px.v(34.0), 1, px, out);
+            if !badge.details.is_empty() {
+                out.links.push(LinkHit { x: bx, y: by, w, h: badge_h, url: format!("zeron-badge://open?i={i}"), scroller: out.scroller });
+            }
+            bx += w + gap;
+        }
+        by += badge_h + gap;
     }
     if bubble_h > 0.0 {
         let bx = x + cw - bubble_w;
@@ -1078,6 +1236,26 @@ fn place_user(u: &UserBubble, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
         }
     }
     h
+}
+
+fn badge_rows(u: &UserBubble, px: Px, max_w: f32) -> Vec<Vec<(usize, f32)>> {
+    let gap = px.v(6.0);
+    let mut rows: Vec<Vec<(usize, f32)>> = Vec::new();
+    let mut used = 0.0;
+    for (i, badge) in u.badges.iter().enumerate() {
+        let w = (px.v(34.0) + badge.label.p.max_content_width().ceil()).min(max_w);
+        match rows.last_mut() {
+            Some(row) if used + gap + w <= max_w => {
+                row.push((i, w));
+                used += gap + w;
+            }
+            _ => {
+                rows.push(vec![(i, w)]);
+                used = w;
+            }
+        }
+    }
+    rows
 }
 
 /// Heap held by a row's prepared text (diagnostics; blocks recurse).
@@ -1110,6 +1288,7 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
                 + u.md.iter().map(block).sum::<usize>()
                 + u.more.p.heap_bytes()
                 + u.files.iter().map(|(_, n)| n.p.heap_bytes()).sum::<usize>()
+                + u.badges.iter().map(|b| b.label.p.heap_bytes()).sum::<usize>()
         }
         Content::Tools(t) => super::tools::heap_bytes(t),
         Content::Chip(c) => c.text.p.heap_bytes(),

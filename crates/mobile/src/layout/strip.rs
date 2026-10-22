@@ -107,8 +107,28 @@ pub(crate) fn struck(mut t: PText) -> PText {
 
 /// `TranscriptListView` routes `zeron-chat` links to `AppRouter.openSession`.
 pub(crate) fn chat_link(chat_id: &str) -> String {
-    let mut out = String::from("zeron-chat://open?id=");
-    for byte in chat_id.bytes() {
+    format!("zeron-chat://open?id={}", query_escape(chat_id))
+}
+
+pub(crate) fn limit_link(chat_id: &str) -> String {
+    format!("zeron-limit://open?chat={}", query_escape(chat_id))
+}
+
+pub(crate) fn blob_link(blob_ref: &str) -> String {
+    format!("zeron-blob://fetch?ref={}", query_escape(blob_ref))
+}
+
+pub(crate) fn skill_link(name: &str, path: Option<&str>) -> String {
+    let mut out = format!("zeron-skill://open?name={}", query_escape(name));
+    if let Some(path) = path {
+        out.push_str(&format!("&path={}", query_escape(path)));
+    }
+    out
+}
+
+fn query_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
             out.push(byte as char);
         } else {

@@ -328,6 +328,29 @@ impl CoreClient {
         Ok(self.client.delete_project(&space_id)?)
     }
 
+    pub async fn chat_usage(
+        &self,
+        chat_id: String,
+    ) -> CoreResult<Option<crate::layout::UsageMeter>> {
+        let client = self.client.clone();
+        let usage = on_runtime(async move { client.chat_usage(&chat_id).await }).await?;
+        Ok(usage.map(|(label, fraction)| crate::layout::UsageMeter::new(label, fraction)))
+    }
+
+    pub fn limit_card(&self, chat_id: String) -> Option<crate::layout::LimitCard> {
+        crate::layout::limit_card(&self.client, &chat_id)
+    }
+
+    pub async fn resolve_limit_offer(&self, chat_id: String, choice: String) -> CoreResult<bool> {
+        let client = self.client.clone();
+        on_runtime(async move { client.resolve_limit_offer(&chat_id, &choice).await }).await
+    }
+
+    pub async fn set_limit_resume(&self, chat_id: String, auto: bool) -> CoreResult<bool> {
+        let client = self.client.clone();
+        on_runtime(async move { client.set_limit_resume(&chat_id, auto).await }).await
+    }
+
     /// Mid-session ref switch (worktree retarget or `git checkout`).
     pub async fn switch_session_ref(&self, chat_id: String, reference: RepoRef) -> CoreResult<()> {
         let client = self.client.clone();

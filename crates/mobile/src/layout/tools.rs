@@ -17,9 +17,9 @@ use zeron_text::WhiteSpace;
 use super::display::{ColorRole, Decoration, DisplayBuilder, FadeEdge, WidgetKind};
 use super::file_icons::{basename, file_icon_asset};
 use super::markdown::{Ctx, PText, Px, SpanPaint, place_text, prepare_plain};
-use super::rows::{Content, RowBuilder, RowCore, RowKind, next_version, place_text_lines, quick_hash, row_key};
+use super::rows::{Blob, Content, RowBuilder, RowCore, RowKind, next_version, place_text_lines, quick_hash, row_key};
 use super::seams::{ChatRef, Chats, brand_icon, model_label, route_badge, route_detail, single_line};
-use super::strip::chat_link;
+use super::strip::{blob_link, chat_link, limit_link, linked, skill_link};
 use super::style::{Family, Weight, baseline};
 
 /// Desktop → phone scale (12pt tool text → 13.5pt).
@@ -38,6 +38,7 @@ const OUT_LH: f32 = 18.0;
 const BODY_PAD: f32 = 6.0;
 const SEPARATOR: f32 = 1.0;
 const MAX_LINES: usize = 24;
+const FULL_OUTPUT_MAX_LINES: usize = 400;
 const DIFF_MAX_LINES: usize = 600;
 const CALL_WRAP_COLS: usize = 80;
 const AGENT_ROW: f32 = 38.0;
@@ -62,6 +63,7 @@ pub(crate) struct ToolLine {
     pub open: bool,
     pub body: Vec<DetailBlock>,
     pub agent: Option<AgentExtra>,
+    pub link: Option<String>,
 }
 
 pub(crate) struct AgentExtra {
@@ -95,6 +97,7 @@ pub(crate) enum DetailBlock {
     Thought(Arc<ThoughtBody>),
     Stats(Vec<StatRow>),
     Diff { rows: Vec<DiffRowP>, notice: Option<PText>, digits: usize },
+    Fetch(PText),
 }
 
 pub(crate) struct StatRow {
@@ -246,6 +249,10 @@ struct Styles {
 }
 
 fn lines_block(ctx: &mut Ctx, st: &Styles, text: &str, wrap: Option<usize>) -> Option<DetailBlock> {
+    capped_lines(ctx, st, text, wrap, MAX_LINES)
+}
+
+fn capped_lines(ctx: &mut Ctx, st: &Styles, text: &str, wrap: Option<usize>, max: usize) -> Option<DetailBlock> {
     let mut lines: Vec<String> = text
         .lines()
         .flat_map(|l| match wrap {
@@ -259,8 +266,8 @@ fn lines_block(ctx: &mut Ctx, st: &Styles, text: &str, wrap: Option<usize>) -> O
     if lines.is_empty() {
         return None;
     }
-    let extra = lines.len().saturating_sub(MAX_LINES);
-    lines.truncate(MAX_LINES);
+    let extra = lines.len().saturating_sub(max);
+    lines.truncate(max);
     let lines = lines
         .iter()
         .map(|l| prepare_plain(ctx, l, st.mono, st.out_lh, ColorRole::TextFaint, WhiteSpace::Pre))
@@ -374,6 +381,13 @@ fn result_block(ctx: &mut Ctx, st: &Styles, part: &MessagePart) -> Option<Detail
         ));
     }
     lines_block(ctx, st, output.as_deref()?, None)
+}
+
+pub(crate) fn blob_refs(own: Option<&str>, part: &MessagePart) -> [Option<String>; 2] {
+    let MessagePart::Tool { diff, diff_ref, diff_stats, output_ref, .. } = part else { return [None, None] };
+    let stats_only = diff.is_none() && diff_stats.as_ref().is_some_and(|s| !s.is_empty());
+    let diff_ref = diff_ref.clone().or_else(|| own.filter(|_| stats_only).map(|chat| format!("{chat}/{}.diff", part.id())));
+    [diff_ref, output_ref.clone()]
 }
 
 // MARK: - Thoughts (desktop `thought_lines`, engine-width wrapping)
@@ -786,6 +800,46 @@ fn place_thought(t: &ThoughtBody, bx: f32, by: f32, bw: f32, o: &mut DisplayBuil
 // MARK: - Building
 
 impl RowBuilder {
+    fn full_result(&self, ctx: &mut Ctx, st: &Styles, part: &MessagePart) -> (Option<DetailBlock>, Option<DetailBlock>) {
+        let [diff_ref, output_ref] = blob_refs(self.chat_id.as_deref(), part);
+        let bytes = match part {
+            MessagePart::Tool { output_bytes, .. } => *output_bytes,
+            _ => None,
+        };
+        let candidates = [(diff_ref, "diff", None), (output_ref, "output", bytes)];
+        let shown = candidates
+            .iter()
+            .filter_map(|(r, ..)| r.as_ref())
+            .filter_map(|r| match self.blobs.get(r) {
+                Some((Blob::Ready(text), order)) => Some((r, text.clone(), *order)),
+                _ => None,
+            })
+            .max_by_key(|(.., order)| *order);
+        let full = shown.as_ref().and_then(|(r, text, _)| {
+            if r.ends_with(".diff") {
+                serde_json::from_str::<zeron_proto::ToolDiff>(text).ok().and_then(|diff| diff_block(ctx, st, &diff))
+            } else {
+                capped_lines(ctx, st, text, None, FULL_OUTPUT_MAX_LINES)
+            }
+        });
+        let offer = candidates.iter().find_map(|(r, what, bytes)| {
+            let r = r.as_ref()?;
+            let label = match self.blobs.get(r).map(|(blob, _)| blob) {
+                Some(Blob::Ready(_)) if shown.as_ref().is_some_and(|(s, ..)| *s == r) => return None,
+                Some(Blob::Ready(_)) => format!("Show full {what}"),
+                Some(Blob::Loading) => format!("Loading full {what}…"),
+                Some(Blob::Failed) => format!("Couldn't load full {what} — tap to retry"),
+                None => match bytes {
+                    Some(b) => format!("Show full {what} ({})", zeron_proto::transcript::format_kb(*b)),
+                    None => format!("Show full {what}"),
+                },
+            };
+            let text = prepare_plain(ctx, &label, st.label, st.out_lh, ColorRole::Link, WhiteSpace::Pre);
+            Some(DetailBlock::Fetch(linked(text, blob_link(r))))
+        });
+        (full, offer)
+    }
+
     /// A reasoning part's prepared detail. The parse advances incrementally
     /// per streamed delta; flattening stops at the visible cap; preparing
     /// (shaping) reruns only when the visible lines change.
@@ -818,6 +872,33 @@ impl RowBuilder {
     #[cfg(test)]
     pub(crate) fn thought_body_for_test(&self, key: &str) -> Option<Arc<ThoughtBody>> {
         self.thoughts.get(key).and_then(|s| s.body.clone())
+    }
+
+    pub(crate) fn work_header(&mut self, ctx: &mut Ctx, entry_id: &str, key: &str, parts: &[MessagePart], worked_secs: Option<i64>, open: bool) -> RowCore {
+        let calls: Vec<(ToolCall, bool)> = parts
+            .iter()
+            .filter_map(|p| match p {
+                MessagePart::Tool { call, is_error, .. } => Some((call.clone(), *is_error)),
+                _ => None,
+            })
+            .collect();
+        let thoughts = parts.iter().filter(|p| matches!(p, MessagePart::Reasoning { .. })).count();
+        let text = match worked_secs {
+            Some(secs) => format!("Worked for {}", zeron_proto::transcript::format_elapsed(secs)),
+            None => group_summary(thoughts, &calls, false),
+        };
+        let size = 12.0 * T;
+        let label = ctx.typo.style(Family::Sans, Weight::Regular, false, size);
+        let lh = ctx.typo.px(18.0 * T);
+        let summary = prepare_plain(ctx, &text, label, lh, ColorRole::TextSecondary, WhiteSpace::Pre);
+        RowCore {
+            key: row_key(key),
+            version: next_version(),
+            kind: RowKind::Tools,
+            entry_id: Arc::from(entry_id),
+            content: Content::Tools(ToolGroup { summary, lines: Vec::new(), expanded: open, live: false, agents: false }),
+            copy_text: String::new(),
+        }
     }
 
     /// One group of consecutive tool / thought parts (`{msg}#g{n}`).
@@ -908,7 +989,16 @@ impl RowBuilder {
                         } else {
                             file_path(call).map(|p| (file_icon_asset(p), prepare_plain(ctx, basename(p), st.label, st.lh, if *is_error { ColorRole::Danger } else { ColorRole::TextSoft }, WhiteSpace::Pre)))
                         };
-                        let detail_color = if agents && !*is_error { ColorRole::TextSoft } else { color };
+                        let skill = call.skill_name().filter(|_| !agents && computer.is_none() && device.is_none());
+                        let detail_color = if *is_error {
+                            color
+                        } else if skill.is_some() {
+                            ColorRole::Link
+                        } else if agents {
+                            ColorRole::TextSoft
+                        } else {
+                            color
+                        };
                         let detail = (badge.is_none() && !detail.is_empty()).then(|| prepare_plain(ctx, &detail, st.label, st.lh, detail_color, WhiteSpace::Pre));
                         let stats = (!agents).then(|| line_stats(part)).flatten().map(|(add, del)| {
                             (
@@ -916,11 +1006,16 @@ impl RowBuilder {
                                 prepare_plain(ctx, &format!("−{del}"), st.mono_small, st.lh, ColorRole::Danger, WhiteSpace::Pre),
                             )
                         });
-                        let open = !agents && self.detail_open.get(&dkey).copied().unwrap_or(false);
+                        let open = !agents && skill.is_none() && self.detail_open.get(&dkey).copied().unwrap_or(false);
                         let mut body = Vec::new();
                         if open && computer.is_none() {
                             body.extend(lines_block(ctx, &st, &call_text(call), Some(CALL_WRAP_COLS)));
-                            body.extend(result_block(ctx, &st, part));
+                            let (full, offer) = self.full_result(ctx, &st, part);
+                            match full {
+                                Some(full) => body.push(full),
+                                None => body.extend(result_block(ctx, &st, part)),
+                            }
+                            body.extend(offer);
                         }
                         let agent = (agents && call.is_subagent_spawn()).then(|| AgentExtra {
                             trailing: spawn_tag(self.harness, call).map(|tag| prepare_plain(ctx, &tag, small, small_lh, ColorRole::TextFaint, WhiteSpace::Pre)),
@@ -945,6 +1040,7 @@ impl RowBuilder {
                             open,
                             body,
                             agent,
+                            link: skill.map(|name| skill_link(name, call.skill_path())),
                         });
                     }
                     MessagePart::Reasoning { text, .. } => {
@@ -974,6 +1070,7 @@ impl RowBuilder {
                             open,
                             body,
                             agent: None,
+                            link: None,
                         });
                     }
                     _ => {}
@@ -1051,7 +1148,11 @@ fn delegate_line(
             detail,
         })
     });
+    let limited = chat.is_some_and(|c| c.limit.as_ref().is_some_and(|l| l.offer.is_some()));
     let trailing = (!native).then(|| {
+        if limited {
+            return prepare_plain(ctx, "Usage limit", small, small_lh, ColorRole::Warning, WhiteSpace::Pre);
+        }
         let state = zeron_proto::transcript::delegate_state_text(status, chat.and_then(|c| c.elapsed_secs), false);
         prepare_plain(ctx, &state, small, small_lh, if failed { ColorRole::Danger } else { ColorRole::TextFaint }, WhiteSpace::Pre)
     });
@@ -1070,8 +1171,9 @@ fn delegate_line(
             trailing,
             meta: meta.map(|m| prepare_plain(ctx, &m, small, small_lh, ColorRole::TextFaint, WhiteSpace::Pre)),
             route: route_badge,
-            open: child.map(chat_link),
+            open: child.map(|id| if limited { limit_link(id) } else { chat_link(id) }),
         }),
+        link: None,
     }
 }
 
@@ -1172,7 +1274,12 @@ fn place_line_header(line: &ToolLine, px: Px, x: f32, ry: f32, cw: f32, o: &mut 
         place_text(add, sx, ry + (row_h - add.lh) / 2.0, aw + 1.0, Some(&mut *o));
         place_text(del, sx + aw + d(px, 4.0), ry + (row_h - del.lh) / 2.0, del.p.max_content_width() + 1.0, Some(&mut *o));
     }
-    o.widget(WidgetKind::ToolToggle { detail: line.key, open: line.open }, (x, ry, cw, row_h), None);
+    match &line.link {
+        Some(url) => o.links.push(super::display::LinkHit { x, y: ry, w: cw, h: row_h, url: url.clone(), scroller: o.scroller }),
+        None => {
+            o.widget(WidgetKind::ToolToggle { detail: line.key, open: line.open }, (x, ry, cw, row_h), None);
+        }
+    }
 }
 
 /// Inline detail under a row: blocks in the text column, each preceded by a
@@ -1208,6 +1315,12 @@ fn place_block(block: &DetailBlock, px: Px, bx: f32, by: f32, bw: f32, out: Opti
                 }
             }
             h
+        }
+        DetailBlock::Fetch(t) => {
+            if let Some(o) = out {
+                place_text(t, bx, by + (lh - t.lh) / 2.0, t.p.max_content_width() + 1.0, Some(o));
+            }
+            lh
         }
         DetailBlock::Thought(t) => {
             let (shown, _) = thought_extent(t, bw);
@@ -1422,6 +1535,7 @@ pub(crate) fn heap_bytes(t: &ToolGroup) -> usize {
                                 .sum::<usize>(),
                             DetailBlock::Stats(rows) => rows.iter().map(|r| r.path.p.heap_bytes()).sum(),
                             DetailBlock::Diff { rows, .. } => rows.iter().map(|r| r.text.p.heap_bytes()).sum(),
+                            DetailBlock::Fetch(t) => t.p.heap_bytes(),
                         })
                         .sum::<usize>()
             })

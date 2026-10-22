@@ -186,13 +186,14 @@ fn thinking_renders_styled_markdown_not_markers() {
         })],
         ..Default::default()
     };
+    w.builder.expanded.insert(rows::row_key("a#work"));
     let folded = w.pass();
-    let key = folded.placement(0).unwrap().key;
+    let key = folded.placement(1).unwrap().key;
     w.builder.expanded.insert(key);
     w.builder.detail_open.insert(rows::row_key("a#g0/r0"), true);
     w.builder.invalidate(key);
     let frame = w.pass();
-    let d = frame.display(0).unwrap();
+    let d = frame.display(1).unwrap();
     assert!(!d.text.contains("**"), "{}", d.text);
     assert!(!d.text.contains("`fix`"), "{}", d.text);
     assert!(!d.text.contains("```"), "{}", d.text);
@@ -229,12 +230,13 @@ fn thinking_renders_styled_markdown_not_markers() {
             })],
             ..Default::default()
         };
-        let key = w.pass().placement(0).unwrap().key;
+        w.builder.expanded.insert(rows::row_key("a#work"));
+        let key = w.pass().placement(1).unwrap().key;
         w.builder.expanded.insert(key);
         w.builder.detail_open.insert(rows::row_key("a#g0/r0"), true);
         w.builder.invalidate(key);
         let frame = w.pass();
-        let d = frame.display(0).unwrap();
+        let d = frame.display(1).unwrap();
         assert!(d.text.contains("• point one"), "width {width}: {}", d.text);
         for run in &d.runs {
             assert!(run.x >= -0.5 && run.x + run.width <= width + 0.5, "width {width}: {run:?}");
@@ -275,6 +277,7 @@ fn streaming_thought_markdown_settles_to_the_fresh_parse() {
         assert!(!frame.display(0).unwrap().text.contains("**"), "mend holds while streaming");
     }
     live.builder.expanded.insert(key);
+    live.builder.expanded.insert(rows::row_key("a#work"));
     live.builder.detail_open.insert(rows::row_key("a#g0/r0"), true);
     live.builder.invalidate(key);
     live.input = TranscriptInput { entries: vec![entry(MessageStatus::Complete, text)], ..Default::default() };
@@ -282,8 +285,9 @@ fn streaming_thought_markdown_settles_to_the_fresh_parse() {
 
     let mut fresh = worker(390.0);
     fresh.input = TranscriptInput { entries: vec![entry(MessageStatus::Complete, text)], ..Default::default() };
+    fresh.builder.expanded.insert(rows::row_key("a#work"));
     let folded = fresh.pass();
-    let fresh_key = folded.placement(0).unwrap().key;
+    let fresh_key = folded.placement(1).unwrap().key;
     assert_eq!(key, fresh_key);
     fresh.builder.expanded.insert(fresh_key);
     fresh.builder.detail_open.insert(rows::row_key("a#g0/r0"), true);
@@ -328,11 +332,12 @@ fn thought_input(text: &str, streaming: bool) -> TranscriptInput {
 fn open_thought(width: f32, text: &str) -> RowDisplay {
     let mut w = worker(width);
     w.input = thought_input(text, false);
-    let key = w.pass().placement(0).unwrap().key;
+    w.builder.expanded.insert(rows::row_key("a#work"));
+    let key = w.pass().placement(1).unwrap().key;
     w.builder.expanded.insert(key);
     w.builder.detail_open.insert(rows::row_key("a#g0/r0"), true);
     w.builder.invalidate(key);
-    w.pass().display(0).unwrap()
+    w.pass().display(1).unwrap()
 }
 
 fn run_text(d: &RowDisplay, r: &display::TextRun) -> String {
@@ -607,17 +612,18 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
             harness,
             ..Default::default()
         };
+        w.builder.expanded.insert(rows::row_key("a#work"));
         w.pass()
     };
     let frame_for = |status: SubagentStatus| frame_with(spawn(status), None);
-    let spinners = |f: &LayoutFrame| f.display(0).unwrap().widgets.iter().filter(|w| matches!(w.kind, display::WidgetKind::Spinner)).count();
+    let spinners = |f: &LayoutFrame| f.display(1).unwrap().widgets.iter().filter(|w| matches!(w.kind, display::WidgetKind::Spinner)).count();
     assert_eq!(spinners(&frame_for(SubagentStatus::Running)), 1, "running subagent spins");
     assert_eq!(spinners(&frame_for(SubagentStatus::Done)), 0, "finished subagent is quiet");
     let failed = frame_for(SubagentStatus::Failed);
-    assert!(failed.display(0).unwrap().runs.iter().any(|r| r.color == display::ColorRole::Danger), "failed subagent is tinted danger");
+    assert!(failed.display(1).unwrap().runs.iter().any(|r| r.color == display::ColorRole::Danger), "failed subagent is tinted danger");
 
     let icon = |f: &LayoutFrame| {
-        f.display(0).unwrap().widgets.iter().find_map(|w| match &w.kind {
+        f.display(1).unwrap().widgets.iter().find_map(|w| match &w.kind {
             display::WidgetKind::Icon { name, .. } => Some(name.clone()),
             _ => None,
         })
@@ -838,6 +844,38 @@ fn a_file_change_line_carries_its_added_and_deleted_counts() {
 }
 
 #[test]
+fn a_stats_only_change_offers_its_full_diff_and_shows_it_once_fetched() {
+    use zeron_doc::schema::MessageRole::Assistant;
+    let mut part = computer_part("t1", "x", None, false, None);
+    if let MessagePart::Tool { call, diff_stats, .. } = &mut part {
+        *call = zeron_proto::ToolCall::ApplyPatch { path: None };
+        *diff_stats = Some(vec![zeron_doc::parts::ToolDiffStat { path: "a.rs".into(), additions: 1, deletions: 1 }]);
+    }
+    let mut w = worker(390.0);
+    w.input = TranscriptInput {
+        entries: vec![Arc::new(SessionMessageEntry {
+            status: Some(MessageStatus::Streaming),
+            ..(*message("a", Assistant, vec![part])).clone()
+        })],
+        working: true,
+        streaming: true,
+        chat_id: Some("c".into()),
+        ..Default::default()
+    };
+    let key = w.pass().placement(0).unwrap().key;
+    w.builder.expanded.insert(key);
+    w.builder.detail_open.insert(rows::row_key("a#g0/t1"), true);
+    w.builder.invalidate(key);
+    let d = w.pass().display(0).unwrap();
+    assert!(d.text.contains("Show full diff"), "{}", d.text);
+    assert!(d.links.iter().any(|l| l.url.starts_with("zeron-blob://fetch?ref=c") && l.url.ends_with("t1.diff")), "{:?}", d.links);
+    let diff = zeron_proto::ToolDiff { path: "a.rs".into(), old_text: Some("old line\n".into()), new_text: "new line\n".into(), line_offset: None };
+    w.builder.blobs.insert("c/t1.diff".into(), (rows::Blob::Ready(serde_json::to_string(&diff).unwrap().into()), 1));
+    let d = w.pass().display(0).unwrap();
+    assert!(d.text.contains("new line") && !d.text.contains("Show full diff"), "{}", d.text);
+}
+
+#[test]
 fn an_advisor_call_names_the_wait_until_it_answers() {
     use zeron_doc::schema::MessageRole::Assistant;
     let frame = |resolved: bool| {
@@ -867,6 +905,61 @@ fn an_advisor_call_names_the_wait_until_it_answers() {
 }
 
 #[test]
+fn the_working_row_follows_the_token_rate() {
+    use zeron_doc::schema::MessageRole::Assistant;
+    let mut w = worker(390.0);
+    let rate = |w: &mut Worker, token_rate: Option<u32>| {
+        w.input = TranscriptInput {
+            entries: vec![message("a", Assistant, vec![text_part("t0", "hi")])],
+            working: true,
+            token_rate,
+            ..Default::default()
+        };
+        let f = w.pass();
+        (0..f.row_count())
+            .find_map(|i| f.display(i).unwrap().widgets.iter().find_map(|w| match &w.kind {
+                display::WidgetKind::Working { rate, .. } => Some(rate.clone()),
+                _ => None,
+            }))
+            .unwrap()
+    };
+    assert_eq!(rate(&mut w, None), None);
+    assert_eq!(rate(&mut w, Some(40)).as_deref(), Some("· 40 tok/s"));
+    assert_eq!(rate(&mut w, Some(58)).as_deref(), Some("· 58 tok/s"));
+}
+
+#[test]
+fn an_idle_chat_waiting_on_compaction_shows_the_wait_row() {
+    use zeron_doc::schema::MessageRole::Assistant;
+    use zeron_proto::transcript::CompactionWait;
+    let mut w = worker(390.0);
+    let shown = |w: &mut Worker, compaction: Option<CompactionWait>| {
+        w.input = TranscriptInput {
+            entries: vec![message("a", Assistant, vec![text_part("t0", "hi")])],
+            token_rate: Some(40),
+            compaction: compaction.map(|wait| (wait, 1_000)),
+            ..Default::default()
+        };
+        let f = w.pass();
+        (0..f.row_count()).find_map(|i| {
+            f.display(i).unwrap().widgets.iter().find_map(|w| match &w.kind {
+                display::WidgetKind::Working { word, since_ms, rate } => Some((word.clone(), *since_ms, rate.clone())),
+                _ => None,
+            })
+        })
+    };
+    assert_eq!(shown(&mut w, None), None);
+    assert_eq!(
+        shown(&mut w, Some(CompactionWait::Compacting(Some((120_000, true))))),
+        Some(("Compacting 120.0k, carrying the last turns over".to_owned(), Some(1_000), None))
+    );
+    assert_eq!(
+        shown(&mut w, Some(CompactionWait::Queued)).map(|(word, since, _)| (word, since)),
+        Some(("Compaction queued · starts when the turn settles".to_owned(), None))
+    );
+}
+
+#[test]
 fn structured_user_text_is_markdown_and_prose_stays_plain() {
     use zeron_doc::schema::MessageRole::User;
     let mut w = worker(390.0);
@@ -881,6 +974,28 @@ fn structured_user_text_is_markdown_and_prose_stays_plain() {
     let text = |i| frame.display(i).unwrap().text;
     assert!(text(0).contains("one") && !text(0).contains("- one"), "{}", text(0));
     assert_eq!(text(1), "plain prose");
+}
+
+#[test]
+fn a_context_block_becomes_a_pill_that_opens_its_card() {
+    use zeron_doc::schema::MessageRole::User;
+    let sent = format!(
+        "Review this\n\n{}\n> Pull request #7 in acme/zeron: Fix 7\n> Body line\n\n> Checks: 1 of 3 passed",
+        zeron_proto::badges::PR_CONTEXT_HEADER
+    );
+    let mut w = worker(390.0);
+    w.input = TranscriptInput { entries: vec![message("a", User, vec![text_part("t0", &sent)])], ..Default::default() };
+    let frame = w.pass();
+    let row = frame.display(0).unwrap();
+    assert!(row.text.contains("PR context") && row.text.contains("Review this"), "{}", row.text);
+    assert!(!row.text.contains("Pull request #7"), "{}", row.text);
+    let pill = row.links.iter().find(|l| l.url == "zeron-badge://open?i=0").expect("pill hit");
+    assert!(pill.y < row.height / 2.0);
+    let card = frame.badge(row.key, 0).unwrap();
+    assert_eq!(card.title, "PR context");
+    let locations: Vec<&str> = card.details.iter().map(|d| d.location.as_str()).collect();
+    assert_eq!(locations, ["Pull request #7 in acme/zeron: Fix 7", "Checks: 1 of 3 passed"]);
+    assert_eq!(card.details[0].body, "Body line");
 }
 
 #[test]
@@ -931,12 +1046,15 @@ fn capability_denial_adds_one_card_per_tool_after_its_chip() {
         computer_part("c3", "computer_type_text", None, true, Some(denied)),
         computer_part("c4", "computer_click", None, true, Some("approval_denied")),
     ];
-    let frame = frame_of(vec![message("m", Assistant, parts)], 390.0);
-    assert_eq!(kinds(&frame), [RowKind::Tools, RowKind::Card, RowKind::Tools, RowKind::Card, RowKind::Tools]);
-    let card = frame.display(1).unwrap();
+    let mut w = worker(390.0);
+    w.builder.expanded.insert(rows::row_key("m#work"));
+    w.input = TranscriptInput { entries: vec![message("m", Assistant, parts)], ..Default::default() };
+    let frame = w.pass();
+    assert_eq!(kinds(&frame), [RowKind::Tools, RowKind::Tools, RowKind::Card, RowKind::Tools, RowKind::Card, RowKind::Tools]);
+    let card = frame.display(2).unwrap();
     assert!(card.text.starts_with("Computer control is off"));
     assert!(card.text.contains("Turn it on in Settings to let the agent use the desktop."));
-    assert_eq!(actions(&frame, 1), [display::CardAction::EnableComputer]);
+    assert_eq!(actions(&frame, 2), [display::CardAction::EnableComputer]);
 }
 
 #[test]
@@ -945,11 +1063,12 @@ fn computer_tools_show_titles_and_never_their_arguments() {
     let secret = "hunter2-typed-secret";
     let parts = vec![computer_part("c1", "computer_type_text", Some(serde_json::json!({ "text": secret })), false, Some(secret))];
     let mut w = worker(390.0);
+    w.builder.expanded.insert(rows::row_key("m#work"));
     w.builder.expanded.insert(rows::row_key("m#g0"));
     w.builder.detail_open.insert(rows::row_key("m#g0/c1"), true);
     w.input = TranscriptInput { entries: vec![message("m", Assistant, parts)], ..Default::default() };
     let frame = w.pass();
-    let d = frame.display(0).unwrap();
+    let d = frame.display(1).unwrap();
     assert!(d.text.contains("Type"), "{}", d.text);
     assert!(!d.text.contains(secret), "{}", d.text);
     assert!(!d.copy_text.contains(secret));

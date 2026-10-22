@@ -12,6 +12,7 @@ struct SessionChrome: Equatable {
         case notDelivered
         case failed(String)
         case editing
+        case limit(String)
     }
 
     struct Question: Equatable {
@@ -47,12 +48,13 @@ struct SessionChrome: Equatable {
     var questions: (requestId: String, items: [Question])?
     var queue: [QueuedItem] = []
     var error: String?
+    var limitPill: LimitPill?
 
     static func == (a: SessionChrome, b: SessionChrome) -> Bool {
         a.title == b.title && a.subtitle == b.subtitle && a.running == b.running && a.canSteer == b.canSteer
             && a.placeholder == b.placeholder && a.chips == b.chips && a.banner == b.banner
             && a.questions?.requestId == b.questions?.requestId && a.questions?.items == b.questions?.items
-            && a.queue == b.queue && a.error == b.error
+            && a.queue == b.queue && a.error == b.error && a.limitPill == b.limitPill
     }
 }
 
@@ -85,6 +87,14 @@ protocol SessionSource: AnyObject {
     func image(_ reference: String) async -> UIImage?
     /// Workspace files for `@` mentions.
     func searchFiles(_ query: String) async -> [FileMatch]
+    func branchBlocked(rewind: Bool) async -> String?
+    func fork(from entryId: String) async throws -> String
+    func rewind(to entryId: String) async throws -> String
+    func skillFile(name: String, path: String?) async throws -> SkillFile
+    func chatUsage() async -> UsageMeter?
+    func limitCard(chatId: String) -> LimitCard?
+    func resolveLimit(chatId: String, choice: String) async throws
+    func setLimitResume(chatId: String, auto: Bool) async throws
 }
 
 enum QueueAction {
@@ -239,4 +249,12 @@ final class FixtureSessionSource: SessionSource {
     func loadImage(_ reference: String, into view: UIImageView) {}
     func image(_ reference: String) async -> UIImage? { nil }
     func searchFiles(_ query: String) async -> [FileMatch] { [] }
+    func branchBlocked(rewind: Bool) async -> String? { "Not available in the lab" }
+    func fork(from entryId: String) async throws -> String { throw CancellationError() }
+    func rewind(to entryId: String) async throws -> String { throw CancellationError() }
+    func skillFile(name: String, path: String?) async throws -> SkillFile { throw CancellationError() }
+    func chatUsage() async -> UsageMeter? { nil }
+    func limitCard(chatId: String) -> LimitCard? { nil }
+    func resolveLimit(chatId: String, choice: String) async throws { throw CancellationError() }
+    func setLimitResume(chatId: String, auto: Bool) async throws { throw CancellationError() }
 }
