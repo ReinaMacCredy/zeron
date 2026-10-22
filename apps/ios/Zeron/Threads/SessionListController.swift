@@ -21,6 +21,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     var reorderable = false
     /// The Archived list: rows offer Unarchive instead of Archive / Pin / Move.
     var archivedRows = false
+    var swipes = true
     /// The session open beside this list (iPad sidebar): drawn as current.
     var currentChatId: String? {
         didSet {
@@ -239,7 +240,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     }
 
     private func leadingSwipe(_ path: IndexPath) -> UISwipeActionsConfiguration? {
-        guard !archivedRows, let id = sessionId(path), let vm = sessions[id] else { return nil }
+        guard swipes, !archivedRows, let id = sessionId(path), let vm = sessions[id] else { return nil }
         let pin = UIContextualAction(style: .normal, title: vm.pinned ? "Unpin" : "Pin") { [weak self] _, _, done in
             self?.app.setPinned(id, !vm.pinned)
             done(true)
@@ -250,7 +251,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     }
 
     private func trailingSwipe(_ path: IndexPath) -> UISwipeActionsConfiguration? {
-        guard let id = sessionId(path) else { return nil }
+        guard swipes, let id = sessionId(path) else { return nil }
         if archivedRows {
             let restore = UIContextualAction(style: .normal, title: "Unarchive") { [weak self] _, _, done in
                 self?.app.unarchive(id)
@@ -279,7 +280,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         if let path = indexPaths.first, case let .header(id) = dataSource.itemIdentifier(for: path), let menu = headerMenu(id) {
             return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in menu }
         }
-        guard let path = indexPaths.first, let id = sessionId(path), let vm = sessions[id] else { return nil }
+        guard swipes, let path = indexPaths.first, let id = sessionId(path), let vm = sessions[id] else { return nil }
         return UIContextMenuConfiguration(identifier: id as NSString, previewProvider: nil) { [weak self] _ in
             guard let self else { return nil }
             if self.archivedRows {

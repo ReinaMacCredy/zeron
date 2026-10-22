@@ -6,6 +6,21 @@ final class SupervisorViewController: UIViewController, UICollectionViewDelegate
     private var dataSource: UICollectionViewDiffableDataSource<String, Row>!
     private var appToken: AnyObject?
     private var needsToken: AnyObject?
+    private var filter = Filter.all
+
+    enum Filter: String, CaseIterable {
+        case all = "All"
+        case questions = "Questions"
+        case decisions = "Decisions"
+        case plans = "Plans"
+
+        func matches(_ entry: NeedsYouEntry) -> Bool {
+            switch (self, entry.kind) {
+            case (.all, _), (.questions, .input), (.decisions, .item), (.plans, .plan): true
+            default: false
+            }
+        }
+    }
 
     struct Row: Hashable {
         let id: String
@@ -110,6 +125,36 @@ final class SupervisorViewController: UIViewController, UICollectionViewDelegate
         }
     }
 
+    static func needsLine(_ entry: NeedsYouEntry) -> String {
+        if let send = entry.sendLine { return "\(entry.host.name) · \(send)" }
+        var parts = [entry.host.name]
+        switch entry.kind {
+        case let .item(_, why, raisedByLead, _, _):
+            parts.append(raisedByLead ? "\(why) · Raised by Lead" : why)
+        case .input:
+            parts.append(entry.kindLabel)
+        case let .plan(_, steps):
+            parts.append(steps.prefix(2).joined(separator: ", ") + (steps.count > 2 ? " +\(steps.count - 2) more" : ""))
+        }
+        parts.append(relativeTimeLabel(atMs: entry.atMs, nowMs: nowMs))
+        return parts.joined(separator: " · ")
+    }
+
+    private func updateFilterMenu() {
+        let all = supervised
+        navigationItem.rightBarButtonItem = UIBarButtonItem(
+            title: filter == .all ? "Filter" : filter.rawValue,
+            image: UIImage(systemName: "line.3.horizontal.decrease.circle"),
+            menu: UIMenu(children: Filter.allCases.map { option in
+                UIAction(title: "\(option.rawValue) · \(all.filter(option.matches).count)", state: option == filter ? .on : .off) { [weak self] _ in
+                    self?.filter = option
+                    self?.reload()
+                }
+            })
+        )
+        navigationItem.rightBarButtonItem?.accessibilityIdentifier = "sv-filter"
+    }
+
     private var supervised: [NeedsYouEntry] { app.needsYou.filter(\.supervised) }
 
     private func reload() {
@@ -121,13 +166,31 @@ final class SupervisorViewController: UIViewController, UICollectionViewDelegate
                 Row(id: "host:\(host.host.deviceId)", title: host.host.name, subtitle: Self.hostLine(host), symbol: "desktopcomputer")
             })
         }
-        let needs = supervised
-        snap.appendSections(["Needs you · \(needs.count)"])
-        if needs.isEmpty {
-            snap.appendItems([Row(id: "needs-empty", title: "Nothing needs you", tint: Palette.secondary, tappable: false)])
-        } else {
-            snap.appendItems(needs.map { entry in
-                Row(id: "needs:\(entry.key)", title: entry.rowTitle, subtitle: "\(entry.host.name) · \(entry.meta(app))", glyph: .dot(entry.tint))
+        let shown = supervised.filter(filter.matches)
+        if shown.isEmpty {
+            snap.appendSections(["Needs you"])
+            let empty = filter == .all ? "Nothing needs you" : "No \(filter.rawValue.lowercased())"
+            snap.appendItems([Row(id: "needs-empty", title: empty, tint: Palette.secondary, tappable: false)])
+        }
+        var groups: [String] = []
+        var byGroup: [String: [NeedsYouEntry]] = [:]
+        for entry in shown {
+            let key = "\(entry.host.deviceId)|\(entry.groupKey)"
+            if byGroup[key] == nil { groups.append(key) }
+            byGroup[key, default: []].append(entry)
+        }
+        for key in groups {
+            let rows = byGroup[key] ?? []
+            guard let first = rows.first else { continue }
+            let section = "\(first.groupTitle) · \(rows.count) to answer"
+            snap.appendSections([snap.sectionIdentifiers.contains(section) ? "\(section) · \(first.host.name)" : section])
+            snap.appendItems(rows.map { entry in
+                let glyph: StatusGlyph.Kind
+                switch entry.kind {
+                case .input: glyph = .dot(StatusTone.input)
+                case .item, .plan: glyph = .dot(Palette.warning)
+                }
+                return Row(id: "needs:\(entry.key)", title: entry.rowTitle, subtitle: Self.needsLine(entry), glyph: glyph)
             })
         }
         if !page.doneToday.isEmpty {
@@ -154,6 +217,7 @@ final class SupervisorViewController: UIViewController, UICollectionViewDelegate
             })
         }
         dataSource.apply(snap, animatingDifferences: view.window != nil)
+        updateFilterMenu()
     }
 
     func collectionView(_ collectionView: UICollectionView, shouldSelectItemAt indexPath: IndexPath) -> Bool {
@@ -163,13 +227,69 @@ final class SupervisorViewController: UIViewController, UICollectionViewDelegate
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         collectionView.deselectItem(at: indexPath, animated: true)
         guard let row = dataSource.itemIdentifier(for: indexPath) else { return }
+        let source = collectionView.cellForItem(at: indexPath)
         if row.id.hasPrefix("host:"), let host = app.supervisor.hosts.first(where: { "host:\($0.host.deviceId)" == row.id }) {
-            presentAuthority(host.host)
+            hostActions(host, from: source)
         } else if row.id.hasPrefix("needs:"), let entry = supervised.first(where: { "needs:\($0.key)" == row.id }) {
             NeedsYou.present(app: app, from: self, excluding: nil, opening: entry)
         } else if row.id.hasPrefix("done:") {
             let taskId = String(row.id.dropFirst("done:".count))
             navigationController?.pushViewController(MissionControlViewController(app: app, taskId: taskId), animated: true)
+        }
+    }
+
+    private func hostActions(_ host: SupervisorHost, from source: UIView?) {
+        guard let client = app.client else { return }
+        let device = host.host.deviceId
+        let sheet = UIAlertController(title: "Supervisor on \(host.host.name)", message: Self.hostLine(host), preferredStyle: .actionSheet)
+        if host.blocked != nil || host.state == .off {
+            let fallback = app.lastDraft.config
+            sheet.addAction(UIAlertAction(title: host.blocked == nil ? "Start" : "Try again", style: .default) { [weak self] _ in
+                self?.run { _ = try await client.ensureSupervisor(deviceId: device, fallback: fallback) }
+            })
+        } else if host.state == .stopped {
+            sheet.addAction(UIAlertAction(title: "Resume", style: .default) { [weak self] _ in
+                self?.run { try await client.resumeSupervisor(deviceId: device) }
+            })
+        } else {
+            sheet.addAction(UIAlertAction(title: "Stop", style: .destructive) { [weak self] _ in
+                self?.confirmStop(host, from: source)
+            })
+        }
+        if let chat = host.chatId {
+            sheet.addAction(UIAlertAction(title: "Open conversation", style: .default) { [weak self] _ in
+                guard let self else { return }
+                TasksViewController.push(thread: chat, app: self.app, from: self.navigationController)
+            })
+        }
+        sheet.addAction(UIAlertAction(title: host.watchEverything ? "Stop watching everything" : "Watch everything", style: .default) { [weak self] _ in
+            self?.run { try await client.setWatchEverything(deviceId: device, on: !host.watchEverything) }
+        })
+        sheet.addAction(UIAlertAction(title: "Authority…", style: .default) { [weak self] _ in
+            self?.presentAuthority(host.host)
+        })
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        sheet.popoverPresentationController?.sourceView = source
+        present(sheet, animated: true)
+    }
+
+    private func confirmStop(_ host: SupervisorHost, from source: UIView?) {
+        guard let client = app.client else { return }
+        let device = host.host.deviceId
+        let alert = UIAlertController(title: "Stop the Supervisor on \(host.host.name)?", message: "Wakes wait until you resume it.", preferredStyle: .actionSheet)
+        alert.addAction(UIAlertAction(title: "Stop", style: .destructive) { [weak self] _ in
+            self?.run { try await client.stopSupervisor(deviceId: device) }
+        })
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.popoverPresentationController?.sourceView = source
+        present(alert, animated: true)
+    }
+
+    private func run(_ action: @escaping () async throws -> Void) {
+        Task { @MainActor in
+            do { try await action() } catch {
+                Toast.show(TasksErrors.message(error), in: self.view.window)
+            }
         }
     }
 

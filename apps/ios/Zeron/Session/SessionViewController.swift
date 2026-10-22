@@ -81,6 +81,23 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             still.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
             still.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
         ])
+        missionStrip.configuration?.cornerStyle = .capsule
+        missionStrip.configuration?.image = UIImage(systemName: "list.bullet.rectangle")
+        missionStrip.configuration?.imagePadding = 6
+        missionStrip.configuration?.titleLineBreakMode = .byTruncatingTail
+        missionStrip.configuration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 12)
+        missionStrip.accessibilityIdentifier = "mission-strip"
+        missionStrip.isHidden = true
+        missionStrip.translatesAutoresizingMaskIntoConstraints = false
+        missionStrip.addAction(UIAction { [weak self] _ in self?.openMission() }, for: .primaryActionTriggered)
+        view.addSubview(missionStrip)
+        NSLayoutConstraint.activate([
+            missionStrip.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            missionStrip.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+            missionStrip.trailingAnchor.constraint(lessThanOrEqualTo: still.leadingAnchor, constant: -8),
+        ])
+        missionToken = app.observe { [weak self] in self?.syncMission() }
+        syncMission()
         // Tapping the transcript puts the composer (and keyboard) away.
         let dismissTap = UITapGestureRecognizer(target: self, action: #selector(dismissComposer))
         dismissTap.cancelsTouchesInView = false
@@ -202,6 +219,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private var voiceBar: VoiceBarItem?
     private var voiceToken: AnyObject?
     private var hostsToken: AnyObject?
+    private var missionToken: AnyObject?
+    private let missionStrip = UIButton(configuration: .gray())
 
     deinit {
         if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }
@@ -579,12 +598,52 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         }
     }
 
+    private func syncMission() {
+        guard let strip = app.client?.missionStrip(chatId: chatId) else {
+            missionStrip.isHidden = true
+            return
+        }
+        var title = AttributedString("\(strip.role) · \(strip.title) · \(strip.done)/\(strip.total)")
+        title.font = Fonts.ui(.sansMedium, 13)
+        missionStrip.configuration?.attributedTitle = title
+        missionStrip.isHidden = false
+    }
+
+    private func openMission() {
+        guard let strip = app.client?.missionStrip(chatId: chatId) else { return }
+        navigationController?.pushViewController(MissionControlViewController(app: app, taskId: strip.taskId), animated: true)
+    }
+
+    private func missionItems() -> [UIMenuElement] {
+        guard let client = app.client else { return [] }
+        var items: [UIMenuElement] = []
+        let strip = client.missionStrip(chatId: chatId)
+        if let strip {
+            items.append(UIAction(title: "Mission Control", image: UIImage(systemName: "list.bullet.rectangle")) { [weak self] _ in self?.openMission() })
+            items.append(UIAction(title: "Brief", image: UIImage(systemName: "doc.plaintext")) { [weak self] _ in
+                guard let self else { return }
+                self.navigationController?.pushViewController(BriefViewController(app: self.app, taskId: strip.taskId, stepId: strip.stepId), animated: true)
+            })
+        }
+        if let watch = client.watchState(chatId: chatId), !(watch.mission && strip?.stepId != nil) {
+            let chat = chatId
+            items.append(UIAction(title: watch.everything ? "Watched (everything is on)" : "Watched by the Supervisor", image: UIImage(systemName: "eye"), attributes: watch.everything ? .disabled : [], state: watch.watched ? .on : .off) { [weak self] _ in
+                Task { @MainActor in
+                    do { try await client.setWatched(chatId: chat, watched: !watch.watched) } catch {
+                        Toast.show(TasksErrors.message(error), in: self?.view.window)
+                    }
+                }
+            })
+        }
+        return items.isEmpty ? [] : [UIMenu(options: .displayInline, children: items)]
+    }
+
     private func sessionMenu() -> UIMenu {
         UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
             guard let self else { return done([]) }
             let vm = self.app.session(self.chatId)
             let pinned = vm?.pinned ?? false
-            done([
+            done(self.missionItems() + [
                 UIAction(title: pinned ? "Unpin" : "Pin", image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(self.chatId, !pinned) },
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = self.engine.frame().plainText()

@@ -678,9 +678,8 @@ final class AppModel {
         } else {
             return nil
         }
-        let config = ChatConfig(harness: draft.harness, model: draft.model, reasoning: draft.effort, modelOptions: [:], sandbox: .workspaceWrite)
         do {
-            let chatId = try client.createSession(newSession: NewSession(target: target, config: config, branch: draft.worktree ? nil : draft.branch, cwd: nil, title: nil))
+            let chatId = try client.createSession(newSession: NewSession(target: target, config: draft.config, branch: draft.worktree ? nil : draft.branch, cwd: nil, title: nil))
             let handle = try client.openSession(chatId: chatId)
             let project = rawProjects.first { $0.id == draft.projectId }
             let worktree = draft.worktree ? project.map { WorktreeSpec(repoPath: $0.path, base: draft.branch ?? "HEAD", spaceId: $0.id) } : nil
@@ -693,6 +692,10 @@ final class AppModel {
             return nil
         }
     }
+}
+
+extension NewSessionDraft {
+    var config: ChatConfig { ChatConfig(harness: harness, model: model, reasoning: effort, modelOptions: [:], sandbox: .workspaceWrite) }
 }
 
 extension StagedImage {
