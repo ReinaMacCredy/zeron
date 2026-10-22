@@ -1227,6 +1227,7 @@ pub struct SupervisorPage {
     ensure_task: Option<Task<()>>,
     effect_task: Option<Task<()>>,
     resuming: bool,
+    shown: bool,
     batches: HashMap<String, Task<()>>,
     last_sheet: Option<String>,
     focus: FocusHandle,
@@ -1299,6 +1300,7 @@ impl SupervisorPage {
             ensure_task: None,
             effect_task: None,
             resuming: false,
+            shown: false,
             batches: HashMap::new(),
             last_sheet: None,
             focus: cx.focus_handle(),
@@ -1315,6 +1317,7 @@ impl SupervisorPage {
     }
 
     pub fn entered(&mut self, cx: &mut Context<Self>) {
+        self.shown = true;
         self.ensured = None;
         if self.ensure != Ensure::Running {
             self.ensure = Ensure::Wanted;
@@ -1354,6 +1357,7 @@ impl SupervisorPage {
     }
 
     pub fn left(&mut self, cx: &mut Context<Self>) {
+        self.shown = false;
         if self.ensure == Ensure::Wanted {
             self.ensure = Ensure::Idle;
         }
@@ -1394,6 +1398,8 @@ impl SupervisorPage {
             .is_some_and(|snapshot| snapshot.chat_id.is_some());
         if known {
             self.ensured = None;
+        } else if self.shown && self.ensured.is_none() && self.ensure == Ensure::Idle {
+            self.ensure = Ensure::Wanted;
         }
         let choices: HashMap<String, String> = self
             .replies
@@ -4447,6 +4453,18 @@ mod tests {
                 let config: ChatConfig = serde_json::from_value(configs[0].clone()).unwrap();
                 assert_eq!(config.harness, HarnessId::ClaudeCode);
                 assert_eq!(config.permission_mode, PermissionMode::Full);
+                let state = page.read_with(cx, |page, _| page.state.clone());
+                for chat_id in [Some("supervisor-1"), None] {
+                    state.update(cx, |state, cx| {
+                        state.supervisor = Some(SupervisorSnapshot {
+                            chat_id: chat_id.map(str::to_owned),
+                            ..Default::default()
+                        });
+                        cx.notify();
+                    });
+                }
+                rpc.settle(cx, &runtime, settled);
+                assert_eq!(ensured.lock().unwrap().len(), 2);
             } else {
                 assert!(configs.is_empty());
                 let ensure = page.read_with(cx, |page, _| page.ensure.clone());
