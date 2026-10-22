@@ -77,11 +77,15 @@ fn step_wake_text(steps: &[StepHandback]) -> String {
     handback_text(children, next)
 }
 
-fn step_lead_to_wake(workspace: &WorkspaceHost, step: &TaskStep) -> Option<String> {
-    let lead = workspace
-        .task(&step.task_id)
+fn open_mission_lead(workspace: &WorkspaceHost, task_id: &str) -> Option<String> {
+    workspace
+        .task(task_id)
         .filter(|task| task.completed_at.is_none())
-        .and_then(|task| task.chat_id)?;
+        .and_then(|task| task.chat_id)
+}
+
+fn step_lead_to_wake(workspace: &WorkspaceHost, step: &TaskStep) -> Option<String> {
+    let lead = open_mission_lead(workspace, &step.task_id)?;
     workspace
         .chat(&lead)
         .ok()
@@ -209,7 +213,7 @@ impl DocHost {
             .iter()
             .find(|step| step.outcome.is_none() && step.chat_id.as_deref() == Some(thread))
             .map(|step| step.task_id.clone())?;
-        workspace.task(&task_id)?.chat_id
+        open_mission_lead(workspace, &task_id)
     }
 
     /// Steps whose thread a delegate_task child holds settle through their delegation.
