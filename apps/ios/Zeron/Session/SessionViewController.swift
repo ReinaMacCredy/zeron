@@ -610,6 +610,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = self.engine.frame().plainText()
                 },
+                self.source.agentsAction { [weak self] id in self?.router?.openSession(id) },
                 self.sidechatAction(),
                 self.source.handoffMenu { [weak self] id in self?.router?.openSession(id) },
                 self.compactAction(),

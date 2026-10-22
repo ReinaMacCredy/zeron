@@ -1,13 +1,21 @@
 use std::sync::Arc;
 
+use chrono::{Duration, Utc};
 use serde_json::Value;
-use zeron_doc::{DocError, SessionDoc};
+use zeron_doc::{DocError, MessagePart, MessageRole, SessionDoc, SubagentStatus};
 use zeron_proto::invocation::Skill;
 use zeron_proto::prediction::ComposerPrediction;
-use zeron_proto::{Chat, HarnessId, SessionStats, SlashCommand, SlashCommandKind};
+use zeron_proto::{
+    BackgroundTask, BackgroundTaskKind, Chat, HarnessId, Session, SessionStats, SessionStatus,
+    SlashCommand, SlashCommandKind, ToolCall,
+};
 
+use super::transcripts::{PHONE, entry, text, tool};
 use crate::client::ClientInner;
 use crate::error::ClientError;
+use crate::session::SessionCore;
+
+const DEMO_SHELL: &str = "shell-mobile-tests";
 
 pub(super) fn prediction(chat_id: &str) -> Option<ComposerPrediction> {
     (chat_id == "chat-home").then(|| ComposerPrediction {
@@ -21,6 +29,9 @@ pub(super) fn seed_meta(chat_id: &str, doc: &SessionDoc, now: i64) -> Result<(),
         return Ok(());
     }
     doc.update_context_usage(Some(184_312), Some(200_000))?;
+    for entry in subagent_turn(now) {
+        doc.push_message(&entry)?;
+    }
     doc.record_session_stats(&SessionStats {
         turns: 14,
         steps: 212,
@@ -183,4 +194,125 @@ pub(super) fn create_sidechat(
     };
     client.registry_write(|doc| doc.upsert_chat(&chat))?;
     Ok(serde_json::to_value(chat).unwrap_or_default())
+}
+
+fn spawn(id: &str, task: &str, model: &str, status: SubagentStatus) -> MessagePart {
+    let mut part = tool(
+        id,
+        ToolCall::Unknown {
+            name: format!("Agent: {task}"),
+            input: Some(serde_json::json!({ "description": task, "model": model })),
+        },
+        false,
+        None,
+    );
+    if let MessagePart::Tool {
+        subagent_ref,
+        subagent_status,
+        ..
+    } = &mut part
+    {
+        *subagent_ref = Some(format!("chat-home--sub--{id}"));
+        *subagent_status = Some(status);
+    }
+    part
+}
+
+fn subagent_turn(now: i64) -> Vec<zeron_doc::SessionMessageEntry> {
+    let host = super::fixtures::MAC;
+    vec![
+        entry(
+            "m-agents-ask",
+            MessageRole::User,
+            PHONE,
+            now - 260_000,
+            vec![text(
+                "t0",
+                "Audit the composer pickers and the sheet layout in parallel.",
+            )],
+        ),
+        entry(
+            "m-agents-1",
+            MessageRole::Assistant,
+            host,
+            now - 252_000,
+            vec![spawn(
+                "spawn-layout",
+                "Check the sheet layout",
+                "gpt-5.5",
+                SubagentStatus::Done,
+            )],
+        ),
+        entry(
+            "m-agents-2",
+            MessageRole::Assistant,
+            host,
+            now - 72_000,
+            vec![
+                spawn(
+                    "spawn-pickers",
+                    "Audit the composer pickers",
+                    "sonnet-5",
+                    SubagentStatus::Running,
+                ),
+                spawn(
+                    "spawn-drafts",
+                    "Trace the draft restore path",
+                    "sonnet-5",
+                    SubagentStatus::Running,
+                ),
+            ],
+        ),
+    ]
+}
+
+pub(super) fn background_session(chat_id: &str) -> Option<Session> {
+    (chat_id == "chat-home").then(|| Session {
+        last_completed_turn: None,
+        chat_id: chat_id.into(),
+        device_id: super::fixtures::MAC.into(),
+        status: SessionStatus::Working,
+        held_by_subagents: true,
+        compacting: false,
+        classifying: None,
+        background_tasks: vec![BackgroundTask {
+            id: DEMO_SHELL.into(),
+            kind: BackgroundTaskKind::Shell,
+            label: "cargo test -p zeron-mobile".into(),
+            started_at: Some(Utc::now() - Duration::seconds(41)),
+            output_path: Some("/tmp/zeron-demo/shell-mobile-tests.log".into()),
+        }],
+        started_at: None,
+        updated_at: Utc::now(),
+        running_subagents: 2,
+        compact_plan: None,
+    })
+}
+
+pub(super) fn shell_output(task_id: &str) -> Vec<String> {
+    if task_id != DEMO_SHELL {
+        return Vec::new();
+    }
+    [
+        "   Compiling zeron-client v0.1.0",
+        "   Compiling zeron-mobile v0.1.0",
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 38.2s",
+        "     Running unittests src/lib.rs (target/debug/deps/zeron_mobile-5f1c)",
+        "running 214 tests",
+        "test client_ffi::composer::tests::roster_labels ... ok",
+        "test client_ffi::composer::tests::stop_routes_by_kind ... ok",
+    ]
+    .map(str::to_owned)
+    .to_vec()
+}
+
+pub(super) fn stop_background_task(
+    core: &SessionCore,
+    params: &Value,
+) -> crate::error::Result<Value> {
+    let task_id = params["taskId"].as_str().unwrap_or_default();
+    if !core.write(|doc| doc.update_subagent_chip(task_id, None, Some("stopped"), None))? {
+        core.drop_background_task(task_id);
+    }
+    Ok(serde_json::json!({}))
 }

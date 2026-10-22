@@ -95,6 +95,7 @@ protocol SessionSource: AnyObject {
     func compact(focus: String?)
     func keepFullHistory()
     func handoffMenu(open: @escaping (String) -> Void) -> UIMenuElement?
+    func agentsAction(open: @escaping (String) -> Void) -> UIAction?
 }
 
 extension SessionSource {
@@ -104,6 +105,7 @@ extension SessionSource {
     func compact(focus: String?) {}
     func keepFullHistory() {}
     func handoffMenu(open: @escaping (String) -> Void) -> UIMenuElement? { nil }
+    func agentsAction(open: @escaping (String) -> Void) -> UIAction? { nil }
 }
 
 enum QueueAction {

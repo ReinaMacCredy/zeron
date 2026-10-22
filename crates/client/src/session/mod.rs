@@ -9,12 +9,14 @@
 //!
 //! The host writes all transcript entries and command outcomes.
 
+mod background;
 mod compaction;
 mod prediction;
 mod snapshot;
 #[cfg(test)]
 mod tests;
 pub(crate) mod transcript;
+mod host_watch;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,6 +33,7 @@ use zeron_proto::{
     WorktreeSpec,
 };
 
+pub use background::BackgroundRoster;
 pub use snapshot::{
     AppendHint, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest, LiveStatus,
     LocalEcho, PendingKind, PendingSend, QueueGate, QueueItem, RoomState, SessionSnapshot,
@@ -185,6 +188,8 @@ struct CoreState {
     compacting: bool,
     kept_full_history: Option<i64>,
     prediction: Option<zeron_proto::prediction::ComposerPrediction>,
+    session: Option<zeron_proto::Session>,
+    shell_output: Option<(String, Vec<String>)>,
 }
 
 pub(crate) struct SessionCore {
@@ -208,6 +213,8 @@ pub(crate) struct SessionCore {
     recompute_gate: Mutex<()>,
     view_attached: AtomicBool,
     prediction_watch: Mutex<Option<tokio_util::sync::CancellationToken>>,
+    session_watch: Mutex<Option<tokio_util::sync::CancellationToken>>,
+    output_watch: Mutex<Option<tokio_util::sync::CancellationToken>>,
     /// Last open/attach/detach (warm-set eviction order).
     touched_ms: std::sync::atomic::AtomicI64,
 }
@@ -261,12 +268,16 @@ impl SessionCore {
                 compacting: false,
                 kept_full_history: None,
                 prediction: None,
+                session: None,
+                shell_output: None,
             }),
             transcript_tx,
             composer: RwLock::new(composer),
             recompute_gate: Mutex::new(()),
             view_attached: AtomicBool::new(false),
             prediction_watch: Mutex::new(None),
+            session_watch: Mutex::new(None),
+            output_watch: Mutex::new(None),
             touched_ms: std::sync::atomic::AtomicI64::new(now_ms()),
         });
         // Coalesced republish for remote imports (a backfill of N rows costs
@@ -1051,12 +1062,23 @@ impl SessionHandle {
         if attached && !was {
             self.mark_seen();
             *lock(&self.core.prediction_watch) = prediction::start(&self.core);
+            *lock(&self.core.session_watch) = background::start(&self.core);
         }
         if !attached && was {
-            if let Some(watch) = lock(&self.core.prediction_watch).take() {
-                watch.cancel();
+            for watch in [
+                &self.core.prediction_watch,
+                &self.core.session_watch,
+                &self.core.output_watch,
+            ] {
+                if let Some(watch) = lock(watch).take() {
+                    watch.cancel();
+                }
             }
-            self.core.update_state(|st| st.prediction = None);
+            self.core.update_state(|st| {
+                st.prediction = None;
+                st.session = None;
+                st.shell_output = None;
+            });
         }
     }
 

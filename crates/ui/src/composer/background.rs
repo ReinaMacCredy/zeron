@@ -5,14 +5,19 @@ use gpui::{
     AnyElement, App, ClickEvent, Context, Div, Entity, Hsla, MouseButton, MouseDownEvent,
     SharedString, Stateful, Window, div, point, prelude::*, px,
 };
-use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry, SubagentStatus};
+use zeron_doc::background::{agent_runs, latest_prompt};
+use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
+use zeron_proto::background::{
+    AgentRun, RunState, aggregate, agents_label, delegate_runs, elapsed_label, latest_line,
+    roster_heading, shell_tasks, shells_label,
+};
 use zeron_proto::{
     BackgroundTask, BackgroundTaskKind, ChatIndicator, HarnessId, ReasoningLevel, Session,
-    SessionStatus, ToolCall,
+    SessionStatus,
 };
 use zeron_rpc::methods;
 
-use super::{Composer, ComposerEvent, harness_display_name};
+use super::{Composer, ComposerEvent};
 use crate::icons::{self, icon};
 use crate::motion;
 use crate::popover::{self, Popup};
@@ -40,235 +45,6 @@ const DETAIL_MENU_WIDTH: f32 = 600.0;
 const DETAIL_LOG_HEIGHT: f32 = 300.0;
 const RAW_BLOCK_LIMIT: usize = 300;
 const RAW_BLOCK_CHARS: usize = 4_000;
-const SUBAGENT_EFFORT_KEYS: [&str; 4] =
-    ["effort", "reasoning_effort", "reasoningEffort", "reasoning"];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RunState {
-    Working,
-    Completed,
-    Stopped,
-    Failed,
-}
-
-impl RunState {
-    fn word(self) -> &'static str {
-        match self {
-            RunState::Working => "Working",
-            RunState::Completed => "Completed",
-            RunState::Stopped => "Stopped",
-            RunState::Failed => "Failed",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct AgentRun {
-    pub part_id: String,
-    pub doc_id: String,
-    pub title: SharedString,
-    pub model: Option<String>,
-    pub reasoning: Option<ReasoningLevel>,
-    pub state: RunState,
-    pub started_ms: i64,
-    pub delegated: bool,
-    pub harness: Option<HarnessId>,
-}
-
-impl AgentRun {
-    fn can_stop(&self, stoppable: bool) -> bool {
-        (stoppable || self.delegated) && self.state == RunState::Working
-    }
-}
-
-/// Spawn chips from the latest prompt onward, plus any chip still running
-/// from an earlier turn. A chip without a status predates the field and has
-/// no truthful state to report, so it is left out.
-pub(crate) fn agent_runs(transcript: &[SessionMessageEntry], turn_start: usize) -> Vec<AgentRun> {
-    transcript
-        .iter()
-        .enumerate()
-        .flat_map(|(ix, entry)| {
-            entry.parts.iter().filter_map(move |part| {
-                let MessagePart::Tool {
-                    id,
-                    call,
-                    subagent_ref: Some(doc_id),
-                    subagent_status: Some(status),
-                    ..
-                } = part
-                else {
-                    return None;
-                };
-                if !call.is_subagent_spawn() {
-                    return None;
-                }
-                let state = match status {
-                    SubagentStatus::Running => RunState::Working,
-                    SubagentStatus::Done => RunState::Completed,
-                    SubagentStatus::Failed => RunState::Failed,
-                    SubagentStatus::Stopped => RunState::Stopped,
-                };
-                (ix >= turn_start || state == RunState::Working).then(|| AgentRun {
-                    part_id: id.clone(),
-                    doc_id: doc_id.clone(),
-                    title: crate::transcript::subagent_tab_title(call),
-                    model: call.subagent_model().map(str::to_string),
-                    reasoning: spawn_reasoning(call),
-                    state,
-                    started_ms: entry.created_at,
-                    delegated: false,
-                    harness: None,
-                })
-            })
-        })
-        .collect()
-}
-
-pub(crate) fn latest_prompt(transcript: &[SessionMessageEntry]) -> Option<usize> {
-    transcript
-        .iter()
-        .rposition(|entry| entry.role == MessageRole::User && entry.answers_request_id.is_none())
-}
-
-pub(crate) fn delegate_runs(
-    chats: &[zeron_proto::Chat],
-    owner: &str,
-    turn_start_ms: i64,
-    keep: Option<&str>,
-) -> Vec<AgentRun> {
-    chats
-        .iter()
-        .filter_map(|chat| {
-            let delegation = chat
-                .delegation
-                .as_ref()
-                .filter(|d| d.delegated_by_chat_id == owner)?;
-            let state = match delegation.status {
-                zeron_proto::DelegationStatus::Running => RunState::Working,
-                zeron_proto::DelegationStatus::Completed => RunState::Completed,
-                zeron_proto::DelegationStatus::Cancelled
-                | zeron_proto::DelegationStatus::Interrupted => RunState::Stopped,
-                zeron_proto::DelegationStatus::Failed => RunState::Failed,
-            };
-            let started_ms = delegation.started_at.timestamp_millis();
-            let kept = keep == Some(chat.id.as_str());
-            (state == RunState::Working || started_ms >= turn_start_ms || kept).then(|| AgentRun {
-                part_id: chat.id.clone(),
-                doc_id: chat.id.clone(),
-                title: chat
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| "Delegated task".into())
-                    .into(),
-                model: chat.config.as_ref().and_then(|c| c.model.clone()),
-                reasoning: chat.config.as_ref().and_then(|c| c.reasoning),
-                state,
-                started_ms,
-                delegated: true,
-                harness: chat.config.as_ref().map(|c| c.harness),
-            })
-        })
-        .collect()
-}
-
-pub(crate) fn shell_tasks(session: Option<&Session>) -> Vec<BackgroundTask> {
-    session
-        .map(|session| {
-            session
-                .background_tasks
-                .iter()
-                .filter(|task| task.kind == BackgroundTaskKind::Shell)
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-pub(crate) fn aggregate(runs: &[AgentRun]) -> RunState {
-    if runs.iter().any(|run| run.state == RunState::Working) {
-        RunState::Working
-    } else if runs.iter().any(|run| run.state == RunState::Failed) {
-        RunState::Failed
-    } else if runs.iter().any(|run| run.state == RunState::Stopped) {
-        RunState::Stopped
-    } else {
-        RunState::Completed
-    }
-}
-
-fn working_count(runs: &[AgentRun]) -> usize {
-    runs.iter()
-        .filter(|run| run.state == RunState::Working)
-        .count()
-}
-
-pub(crate) fn agents_label(runs: &[AgentRun]) -> (Option<SharedString>, String) {
-    let working = working_count(runs);
-    match runs {
-        [one] => (Some(one.title.clone()), format!("· {}", one.state.word())),
-        _ if working > 0 => (None, format!("{working} Working")),
-        _ => (
-            None,
-            [RunState::Completed, RunState::Stopped, RunState::Failed]
-                .into_iter()
-                .filter_map(|state| {
-                    let count = runs.iter().filter(|run| run.state == state).count();
-                    (count > 0).then(|| format!("{count} {}", state.word()))
-                })
-                .collect::<Vec<_>>()
-                .join(" · "),
-        ),
-    }
-}
-
-pub(crate) fn roster_heading(runs: &[AgentRun]) -> String {
-    match working_count(runs) {
-        0 => "Subagents".to_string(),
-        working => format!("{working} of {} working", runs.len()),
-    }
-}
-
-pub(crate) fn shells_label(count: usize) -> String {
-    format!("{count} Running")
-}
-
-pub(crate) fn elapsed_label(secs: i64) -> String {
-    let secs = secs.max(0);
-    if secs < 60 {
-        return format!("{secs}s");
-    }
-    let mins = secs / 60;
-    if mins < 60 {
-        return format!("{mins}m {:02}s", secs % 60);
-    }
-    format!("{}h {:02}m", mins / 60, mins % 60)
-}
-
-pub(crate) fn latest_line(lines: &[String]) -> Option<&str> {
-    lines
-        .iter()
-        .rev()
-        .map(|line| line.trim())
-        .find(|line| !line.is_empty())
-}
-
-fn spawn_reasoning(call: &ToolCall) -> Option<ReasoningLevel> {
-    let (ToolCall::Unknown { input, .. } | ToolCall::Mcp { input, .. }) = call else {
-        return None;
-    };
-    let input = input.as_ref()?;
-    SUBAGENT_EFFORT_KEYS.iter().find_map(|key| {
-        let raw = input
-            .get(*key)?
-            .as_str()?
-            .trim()
-            .to_ascii_lowercase()
-            .replace(['-', '_'], "");
-        serde_json::from_value(serde_json::Value::String(raw)).ok()
-    })
-}
-
 pub(crate) fn compact_count(n: u64) -> String {
     match n {
         0..1_000 => n.to_string(),
@@ -857,7 +633,7 @@ impl Composer {
             };
             let state_text = run_state_text(run, now_ms);
             let run_harness = run.harness.or(harness);
-            let tag = run_tag(run, run_harness);
+            let tag = run.tag(harness);
             let level = run.reasoning.or(chat_reasoning);
             let tokens = self.agent_tokens(&run.doc_id);
             let stop = run.can_stop(stoppable).then(|| {
@@ -1365,7 +1141,7 @@ impl Composer {
         });
         let head = detail_head(
             glyph("background-detail-glyph", run.state, 1.0, theme),
-            run.title.clone(),
+            run.title.clone().into(),
             run_state_text(run, now_ms),
             stop,
             theme,
@@ -1380,7 +1156,7 @@ impl Composer {
             .gap(px(6.0))
             .pl(px(36.0))
             .pb(px(8.0))
-            .children(run_tag(run, run_harness).map(|tag| model_tag(tag, run_harness, theme)))
+            .children(run.tag(harness).map(|tag| model_tag(tag, run_harness, theme)))
             .children(level.map(|level| {
                 detail_chip(
                     "thinking",
@@ -1716,12 +1492,6 @@ fn run_state_text(run: &AgentRun, now_ms: i64) -> String {
     }
 }
 
-fn run_tag(run: &AgentRun, harness: Option<HarnessId>) -> Option<String> {
-    run.model
-        .clone()
-        .or_else(|| harness.map(|h| harness_display_name(h).to_string()))
-}
-
 fn model_tag(tag: String, harness: Option<HarnessId>, theme: &Theme) -> Div {
     div()
         .flex_none()
@@ -1996,6 +1766,7 @@ impl Render for DotGridView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeron_doc::SubagentStatus;
     use zeron_proto::ToolCall;
 
     fn entry(
@@ -2077,206 +1848,6 @@ mod tests {
         }
     }
 
-    fn run(title: &str, state: RunState) -> AgentRun {
-        AgentRun {
-            part_id: title.into(),
-            doc_id: title.into(),
-            title: SharedString::from(title.to_string()),
-            model: None,
-            reasoning: None,
-            state,
-            started_ms: 0,
-            delegated: false,
-            harness: None,
-        }
-    }
-
-    #[test]
-    fn delegated_children_join_the_roster_on_their_own_harness() {
-        let child = |id: &str, owner: &str, status, started_ms: i64| {
-            let mut chat: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
-                "id": id, "deviceId": "dev", "archived": false,
-                "title": format!("Task {id}"),
-                "createdAt": "2026-10-03T10:00:00Z",
-                "config": { "harness": "codex", "model": "gpt-5", "sandbox": "workspace-write" },
-            }))
-            .unwrap();
-            chat.delegation = Some(zeron_proto::Delegation {
-                delegated_by_chat_id: owner.into(),
-                depth: 1,
-                anchor: "task".into(),
-                client_request_id: None,
-                owner_turn_started_at: None,
-                wake: zeron_proto::DelegationWake::Always,
-                status,
-                cancel_requested: false,
-                delivery: None,
-                summary: None,
-                started_at: chrono::DateTime::from_timestamp_millis(started_ms).unwrap(),
-                completed_at: None,
-                finding_outcomes: Default::default(),
-                findings_handed: Default::default(),
-                findings_announced: Default::default(),
-                route: None,
-            });
-            chat
-        };
-        use zeron_proto::DelegationStatus::*;
-        let chats = vec![
-            child("old-running", "owner", Running, 1_000),
-            child("old-done", "owner", Completed, 1_000),
-            child("new-failed", "owner", Failed, 5_000),
-            child("new-stopped", "owner", Interrupted, 5_000),
-            child("elsewhere", "other", Running, 5_000),
-        ];
-        let runs = delegate_runs(&chats, "owner", 4_000, Some("old-done"));
-        let ids: Vec<&str> = runs.iter().map(|run| run.doc_id.as_str()).collect();
-        assert_eq!(
-            ids,
-            ["old-running", "old-done", "new-failed", "new-stopped"]
-        );
-        assert!(runs.iter().all(|run| run.delegated));
-        assert_eq!(runs[0].harness, Some(HarnessId::Codex));
-        assert_eq!(runs[0].state, RunState::Working);
-        assert_eq!(runs[2].state, RunState::Failed);
-        assert_eq!(runs[3].state, RunState::Stopped);
-    }
-
-    #[test]
-    fn spawn_chips_of_the_latest_turn_and_earlier_running_ones_become_runs() {
-        let transcript = vec![
-            entry("u1", MessageRole::User, 1, vec![]),
-            entry(
-                "a1",
-                MessageRole::Assistant,
-                2,
-                vec![
-                    spawn(
-                        "old-done",
-                        "Agent: old finished",
-                        Some(SubagentStatus::Done),
-                    ),
-                    spawn(
-                        "old-live",
-                        "Agent: old still going",
-                        Some(SubagentStatus::Running),
-                    ),
-                ],
-            ),
-            entry("u2", MessageRole::User, 3, vec![]),
-            entry(
-                "a2",
-                MessageRole::Assistant,
-                4,
-                vec![
-                    spawn(
-                        "new-live",
-                        "Agent: audit drag",
-                        Some(SubagentStatus::Running),
-                    ),
-                    spawn(
-                        "new-fail",
-                        "Agent: rewrite fixture",
-                        Some(SubagentStatus::Failed),
-                    ),
-                    spawn("legacy", "Agent: no status", None),
-                    tool(
-                        "stray",
-                        ToolCall::Exec {
-                            command: "ls".into(),
-                        },
-                        Some(SubagentStatus::Running),
-                    ),
-                ],
-            ),
-        ];
-        let runs = agent_runs(&transcript, latest_prompt(&transcript).unwrap_or(0));
-        let ids: Vec<&str> = runs.iter().map(|run| run.part_id.as_str()).collect();
-        assert_eq!(ids, ["old-live", "new-live", "new-fail"]);
-        assert_eq!(runs[0].state, RunState::Working);
-        assert_eq!(runs[0].started_ms, 2);
-        assert_eq!(runs[1].title.as_ref(), "audit drag");
-        assert_eq!(runs[1].model.as_deref(), Some("opus"));
-        assert_eq!(runs[1].doc_id, "c1--sub--new-live");
-        assert_eq!(runs[2].state, RunState::Failed);
-    }
-
-    #[test]
-    fn an_answer_entry_does_not_start_a_new_turn_window() {
-        let mut answer = entry("u2", MessageRole::User, 3, vec![]);
-        answer.answers_request_id = Some("req".into());
-        let transcript = vec![
-            entry("u1", MessageRole::User, 1, vec![]),
-            entry(
-                "a1",
-                MessageRole::Assistant,
-                2,
-                vec![spawn("done", "Agent: finished", Some(SubagentStatus::Done))],
-            ),
-            answer,
-        ];
-        assert_eq!(latest_prompt(&transcript), Some(0));
-        assert_eq!(agent_runs(&transcript, 0).len(), 1);
-    }
-
-    #[test]
-    fn labels_for_one_many_and_settled_runs() {
-        assert_eq!(
-            agents_label(&[run("Audit drag", RunState::Working)]),
-            (Some("Audit drag".into()), "· Working".to_string())
-        );
-        assert_eq!(
-            agents_label(&[run("Audit drag", RunState::Completed)]),
-            (Some("Audit drag".into()), "· Completed".to_string())
-        );
-        assert_eq!(
-            agents_label(&[run("Audit drag", RunState::Failed)]),
-            (Some("Audit drag".into()), "· Failed".to_string())
-        );
-        let mixed = [
-            run("a", RunState::Working),
-            run("b", RunState::Completed),
-            run("c", RunState::Working),
-        ];
-        assert_eq!(agents_label(&mixed), (None, "2 Working".to_string()));
-        assert_eq!(roster_heading(&mixed), "2 of 3 working");
-        assert_eq!(aggregate(&mixed), RunState::Working);
-        let settled = [run("a", RunState::Completed), run("b", RunState::Failed)];
-        assert_eq!(
-            agents_label(&settled),
-            (None, "1 Completed · 1 Failed".to_string())
-        );
-        let stopped = [run("a", RunState::Stopped), run("b", RunState::Stopped)];
-        assert_eq!(agents_label(&stopped), (None, "2 Stopped".to_string()));
-        assert_eq!(aggregate(&stopped), RunState::Stopped);
-        assert_eq!(roster_heading(&settled), "Subagents");
-        assert_eq!(aggregate(&settled), RunState::Failed);
-        assert_eq!(
-            aggregate(&[run("a", RunState::Completed)]),
-            RunState::Completed
-        );
-        assert_eq!(shells_label(2), "2 Running");
-    }
-
-    #[test]
-    fn shell_list_keeps_only_shell_tasks() {
-        let session = session(
-            SessionStatus::Idle,
-            false,
-            vec![
-                task("s1", BackgroundTaskKind::Shell),
-                task("a1", BackgroundTaskKind::Agent),
-                task("o1", BackgroundTaskKind::Other),
-                task("s2", BackgroundTaskKind::Shell),
-            ],
-        );
-        let ids: Vec<String> = shell_tasks(Some(&session))
-            .into_iter()
-            .map(|task| task.id)
-            .collect();
-        assert_eq!(ids, ["s1", "s2"]);
-        assert!(shell_tasks(None).is_empty());
-    }
 
     #[test]
     fn ring_shows_for_idle_background_work_and_for_held_turns() {
@@ -2609,30 +2180,6 @@ mod tests {
         cx.run_until_parked();
     }
 
-    #[test]
-    fn a_spawn_names_its_own_level_under_any_spelling() {
-        let spawn = |input: serde_json::Value| ToolCall::Unknown {
-            name: "Agent".into(),
-            input: Some(input),
-        };
-        assert_eq!(
-            spawn_reasoning(&spawn(serde_json::json!({ "effort": "X-High" }))),
-            Some(ReasoningLevel::XHigh)
-        );
-        assert_eq!(
-            spawn_reasoning(&spawn(serde_json::json!({ "reasoning_effort": "medium" }))),
-            Some(ReasoningLevel::Medium)
-        );
-        assert_eq!(
-            spawn_reasoning(&spawn(serde_json::json!({ "reasoning": "loud" }))),
-            None
-        );
-        assert_eq!(
-            spawn_reasoning(&spawn(serde_json::json!({ "model": "opus" }))),
-            None
-        );
-    }
-
     #[gpui::test]
     fn a_chat_bound_composer_shows_its_own_chats_pills(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -2785,22 +2332,11 @@ mod tests {
     }
 
     #[test]
-    fn the_live_line_is_the_last_non_blank_one() {
-        let with_blank = vec!["  Finished dev ".to_string(), "  ".to_string()];
-        assert_eq!(latest_line(&with_blank), Some("Finished dev"));
-        assert_eq!(latest_line(&[]), None);
-    }
-
-    #[test]
-    fn dot_frames_and_elapsed_text() {
+    fn dot_frames() {
         let lit: Vec<bool> = (0..9).map(|dot| dot_lit(FRAMES[0], dot)).collect();
         assert_eq!(
             lit,
             [false, true, false, true, true, true, true, false, true]
         );
-        assert_eq!(elapsed_label(7), "7s");
-        assert_eq!(elapsed_label(74), "1m 14s");
-        assert_eq!(elapsed_label(3_725), "1h 02m");
-        assert_eq!(elapsed_label(-3), "0s");
     }
 }

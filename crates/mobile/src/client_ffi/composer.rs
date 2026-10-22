@@ -631,3 +631,83 @@ impl CoreClient {
 pub fn new_sidechat_label() -> String {
     zeron_proto::sidechat::NEW_SIDECHAT.into()
 }
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct AgentRunRow {
+    pub task_id: String,
+    pub title: String,
+    pub line: String,
+    pub working: bool,
+    pub can_stop: bool,
+    pub delegated: bool,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ShellRow {
+    pub task_id: String,
+    pub label: String,
+    pub line: String,
+    pub can_stop: bool,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct BackgroundRosterView {
+    pub title: String,
+    pub summary: Option<String>,
+    pub agents_section: String,
+    pub agents: Vec<AgentRunRow>,
+    pub shells_section: String,
+    pub shells: Vec<ShellRow>,
+}
+
+#[uniffi::export]
+impl SessionHandle {
+    pub fn background_roster(&self, now_ms: i64) -> BackgroundRosterView {
+        use zeron_proto::background::{
+            roster_summary, shell_line, shells_section, stoppable, subagents_section,
+        };
+        let roster = self.inner.background_roster();
+        let stoppable = stoppable(roster.harness);
+        BackgroundRosterView {
+            title: "Agents".into(),
+            summary: roster_summary(&roster.agents, roster.shells.len()),
+            agents_section: subagents_section(&roster.agents),
+            agents: roster
+                .agents
+                .iter()
+                .map(|run| AgentRunRow {
+                    task_id: run.part_id.clone(),
+                    title: run.title.clone(),
+                    line: run.line(roster.harness, now_ms),
+                    working: run.state == zeron_proto::background::RunState::Working,
+                    can_stop: run.can_stop(stoppable),
+                    delegated: run.delegated,
+                })
+                .collect(),
+            shells_section: shells_section(roster.shells.len()),
+            shells: roster
+                .shells
+                .iter()
+                .map(|task| ShellRow {
+                    task_id: task.id.clone(),
+                    label: task.label.clone(),
+                    line: shell_line(task, now_ms),
+                    can_stop: stoppable,
+                })
+                .collect(),
+        }
+    }
+
+    pub fn shell_output(&self, task_id: String) -> Vec<String> {
+        self.inner.shell_output(&task_id)
+    }
+
+    pub fn watch_shell_output(&self, task_id: Option<String>) {
+        self.inner.watch_shell_output(task_id);
+    }
+
+    pub async fn stop_background_run(&self, task_id: String, delegated: bool) -> CoreResult<()> {
+        let handle = self.inner.clone();
+        on_runtime(async move { handle.stop_background_run(&task_id, delegated).await }).await
+    }
+}

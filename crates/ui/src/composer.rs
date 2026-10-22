@@ -7301,7 +7301,7 @@ impl Composer {
                                     .font_family(theme.font_mono.clone())
                                     .text_size(crate::typography::ui_rems(11.0))
                                     .text_color(theme.text_faint)
-                                    .child(crate::composer::background::elapsed_label(secs)),
+                                    .child(zeron_proto::background::elapsed_label(secs)),
                             )
                     })),
             )

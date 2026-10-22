@@ -394,6 +394,15 @@ final class CoreSessionSource: SessionSource {
         onPresent?(alert)
     }
 
+    func agentsAction(open: @escaping (String) -> Void) -> UIAction? {
+        let roster = handle.backgroundRoster(nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+        guard let summary = roster.summary else { return nil }
+        return UIAction(title: roster.title, subtitle: summary, image: UIImage(systemName: "person.2")) { [weak self] _ in
+            guard let self else { return }
+            self.onPresent?(AgentsSheetViewController(handle: self.handle, open: open).wrapped)
+        }
+    }
+
     func handoffMenu(open: @escaping (String) -> Void) -> UIMenuElement? {
         let labels = handoffLabels()
         let image = UIImage(systemName: "arrow.left.arrow.right")

@@ -195,6 +195,14 @@ impl DemoHost {
         composer::prediction(chat_id)
     }
 
+    pub(crate) fn background_session(&self, chat_id: &str) -> Option<Session> {
+        composer::background_session(chat_id)
+    }
+
+    pub(crate) fn shell_output(&self, task_id: &str) -> Vec<String> {
+        composer::shell_output(task_id)
+    }
+
     fn host_of(&self, client: &ClientInner, chat_id: &str) -> String {
         client
             .workspace
@@ -814,6 +822,9 @@ impl DemoHost {
         let core = client
             .session_core(&chat_id)
             .ok_or_else(|| ClientError::NotFound(chat_id.clone()))?;
+        if method == m::STOP_BACKGROUND_TASK {
+            return composer::stop_background_task(&core, &params);
+        }
         let row = core
             .doc()
             .read_queue()

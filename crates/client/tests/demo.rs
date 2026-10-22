@@ -220,7 +220,7 @@ fn send_streams_a_reply_and_adopts_the_echo() {
     session.set_view_attached(true);
     let before = session.snapshot();
     assert!(before.hydrated);
-    assert_eq!(before.transcript_len, 2);
+    assert_eq!(before.transcript_len, 5);
     let first_message = before.entries[0].message.clone();
 
     let outcome = session
@@ -263,7 +263,7 @@ fn send_streams_a_reply_and_adopts_the_echo() {
     let after = session.snapshot();
     assert!(rx.try_iter().count() > 0, "watch follows the stream");
     assert!(after.pending.is_empty());
-    assert_eq!(after.transcript_len, 4);
+    assert_eq!(after.transcript_len, 7);
     // Settled entries keep their shared message across every update.
     assert!(Arc::ptr_eq(&after.entries[0].message, &first_message));
     let reply = after.transcript().last().unwrap();
@@ -763,4 +763,52 @@ fn a_bare_btw_reopens_the_live_sidechat_and_a_prompt_starts_a_new_one() {
                 .any(|e| e.role() == zeron_doc::MessageRole::User)
     });
     assert!(rt.block_on(client.create_sidechat(&second)).is_err());
+}
+
+#[test]
+fn the_roster_lists_subagents_and_shells_and_stops_them() {
+    use zeron_proto::background::RunState;
+    let (client, _dir) = demo(fast());
+    let session = client.open_session("chat-home").unwrap();
+    session.set_view_attached(true);
+    wait_for("hydrated", Duration::from_secs(5), || {
+        session.snapshot().hydrated
+    });
+    let roster = session.background_roster();
+    let runs: Vec<_> = roster
+        .agents
+        .iter()
+        .map(|run| (run.title.as_str(), run.state))
+        .collect();
+    assert_eq!(
+        runs,
+        [
+            ("Check the sheet layout", RunState::Completed),
+            ("Audit the composer pickers", RunState::Working),
+            ("Trace the draft restore path", RunState::Working),
+        ]
+    );
+    assert_eq!(roster.harness, Some(zeron_proto::HarnessId::ClaudeCode));
+    let shell = roster.shells[0].id.clone();
+    assert_eq!(roster.shells[0].label, "cargo test -p zeron-mobile");
+    session.watch_shell_output(Some(shell.clone()));
+    assert!(
+        session
+            .shell_output(&shell)
+            .iter()
+            .any(|line| line.contains("running 214 tests"))
+    );
+
+    let rt = zeron_client::runtime::shared();
+    rt.block_on(session.stop_background_run("spawn-pickers", false))
+        .unwrap();
+    wait_for("the subagent settles", Duration::from_secs(5), || {
+        session.background_roster().agents[1].state == RunState::Stopped
+    });
+    rt.block_on(session.stop_background_run(&shell, false))
+        .unwrap();
+    assert!(session.background_roster().shells.is_empty());
+
+    session.set_view_attached(false);
+    assert!(session.shell_output(&shell).is_empty());
 }

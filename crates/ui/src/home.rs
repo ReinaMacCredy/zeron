@@ -1007,7 +1007,7 @@ impl HomeView {
                 .into_iter()
                 .map(|(chat, started)| {
                     let shell =
-                        crate::composer::background::shell_tasks(state.session_for(&chat.id))
+                        zeron_proto::background::shell_tasks(state.session_for(&chat.id))
                             .into_iter()
                             .next()
                             .map(|task| task.label);
@@ -1046,7 +1046,7 @@ impl HomeView {
                 .take(4)
                 .map(|(chat_id, title, detail, mark, started, model)| {
                     let elapsed =
-                        crate::composer::background::elapsed_label((now - started).num_seconds());
+                        zeron_proto::background::elapsed_label((now - started).num_seconds());
                     let id: SharedString = format!("home-working-{chat_id}").into();
                     div()
                         .id(id.clone())
