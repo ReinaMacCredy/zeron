@@ -53,7 +53,7 @@ Tap **New session**. Describe the task under "What are we building?", then set w
 
 If Zeron cannot tell where to run it, it says **Couldn't start the session**: choose a project or a host.
 
-**New Project…** browses folders on one of your computers (switch computers with the **Device** button). Open folders to find yours, then tap **Use “<folder>”**. With no computers in your workspace yet, it says "No desktop devices yet — open Zeron on a computer to add one."
+**New Project…** browses folders on one of your computers (switch computers with the button at the top right, which shows the current computer's name). Open folders to find yours, then tap **Use “<folder>”**. With no computers in your workspace yet, it says "No desktop devices yet — open Zeron on a computer to add one."
 
 ## Notifications
 

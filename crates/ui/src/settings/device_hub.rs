@@ -18,8 +18,7 @@ use crate::settings::{self, SavePolicy};
 use crate::state::AppState;
 use crate::theme::Theme;
 
-pub const AUTO_FLOAT_DESCRIPTION: &str =
-    "Show the floating preview when an agent opens a device unless the agent says otherwise.";
+pub const AUTO_FLOAT_DESCRIPTION: &str = "Show the floating preview when an agent opens a device.";
 const UPDATE_FAILED: &str = "Update failed. Check this host's network connection and try again.";
 pub const DEVICE_HOSTS_DESCRIPTION: &str = "Add remote machines with simulator or emulator runtimes installed, and the selected environments will connect over SSH and set up device tools automatically.";
 const SAME_MACHINE: &str = "Hosts on the same machine are skipped.";
