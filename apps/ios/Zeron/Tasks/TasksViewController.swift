@@ -77,6 +77,9 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
         super.viewDidLoad()
         view.backgroundColor = Palette.background
         navigationItem.largeTitleDisplayMode = .always
+        let add = UIBarButtonItem(systemItem: .add, primaryAction: UIAction { [weak self] _ in self?.presentNewTask() })
+        add.accessibilityIdentifier = "tasks-add"
+        navigationItem.rightBarButtonItem = add
         var config = UICollectionLayoutListConfiguration(appearance: .insetGrouped)
         config.backgroundColor = .clear
         config.headerMode = .supplementary
@@ -133,7 +136,7 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
             cv.dequeueConfiguredReusableSupplementary(using: header, for: path)
         }
 
-        empty.text = "No tasks yet.\nAdd one from the desktop's Tasks page."
+        empty.text = "No tasks yet.\nTap + to add one."
         empty.numberOfLines = 0
         empty.textAlignment = .center
         empty.font = Fonts.ui(.sans, 15)
@@ -245,6 +248,20 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
         let nav = UINavigationController(rootViewController: sheet)
         if let presentation = nav.sheetPresentationController {
             presentation.detents = [.medium(), .large()]
+            presentation.prefersGrabberVisible = true
+        }
+        present(nav, animated: true)
+    }
+
+    func presentNewTask() {
+        let sheet = NewTaskViewController(app: app) { [weak self] taskId, mission in
+            self?.dismiss(animated: true) {
+                mission ? self?.openMission(taskId) : self?.presentTask(taskId)
+            }
+        }
+        let nav = UINavigationController(rootViewController: sheet)
+        if let presentation = nav.sheetPresentationController {
+            presentation.detents = [.large()]
             presentation.prefersGrabberVisible = true
         }
         present(nav, animated: true)
