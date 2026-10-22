@@ -1,4 +1,3 @@
-
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -452,8 +451,10 @@ pub(crate) fn detail(
                 .map(|q| q.title()),
         })
         .collect();
-    let approval = ctx
-        .approval(task)
+    let phase = plan.phase(task);
+    let approval = (phase != PlanPhase::PlanReady && task.completed_at.is_none())
+        .then(|| ctx.approval(task))
+        .flatten()
         .filter(|state| *state != ApprovalState::TakenBack)
         .map(|state| ApprovalView {
             line: state.line(),
@@ -462,7 +463,7 @@ pub(crate) fn detail(
         });
     Some(TaskDetail {
         row: ctx.row(task, &plan),
-        phase: plan.phase(task),
+        phase,
         plan: task.plan.clone(),
         approval,
         steps: step_views,
