@@ -103,6 +103,7 @@ struct Open {
     notes: Entity<ComposerInput>,
     saved_title: String,
     saved_notes: String,
+    stored: (String, String),
     images: Vec<String>,
     uploads: Vec<Task<()>>,
     refused: bool,
@@ -376,6 +377,7 @@ impl TaskCard {
             task_id,
             title: title_input,
             notes: notes_input,
+            stored: (saved_title.clone(), saved_notes.clone()),
             saved_title,
             saved_notes,
             images: saved_images,
@@ -511,12 +513,16 @@ impl TaskCard {
         let Some(row) = state.tasks.iter().find(|task| task.id == open.task_id) else {
             return;
         };
-        let title = (row.title != open.saved_title
+        let (stored_title, stored_notes) = &open.stored;
+        let title = (row.title != *stored_title
+            && row.title != open.saved_title
             && open.title.read(cx).text().trim() == open.saved_title)
             .then(|| row.title.clone());
-        let notes = (row.notes != open.saved_notes
+        let notes = (row.notes != *stored_notes
+            && row.notes != open.saved_notes
             && open.notes.read(cx).text() == open.saved_notes)
             .then(|| row.notes.clone());
+        open.stored = (row.title.clone(), row.notes.clone());
         if let Some(title) = title {
             open.saved_title = title.clone();
             open.title.update(cx, |input, cx| input.set_text(title, cx));
@@ -3029,6 +3035,39 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0][0].step_id.as_deref(), Some("s1"));
         assert_eq!(sent[0][0].images, ["/uploads/image.png"]);
+    }
+
+    #[gpui::test]
+    fn an_open_card_keeps_its_save_in_flight_and_takes_a_save_from_elsewhere(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _dir = init(cx);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| state.tasks = vec![task("plain", false)]);
+        let (card, cx) = cx.add_window_view(|_, cx| TaskCard::new(state.clone(), cx));
+        card.update(cx, |card, cx| {
+            card.open("plain".into(), None, CardFocus::Title, None, cx)
+        });
+        cx.run_until_parked();
+        let notes = |card: &Entity<TaskCard>, cx: &mut gpui::VisualTestContext| {
+            card.read_with(cx, |card, cx| {
+                card.open.as_ref().unwrap().notes.read(cx).text().to_string()
+            })
+        };
+        card.update(cx, |card, cx| {
+            let input = card.open.as_ref().unwrap().notes.clone();
+            input.update(cx, |input, cx| input.set_text("typed", cx));
+            card.flush(cx);
+        });
+        state.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(notes(&card, cx), "typed");
+        state.update(cx, |state, cx| {
+            state.tasks[0].notes = "from the inbox".into();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(notes(&card, cx), "from the inbox");
     }
 
     #[gpui::test]
