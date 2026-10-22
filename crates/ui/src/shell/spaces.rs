@@ -2835,6 +2835,7 @@ pub(super) struct LeadFold {
     pub(super) rollup: SharedString,
     pub(super) asking: bool,
     pub(super) holds_selected: bool,
+    pub(super) more: Option<(String, usize)>,
 }
 
 pub(super) fn lead_rollup(children: &[(ChatIndicator, bool)]) -> (String, bool) {
@@ -2858,7 +2859,11 @@ pub(super) fn lead_rollup(children: &[(ChatIndicator, bool)]) -> (String, bool) 
     (text, asking > 0)
 }
 
-fn step_needs_you(state: &AppState, chat: &zeron_proto::Chat, status: ChatIndicator) -> bool {
+pub(super) fn step_needs_you(
+    state: &AppState,
+    chat: &zeron_proto::Chat,
+    status: ChatIndicator,
+) -> bool {
     state
         .task_steps
         .iter()
@@ -2867,6 +2872,79 @@ fn step_needs_you(state: &AppState, chat: &zeron_proto::Chat, status: ChatIndica
             zeron_proto::step_status(step, Some(chat), Some(status))
                 == zeron_proto::StepStatus::NeedsYou
         })
+}
+
+fn step_live(status: zeron_proto::StepStatus) -> bool {
+    matches!(
+        status,
+        zeron_proto::StepStatus::Working | zeron_proto::StepStatus::NeedsYou
+    )
+}
+
+fn live_plan(
+    state: &AppState,
+    lead: &zeron_proto::Chat,
+    now: DateTime<Utc>,
+) -> Option<crate::tasks::Rollup> {
+    let task = zeron_proto::plan_of_chat(&state.tasks, &lead.id)?;
+    let plan = crate::tasks::rollup(state, task, now);
+    let live = plan.lead == Some(ChatIndicator::Working)
+        || plan.steps.iter().any(|row| step_live(row.status));
+    live.then_some(plan)
+}
+
+pub(super) struct SidebarMission {
+    pub(super) task_id: String,
+    done: usize,
+    total: usize,
+    complete: bool,
+}
+
+impl SidebarMission {
+    pub(super) fn of(state: &AppState, lead_id: &str) -> Option<Self> {
+        let task = crate::tasks::plan_led_by(&state.tasks, lead_id)?;
+        let progress = crate::tasks::rollup(state, task, Utc::now()).progress;
+        Some(Self {
+            task_id: task.id.clone(),
+            done: progress.done,
+            total: progress.total,
+            complete: task.completed_at.is_some(),
+        })
+    }
+
+    pub(super) fn ring(&self, size: f32, theme: &Theme) -> AnyElement {
+        let percent = if self.complete {
+            100
+        } else {
+            (self.done * 100)
+                .checked_div(self.total)
+                .unwrap_or(0)
+                .min(100) as u8
+        };
+        let arc = if self.complete {
+            super::chat_status_tone(ChatIndicator::Completed, theme).2
+        } else {
+            theme.accent
+        };
+        crate::loaders::upload_progress_arc(percent, size, theme.text_faint.opacity(0.6), arc)
+    }
+
+    pub(super) fn count(&self) -> SharedString {
+        format!("{}/{}", self.done, self.total).into()
+    }
+
+    pub(super) fn mark(&self, theme: &Theme) -> AnyElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(5.0))
+            .whitespace_nowrap()
+            .text_color(theme.text_muted)
+            .child(self.ring(14.0, theme))
+            .child(self.count())
+            .into_any_element()
+    }
 }
 
 /// Project-mode group of a chat as (key, label). Projects sharing a
@@ -5914,7 +5992,7 @@ impl Shell {
     ) -> ChatIndicator {
         if self.settings.sidebar_working_shelf
             && status != ChatIndicator::AwaitingInput
-            && mission_card::live_plan(state, chat, now).is_some()
+            && live_plan(state, chat, now).is_some()
         {
             ChatIndicator::Working
         } else {
@@ -5929,6 +6007,14 @@ impl Shell {
         filter: Option<&str>,
     ) -> Vec<(ChatIndicator, &'a zeron_proto::Chat)> {
         let mut chats = state.sidebar_chats(now, filter);
+        let folded: HashSet<String> = chats
+            .iter()
+            .filter_map(|(_, chat)| live_plan(state, chat, now))
+            .flat_map(|plan| plan.steps)
+            .filter(|row| !step_live(row.status))
+            .filter_map(|row| row.step.chat_id)
+            .collect();
+        chats.retain(|(_, chat)| !folded.contains(&chat.id));
         if self.settings.sidebar_organization == SidebarOrganization::Inbox {
             chats.sort_by_cached_key(|(status, chat)| {
                 let status = self.inbox_status(state, *status, chat, now);
@@ -6163,31 +6249,14 @@ impl Shell {
         }
     }
 
-    fn lead_body_shown(&mut self, motion_key: &str, open: bool, body_height: f32) -> f32 {
-        if self.sidebar_reveal_motions.remove(motion_key) {
-            let (from, to) = if open {
-                (0.0, body_height)
-            } else {
-                (body_height, 0.0)
-            };
-            self.begin_sidebar_disclosure_motion(motion_key, from, to);
-        }
-        self.sidebar_disclosure_motion
-            .get(motion_key)
-            .copied()
-            .filter(|motion| motion.animating() && !self.reduced_motion)
-            .map_or(
-                if open { body_height } else { 0.0 },
-                SidebarDisclosureMotion::current,
-            )
-    }
-
     fn fold_step_threads(
         &mut self,
         rows: &mut Vec<(String, f32, AnyElement)>,
         folds: &std::collections::HashMap<String, LeadFold>,
         lead_of: &std::collections::HashMap<String, String>,
         pair: Option<&split::SplitPair>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
     ) {
         for (lead, fold) in folds {
             let mut children = Vec::new();
@@ -6203,6 +6272,12 @@ impl Shell {
                 } else {
                     ix += 1;
                 }
+            }
+            let hosted = rows.iter().any(|(key, _, _)| *key == format!("c:{lead}"));
+            if let Some((task_id, count)) = fold.more.as_ref().filter(|_| hosted) {
+                let height = sidebar_row_height(self.settings.sidebar_compact, true, false);
+                let row = self.render_more_steps_row(lead, task_id, *count, height, theme, cx);
+                children.push((format!("more:{lead}"), height, row));
             }
             if children.is_empty() {
                 continue;
@@ -6222,7 +6297,23 @@ impl Shell {
                 .iter()
                 .map(|(_, height, _)| height + SIDEBAR_LIST_GAP)
                 .sum::<f32>();
-            let shown = self.lead_body_shown(&fold.motion_key, fold.open, body_height);
+            if self.sidebar_reveal_motions.remove(&fold.motion_key) {
+                let (from, to) = if fold.open {
+                    (0.0, body_height)
+                } else {
+                    (body_height, 0.0)
+                };
+                self.begin_sidebar_disclosure_motion(&fold.motion_key, from, to);
+            }
+            let shown = self
+                .sidebar_disclosure_motion
+                .get(&fold.motion_key)
+                .copied()
+                .filter(|motion| motion.animating() && !self.reduced_motion)
+                .map_or(
+                    if fold.open { body_height } else { 0.0 },
+                    SidebarDisclosureMotion::current,
+                );
             let body = div()
                 .w_full()
                 .flex()
@@ -6243,6 +6334,48 @@ impl Shell {
                 .into_any_element();
             rows.insert(at, (key, height + shown, row));
         }
+    }
+
+    fn render_more_steps_row(
+        &self,
+        lead: &str,
+        task_id: &str,
+        count: usize,
+        height: f32,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label: SharedString = if count == 1 {
+            "1 more step".into()
+        } else {
+            format!("{count} more steps").into()
+        };
+        let task_id = task_id.to_owned();
+        div()
+            .id(SharedString::from(format!("more-steps-{lead}")))
+            .debug_selector({
+                let lead = lead.to_owned();
+                move || format!("more-steps-{lead}")
+            })
+            .h(px(height))
+            .flex_none()
+            .flex()
+            .items_center()
+            .pl(px(10.0 + SIDEBAR_NESTED_INDENT))
+            .pr(px(10.0))
+            .rounded(px(8.0))
+            .cursor_pointer()
+            .role(gpui::Role::Button)
+            .aria_label(label.clone())
+            .hover(|el| el.bg(theme.glass_hover()))
+            .text_size(crate::typography::ui_rems(12.0))
+            .text_color(theme.text_muted.opacity(0.6))
+            .whitespace_nowrap()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_task_center(task_id.clone(), cx);
+            }))
+            .child(label)
+            .into_any_element()
     }
 
     /// Shared metadata and visibility settings for active and archived sessions.
@@ -6374,10 +6507,26 @@ impl Shell {
             .collect();
         let lead_folds: std::collections::HashMap<String, LeadFold> = {
             let state = self.state.read(cx);
+            let missions: std::collections::HashMap<&str, (String, usize)> = rows
+                .iter()
+                .filter_map(|row| {
+                    let task = zeron_proto::plan_of_chat(&state.tasks, &row.chat.id)?;
+                    let plan = live_plan(state, &row.chat, now)?;
+                    let rest = plan.steps.iter().filter(|step| !step_live(step.status));
+                    Some((row.chat.id.as_str(), (task.id.clone(), rest.count())))
+                })
+                .filter(|(_, (_, rest))| *rest > 0)
+                .collect();
+            let no_children = Vec::new();
             step_rows
                 .iter()
                 .filter(|(_, children)| !children.is_empty())
-                .map(|(lead, children)| {
+                .map(|(lead, _)| lead.as_str())
+                .chain(missions.keys().copied())
+                .collect::<HashSet<&str>>()
+                .into_iter()
+                .map(|lead| {
+                    let children = step_rows.get(lead).unwrap_or(&no_children);
                     let statuses: Vec<_> = children
                         .iter()
                         .map(|row| (row.status, step_needs_you(state, &row.chat, row.status)))
@@ -6392,8 +6541,9 @@ impl Shell {
                             && children.iter().any(|row| {
                                 state.selected_chat.as_deref() == Some(row.chat.id.as_str())
                             }),
+                        more: missions.get(lead).cloned(),
                     };
-                    (lead.clone(), fold)
+                    (lead.to_owned(), fold)
                 })
                 .collect()
         };
@@ -6687,23 +6837,6 @@ impl Shell {
             .chat_rename
             .as_ref()
             .map(|rename| rename.chat_id.clone());
-        let mut mission_cards: std::collections::HashMap<String, mission_card::MissionCard> =
-            Default::default();
-        if self.settings.sidebar_organization == SidebarOrganization::Inbox {
-            let working = InboxShelf::Working.group().map(|(key, _)| key);
-            let state = self.state.read(cx);
-            for (_, rows) in sections
-                .iter()
-                .filter(|(group, _)| group.as_ref().map(|(key, _)| key.as_str()) == working)
-            {
-                for row in rows.iter().filter(|row| !row.nested) {
-                    if let Some(card) = mission_card::MissionCard::of(state, &row.chat, now) {
-                        mission_cards.insert(row.chat.id.clone(), card);
-                    }
-                }
-            }
-        }
-        let carded: HashSet<String> = mission_cards.keys().cloned().collect();
         for (group, rows) in sections {
             let pinned_group = slot < pinned_count;
             let drag_group = if pinned_group {
@@ -6735,27 +6868,11 @@ impl Shell {
                 project_group && !rows.is_empty() && rows.iter().all(|row| dimmed(&row.chat));
             let mut rendered_rows = Vec::with_capacity(rows.len());
             for (group_index, row) in rows.into_iter().enumerate() {
-                if lead_of
-                    .get(&row.chat.id)
-                    .is_some_and(|lead| carded.contains(lead))
-                {
-                    slot += 1;
-                    continue;
-                }
-                let card = mission_cards.remove(&row.chat.id).map(|card| {
-                    let open = !self.sidebar_lead_collapsed(&row.chat.id);
-                    let body = card.body_height();
-                    let shown = self.lead_body_shown(&format!("lead:{}", row.chat.id), open, body);
-                    (card, open, body, shown)
-                });
-                let height = match &card {
-                    Some((_, _, _, shown)) => mission_card::MissionCard::top_height() + shown,
-                    None => row.height(
-                        self.settings.sidebar_compact,
-                        slim,
-                        self.settings.sidebar_show_project_label && !project_group,
-                    ),
-                };
+                let height = row.height(
+                    self.settings.sidebar_compact,
+                    slim,
+                    self.settings.sidebar_show_project_label && !project_group,
+                );
                 if lead_of
                     .get(&row.chat.id)
                     .is_some_and(|lead| folded_leads.contains(lead.as_str()))
@@ -6839,16 +6956,6 @@ impl Shell {
                 });
                 let element = if windowed {
                     div().into_any_element()
-                } else if let Some((card, open, body, _)) = card {
-                    let element = self.render_sidebar_mission_card(
-                        card,
-                        open,
-                        body,
-                        selected.as_deref(),
-                        theme,
-                        cx,
-                    );
-                    self.render_sidebar_gap_row(element, &chat.id, &drag_group, group_index)
                 } else {
                     let element = self.render_chat_row(
                         chat.id.clone(),
@@ -6983,6 +7090,8 @@ impl Shell {
                 &lead_folds,
                 &lead_of,
                 split_card.as_ref(),
+                theme,
+                cx,
             );
 
             let Some((key, label)) = group else {
@@ -9692,9 +9801,6 @@ mod tests {
                 shell.toggle_sidebar_lead("a2", cx);
                 shell.reveal_sidebar_child("a1", cx);
                 assert!(!shell.sidebar_lead_collapsed("a2"));
-                shell.settings.sidebar_organization = SidebarOrganization::ByProject;
-                assert_eq!(keys(shell, cx), ["g:project:b", "g:project:a"]);
-                assert_eq!(shell.sidebar_visible_order(cx), ["b1", "a2", "a1"]);
                 shell.settings.sidebar_organization = SidebarOrganization::Inbox;
                 shell.settings.sidebar_working_shelf = true;
                 assert_eq!(keys(shell, cx), ["g:inbox:inbox", "g:inbox:working"]);
@@ -9703,10 +9809,25 @@ mod tests {
                         ended: zeron_proto::StepTurnEnd::Completed,
                         turn: None,
                     });
+                    state.task_steps.push(
+                        serde_json::from_value(serde_json::json!({
+                            "id": "s2", "taskId": "t", "chatId": "b1",
+                        }))
+                        .unwrap(),
+                    );
+                });
+                assert_eq!(shell.sidebar_visible_order(cx), ["a2", "b1"]);
+                shell.state.update(cx, |state, _| {
+                    state.task_steps.truncate(1);
                 });
                 assert_eq!(keys(shell, cx), ["g:inbox:inbox"]);
+                shell
+                    .state
+                    .update(cx, |state, _| state.task_steps[0].turn = None);
                 shell.settings.sidebar_working_shelf = false;
                 shell.settings.sidebar_organization = SidebarOrganization::ByProject;
+                assert_eq!(keys(shell, cx), ["g:project:b", "g:project:a"]);
+                assert_eq!(shell.sidebar_visible_order(cx), ["b1", "a2", "a1"]);
                 shell
                     .state
                     .update(cx, |state, _| state.task_steps[0].deleted = true);

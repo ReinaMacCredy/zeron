@@ -45,10 +45,7 @@ pub(crate) use index::{Kind as IndexKind, MissionIndex, MissionIndexEvent, index
 use logic::COLUMNS;
 use morph::{Key, Morph, Painted, Rects};
 pub(crate) use strip_tree::{SampleRow, StripTree, StripTreeEvent, TreeHost};
-pub(crate) use tree::{
-    Link as TreeLink, Status as TreeStatus, glyph as tree_glyph, kind_badge, link_color,
-    links as tree_links, thread_time,
-};
+pub(crate) use tree::{Status as TreeStatus, glyph as tree_glyph, kind_badge};
 
 pub(crate) const ADD_PLACEHOLDER: &str = "Add a task, or press Tab to add notes and start it";
 const LIST_MAX_WIDTH: f32 = 640.0;
