@@ -1032,17 +1032,6 @@ impl Shell {
             || self.task_center_docs.iter().any(|id| id == chat_id)
     }
 
-    fn other_holds(&self, chat_id: &str) -> bool {
-        self.btw_tabs.contains_key(chat_id)
-            || self
-                .sidechat_tabs
-                .values()
-                .any(|tab| tab.chat_id == chat_id)
-            || self.subagent_tabs.values().any(|tab| tab.doc_id == chat_id)
-            || self.split_chat_id() == Some(chat_id)
-            || self.supervisor.holds(chat_id)
-    }
-
     /// Native sub-agent chips come from the root's doc and each node's that reports running sub-agents.
     fn watch_task_center_docs(&mut self, docs: Vec<String>, cx: &mut Context<Self>) {
         if self.task_center_docs == docs {
@@ -1050,15 +1039,7 @@ impl Shell {
         }
         let previous = std::mem::replace(&mut self.task_center_docs, docs.clone());
         for id in previous.iter().filter(|id| !docs.contains(id)) {
-            let held = self.other_holds(id)
-                || self
-                    .task_center_pane
-                    .as_ref()
-                    .is_some_and(|pane| &pane.chat_id == id);
-            if !held {
-                self.state
-                    .update(cx, |state, _| state.unwatch_subagent_doc(id));
-            }
+            self.release_doc(id, cx);
         }
         for id in docs.into_iter().filter(|id| !previous.contains(id)) {
             self.state
@@ -1094,11 +1075,7 @@ impl Shell {
         if let Some((center, _)) = &self.task_center {
             center.update(cx, |center, cx| center.set_live(None, cx));
         }
-        let held = self.other_holds(&pane.chat_id) || self.task_center_docs.contains(&pane.chat_id);
-        if !held {
-            self.state
-                .update(cx, |state, _| state.unwatch_subagent_doc(&pane.chat_id));
-        }
+        self.release_doc(&pane.chat_id, cx);
     }
 
     pub(super) fn open_task_center_pane(

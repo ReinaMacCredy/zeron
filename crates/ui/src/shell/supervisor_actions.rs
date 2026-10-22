@@ -54,26 +54,13 @@ impl Shell {
         }
     }
 
-    fn supervisor_doc_held(&self, chat_id: &str) -> bool {
-        self.supervisor.holds(chat_id)
-            || self.btw_tabs.contains_key(chat_id)
-            || self
-                .sidechat_tabs
-                .values()
-                .any(|tab| tab.chat_id == chat_id)
-            || self.subagent_tabs.values().any(|tab| tab.doc_id == chat_id)
-            || self.split_chat_id() == Some(chat_id)
-            || self.task_center_holds(chat_id)
-    }
-
     fn set_supervisor_doc(&mut self, doc: Option<String>, cx: &mut Context<Self>) {
         let previous = std::mem::replace(&mut self.supervisor.doc, doc.clone());
         if previous == doc {
             return;
         }
-        if let Some(previous) = previous.filter(|id| !self.supervisor_doc_held(id)) {
-            self.state
-                .update(cx, |state, _| state.unwatch_subagent_doc(&previous));
+        if let Some(previous) = previous {
+            self.release_doc(&previous, cx);
         }
         if let Some(doc) = doc {
             self.state
@@ -88,10 +75,7 @@ impl Shell {
         if let Some((page, _)) = &self.supervisor.page {
             page.update(cx, |page, cx| page.set_pane(None, cx));
         }
-        if !self.supervisor_doc_held(&pane.chat_id) {
-            self.state
-                .update(cx, |state, _| state.unwatch_subagent_doc(&pane.chat_id));
-        }
+        self.release_doc(&pane.chat_id, cx);
     }
 
     fn open_supervisor_pane(

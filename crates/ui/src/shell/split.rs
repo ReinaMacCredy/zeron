@@ -411,20 +411,7 @@ impl Shell {
         let Some(split) = self.split.take() else {
             return;
         };
-        let held_elsewhere = self
-            .sidechat_tabs
-            .values()
-            .any(|tab| tab.chat_id == split.chat_id)
-            || self
-                .subagent_tabs
-                .values()
-                .any(|tab| tab.doc_id == split.chat_id)
-            || self.task_center_holds(&split.chat_id)
-            || self.supervisor.holds(&split.chat_id);
-        if !held_elsewhere {
-            self.state
-                .update(cx, |s, _| s.unwatch_subagent_doc(&split.chat_id));
-        }
+        self.release_doc(&split.chat_id, cx);
         cx.notify();
     }
 
