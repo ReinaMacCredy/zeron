@@ -410,11 +410,12 @@ final class NeedsYouQuestionController: UIViewController {
 
     private func send(_ answers: [(questionId: String, labels: [String])]) {
         guard let nav = navigationController as? NeedsYouNavigationController else { return }
+        nav.sent = entry
         guard app.answer(entry, answers) else {
+            nav.sent = nil
             Toast.show("Couldn't send. Try again.", in: view.window, atTop: true)
             return
         }
-        nav.sent = entry
         let window = view.window
         let dest = entry.dest
         if nav.viewControllers.count > 1, NeedsYou.all(app, excluding: nil).count > 0 {
