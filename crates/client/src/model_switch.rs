@@ -38,7 +38,7 @@ impl Client {
 
     /// Pending echoes count and an unloaded chat is assumed read: a fresh
     /// chat must not warn, a just-sent one must not skip.
-    fn chat_has_history(&self, chat_id: &str) -> bool {
+    pub(crate) fn chat_has_history(&self, chat_id: &str) -> bool {
         let Some(core) = self.inner.session_core(chat_id) else {
             return true;
         };

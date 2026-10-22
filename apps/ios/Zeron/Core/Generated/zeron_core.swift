@@ -1262,19 +1262,33 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func workspaceRevision()  -> UInt64
     
+    func applyAgentProfile(chatId: String, profileId: String, note: String?, hint: String?) async throws 
+    
     func continueInNewThread(sourceChatId: String, harness: String?, model: String?, targetSpaceId: String?) async throws  -> String
     
     func createSidechat(sourceChatId: String) async throws  -> String
+    
+    func detachAgentProfile(chatId: String) throws 
     
     func handoffTargets(deviceId: String) async  -> [HandoffTarget]
     
     func invocationCatalog(deviceId: String, harness: String, chatId: String?, spaceId: String?, skill: Bool) async  -> InvocationCatalog
     
+    func listInstanceModels(deviceId: String, harness: String, instanceId: String, force: Bool) async  -> InstanceModels
+    
+    func listProviderInstances(deviceId: String) async  -> [ProviderInstanceRow]
+    
     func modelSwitchPrompt(chatId: String, toModel: String, fromLabel: String, toLabel: String)  -> ModelSwitchPrompt?
     
     func openSidechat(sourceChatId: String, prompt: String?) async throws  -> String
     
+    func profileRows(chatId: String) async  -> [ProfileRow]
+    
+    func profileSwitchPrompt(chatId: String, profileId: String) async throws  -> ModelSwitchPrompt?
+    
     func providerSwitchPrompt(chatId: String, fromProvider: String, toProvider: String, fromModel: String, toModel: String)  -> ModelSwitchPrompt?
+    
+    func saveChatIntoProfile(chatId: String, profileId: String) async throws 
     
     func setSessionConfigNoted(chatId: String, config: ChatConfig, note: String, hint: String) async throws 
     
@@ -2119,6 +2133,22 @@ open func workspaceRevision() -> UInt64  {
 })
 }
     
+open func applyAgentProfile(chatId: String, profileId: String, note: String?, hint: String?)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_apply_agent_profile(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId),FfiConverterString.lower(profileId),FfiConverterOptionString.lower(note),FfiConverterOptionString.lower(hint)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
 open func continueInNewThread(sourceChatId: String, harness: String?, model: String?, targetSpaceId: String?)async throws  -> String  {
     return
         try  await uniffiRustCallAsync(
@@ -2149,6 +2179,15 @@ open func createSidechat(sourceChatId: String)async throws  -> String  {
             liftFunc: FfiConverterString.lift,
             errorHandler: FfiConverterTypeCoreError_lift
         )
+}
+    
+open func detachAgentProfile(chatId: String)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_detach_agent_profile(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(chatId),uniffiCallStatus
+    )
+}
 }
     
 open func handoffTargets(deviceId: String)async  -> [HandoffTarget]  {
@@ -2185,6 +2224,40 @@ open func invocationCatalog(deviceId: String, harness: String, chatId: String?, 
         )
 }
     
+open func listInstanceModels(deviceId: String, harness: String, instanceId: String, force: Bool)async  -> InstanceModels  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_list_instance_models(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(harness),FfiConverterString.lower(instanceId),FfiConverterBool.lower(force)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeInstanceModels_lift,
+            errorHandler: nil
+            
+        )
+}
+    
+open func listProviderInstances(deviceId: String)async  -> [ProviderInstanceRow]  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_list_provider_instances(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeProviderInstanceRow.lift,
+            errorHandler: nil
+            
+        )
+}
+    
 open func modelSwitchPrompt(chatId: String, toModel: String, fromLabel: String, toLabel: String) -> ModelSwitchPrompt?  {
     return try!  FfiConverterOptionTypeModelSwitchPrompt.lift(try! rustCall() {
         uniffiCallStatus in
@@ -2214,6 +2287,39 @@ open func openSidechat(sourceChatId: String, prompt: String?)async throws  -> St
         )
 }
     
+open func profileRows(chatId: String)async  -> [ProfileRow]  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_profile_rows(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeProfileRow.lift,
+            errorHandler: nil
+            
+        )
+}
+    
+open func profileSwitchPrompt(chatId: String, profileId: String)async throws  -> ModelSwitchPrompt?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_profile_switch_prompt(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId),FfiConverterString.lower(profileId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeModelSwitchPrompt.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
 open func providerSwitchPrompt(chatId: String, fromProvider: String, toProvider: String, fromModel: String, toModel: String) -> ModelSwitchPrompt?  {
     return try!  FfiConverterOptionTypeModelSwitchPrompt.lift(try! rustCall() {
         uniffiCallStatus in
@@ -2226,6 +2332,22 @@ open func providerSwitchPrompt(chatId: String, fromProvider: String, toProvider:
         FfiConverterString.lower(toModel),uniffiCallStatus
     )
 })
+}
+    
+open func saveChatIntoProfile(chatId: String, profileId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_save_chat_into_profile(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId),FfiConverterString.lower(profileId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
 open func setSessionConfigNoted(chatId: String, config: ChatConfig, note: String, hint: String)async throws   {
@@ -3314,6 +3436,8 @@ public protocol SessionHandleProtocol: AnyObject, Sendable {
     
     func compact(focus: String?) async throws  -> String?
     
+    func compactSection(nowMs: Int64)  -> CompactSectionView?
+    
     func handoffBlocked()  -> Bool
     
     func keepFullHistory() 
@@ -3485,6 +3609,16 @@ open func compact(focus: String?)async throws  -> String?  {
             liftFunc: FfiConverterOptionString.lift,
             errorHandler: FfiConverterTypeCoreError_lift
         )
+}
+    
+open func compactSection(nowMs: Int64) -> CompactSectionView?  {
+    return try!  FfiConverterOptionTypeCompactSectionView.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_sessionhandle_compact_section(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(nowMs),uniffiCallStatus
+    )
+})
 }
     
 open func handoffBlocked() -> Bool  {
@@ -6386,6 +6520,64 @@ public func FfiConverterTypeCompactCommand_lower(_ value: CompactCommand) -> Rus
 }
 
 
+public struct CompactSectionView: Equatable, Hashable {
+    public var heading: String
+    public var note: String?
+    public var rows: [StatsRow]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(heading: String, note: String?, rows: [StatsRow]) {
+        self.heading = heading
+        self.note = note
+        self.rows = rows
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension CompactSectionView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCompactSectionView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CompactSectionView {
+        return
+            try CompactSectionView(
+                heading: FfiConverterString.read(from: &buf), 
+                note: FfiConverterOptionString.read(from: &buf), 
+                rows: FfiConverterSequenceTypeStatsRow.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CompactSectionView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.heading, into: &buf)
+        FfiConverterOptionString.write(value.note, into: &buf)
+        FfiConverterSequenceTypeStatsRow.write(value.rows, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCompactSectionView_lift(_ buf: RustBuffer) throws -> CompactSectionView {
+    return try FfiConverterTypeCompactSectionView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCompactSectionView_lower(_ value: CompactSectionView) -> RustBuffer {
+    return FfiConverterTypeCompactSectionView.lower(value)
+}
+
+
 /**
  * Everything the composer and its status strip render.
  */
@@ -8131,6 +8323,60 @@ public func FfiConverterTypeInputRequest_lower(_ value: InputRequest) -> RustBuf
 }
 
 
+public struct InstanceModels: Equatable, Hashable {
+    public var models: [ModelInfo]
+    public var error: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(models: [ModelInfo], error: String?) {
+        self.models = models
+        self.error = error
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension InstanceModels: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeInstanceModels: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> InstanceModels {
+        return
+            try InstanceModels(
+                models: FfiConverterSequenceTypeModelInfo.read(from: &buf), 
+                error: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: InstanceModels, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeModelInfo.write(value.models, into: &buf)
+        FfiConverterOptionString.write(value.error, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeInstanceModels_lift(_ buf: RustBuffer) throws -> InstanceModels {
+    return try FfiConverterTypeInstanceModels.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeInstanceModels_lower(_ value: InstanceModels) -> RustBuffer {
+    return FfiConverterTypeInstanceModels.lower(value)
+}
+
+
 public struct InvocationCatalog: Equatable, Hashable {
     public var entries: [InvocationEntry]
     public var skill: Bool
@@ -9226,6 +9472,150 @@ public func FfiConverterTypePermissionModeInfo_lower(_ value: PermissionModeInfo
 }
 
 
+public struct ProfileMenuLabels: Equatable, Hashable {
+    public var title: String
+    public var none: String
+    public var noneNote: String
+    public var edited: String
+    public var revert: String
+    public var save: String
+    public var retry: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(title: String, none: String, noneNote: String, edited: String, revert: String, save: String, retry: String) {
+        self.title = title
+        self.none = none
+        self.noneNote = noneNote
+        self.edited = edited
+        self.revert = revert
+        self.save = save
+        self.retry = retry
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ProfileMenuLabels: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeProfileMenuLabels: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProfileMenuLabels {
+        return
+            try ProfileMenuLabels(
+                title: FfiConverterString.read(from: &buf), 
+                none: FfiConverterString.read(from: &buf), 
+                noneNote: FfiConverterString.read(from: &buf), 
+                edited: FfiConverterString.read(from: &buf), 
+                revert: FfiConverterString.read(from: &buf), 
+                save: FfiConverterString.read(from: &buf), 
+                retry: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ProfileMenuLabels, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.none, into: &buf)
+        FfiConverterString.write(value.noneNote, into: &buf)
+        FfiConverterString.write(value.edited, into: &buf)
+        FfiConverterString.write(value.revert, into: &buf)
+        FfiConverterString.write(value.save, into: &buf)
+        FfiConverterString.write(value.retry, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProfileMenuLabels_lift(_ buf: RustBuffer) throws -> ProfileMenuLabels {
+    return try FfiConverterTypeProfileMenuLabels.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProfileMenuLabels_lower(_ value: ProfileMenuLabels) -> RustBuffer {
+    return FfiConverterTypeProfileMenuLabels.lower(value)
+}
+
+
+public struct ProfileRow: Equatable, Hashable {
+    public var id: String
+    public var name: String
+    public var line: String
+    public var active: Bool
+    public var drift: String?
+    public var savable: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String, line: String, active: Bool, drift: String?, savable: Bool) {
+        self.id = id
+        self.name = name
+        self.line = line
+        self.active = active
+        self.drift = drift
+        self.savable = savable
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ProfileRow: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeProfileRow: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProfileRow {
+        return
+            try ProfileRow(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                line: FfiConverterString.read(from: &buf), 
+                active: FfiConverterBool.read(from: &buf), 
+                drift: FfiConverterOptionString.read(from: &buf), 
+                savable: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ProfileRow, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.line, into: &buf)
+        FfiConverterBool.write(value.active, into: &buf)
+        FfiConverterOptionString.write(value.drift, into: &buf)
+        FfiConverterBool.write(value.savable, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProfileRow_lift(_ buf: RustBuffer) throws -> ProfileRow {
+    return try FfiConverterTypeProfileRow.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProfileRow_lower(_ value: ProfileRow) -> RustBuffer {
+    return FfiConverterTypeProfileRow.lower(value)
+}
+
+
 public struct ProjectRef: Equatable, Hashable {
     public var id: String
     public var name: String
@@ -9413,6 +9803,64 @@ public func FfiConverterTypeProjectView_lift(_ buf: RustBuffer) throws -> Projec
 #endif
 public func FfiConverterTypeProjectView_lower(_ value: ProjectView) -> RustBuffer {
     return FfiConverterTypeProjectView.lower(value)
+}
+
+
+public struct ProviderInstanceRow: Equatable, Hashable {
+    public var id: String
+    public var harness: String
+    public var label: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, harness: String, label: String) {
+        self.id = id
+        self.harness = harness
+        self.label = label
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ProviderInstanceRow: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeProviderInstanceRow: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProviderInstanceRow {
+        return
+            try ProviderInstanceRow(
+                id: FfiConverterString.read(from: &buf), 
+                harness: FfiConverterString.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ProviderInstanceRow, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.harness, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProviderInstanceRow_lift(_ buf: RustBuffer) throws -> ProviderInstanceRow {
+    return try FfiConverterTypeProviderInstanceRow.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProviderInstanceRow_lower(_ value: ProviderInstanceRow) -> RustBuffer {
+    return FfiConverterTypeProviderInstanceRow.lower(value)
 }
 
 
@@ -17371,6 +17819,30 @@ fileprivate struct FfiConverterOptionTypeCompactCommand: FfiConverterRustBuffer 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeCompactSectionView: FfiConverterRustBuffer {
+    typealias SwiftType = CompactSectionView?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeCompactSectionView.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeCompactSectionView.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeComputerStill: FfiConverterRustBuffer {
     typealias SwiftType = ComputerStill?
 
@@ -18547,6 +19019,31 @@ fileprivate struct FfiConverterSequenceTypePermissionModeInfo: FfiConverterRustB
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeProfileRow: FfiConverterRustBuffer {
+    typealias SwiftType = [ProfileRow]
+
+    public static func write(_ value: [ProfileRow], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeProfileRow.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ProfileRow] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ProfileRow]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeProfileRow.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeProjectView: FfiConverterRustBuffer {
     typealias SwiftType = [ProjectView]
 
@@ -18564,6 +19061,31 @@ fileprivate struct FfiConverterSequenceTypeProjectView: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeProjectView.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeProviderInstanceRow: FfiConverterRustBuffer {
+    typealias SwiftType = [ProviderInstanceRow]
+
+    public static func write(_ value: [ProviderInstanceRow], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeProviderInstanceRow.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ProviderInstanceRow] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ProviderInstanceRow]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeProviderInstanceRow.read(from: &buf))
         }
         return seq
     }
@@ -19516,6 +20038,13 @@ public func predictionPlaceholder(prediction: String?, text: String) -> String? 
     )
 })
 }
+public func profileMenuLabels() -> ProfileMenuLabels  {
+    return try!  FfiConverterTypeProfileMenuLabels_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_profile_menu_labels(uniffiCallStatus
+    )
+})
+}
 public func quoteChipLabel(count: UInt32) -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
         uniffiCallStatus in
@@ -19797,6 +20326,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_prediction_placeholder() != 31250) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_func_profile_menu_labels() != 55670) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_func_quote_chip_label() != 38057) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -20025,10 +20557,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_workspace_revision() != 48105) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_apply_agent_profile() != 2556) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_continue_in_new_thread() != 58949) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_create_sidechat() != 65484) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_detach_agent_profile() != 40793) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_handoff_targets() != 35638) {
@@ -20037,13 +20575,28 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_invocation_catalog() != 5961) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_list_instance_models() != 3408) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_list_provider_instances() != 47211) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_model_switch_prompt() != 452) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_open_sidechat() != 37619) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_profile_rows() != 62493) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_profile_switch_prompt() != 9543) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_provider_switch_prompt() != 48492) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_save_chat_into_profile() != 57028) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_set_session_config_noted() != 45535) {
@@ -20065,6 +20618,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_compact() != 17175) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_sessionhandle_compact_section() != 27217) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_handoff_blocked() != 45811) {

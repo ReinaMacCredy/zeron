@@ -38,6 +38,7 @@ pub mod events;
 pub mod invocations;
 mod live;
 pub mod model_picks;
+pub mod model_menu;
 pub mod model_switch;
 pub mod rpc;
 pub mod runtime;

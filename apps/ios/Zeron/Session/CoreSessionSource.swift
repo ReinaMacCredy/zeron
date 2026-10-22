@@ -18,6 +18,8 @@ final class CoreSessionSource: SessionSource {
     private weak var engine: TranscriptView?
     private var models: [ModelInfo] = []
     private var modelsKey = ""
+    private var profiles: [ProfileRow] = []
+    private var profilesFor: ChatConfig?
     private var invocationCatalogs: [String: InvocationCatalog] = [:]
     private weak var contextSheet: ContextSheetViewController?
 
@@ -64,11 +66,13 @@ final class CoreSessionSource: SessionSource {
         next.canSteer = c.host.capabilities.midTurnSteering ?? false
         next.placeholder = "Message \(row?.harnessLabel ?? "the agent")"
         var chips: [ComposerChip] = []
+        let config = client.sessionConfig(chatId: chatId)
+        loadProfiles(config)
         if let model = row?.modelLabel ?? row?.harnessLabel {
-            chips.append(ComposerChip(id: "model", title: model, symbol: nil, icon: BrandMarks.image(for: row?.harness ?? "claude-code", side: 13)))
+            let title = profiles.first(where: \.active).map { "\($0.name)\($0.drift == nil ? "" : " •") · \(model)" } ?? model
+            chips.append(ComposerChip(id: "model", title: title, symbol: nil, icon: BrandMarks.image(for: row?.harness ?? "claude-code", side: 13)))
         }
         loadModels(harness: row?.harness ?? "claude-code")
-        let config = client.sessionConfig(chatId: chatId)
         let model = currentModel
         if let r = row?.reasoning, !r.isEmpty {
             let fast = model.flatMap { m in config.map { fastModeOn(model: m, config: $0) } } ?? false
@@ -149,6 +153,19 @@ final class CoreSessionSource: SessionSource {
             let models = await self.client.listModels(deviceId: self.hostDevice, harness: harness)
             guard self.modelsKey == key else { return }
             self.models = models
+            self.refresh()
+        }
+    }
+
+    private func loadProfiles(_ config: ChatConfig?) {
+        guard config != profilesFor else { return }
+        profilesFor = config
+        guard config?.profileId != nil || !profiles.isEmpty else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let rows = await self.client.profileRows(chatId: self.chatId)
+            guard self.profilesFor == config, rows != self.profiles else { return }
+            self.profiles = rows
             self.refresh()
         }
     }
@@ -309,16 +326,9 @@ final class CoreSessionSource: SessionSource {
         let harness = row.harness ?? "claude-code"
         switch id {
         case "model":
-            return UIMenu(title: "Model", children: [UIDeferredMenuElement { [weak self] done in
+            return UIMenu(title: "Model", children: [UIDeferredMenuElement.uncached { [weak self] done in
                 guard let self else { return done([]) }
-                Task { @MainActor in
-                    let models = (try? await self.client.listModels(deviceId: self.hostDevice, harness: harness)) ?? fallbackModels(harness: harness)
-                    done(models.map { m in
-                        UIAction(title: m.label, subtitle: m.description, state: m.id == row.model ? .on : .off) { [weak self] _ in
-                            self?.pickModel(m, among: models)
-                        }
-                    })
-                }
+                Task { @MainActor in done(await self.modelMenu(row: row, harness: harness)) }
             }])
         case "effort":
             return UIMenu(title: "Effort", children: [UIDeferredMenuElement { [weak self] done in
@@ -377,6 +387,160 @@ final class CoreSessionSource: SessionSource {
         return config
     }
 
+    private struct Provider {
+        let harness: String
+        let instanceId: String?
+        let label: String
+    }
+
+    @MainActor
+    private func modelMenu(row: SessionRow, harness: String) async -> [UIMenuElement] {
+        let device = hostDevice
+        async let profileRows = client.profileRows(chatId: chatId)
+        async let instances = client.listProviderInstances(deviceId: device)
+        let config = client.sessionConfig(chatId: chatId)
+        let current = Provider(
+            harness: harness,
+            instanceId: config?.instanceId,
+            label: (await instances).first { $0.id == config?.instanceId }?.label ?? row.harnessLabel ?? harness)
+        var providers = [current]
+        if current.instanceId != nil {
+            providers.append(Provider(harness: harness, instanceId: nil, label: row.harnessLabel ?? harness))
+        }
+        providers += await instances.filter { $0.id != current.instanceId }.map { Provider(harness: $0.harness, instanceId: $0.id, label: $0.label) }
+        let catalogs = await withTaskGroup(of: (Int, InstanceModels).self) { group in
+            for (i, provider) in providers.enumerated() {
+                group.addTask { [client] in
+                    guard let id = provider.instanceId else {
+                        return (i, InstanceModels(models: await client.listModels(deviceId: device, harness: provider.harness), error: nil))
+                    }
+                    return (i, await client.listInstanceModels(deviceId: device, harness: provider.harness, instanceId: id, force: false))
+                }
+            }
+            var out = [Int: InstanceModels]()
+            for await (i, catalog) in group { out[i] = catalog }
+            return out
+        }
+        profiles = await profileRows
+        var sections: [UIMenuElement] = []
+        if !profiles.isEmpty { sections.append(profileSection(profiles)) }
+        let labels = profileMenuLabels()
+        for (i, provider) in providers.enumerated() {
+            guard let catalog = catalogs[i] else { continue }
+            let children: [UIMenuElement]
+            if let error = catalog.error, let id = provider.instanceId {
+                children = [
+                    UIAction(title: provider.label, subtitle: error, image: UIImage(systemName: "exclamationmark.triangle"), attributes: .disabled) { _ in },
+                    UIAction(title: labels.retry, image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in self?.retryInstance(provider.label, harness: provider.harness, id: id) },
+                ]
+            } else if i == 0 {
+                children = catalog.models.map { m in
+                    UIAction(title: m.label, subtitle: m.description, state: m.id == row.model ? .on : .off) { [weak self] _ in
+                        self?.pickModel(m, among: catalog.models)
+                    }
+                }
+            } else {
+                children = catalog.models.map { m in
+                    UIAction(title: m.label, subtitle: m.description) { [weak self] _ in
+                        self?.pickProvider(provider, model: m, from: current, row: row)
+                    }
+                }
+            }
+            sections.append(UIMenu(title: provider.label, options: .displayInline, children: children))
+        }
+        return sections
+    }
+
+    private func profileSection(_ rows: [ProfileRow]) -> UIMenu {
+        let labels = profileMenuLabels()
+        var items: [UIMenuElement] = rows.map { p in
+            let image = UIImage(systemName: "person.crop.circle")
+            guard p.active, let drift = p.drift else {
+                return UIAction(title: p.name, subtitle: p.line, image: image, state: p.active ? .on : .off) { [weak self] _ in
+                    self?.applyProfile(p.id)
+                }
+            }
+            var actions = [UIAction(title: labels.revert, image: UIImage(systemName: "arrow.uturn.backward")) { [weak self] _ in self?.applyProfile(p.id) }]
+            if p.savable {
+                actions.append(UIAction(title: labels.save, image: UIImage(systemName: "square.and.arrow.down")) { [weak self] _ in self?.saveProfile(p.id) })
+            }
+            return UIMenu(title: "\(p.name) · \(labels.edited)", subtitle: drift, image: image, children: actions)
+        }
+        let none = !rows.contains(where: \.active)
+        items.append(UIAction(title: labels.none, subtitle: labels.noneNote, image: UIImage(systemName: "person.crop.circle.badge.xmark"), state: none ? .on : .off) { [weak self] _ in
+            guard let self, !none else { return }
+            self.reportFailure { try self.client.detachAgentProfile(chatId: self.chatId) }
+        })
+        return UIMenu(title: labels.title, options: .displayInline, children: items)
+    }
+
+    private func applyProfile(_ id: String) {
+        let chat = chatId
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                guard let prompt = try await self.client.profileSwitchPrompt(chatId: chat, profileId: id) else {
+                    return try await self.client.applyAgentProfile(chatId: chat, profileId: id, note: nil, hint: nil)
+                }
+                self.confirm(prompt) { [weak self] in
+                    try await self?.client.applyAgentProfile(chatId: chat, profileId: id, note: prompt.note, hint: prompt.noteHint)
+                }
+            } catch {
+                self.alert("\(error)")
+            }
+        }
+    }
+
+    private func saveProfile(_ id: String) {
+        let chat = chatId
+        Task { @MainActor [weak self] in
+            do {
+                try await self?.client.saveChatIntoProfile(chatId: chat, profileId: id)
+                self?.profilesFor = nil
+                self?.refresh()
+            } catch {
+                self?.alert("\(error)")
+            }
+        }
+    }
+
+    private func retryInstance(_ label: String, harness: String, id: String) {
+        let device = hostDevice
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let catalog = await self.client.listInstanceModels(deviceId: device, harness: harness, instanceId: id, force: true)
+            if let error = catalog.error { self.alert("\(label): \(error)") }
+        }
+    }
+
+    private func pickProvider(_ provider: Provider, model: ModelInfo, from current: Provider, row: SessionRow) {
+        let prompt = client.providerSwitchPrompt(
+            chatId: chatId,
+            fromProvider: current.label,
+            toProvider: provider.label,
+            fromModel: row.modelLabel ?? row.model ?? "",
+            toModel: model.label)
+        confirmSwitch(prompt) {
+            if $0.harness != provider.harness {
+                $0.reasoning = nil
+                $0.modelOptions = [:]
+            }
+            $0.harness = provider.harness
+            $0.instanceId = provider.instanceId
+            $0.model = model.id
+        }
+    }
+
+    private func reportFailure(_ body: () throws -> Void) {
+        do { try body() } catch { alert("\(error)") }
+    }
+
+    private func alert(_ message: String) {
+        let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        onPresent?(alert)
+    }
+
     private func pickModel(_ model: ModelInfo, among models: [ModelInfo]) {
         let current = client.sessionConfig(chatId: chatId)?.model
         let from = models.first { $0.id == current }?.label ?? current ?? ""
@@ -385,12 +549,18 @@ final class CoreSessionSource: SessionSource {
 
     private func confirmSwitch(_ prompt: ModelSwitchPrompt?, _ change: @escaping (inout ChatConfig) -> Void) {
         guard let prompt else { return setConfig(change) }
+        let chat = chatId
+        confirm(prompt) { [weak self] in
+            guard let self else { return }
+            try await self.client.setSessionConfigNoted(chatId: chat, config: self.changedConfig(change), note: prompt.note, hint: prompt.noteHint)
+        }
+    }
+
+    private func confirm(_ prompt: ModelSwitchPrompt, then apply: @escaping @MainActor () async throws -> Void) {
         let alert = UIAlertController(title: prompt.title, message: "\(prompt.lead).\n\n\(prompt.body)", preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: prompt.cancel, style: .cancel))
-        alert.addAction(UIAlertAction(title: prompt.confirm, style: .default) { [weak self] _ in
-            guard let self else { return }
-            let config = self.changedConfig(change)
-            Task { try? await self.client.setSessionConfigNoted(chatId: self.chatId, config: config, note: prompt.note, hint: prompt.noteHint) }
+        alert.addAction(UIAlertAction(title: prompt.confirm, style: .default) { _ in
+            Task { @MainActor in try? await apply() }
         })
         alert.preferredAction = alert.actions.last
         onPresent?(alert)

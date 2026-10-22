@@ -737,3 +737,154 @@ impl SessionHandle {
         on_runtime(async move { handle.stop_background_run(&task_id, delegated).await }).await
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ProviderInstanceRow {
+    pub id: String,
+    pub harness: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct InstanceModels {
+    pub models: Vec<ModelInfo>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ProfileRow {
+    pub id: String,
+    pub name: String,
+    pub line: String,
+    pub active: bool,
+    pub drift: Option<String>,
+    pub savable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ProfileMenuLabels {
+    pub title: String,
+    pub none: String,
+    pub none_note: String,
+    pub edited: String,
+    pub revert: String,
+    pub save: String,
+    pub retry: String,
+}
+
+#[uniffi::export]
+pub fn profile_menu_labels() -> ProfileMenuLabels {
+    use zeron_proto::picker as p;
+    ProfileMenuLabels {
+        title: p::PROFILES.into(),
+        none: p::NO_PROFILE.into(),
+        none_note: p::NO_PROFILE_NOTE.into(),
+        edited: p::EDITED.into(),
+        revert: p::REVERT.into(),
+        save: p::SAVE.into(),
+        retry: p::RETRY.into(),
+    }
+}
+
+#[uniffi::export]
+impl CoreClient {
+    pub async fn list_provider_instances(&self, device_id: String) -> Vec<ProviderInstanceRow> {
+        let client = self.client.clone();
+        on_runtime(async move { client.list_provider_instances(&device_id).await })
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|instance| ProviderInstanceRow {
+                id: instance.id,
+                harness: zeron_client::model_menu::harness_wire(instance.driver),
+                label: instance.label,
+            })
+            .collect()
+    }
+
+    pub async fn list_instance_models(
+        &self,
+        device_id: String,
+        harness: String,
+        instance_id: String,
+        force: bool,
+    ) -> InstanceModels {
+        use zeron_client::model_menu::InstanceCatalog;
+        let client = self.client.clone();
+        let catalog = on_runtime(async move {
+            Ok(client
+                .list_instance_models(&device_id, &harness, &instance_id, force)
+                .await)
+        })
+        .await
+        .unwrap_or_else(|err| InstanceCatalog::Failed(err.to_string()));
+        match catalog {
+            InstanceCatalog::Ready(models) => InstanceModels {
+                models: models.into_iter().map(Into::into).collect(),
+                error: None,
+            },
+            InstanceCatalog::Failed(error) => InstanceModels {
+                models: Vec::new(),
+                error: Some(error),
+            },
+        }
+    }
+
+    pub async fn profile_rows(&self, chat_id: String) -> Vec<ProfileRow> {
+        let client = self.client.clone();
+        on_runtime(async move { client.profile_rows(&chat_id).await })
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| ProfileRow {
+                id: row.id,
+                name: row.name,
+                line: row.line,
+                active: row.active,
+                drift: row.drift,
+                savable: row.savable,
+            })
+            .collect()
+    }
+
+    pub async fn profile_switch_prompt(
+        &self,
+        chat_id: String,
+        profile_id: String,
+    ) -> CoreResult<Option<ModelSwitchPrompt>> {
+        let client = self.client.clone();
+        let prompt =
+            on_runtime(async move { client.profile_switch_prompt(&chat_id, &profile_id).await })
+                .await?;
+        Ok(prompt.map(Into::into))
+    }
+
+    pub async fn apply_agent_profile(
+        &self,
+        chat_id: String,
+        profile_id: String,
+        note: Option<String>,
+        hint: Option<String>,
+    ) -> CoreResult<()> {
+        let client = self.client.clone();
+        on_runtime(async move {
+            client
+                .apply_agent_profile(&chat_id, &profile_id, note.zip(hint))
+                .await
+        })
+        .await
+    }
+
+    pub fn detach_agent_profile(&self, chat_id: String) -> CoreResult<()> {
+        Ok(self.client.detach_agent_profile(&chat_id)?)
+    }
+
+    pub async fn save_chat_into_profile(
+        &self,
+        chat_id: String,
+        profile_id: String,
+    ) -> CoreResult<()> {
+        let client = self.client.clone();
+        on_runtime(async move { client.save_chat_into_profile(&chat_id, &profile_id).await }).await
+    }
+}

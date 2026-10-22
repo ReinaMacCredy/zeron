@@ -81,6 +81,7 @@ pub(crate) struct DemoHost {
     uploads: Mutex<HashMap<String, Arc<Vec<u8>>>>,
     rng: Mutex<Rng>,
     cancel: Mutex<Option<CancellationToken>>,
+    profiles: Mutex<Vec<zeron_proto::AgentProfile>>,
 }
 
 fn doc_err(err: zeron_doc::DocError) -> ClientError {
@@ -101,6 +102,7 @@ impl DemoHost {
             uploads: Mutex::new(HashMap::new()),
             rng: Mutex::new(Rng(0x9e37_79b9_7f4a_7c15)),
             cancel: Mutex::new(None),
+            profiles: Mutex::new(composer::profiles()),
         })
     }
 
@@ -816,6 +818,9 @@ impl DemoHost {
         }
         if method == m::CREATE_SIDECHAT {
             return composer::create_sidechat(&client, &params);
+        }
+        if let Some(reply) = composer::model_menu_rpc(&self.profiles, method, &params) {
+            return reply;
         }
         let chat_id = params["chatId"].as_str().unwrap_or_default().to_owned();
         let id = params["id"].as_str().unwrap_or_default().to_owned();

@@ -815,3 +815,66 @@ fn the_roster_lists_subagents_and_shells_and_stops_them() {
     session.set_view_attached(false);
     assert!(session.shell_output(&shell).is_empty());
 }
+
+#[test]
+fn the_model_menu_lists_instances_and_applies_profiles() {
+    use zeron_client::model_menu::InstanceCatalog;
+    let (client, _dir) = demo(fast());
+    let session = client.open_session("chat-home").unwrap();
+    session.set_view_attached(true);
+    wait_for("hydrated", Duration::from_secs(5), || {
+        session.snapshot().hydrated
+    });
+    let rt = zeron_client::runtime::shared();
+    let device = client
+        .workspace()
+        .session("chat-home")
+        .unwrap()
+        .device_id
+        .clone();
+    let instances = rt
+        .block_on(client.list_provider_instances(&device))
+        .unwrap();
+    let labels: Vec<_> = instances.iter().map(|i| i.label.as_str()).collect();
+    assert_eq!(labels, ["Claude · Personal", "Codex · Work"]);
+    assert_eq!(
+        rt.block_on(client.list_instance_models(&device, "codex", "codex_work", true)),
+        InstanceCatalog::Failed("timed out after 20s".into())
+    );
+    let InstanceCatalog::Ready(models) =
+        rt.block_on(client.list_instance_models(&device, "claude-code", "claude_personal", false))
+    else {
+        panic!("a working instance lists its models");
+    };
+    assert!(!models.is_empty());
+
+    let rows = rt.block_on(client.profile_rows("chat-home")).unwrap();
+    let reviewer = &rows[0];
+    assert_eq!(reviewer.name, "iOS reviewer");
+    assert!(reviewer.active && reviewer.savable);
+    assert_eq!(reviewer.drift.as_deref(), Some("effort High → Medium"));
+    assert!(!rows[1].active && rows[1].drift.is_none());
+
+    rt.block_on(client.save_chat_into_profile("chat-home", "ios-reviewer"))
+        .unwrap();
+    let rows = rt.block_on(client.profile_rows("chat-home")).unwrap();
+    assert_eq!(rows[0].drift, None);
+
+    let prompt = rt
+        .block_on(client.profile_switch_prompt("chat-home", "planner"))
+        .unwrap()
+        .expect("a chat with history confirms a harness move");
+    assert_eq!(prompt.title, "Switch provider?");
+    rt.block_on(client.apply_agent_profile("chat-home", "planner", None))
+        .unwrap();
+    let config = client.session_config("chat-home").unwrap();
+    assert_eq!(config.harness, zeron_proto::HarnessId::Codex);
+    assert_eq!(config.profile_id.as_deref(), Some("planner"));
+    assert_eq!(config.instructions, "Plan first; do not edit files.");
+    client.detach_agent_profile("chat-home").unwrap();
+    let config = client.session_config("chat-home").unwrap();
+    assert_eq!(
+        (config.profile_id, config.instructions),
+        (None, String::new())
+    );
+}
