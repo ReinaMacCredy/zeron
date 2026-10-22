@@ -19,7 +19,7 @@ The toolbar has **Back**, **Forward**, **Reload page**, the address field, and *
 
 Browser tabs close when Zeron quits, like every right-pane tab. What a site stores, such as your logins and cookies, is kept for next time on macOS 14 or later and on Linux. On macOS 12 and 13 it is kept only until Zeron quits, and a notice under the toolbar says so. On Windows the browser is private and keeps nothing.
 
-That data belongs to a browser profile: one per device for a local workspace, and one per signed-in account for a synced workspace (see [Devices](zeron://docs/devices)). Turning sync on or off, or signing in or out, switches the profile and closes your open browser tabs.
+That data belongs to a browser profile: one per device for a local workspace, and one per signed-in account and workspace for a synced workspace (see [Devices](zeron://docs/devices)). Turning sync on or off, or signing in or out, switches the profile and closes your open browser tabs.
 
 ## Agents in the browser
 
