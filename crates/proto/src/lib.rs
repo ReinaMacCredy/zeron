@@ -5,9 +5,11 @@
 
 pub mod account_usage;
 pub mod agent;
+pub mod app_commands;
 pub mod attachment_mentions;
 pub mod change_request_assessment;
 pub mod chat_mentions;
+pub mod compaction;
 pub mod computer;
 pub mod device_hub;
 pub mod device_paths;

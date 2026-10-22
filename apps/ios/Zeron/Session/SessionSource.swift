@@ -13,6 +13,7 @@ struct SessionChrome: Equatable {
         case failed(String)
         case editing
         case notice(String)
+        case offer(title: String, body: String)
     }
 
     struct Question: Equatable {
@@ -88,10 +89,16 @@ protocol SessionSource: AnyObject {
     /// Workspace files for `@` mentions.
     func searchFiles(_ query: String) async -> [FileMatch]
     func threadMentions(_ query: String) -> [ThreadMention]
+    var compactBlocked: String? { get }
+    func compact(focus: String?)
+    func keepFullHistory()
 }
 
 extension SessionSource {
     func chipSheet(_ id: String) -> UIViewController? { nil }
+    var compactBlocked: String? { nil }
+    func compact(focus: String?) {}
+    func keepFullHistory() {}
 }
 
 enum QueueAction {

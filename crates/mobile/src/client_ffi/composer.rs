@@ -307,3 +307,31 @@ impl SessionHandle {
         })
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CompactCommand {
+    pub focus: Option<String>,
+}
+
+#[uniffi::export]
+pub fn compact_command(text: String) -> Option<CompactCommand> {
+    zeron_proto::app_commands::compact_focus(text.trim()).map(|focus| CompactCommand { focus })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ResumeOffer {
+    pub title: String,
+    pub body: String,
+}
+
+#[uniffi::export]
+impl SessionHandle {
+    pub async fn compact(&self, focus: Option<String>) -> CoreResult<Option<String>> {
+        let handle = self.inner.clone();
+        on_runtime(async move { handle.compact(focus).await }).await
+    }
+
+    pub fn keep_full_history(&self) {
+        self.inner.keep_full_history();
+    }
+}

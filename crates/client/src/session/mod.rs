@@ -9,6 +9,7 @@
 //!
 //! The host writes all transcript entries and command outcomes.
 
+mod compaction;
 mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -179,6 +180,9 @@ struct CoreState {
     hydrated: bool,
     transcript_revision: u64,
     composer_revision: u64,
+    /// This device's own `CompactChat` is in flight.
+    compacting: bool,
+    kept_full_history: Option<i64>,
 }
 
 pub(crate) struct SessionCore {
@@ -251,6 +255,8 @@ impl SessionCore {
                 hydrated: false,
                 transcript_revision: 0,
                 composer_revision: 0,
+                compacting: false,
+                kept_full_history: None,
             }),
             transcript_tx,
             composer: RwLock::new(composer),
@@ -529,6 +535,18 @@ impl SessionCore {
         let parked = row.as_ref().is_some_and(|r| r.held_by_subagents);
         let turn_running =
             (host_indicator == ChatIndicator::Working && !parked) || snapshot.streaming;
+        let compacting = st.compacting || row.as_ref().is_some_and(|r| r.compacting);
+        let compact_blocked = compaction::compact_blocked(compacting, busy || snapshot.streaming);
+        let resume_compaction = compact_blocked
+            .is_none()
+            .then(|| {
+                compaction::resume_offer(
+                    row.as_deref(),
+                    st.context_usage.and_then(|u| u.tokens),
+                    st.kept_full_history,
+                )
+            })
+            .flatten();
         let mut next = ComposerState {
             chat_id: self.chat_id.clone(),
             revision: 0,
@@ -562,6 +580,9 @@ impl SessionCore {
             queue_error: st.queue_error.clone(),
             last_submitted_message_id: st.last_submitted.clone(),
             context_usage: st.context_usage,
+            compacting,
+            compact_blocked,
+            resume_compaction,
         };
         let current = self.composer();
         next.revision = current.revision;
@@ -662,6 +683,9 @@ fn empty_composer(chat_id: &str) -> ComposerState {
         queue_error: None,
         last_submitted_message_id: None,
         context_usage: None,
+        compacting: false,
+        compact_blocked: None,
+        resume_compaction: None,
     }
 }
 

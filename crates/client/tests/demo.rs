@@ -642,3 +642,28 @@ fn a_model_switch_on_a_read_chat_asks_then_marks_the_transcript() {
         })
     });
 }
+
+#[test]
+fn a_large_idle_claude_chat_offers_compaction_until_it_compacts() {
+    let (client, _dir) = demo(fast());
+    let session = client.open_session("chat-home").unwrap();
+    session.set_view_attached(true);
+    wait_for("the resume offer", Duration::from_secs(5), || {
+        session.composer().resume_compaction.is_some()
+    });
+    assert_eq!(session.composer().compact_blocked, None);
+    let notice = zeron_client::runtime::shared()
+        .block_on(session.compact(Some("auth".into())))
+        .unwrap();
+    assert_eq!(notice, None);
+    wait_for("the boundary entry", Duration::from_secs(5), || {
+        session.snapshot().transcript().last().is_some_and(|entry| {
+            entry.role() == MessageRole::System
+                && format!("{:?}", entry.parts()).contains("Context compacted")
+        })
+    });
+    wait_for("the offer to go", Duration::from_secs(5), || {
+        let composer = session.composer();
+        composer.resume_compaction.is_none() && !composer.compacting
+    });
+}

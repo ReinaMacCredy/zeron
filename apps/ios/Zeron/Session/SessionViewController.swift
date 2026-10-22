@@ -101,6 +101,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             // An immediate send (new turn, steer, stop-and-send) gets the
             // desktop runway; a message queued behind a live turn keeps the
             // live turn's runway and just follows.
+            if let command = compactCommand(text: text) {
+                self.source.compact(focus: command.focus)
+                DispatchQueue.main.async { self.composer.resignFirstResponder() }
+                return .sent
+            }
             let queued = self.shown.running && mode == .queue
             guard self.source.send(text: text, images: images, mode: mode) else { return .kept }
             // Sending puts the keyboard away (the composer rests as the capsule).
@@ -131,6 +136,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             guard let self else { return }
             if self.editingQueueId != nil { self.endEdit(commit: nil) }
             if case .notDelivered = self.shown.banner { self.source.retryDelivery() }
+            if case let .offer(title, body) = self.shown.banner { self.offerCompaction(title: title, body: body) }
         }
 
         bottom.axis = .vertical
@@ -554,6 +560,23 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         }
     }
 
+    private func compactAction() -> UIAction {
+        let blocked = source.compactBlocked
+        let action = UIAction(title: "Compact Context", subtitle: blocked, image: UIImage(systemName: "arrow.down.right.and.arrow.up.left")) { [weak self] _ in
+            self?.source.compact(focus: nil)
+        }
+        if blocked != nil { action.attributes = .disabled }
+        return action
+    }
+
+    private func offerCompaction(title: String, body: String) {
+        let sheet = UIAlertController(title: title, message: body, preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "Compact", style: .default) { [weak self] _ in self?.source.compact(focus: nil) })
+        sheet.addAction(UIAlertAction(title: "Keep full history", style: .cancel) { [weak self] _ in self?.source.keepFullHistory() })
+        sheet.popoverPresentationController?.sourceView = pill
+        present(sheet, animated: true)
+    }
+
     private func sessionMenu() -> UIMenu {
         UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
             guard let self else { return done([]) }
@@ -564,6 +587,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = self.engine.frame().plainText()
                 },
+                self.compactAction(),
                 UIAction(title: "Archive", image: UIImage(systemName: "archivebox"), attributes: .destructive) { _ in
                     self.app.archive(self.chatId)
                     // Beside the iPad sidebar there's nothing to pop back to.
@@ -694,6 +718,9 @@ final class StatusPill: UIControl {
         case let .notice(message):
             grid.kind = .dot(StatusTone.idle)
             label.text = message
+        case let .offer(title, body):
+            grid.kind = .dot(StatusTone.input)
+            label.text = "\(title) · \(body)"
         }
     }
 

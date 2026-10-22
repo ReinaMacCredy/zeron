@@ -87,6 +87,7 @@ pub struct SessionRow {
     pub working_since_ms: Option<i64>,
     /// Parked on background subagents: the next prompt is a send, not a queue.
     pub held_by_subagents: bool,
+    pub compacting: bool,
     /// `last_message_at`, falling back to `created_at` (the sort key).
     pub last_activity_ms: i64,
     /// [`relative_time_label`] of `last_activity_ms` at derive time (the 1 Hz
@@ -403,6 +404,7 @@ fn hash_row(row: &SessionRow) -> u64 {
     attention_rank(row.host_indicator).hash(&mut h);
     row.working_since_ms.hash(&mut h);
     row.held_by_subagents.hash(&mut h);
+    row.compacting.hash(&mut h);
     row.last_activity_ms.hash(&mut h);
     row.time_label.hash(&mut h);
     row.created_at_ms.hash(&mut h);
@@ -509,6 +511,7 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         working_since_ms,
         held_by_subagents: host_indicator == ChatIndicator::Working
             && session.is_some_and(|s| s.held_by_subagents),
+        compacting: session.is_some_and(|s| s.compacting),
         last_activity_ms: sort_key(chat).timestamp_millis(),
         time_label: relative_time_label(sort_key(chat).timestamp_millis(), now_ms),
         created_at_ms: chat.created_at.timestamp_millis(),

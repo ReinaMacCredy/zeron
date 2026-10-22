@@ -943,6 +943,25 @@ impl DemoHost {
                 }
                 serde_json::json!({})
             }
+            m::COMPACT_CHAT => {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                let host = self.host_of(&client, &chat_id);
+                let entry = transcripts::entry(
+                    &crate::new_id(),
+                    zeron_doc::MessageRole::System,
+                    &host,
+                    now,
+                    vec![transcripts::text(
+                        "t0",
+                        "Context compacted · 184.3k → 21.0k tokens",
+                    )],
+                );
+                core.write(|doc| {
+                    doc.push_message(&entry)?;
+                    doc.update_context_usage(Some(21_000), None)
+                })?;
+                serde_json::json!({ "compacted": true })
+            }
             m::REMOVE_QUEUED_MESSAGE => {
                 let removed = core.write(|doc| doc.remove_queued(&id))?;
                 serde_json::json!({ "removed": removed })

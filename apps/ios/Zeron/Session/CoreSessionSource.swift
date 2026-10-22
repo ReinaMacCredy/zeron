@@ -97,6 +97,10 @@ final class CoreSessionSource: SessionSource {
         next.chips = chips
         if let sendFailure {
             next.banner = .failed(sendFailure)
+        } else if let compactNotice {
+            next.banner = .notice(compactNotice)
+        } else if c.compacting {
+            next.banner = .working(since: nil, word: "Compacting context")
         } else if c.sendState == .failed {
             next.banner = .notDelivered
         } else if c.sendState == .queued {
@@ -107,6 +111,9 @@ final class CoreSessionSource: SessionSource {
             next.banner = .offline
         } else if !c.room.connected, let retry = c.room.retryAtMs {
             next.banner = .reconnecting(in: max(1, Int((retry - Int64(Date().timeIntervalSince1970 * 1000)) / 1000)))
+        }
+        if next.banner == .none, let offer = c.resumeCompaction {
+            next.banner = .offer(title: offer.title, body: offer.body)
         }
         next.uploadProgress = c.transferProgress
         // Working state is shown at the transcript tail (layout engine), not here.
@@ -180,6 +187,7 @@ final class CoreSessionSource: SessionSource {
             _ = try handle.send(request: SendRequest(text: text, attachments: images.map(\.outgoing), worktree: nil, busy: mode == .steer ? .steer : .queue))
             app?.noteDeliveryActivity()
             sendFailure = nil
+            compactNotice = nil
             return true
         } catch {
             // Kept across refreshes (which rebuild the chrome) until the next send.
@@ -190,6 +198,26 @@ final class CoreSessionSource: SessionSource {
     }
 
     private var sendFailure: String?
+    private var compactNotice: String?
+
+    var compactBlocked: String? { handle.composer().compactBlocked }
+
+    func compact(focus: String?) {
+        compactNotice = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                self.compactNotice = try await self.handle.compact(focus: focus)
+            } catch {
+                self.compactNotice = "Compaction failed: \(error)"
+            }
+            self.refresh()
+        }
+    }
+
+    func keepFullHistory() {
+        handle.keepFullHistory()
+    }
 
     func stop() {
         try? handle.interrupt()
