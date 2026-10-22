@@ -323,6 +323,7 @@ pub(crate) struct DeriveContext<'a> {
     pub steps: &'a [zeron_proto::TaskStep],
     pub supervisors:
         &'a std::collections::BTreeMap<String, zeron_proto::supervisor::SupervisorSnapshot>,
+    pub item_sends: &'a HashMap<String, super::ItemSend>,
     /// Oldest-unadopted-send state per chat (open sessions only).
     pub send_states: &'a HashMap<String, SendState>,
     pub synced: bool,

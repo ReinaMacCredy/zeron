@@ -1,4 +1,3 @@
-
 use zeron_client as zc;
 use zeron_proto::supervisor as sv;
 
@@ -230,6 +229,33 @@ pub enum NeedsYouKind {
         request_id: String,
         questions: Vec<UserInputQuestion>,
     },
+    Plan {
+        task_id: String,
+        steps: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum ItemSend {
+    Sending { choice: String },
+    Sent { choice: String },
+    Failed { choice: String, reason: String },
+}
+
+impl From<&zc::ItemSend> for ItemSend {
+    fn from(s: &zc::ItemSend) -> Self {
+        match s.clone() {
+            zc::ItemSend::Sending { choice } => Self::Sending { choice },
+            zc::ItemSend::Sent { choice } => Self::Sent { choice },
+            zc::ItemSend::Failed { choice, reason } => Self::Failed { choice, reason },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ItemAnswer {
+    pub item_id: String,
+    pub choice: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -241,6 +267,10 @@ pub struct NeedsYouEntry {
     pub task_title: Option<String>,
     pub chat_id: String,
     pub at_ms: i64,
+    pub group_key: String,
+    pub group_title: String,
+    pub dest: String,
+    pub send: Option<ItemSend>,
     pub kind: NeedsYouKind,
 }
 
@@ -254,6 +284,10 @@ impl From<&zc::NeedsYouEntry> for NeedsYouEntry {
             task_title: e.task_title.clone(),
             chat_id: e.chat_id.clone(),
             at_ms: e.at_ms,
+            group_key: e.group_key.clone(),
+            group_title: e.group_title.clone(),
+            dest: e.dest.clone(),
+            send: e.send.as_ref().map(Into::into),
             kind: match &e.kind {
                 zc::NeedsYouKind::Item {
                     item_id,
@@ -287,6 +321,10 @@ impl From<&zc::NeedsYouEntry> for NeedsYouEntry {
                             multiline: q.multiline,
                         })
                         .collect(),
+                },
+                zc::NeedsYouKind::Plan { task_id, steps } => NeedsYouKind::Plan {
+                    task_id: task_id.clone(),
+                    steps: steps.clone(),
                 },
             },
         }
@@ -475,19 +513,17 @@ impl CoreClient {
         on_runtime(async move { client.delete_task(&task_id).await }).await
     }
 
-    pub async fn resolve_supervisor_item(
+    pub async fn resolve_supervisor_items(
         &self,
         device_id: String,
-        item_id: String,
-        choice: String,
+        answers: Vec<ItemAnswer>,
     ) -> CoreResult<()> {
         let client = self.client.clone();
-        on_runtime(async move {
-            client
-                .resolve_supervisor_item(&device_id, &item_id, &choice)
-                .await
-        })
-        .await
+        let answers = answers
+            .into_iter()
+            .map(|answer| (answer.item_id, answer.choice))
+            .collect();
+        on_runtime(async move { client.resolve_supervisor_items(&device_id, answers).await }).await
     }
 
     pub async fn supervisor_settings(&self, device_id: String) -> CoreResult<SupervisorSettings> {

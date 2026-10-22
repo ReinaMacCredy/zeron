@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use zeron_doc::WorkspaceState;
 use zeron_proto::mission::{self, ApprovalState, PlanPhase, Rollup};
 use zeron_proto::supervisor::{
-    ItemWhy, NeedsYouRow, Raiser, SupervisorSnapshot, SupervisorState, SupervisorWake,
+    ItemWhy, NeedsYouRow, Raiser, SendDest, SupervisorSnapshot, SupervisorState, SupervisorWake,
 };
 use zeron_proto::{Chat, ChatIndicator, HarnessId, StepStatus, Task, TaskStatus, TaskStep};
 
@@ -82,6 +82,17 @@ pub enum NeedsYouKind {
         request_id: String,
         questions: Vec<zeron_proto::UserInputQuestion>,
     },
+    Plan {
+        task_id: String,
+        steps: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ItemSend {
+    Sending { choice: String },
+    Sent { choice: String },
+    Failed { choice: String, reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -93,6 +104,10 @@ pub struct NeedsYouEntry {
     pub task_title: Option<String>,
     pub chat_id: String,
     pub at_ms: i64,
+    pub group_key: String,
+    pub group_title: String,
+    pub dest: String,
+    pub send: Option<ItemSend>,
     pub kind: NeedsYouKind,
 }
 
@@ -134,6 +149,16 @@ pub struct StepView {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct MissionStrip {
+    pub task_id: String,
+    pub title: String,
+    pub role: String,
+    pub step_id: Option<String>,
+    pub done: u32,
+    pub total: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct TaskDetail {
     pub row: TaskRow,
     pub phase: PlanPhase,
@@ -148,6 +173,7 @@ struct Ctx<'a> {
     rows: &'a HashMap<String, Arc<SessionRow>>,
     devices: &'a [DeviceView],
     supervisors: &'a BTreeMap<String, SupervisorSnapshot>,
+    item_sends: &'a HashMap<String, ItemSend>,
     now: DateTime<Utc>,
 }
 
@@ -276,6 +302,7 @@ pub(crate) fn derive(
         rows,
         devices,
         supervisors: cx.supervisors,
+        item_sends: cx.item_sends,
         now: cx.now,
     };
     (tasks_page(&ctx), supervisor_page(&ctx))
@@ -343,8 +370,11 @@ fn supervisor_page(ctx: &Ctx<'_>) -> SupervisorPage {
         });
         for row in &snapshot.needs_you {
             let (task_id, chat_id) = row.origin();
+            let item_key = format!("{device_id}/{}", row.key());
+            let group_key = row.group(&|chat| root_id(ctx, chat)).unwrap_or_default();
             page.needs_you.push(NeedsYouEntry {
-                key: format!("{device_id}/{}", row.key()),
+                send: ctx.item_sends.get(&item_key).cloned(),
+                key: item_key,
                 host: host.clone(),
                 title: row.title(),
                 task_id: task_id.map(str::to_owned),
@@ -353,6 +383,9 @@ fn supervisor_page(ctx: &Ctx<'_>) -> SupervisorPage {
                     .map(|task| task.title.clone()),
                 chat_id: chat_id.to_owned(),
                 at_ms: row.at().timestamp_millis(),
+                group_title: group_title(ctx, &tasks, &group_key),
+                group_key,
+                dest: row.dest().word().to_owned(),
                 kind: match row {
                     NeedsYouRow::Item(item) => NeedsYouKind::Item {
                         item_id: item.id.clone(),
@@ -372,6 +405,40 @@ fn supervisor_page(ctx: &Ctx<'_>) -> SupervisorPage {
         page.wakes
             .extend(snapshot.wakes.iter().map(|wake| wake_entry(wake, &host)));
     }
+    for task in mission::open_missions(&ctx.state.tasks) {
+        let plan = ctx.rollup(task);
+        if plan.phase(task) != PlanPhase::PlanReady {
+            continue;
+        }
+        let Some(lead) = mission::linked_chat(&ctx.state.chats, task) else {
+            continue;
+        };
+        page.needs_you.push(NeedsYouEntry {
+            key: format!("plan:{}", task.id),
+            host: ctx.host(&lead.device_id),
+            title: format!(
+                "Plan ready · {} step{} · the lead waits for you",
+                plan.steps.len(),
+                if plan.steps.len() == 1 { "" } else { "s" }
+            ),
+            task_id: Some(task.id.clone()),
+            task_title: Some(task.title.clone()),
+            chat_id: lead.id.clone(),
+            at_ms: task.updated_at.timestamp_millis(),
+            group_key: task.id.clone(),
+            group_title: task.title.clone(),
+            dest: SendDest::Lead.word().to_owned(),
+            send: None,
+            kind: NeedsYouKind::Plan {
+                task_id: task.id.clone(),
+                steps: plan
+                    .steps
+                    .iter()
+                    .map(|row| row.step.title.clone())
+                    .collect(),
+            },
+        });
+    }
     page.needs_you
         .sort_by(|a, b| b.at_ms.cmp(&a.at_ms).then_with(|| a.key.cmp(&b.key)));
     page.wakes
@@ -383,6 +450,31 @@ fn supervisor_page(ctx: &Ctx<'_>) -> SupervisorPage {
         .map(|task| ctx.task_row(task))
         .collect();
     page
+}
+
+fn root_id(ctx: &Ctx<'_>, chat_id: &str) -> Option<String> {
+    let chats = &ctx.state.chats;
+    let chat = chats.iter().find(|chat| chat.id == chat_id)?;
+    zeron_proto::tree_path(chat, chats, &ctx.state.tasks, ctx.steps)
+        .last()
+        .map(|root| root.id.clone())
+}
+
+fn group_title(ctx: &Ctx<'_>, tasks: &HashMap<&str, &Task>, key: &str) -> String {
+    if key.is_empty() {
+        return "Supervisor and shared".to_owned();
+    }
+    tasks
+        .get(key)
+        .map(|task| task.title.clone())
+        .or_else(|| {
+            ctx.state
+                .chats
+                .iter()
+                .find(|chat| chat.id == key)
+                .map(|chat| chat.title.as_deref().unwrap_or("New session").to_owned())
+        })
+        .unwrap_or_else(|| "A mission".to_owned())
 }
 
 fn wake_entry(wake: &SupervisorWake, host: &HostRef) -> WakeEntry {
@@ -417,6 +509,7 @@ pub(crate) fn detail(
         rows: &snapshot.sessions,
         devices: &snapshot.devices,
         supervisors,
+        item_sends: &HashMap::new(),
         now: Utc::now(),
     };
     let plan = ctx.rollup(task);
@@ -467,5 +560,36 @@ pub(crate) fn detail(
         plan: task.plan.clone(),
         approval,
         steps: step_views,
+    })
+}
+
+pub(crate) fn strip(
+    state: &WorkspaceState,
+    steps: &[TaskStep],
+    snapshot: &super::WorkspaceSnapshot,
+    supervisors: &BTreeMap<String, SupervisorSnapshot>,
+    chat_id: &str,
+) -> Option<MissionStrip> {
+    let ctx = Ctx {
+        state,
+        steps,
+        rows: &snapshot.sessions,
+        devices: &snapshot.devices,
+        supervisors,
+        item_sends: &HashMap::new(),
+        now: Utc::now(),
+    };
+    let thread = mission::mission_thread(&state.tasks, steps, chat_id, |task| ctx.rollup(task))?;
+    let (role, step_id) = match thread.role {
+        mission::MissionRole::Lead => ("Lead".to_owned(), None),
+        mission::MissionRole::Step { step_id, label } => (label, Some(step_id)),
+    };
+    Some(MissionStrip {
+        task_id: thread.task_id,
+        title: thread.title,
+        role,
+        step_id,
+        done: thread.progress.done as u32,
+        total: thread.progress.total as u32,
     })
 }
