@@ -1638,6 +1638,7 @@ mod tests {
     fn committed_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         run(dir.path(), &["init", "-b", "main", "."]);
+        run(dir.path(), &["config", "core.autocrlf", "false"]);
         std::fs::write(dir.path().join("tracked.txt"), "one\n").unwrap();
         std::fs::write(dir.path().join("old name.txt"), "rename me\n").unwrap();
         run(dir.path(), &["add", "."]);
