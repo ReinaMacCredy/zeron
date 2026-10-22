@@ -519,9 +519,7 @@ impl SupervisorPage {
                     format!("supervisor-mission-fold-{}", key),
                     &motion.fold,
                     now,
-                    div()
-                        .opacity(motion.fold.value(now))
-                        .child(self.render_owners(mission, narrow, theme, cx)),
+                    self.render_owners(mission, narrow, theme, cx),
                 )
             });
         let amber = needs_tone(theme);

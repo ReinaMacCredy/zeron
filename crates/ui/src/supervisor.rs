@@ -1379,7 +1379,6 @@ impl SupervisorPage {
         self.drawer_open = false;
         self.drawer_slide = Tween::at(0.0, Instant::now());
         self.gear = Popup::default();
-        self.pane = None;
         cx.notify();
     }
 
