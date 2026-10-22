@@ -68,8 +68,8 @@ Three places hand an agent a chat to read rather than a copy of it, and the agen
 
 The [Supervisor](zeron://docs/supervisor) reaches leads and their step threads through the same tools, within the switches under **Authority** on its page:
 
-- Messaging a chat and answering its questions follow **Message a Lead or Peer directly**.
-- Starting a chat with `create_thread`, like delegating a task, follows **Start a new mission**, which is off by default.
+- Messaging a chat and answering its questions follow **Message a Lead or Peer directly**. In a tree without a plan, answering a question also needs the tree watched and **Decide for me** on.
+- Starting a chat with `create_thread`, like delegating a task or starting a review with `review_changes`, follows **Start a new mission**, which is off by default.
 - It never stops a chat's turn with `interrupt_thread`. A step that blocks a shared resource is paused instead, which needs a contention Zeron verified.
 
 ## Limits

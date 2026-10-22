@@ -30,7 +30,7 @@ fn init_env() {
     });
 }
 
-/// Asks on "please ask", writes the named file on "please write <path>", and on "please fan out"
+/// Fails on "please fail", asks on "please ask", writes the named file on "please write <path>", and on "please fan out"
 /// ends its turn with a background sub-agent still running until the run is cancelled. Only a
 /// steerable run parks after its turn, so fanning out runs on the steerable `Pi` id.
 struct StallHarness {
@@ -86,6 +86,18 @@ impl Harness for StallHarness {
                     assistant_message_id: "a-stall".into(),
                 }))
                 .await;
+            if prompt.starts_with("please fail") {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let _ = tx
+                    .send(Ok(AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        result: None,
+                        error: Some("boom".into()),
+                        session_id: Some("hs-stall".into()),
+                    }))
+                    .await;
+                return;
+            }
             let mut text = "noted".to_string();
             if prompt.starts_with("please ask") {
                 let answers = (request_input)(vec![zeron_proto::UserInputQuestion {
@@ -535,7 +547,7 @@ async fn a_watched_turn_that_leaves_files_or_an_unmerged_branch_wakes_once_per_h
     assert_eq!(dirty.root_chat_id.as_deref(), Some("lead"));
     assert_eq!(
         dirty.label,
-        "Thread \"Work child-dirty\" left 1 uncommitted file"
+        "Thread \"Work child-dirty\" ended its turn with 1 uncommitted file in its checkout"
     );
     let [unmerged] = events(&snapshot, SupervisorEventKind::Unmerged)
         .try_into()
@@ -580,7 +592,7 @@ async fn a_watched_turn_that_leaves_files_or_an_unmerged_branch_wakes_once_per_h
         "a clean merged checkout: {clean_events:?}"
     );
     assert!(
-        wakes_text(&rig).contains("left 1 uncommitted file"),
+        wakes_text(&rig).contains("with 1 uncommitted file in its checkout"),
         "{}",
         wakes_text(&rig)
     );
@@ -761,6 +773,71 @@ async fn a_worktree_branch_overlapping_the_main_checkouts_dirty_files_names_the_
     assert_eq!(
         offered(&snapshot, SupervisorEventKind::MergeBlocked).len(),
         1
+    );
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_watched_thread_wakes_each_time_it_fails_and_each_delegated_task_wakes_when_it_finishes()
+{
+    let rig = rig();
+    watch_lead(&rig).await;
+    child(&rig, "child-fail", None);
+    for round in 1..=2 {
+        queue_run(&rig, "child-fail", &format!("please fail {round}"), "/tmp");
+        snapshot_until(&rig, |s| {
+            offered(s, SupervisorEventKind::NodeFailed).len() == round
+        })
+        .await;
+    }
+    let failed = offered(
+        &snapshot_until(&rig, |_| true).await,
+        SupervisorEventKind::NodeFailed,
+    );
+    assert!(
+        failed.iter().all(|event| {
+            event.thread_id.as_deref() == Some("child-fail")
+                && event.root_chat_id.as_deref() == Some("lead")
+                && event.label == "Thread \"Work child-fail\" failed"
+        }),
+        "{failed:?}"
+    );
+
+    let mut delegated = Vec::new();
+    for (round, task) in [(1, "count the tests"), (2, "count the docs")] {
+        let view = rig
+            .core
+            .doc_host
+            .delegate_task(
+                serde_json::from_value(serde_json::json!({ "ownerChatId": "lead", "task": task }))
+                    .unwrap(),
+                Default::default(),
+            )
+            .await
+            .expect("delegate");
+        delegated.push(view.task_id);
+        snapshot_until(&rig, |s| {
+            offered(s, SupervisorEventKind::NodeFinished).len() == round
+        })
+        .await;
+    }
+    let finished = offered(
+        &snapshot_until(&rig, |_| true).await,
+        SupervisorEventKind::NodeFinished,
+    );
+    let mut threads: Vec<String> = finished
+        .iter()
+        .filter_map(|event| event.thread_id.clone())
+        .collect();
+    threads.sort();
+    delegated.sort();
+    assert_eq!(threads, delegated, "{finished:?}");
+    assert!(
+        finished
+            .iter()
+            .all(|event| event.label.ends_with("completed")
+                && event.root_chat_id.as_deref() == Some("lead")),
+        "{finished:?}"
     );
     rig.core.shutdown().await;
 }
