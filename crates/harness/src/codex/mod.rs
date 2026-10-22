@@ -2286,7 +2286,7 @@ const COMPETING_BUNDLED_PLUGINS: [&str; 4] = [
     "chrome@openai-bundled",
 ];
 
-// Their destructiveHint makes Codex ask on every call, and Zeron refuses non-computer elicitations.
+// Their destructiveHint makes Codex ask on every call, and Zeron refuses elicitations it does not route.
 const PREAPPROVED_ZERON_TOOLS: [&str; 1] = ["device_close"];
 // Driving a Dev bundle can click its Approve buttons, so only a Full chat skips the ask.
 const UI_DRIVE_TOOL: &str = "ui_driver_drive";
