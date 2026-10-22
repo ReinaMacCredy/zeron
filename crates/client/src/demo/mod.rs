@@ -945,21 +945,41 @@ impl DemoHost {
             harness.steering_mode = Some("step-boundary".into());
             harness.enabled = Some(true);
         }
-        list.push(HarnessInfo {
-            id: "opencode".into(),
-            label: "OpenCode".into(),
-            supports_steering: Some(false),
-            steering_mode: Some("turn-boundary".into()),
-            reasoning_levels: Vec::new(),
-            installed: true,
-            enabled: Some(true),
-        });
+        for (id, label) in [
+            ("opencode", "OpenCode"),
+            ("cursor", "Cursor"),
+            ("devin", "Devin"),
+            ("grok", "Grok"),
+            ("hermes", "Hermes"),
+            ("pi", "Pi"),
+            ("antigravity", "Antigravity"),
+            ("acp", "ACP agent"),
+        ] {
+            list.push(HarnessInfo {
+                id: id.into(),
+                label: label.into(),
+                supports_steering: Some(false),
+                steering_mode: Some("turn-boundary".into()),
+                reasoning_levels: Vec::new(),
+                installed: true,
+                enabled: Some(true),
+            });
+        }
         list
     }
 
     pub(crate) async fn list_models(&self, harness: &str) -> Vec<ModelInfo> {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        catalog::fallback_models(harness)
+        match harness {
+            "cursor" | "acp" => vec![ModelInfo {
+                id: "default".into(),
+                label: "Agent default".into(),
+                description: None,
+                reasoning_levels: Vec::new(),
+                options: Vec::new(),
+            }],
+            _ => catalog::fallback_models(harness),
+        }
     }
 
     fn seeded_refs(path: &str) -> Vec<RepoRef> {
