@@ -1325,6 +1325,9 @@ fn authority_footer(settings: SupervisorSettings, permission: PermissionMode) ->
     let mut decides = String::new();
     if settings.decide_for_me {
         decides.push_str("\n- decide each lead's Needs you item whose why is decision yourself, in the person's place, with the supervisor tool, action \"decide\" (itemId, choice, reason), and approve a plan that waits for review with action \"approve\" (taskId, reason) when it fits the mission: on");
+        if !settings.goal_and_spend {
+            decides.push_str(" (the lead picks an item's why itself: one marked decision that changes the mission's goal or spends money is still the person's, so raise it with action \"ask\")");
+        }
     }
     let goal = if settings.goal_and_spend {
         decides.push_str("\n- decide each lead's goal and spend items yourself too with action \"decide\", and change a mission's goal, its title and notes, with action \"goal\" (taskId, title, notes, reason): on");
@@ -1336,7 +1339,7 @@ fn authority_footer(settings: SupervisorSettings, permission: PermissionMode) ->
         decides.push_str("\nThe person sees each of these decisions with your reason and may change it, so give a reason they can check.");
     }
     format!(
-        "Read more with read_thread, list_threads, or the tasks tool (action \"list\", taskId). What you may do now:\n- message leads and step threads with send_message_to_thread: {}\n- answer their questions and tool approvals with respond_to_input: {}{approvals}\n- answer the questions of a watched tree without a plan with respond_to_input (Decide for me): {}; decide, approve, goal, re-brief and pause apply once a tree has a plan\n- re-brief a step's title and spec through its lead with the supervisor tool, action \"rebrief\": {}{resources}\n- start a mission whose plan the person reviews with the supervisor tool, action \"start\" (create_thread and delegate_task go with it): {}{decides}\n{goal}\nIf nothing needs doing, reply in one line.",
+        "Read more with read_thread, list_threads, or the tasks tool (action \"list\", taskId). What you may do now:\n- message leads and step threads with send_message_to_thread: {}\n- answer their questions and tool approvals with respond_to_input: {}{approvals}\n- answer the questions of a watched tree without a plan with respond_to_input (Decide for me): {}; decide, approve, goal, re-brief and pause apply once a tree has a plan\n- re-brief a step's title and spec through its lead with the supervisor tool, action \"rebrief\": {}{resources}\n- start a mission whose plan the person reviews with the supervisor tool, action \"start\" (create_thread, delegate_task and review_changes go with it): {}{decides}\n{goal}\nIf nothing needs doing, reply in one line.",
         on(settings.message_threads),
         on(settings.message_threads),
         on(settings.message_threads && settings.decide_for_me),
@@ -1634,7 +1637,7 @@ mod tests {
         let off = SupervisorSettings::default();
         assert_eq!(
             footer(off),
-            "- start a mission whose plan the person reviews with the supervisor tool, action \"start\" (create_thread and delegate_task go with it): off\nA change to a mission's goal or spend is the person's decision: raise it with the supervisor tool, action \"ask\".\nIf nothing needs doing, reply in one line."
+            "- start a mission whose plan the person reviews with the supervisor tool, action \"start\" (create_thread, delegate_task and review_changes go with it): off\nA change to a mission's goal or spend is the person's decision: raise it with the supervisor tool, action \"ask\".\nIf nothing needs doing, reply in one line."
         );
         let decide = footer(SupervisorSettings {
             decide_for_me: true,

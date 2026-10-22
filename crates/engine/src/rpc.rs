@@ -3412,6 +3412,7 @@ impl RpcService for EngineRpc {
             }
             methods::START_REVIEW => {
                 let p: StartReviewParams = parse_params(params)?;
+                self.supervisor_gate(Some(&p.owner_chat_id), |s| s.start_missions, supervisor::START_OFF)?;
                 RpcReply::value(&Box::pin(self.start_review(p)).await?)
             }
             methods::SET_DELEGATION_SETTINGS => {
