@@ -92,6 +92,7 @@ mod file_mutations;
 mod files_panel;
 mod handoff;
 mod harness_updates;
+mod mission_card;
 mod mission_control;
 mod mission_intro;
 mod mission_strip;

@@ -5896,11 +5896,30 @@ impl Shell {
         chat: &zeron_proto::Chat,
         now: DateTime<Utc>,
     ) -> InboxShelf {
+        let status = self.inbox_status(state, status, chat, now);
         InboxShelf::of(
             status,
             sidebar_settled_at(state, status, chat, now),
             self.settings.sidebar_working_shelf,
         )
+    }
+
+    // A lead waits idle while its steps run, so a live mission holds the Working shelf.
+    fn inbox_status(
+        &self,
+        state: &AppState,
+        status: ChatIndicator,
+        chat: &zeron_proto::Chat,
+        now: DateTime<Utc>,
+    ) -> ChatIndicator {
+        if self.settings.sidebar_working_shelf
+            && status != ChatIndicator::AwaitingInput
+            && mission_card::live_plan(state, chat, now).is_some()
+        {
+            ChatIndicator::Working
+        } else {
+            status
+        }
     }
 
     fn sorted_sidebar_chats<'a>(
@@ -5912,14 +5931,15 @@ impl Shell {
         let mut chats = state.sidebar_chats(now, filter);
         if self.settings.sidebar_organization == SidebarOrganization::Inbox {
             chats.sort_by_cached_key(|(status, chat)| {
+                let status = self.inbox_status(state, *status, chat, now);
                 inbox_rank(
-                    *status,
+                    status,
                     chat,
                     state
                         .session_for(&chat.id)
                         .and_then(|session| session.started_at),
                     self.sidebar_inbox_marks.get(&chat.id).copied(),
-                    sidebar_settled_at(state, *status, chat, now),
+                    sidebar_settled_at(state, status, chat, now),
                     self.settings.sidebar_working_shelf,
                 )
             });
@@ -6143,6 +6163,25 @@ impl Shell {
         }
     }
 
+    fn lead_body_shown(&mut self, motion_key: &str, open: bool, body_height: f32) -> f32 {
+        if self.sidebar_reveal_motions.remove(motion_key) {
+            let (from, to) = if open {
+                (0.0, body_height)
+            } else {
+                (body_height, 0.0)
+            };
+            self.begin_sidebar_disclosure_motion(motion_key, from, to);
+        }
+        self.sidebar_disclosure_motion
+            .get(motion_key)
+            .copied()
+            .filter(|motion| motion.animating() && !self.reduced_motion)
+            .map_or(
+                if open { body_height } else { 0.0 },
+                SidebarDisclosureMotion::current,
+            )
+    }
+
     fn fold_step_threads(
         &mut self,
         rows: &mut Vec<(String, f32, AnyElement)>,
@@ -6183,23 +6222,7 @@ impl Shell {
                 .iter()
                 .map(|(_, height, _)| height + SIDEBAR_LIST_GAP)
                 .sum::<f32>();
-            if self.sidebar_reveal_motions.remove(&fold.motion_key) {
-                let (from, to) = if fold.open {
-                    (0.0, body_height)
-                } else {
-                    (body_height, 0.0)
-                };
-                self.begin_sidebar_disclosure_motion(&fold.motion_key, from, to);
-            }
-            let shown = self
-                .sidebar_disclosure_motion
-                .get(&fold.motion_key)
-                .copied()
-                .filter(|motion| motion.animating() && !self.reduced_motion)
-                .map_or(
-                    if fold.open { body_height } else { 0.0 },
-                    SidebarDisclosureMotion::current,
-                );
+            let shown = self.lead_body_shown(&fold.motion_key, fold.open, body_height);
             let body = div()
                 .w_full()
                 .flex()
@@ -6664,6 +6687,23 @@ impl Shell {
             .chat_rename
             .as_ref()
             .map(|rename| rename.chat_id.clone());
+        let mut mission_cards: std::collections::HashMap<String, mission_card::MissionCard> =
+            Default::default();
+        if self.settings.sidebar_organization == SidebarOrganization::Inbox {
+            let working = InboxShelf::Working.group().map(|(key, _)| key);
+            let state = self.state.read(cx);
+            for (_, rows) in sections
+                .iter()
+                .filter(|(group, _)| group.as_ref().map(|(key, _)| key.as_str()) == working)
+            {
+                for row in rows.iter().filter(|row| !row.nested) {
+                    if let Some(card) = mission_card::MissionCard::of(state, &row.chat, now) {
+                        mission_cards.insert(row.chat.id.clone(), card);
+                    }
+                }
+            }
+        }
+        let carded: HashSet<String> = mission_cards.keys().cloned().collect();
         for (group, rows) in sections {
             let pinned_group = slot < pinned_count;
             let drag_group = if pinned_group {
@@ -6695,11 +6735,27 @@ impl Shell {
                 project_group && !rows.is_empty() && rows.iter().all(|row| dimmed(&row.chat));
             let mut rendered_rows = Vec::with_capacity(rows.len());
             for (group_index, row) in rows.into_iter().enumerate() {
-                let height = row.height(
-                    self.settings.sidebar_compact,
-                    slim,
-                    self.settings.sidebar_show_project_label && !project_group,
-                );
+                if lead_of
+                    .get(&row.chat.id)
+                    .is_some_and(|lead| carded.contains(lead))
+                {
+                    slot += 1;
+                    continue;
+                }
+                let card = mission_cards.remove(&row.chat.id).map(|card| {
+                    let open = !self.sidebar_lead_collapsed(&row.chat.id);
+                    let body = card.body_height();
+                    let shown = self.lead_body_shown(&format!("lead:{}", row.chat.id), open, body);
+                    (card, open, body, shown)
+                });
+                let height = match &card {
+                    Some((_, _, _, shown)) => mission_card::MissionCard::top_height() + shown,
+                    None => row.height(
+                        self.settings.sidebar_compact,
+                        slim,
+                        self.settings.sidebar_show_project_label && !project_group,
+                    ),
+                };
                 if lead_of
                     .get(&row.chat.id)
                     .is_some_and(|lead| folded_leads.contains(lead.as_str()))
@@ -6783,6 +6839,16 @@ impl Shell {
                 });
                 let element = if windowed {
                     div().into_any_element()
+                } else if let Some((card, open, body, _)) = card {
+                    let element = self.render_sidebar_mission_card(
+                        card,
+                        open,
+                        body,
+                        selected.as_deref(),
+                        theme,
+                        cx,
+                    );
+                    self.render_sidebar_gap_row(element, &chat.id, &drag_group, group_index)
                 } else {
                     let element = self.render_chat_row(
                         chat.id.clone(),
@@ -9629,6 +9695,18 @@ mod tests {
                 shell.settings.sidebar_organization = SidebarOrganization::ByProject;
                 assert_eq!(keys(shell, cx), ["g:project:b", "g:project:a"]);
                 assert_eq!(shell.sidebar_visible_order(cx), ["b1", "a2", "a1"]);
+                shell.settings.sidebar_organization = SidebarOrganization::Inbox;
+                shell.settings.sidebar_working_shelf = true;
+                assert_eq!(keys(shell, cx), ["g:inbox:inbox", "g:inbox:working"]);
+                shell.state.update(cx, |state, _| {
+                    state.task_steps[0].turn = Some(zeron_proto::StepTurn {
+                        ended: zeron_proto::StepTurnEnd::Completed,
+                        turn: None,
+                    });
+                });
+                assert_eq!(keys(shell, cx), ["g:inbox:inbox"]);
+                shell.settings.sidebar_working_shelf = false;
+                shell.settings.sidebar_organization = SidebarOrganization::ByProject;
                 shell
                     .state
                     .update(cx, |state, _| state.task_steps[0].deleted = true);
