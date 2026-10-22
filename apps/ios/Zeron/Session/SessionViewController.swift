@@ -502,6 +502,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         titleView.set(title: c.title, subtitle: c.subtitle)
         list.uploadProgress = c.uploadProgress
         composer.running = c.running
+        composer.resumable = c.resumable
         still.working = c.running
         composer.canSteer = c.canSteer
         composer.placeholder = c.placeholder

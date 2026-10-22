@@ -254,8 +254,8 @@ final class RowView: UIView {
                 view = iv
             case .spinner:
                 view = StatusGlyph(.spinner)
-            case let .working(sinceMs, streaming):
-                view = WorkingIndicatorView(since: sinceMs.map { Date(timeIntervalSince1970: Double($0) / 1000) }, streaming: streaming)
+            case let .working(sinceMs, word):
+                view = WorkingIndicatorView(since: sinceMs.map { Date(timeIntervalSince1970: Double($0) / 1000) }, word: word)
             case let .detail(title):
                 let b = UIControl()
                 b.accessibilityLabel = "\(title) details"
@@ -475,9 +475,9 @@ final class WorkingIndicatorView: UIView {
     private let word: String
     private var timer: Timer?
 
-    init(since: Date?, streaming: Bool) {
+    init(since: Date?, word: String) {
         self.since = since
-        self.word = streaming ? "Writing" : "Working"
+        self.word = word
         super.init(frame: .zero)
         isUserInteractionEnabled = false
         label.font = Fonts.ui(.sansMedium, UIFontMetrics(forTextStyle: .body).scaledValue(for: 13.5))

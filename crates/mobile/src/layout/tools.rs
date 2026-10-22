@@ -5,10 +5,12 @@
 //! Subagent spawns render as their own card group. Desktop metrics scale by
 //! [`T`] so 12pt desktop text lands on the phone's 13.5pt small size.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use zeron_doc::parts::{MessagePart, SubagentStatus};
 use zeron_markdown::parser::{Block, BlockTree, IncrementalParser, InlineRun, InlineStyle};
+use zeron_proto::device_tools::device_call;
 use zeron_proto::{ChildRoute, DelegationStatus, HarnessId, ToolCall};
 use zeron_text::WhiteSpace;
 
@@ -52,6 +54,8 @@ pub(crate) struct ToolLine {
     pub detail: Option<PText>,
     /// File calls show a badge: (file-icon asset, basename).
     pub badge: Option<(String, PText)>,
+    /// A file change's `+N −M` after the badge.
+    pub stats: Option<(PText, PText)>,
     pub failed: bool,
     pub running: bool,
     pub key: u64,
@@ -119,15 +123,23 @@ pub(crate) struct DiffRowP {
 // MARK: - Summary / invocation / detail (desktop ports)
 
 /// Desktop summary: thought segment first, then the shared tool summary.
-fn group_summary(thoughts: usize, calls: &[(ToolCall, bool)]) -> String {
+fn group_summary(thoughts: usize, calls: &[(ToolCall, bool)], advisor_out: bool) -> String {
     let mut segments: Vec<String> = Vec::new();
     match thoughts {
         0 => {}
         1 => segments.push("thought process".into()),
         n => segments.push(format!("thought {n} times")),
     }
+    let devices = calls.iter().filter(|(call, _)| device_call(call).is_some()).count();
+    if devices > 0 {
+        segments.push(zeron_proto::device_tools::device_group_label(devices));
+    }
+    let calls: Vec<(ToolCall, bool)> = calls.iter().filter(|(call, _)| device_call(call).is_none()).cloned().collect();
     if !calls.is_empty() {
-        let s = zeron_proto::view::tool_group_summary(calls);
+        let mut s = zeron_proto::view::tool_group_summary(&calls);
+        if advisor_out {
+            s = zeron_proto::transcript::advisor_out(&s);
+        }
         let mut c = s.chars();
         let lowered = c.next().map(|f| f.to_lowercase().collect::<String>() + c.as_str()).unwrap_or_default();
         segments.push(lowered);
@@ -328,6 +340,16 @@ fn diff_block(ctx: &mut Ctx, st: &Styles, diff: &zeron_proto::ToolDiff) -> Optio
         .collect();
     let notice = notice.map(|n| prepare_plain(ctx, &n, st.label, st.out_lh, ColorRole::TextFaint, WhiteSpace::Pre));
     Some(DetailBlock::Diff { rows, notice, digits })
+}
+
+/// Added and deleted line totals of a file change (desktop `ToolDetail::line_stats`).
+fn line_stats(part: &MessagePart) -> Option<(u64, u64)> {
+    let MessagePart::Tool { diff, diff_stats, .. } = part else { return None };
+    if let Some(stat) = diff.as_ref().map(zeron_doc::parts::diff_stat).filter(|s| s.additions + s.deletions > 0) {
+        return Some((stat.additions, stat.deletions));
+    }
+    let stats = diff_stats.as_ref().filter(|s| !s.is_empty())?;
+    Some(stats.iter().fold((0, 0), |(add, del), stat| (add + stat.additions, del + stat.deletions)))
 }
 
 /// Result detail (desktop `tool_detail`): a diff wins, then stats, then output.
@@ -840,7 +862,8 @@ impl RowBuilder {
         let medium = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
         let small = ctx.typo.style(Family::Sans, Weight::Regular, false, 11.0 * T);
         let small_lh = ctx.typo.px(AGENT_SUB * T);
-        let summary = prepare_plain(ctx, &group_summary(thoughts, &calls), st.label, st.lh, ColorRole::TextSecondary, WhiteSpace::Pre);
+        let advisor_out = parts.iter().any(|p| matches!(p, MessagePart::Tool { call, resolved: false, .. } if call.is_advisor()));
+        let summary = prepare_plain(ctx, &group_summary(thoughts, &calls, advisor_out), st.label, st.lh, ColorRole::TextSecondary, WhiteSpace::Pre);
         let mut lines = Vec::new();
         if expanded {
             let last = parts.len().saturating_sub(1);
@@ -852,12 +875,20 @@ impl RowBuilder {
                     {
                         lines.push(delegate_line(ctx, &st, medium, call, subagent_ref.as_deref(), delegate_route.as_ref(), dkey, chats, own));
                     }
-                    MessagePart::Tool { call, is_error, resolved, subagent_ref, subagent_status, .. } => {
+                    MessagePart::Tool { call, is_error, resolved, output, subagent_ref, subagent_status, .. } => {
                         // Computer calls show their title only: arguments can hold typed text.
                         let computer = zeron_client::computer::computer_tool(call);
-                        let (label, detail) = match computer {
-                            Some(tool) => (zeron_client::computer::tool_title(tool), String::new()),
-                            None => zeron_proto::view::tool_chip_content(call),
+                        let device = device_call(call);
+                        let (label, detail): (Cow<str>, String) = match (computer, device) {
+                            (Some(tool), _) => (zeron_client::computer::tool_title(tool).into(), String::new()),
+                            (None, Some(device)) => (
+                                zeron_proto::device_tools::device_call_label(device, *resolved, *is_error).into(),
+                                zeron_proto::device_tools::device_call_detail(device, output.as_deref().unwrap_or("")).unwrap_or_default(),
+                            ),
+                            (None, None) => {
+                                let (label, detail) = zeron_proto::view::tool_chip_content(call);
+                                (label.into(), detail)
+                            }
                         };
                         // Subagent lifecycle is distinct from `resolved`: under
                         // eager-done the spawn call resolves while the subagent
@@ -879,6 +910,12 @@ impl RowBuilder {
                         };
                         let detail_color = if agents && !*is_error { ColorRole::TextSoft } else { color };
                         let detail = (badge.is_none() && !detail.is_empty()).then(|| prepare_plain(ctx, &detail, st.label, st.lh, detail_color, WhiteSpace::Pre));
+                        let stats = (!agents).then(|| line_stats(part)).flatten().map(|(add, del)| {
+                            (
+                                prepare_plain(ctx, &format!("+{add}"), st.mono_small, st.lh, ColorRole::Success, WhiteSpace::Pre),
+                                prepare_plain(ctx, &format!("−{del}"), st.mono_small, st.lh, ColorRole::Danger, WhiteSpace::Pre),
+                            )
+                        });
                         let open = !agents && self.detail_open.get(&dkey).copied().unwrap_or(false);
                         let mut body = Vec::new();
                         if open && computer.is_none() {
@@ -894,12 +931,14 @@ impl RowBuilder {
                         lines.push(ToolLine {
                             icon: match (computer, agents) {
                                 (Some(_), _) => "cursorarrow".to_owned(),
+                                (None, false) if device.is_some() => "tool-smartphone".to_owned(),
                                 (None, true) if subagent_ref.is_some() => brand_icon(self.harness, call.subagent_model()),
                                 (None, _) => tool_icon(call).to_owned(),
                             },
-                            label: prepare_plain(ctx, label, if agents { medium } else { st.label }, st.lh, color, WhiteSpace::Pre),
+                            label: prepare_plain(ctx, &label, if agents { medium } else { st.label }, st.lh, color, WhiteSpace::Pre),
                             detail,
                             badge,
+                            stats,
                             failed: *is_error,
                             running,
                             key: dkey,
@@ -928,6 +967,7 @@ impl RowBuilder {
                             label: prepare_plain(ctx, "Thought process", st.label, st.lh, ColorRole::TextSecondary, WhiteSpace::Pre),
                             detail: None,
                             badge: None,
+                            stats: None,
                             failed: false,
                             running: false,
                             key: dkey,
@@ -1020,6 +1060,7 @@ fn delegate_line(
         label: prepare_plain(ctx, &label, medium, st.lh, if failed { ColorRole::Danger } else { ColorRole::TextSecondary }, WhiteSpace::Pre),
         detail: Some(prepare_plain(ctx, &title, st.label, st.lh, if failed { ColorRole::Danger } else { ColorRole::TextSoft }, WhiteSpace::Pre)),
         badge: None,
+        stats: None,
         failed,
         running: status == Some(DelegationStatus::Running),
         key,
@@ -1098,7 +1139,9 @@ fn place_line_header(line: &ToolLine, px: Px, x: f32, ry: f32, cw: f32, o: &mut 
     let lw = line.label.p.max_content_width();
     place_text(&line.label, tx, ry + (row_h - line.label.lh) / 2.0, lw + 1.0, Some(o));
     let dx = tx + lw + d(px, 8.0);
-    let avail = (x + cw - dx).max(0.0);
+    let stats_w = line.stats.as_ref().map_or(0.0, |(add, del)| add.p.max_content_width() + d(px, 4.0) + del.p.max_content_width());
+    let avail = (x + cw - dx - if stats_w > 0.0 { stats_w + d(px, 8.0) } else { 0.0 }).max(0.0);
+    let mut used = 0.0;
     if let Some((asset, name)) = &line.badge {
         let bh = d(px, 22.0);
         let by = ry + (row_h - bh) / 2.0;
@@ -1115,11 +1158,19 @@ fn place_line_header(line: &ToolLine, px: Px, x: f32, ry: f32, cw: f32, o: &mut 
                 None,
             );
             place_text_lines(name, dx + d(px, 27.0), ry + (row_h - name.lh) / 2.0, (bw - d(px, 33.0)).max(1.0), 1, px, o);
+            used = bw;
         }
     } else if let Some(detail) = &line.detail {
         if avail > 1.0 {
             place_text_lines(detail, dx, ry + (row_h - detail.lh) / 2.0, avail, 1, px, o);
+            used = detail.p.max_content_width().min(avail);
         }
+    }
+    if let Some((add, del)) = &line.stats {
+        let sx = dx + if used > 0.0 { used + d(px, 8.0) } else { 0.0 };
+        let aw = add.p.max_content_width();
+        place_text(add, sx, ry + (row_h - add.lh) / 2.0, aw + 1.0, Some(&mut *o));
+        place_text(del, sx + aw + d(px, 4.0), ry + (row_h - del.lh) / 2.0, del.p.max_content_width() + 1.0, Some(&mut *o));
     }
     o.widget(WidgetKind::ToolToggle { detail: line.key, open: line.open }, (x, ry, cw, row_h), None);
 }
@@ -1352,6 +1403,7 @@ pub(crate) fn heap_bytes(t: &ToolGroup) -> usize {
                 l.label.p.heap_bytes()
                     + l.detail.as_ref().map_or(0, |d| d.p.heap_bytes())
                     + l.badge.as_ref().map_or(0, |b| b.1.p.heap_bytes())
+                    + l.stats.as_ref().map_or(0, |(a, d)| a.p.heap_bytes() + d.p.heap_bytes())
                     + l.agent.as_ref().map_or(0, |a| {
                         a.trailing.as_ref().map_or(0, |t| t.p.heap_bytes())
                             + a.meta.as_ref().map_or(0, |t| t.p.heap_bytes())
@@ -1413,8 +1465,8 @@ mod tests {
             (ToolCall::ReadFile { path: "a.rs".into() }, false),
             (ToolCall::Exec { command: "x".into() }, true),
         ];
-        assert_eq!(group_summary(0, &calls), "Ran 2 commands · read 1 file · 1 failed");
-        assert_eq!(group_summary(1, &calls), "Thought process · ran 2 commands · read 1 file · 1 failed");
-        assert_eq!(group_summary(3, &[]), "Thought 3 times");
+        assert_eq!(group_summary(0, &calls, false), "Ran 2 commands · read 1 file · 1 failed");
+        assert_eq!(group_summary(1, &calls, false), "Thought process · ran 2 commands · read 1 file · 1 failed");
+        assert_eq!(group_summary(3, &[], false), "Thought 3 times");
     }
 }

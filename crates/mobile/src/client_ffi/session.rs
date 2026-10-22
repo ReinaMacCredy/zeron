@@ -119,6 +119,7 @@ pub struct LiveStatus {
     pub streaming: bool,
     /// Stop is meaningful.
     pub can_interrupt: bool,
+    pub resumable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -288,6 +289,7 @@ impl From<&zc::ComposerState> for ComposerState {
                 working_since_ms: c.live.working_since_ms,
                 streaming: c.live.streaming,
                 can_interrupt: c.live.can_interrupt,
+                resumable: c.live.resumable,
             },
             queue: c
                 .queue

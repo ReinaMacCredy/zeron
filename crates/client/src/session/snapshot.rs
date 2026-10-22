@@ -266,6 +266,9 @@ pub struct LiveStatus {
     pub streaming: bool,
     /// Stop is meaningful (working, awaiting input, or streaming).
     pub can_interrupt: bool,
+    /// Nothing runs and the last turn stopped short: an empty composer's
+    /// send button resumes it.
+    pub resumable: bool,
 }
 
 /// The chat room's transport state (live mode; demo is always connected).

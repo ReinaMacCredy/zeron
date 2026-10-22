@@ -283,6 +283,16 @@ fn send_streams_a_reply_and_adopts_the_echo() {
 }
 
 #[test]
+fn a_stopped_turn_offers_resume() {
+    let (client, _dir) = demo(fast());
+    let errored = client.open_session("chat-errored").unwrap();
+    wait_for("resumable", Duration::from_secs(5), || errored.composer().live.resumable);
+    let settled = client.open_session("chat-deploy").unwrap();
+    wait_for("loaded", Duration::from_secs(5), || settled.snapshot().transcript_len > 0);
+    assert!(!settled.composer().live.resumable);
+}
+
+#[test]
 fn sends_while_working_park_on_the_queue_and_drain() {
     let (client, _dir) = demo(fast());
     let session = client.open_session("chat-deploy").unwrap();

@@ -56,6 +56,7 @@ final class CoreSessionSource: SessionSource {
         let project = row?.project?.name ?? "No project"
         next.subtitle = c.host.name.map { "\(project) @ \($0)" } ?? project
         next.running = c.live.turnRunning
+        next.resumable = c.live.resumable
         next.canSteer = c.host.capabilities.midTurnSteering ?? false
         next.placeholder = "Message \(row?.harnessLabel ?? "the agent")"
         var chips: [ComposerChip] = []

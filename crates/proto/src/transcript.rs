@@ -21,6 +21,12 @@ pub fn format_elapsed(secs: i64) -> String {
     }
 }
 
+/// A group summary while its advisor call is still out: the shared summary
+/// has no resolution bit, and this is the one chip that waits minutes.
+pub fn advisor_out(summary: &str) -> String {
+    summary.replace("onsulted advisor", "onsulting advisor")
+}
+
 pub fn compact_count(n: u64) -> String {
     match n {
         0..1_000 => n.to_string(),

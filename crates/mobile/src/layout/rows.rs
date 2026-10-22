@@ -81,8 +81,6 @@ pub(crate) fn next_version() -> u64 {
 
 pub(crate) struct UserBubble {
     pub text: PText,
-    /// Structured text (`zeron_markdown::parser::user_markdown`) drawn as
-    /// markdown in place of `text`; empty for plain prose.
     pub md: Vec<PBlock>,
     pub images: Vec<String>,
     /// Non-image attachments (desktop-sent ZIPs, docs): icon asset + name.
@@ -106,7 +104,7 @@ pub(crate) enum Content {
     Tools(ToolGroup),
     Chip(Chip),
     Image { reference: String },
-    Working { since_ms: Option<i64>, streaming: bool },
+    Working { since_ms: Option<i64>, word: &'static str },
     Card(Card),
     /// An agent visual: its height comes from its worker.
     Visual(Arc<crate::visual::VisualSlot>),
@@ -294,10 +292,17 @@ impl RowBuilder {
         self.pending.retain(|id, _| live_pending.contains(id));
 
         if input.working {
+            let word = if input.entries.last().is_some_and(|e| zeron_doc::schema::consulting_advisor(e)) {
+                "Consulting advisor"
+            } else if input.streaming {
+                "Writing"
+            } else {
+                "Working"
+            };
             let stale = self
                 .working
                 .as_ref()
-                .is_none_or(|w| !matches!(&w.content, Content::Working { since_ms, streaming } if *since_ms == input.working_since_ms && *streaming == input.streaming));
+                .is_none_or(|w| !matches!(&w.content, Content::Working { since_ms, word: shown } if *since_ms == input.working_since_ms && *shown == word));
             if stale {
                 self.working = Some(Arc::new(RowCore {
                     key: row_key("#working"),
@@ -306,7 +311,7 @@ impl RowBuilder {
                     entry_id: Arc::from(""),
                     content: Content::Working {
                         since_ms: input.working_since_ms,
-                        streaming: input.streaming,
+                        word,
                     },
                     copy_text: String::new(),
                 }));
@@ -489,10 +494,10 @@ impl RowBuilder {
                     flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
                 }
                 MessagePart::Tool { id, call, is_error, output, .. } => {
-                    let spawn = is_agent_call(call);
+                    let genus = Genus::of(call);
                     let genus_flip = tools.iter().any(|p| match p {
-                        MessagePart::Tool { call, .. } => is_agent_call(call) != spawn,
-                        _ => spawn,
+                        MessagePart::Tool { call, .. } => Genus::of(call) != genus,
+                        _ => genus != Genus::Other,
                     });
                     if genus_flip {
                         flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
@@ -509,7 +514,7 @@ impl RowBuilder {
                     }
                 }
                 MessagePart::Reasoning { text, .. } if !text.trim().is_empty() => {
-                    if tools.iter().any(|p| matches!(p, MessagePart::Tool { call, .. } if is_agent_call(call))) {
+                    if tools.iter().any(|p| matches!(p, MessagePart::Tool { call, .. } if Genus::of(call) != Genus::Other)) {
                         flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
                     }
                     live_parts.insert(format!("{}#{}", entry.id, part.id()));
@@ -854,6 +859,27 @@ fn is_agent_call(call: &zeron_proto::ToolCall) -> bool {
     call.is_subagent_spawn() || call.is_delegate_task()
 }
 
+/// Desktop `ToolGenus`: agents and device calls never share a group with
+/// ordinary tools.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Genus {
+    Agent,
+    Device,
+    Other,
+}
+
+impl Genus {
+    fn of(call: &zeron_proto::ToolCall) -> Self {
+        if is_agent_call(call) {
+            Genus::Agent
+        } else if zeron_proto::device_tools::device_call(call).is_some() {
+            Genus::Device
+        } else {
+            Genus::Other
+        }
+    }
+}
+
 fn chip_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, icon: &'static str, color: ColorRole, text: &str) -> RowCore {
     let (size, lh) = TYPE.small;
     let style = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
@@ -930,13 +956,13 @@ pub(crate) fn place_row(
             }
             h
         }
-        Content::Working { since_ms, streaming } => {
+        Content::Working { since_ms, word } => {
             let h = px.v(WORKING);
             if let Some(out) = out {
                 out.widget(
                     WidgetKind::Working {
                         since_ms: *since_ms,
-                        streaming: *streaming,
+                        word: (*word).to_owned(),
                     },
                     (x, top, cw, h),
                     None,

@@ -43,6 +43,9 @@ use gpui::{
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
 use zeron_proto::ToolCall;
+use zeron_proto::device_tools::{
+    device_call, device_call_detail, device_call_label, device_group_label,
+};
 
 use crate::route_badge::{self, RouteInfo};
 
@@ -56,9 +59,6 @@ use crate::computer::cards::{
 use crate::computer::presentation::{
     ComputerCall, computer_action_label, computer_call, computer_call_app, computer_call_rows,
     computer_js_action_label, computer_js_actions, computer_output_hidden,
-};
-use crate::device_panel::presentation::{
-    device_call, device_call_detail, device_call_label, device_group_label,
 };
 use crate::markdown::mermaid_cache::{self, MermaidCache};
 use crate::markdown::parser::{
@@ -2747,7 +2747,7 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
     // The shared rule has no resolution bit; while the advisor is still out
     // the group says so (it is the only chip that waits minutes for an answer).
     if tools.iter().any(|t| t.call.is_advisor() && !t.resolved) {
-        base = base.replace("onsulted advisor", "onsulting advisor");
+        base = zeron_proto::transcript::advisor_out(&base);
     }
     // Thought and note chips ride the group (they are UI-synthesized, so the
     // shared view summary never sees them): name them on the collapsed line.
@@ -3135,15 +3135,7 @@ pub fn flavour_seed(chat_id: &str) -> u64 {
 /// minutes with nothing streaming, and a rotating "Scheming…" over it read
 /// as a stalled run (user report).
 pub fn consulting_advisor(entries: &[SessionMessageEntry]) -> bool {
-    entries.last().is_some_and(|last| {
-        last.status == Some(MessageStatus::Streaming)
-            && last.parts.iter().any(|part| {
-                matches!(
-                    part,
-                    MessagePart::Tool { call, resolved: false, .. } if call.is_advisor()
-                )
-            })
-    })
+    entries.last().is_some_and(zeron_doc::schema::consulting_advisor)
 }
 
 pub use zeron_proto::RESUME_PROMPT;
@@ -3162,12 +3154,7 @@ pub fn resume_offer(entries: &[SessionMessageEntry], indicator: crate::state::In
     ) {
         return false;
     }
-    entries.last().is_some_and(|last| {
-        last.role == MessageRole::User
-            || last.status == Some(MessageStatus::Aborted)
-            || (last.status != Some(MessageStatus::Streaming)
-                && matches!(last.parts.last(), Some(MessagePart::Error { .. })))
-    })
+    entries.last().is_some_and(zeron_doc::schema::turn_stopped)
 }
 
 /// The working trailer's "Sending…" bridge: true while an in-flight send is

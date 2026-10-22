@@ -786,6 +786,62 @@ fn thread_sent_rows_route_by_sender() {
 }
 
 #[test]
+fn device_calls_group_apart_with_their_own_wording() {
+    use zeron_doc::schema::MessageRole::Assistant;
+    let call = |id: &str, tool: &str| {
+        let mut part = computer_part(id, "x", None, false, None);
+        if let MessagePart::Tool { call, .. } = &mut part {
+            *call = zeron_proto::ToolCall::Mcp { server: "zeron".into(), tool: tool.into(), input: None };
+        }
+        part
+    };
+    let mut w = worker(390.0);
+    w.input = TranscriptInput {
+        entries: vec![Arc::new(SessionMessageEntry {
+            status: Some(MessageStatus::Streaming),
+            ..(*message("a", Assistant, vec![computer_part("t0", "x", None, false, None), call("t1", "device_open"), call("t2", "device_close")])).clone()
+        })],
+        working: true,
+        streaming: true,
+        ..Default::default()
+    };
+    let frame = w.pass();
+    assert_eq!(kinds(&frame)[..2], [RowKind::Tools, RowKind::Tools]);
+    let devices = frame.display(1).unwrap().text;
+    assert!(devices.contains("Used device controls 2 times"), "{devices}");
+    assert!(devices.contains("Opened a device in the Device panel"), "{devices}");
+}
+
+#[test]
+fn an_advisor_call_names_the_wait_until_it_answers() {
+    use zeron_doc::schema::MessageRole::Assistant;
+    let frame = |resolved: bool| {
+        let mut entry = (*message("a", Assistant, vec![computer_part("t1", "x", None, false, None)])).clone();
+        entry.status = Some(MessageStatus::Streaming);
+        let MessagePart::Tool { call, resolved: done, .. } = &mut entry.parts[0] else { unreachable!() };
+        *call = zeron_proto::ToolCall::Unknown { name: zeron_proto::ADVISOR_TOOL_NAME.into(), input: None };
+        *done = resolved;
+        let mut w = worker(390.0);
+        w.input = TranscriptInput { entries: vec![Arc::new(entry)], working: true, streaming: true, ..Default::default() };
+        w.pass()
+    };
+    let word = |f: &LayoutFrame| {
+        (0..f.row_count())
+            .find_map(|i| f.display(i).unwrap().widgets.iter().find_map(|w| match &w.kind {
+                display::WidgetKind::Working { word, .. } => Some(word.clone()),
+                _ => None,
+            }))
+            .unwrap()
+    };
+    let out = frame(false);
+    assert_eq!(word(&out), "Consulting advisor");
+    assert!(out.display(0).unwrap().text.contains("onsulting advisor"), "{}", out.display(0).unwrap().text);
+    let answered = frame(true);
+    assert_eq!(word(&answered), "Writing");
+    assert!(answered.display(0).unwrap().text.contains("onsulted advisor"), "{}", answered.display(0).unwrap().text);
+}
+
+#[test]
 fn structured_user_text_is_markdown_and_prose_stays_plain() {
     use zeron_doc::schema::MessageRole::User;
     let mut w = worker(390.0);

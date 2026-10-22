@@ -39,6 +39,7 @@ struct SessionChrome: Equatable {
     var title = ""
     var subtitle = ""
     var running = false
+    var resumable = false
     var canSteer = false
     var placeholder = "Message"
     var chips: [ComposerChip] = []

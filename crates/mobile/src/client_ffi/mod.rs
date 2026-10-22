@@ -612,6 +612,11 @@ pub fn fallback_models(harness: String) -> Vec<ModelInfo> {
 }
 
 #[uniffi::export]
+pub fn resume_prompt() -> String {
+    zeron_proto::RESUME_PROMPT.to_owned()
+}
+
+#[uniffi::export]
 pub fn harness_label(harness: String) -> String {
     zc::catalog::harness_label(&harness)
 }

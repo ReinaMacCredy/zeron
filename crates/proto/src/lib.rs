@@ -10,6 +10,7 @@ pub mod chat_mentions;
 pub mod computer;
 pub mod device_hub;
 pub mod device_paths;
+pub mod device_tools;
 pub mod entities;
 pub mod file_mentions;
 pub mod home;

@@ -545,6 +545,15 @@ impl SessionCore {
                 working_since_ms: row.as_ref().and_then(|r| r.working_since_ms),
                 streaming: snapshot.streaming,
                 can_interrupt: busy || snapshot.streaming,
+                resumable: !busy
+                    && !matches!(
+                        indicator,
+                        ChatIndicator::Working | ChatIndicator::AwaitingInput
+                    )
+                    && snapshot
+                        .transcript()
+                        .last()
+                        .is_some_and(|entry| zeron_doc::schema::turn_stopped(&entry.message)),
             },
             queue: st
                 .queue
@@ -659,6 +668,7 @@ fn empty_composer(chat_id: &str) -> ComposerState {
             working_since_ms: None,
             streaming: false,
             can_interrupt: false,
+            resumable: false,
         },
         queue: Vec::new(),
         pending_sends: Vec::new(),
