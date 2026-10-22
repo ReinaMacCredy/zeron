@@ -30,6 +30,7 @@ struct SessionRowVM: Hashable {
     var pinned: Bool
     var sendFailed: Bool
     var settled = false
+    var expired = false
     /// 1 for a step thread or opened chat drawn under its lead.
     var depth = 0
     var childCount = 0
@@ -108,6 +109,7 @@ final class SessionCell: UICollectionViewListCell {
     /// Desktop precedence: a failed send beats everything; then the live
     /// state; unseen-and-finished reads "Done"; otherwise the time.
     static func corner(_ vm: SessionRowVM) -> (word: String, color: UIColor, glyph: StatusGlyph.Kind)? {
+        if vm.expired { return ("Expired", StatusTone.time, .dot(StatusTone.idle)) }
         if vm.sendFailed { return ("Failed", Palette.danger, .dot(Palette.danger)) }
         switch vm.status {
         case .working: return ("Working", StatusTone.working, .spinner)

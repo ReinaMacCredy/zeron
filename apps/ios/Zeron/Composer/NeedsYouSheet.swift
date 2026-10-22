@@ -149,7 +149,7 @@ enum NeedsYou {
     static func threads(_ app: AppModel) -> [SessionRowVM] {
         var seen = Set<String>()
         return app.needsYou.compactMap { entry in
-            guard entry.isThread, seen.insert(entry.chatId).inserted, let row = app.row(entry.chatId) else { return nil }
+            guard entry.input != nil, seen.insert(entry.chatId).inserted, let row = app.row(entry.chatId) else { return nil }
             return AppModel.vm(row)
         }
     }

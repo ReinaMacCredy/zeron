@@ -83,6 +83,10 @@ final class InboxFlowTests: XCTestCase {
         snapshot(app, "nested-lead-folded")
         app.buttons["session-children-chat-lead-shelf"].tap()
         XCTAssertTrue(step.waitForExistence(timeout: 5))
+        let btw = app.cells["session-chat-btw"]
+        scrollTo(btw, in: list)
+        XCTAssertTrue(btw.label.contains("Expired"))
+        snapshot(app, "side-chat-expired")
     }
 
     func testLongPressShowsThePreview() {
@@ -115,6 +119,33 @@ final class InboxFlowTests: XCTestCase {
         expectation(for: flipped, evaluatedWith: p0)
         waitForExpectations(timeout: 10)
         snapshot(app, "section-moved")
+    }
+
+    func testTheTodayCardOpensItsSheetAndChecksATask() {
+        let (app, _) = launch()
+        let card = app.cells["today-card"]
+        XCTAssertTrue(card.waitForExistence(timeout: 10))
+        expectation(for: NSPredicate(format: "label ENDSWITH 'to do.'"), evaluatedWith: card)
+        waitForExpectations(timeout: 10)
+        snapshot(app, "today-card")
+        card.tap()
+        let sheet = app.tables["today-sheet"]
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5))
+        let open = app.cells.matching(NSPredicate(format: "identifier BEGINSWITH 'today-task-' AND value == 'Open'")).firstMatch
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        let id = open.identifier
+        snapshot(app, "today-sheet")
+        open.tap()
+        let task = app.cells[id]
+        expectation(for: NSPredicate(format: "value == 'Done'"), evaluatedWith: task)
+        waitForExpectations(timeout: 10)
+        snapshot(app, "today-task-done")
+        let usage = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Left on'")).firstMatch
+        scrollTo(usage, in: sheet)
+        snapshot(app, "today-usage")
+        task.tap()
+        expectation(for: NSPredicate(format: "value == 'Open'"), evaluatedWith: task)
+        waitForExpectations(timeout: 10)
     }
 
     func testActiveFirstAndGroupByProject() {

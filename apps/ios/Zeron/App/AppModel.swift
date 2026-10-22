@@ -60,6 +60,7 @@ final class AppModel {
     private(set) var tasks = TasksPage(missions: [], needsYou: [], working: [], toDo: [], done: [], needsYouCount: 0)
     private(set) var supervisor = SupervisorPage(hosts: [], doneToday: [], wakes: [])
     private(set) var needsYou: [NeedsYouEntry] = []
+    private(set) var today = TodayPage(greeting: "", summary: "", tasks: [], openTasks: 0, prompts: 0, digest: [], slots: [], usage: nil, runsLoaded: false)
     private var needsYouObservers: [UUID: () -> Void] = [:]
     private var rows: [String: SessionRow] = [:]
     private var rawProjects: [ProjectView] = []
@@ -330,10 +331,16 @@ final class AppModel {
         }
         client?.onForeground()
         refreshWorkspace()
+        refreshToday()
         DispatchQueue.main.asyncAfter(deadline: .now() + maximum) {
             finish()
             _ = token
         }
+    }
+
+    func refreshToday() {
+        guard let client else { return }
+        Task { await client.refreshToday() }
     }
 
     // MARK: Observation
@@ -431,10 +438,13 @@ final class AppModel {
         let hosts = hostOptions
         let tasksPage = client.tasksPage()
         let supervisorPage = client.supervisorPage()
+        let todayPage = client.todayPage()
         let changed = page != frontPage || archivedVMs != archived || counts != live || hosts != lastHosts
-            || tasksPage != tasks || supervisorPage != supervisor || nextNeeds != needsYou
+            || tasksPage != tasks || supervisorPage != supervisor || nextNeeds != needsYou || todayPage != today
         let needsChanged = nextNeeds != needsYou
+        if hosts != lastHosts { refreshToday() }
         lastHosts = hosts
+        today = todayPage
         tasks = tasksPage
         supervisor = supervisorPage
         live = counts
@@ -484,7 +494,8 @@ final class AppModel {
             unseen: r.unseen,
             pinned: r.pinned,
             sendFailed: r.sendState == .failed,
-            settled: r.settled
+            settled: r.settled,
+            expired: r.expired
         )
     }
 

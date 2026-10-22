@@ -8,6 +8,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         case folder(String)
         case session(String)
         case header(String)
+        case today
     }
 
     let app: AppModel
@@ -39,6 +40,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     var movesAcrossSections = false
     private(set) var collapsed = Set(UserDefaults.standard.stringArray(forKey: "collapsedSections") ?? ["settled"])
     private var headerStates: [String: SectionHeaderCell.State] = [:]
+    private var shownToday: TodayPage?
 
     init(app: AppModel) {
         self.app = app
@@ -94,8 +96,13 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             guard let state = self?.headerStates[id] else { return }
             cell.configure(state)
         }
+        let todayReg = UICollectionView.CellRegistration<TodayCardCell, Item> { [weak self] cell, _, _ in
+            guard let page = self?.shownToday else { return }
+            cell.configure(page)
+        }
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { [weak self] cv, path, item in
             switch item {
+            case .today: cv.dequeueConfiguredReusableCell(using: todayReg, for: path, item: item)
             case let .session(id): cv.dequeueConfiguredReusableCell(using: sessionReg, for: path, item: id)
             case let .folder(id): cv.dequeueConfiguredReusableCell(using: folderReg, for: path, item: id)
             case let .header(id) where self?.collapsible == true: cv.dequeueConfiguredReusableCell(using: sectionReg, for: path, item: id)
@@ -125,12 +132,24 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
 
     /// Subclasses build their sections from the app model.
     func buildSections() -> [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] { [] }
+
+    func todayPage() -> TodayPage? { nil }
+
+    func openToday() {}
+
     func reload(animated: Bool) {
         let sections = buildSections()
         var snapshot = NSDiffableDataSourceSnapshot<String, Item>()
         var nextSessions: [String: SessionRowVM] = [:]
         var nextFolders: [String: FolderRowVM] = [:]
         var changed: [Item] = []
+        let today = todayPage()
+        if let today {
+            snapshot.appendSections(["today"])
+            snapshot.appendItems([.today], toSection: "today")
+            if shownToday != nil, shownToday != today { changed.append(.today) }
+        }
+        shownToday = today
         for s in sections {
             snapshot.appendSections([s.id])
             var items: [Item] = []
@@ -188,6 +207,8 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             openSession(id)
         case let .folder(id):
             openFolder(id)
+        case .today:
+            openToday()
         case let .header(id) where collapsible:
             toggleSection(id)
         default:
@@ -514,6 +535,19 @@ class SessionsViewController: SessionListController {
         navigationItem.largeTitleDisplayMode = .always
         navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: optionsMenu())
         navigationItem.rightBarButtonItem?.accessibilityIdentifier = "sessions-options"
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        app.refreshToday()
+    }
+
+    override func todayPage() -> TodayPage? {
+        query.trimmingCharacters(in: .whitespaces).isEmpty ? app.today : nil
+    }
+
+    override func openToday() {
+        TodaySheetController.present(app: app, from: self)
     }
 
     override func buildSections() -> [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] {

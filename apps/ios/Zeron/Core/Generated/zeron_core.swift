@@ -1334,6 +1334,13 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func watchState(chatId: String)  -> WatchState?
     
     /**
+     * Re-fetch every online Mac's runs and accounts (card appear, pull to refresh).
+     */
+    func refreshToday() async 
+    
+    func todayPage()  -> TodayPage
+    
+    /**
      * Returns immediately. Callbacks are dispatched on the core runtime; the
      * platform must hop to its media/UI executor and call complete_media.
      */
@@ -2651,6 +2658,35 @@ open func watchState(chatId: String) -> WatchState?  {
     uniffi_zeron_mobile_fn_method_coreclient_watch_state(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(chatId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Re-fetch every online Mac's runs and accounts (card appear, pull to refresh).
+     */
+open func refreshToday()async   {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_refresh_today(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: nil
+            
+        )
+}
+    
+open func todayPage() -> TodayPage  {
+    return try!  FfiConverterTypeTodayPage_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_today_page(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -10921,6 +10957,7 @@ public struct SessionRow: Equatable, Hashable {
      * On the Settled shelf (its host's `settle_after_days`, or a Settle).
      */
     public var settled: Bool
+    public var expired: Bool
     /**
      * 2 = chat2; 1 = legacy (not dialable).
      */
@@ -10961,7 +10998,7 @@ public struct SessionRow: Equatable, Hashable {
          */sendState: SendState?, parentChatId: String?, 
         /**
          * On the Settled shelf (its host's `settle_after_days`, or a Settle).
-         */settled: Bool, 
+         */settled: Bool, expired: Bool, 
         /**
          * 2 = chat2; 1 = legacy (not dialable).
          */roomGen: UInt32) {
@@ -10995,6 +11032,7 @@ public struct SessionRow: Equatable, Hashable {
         self.sendState = sendState
         self.parentChatId = parentChatId
         self.settled = settled
+        self.expired = expired
         self.roomGen = roomGen
     }
 
@@ -11044,6 +11082,7 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
                 sendState: FfiConverterOptionTypeSendState.read(from: &buf), 
                 parentChatId: FfiConverterOptionString.read(from: &buf), 
                 settled: FfiConverterBool.read(from: &buf), 
+                expired: FfiConverterBool.read(from: &buf), 
                 roomGen: FfiConverterUInt32.read(from: &buf)
         )
     }
@@ -11079,6 +11118,7 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
         FfiConverterOptionTypeSendState.write(value.sendState, into: &buf)
         FfiConverterOptionString.write(value.parentChatId, into: &buf)
         FfiConverterBool.write(value.settled, into: &buf)
+        FfiConverterBool.write(value.expired, into: &buf)
         FfiConverterUInt32.write(value.roomGen, into: &buf)
     }
 }
@@ -11977,6 +12017,394 @@ public func FfiConverterTypeTextRun_lift(_ buf: RustBuffer) throws -> TextRun {
 #endif
 public func FfiConverterTypeTextRun_lower(_ value: TextRun) -> RustBuffer {
     return FfiConverterTypeTextRun.lower(value)
+}
+
+
+public struct TodayHour: Equatable, Hashable {
+    public var prompts: UInt32
+    public var future: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(prompts: UInt32, future: Bool) {
+        self.prompts = prompts
+        self.future = future
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TodayHour: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTodayHour: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TodayHour {
+        return
+            try TodayHour(
+                prompts: FfiConverterUInt32.read(from: &buf), 
+                future: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TodayHour, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.prompts, into: &buf)
+        FfiConverterBool.write(value.future, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTodayHour_lift(_ buf: RustBuffer) throws -> TodayHour {
+    return try FfiConverterTypeTodayHour.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTodayHour_lower(_ value: TodayHour) -> RustBuffer {
+    return FfiConverterTypeTodayHour.lower(value)
+}
+
+
+public struct TodayPage: Equatable, Hashable {
+    public var greeting: String
+    public var summary: String
+    public var tasks: [TodayTask]
+    public var openTasks: UInt32
+    public var prompts: UInt32
+    public var digest: [TodaySentence]
+    public var slots: [TodaySlot]
+    public var usage: TodayUsage?
+    public var runsLoaded: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(greeting: String, summary: String, tasks: [TodayTask], openTasks: UInt32, prompts: UInt32, digest: [TodaySentence], slots: [TodaySlot], usage: TodayUsage?, runsLoaded: Bool) {
+        self.greeting = greeting
+        self.summary = summary
+        self.tasks = tasks
+        self.openTasks = openTasks
+        self.prompts = prompts
+        self.digest = digest
+        self.slots = slots
+        self.usage = usage
+        self.runsLoaded = runsLoaded
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TodayPage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTodayPage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TodayPage {
+        return
+            try TodayPage(
+                greeting: FfiConverterString.read(from: &buf), 
+                summary: FfiConverterString.read(from: &buf), 
+                tasks: FfiConverterSequenceTypeTodayTask.read(from: &buf), 
+                openTasks: FfiConverterUInt32.read(from: &buf), 
+                prompts: FfiConverterUInt32.read(from: &buf), 
+                digest: FfiConverterSequenceTypeTodaySentence.read(from: &buf), 
+                slots: FfiConverterSequenceTypeTodaySlot.read(from: &buf), 
+                usage: FfiConverterOptionTypeTodayUsage.read(from: &buf), 
+                runsLoaded: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TodayPage, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.greeting, into: &buf)
+        FfiConverterString.write(value.summary, into: &buf)
+        FfiConverterSequenceTypeTodayTask.write(value.tasks, into: &buf)
+        FfiConverterUInt32.write(value.openTasks, into: &buf)
+        FfiConverterUInt32.write(value.prompts, into: &buf)
+        FfiConverterSequenceTypeTodaySentence.write(value.digest, into: &buf)
+        FfiConverterSequenceTypeTodaySlot.write(value.slots, into: &buf)
+        FfiConverterOptionTypeTodayUsage.write(value.usage, into: &buf)
+        FfiConverterBool.write(value.runsLoaded, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTodayPage_lift(_ buf: RustBuffer) throws -> TodayPage {
+    return try FfiConverterTypeTodayPage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTodayPage_lower(_ value: TodayPage) -> RustBuffer {
+    return FfiConverterTypeTodayPage.lower(value)
+}
+
+
+public struct TodaySentence: Equatable, Hashable {
+    public var parts: [TodayPart]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(parts: [TodayPart]) {
+        self.parts = parts
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TodaySentence: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTodaySentence: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TodaySentence {
+        return
+            try TodaySentence(
+                parts: FfiConverterSequenceTypeTodayPart.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TodaySentence, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeTodayPart.write(value.parts, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTodaySentence_lift(_ buf: RustBuffer) throws -> TodaySentence {
+    return try FfiConverterTypeTodaySentence.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTodaySentence_lower(_ value: TodaySentence) -> RustBuffer {
+    return FfiConverterTypeTodaySentence.lower(value)
+}
+
+
+public struct TodaySlot: Equatable, Hashable {
+    public var label: String
+    public var now: Bool
+    public var prompts: UInt32
+    public var hours: [TodayHour]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(label: String, now: Bool, prompts: UInt32, hours: [TodayHour]) {
+        self.label = label
+        self.now = now
+        self.prompts = prompts
+        self.hours = hours
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TodaySlot: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTodaySlot: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TodaySlot {
+        return
+            try TodaySlot(
+                label: FfiConverterString.read(from: &buf), 
+                now: FfiConverterBool.read(from: &buf), 
+                prompts: FfiConverterUInt32.read(from: &buf), 
+                hours: FfiConverterSequenceTypeTodayHour.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TodaySlot, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterBool.write(value.now, into: &buf)
+        FfiConverterUInt32.write(value.prompts, into: &buf)
+        FfiConverterSequenceTypeTodayHour.write(value.hours, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTodaySlot_lift(_ buf: RustBuffer) throws -> TodaySlot {
+    return try FfiConverterTypeTodaySlot.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTodaySlot_lower(_ value: TodaySlot) -> RustBuffer {
+    return FfiConverterTypeTodaySlot.lower(value)
+}
+
+
+public struct TodayTask: Equatable, Hashable {
+    public var id: String
+    public var title: String
+    public var meta: String?
+    public var overdue: Bool
+    public var done: Bool
+    public var host: HostRef?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, title: String, meta: String?, overdue: Bool, done: Bool, host: HostRef?) {
+        self.id = id
+        self.title = title
+        self.meta = meta
+        self.overdue = overdue
+        self.done = done
+        self.host = host
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TodayTask: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTodayTask: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TodayTask {
+        return
+            try TodayTask(
+                id: FfiConverterString.read(from: &buf), 
+                title: FfiConverterString.read(from: &buf), 
+                meta: FfiConverterOptionString.read(from: &buf), 
+                overdue: FfiConverterBool.read(from: &buf), 
+                done: FfiConverterBool.read(from: &buf), 
+                host: FfiConverterOptionTypeHostRef.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TodayTask, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterOptionString.write(value.meta, into: &buf)
+        FfiConverterBool.write(value.overdue, into: &buf)
+        FfiConverterBool.write(value.done, into: &buf)
+        FfiConverterOptionTypeHostRef.write(value.host, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTodayTask_lift(_ buf: RustBuffer) throws -> TodayTask {
+    return try FfiConverterTypeTodayTask.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTodayTask_lower(_ value: TodayTask) -> RustBuffer {
+    return FfiConverterTypeTodayTask.lower(value)
+}
+
+
+public struct TodayUsage: Equatable, Hashable {
+    public var harness: String
+    public var harnessName: String
+    public var window: String
+    public var usedFraction: Float
+    public var resetsIn: String?
+    public var host: HostRef
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(harness: String, harnessName: String, window: String, usedFraction: Float, resetsIn: String?, host: HostRef) {
+        self.harness = harness
+        self.harnessName = harnessName
+        self.window = window
+        self.usedFraction = usedFraction
+        self.resetsIn = resetsIn
+        self.host = host
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TodayUsage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTodayUsage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TodayUsage {
+        return
+            try TodayUsage(
+                harness: FfiConverterString.read(from: &buf), 
+                harnessName: FfiConverterString.read(from: &buf), 
+                window: FfiConverterString.read(from: &buf), 
+                usedFraction: FfiConverterFloat.read(from: &buf), 
+                resetsIn: FfiConverterOptionString.read(from: &buf), 
+                host: FfiConverterTypeHostRef.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TodayUsage, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.harness, into: &buf)
+        FfiConverterString.write(value.harnessName, into: &buf)
+        FfiConverterString.write(value.window, into: &buf)
+        FfiConverterFloat.write(value.usedFraction, into: &buf)
+        FfiConverterOptionString.write(value.resetsIn, into: &buf)
+        FfiConverterTypeHostRef.write(value.host, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTodayUsage_lift(_ buf: RustBuffer) throws -> TodayUsage {
+    return try FfiConverterTypeTodayUsage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTodayUsage_lower(_ value: TodayUsage) -> RustBuffer {
+    return FfiConverterTypeTodayUsage.lower(value)
 }
 
 
@@ -17056,6 +17484,88 @@ public func FfiConverterTypeTaskStatus_lower(_ value: TaskStatus) -> RustBuffer 
 
 
 
+public enum TodayPart: Equatable, Hashable {
+    
+    case text(text: String
+    )
+    case strong(text: String
+    )
+    case bad(text: String
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension TodayPart: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTodayPart: FfiConverterRustBuffer {
+    typealias SwiftType = TodayPart
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TodayPart {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .text(text: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 2: return .strong(text: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 3: return .bad(text: try FfiConverterString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: TodayPart, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .text(text):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(text, into: &buf)
+            
+        
+        case let .strong(text):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(text, into: &buf)
+            
+        
+        case let .bad(text):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(text, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTodayPart_lift(_ buf: RustBuffer) throws -> TodayPart {
+    return try FfiConverterTypeTodayPart.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTodayPart_lower(_ value: TodayPart) -> RustBuffer {
+    return FfiConverterTypeTodayPart.lower(value)
+}
+
+
+
+
 public enum TranscriptScale: Equatable, Hashable {
     
     case normal
@@ -18957,6 +19467,30 @@ fileprivate struct FfiConverterOptionTypeTaskDetail: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeTodayUsage: FfiConverterRustBuffer {
+    typealias SwiftType = TodayUsage?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeTodayUsage.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeTodayUsage.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWatchState: FfiConverterRustBuffer {
     typealias SwiftType = WatchState?
 
@@ -20173,6 +20707,106 @@ fileprivate struct FfiConverterSequenceTypeTextRun: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeTodayHour: FfiConverterRustBuffer {
+    typealias SwiftType = [TodayHour]
+
+    public static func write(_ value: [TodayHour], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTodayHour.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TodayHour] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TodayHour]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTodayHour.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTodaySentence: FfiConverterRustBuffer {
+    typealias SwiftType = [TodaySentence]
+
+    public static func write(_ value: [TodaySentence], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTodaySentence.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TodaySentence] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TodaySentence]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTodaySentence.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTodaySlot: FfiConverterRustBuffer {
+    typealias SwiftType = [TodaySlot]
+
+    public static func write(_ value: [TodaySlot], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTodaySlot.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TodaySlot] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TodaySlot]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTodaySlot.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTodayTask: FfiConverterRustBuffer {
+    typealias SwiftType = [TodayTask]
+
+    public static func write(_ value: [TodayTask], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTodayTask.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TodayTask] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TodayTask]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTodayTask.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeUserImage: FfiConverterRustBuffer {
     typealias SwiftType = [UserImage]
 
@@ -20365,6 +20999,31 @@ fileprivate struct FfiConverterSequenceTypeWidget: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeWidget.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTodayPart: FfiConverterRustBuffer {
+    typealias SwiftType = [TodayPart]
+
+    public static func write(_ value: [TodayPart], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTodayPart.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TodayPart] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TodayPart]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTodayPart.read(from: &buf))
         }
         return seq
     }
@@ -21226,6 +21885,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_watch_state() != 26199) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_refresh_today() != 22732) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_today_page() != 6942) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_start_voice() != 62086) {
