@@ -2222,6 +2222,30 @@ pub struct AgentProfilesSnapshot {
     pub profiles: Vec<AgentProfile>,
 }
 
+/// "Claude Code · Opus 5.5 · Auto · High · 2 tools off" under a profile's name.
+pub fn profile_line(
+    harness_name: &str,
+    model: Option<&str>,
+    mode: Option<PermissionMode>,
+    reasoning: Option<ReasoningLevel>,
+    tools_off: usize,
+) -> String {
+    let mut parts = vec![harness_name.to_string()];
+    if let Some(model) = model {
+        parts.push(model.to_string());
+    }
+    if let Some(mode) = mode {
+        parts.push(mode.short_label().to_string());
+    }
+    if let Some(level) = reasoning {
+        parts.push(level.label().to_string());
+    }
+    if tools_off > 0 {
+        parts.push(format!("{tools_off} tools off"));
+    }
+    parts.join(" · ")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectActionsSnapshot {

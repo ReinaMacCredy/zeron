@@ -5,9 +5,8 @@
 //! (experimentalApi). This snapshot is the failure/offline fallback, kept in
 //! newest-first order so a picker remains useful when discovery cannot run.
 
-use zeron_proto::{
-    Model, ModelOption, ModelOptionChoice, PermissionMode, ReasoningLevel, SandboxLevel,
-};
+pub(crate) use zeron_proto::model_catalog::codex::static_models;
+use zeron_proto::{PermissionMode, ReasoningLevel, SandboxLevel};
 
 /// The unified reasoning ladder Codex accepts (`minimal` is offered but clamped
 /// on the wire — see [`to_effort`]).
@@ -88,139 +87,6 @@ pub(crate) fn sandbox_policy_value(sandbox: SandboxLevel) -> serde_json::Value {
         policy.insert("networkAccess".into(), true.into());
     }
     serde_json::Value::Object(policy)
-}
-
-const ULTRA_LADDER: &[ReasoningLevel] = &[
-    ReasoningLevel::Low,
-    ReasoningLevel::Medium,
-    ReasoningLevel::High,
-    ReasoningLevel::XHigh,
-    ReasoningLevel::Max,
-    ReasoningLevel::Ultra,
-];
-
-const MAX_LADDER: &[ReasoningLevel] = &[
-    ReasoningLevel::Low,
-    ReasoningLevel::Medium,
-    ReasoningLevel::High,
-    ReasoningLevel::XHigh,
-    ReasoningLevel::Max,
-];
-
-const XHIGH_LADDER: &[ReasoningLevel] = &[
-    ReasoningLevel::Low,
-    ReasoningLevel::Medium,
-    ReasoningLevel::High,
-    ReasoningLevel::XHigh,
-];
-
-/// The service-tier select the app server reports per model (`serviceTiers` /
-/// `additionalSpeedTiers` in `model/list`); "default" means Standard and is
-/// omitted from the wire params entirely.
-fn service_tier() -> ModelOption {
-    ModelOption {
-        id: "serviceTier".into(),
-        label: "Service Tier".into(),
-        choices: vec![
-            ModelOptionChoice {
-                id: "default".into(),
-                label: "Standard".into(),
-            },
-            ModelOptionChoice {
-                id: "fast".into(),
-                label: "Fast".into(),
-            },
-        ],
-        default_choice: "default".into(),
-    }
-}
-
-fn model(
-    id: &str,
-    label: &str,
-    description: &str,
-    ladder: &[ReasoningLevel],
-    options: Vec<ModelOption>,
-) -> Model {
-    Model {
-        id: id.into(),
-        label: label.into(),
-        description: (!description.is_empty()).then(|| description.into()),
-        reasoning_levels: ladder.to_vec(),
-        options,
-    }
-}
-
-/// The curated fallback catalog: newest family first, with efforts as the
-/// app server reports them. Daybreak Blue reports NO service tiers, so it
-/// carries no trait — sending `serviceTier: priority` for it would be
-/// rejected. The live `model/list` remains authoritative whenever available.
-pub(crate) fn static_models() -> Vec<Model> {
-    vec![
-        model(
-            "gpt-6-astra",
-            "GPT-6-Astra",
-            "Our most capable model for complex, demanding work.",
-            ULTRA_LADDER,
-            vec![service_tier()],
-        ),
-        model(
-            "gpt-5.6-sol",
-            "GPT-5.6-Sol",
-            "Frontier reasoning flagship",
-            ULTRA_LADDER,
-            vec![service_tier()],
-        ),
-        model(
-            "gpt-5.6-terra",
-            "GPT-5.6-Terra",
-            "Deep multi-step agentic work",
-            ULTRA_LADDER,
-            vec![service_tier()],
-        ),
-        model(
-            "gpt-5.6-luna",
-            "GPT-5.6-Luna",
-            "Fast frontier model",
-            MAX_LADDER,
-            vec![service_tier()],
-        ),
-        model(
-            "gpt-daybreak-blue-latest",
-            "Daybreak Blue",
-            "Frontier model for defensive cybersecurity work",
-            ULTRA_LADDER,
-            Vec::new(),
-        ),
-        model(
-            "gpt-5.5",
-            "GPT-5.5",
-            "Previous generation flagship",
-            XHIGH_LADDER,
-            vec![service_tier()],
-        ),
-        model(
-            "gpt-5.4",
-            "GPT-5.4",
-            "Reliable general coding",
-            XHIGH_LADDER,
-            vec![service_tier()],
-        ),
-        model(
-            "gpt-5.4-mini",
-            "GPT-5.4-Mini",
-            "Small, fast and capable",
-            XHIGH_LADDER,
-            vec![service_tier()],
-        ),
-        model(
-            "gpt-5.3-codex-spark",
-            "GPT-5.3-Codex-Spark",
-            "Ultra-fast lightweight coding",
-            XHIGH_LADDER,
-            vec![service_tier()],
-        ),
-    ]
 }
 
 #[cfg(test)]

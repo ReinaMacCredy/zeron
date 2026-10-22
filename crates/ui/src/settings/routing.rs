@@ -24,43 +24,8 @@ const REASONING_WIDTH: f32 = 100.0;
 const QUOTA_WIDTH: f32 = 140.0;
 const GAP: f32 = 8.0;
 
-const ROLES: [(Role, &str); 5] = [
-    (Role::Worker, "Write and change code, incl. tests"),
-    (
-        Role::Validator,
-        "Review a diff or finished step, run tests and QA",
-    ),
-    (Role::Research, "Read code, docs and the web, report back"),
-    (Role::Design, "Shape an approach or a UI before code"),
-    (Role::General, "Anything else"),
-];
-
-const POLICIES: [(OutOfQuota, &str, &str); 4] = [
-    (
-        OutOfQuota::Native,
-        "Native sub-agent",
-        "Run the work as the chat's own sub-agent, on the chat's model. If native sub-agents \
-         are Off, open a Zeron child on the chat's model instead. Mid-run: switch the child to \
-         the chat's model.",
-    ),
-    (
-        OutOfQuota::NextInList,
-        "Next in fallback list",
-        "Try the next harness below that still has quota.",
-    ),
-    (
-        OutOfQuota::Wait,
-        "Wait for reset",
-        "Start or resume when the window resets, like auto-resume today.",
-    ),
-    (
-        OutOfQuota::Ask,
-        "Ask me",
-        "Stop and ask in the chat, with the options above.",
-    ),
-];
-
 use zeron_engine::routing::preview::{Preview, Row as PreviewRow};
+use zeron_proto::routing::{multiplier_text, short_name};
 
 struct Quota {
     fraction: f32,
@@ -338,32 +303,6 @@ fn exhausted(preview: Option<&Preview>, harness: HarnessId, cx: &App) -> bool {
     quota(preview, harness, cx).is_some_and(|quota| quota.fraction >= 1.0)
 }
 
-fn short_name(harness: HarnessId) -> &'static str {
-    let name = harness.display_name();
-    name.split(' ').next().unwrap_or(name)
-}
-
-fn target_label(target: &RouteTarget) -> String {
-    match &target.model {
-        Some(model) => format!("{} {model}", target.harness.display_name()),
-        None => target.harness.display_name().to_string(),
-    }
-}
-
-fn multiplier_text(multiplier: f64) -> String {
-    let text = format!("{multiplier:.2}");
-    let text = text.trim_end_matches('0').trim_end_matches('.');
-    format!("{text}x")
-}
-
-fn until(resets_at: Option<i64>) -> Option<String> {
-    let at = Utc.timestamp_millis_opt(resets_at?).single()?;
-    Some(format!(
-        "until {}",
-        at.with_timezone(&chrono::Local).format("%-I:%M %p")
-    ))
-}
-
 fn brand_icon(harness: HarnessId, size: f32, theme: &Theme) -> AnyElement {
     let (mark, tint) = crate::pickers::harness_brand_icon(harness);
     crate::icons::icon(mark)
@@ -565,8 +504,8 @@ impl RoutingPage {
                 .child(header("Reasoning".into(), Some(REASONING_WIDTH)))
                 .child(header("Quota".into(), Some(QUOTA_WIDTH))),
         );
-        for (ix, (role, meaning)) in ROLES.into_iter().enumerate() {
-            card = card.child(self.render_role(ix, role, meaning, theme, cx));
+        for (ix, role) in Role::ALL.into_iter().enumerate() {
+            card = card.child(self.render_role(ix, role, role.summary(), theme, cx));
         }
         div()
             .mt(px(24.0))
@@ -607,38 +546,8 @@ impl RoutingPage {
             )),
             _ => None,
         };
-        let fell_back = preview
-            .as_ref()
-            .is_some_and(|row| row.source == "fell_back" || row.fallback.is_some());
-        let fallback_line = preview
-            .as_ref()
-            .filter(|_| fell_back)
-            .map(|row| match &row.fallback {
-                Some(fallback) => {
-                    let line = match (&fallback.target, fallback.native) {
-                        (Some(target), true) => format!(
-                            "Falling back: {} native sub-agent",
-                            short_name(target.harness)
-                        ),
-                        (Some(target), false) => format!("Falling back: {}", target_label(target)),
-                        (None, _) => format!("Out of quota: {}", fallback.reason),
-                    };
-                    match until(fallback.resets_at) {
-                        Some(until) => format!("{line} {until}"),
-                        None => line,
-                    }
-                }
-                None => {
-                    let to = row
-                        .target
-                        .as_ref()
-                        .map_or_else(|| "the chat's model".to_string(), target_label);
-                    match &row.reason {
-                        Some(reason) => format!("Falling back: {to} ({reason})"),
-                        None => format!("Falling back: {to}"),
-                    }
-                }
-            });
+        let fell_back = preview.as_ref().is_some_and(PreviewRow::fell_back);
+        let fallback_line = preview.as_ref().and_then(PreviewRow::fallback_line);
         let description = match (&fallback_line, &target_quota) {
             (Some(line), _) => small(theme.accent, line.clone()),
             (None, Some((_, None))) => small(
@@ -947,11 +856,7 @@ impl RoutingPage {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let current = settings.out_of_quota;
-        let (_, label, _) = POLICIES
-            .iter()
-            .find(|(policy, _, _)| *policy == current)
-            .copied()
-            .unwrap_or(POLICIES[0]);
+        let label = current.label();
         let value = if current == OutOfQuota::Native {
             format!("{label} (Recommended)")
         } else {
@@ -964,11 +869,11 @@ impl RoutingPage {
             .aria_label(format!("When out of quota: {value}"))
             .child(widgets::select_value(value))
             .child(widgets::select_chevron(theme, open));
-        let entries = POLICIES
+        let entries = OutOfQuota::ALL
             .iter()
-            .map(|(policy, label, meaning)| MenuEntry {
-                label: (*label).into(),
-                detail: Some((*meaning).into()),
+            .map(|policy| MenuEntry {
+                label: policy.label().into(),
+                detail: Some(policy.detail().into()),
                 badge: (*policy == OutOfQuota::Native).then_some("Recommended"),
                 harness: None,
                 selected: *policy == current,
@@ -981,7 +886,7 @@ impl RoutingPage {
             320.0,
             entries,
             |page, ix, cx| {
-                if let Some((policy, _, _)) = POLICIES.get(ix).copied() {
+                if let Some(policy) = OutOfQuota::ALL.get(ix).copied() {
                     page.save(move |settings| settings.out_of_quota = policy, cx);
                 }
             },
@@ -993,11 +898,7 @@ impl RoutingPage {
         let mid_run = widgets::segmented(
             theme,
             "routing-mid-run",
-            &[
-                (MidRun::Ask, "Ask"),
-                (MidRun::After10s, "10 s"),
-                (MidRun::After30s, "30 s"),
-            ],
+            &MidRun::ALL,
             settings.mid_run,
             move |mid_run, _, cx| {
                 this.update(cx, |page, cx| {

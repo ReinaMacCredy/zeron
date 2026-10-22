@@ -124,45 +124,8 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
     }
 }
 
-/// A provider's version line: the installed version, plus only what the
-/// Update button doesn't already say (progress, a failure), all in one muted
-/// tone. Up-to-date providers, checks in flight and providers whose updates
-/// aren't monitored show just the version, so rows don't flash through
-/// states while checks run.
 fn harness_update_label(status: &HarnessUpdateStatus, theme: &Theme) -> (SharedString, gpui::Hsla) {
-    let installed = status
-        .installed_version
-        .as_deref()
-        .map(|version| format!("v{version}"));
-    let with = |detail: &str| match &installed {
-        Some(version) => format!("{version} · {detail}"),
-        None => detail.to_owned(),
-    };
-    let version_only = || installed.clone().unwrap_or_default();
-    let label = match status.phase {
-        HarnessUpdatePhase::Dormant
-        | HarnessUpdatePhase::Checking
-        | HarnessUpdatePhase::Current => version_only(),
-        // The row's Update button already says it; one Zeron can only
-        // describe (a command to run yourself) is just the version too.
-        HarnessUpdatePhase::Available | HarnessUpdatePhase::ManualActionRequired
-            if status.can_apply =>
-        {
-            version_only()
-        }
-        HarnessUpdatePhase::Available => match status.latest_version.as_deref() {
-            Some(latest) => with(&format!("v{latest} available")),
-            None => with("Update available"),
-        },
-        HarnessUpdatePhase::ManualActionRequired => version_only(),
-        HarnessUpdatePhase::WaitingForIdle => with("Waiting for agent to be idle"),
-        HarnessUpdatePhase::Preparing => with("Preparing update…"),
-        HarnessUpdatePhase::Downloading => with("Downloading…"),
-        HarnessUpdatePhase::Installing => with("Installing…"),
-        HarnessUpdatePhase::Verifying => with("Verifying…"),
-        HarnessUpdatePhase::Updated => with("Updated"),
-        HarnessUpdatePhase::Failed => with("Couldn't check for updates"),
-    };
+    let label = status.version_line();
     let color = match status.phase {
         HarnessUpdatePhase::Failed => theme.danger_muted,
         _ => theme.text_muted.opacity(0.75),
