@@ -45,6 +45,7 @@ The account in use is marked **In use**. Click another account to switch to it, 
 Below the tiles, **Or choose from ACP Registry** searches the registry of agents that speak the Agent Client Protocol. Each result shows its version and how it installs, and **Installed** when it is already set up. Click **Add** to download or prepare it, give it a label, then choose **Continue to sign-in**. The **Sign in** step lists the sign-in methods the agent offers, or links to its docs with **Open docs** when it has none in the app. **Skip for now** finishes without signing in.
 
 - **Enter manually** takes an agent ID from the official ACP Registry, for example `devin`.
+- An agent marked **unverified** downloads a program the registry publishes no checksum for, so Zeron cannot check it. Its **Add** turns into **Add anyway** on the first click, and under **Enter manually** **Next** does the same; click again to install it unchecked.
 - **Local ACP command** runs an ACP agent that is already installed: set its **Executable** (an absolute path or a command on PATH), **Arguments**, and **Environment**, click **Next**, give it a **Label** on the **Identity** step, then **Add instance**.
 
 ## Instances on the Providers page
