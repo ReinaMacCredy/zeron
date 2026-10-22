@@ -96,9 +96,8 @@ fn item_quote(item: &SupervisorItem, mission: Option<&str>) -> String {
 }
 
 fn input_quote(input: &NeedsYouInput, who: &str) -> String {
-    let row = NeedsYouRow::Input(input.clone());
     let mut quote = vec![
-        format!("Needs you: {}", row_title(&row)),
+        format!("Needs you: {}", input_title(&input.questions)),
         format!("Asked by {who}"),
     ];
     for question in &input.questions {
@@ -234,9 +233,9 @@ impl SupervisorPage {
         let total = feed.open.len();
         let mut tabs = vec![(None, total)];
         tabs.extend(
-            Kind::chips()
-                .into_iter()
-                .map(|kind| (Some(kind), feed.count(kind))),
+            Kind::CHIPS
+                .iter()
+                .map(|&kind| (Some(kind), feed.count(kind))),
         );
         let origin = self.tabs.clone();
         let underline = self.underline_rect(now);
@@ -385,7 +384,7 @@ impl SupervisorPage {
             .values()
             .filter(|motion| !motion.fold.gone(now))
             .collect();
-        let groups = feed::grouped(motions.iter().map(|motion| &motion.row));
+        let groups = feed::grouped(motions.iter().map(|motion| &*motion.row));
         let narrow = self
             .rail
             .as_ref()
@@ -464,23 +463,31 @@ impl SupervisorPage {
         let key = group.key();
         let mission = group
             .task
-            .and_then(|task| missions.iter().find(|m| m.plan && m.key == task));
+            .and_then(|task| missions.iter().find(|m| m.key == task));
         let title = match (group.task, mission) {
             (None, _) => "Supervisor and shared".to_owned(),
             (Some(_), Some(mission)) => mission.title.clone(),
-            (Some(task), None) => {
-                mission_title(self.state.read(cx), Some(task)).unwrap_or_else(|| "A mission".into())
+            (Some(key), None) => {
+                let state = self.state.read(cx);
+                mission_title(state, Some(key))
+                    .or_else(|| {
+                        let root = state.chats.iter().find(|chat| chat.id == key)?;
+                        Some(crate::transcript::single_line(&crate::home::chat_title(
+                            root,
+                        )))
+                    })
+                    .unwrap_or_else(|| "A mission".into())
             }
         };
         let open_needs = feed
             .open
             .iter()
-            .filter(|row| row.kind == Kind::Needs && feed::task_of(&row.entry) == group.task)
+            .filter(|row| row.kind == Kind::Needs && row.group.as_deref() == group.task)
             .count();
         let updates = feed
             .open
             .iter()
-            .filter(|row| row.kind != Kind::Needs && feed::task_of(&row.entry) == group.task)
+            .filter(|row| row.kind != Kind::Needs && row.group.as_deref() == group.task)
             .count();
         let tick = self
             .groups
@@ -650,9 +657,9 @@ impl SupervisorPage {
                     self.render_answer(row, needs, reply, mission, now, theme, cx)
                 }
                 _ => match needs {
-                    NeedsYouRow::Item(item) => self.render_item(&row.key, item, q_width, theme, cx),
+                    NeedsYouRow::Item(item) => self.render_item(row, item, q_width, theme, cx),
                     NeedsYouRow::Input(input) => {
-                        self.render_input(&row.key, input, q_width, mission, theme, cx)
+                        self.render_input(row, input, q_width, mission, theme, cx)
                     }
                 },
             },
@@ -790,15 +797,17 @@ impl SupervisorPage {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let group = SharedString::from(format!("supervisor-row-{key}"));
-        let reply = icon_button(
-            theme,
-            format!("{selector}-discuss"),
-            "Reply (Discuss)",
-            icons::LUCIDE_MESSAGE_SQUARE,
-        )
-        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-            cx.emit(SupervisorEvent::Discuss(quote.clone()))
-        }));
+        let reply = self.pane.is_some().then(|| {
+            icon_button(
+                theme,
+                format!("{selector}-discuss"),
+                "Reply (Discuss)",
+                icons::LUCIDE_MESSAGE_SQUARE,
+            )
+            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                cx.emit(SupervisorEvent::Discuss(quote.clone()))
+            }))
+        });
         let open = thread.map(|chat_id| {
             icon_button(
                 theme,
@@ -832,20 +841,21 @@ impl SupervisorPage {
                     .opacity(0.0)
                     .group_hover(group, |s| s.opacity(1.0))
                     .children(open)
-                    .child(reply),
+                    .children(reply),
             )
     }
 
     fn render_item(
         &self,
-        key: &str,
+        row: &Row,
         item: &SupervisorItem,
         q_width: f32,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let sel = format!("supervisor-needs-item-{}", item.id);
-        let group = item.task_id.clone().unwrap_or_default();
+        let key = row.key.as_str();
+        let group = row.group.clone().unwrap_or_default();
         let picked = self.staged(key, "");
         let mission_name = mission_title(self.state.read(cx), item.task_id.as_deref());
         let title = strip_mission(&item.title, mission_name.as_deref());
@@ -889,58 +899,60 @@ impl SupervisorPage {
 
     fn render_input(
         &self,
-        key: &str,
+        shown: &Row,
         input: &NeedsYouInput,
         q_width: f32,
         mission: Option<&str>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let key = shown.key.as_str();
         let sel = format!(
             "supervisor-needs-input-{}",
             input.request_id.replace(':', "-")
         );
-        let row = NeedsYouRow::Input(input.clone());
         let who = asker_name(input, self.state.read(cx), Utc::now());
         let quote = input_quote(input, &who);
         let thread = (input.asker != InputAsker::Supervisor).then(|| input.chat_id.clone());
-        let title = strip_mission(&row_title(&row), mission);
+        let title = strip_mission(&input_title(&input.questions), mission);
         let approval = input.questions.iter().any(|question| question.approval);
-        if sheet_row(&Entry::Needs(row.clone())).is_none() {
+        if sheet_row(&shown.entry).is_none() {
             let chat_id = input.chat_id.clone();
             let supervisor = input.asker == InputAsker::Supervisor;
             let reply_quote = quote.clone();
-            let link = div()
-                .id(SharedString::from(format!("{sel}-reply")))
-                .debug_selector({
-                    let sel = sel.clone();
-                    move || format!("{sel}-reply")
-                })
-                .role(gpui::Role::Button)
-                .flex_none()
-                .cursor_pointer()
-                .text_size(ui_rems(12.0))
-                .text_color(theme.text_muted)
-                .hover(|s| s.text_color(theme.text))
-                .child("Reply in conversation")
-                .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
-                    if supervisor {
-                        page.open_conversation(cx);
-                        cx.emit(SupervisorEvent::Discuss(reply_quote.clone()));
-                    } else {
-                        cx.emit(SupervisorEvent::OpenChat(chat_id.clone()));
-                    }
-                }));
+            let link = (!supervisor || self.pane.is_some()).then(|| {
+                div()
+                    .id(SharedString::from(format!("{sel}-reply")))
+                    .debug_selector({
+                        let sel = sel.clone();
+                        move || format!("{sel}-reply")
+                    })
+                    .role(gpui::Role::Button)
+                    .flex_none()
+                    .cursor_pointer()
+                    .text_size(ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .hover(|s| s.text_color(theme.text))
+                    .child("Reply in conversation")
+                    .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
+                        if supervisor {
+                            page.open_conversation(cx);
+                            cx.emit(SupervisorEvent::Discuss(reply_quote.clone()));
+                        } else {
+                            cx.emit(SupervisorEvent::OpenChat(chat_id.clone()));
+                        }
+                    }))
+            });
             return self
                 .row_shell(key, sel, title.clone(), theme)
                 .child(mark(unread(theme)))
                 .child(question_cell(theme, title, q_width, None))
-                .child(link)
+                .children(link)
                 .child(faint(theme, "Typed answer".into()))
                 .child(time_cell(theme, clock(input.at)))
                 .into_any_element();
         }
-        let group = input.task_id.clone().unwrap_or_default();
+        let group = shown.group.clone().unwrap_or_default();
         let multi = input.questions.len() > 1;
         let mut lines = div().flex().flex_col();
         for (qx, question) in input.questions.iter().enumerate() {
@@ -1237,19 +1249,20 @@ impl SupervisorPage {
                     })
                     .child(format!("{picked} of {total} picked")),
             )
-            .child("·")
-            .child(
-                div()
-                    .id(SharedString::from(reply_sel.clone()))
-                    .debug_selector(move || reply_sel.clone())
-                    .role(gpui::Role::Button)
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme.text))
-                    .child("Reply with a note")
-                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                        cx.emit(SupervisorEvent::Discuss(quote.clone()))
-                    })),
-            )
+            .when(self.pane.is_some(), |el| {
+                el.child("·").child(
+                    div()
+                        .id(SharedString::from(reply_sel.clone()))
+                        .debug_selector(move || reply_sel.clone())
+                        .role(gpui::Role::Button)
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.text))
+                        .child("Reply with a note")
+                        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                            cx.emit(SupervisorEvent::Discuss(quote.clone()))
+                        })),
+                )
+            })
             .child(div().flex_1())
             .child(
                 div()
@@ -1270,20 +1283,23 @@ impl SupervisorPage {
                     .when(!enabled, |el| el.opacity(0.35))
                     .when(enabled, |el| el.cursor_pointer().hover(|s| s.opacity(0.9)))
                     .child(label)
-                    .when(!compact, |el| {
-                        el.child(
-                            div()
-                                .px(px(4.0))
-                                .rounded(px(4.0))
-                                .border_1()
-                                .border_color(theme.on_solid.opacity(0.5))
-                                .font_family(theme.font_mono.clone())
-                                .text_size(ui_rems(10.5))
-                                .line_height(ui_rems(15.0))
-                                .opacity(0.7)
-                                .child("⌘↵"),
-                        )
-                    })
+                    .when(
+                        !compact && self.last_sheet.as_deref() == Some(group),
+                        |el| {
+                            el.child(
+                                div()
+                                    .px(px(4.0))
+                                    .rounded(px(4.0))
+                                    .border_1()
+                                    .border_color(theme.on_solid.opacity(0.5))
+                                    .font_family(theme.font_mono.clone())
+                                    .text_size(ui_rems(10.5))
+                                    .line_height(ui_rems(15.0))
+                                    .opacity(0.7)
+                                    .child("⌘↵"),
+                            )
+                        },
+                    )
                     .when(enabled, |el| {
                         el.on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
                             page.send_sheet(&send_group, cx)
@@ -1696,11 +1712,24 @@ impl SupervisorPage {
     ) -> AnyElement {
         let key = row_key(&answered.row);
         let (task_id, _) = row_origin(&answered.row);
-        let mission = mission_title(self.state.read(cx), task_id);
+        let state = self.state.read(cx);
+        let mission = mission_title(state, task_id);
         let title = strip_mission(&row_title(&answered.row), mission.as_deref());
-        let choice = match &answered.choice {
-            Some(choice) => format!("→ {choice}"),
-            None => "Answered".to_owned(),
+        let decided = |id: &str| {
+            state
+                .supervisor
+                .as_ref()?
+                .interventions
+                .iter()
+                .filter_map(|row| row.item.as_ref())
+                .find(|item| item.id == id)
+                .and_then(|item| Some(item.answer.as_ref()?.choice.clone()))
+        };
+        let choice = match (&answered.choice, &answered.row) {
+            (Some(choice), _) => format!("→ {choice}"),
+            (None, NeedsYouRow::Item(item)) => decided(&item.id)
+                .map_or_else(|| "Answered".to_owned(), |choice| format!("→ {choice}")),
+            (None, NeedsYouRow::Input(_)) => "Closed".to_owned(),
         };
         self.other_shell(
             &key,
@@ -1725,7 +1754,7 @@ impl SupervisorPage {
 
     fn render_earlier(
         &self,
-        rows: &[Row],
+        rows: &[Rc<Row>],
         now: Instant,
         theme: &Theme,
         cx: &mut Context<Self>,

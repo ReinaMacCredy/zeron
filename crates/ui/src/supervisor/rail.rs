@@ -83,7 +83,6 @@ pub(super) fn mission_tone(mission: &Mission, theme: &Theme) -> Hsla {
     let tone = |indicator| crate::shell::chat_status_tone(indicator, theme).2;
     match mission.status {
         TaskStatus::NeedsYou => tone(ChatIndicator::AwaitingInput),
-        TaskStatus::Working => tone(ChatIndicator::Working),
         _ => tone(ChatIndicator::Completed),
     }
 }
@@ -224,7 +223,7 @@ impl SupervisorPage {
                     .open
                     .iter()
                     .filter(|row| {
-                        row.kind == Kind::Needs && feed::task_of(&row.entry) == Some(id.as_str())
+                        row.kind == Kind::Needs && row.group.as_deref() == Some(id.as_str())
                     })
                     .count();
                 let tick = self
@@ -367,6 +366,7 @@ impl SupervisorPage {
             watch => {
                 let on = *watch == Watch::Watched;
                 let params = watch_params(mission, !on);
+                let key = mission.key.clone();
                 div()
                     .flex()
                     .items_center()
@@ -386,7 +386,7 @@ impl SupervisorPage {
                         .on_click(cx.listener(
                             move |page, _: &ClickEvent, _, cx| {
                                 cx.stop_propagation();
-                                page.send_watch(params.clone(), cx);
+                                page.send_watch(key.clone(), params.clone(), cx);
                             },
                         )),
                     )
@@ -410,6 +410,10 @@ impl SupervisorPage {
             .flex_col()
             .children(tree)
             .child(tail)
+            .children(
+                self.watch_error_line(task_id, theme)
+                    .map(|line| line.pl(px(37.0)).pr(px(12.0)).pb(px(7.0))),
+            )
             .into_any_element()
     }
 
@@ -505,9 +509,9 @@ impl SupervisorPage {
                     .child(div().h_full().w(relative(fill)).bg(arc)),
             )
             .child(chevron(theme, turn * 90.0))
-            .on_click(
-                cx.listener(move |page, _: &ClickEvent, _, cx| page.toggle_mission(&toggle_id, cx)),
-            );
+            .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
+                page.set_mission_open(&toggle_id, !expanded, cx)
+            }));
         let body = motion
             .filter(|motion| !motion.fold.gone(now))
             .map(|motion| {
@@ -515,9 +519,7 @@ impl SupervisorPage {
                     format!("supervisor-mission-fold-{}", key),
                     &motion.fold,
                     now,
-                    div()
-                        .opacity(motion.fold.value(now))
-                        .child(self.render_owners(mission, narrow, theme, cx)),
+                    self.render_owners(mission, narrow, theme, cx),
                 )
             });
         let amber = needs_tone(theme);

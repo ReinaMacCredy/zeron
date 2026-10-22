@@ -700,6 +700,7 @@ pub(crate) struct MissionRow {
     pub progress: PlanProgress,
     pub status: TaskStatus,
     pub label: String,
+    pub current: Option<String>,
 }
 
 pub(crate) fn mission_rows(state: &AppState, now: DateTime<Utc>) -> Vec<MissionRow> {
@@ -743,8 +744,20 @@ fn mission_row_of(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>
     let plan = crate::tasks::rollup(state, task, now);
     let phase = plan.phase(task);
     let (word, status) = plan.label(task);
+    let held = crate::supervisor::approval_held(state, &task.id, now);
+    let current = plan
+        .steps
+        .iter()
+        .position(|row| !matches!(row.status, StepStatus::Done | StepStatus::Skipped))
+        .or_else(|| {
+            plan.steps
+                .iter()
+                .rposition(|row| row.status != StepStatus::Skipped)
+        })
+        .or(plan.steps.len().checked_sub(1));
     let label = match phase {
         PlanPhase::PlanReady => "Needs you · plan review".to_owned(),
+        _ if held => crate::supervisor::HELD_APPROVAL.to_owned(),
         PlanPhase::Planning => "Planning".to_owned(),
         PlanPhase::Status(TaskStatus::NeedsYou) => plan
             .steps
@@ -752,31 +765,26 @@ fn mission_row_of(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>
             .position(|row| matches!(row.status, StepStatus::NeedsYou | StepStatus::Failed))
             .map(|index| format!("Needs you · step {}", index + 1))
             .unwrap_or_else(|| word.to_owned()),
-        _ if plan.steps.is_empty() => word.to_owned(),
-        _ => {
-            let counted: Vec<StepStatus> = plan
-                .steps
-                .iter()
-                .map(|row| row.status)
-                .filter(|status| *status != StepStatus::Skipped)
-                .collect();
-            let current = counted
-                .iter()
-                .position(|status| *status != StepStatus::Done)
-                .unwrap_or(counted.len().saturating_sub(1));
-            format!(
-                "Step {}/{} · {word}",
-                current + 1,
-                plan.progress.total.max(1)
-            )
-        }
+        _ => match current {
+            Some(ix) => format!("Step {}/{} · {word}", ix + 1, plan.steps.len()),
+            None => word.to_owned(),
+        },
     };
     MissionRow {
         task_id: task.id.clone(),
         title: task.title.clone(),
         progress: plan.progress,
-        status,
+        status: if held { TaskStatus::Working } else { status },
         label,
+        current: current.map(|ix| {
+            let row = &plan.steps[ix];
+            format!(
+                "Step {} of {} · {}",
+                ix + 1,
+                plan.steps.len(),
+                row.step.title
+            )
+        }),
     }
 }
 
@@ -2516,10 +2524,11 @@ mod tests {
             [
                 ("review", "Needs you · plan review"),
                 ("stuck", "Needs you · step 2"),
-                ("working", "Step 3/4 · Working"),
+                ("working", "Step 4/5 · Working"),
             ]
         );
         assert_eq!((rows[2].progress.done, rows[2].progress.total), (2, 4));
+        assert_eq!(rows[2].current.as_deref(), Some("Step 4 of 5 · "));
         let strip = |chat: &str| {
             crate::tasks::mission_thread(&state, chat, Utc::now())
                 .map(|thread| (thread.task_id, thread.role.label()))

@@ -5986,7 +5986,7 @@ impl Shell {
             .collect();
         for id in dead {
             self.btw_tabs.remove(&id);
-            self.release_sidechat_doc(&id, cx);
+            self.release_doc(&id, cx);
         }
         for (source, live) in live {
             let Some(view) = self.btw.get_mut(&source) else {
@@ -6224,7 +6224,7 @@ impl Shell {
             self.set_chat_archived(chat_id.to_string(), true, cx);
         }
         self.btw_tabs.remove(chat_id);
-        self.release_sidechat_doc(chat_id, cx);
+        self.release_doc(chat_id, cx);
         let view = self.btw.entry(source.to_string()).or_default();
         if view.active.as_deref() != Some(chat_id) {
             return;
@@ -6346,20 +6346,24 @@ impl Shell {
             }
         }
         self.btw_tabs.remove(&active);
-        self.release_sidechat_doc(&active, cx);
+        self.release_doc(&active, cx);
         cx.notify();
     }
 
-    fn release_sidechat_doc(&mut self, chat_id: &str, cx: &mut Context<Self>) {
-        // The right pane and btw mode share one doc watch per sidechat.
-        let held = self.btw_tabs.contains_key(chat_id)
+    fn doc_held(&self, chat_id: &str) -> bool {
+        self.btw_tabs.contains_key(chat_id)
             || self
                 .sidechat_tabs
                 .values()
                 .any(|tab| tab.chat_id == chat_id)
+            || self.subagent_tabs.values().any(|tab| tab.doc_id == chat_id)
+            || self.split_chat_id() == Some(chat_id)
             || self.task_center_holds(chat_id)
-            || self.supervisor.holds(chat_id);
-        if !held {
+            || self.supervisor.holds(chat_id)
+    }
+
+    pub(super) fn release_doc(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        if !self.doc_held(chat_id) {
             self.state
                 .update(cx, |state, _| state.unwatch_subagent_doc(chat_id));
         }
@@ -7385,8 +7389,7 @@ impl Shell {
                 // Unwatch drops the watch task — that cancels the engine-side
                 // watch and unpins the subagent doc from the engine LRU.
                 if let Some(tab) = self.subagent_tabs.remove(&id) {
-                    self.state
-                        .update(cx, |s, _| s.unwatch_subagent_doc(&tab.doc_id));
+                    self.release_doc(&tab.doc_id, cx);
                 }
             }
             RightSurface::Sidechat(id) => {
@@ -7403,7 +7406,7 @@ impl Shell {
                             .find(|chat| chat.id == tab.chat_id)
                             .is_some_and(|chat| s.unstarted_sidechat(chat, Utc::now()))
                     });
-                    self.release_sidechat_doc(&tab.chat_id, cx);
+                    self.release_doc(&tab.chat_id, cx);
                     if unstarted && !self.btw_tabs.contains_key(&tab.chat_id) {
                         self.set_chat_archived(tab.chat_id, true, cx);
                     }
