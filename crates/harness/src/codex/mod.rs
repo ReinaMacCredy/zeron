@@ -2663,13 +2663,33 @@ fn handle_server_request(
     computer_control: bool,
     request_input: &Arc<RequestInputFn>,
 ) {
-    // The engine's consent card is the only prompt a Zeron computer call gets.
-    if method == "mcpServer/elicitation/request"
-        && computer_control
-        && is_zeron_computer_tool_approval(params)
-    {
-        client.respond(&id, json!({ "action": "accept" }));
-        return;
+    if method == "mcpServer/elicitation/request" {
+        let tool = zeron_tool_approval(params);
+        // The engine's consent card is the only prompt a Zeron computer call gets.
+        if computer_control && tool.is_some_and(crate::is_computer_tool_name) {
+            client.respond(&id, json!({ "action": "accept" }));
+            return;
+        }
+        if tool == Some(UI_DRIVE_TOOL) {
+            if auto_approve {
+                client.respond(&id, json!({ "action": "accept" }));
+            } else {
+                let question = yes_no(
+                    "Approve UI drive".to_owned(),
+                    "Codex wants to drive a Zeron Dev app's UI with `ui_driver_drive`, which can \
+                     click its buttons. Allow it?"
+                        .to_owned(),
+                );
+                ask_approval(
+                    client,
+                    id,
+                    question,
+                    request_input,
+                    |accept| json!({ "action": if accept { "accept" } else { "decline" } }),
+                );
+            }
+            return;
+        }
     }
     // A tool's user-input request (EXPERIMENTAL, codex 0.146.x) is a CONTENT
     // question, never auto-approvable — route it to the input bridge and
@@ -2715,7 +2735,22 @@ fn handle_server_request(
         return;
     }
 
-    let question = approval_question(method, params);
+    ask_approval(
+        client,
+        id,
+        approval_question(method, params),
+        request_input,
+        |accept| json!({ "decision": if accept { "accept" } else { "decline" } }),
+    );
+}
+
+fn ask_approval(
+    client: &RpcClient,
+    id: Value,
+    question: UserInputQuestion,
+    request_input: &Arc<RequestInputFn>,
+    reply: fn(bool) -> Value,
+) {
     let client = client.clone();
     let request_input = Arc::clone(request_input);
     tokio::spawn(async move {
@@ -2732,32 +2767,24 @@ fn handle_server_request(
         let accept = answers.iter().any(|a| {
             a.question_id == question.id && a.labels.iter().any(|l| l.eq_ignore_ascii_case("yes"))
         });
-        client.respond(
-            &id,
-            json!({ "decision": if accept { "accept" } else { "decline" } }),
-        );
+        client.respond(&id, reply(accept));
     });
 }
 
-fn is_zeron_computer_tool_approval(params: &Value) -> bool {
+fn zeron_tool_approval(params: &Value) -> Option<&str> {
     if params.get("serverName").and_then(Value::as_str) != Some("zeron")
         || params["_meta"]["codex_approval_kind"].as_str() != Some("mcp_tool_call")
     {
-        return false;
+        return None;
     }
     // Codex 0.154.0 omits `tool_name` and names the tool only in its generated message.
-    params["_meta"]["tool_name"]
-        .as_str()
-        .or_else(|| {
-            params
-                .get("message")
-                .and_then(Value::as_str)
-                .and_then(|message| {
-                    message.strip_prefix("Allow the zeron MCP server to run tool \"")
-                })
-                .and_then(|rest| rest.strip_suffix("\"?"))
-        })
-        .is_some_and(crate::is_computer_tool_name)
+    params["_meta"]["tool_name"].as_str().or_else(|| {
+        params
+            .get("message")
+            .and_then(Value::as_str)
+            .and_then(|message| message.strip_prefix("Allow the zeron MCP server to run tool \""))
+            .and_then(|rest| rest.strip_suffix("\"?"))
+    })
 }
 
 /// Parse `item/tool/requestUserInput` questions into (wire id, question)
@@ -2860,6 +2887,10 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
             },
         )
     };
+    yes_no(header, question)
+}
+
+fn yes_no(header: String, question: String) -> UserInputQuestion {
     UserInputQuestion {
         approval: true,
         id: new_message_id(),
@@ -3099,6 +3130,10 @@ mod tests {
         assert_eq!(ask["approvalsReviewer"], "user");
     }
 
+    fn is_zeron_computer_tool_approval(params: &Value) -> bool {
+        zeron_tool_approval(params).is_some_and(crate::is_computer_tool_name)
+    }
+
     #[test]
     fn only_zeron_computer_tool_approvals_are_auto_accepted() {
         let elicitation = |server: &str, message: &str, meta: Value| {
@@ -3129,6 +3164,14 @@ mod tests {
                 "{tool}"
             );
         }
+        assert_eq!(
+            zeron_tool_approval(&elicitation(
+                "zeron",
+                &generated(UI_DRIVE_TOOL),
+                native.clone()
+            )),
+            Some(UI_DRIVE_TOOL)
+        );
         assert!(is_zeron_computer_tool_approval(&elicitation(
             "zeron",
             "Run it?",
