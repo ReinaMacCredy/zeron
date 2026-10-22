@@ -71,26 +71,23 @@ impl TaskCenter {
             return;
         };
         let previous = self.authority.ready().copied();
+        let patch = crate::supervisor::settings_patch(previous, settings);
         self.authority = popover::Loadable::Ready(settings);
         self.authority_task = Some(cx.spawn(async move |center, cx| {
             let saved = engine
                 .client()
-                .call(
-                    methods::SET_SUPERVISOR_SETTINGS,
-                    serde_json::to_value(settings).unwrap_or_default(),
-                )
+                .call_as::<SupervisorSettings>(methods::SET_SUPERVISOR_SETTINGS, patch)
                 .await;
-            if let Err(err) = saved {
-                center
-                    .update(cx, |center, cx| {
-                        center.authority = match previous {
-                            Some(previous) => popover::Loadable::Ready(previous),
-                            None => popover::Loadable::Error(err.to_string()),
-                        };
-                        cx.notify();
-                    })
-                    .ok();
-            }
+            center
+                .update(cx, |center, cx| {
+                    center.authority = match (saved, previous) {
+                        (Ok(stored), _) => popover::Loadable::Ready(stored),
+                        (Err(_), Some(previous)) => popover::Loadable::Ready(previous),
+                        (Err(err), None) => popover::Loadable::Error(err.to_string()),
+                    };
+                    cx.notify();
+                })
+                .ok();
         }));
         cx.notify();
     }

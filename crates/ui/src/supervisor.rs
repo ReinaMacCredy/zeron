@@ -249,6 +249,24 @@ pub(crate) fn approval_held(state: &AppState, task_id: &str, now: DateTime<Utc>)
     )
 }
 
+pub(crate) fn settings_patch(
+    before: Option<SupervisorSettings>,
+    after: SupervisorSettings,
+) -> serde_json::Value {
+    let after = serde_json::to_value(after).unwrap_or_default();
+    match (before.map(serde_json::to_value), after) {
+        (Some(Ok(serde_json::Value::Object(before))), serde_json::Value::Object(after)) => {
+            serde_json::Value::Object(
+                after
+                    .into_iter()
+                    .filter(|(key, value)| before.get(key) != Some(value))
+                    .collect(),
+            )
+        }
+        (_, after) => after,
+    }
+}
+
 fn take_back_key(task_id: &str) -> String {
     format!("take-back:{task_id}")
 }
@@ -1864,23 +1882,24 @@ impl SupervisorPage {
             return;
         };
         let previous = self.settings.ready().copied();
+        let patch = settings_patch(previous, settings);
         self.settings = Loadable::Ready(settings);
         self.settings_error = None;
         self.save_task = Some(cx.spawn(async move |page, cx| {
             let saved = engine
                 .client()
-                .call(
-                    methods::SET_SUPERVISOR_SETTINGS,
-                    serde_json::to_value(settings).unwrap_or_default(),
-                )
+                .call_as::<SupervisorSettings>(methods::SET_SUPERVISOR_SETTINGS, patch)
                 .await;
             page.update(cx, |page, cx| {
                 page.save_task = None;
-                if let Err(err) = saved {
-                    if let Some(previous) = previous {
-                        page.settings = Loadable::Ready(previous);
+                match saved {
+                    Ok(stored) => page.settings = Loadable::Ready(stored),
+                    Err(err) => {
+                        if let Some(previous) = previous {
+                            page.settings = Loadable::Ready(previous);
+                        }
+                        page.settings_error = Some(err.to_string());
                     }
-                    page.settings_error = Some(err.to_string());
                 }
                 cx.notify();
             })
@@ -4379,6 +4398,23 @@ mod tests {
         );
         let stopped = snapshot(SupervisorState::Stopped, Some(off));
         assert_eq!(mode(Some(&stopped), &Ensure::Idle), Mode::Stopped);
+    }
+
+    #[test]
+    fn a_settings_save_sends_only_the_switch_that_changed() {
+        let before = SupervisorSettings::default();
+        let after = SupervisorSettings {
+            decide_for_me: !before.decide_for_me,
+            ..before
+        };
+        assert_eq!(
+            settings_patch(Some(before), after),
+            serde_json::json!({ "decideForMe": after.decide_for_me })
+        );
+        assert_eq!(
+            settings_patch(None, after),
+            serde_json::to_value(after).unwrap()
+        );
     }
 
     #[test]
