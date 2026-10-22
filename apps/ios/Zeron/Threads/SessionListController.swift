@@ -463,11 +463,13 @@ class SessionsViewController: SessionListController {
     /// The chat wallpaper behind the top of the front page. Fixed behind the
     /// list, fading out as the list scrolls up over it.
     private let wallpaper = WallpaperView()
+    private var pendingToken: AnyObject?
 
     override func viewDidLoad() {
         collapsible = true
         movesAcrossSections = true
         super.viewDidLoad()
+        pendingToken = app.observePending { [weak self] in self?.reload(animated: true) }
         let backdrop = UIView()
         backdrop.addSubview(wallpaper)
         collectionView.backgroundView = backdrop
@@ -481,6 +483,9 @@ class SessionsViewController: SessionListController {
             return [("results", nil, [], app.search(query))]
         }
         var out: [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] = []
+        if !app.pending.isEmpty {
+            out.append(("needs-you", "Needs you", [], app.pending.map { AppModel.vm($0.session) }))
+        }
         for f in app.frontPage.folders {
             out.append((f.id, f.name, [], app.sessions(inFolder: f.id)))
         }

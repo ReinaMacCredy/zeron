@@ -23,8 +23,10 @@ use crate::error::{ClientError, Result};
 use crate::events::{ClientEvent, ClientListener, EventPump};
 use crate::live::LiveBackend;
 use crate::rpc::{FolderListing, ProgressFn, QUEUED_ATTACHMENTS_MIN, RepoRef, capability};
-use crate::session::{HostCapabilities, OutgoingAttachment, RoomState, SessionCore, SessionHandle};
-use crate::workspace::{SearchHit, TaskDetail, WorkspaceSnapshot, WorkspaceStore};
+use crate::session::{
+    HostCapabilities, InputRequest, OutgoingAttachment, RoomState, SessionCore, SessionHandle,
+};
+use crate::workspace::{SearchHit, SessionRow, TaskDetail, WorkspaceSnapshot, WorkspaceStore};
 use crate::{lock, now_ms, read, write};
 
 /// Attachment read cache budget.
@@ -489,7 +491,10 @@ impl ClientInner {
         let mut idle: Vec<(i64, String)> = sessions
             .values()
             .filter(|core| {
-                !core.view_attached() && !core.has_pending_sends() && !core.snapshot().streaming
+                !core.view_attached()
+                    && !core.has_pending_sends()
+                    && !core.snapshot().streaming
+                    && core.composer().open_input.is_none()
             })
             .map(|core| (core.touched_ms(), core.chat_id.clone()))
             .collect();
@@ -1715,12 +1720,60 @@ impl Client {
         }
     }
 
+    pub fn pending_inputs(&self) -> Vec<PendingInput> {
+        let workspace = self.workspace();
+        let mut rows: Vec<&Arc<SessionRow>> = workspace
+            .sessions
+            .values()
+            .filter(|row| !row.archived && row.indicator == zeron_proto::ChatIndicator::AwaitingInput)
+            .collect();
+        rows.sort_by_key(|row| std::cmp::Reverse(row.last_activity_ms));
+        rows.into_iter()
+            .filter_map(|row| {
+                let session = self.open_session(&row.id).ok()?;
+                let request = session.composer().open_input.clone()?;
+                if session.snapshot().input_answers.contains_key(&request.request_id) {
+                    return None;
+                }
+                let approval = request.questions.iter().any(|q| q.approval);
+                Some(PendingInput {
+                    row: row.clone(),
+                    approval,
+                    destructive: approval && destructive_approval(&request.questions),
+                    request,
+                })
+            })
+            .collect()
+    }
+
     /// Ids of the sessions currently open (warm), most recently used first.
     pub fn open_session_ids(&self) -> Vec<String> {
         let mut cores = self.inner.cores();
         cores.sort_by_key(|c| std::cmp::Reverse(c.touched_ms()));
         cores.iter().map(|c| c.chat_id.clone()).collect()
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingInput {
+    pub row: Arc<SessionRow>,
+    pub request: InputRequest,
+    pub approval: bool,
+    pub destructive: bool,
+}
+
+fn destructive_approval(questions: &[zeron_proto::UserInputQuestion]) -> bool {
+    const WORDS: &[&str] = &[
+        "delete", "remove", "rm", "rmdir", "unlink", "trash", "push", "edit", "multiedit",
+        "notebookedit", "write", "modify", "patch", "apply_patch",
+    ];
+    questions.iter().filter(|q| q.approval).any(|q| {
+        let text = format!("{} {}", q.header, q.question).to_lowercase();
+        text.contains("file change")
+            || text
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|word| WORDS.contains(&word))
+    })
 }
 
 /// Seed helpers shared with the demo host.

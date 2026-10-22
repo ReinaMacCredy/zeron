@@ -93,6 +93,9 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     /// Agent visuals by id: one live view each, moved between reused rows so
     /// its painted state survives row reconfigures.
     private var visuals: [String: VisualView] = [:]
+    private var pages: [(id: String, view: HtmlPageView)] = []
+    private let maxPages = 6
+    var htmlLoader: ((_ deviceId: String, _ path: String) async -> String?)?
     private var memoryObserver: NSObjectProtocol?
     private var mathObserver: NSObjectProtocol?
 
@@ -701,6 +704,26 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
         }
         visuals[id] = live
         return live
+    }
+
+    func rowView(_ view: RowView, pageFor id: String, deviceId: String, path: String) -> UIView? {
+        if let i = pages.firstIndex(where: { $0.id == id }) {
+            let live = pages.remove(at: i)
+            pages.append(live)
+            return live.view
+        }
+        let loader = htmlLoader
+        let page = HtmlPageView { await loader?(deviceId, path) }
+        page.onHeight = { [weak self] height in self?.engine.setHtmlHeight(id: id, height: Float(height)) }
+        page.openURL = { [weak self, weak page] url in
+            guard let self, let row = page?.superview as? RowView else { return }
+            self.rowView(row, open: url)
+        }
+        pages.append((id, page))
+        if pages.count > maxPages, let i = pages.firstIndex(where: { $0.view.superview == nil || $0.view.superview?.isHidden == true }) {
+            pages.remove(at: i)
+        }
+        return page
     }
 
     fileprivate func row(at point: CGPoint) -> RowView? {

@@ -7,7 +7,7 @@ final class Toast: UIView {
     private let glass = Glass.surface()
     private var dismissWork: DispatchWorkItem?
 
-    static func show(_ text: String, action: String? = nil, in window: UIWindow?, handler: (() -> Void)? = nil) {
+    static func show(_ text: String, action: String? = nil, in window: UIWindow?, atTop: Bool = false, handler: (() -> Void)? = nil) {
         guard let window else { return }
         current?.dismiss(animated: false)
         let toast = Toast(text: text, action: action, handler: handler)
@@ -19,7 +19,9 @@ final class Toast: UIView {
         let gap: CGFloat = 12
         NSLayoutConstraint.activate([
             toast.centerXAnchor.constraint(equalTo: window.centerXAnchor),
-            toast.bottomAnchor.constraint(equalTo: window.topAnchor, constant: chromeTop(in: window) - gap),
+            atTop
+                ? toast.topAnchor.constraint(equalTo: window.safeAreaLayoutGuide.topAnchor, constant: gap)
+                : toast.bottomAnchor.constraint(equalTo: window.topAnchor, constant: chromeTop(in: window) - gap),
             toast.widthAnchor.constraint(lessThanOrEqualTo: window.widthAnchor, constant: -48),
         ])
         current = toast

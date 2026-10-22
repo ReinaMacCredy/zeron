@@ -125,7 +125,14 @@ impl MissionMotion {
     }
 
     fn on(&self) -> bool {
-        self.border.target() > 0.5
+        self.placeholder.target() > 0.5
+    }
+
+    fn light(&mut self, lit: bool, reduced: bool, now: Instant) {
+        let to = if lit { 1.0 } else { 0.0 };
+        if self.border.target() != to {
+            self.border.retarget(to, MISSION_BORDER, reduced, now);
+        }
     }
 
     fn retarget(&mut self, on: bool, placeholder_from: SharedString, reduced: bool, now: Instant) {
@@ -1048,13 +1055,13 @@ const MENTION_TOOLTIP_HEIGHT: f32 = 24.0;
 // rest of the padding, while preserving the chip's atomic wrapping and
 // source/caret projection.
 const MENTION_SIDE_PAD: &str = "\u{00A0}";
-/// A private URI scheme keeps file mentions distinguishable from ordinary
-/// Markdown links pasted into the composer.
-use zeron_proto::file_mentions::{FILE_MENTION_SCHEME, local_file_link, local_path_is_safe};
 /// A thread mention names another chat by id; the agent reads it through
 /// the `zeron` MCP server's `read_thread`, so the prompt carries the id
 /// verbatim and the label is only the title at insert time.
-const THREAD_MENTION_SCHEME: &str = "zeron-thread:";
+use zeron_proto::chat_mentions::THREAD_MENTION_SCHEME;
+/// A private URI scheme keeps file mentions distinguishable from ordinary
+/// Markdown links pasted into the composer.
+use zeron_proto::file_mentions::{FILE_MENTION_SCHEME, local_file_link, local_path_is_safe};
 const THREAD_ICON_SIZE: f32 = 14.0;
 
 /// The mark painted in a thread chip's icon slot: the thread's current
@@ -7375,6 +7382,15 @@ impl Composer {
 
     fn mission_available(&self) -> bool {
         self.chat_override.is_none() && !self.side_chat && !self.btw && !self.pr_chat
+    }
+
+    fn leads_open_mission(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        self.mission_available()
+            && state
+                .selected_chat
+                .as_deref()
+                .is_some_and(|chat_id| zeron_proto::plan_of_chat(&state.tasks, chat_id).is_some())
     }
 
     fn set_mission(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -14299,6 +14315,9 @@ impl Render for Composer {
                 Instant::now(),
             );
         }
+        let lit = self.mission || self.leads_open_mission(cx);
+        self.mission_motion
+            .light(lit, motion::reduced_motion(cx), Instant::now());
         self.sync_prediction(cx);
         let mission_now = Instant::now();
         if !self.mission_motion.settled_at(mission_now) {

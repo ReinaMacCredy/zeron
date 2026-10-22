@@ -7,6 +7,7 @@ use std::ops::Range;
 use crate::file_mentions::escape_mention_label;
 
 pub const CHAT_MENTION_SCHEME: &str = "zeron-chat:";
+pub const THREAD_MENTION_SCHEME: &str = "zeron-thread:";
 
 pub struct ChatMentionLink {
     pub range: Range<usize>,
@@ -92,6 +93,22 @@ pub fn chat_mention_links(text: &str) -> Vec<ChatMentionLink> {
     links
 }
 
+pub fn mentioned_chat_ids(text: &str) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for event in pulldown_cmark::Parser::new(text) {
+        if let pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { dest_url, .. }) = event
+            && let Some(id) = dest_url
+                .strip_prefix(CHAT_MENTION_SCHEME)
+                .or_else(|| dest_url.strip_prefix(THREAD_MENTION_SCHEME))
+            && valid_chat_id(id)
+            && !ids.iter().any(|known| known == id)
+        {
+            ids.push(id.to_owned());
+        }
+    }
+    ids
+}
+
 /// Replace each chat chip with text any agent can act on. The durable
 /// transcript keeps the chip; only outgoing text changes.
 pub fn chat_mention_prompt(text: &str) -> String {
@@ -131,6 +148,16 @@ mod tests {
         // Markup in a title stays text.
         let marked = chat_mention_link("a1", "[x](y) `z`").unwrap();
         assert_eq!(chat_mention_links(&marked)[0].title, "[x](y) `z`");
+    }
+
+    #[test]
+    fn mentioned_ids_cover_both_link_kinds_once_and_skip_code() {
+        let chip = chat_mention_link("a1", "One").unwrap();
+        let text = format!(
+            "{chip} and [Two](zeron-thread:b2) again [One](zeron-thread:a1), \
+             not `[x](zeron-thread:c3)` or [y](zeron-thread:../d)"
+        );
+        assert_eq!(mentioned_chat_ids(&text), ["a1", "b2"]);
     }
 
     #[test]

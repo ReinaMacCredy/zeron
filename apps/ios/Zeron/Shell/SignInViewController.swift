@@ -105,15 +105,28 @@ final class SignInViewController: UIViewController, ASWebAuthenticationPresentat
                 do {
                     try await self.app.signIn(code: code) { orgs in await self.pickOrg(orgs) }
                 } catch {
-                    self.status.text = error.localizedDescription
+                    self.status.text = Self.message(for: error)
                 }
                 self.signIn.configuration?.showsActivityIndicator = false
             }
         }
         s.presentationContextProvider = self
-        s.prefersEphemeralWebBrowserSession = false
+        // A shared session keeps the WorkOS cookie, so after a rejected account
+        // (no organization) every retry silently signs that account in again.
+        s.prefersEphemeralWebBrowserSession = true
         session = s
         s.start()
+    }
+
+    private static func message(for error: Error) -> String {
+        switch error as? CoreError {
+        case let .Auth(message), let .Network(message), let .HostError(message), let .Internal(message),
+             let .NotFound(message), let .InvalidArgument(message), let .HostUnavailable(message),
+             let .Unsupported(message), let .Storage(message), let .NotImplemented(message):
+            return message
+        case .Closed, nil:
+            return error.localizedDescription
+        }
     }
 
     /// Several organizations: let the user pick (nil = cancelled).

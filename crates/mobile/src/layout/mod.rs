@@ -12,6 +12,7 @@ mod cards;
 pub mod display;
 mod markdown;
 mod file_icons;
+mod html;
 mod rows;
 pub(crate) mod style;
 mod tools;
@@ -29,6 +30,7 @@ use zeron_text::WidthCache;
 
 use display::{DisplayBuilder, MathFace, RowDisplay};
 use markdown::{Ctx, MathFailures, MathSettings, Px};
+pub use html::html_render_document;
 pub use rows::{PendingUser, RowKind, TranscriptInput};
 use rows::{Gap, Placed, RowBuilder, RowCore, place_row};
 pub use style::{FaceRole, StyleDesc};
@@ -358,6 +360,7 @@ enum Msg {
     ToggleDetail { row: u64, detail: u64, open: bool },
     /// A visual row's height changed (its key), or visuals got a source.
     Visual(Option<u64>),
+    HtmlHeight { id: String, height: f32 },
     Shutdown,
 }
 
@@ -415,6 +418,12 @@ impl TranscriptView {
         }
         self.visuals.set_source(client.client().clone(), device_id, pixel_scale);
         self.send(Msg::Visual(None));
+    }
+
+    pub fn set_html_height(&self, id: String, height: f32) {
+        if height.is_finite() && height >= 0.0 {
+            self.send(Msg::HtmlHeight { id, height });
+        }
     }
 
     /// The live visual behind a `WidgetKind::Visual` (by its visual id).
@@ -628,6 +637,14 @@ impl Worker {
                         }
                         dirty = true;
                     }
+                    Msg::HtmlHeight { id, height } => {
+                        if let Some(slot) = self.builder.html_slots.get(&id)
+                            && slot.set_content(height)
+                        {
+                            self.heights.remove(&slot.row_key);
+                            dirty = true;
+                        }
+                    }
                     Msg::Toggle(key) => {
                         if !self.builder.expanded.remove(&key) && !self.builder.collapsed.remove(&key) {
                             // First toggle flips the row's default.
@@ -675,6 +692,7 @@ impl Worker {
         self.builder.collapsed = old.collapsed;
         self.builder.detail_open = old.detail_open;
         self.builder.visual_slots = old.visual_slots;
+        self.builder.html_slots = old.html_slots;
         self.heights.clear();
     }
 
@@ -714,6 +732,10 @@ impl Worker {
                         visuals.ensure(slot, p.core.key, rows::column_width(px, self.width), self.typo.scale);
                     }
                     slot.snapshot()
+                }
+                rows::Content::Html(row) => {
+                    let (epoch, frame) = row.slot.snapshot();
+                    (epoch, Some(frame))
                 }
                 _ => (0, None),
             };

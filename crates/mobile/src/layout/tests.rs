@@ -1495,3 +1495,79 @@ fn math_tables_keep_a_bounded_canvas() {
     let small = rows_of("| a | b |\n|---|---|\n| $x^2$ | $\\frac{1}{2}$ |", 390.0).remove(0);
     assert!(!small.glyphs.is_empty(), "a small math table renders its formulas");
 }
+
+#[test]
+fn page_rows_sit_outside_the_fold_and_take_the_height_their_page_reports() {
+    struct Ping(Mutex<mpsc::Sender<u64>>);
+    impl LayoutListener for Ping {
+        fn frame_ready(&self, revision: u64) {
+            let _ = self.0.lock().unwrap().send(revision);
+        }
+    }
+    let (tx, frames) = mpsc::channel();
+    let view = TranscriptView::new(text_system(), Arc::new(Ping(Mutex::new(tx))));
+    let tool = MessagePart::Tool {
+        id: "h1".into(),
+        call: zeron_proto::ToolCall::Mcp { server: "zeron".into(), tool: "html_render".into(), input: None },
+        is_error: false,
+        resolved: true,
+        output: None,
+        diff: None,
+        output_ref: None,
+        output_bytes: None,
+        diff_ref: None,
+        diff_stats: None,
+        subagent_ref: None,
+        subagent_status: None,
+        subagent_tail: None,
+        html_render: Some(zeron_proto::html_render::HtmlRenderRef { path: "html/a1/page.html".into(), title: "Mockup".into(), height: 600 }),
+        delegate_route: None,
+    };
+    view.set_viewport(390.0, 1.0);
+    view.set_input(TranscriptInput {
+        entries: vec![Arc::new(SessionMessageEntry {
+            id: "a1".into(),
+            role: MessageRole::Assistant,
+            parts: vec![tool, MessagePart::Text { id: "t1".into(), text: "Here it is.".into() }],
+            created_at: 0,
+            device_id: "dev-mac".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+        })],
+        ..Default::default()
+    });
+    let page_frame = |height: f32| {
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let _ = frames.recv_timeout(deadline.saturating_duration_since(Instant::now())).expect("a frame");
+            let frame = view.frame();
+            let kinds: Vec<RowKind> = (0..frame.row_count()).filter_map(|i| frame.placement(i)).map(|p| p.kind).collect();
+            assert_eq!(kinds, [RowKind::Tools, RowKind::Html, RowKind::Markdown]);
+            let row = frame.placement(1).unwrap();
+            let display = frame.display(1).unwrap();
+            let widget = display.widgets.iter().find_map(|w| match &w.kind {
+                display::WidgetKind::HtmlRender { id, device_id, path, scrolls } => Some((w.clone(), id.clone(), device_id.clone(), path.clone(), *scrolls)),
+                _ => None,
+            });
+            let (w, id, device, path, scrolls) = widget.expect("a page widget");
+            if (w.h - height).abs() < 0.5 {
+                assert!((w.y + w.h - row.height).abs() < 0.5, "the page fills the row below its title");
+                assert_eq!((device.as_str(), path.as_str()), ("dev-mac", "html/a1/page.html"));
+                break (id, scrolls);
+            }
+        }
+    };
+    let (id, scrolls) = page_frame(600.0);
+    assert!(!scrolls);
+    view.set_html_height(id.clone(), 420.0);
+    assert_eq!(page_frame(420.0), (id.clone(), false), "a shorter page shrinks its frame");
+    view.set_html_height(id.clone(), 900.0);
+    assert_eq!(page_frame(600.0), (id.clone(), true), "an overflowing page keeps the agent's height and scrolls");
+    view.set_html_height(id.clone(), 300.0);
+    assert_eq!(page_frame(600.0), (id, false), "once capped it stays at the agent's height");
+    view.close();
+}

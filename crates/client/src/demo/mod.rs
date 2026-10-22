@@ -13,6 +13,7 @@ mod fixtures;
 mod missions;
 mod png;
 mod transcripts;
+mod pages;
 mod visuals;
 
 use std::collections::{HashMap, HashSet};
@@ -1143,6 +1144,9 @@ impl DemoHost {
             return Ok(bytes.clone());
         }
         if let Some(bytes) = visuals::read(path) {
+            return Ok(Arc::new(bytes));
+        }
+        if let Some(bytes) = pages::read(path) {
             return Ok(Arc::new(bytes));
         }
         transcripts::DEMO_IMAGES

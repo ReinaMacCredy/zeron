@@ -13,6 +13,9 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private let questions = QuestionPanel()
     private let queue = QueuePanel()
     private let pill = StatusPill()
+    private let needsYou = NeedsYouPill()
+    private var needsYouRow: UIStackView!
+    private var pendingToken: AnyObject?
     private let still = ComputerStillPreview()
     private let bottom = UIStackView()
     private let jump = Glass.circleButton(symbol: "arrow.down", size: 40, pointSize: 15)
@@ -63,6 +66,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         list.accessibilityIdentifier = "transcript"
         list.imageLoader = { [weak self] ref, iv in self?.source.loadImage(ref, into: iv) }
         list.imageFetcher = { [weak self] ref in await self?.source.image(ref) }
+        list.htmlLoader = { [weak self] device, path in await self?.source.htmlPage(deviceId: device, path: path) }
         // Hidden while following (the runway glide and tail spring travel).
         list.onDistanceFromBottom = { [weak self] d in
             guard let self else { return }
@@ -131,7 +135,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         bottom.translatesAutoresizingMaskIntoConstraints = false
         let pillRow = UIStackView(arrangedSubviews: [pill, UIView()])
         pillRow.axis = .horizontal
-        for v in [pillRow, queue, questions, composer] { bottom.addArrangedSubview(v) }
+        needsYouRow = UIStackView(arrangedSubviews: [needsYou, UIView()])
+        needsYouRow.axis = .horizontal
+        needsYouRow.isHidden = true
+        needsYou.addAction(UIAction { [weak self] _ in self?.openNeedsYou() }, for: .touchUpInside)
+        for v in [needsYouRow!, pillRow, queue, questions, composer] { bottom.addArrangedSubview(v) }
         questions.isHidden = true
         queue.isHidden = true
         // Hidden panels start dematerialized so their first appearance grows in.
@@ -176,6 +184,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         source.onChange = { [weak self] in self?.render(animated: true) }
         source.attach(engine)
         render(animated: false)
+        pendingToken = app.observePending { [weak self] in self?.syncNeedsYou(animated: true) }
+        syncNeedsYou(animated: false)
         app.markSeen(chatId)
     }
 
@@ -537,6 +547,35 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             UIView.animate(withDuration: 0.38, delay: 0, usingSpringWithDamping: 0.86, initialSpringVelocity: 0, options: [.allowUserInteraction, .beginFromCurrentState], animations: changes)
         } else {
             changes()
+        }
+    }
+
+    private func syncNeedsYou(animated: Bool) {
+        let waiting = NeedsYou.waiting(app, excluding: chatId)
+        let show = !waiting.isEmpty
+        if show { needsYou.configure(waiting) }
+        guard needsYouRow.isHidden == show else { return }
+        let apply = {
+            self.needsYouRow.isHidden = !show
+            self.needsYou.alpha = show ? 1 : 0
+            self.needsYou.transform = show ? .identity : CGAffineTransform(translationX: 0, y: 10).scaledBy(x: 0.92, y: 0.92)
+            self.bottom.layoutIfNeeded()
+            self.view.layoutIfNeeded()
+        }
+        guard animated, view.window != nil, !UIAccessibility.isReduceMotionEnabled else { return apply() }
+        if show {
+            needsYou.alpha = 0
+            needsYou.transform = CGAffineTransform(translationX: 0, y: 10).scaledBy(x: 0.92, y: 0.92)
+        }
+        UIView.animate(withDuration: 0.42, delay: 0, usingSpringWithDamping: 0.72, initialSpringVelocity: 0, options: [.allowUserInteraction, .beginFromCurrentState], animations: apply)
+    }
+
+    private func openNeedsYou() {
+        let editing = composer.textView.isFirstResponder
+        composer.resignFirstResponder()
+        NeedsYou.present(app: app, from: self, excluding: chatId) { [weak self] _ in
+            guard let self, editing, self.view.window != nil, !self.composer.isHidden else { return }
+            self.composer.becomeFirstResponder()
         }
     }
 

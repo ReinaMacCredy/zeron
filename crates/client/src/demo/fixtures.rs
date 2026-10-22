@@ -98,6 +98,33 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             harness: Codex,
             model: "gpt-5.6-terra",
             reasoning: High,
+            status: Some(SessionStatus::AwaitingInput),
+            last_ago_ms: 5 * MIN,
+            seen: false,
+            ..chat(
+                "chat-approve-test",
+                Some("space-edge"),
+                VPS,
+                "Run: cargo test",
+                "Codex wants to run the test suite.",
+            )
+        },
+        DemoChat {
+            status: Some(SessionStatus::AwaitingInput),
+            last_ago_ms: 9 * MIN,
+            seen: false,
+            ..chat(
+                "chat-approve-push",
+                Some("space-zeron"),
+                MAC,
+                "Publish the release branch",
+                "Claude wants to push to origin.",
+            )
+        },
+        DemoChat {
+            harness: Codex,
+            model: "gpt-5.6-terra",
+            reasoning: High,
             branch: Some("fix/tool-colors"),
             pr: Some((77, Closed, "Refine tool group colors")),
             last_ago_ms: 15 * MIN,

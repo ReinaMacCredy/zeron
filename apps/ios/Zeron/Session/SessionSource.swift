@@ -83,6 +83,7 @@ protocol SessionSource: AnyObject {
     func image(_ reference: String) async -> UIImage?
     /// Workspace files for `@` mentions.
     func searchFiles(_ query: String) async -> [FileMatch]
+    func htmlPage(deviceId: String, path: String) async -> String?
 }
 
 enum QueueAction {
@@ -237,4 +238,5 @@ final class FixtureSessionSource: SessionSource {
     func loadImage(_ reference: String, into view: UIImageView) {}
     func image(_ reference: String) async -> UIImage? { nil }
     func searchFiles(_ query: String) async -> [FileMatch] { [] }
+    func htmlPage(deviceId: String, path: String) async -> String? { nil }
 }
