@@ -150,6 +150,7 @@ fn main() -> anyhow::Result<()> {
             delegated_tasks: Vec::new(),
             task_steps: Vec::new(),
             input_request: None,
+            engine_sent: false,
         },
         zeron_doc::QueuedMessage {
             id: "queued-text".into(),
@@ -165,6 +166,7 @@ fn main() -> anyhow::Result<()> {
             delegated_tasks: Vec::new(),
             task_steps: Vec::new(),
             input_request: None,
+            engine_sent: false,
         },
     ];
     let failure = Arc::new(std::sync::Mutex::new(None));

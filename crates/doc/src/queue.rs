@@ -61,6 +61,9 @@ pub struct QueuedMessage {
     pub task_steps: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_request: Option<String>,
+    /// Composed by the engine with no sender thread, so it is not the person's message.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub engine_sent: bool,
 }
 
 /// Why a queued row is not currently eligible for automatic or explicit
@@ -113,6 +116,7 @@ impl QueuedMessage {
             delegated_tasks: Vec::new(),
             task_steps: Vec::new(),
             input_request: None,
+            engine_sent: false,
         }
     }
 }
@@ -391,6 +395,9 @@ fn write_queued_map(map: &loro::LoroMap, item: &QueuedMessage) -> Result<(), Doc
     if let Some(request_id) = &item.input_request {
         map.insert("inputRequest", request_id.as_str())?;
     }
+    if item.engine_sent {
+        map.insert("engineSent", true)?;
+    }
     if let Some(gate) = &item.delivery_gate {
         map.insert(
             "deliveryGate",
@@ -444,6 +451,10 @@ fn queued_from_json(v: serde_json::Value) -> Option<QueuedMessage> {
             .get("inputRequest")
             .and_then(|r| r.as_str())
             .map(str::to_string),
+        engine_sent: v
+            .get("engineSent")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
         delivery_gate: match v.get("deliveryGate") {
             None | Some(serde_json::Value::Null) => None,
             Some(gate) => serde_json::from_value(gate.clone()).ok().or_else(|| {
@@ -483,6 +494,7 @@ mod tests {
             delegated_tasks: Vec::new(),
             task_steps: Vec::new(),
             input_request: None,
+            engine_sent: false,
         }
     }
 

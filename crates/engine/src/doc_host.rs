@@ -3762,6 +3762,7 @@ impl DocHost {
             delegated_tasks: Vec::new(),
             task_steps: Vec::new(),
             input_request: None,
+            engine_sent: false,
         })?;
         handle.publish_queue();
         // Same reasoning as a command: the user is acting in this chat again.
@@ -3865,6 +3866,7 @@ impl DocHost {
             delegated_tasks: Vec::new(),
             task_steps,
             input_request: None,
+            engine_sent: from_chat_id.is_none(),
         })?;
         handle.publish_queue();
         self.unarchive_on_send(chat_id);
@@ -3992,6 +3994,7 @@ impl DocHost {
             delegated_tasks: Vec::new(),
             task_steps: Vec::new(),
             input_request: None,
+            engine_sent: false,
         })?;
         drop(drain);
         handle.publish_queue();
@@ -5061,6 +5064,7 @@ impl DocHost {
         // anchor the prompt only once this exact row reaches the transcript.
         let message_id = item.id.clone();
         let from_person = item.from_chat_id.is_none()
+            && !item.engine_sent
             && item.delegated_tasks.is_empty()
             && item.task_steps.is_empty()
             && item.text != zeron_proto::RESUME_PROMPT;
@@ -6566,6 +6570,7 @@ impl DocHost {
             delegated_tasks: Vec::new(),
             task_steps: Vec::new(),
             input_request: None,
+            engine_sent: false,
         };
         if handle.doc.read_queue()?.iter().any(|row| row.id == item.id) {
             return Ok(()); // a redelivered command: already held
@@ -6746,6 +6751,7 @@ impl DocHost {
             delegated_tasks: Vec::new(),
             task_steps: Vec::new(),
             input_request: None,
+            engine_sent: false,
         })?;
         handle.publish_queue();
         Ok(())

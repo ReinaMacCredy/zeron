@@ -1893,6 +1893,11 @@ async fn the_persons_message_in_a_running_child_tells_its_owner_once_and_a_creat
         .expect("delegate");
     let child = view.task_id.clone();
     wait_for(|| working(&rig.core, &child), "the child's turn").await;
+    rig.core
+        .doc_host
+        .queue_thread_message(&child, None, "The Supervisor decided the open item")
+        .await
+        .unwrap();
     queue_steer(&rig.core, &child, "cmd-p", "also check the refresh token");
     let note = "The person wrote directly in";
     wait_for(|| !prompts_with(&rig, note).is_empty(), "the owner's note").await;
@@ -1931,7 +1936,7 @@ async fn the_persons_message_in_a_running_child_tells_its_owner_once_and_a_creat
     assert_eq!(
         prompts_with(&rig, note).len(),
         1,
-        "one note for the steer, none for the child's own task or an opened thread"
+        "one note for the steer, none for an engine message, the child's own task or an opened thread"
     );
     rig.core.shutdown().await;
 }

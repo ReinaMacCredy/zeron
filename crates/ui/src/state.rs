@@ -6762,6 +6762,7 @@ mod tests {
             delegated_tasks: Vec::new(),
             task_steps: Vec::new(),
             input_request: None,
+            engine_sent: false,
         };
         state.push_echo("c1", echo("held"));
         state.push_echo("c1", echo("sent"));
