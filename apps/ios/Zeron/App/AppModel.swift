@@ -45,10 +45,9 @@ final class AppModel {
     /// Front-page sessions that are working / waiting on the user.
     private(set) var live = LiveCounts()
     private(set) var tasks = TasksPage(missions: [], needsYou: [], working: [], toDo: [], done: [], needsYouCount: 0)
-    private(set) var supervisor = SupervisorPage(hosts: [], needsYou: [], doneToday: [], wakes: [])
-    private(set) var pending: [PendingInput] = []
-    private var pendingObservers: [UUID: () -> Void] = [:]
-    private var pendingScheduled = false
+    private(set) var supervisor = SupervisorPage(hosts: [], doneToday: [], wakes: [])
+    private(set) var needsYou: [NeedsYouEntry] = []
+    private var needsYouObservers: [UUID: () -> Void] = [:]
     private var rows: [String: SessionRow] = [:]
     private var rawProjects: [ProjectView] = []
     private var lastHosts: [HostOption] = []
@@ -332,10 +331,10 @@ final class AppModel {
         return Token { [weak self] in self?.observers[id] = nil }
     }
 
-    func observePending(_ handler: @escaping () -> Void) -> AnyObject {
+    func observeNeedsYou(_ handler: @escaping () -> Void) -> AnyObject {
         let id = UUID()
-        pendingObservers[id] = handler
-        return Token { [weak self] in self?.pendingObservers[id] = nil }
+        needsYouObservers[id] = handler
+        return Token { [weak self] in self?.needsYouObservers[id] = nil }
     }
 
     func observeSession(_ chatId: String, _ handler: @escaping () -> Void) -> AnyObject {
@@ -356,9 +355,6 @@ final class AppModel {
             scheduleRefresh()
         case let .sessionChanged(chatId, _), let .composerChanged(chatId, _):
             sessionObservers[chatId]?.values.forEach { $0() }
-            if rows[chatId]?.indicator == .awaitingInput || pending.contains(where: { $0.session.id == chatId }) {
-                schedulePendingRefresh()
-            }
         case let .connectivityChanged(c):
             connectivity = c
             observers.values.forEach { $0() }
@@ -411,39 +407,32 @@ final class AppModel {
         var seen = Set<String>()
         for row in page.sessions + page.sectionSessions.values.flatMap({ $0 }) where seen.insert(row.id).inserted {
             if row.status == .working { counts.working += 1 }
-            if row.status == .awaiting { counts.awaiting += 1 }
         }
+        let nextNeeds = client.needsYou()
+        counts.awaiting = nextNeeds.count
         rows = all
         // Devices coming and going (Settings, host pickers) count as changes.
         let hosts = hostOptions
         let tasksPage = client.tasksPage()
         let supervisorPage = client.supervisorPage()
         let changed = page != frontPage || archivedVMs != archived || counts != live || hosts != lastHosts
-            || tasksPage != tasks || supervisorPage != supervisor
+            || tasksPage != tasks || supervisorPage != supervisor || nextNeeds != needsYou
+        let needsChanged = nextNeeds != needsYou
         lastHosts = hosts
         tasks = tasksPage
         supervisor = supervisorPage
         live = counts
         frontPage = page
         archived = archivedVMs
+        needsYou = nextNeeds
         if changed { observers.values.forEach { $0() } }
-        refreshPending()
+        if needsChanged { needsYouObservers.values.forEach { $0() } }
     }
 
-    private func schedulePendingRefresh() {
-        guard !pendingScheduled else { return }
-        pendingScheduled = true
-        DispatchQueue.main.async { [weak self] in
-            self?.pendingScheduled = false
-            self?.refreshPending()
-        }
-    }
-
-    private func refreshPending() {
-        let next = client?.pendingInputs() ?? []
-        guard next != pending else { return }
-        pending = next
-        pendingObservers.values.forEach { $0() }
+    private func setNeedsYou(_ next: [NeedsYouEntry]) {
+        guard next != needsYou else { return }
+        needsYou = next
+        needsYouObservers.values.forEach { $0() }
     }
 
     /// Like the desktop's project grouping: checkouts of one repository
@@ -576,17 +565,22 @@ final class AppModel {
         }
     }
 
-    func answer(_ input: PendingInput, _ answers: [(questionId: String, labels: [String])]) -> Bool {
-        guard let handle = try? client?.openSession(chatId: input.session.id) else { return false }
+    func answer(_ entry: NeedsYouEntry, _ answers: [(questionId: String, labels: [String])]) -> Bool {
+        guard let ask = entry.input, let handle = try? client?.openSession(chatId: ask.chatId) else { return false }
         do {
-            try handle.respondInput(requestId: input.request.requestId, answers: answers.map { UserInputAnswer(questionId: $0.questionId, labels: $0.labels) })
+            try handle.respondInput(requestId: ask.requestId, answers: answers.map { UserInputAnswer(questionId: $0.questionId, labels: $0.labels) })
         } catch {
             NSLog("answer failed: \(error)")
             return false
         }
         noteDeliveryActivity()
-        refreshPending()
+        setNeedsYou(client?.needsYou() ?? [])
         return true
+    }
+
+    func resolve(deviceId: String, _ answers: [ItemAnswer]) async throws {
+        guard let client else { return }
+        try await client.resolveSupervisorItems(deviceId: deviceId, answers: answers)
     }
 
     // MARK: New session

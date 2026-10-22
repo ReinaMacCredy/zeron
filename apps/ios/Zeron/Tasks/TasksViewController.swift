@@ -181,9 +181,9 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
         return "due " + out.string(from: date)
     }
 
-    static func supervisorLine(_ page: SupervisorPage) -> String {
+    static func supervisorLine(_ page: SupervisorPage, needs: Int) -> String {
         var parts: [String] = []
-        if !page.needsYou.isEmpty { parts.append("\(page.needsYou.count) need\(page.needsYou.count == 1 ? "s" : "") you") }
+        if needs > 0 { parts.append("\(needs) need\(needs == 1 ? "s" : "") you") }
         let trees = page.hosts.reduce(0) { $0 + Int($1.trees) }
         let names = page.hosts.map(\.host.name)
         if !names.isEmpty {
@@ -201,7 +201,7 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
         var snap = NSDiffableDataSourceSnapshot<String, Row>()
         if !app.supervisor.hosts.isEmpty {
             snap.appendSections([" "])
-            snap.appendItems([.supervisor(title: "Supervisor", subtitle: Self.supervisorLine(app.supervisor))])
+            snap.appendItems([.supervisor(title: "Supervisor", subtitle: Self.supervisorLine(app.supervisor, needs: app.needsYou.filter(\.supervised).count))])
         }
         if !page.missions.isEmpty {
             snap.appendSections(["Missions"])

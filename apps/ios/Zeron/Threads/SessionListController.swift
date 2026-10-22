@@ -469,7 +469,7 @@ class SessionsViewController: SessionListController {
         collapsible = true
         movesAcrossSections = true
         super.viewDidLoad()
-        pendingToken = app.observePending { [weak self] in self?.reload(animated: true) }
+        pendingToken = app.observeNeedsYou { [weak self] in self?.reload(animated: true) }
         let backdrop = UIView()
         backdrop.addSubview(wallpaper)
         collectionView.backgroundView = backdrop
@@ -483,8 +483,9 @@ class SessionsViewController: SessionListController {
             return [("results", nil, [], app.search(query))]
         }
         var out: [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] = []
-        if !app.pending.isEmpty {
-            out.append(("needs-you", "Needs you", [], app.pending.map { AppModel.vm($0.session) }))
+        let asking = NeedsYou.threads(app)
+        if !asking.isEmpty {
+            out.append(("needs-you", "Needs you", [], asking))
         }
         for f in app.frontPage.folders {
             out.append((f.id, f.name, [], app.sessions(inFolder: f.id)))

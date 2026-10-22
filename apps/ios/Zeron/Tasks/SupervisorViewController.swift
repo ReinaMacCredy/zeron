@@ -5,6 +5,7 @@ final class SupervisorViewController: UIViewController, UICollectionViewDelegate
     private var collectionView: UICollectionView!
     private var dataSource: UICollectionViewDiffableDataSource<String, Row>!
     private var appToken: AnyObject?
+    private var needsToken: AnyObject?
 
     struct Row: Hashable {
         let id: String
@@ -83,6 +84,7 @@ final class SupervisorViewController: UIViewController, UICollectionViewDelegate
         }
         reload()
         appToken = app.observe { [weak self] in self?.reload() }
+        needsToken = app.observeNeedsYou { [weak self] in self?.reload() }
     }
 
     private static var nowMs: Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
@@ -108,18 +110,7 @@ final class SupervisorViewController: UIViewController, UICollectionViewDelegate
         }
     }
 
-    static func needsLine(_ entry: NeedsYouEntry) -> String {
-        var parts = [entry.host.name]
-        switch entry.kind {
-        case let .item(_, why, raisedByLead, _, _):
-            parts.append(raisedByLead ? "\(why) · Lead" : why)
-        case .input:
-            parts.append("Question")
-        }
-        if let task = entry.taskTitle { parts.append(task) }
-        parts.append(relativeTimeLabel(atMs: entry.atMs, nowMs: nowMs))
-        return parts.joined(separator: " · ")
-    }
+    private var supervised: [NeedsYouEntry] { app.needsYou.filter(\.supervised) }
 
     private func reload() {
         let page = app.supervisor
@@ -130,17 +121,13 @@ final class SupervisorViewController: UIViewController, UICollectionViewDelegate
                 Row(id: "host:\(host.host.deviceId)", title: host.host.name, subtitle: Self.hostLine(host), symbol: "desktopcomputer")
             })
         }
-        snap.appendSections(["Needs you · \(page.needsYou.count)"])
-        if page.needsYou.isEmpty {
+        let needs = supervised
+        snap.appendSections(["Needs you · \(needs.count)"])
+        if needs.isEmpty {
             snap.appendItems([Row(id: "needs-empty", title: "Nothing needs you", tint: Palette.secondary, tappable: false)])
         } else {
-            snap.appendItems(page.needsYou.map { entry in
-                let glyph: StatusGlyph.Kind
-                switch entry.kind {
-                case .item: glyph = .dot(Palette.warning)
-                case .input: glyph = .dot(StatusTone.input)
-                }
-                return Row(id: "needs:\(entry.key)", title: entry.title, subtitle: Self.needsLine(entry), glyph: glyph)
+            snap.appendItems(needs.map { entry in
+                Row(id: "needs:\(entry.key)", title: entry.rowTitle, subtitle: "\(entry.host.name) · \(entry.meta(app))", glyph: .dot(entry.tint))
             })
         }
         if !page.doneToday.isEmpty {
@@ -176,42 +163,13 @@ final class SupervisorViewController: UIViewController, UICollectionViewDelegate
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         collectionView.deselectItem(at: indexPath, animated: true)
         guard let row = dataSource.itemIdentifier(for: indexPath) else { return }
-        let source = collectionView.cellForItem(at: indexPath)
         if row.id.hasPrefix("host:"), let host = app.supervisor.hosts.first(where: { "host:\($0.host.deviceId)" == row.id }) {
             presentAuthority(host.host)
-        } else if row.id.hasPrefix("needs:"), let entry = app.supervisor.needsYou.first(where: { "needs:\($0.key)" == row.id }) {
-            answer(entry, from: source)
+        } else if row.id.hasPrefix("needs:"), let entry = supervised.first(where: { "needs:\($0.key)" == row.id }) {
+            NeedsYou.present(app: app, from: self, excluding: nil, opening: entry)
         } else if row.id.hasPrefix("done:") {
             let taskId = String(row.id.dropFirst("done:".count))
             navigationController?.pushViewController(MissionControlViewController(app: app, taskId: taskId), animated: true)
-        }
-    }
-
-    private func answer(_ entry: NeedsYouEntry, from source: UIView?) {
-        switch entry.kind {
-        case .input:
-            TasksViewController.push(thread: entry.chatId, app: app, from: navigationController)
-        case let .item(itemId, _, _, detail, options):
-            let sheet = UIAlertController(title: entry.title, message: [detail, Self.needsLine(entry)].filter { !$0.isEmpty }.joined(separator: "\n\n"), preferredStyle: .actionSheet)
-            for option in options {
-                sheet.addAction(UIAlertAction(title: option, style: .default) { [weak self] _ in
-                    guard let client = self?.app.client else { return }
-                    Task { @MainActor in
-                        do {
-                            try await client.resolveSupervisorItem(deviceId: entry.host.deviceId, itemId: itemId, choice: option)
-                        } catch {
-                            Toast.show(TasksErrors.message(error), in: self?.view.window)
-                        }
-                    }
-                })
-            }
-            sheet.addAction(UIAlertAction(title: "Open thread", style: .default) { [weak self] _ in
-                guard let self else { return }
-                TasksViewController.push(thread: entry.chatId, app: self.app, from: self.navigationController)
-            })
-            sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-            sheet.popoverPresentationController?.sourceView = source
-            present(sheet, animated: true)
         }
     }
 

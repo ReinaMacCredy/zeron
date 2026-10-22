@@ -184,7 +184,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         source.onChange = { [weak self] in self?.render(animated: true) }
         source.attach(engine)
         render(animated: false)
-        pendingToken = app.observePending { [weak self] in self?.syncNeedsYou(animated: true) }
+        pendingToken = app.observeNeedsYou { [weak self] in self?.syncNeedsYou(animated: true) }
         syncNeedsYou(animated: false)
         app.markSeen(chatId)
     }
@@ -553,7 +553,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private func syncNeedsYou(animated: Bool) {
         let waiting = NeedsYou.waiting(app, excluding: chatId)
         let show = !waiting.isEmpty
-        if show { needsYou.configure(waiting) }
+        if show { needsYou.configure(waiting, app: app) }
         guard needsYouRow.isHidden == show else { return }
         let apply = {
             self.needsYouRow.isHidden = !show
