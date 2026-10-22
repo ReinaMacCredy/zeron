@@ -43,7 +43,7 @@ Before a routed child starts, Zeron checks the routed agent's quota from what Us
 
 ## When a child hits its limit mid-run
 
-A delegated child or a mission step that hits its usage limit partway through gets a card under its chip in the parent's transcript: **Switch to** the chat's own model (or the first fallback with quota), which keeps the child's transcript and hands it to the new agent behind a provider divider, or **Wait for reset**, which resumes it on the same agent when the limit resets. **Mid-run limit** sets what happens without you: after **10 s** or **30 s** the preselected choice runs by itself, and **Ask** waits for you. **Cancel** stops the countdown. The child's own limit pill also offers **Switch to**. While the card waits, the parent's agent is not told the child failed.
+A delegated child or a mission step that hits its usage limit partway through gets a card under its chip in the parent's transcript: **Switch to** the chat's own model (or the first fallback with quota), which keeps the child's transcript and hands it to the new agent behind a provider divider, or **Wait for reset**, which resumes it on the same agent when the limit resets. When auto-resume is off in Settings > Harnesses or the reset time is unknown, **Wait for reset** stops the child instead and its parent is told. **Mid-run limit** sets what happens without you: after **10 s** or **30 s** the preselected choice runs by itself, and **Ask** waits for you. **Cancel** stops the countdown. The child's own limit pill also offers **Switch to**. While the card waits, the parent's agent is not told the child failed.
 
 Top-level chats keep the [usage limit pill](zeron://docs/usage) and auto-resume.
 
