@@ -1066,12 +1066,11 @@ fn missions(state: &AppState, now: DateTime<Utc>) -> Vec<Mission> {
             starts_open: false,
         }
     });
-    let index = crate::tasks::index_rows(state, now);
+    let index = crate::tasks::index_rows(state, now, Some(crate::tasks::IndexKind::Tree));
     let trees = index
         .running
         .into_iter()
         .chain(index.done_today)
-        .filter(|row| row.kind == crate::tasks::IndexKind::Tree)
         .filter(|row| tree_watch(state, &row.root) == Watch::Watched)
         .map(|row| {
             let done = row
