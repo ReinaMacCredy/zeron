@@ -8,7 +8,7 @@ use zeron_proto::supervisor::{
     InputAsker, InterventionKind, ItemWhy, NeedsYouInput, NeedsYouRow, NextCheck, NextCheckKind,
     PlanApproval, Raiser, SupervisorEventKind, SupervisorEventSummary, SupervisorIntervention,
     SupervisorItem, SupervisorSettings, SupervisorSnapshot, SupervisorState, SupervisorWake,
-    WakeDelivery,
+    WakeDelivery, is_supervisor_chat,
 };
 use zeron_proto::{Task, TaskPatch, TaskStep, TaskStepPatch, UserInputQuestion};
 
@@ -355,6 +355,7 @@ const FLAKY_ITEM: &str = "item-settle";
 pub(crate) fn supervisors(now: DateTime<Utc>) -> Vec<(&'static str, SupervisorSnapshot)> {
     use SupervisorEventKind::*;
     let mac = SupervisorSnapshot {
+        chat_id: Some("supervisor-dev-mac".into()),
         state: SupervisorState::Asleep,
         next_check: Some(NextCheck {
             at: now + Duration::minutes(8),
@@ -429,6 +430,7 @@ pub(crate) fn supervisors(now: DateTime<Utc>) -> Vec<(&'static str, SupervisorSn
         ..Default::default()
     };
     let mini = SupervisorSnapshot {
+        chat_id: Some("supervisor-dev-mini".into()),
         state: SupervisorState::Awake,
         wakes: vec![wake(
             "wake-mini-1",
@@ -482,6 +484,61 @@ pub(crate) fn host_call(
     use zeron_rpc::methods as m;
     Some(match method {
         m::MUTATE => mutate(client, refused, device_id, params).map(|()| json!({})),
+        m::LIST_AGENT_PROFILES => Ok(json!({ "profiles": [] })),
+        m::ENSURE_SUPERVISOR => {
+            let chat_id = format!("{}{}", zeron_proto::supervisor::CHAT_PREFIX, device_id);
+            client.workspace.update_supervisor(device_id, |snapshot| {
+                snapshot.chat_id = Some(chat_id.clone());
+                snapshot.blocked = None;
+                if snapshot.state == SupervisorState::Off {
+                    snapshot.state = SupervisorState::Asleep;
+                }
+            });
+            client.recompute_workspace();
+            Ok(json!({ "chatId": chat_id }))
+        }
+        m::QUEUE_COMMAND if is_supervisor_chat(params["chatId"].as_str().unwrap_or_default()) => {
+            let now = Utc::now();
+            client.workspace.update_supervisor(device_id, |snapshot| {
+                snapshot.state = SupervisorState::Stopped;
+                snapshot.wakes.insert(
+                    0,
+                    wake(
+                        &format!("wake-held-{}", now.timestamp_millis()),
+                        now,
+                        &[SupervisorEventKind::NeedsYou],
+                        WakeDelivery::HeldByStop,
+                    ),
+                );
+                snapshot.waiting = snapshot
+                    .wakes
+                    .iter()
+                    .filter(|w| w.delivery == WakeDelivery::HeldByStop)
+                    .count();
+            });
+            client.recompute_workspace();
+            Ok(json!({}))
+        }
+        m::STEER_QUEUED_MESSAGE_NOW
+            if is_supervisor_chat(params["chatId"].as_str().unwrap_or_default()) =>
+        {
+            let id = params["id"].as_str().unwrap_or_default();
+            let mut sent = false;
+            client.workspace.update_supervisor(device_id, |snapshot| {
+                for wake in &mut snapshot.wakes {
+                    if wake.id == id && wake.delivery == WakeDelivery::HeldByStop {
+                        wake.delivery = WakeDelivery::Started;
+                        sent = true;
+                    }
+                }
+                if sent {
+                    snapshot.state = SupervisorState::Awake;
+                    snapshot.waiting = 0;
+                }
+            });
+            client.recompute_workspace();
+            Ok(json!({ "sent": sent }))
+        }
         m::GET_SUPERVISOR_SETTINGS => Ok(json!(
             lock(settings).get(device_id).copied().unwrap_or_default()
         )),
@@ -553,6 +610,159 @@ fn mutate(
             let task_id = id("taskId");
             client.registry_write(|doc| doc.delete_task(&task_id, now))?;
         }
+        "createTask" => {
+            let task_id = id("taskId");
+            let task = task(
+                &task_id,
+                params["title"].as_str().unwrap_or_default(),
+                json!({
+                    "notes": params["notes"].as_str().unwrap_or_default(),
+                    "spaceId": params["spaceId"],
+                    "images": params.get("images").cloned().unwrap_or(json!([])),
+                    "context": params.get("context").cloned().unwrap_or(json!([])),
+                    "createdAt": now,
+                }),
+                now,
+            );
+            client.registry_write(|doc| doc.create_task(&task))?;
+        }
+        "startTask" => {
+            let task_id = id("taskId");
+            let chat_id = id("chatId");
+            let (state, _) = client.workspace.state();
+            let task = state
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .ok_or_else(|| ClientError::NotFound(task_id.clone()))?;
+            let space_id = match params.get("spaceId") {
+                Some(Value::String(id)) => Some(id.clone()),
+                Some(_) => None,
+                None => task.space_id.clone(),
+            };
+            let config = params
+                .get("config")
+                .filter(|c| !c.is_null())
+                .map(parse)
+                .transpose()?;
+            let chat = lead_chat(&chat_id, device_id, space_id.clone(), &task.title, config, now);
+            let orchestrate = params["orchestrate"].as_bool().unwrap_or(false);
+            let mut patch = TaskPatch {
+                chat_id: Some(Some(chat_id.clone())),
+                ..Default::default()
+            };
+            if task.space_id.is_none() {
+                patch.space_id = Some(space_id);
+            }
+            if orchestrate {
+                patch.mode = Some(zeron_proto::TaskMode::Orchestrated);
+                patch.plan_pending = Some(params["approvePlan"].as_bool().unwrap_or(true));
+            }
+            client.registry_write(|doc| {
+                doc.upsert_chat(&chat)?;
+                doc.update_task(&task_id, &patch, now)
+            })?;
+        }
+        "assignTask" => {
+            let task_id = id("taskId");
+            let patch = TaskPatch {
+                chat_id: Some(Some(id("chatId"))),
+                completed: Some(false),
+                ..Default::default()
+            };
+            client.registry_write(|doc| doc.update_task(&task_id, &patch, now))?;
+        }
+        "editTaskPlan" => {
+            let task_id = id("taskId");
+            let edit: zeron_proto::PlanEdit = parse(params)?;
+            let patch = TaskPatch {
+                plan: edit.overview.clone(),
+                ..Default::default()
+            };
+            let order_key = |ix: usize| format!("{:04x}1", ix + 1);
+            let mut updates: Vec<(String, TaskStepPatch)> = Vec::new();
+            for step in &edit.steps {
+                if let Some(step_id) = &step.step_id {
+                    updates.push((
+                        step_id.clone(),
+                        TaskStepPatch {
+                            title: Some(step.title.clone()),
+                            notes: Some(step.notes.clone()),
+                            images: Some(step.images.clone()),
+                            ..Default::default()
+                        },
+                    ));
+                }
+            }
+            for (ix, step_id) in edit.order.iter().enumerate() {
+                match updates.iter_mut().find(|(id, _)| id == step_id) {
+                    Some((_, patch)) => patch.order_key = Some(order_key(ix)),
+                    None => updates.push((
+                        step_id.clone(),
+                        TaskStepPatch {
+                            order_key: Some(order_key(ix)),
+                            ..Default::default()
+                        },
+                    )),
+                }
+            }
+            let creates: Vec<TaskStep> = edit
+                .steps
+                .iter()
+                .filter(|step| step.step_id.is_none())
+                .map(|step| {
+                    serde_json::from_value(json!({
+                        "id": crate::new_id(),
+                        "taskId": task_id,
+                        "title": step.title,
+                        "notes": step.notes,
+                        "images": step.images,
+                        "createdAt": now,
+                        "updatedAt": now,
+                    }))
+                    .expect("demo step")
+                })
+                .collect();
+            client.registry_write(|doc| {
+                doc.edit_task_plan(
+                    &task_id,
+                    &patch,
+                    &updates,
+                    &creates,
+                    &edit.remove_step_ids,
+                    now,
+                )
+            })?;
+        }
+        "setMissionSupervised" => {
+            let task_id = id("taskId");
+            let on = params["supervised"].as_bool().unwrap_or(true);
+            client.workspace.update_supervisor(device_id, |snapshot| {
+                snapshot.unwatched.retain(|id| *id != task_id);
+                if !on {
+                    snapshot.unwatched.push(task_id.clone());
+                }
+            });
+            client.recompute_workspace();
+        }
+        "setTreeWatched" => {
+            let root = id("rootChatId");
+            let on = params["watched"].as_bool().unwrap_or(true);
+            client.workspace.update_supervisor(device_id, |snapshot| {
+                snapshot.watched_roots.retain(|id| *id != root);
+                if on {
+                    snapshot.watched_roots.push(root.clone());
+                }
+            });
+            client.recompute_workspace();
+        }
+        "setWatchEverything" => {
+            let on = params["on"].as_bool().unwrap_or(false);
+            client.workspace.update_supervisor(device_id, |snapshot| {
+                snapshot.watch_everything = on;
+            });
+            client.recompute_workspace();
+        }
         "resolveSupervisorItems" => {
             let answered: Vec<String> = params["answers"]
                 .as_array()
@@ -576,6 +786,42 @@ fn mutate(
         other => return Err(ClientError::Unsupported(format!("mutate {other}"))),
     }
     Ok(())
+}
+
+fn lead_chat(
+    id: &str,
+    device_id: &str,
+    space_id: Option<String>,
+    title: &str,
+    config: Option<zeron_proto::ChatConfig>,
+    now: DateTime<Utc>,
+) -> zeron_proto::Chat {
+    zeron_proto::Chat {
+        id: id.to_owned(),
+        device_id: device_id.to_owned(),
+        title: Some(title.to_owned()),
+        archived: false,
+        cwd: Some("~".to_owned()),
+        branch: None,
+        checkout_id: None,
+        source_context: None,
+        config,
+        last_message_preview: None,
+        last_message_at: None,
+        created_at: now,
+        harness_session_id: None,
+        harness_session_cwd: None,
+        space_id,
+        last_seen_at: None,
+        room_gen: Some(2),
+        sidechat_source_chat_id: None,
+        created_by_chat_id: None,
+        forked_from_chat_id: None,
+        previous_harnesses: Vec::new(),
+        delegation: None,
+        settle: None,
+        unsettled_at: None,
+    }
 }
 
 fn set_approval(

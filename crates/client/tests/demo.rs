@@ -719,3 +719,170 @@ fn needs_you_keeps_a_failed_send_with_its_reason_until_it_goes_through() {
         settle(&client).is_none()
     });
 }
+
+#[test]
+fn phone_starts_edits_and_watches_missions() {
+    let (client, _dir) = demo(fast());
+    let rt = zeron_client::runtime::shared();
+
+    let draft = zeron_client::TaskDraft {
+        title: "Ship the widget".into(),
+        notes: "Use the shared layout.".into(),
+        ..Default::default()
+    };
+    let task_id = rt
+        .block_on(client.start_mission(
+            "dev-mac",
+            draft,
+            None,
+            zeron_client::MissionOptions::default(),
+        ))
+        .unwrap();
+    wait_for("mission started", Duration::from_secs(5), || {
+        client
+            .task_detail(&task_id)
+            .is_some_and(|detail| detail.row.mission && detail.row.lead_chat_id.is_some())
+    });
+
+    let plain = rt
+        .block_on(client.create_task(
+            "dev-mac",
+            zeron_client::TaskDraft {
+                title: "Hand me off".into(),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    wait_for("task created", Duration::from_secs(5), || {
+        client.task_detail(&plain).is_some()
+    });
+    rt.block_on(client.update_task(
+        &plain,
+        zeron_proto::TaskPatch {
+            context: Some(vec!["chat-picker".into()]),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    rt.block_on(client.assign_task(&plain, "chat-veil", false))
+        .unwrap();
+    wait_for("assigned with context", Duration::from_secs(5), || {
+        client.task_detail(&plain).is_some_and(|detail| {
+            detail.row.lead_chat_id.as_deref() == Some("chat-veil")
+                && detail
+                    .context
+                    .iter()
+                    .map(|c| c.chat_id.as_str())
+                    .eq(["chat-picker"])
+        })
+    });
+
+    let detail = client.task_detail("task-ios-install").unwrap();
+    let first = detail.steps[0].id.clone();
+    let second = detail.steps[1].id.clone();
+    let edit = zeron_proto::PlanEdit {
+        steps: vec![
+            zeron_proto::PlanStepEdit {
+                step_id: Some(first.clone()),
+                title: "Renamed first step".into(),
+                ..Default::default()
+            },
+            zeron_proto::PlanStepEdit {
+                title: "A new last step".into(),
+                ..Default::default()
+            },
+        ],
+        order: detail
+            .steps
+            .iter()
+            .map(|s| s.id.clone())
+            .filter(|id| *id != first)
+            .chain([first.clone()])
+            .collect(),
+        ..Default::default()
+    };
+    rt.block_on(client.edit_task_plan("task-ios-install", Some(edit), true))
+        .unwrap();
+    wait_for("plan edited and approved", Duration::from_secs(5), || {
+        let detail = client.task_detail("task-ios-install").unwrap();
+        !detail.row.plan_ready
+            && detail.steps[0].id == second
+            && detail
+                .steps
+                .iter()
+                .any(|s| s.id == first && s.title == "Renamed first step")
+            && detail.steps.last().unwrap().title == "A new last step"
+    });
+
+    let watch = client.watch_state("chat-lead-ios").unwrap();
+    assert!(watch.mission && watch.watched);
+    rt.block_on(client.set_watched("chat-lead-ios", false))
+        .unwrap();
+    wait_for("mission unwatched", Duration::from_secs(5), || {
+        !client.watch_state("chat-lead-ios").unwrap().watched
+    });
+    rt.block_on(client.set_watched("chat-veil", true)).unwrap();
+    wait_for("tree watched", Duration::from_secs(5), || {
+        client
+            .watch_state("chat-veil")
+            .is_some_and(|w| !w.mission && w.watched)
+    });
+
+    let brief = client.brief("task-ios-install", None).unwrap();
+    assert_eq!(brief.thread_chat_id.as_deref(), Some("chat-lead-ios"));
+    let messages = rt.block_on(client.brief_messages(&brief)).unwrap();
+    assert!(
+        messages
+            .first()
+            .is_some_and(|m| m.from_you && m.tag == "From you")
+    );
+}
+
+#[test]
+fn phone_stops_resumes_and_starts_supervisors() {
+    let (client, _dir) = demo(fast());
+    let rt = zeron_client::runtime::shared();
+    let host = |client: &Client| {
+        client
+            .workspace()
+            .supervisor
+            .hosts
+            .iter()
+            .find(|h| h.host.device_id == "dev-mac")
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(host(&client).chat_id.as_deref(), Some("supervisor-dev-mac"));
+
+    rt.block_on(client.stop_supervisor("dev-mac")).unwrap();
+    wait_for("stopped", Duration::from_secs(5), || {
+        let h = host(&client);
+        h.state == zeron_proto::supervisor::SupervisorState::Stopped && h.waiting > 0
+    });
+    rt.block_on(client.resume_supervisor("dev-mac")).unwrap();
+    wait_for("resumed", Duration::from_secs(5), || {
+        let h = host(&client);
+        h.state != zeron_proto::supervisor::SupervisorState::Stopped && h.waiting == 0
+    });
+
+    let err = rt.block_on(client.ensure_supervisor("dev-mini", None));
+    assert!(err.is_err());
+    let chat = rt
+        .block_on(client.ensure_supervisor(
+            "dev-mini",
+            Some(zeron_proto::ChatConfig {
+                harness: zeron_proto::HarnessId::ClaudeCode,
+                model: Some("haiku".into()),
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                permission_mode: Default::default(),
+                instructions: String::new(),
+                profile_id: None,
+                instance_id: None,
+                disabled_tools: Vec::new(),
+            }),
+        ))
+        .unwrap();
+    assert_eq!(chat, "supervisor-dev-mini");
+}

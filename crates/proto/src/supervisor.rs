@@ -7,8 +7,70 @@ pub const CHAT_PREFIX: &str = "supervisor-";
 pub const CHAT_TITLE: &str = "Supervisor";
 pub const WAKES_PER_HOUR: usize = 12;
 
+pub const PROFILE_ID: &str = "slp-supervisor";
+
 pub fn is_supervisor_chat(chat_id: &str) -> bool {
     chat_id.starts_with(CHAT_PREFIX)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BriefSender {
+    You,
+    Lead,
+    Supervisor,
+    Step(String),
+    Itself,
+    Thread,
+}
+
+impl BriefSender {
+    pub fn tag(&self) -> String {
+        match self {
+            Self::You => "From you".into(),
+            Self::Lead => "From Lead".into(),
+            Self::Supervisor => "From Supervisor".into(),
+            Self::Step(label) => format!("From {label}"),
+            Self::Itself => "Auto-continue".into(),
+            Self::Thread => "From another thread".into(),
+        }
+    }
+}
+
+pub fn brief_sender(
+    from: Option<&str>,
+    own: &str,
+    lead: Option<&str>,
+    step_label: &dyn Fn(&str) -> Option<String>,
+) -> BriefSender {
+    let Some(from) = from else {
+        return BriefSender::You;
+    };
+    if is_supervisor_chat(from) {
+        BriefSender::Supervisor
+    } else if from == own {
+        BriefSender::Itself
+    } else if Some(from) == lead {
+        BriefSender::Lead
+    } else {
+        step_label(from).map_or(BriefSender::Thread, BriefSender::Step)
+    }
+}
+
+pub fn profile_config(profile: &crate::AgentProfile) -> crate::ChatConfig {
+    crate::ChatConfig {
+        harness: profile.harness,
+        model: profile.model.clone(),
+        reasoning: profile.reasoning,
+        model_options: profile.model_options.clone(),
+        sandbox: crate::SandboxLevel::WorkspaceWrite,
+        permission_mode: profile
+            .permission_mode
+            .unwrap_or(crate::PermissionMode::Full),
+        instructions: profile.instructions.clone(),
+        profile_id: Some(profile.id.clone()),
+        instance_id: None,
+        disabled_tools: profile.disabled_tools.clone(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -618,6 +680,24 @@ pub struct SharedResource {
 impl SupervisorSnapshot {
     pub fn needs_you_count(&self) -> usize {
         self.needs_you.len()
+    }
+
+    pub fn held_wakes(&self) -> Vec<&SupervisorWake> {
+        let mut held: Vec<&SupervisorWake> = self
+            .wakes
+            .iter()
+            .filter(|wake| wake.delivery == WakeDelivery::HeldByStop)
+            .take(self.waiting)
+            .collect();
+        held.reverse();
+        held
+    }
+
+    pub fn watches(&self, tasks: &[crate::Task], root: &str) -> bool {
+        match crate::plan_of_chat(tasks, root) {
+            Some(task) => !self.unwatched.iter().any(|id| *id == task.id),
+            None => self.watch_everything || self.watched_roots.iter().any(|id| id == root),
+        }
     }
 }
 

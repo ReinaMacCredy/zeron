@@ -56,10 +56,11 @@ pub use session::{
     SendRequest, SessionHandle, SessionSnapshot, SnapshotDelta, SnapshotWatch,
 };
 pub use workspace::{
-    ApprovalView, DeviceView, FrontPage, HostRef, ItemSend, MissionStrip, NeedsYouEntry,
+    ApprovalView, Brief, BriefMessage, ContextChat, DeviceView, FrontPage, HostRef, ItemSend, MissionOptions,
+    MissionStrip, NeedsYouEntry,
     NeedsYouKind, ProjectRef, ProjectView, PullRequestGroups, SearchField, SearchHit, SectionView,
-    SessionRow, StepView, SupervisorHost, SupervisorPage, TaskDetail, TaskRow, TasksPage,
-    WakeEntry, WorkspaceSnapshot, project_color_index, relative_time_label,
+    SessionRow, StepView, SupervisorHost, SupervisorPage, TaskDetail, TaskDraft, TaskRow, TasksPage,
+    WakeEntry, WatchState, WorkspaceSnapshot, project_color_index, relative_time_label,
 };
 
 /// Re-exported so consumers (the layout engine) name the exact doc types the

@@ -176,6 +176,69 @@ pub struct TaskDetail {
     pub plan: String,
     pub approval: Option<ApprovalView>,
     pub steps: Vec<StepView>,
+    pub images: Vec<String>,
+    pub context: Vec<ContextChat>,
+    pub watch: Option<WatchState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextChat {
+    pub chat_id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchState {
+    pub root_chat_id: String,
+    pub host: HostRef,
+    pub mission: bool,
+    pub watched: bool,
+    pub everything: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Brief {
+    pub title: String,
+    pub meta: Vec<String>,
+    pub task: String,
+    pub spec: String,
+    pub thread_chat_id: Option<String>,
+    pub lead_chat_id: Option<String>,
+    pub step_labels: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BriefMessage {
+    pub tag: String,
+    pub from_you: bool,
+    pub text: String,
+    pub at_ms: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskDraft {
+    pub title: String,
+    pub notes: String,
+    pub space_id: Option<String>,
+    pub images: Vec<String>,
+    pub context: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissionOptions {
+    pub approve_plan: bool,
+    pub same_agents: bool,
+    pub plan_doc: bool,
+}
+
+impl Default for MissionOptions {
+    fn default() -> Self {
+        Self {
+            approve_plan: true,
+            same_agents: false,
+            plan_doc: true,
+        }
+    }
 }
 
 struct Ctx<'a> {
@@ -286,6 +349,27 @@ impl Ctx<'_> {
 
     fn task_row(&self, task: &Task) -> TaskRow {
         self.row(task, &self.rollup(task))
+    }
+
+    fn watch(&self, chat_id: &str) -> Option<WatchState> {
+        let chats = &self.state.chats;
+        let chat = chats.iter().find(|chat| chat.id == chat_id)?;
+        let root = zeron_proto::tree_path(chat, chats, &self.state.tasks, self.steps)
+            .last()
+            .copied()
+            .unwrap_or(chat);
+        let snapshot = self.supervisors.get(&root.device_id)?;
+        let mission = zeron_proto::plan_of_chat(&self.state.tasks, &root.id).is_some();
+        let watched = snapshot.watches(&self.state.tasks, &root.id);
+        Some(WatchState {
+            root_chat_id: root.id.clone(),
+            host: self.host(&root.device_id),
+            mission,
+            watched,
+            everything: !mission
+                && snapshot.watch_everything
+                && !snapshot.watched_roots.iter().any(|id| *id == root.id),
+        })
     }
 }
 
@@ -652,7 +736,41 @@ pub(crate) fn detail(
         plan: task.plan.clone(),
         approval,
         steps: step_views,
+        images: task.images.clone(),
+        context: task
+            .context
+            .iter()
+            .map(|id| ContextChat {
+                chat_id: id.clone(),
+                title: state
+                    .chats
+                    .iter()
+                    .find(|chat| chat.id == *id)
+                    .and_then(|chat| chat.title.clone())
+                    .unwrap_or_else(|| "New session".to_owned()),
+            })
+            .collect(),
+        watch: task.chat_id.as_deref().and_then(|lead| ctx.watch(lead)),
     })
+}
+
+pub(crate) fn watch(
+    state: &WorkspaceState,
+    steps: &[TaskStep],
+    snapshot: &super::WorkspaceSnapshot,
+    supervisors: &BTreeMap<String, SupervisorSnapshot>,
+    chat_id: &str,
+) -> Option<WatchState> {
+    Ctx {
+        state,
+        steps,
+        rows: &snapshot.sessions,
+        devices: &snapshot.devices,
+        supervisors,
+        item_sends: &HashMap::new(),
+        now: Utc::now(),
+    }
+    .watch(chat_id)
 }
 
 pub(crate) fn strip(
@@ -683,5 +801,91 @@ pub(crate) fn strip(
         step_id,
         done: thread.progress.done as u32,
         total: thread.progress.total as u32,
+    })
+}
+
+pub(crate) fn brief(
+    state: &WorkspaceState,
+    steps: &[TaskStep],
+    snapshot: &super::WorkspaceSnapshot,
+    supervisors: &BTreeMap<String, SupervisorSnapshot>,
+    task_id: &str,
+    step_id: Option<&str>,
+) -> Option<Brief> {
+    let task = state
+        .tasks
+        .iter()
+        .find(|task| task.id == task_id && !task.deleted)?;
+    let ctx = Ctx {
+        state,
+        steps,
+        rows: &snapshot.sessions,
+        devices: &snapshot.devices,
+        supervisors,
+        item_sends: &HashMap::new(),
+        now: Utc::now(),
+    };
+    let plan = ctx.rollup(task);
+    let step = step_id.and_then(|id| plan.steps.iter().find(|row| row.step.id == id));
+    let thread = match step_id {
+        Some(_) => step.and_then(|row| row.step.chat_id.clone()),
+        None => task.chat_id.clone(),
+    };
+    let title = match step {
+        Some(row) => format!(
+            "Brief · {} · {}",
+            plan.step_label(&row.step.id).unwrap_or_default(),
+            row.step.title
+        ),
+        None if step_id.is_some() => "Brief · A removed step".to_owned(),
+        None => "Brief · Lead".to_owned(),
+    };
+    let chat = thread
+        .as_deref()
+        .and_then(|id| state.chats.iter().find(|chat| chat.id == id));
+    let mut meta = vec![task.title.clone()];
+    if let Some(model) = chat.and_then(|chat| chat.config.as_ref()?.model.clone()) {
+        meta.push(model);
+    }
+    let started = chat.and_then(|chat| match &chat.source_context {
+        Some(source) => Some(match source.head_sha.as_deref() {
+            Some(sha) => format!(
+                "started on {} at {}",
+                source.branch,
+                &sha[..sha.len().min(7)]
+            ),
+            None => format!("started on {}", source.branch),
+        }),
+        None => chat
+            .branch
+            .as_deref()
+            .filter(|branch| !branch.is_empty())
+            .map(|branch| format!("started on {branch}")),
+    });
+    meta.extend(started);
+    let mut spec = task.plan.trim().to_owned();
+    if let Some(notes) = step.map(|row| row.step.notes.trim()).filter(|n| !n.is_empty()) {
+        if !spec.is_empty() {
+            spec.push_str("\n\n");
+        }
+        spec.push_str(notes);
+    }
+    let mut task_text = task.title.clone();
+    if !task.notes.trim().is_empty() {
+        task_text.push_str("\n\n");
+        task_text.push_str(task.notes.trim());
+    }
+    Some(Brief {
+        title,
+        meta,
+        task: task_text,
+        spec,
+        thread_chat_id: thread,
+        lead_chat_id: task.chat_id.clone(),
+        step_labels: plan
+            .steps
+            .iter()
+            .filter_map(|row| Some((row.step.chat_id.clone()?, plan.step_label(&row.step.id)?)))
+            .collect(),
     })
 }

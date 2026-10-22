@@ -379,6 +379,28 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             )
         },
         DemoChat {
+            last_ago_ms: 2 * MIN,
+            created_ago_ms: DAY,
+            ..chat(
+                "supervisor-dev-mac",
+                None,
+                MAC,
+                "Supervisor",
+                "Asked you about TestFlight before the widget.",
+            )
+        },
+        DemoChat {
+            last_ago_ms: 6 * MIN,
+            created_ago_ms: DAY,
+            ..chat(
+                "supervisor-dev-mini",
+                None,
+                MINI,
+                "Supervisor",
+                "Re-briefed step 3 after the swipe failure.",
+            )
+        },
+        DemoChat {
             model: "claude-opus-5",
             last_ago_ms: 5 * MIN,
             created_ago_ms: 25 * MIN,
