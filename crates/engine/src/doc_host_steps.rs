@@ -255,6 +255,9 @@ impl DocHost {
                     }
                     continue;
                 }
+                if sessions.limit_holds(&thread) {
+                    continue;
+                }
                 let was_active = lock(&self.inner.active_step_threads).remove(&thread);
                 let Some(turn) = turn_end(
                     session.status,

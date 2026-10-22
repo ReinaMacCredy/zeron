@@ -75,6 +75,10 @@ pub mod workspace_host;
 pub mod workspace_search;
 mod worktree_settings;
 
+#[cfg(test)]
+#[path = "../tests/support/discovery_probe.rs"]
+mod discovery_probe;
+
 pub use agent_accounts::{AgentAccounts, AgentAccountsConfig};
 pub use agent_profiles::AgentProfilesStore;
 pub use auth::{Auth, AuthConfig, AuthState, AuthUser, OrgMembership};
@@ -308,18 +312,23 @@ impl EngineCore {
         }
         let restarted = resume_schedule.take_restart(chrono::Utc::now().timestamp_millis());
         let host = doc_host.clone();
+        let schedule = resume_schedule.clone();
         resume_schedule.spawn(move |due| {
             let host = host.clone();
+            let schedule = schedule.clone();
             async move {
                 match due {
                     resume_schedule::Due::Resume(continuation) => {
-                        send_continuation(&host, &continuation).await
+                        send_continuation(&host, &continuation).await;
+                        schedule.acted(&continuation.chat_id, false);
                     }
                     resume_schedule::Due::Start(chat_id) => host.start_deferred(&chat_id).await,
                     resume_schedule::Due::Switch(chat_id, to) => {
-                        if let Err(error) = host.act_on_offer(&chat_id, &to).await {
+                        let switched = host.act_on_offer(&chat_id, &to).await;
+                        if let Err(error) = &switched {
                             tracing::warn!(chat = %chat_id, %error, "limit offer switch failed");
                         }
+                        schedule.acted(&chat_id, switched.is_err());
                     }
                 }
             }

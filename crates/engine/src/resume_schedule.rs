@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
@@ -9,7 +10,7 @@ use tokio::sync::{Notify, watch};
 use zeron_proto::{LimitOffer, LimitResume, LimitResumes, OfferChoice, RouteTarget};
 
 /// Windows reset on the provider's clock, not ours.
-const RESET_SLACK_MS: i64 = 15_000;
+pub(crate) const RESET_SLACK_MS: i64 = 15_000;
 /// Monotonic sleeps stop while the Mac sleeps; re-read the wall clock often.
 const MAX_NAP: Duration = Duration::from_secs(60);
 /// A restart that never came (a failed install) must not continue old turns
@@ -82,6 +83,8 @@ struct Stored {
     reset: Vec<Reset>,
     #[serde(default)]
     deferred: Vec<Deferred>,
+    #[serde(skip)]
+    acting: HashMap<String, Limited>,
 }
 
 fn enabled() -> bool {
@@ -97,6 +100,7 @@ impl Default for Stored {
             restart_recorded_at: 0,
             reset: Vec::new(),
             deferred: Vec::new(),
+            acting: HashMap::new(),
         }
     }
 }
@@ -175,6 +179,16 @@ impl Stored {
         self.reset
             .retain(|reset| now - reset.resets_at < RESET_KEPT_MS);
         (due, next)
+    }
+
+    fn shape(&self) -> (usize, usize, usize, usize) {
+        let offers = self.limited.iter().filter(|e| e.offer.is_some()).count();
+        (
+            self.limited.len(),
+            offers,
+            self.deferred.len(),
+            self.reset.len(),
+        )
     }
 }
 
@@ -259,15 +273,20 @@ impl ResumeSchedule {
     pub fn resolve_offer(&self, chat_id: &str, choice: OfferResolution) -> Option<LimitOffer> {
         let mut taken = None;
         self.update(|stored| {
-            let Some(at) = stored
-                .limited
-                .iter()
-                .position(|entry| entry.at.chat_id == chat_id && entry.offer.is_some())
-            else {
+            let Some(at) = stored.limited.iter().position(|entry| {
+                entry.at.chat_id == chat_id
+                    && entry.offer.as_ref().is_some_and(|offer| {
+                        choice != OfferResolution::Switch || offer.to.is_some()
+                    })
+            }) else {
                 return false;
             };
             match choice {
-                OfferResolution::Switch => taken = stored.limited.remove(at).offer,
+                OfferResolution::Switch => {
+                    let mut entry = stored.limited.remove(at);
+                    taken = entry.offer.take();
+                    stored.acting.insert(chat_id.to_owned(), entry);
+                }
                 OfferResolution::Wait => taken = stored.limited[at].offer.take(),
                 OfferResolution::Hold => {
                     if let Some(offer) = stored.limited[at].offer.as_mut() {
@@ -282,11 +301,27 @@ impl ResumeSchedule {
     }
 
     pub fn holds(&self, chat_id: &str, now: i64) -> bool {
-        lock(&self.inner.stored).limited.iter().any(|entry| {
-            entry.at.chat_id == chat_id
-                && (entry.offer.is_some()
-                    || (entry.auto && entry.resets_at.is_some_and(|at| at + RESET_SLACK_MS > now)))
-        })
+        let stored = lock(&self.inner.stored);
+        stored.acting.contains_key(chat_id)
+            || stored.limited.iter().any(|entry| {
+                entry.at.chat_id == chat_id
+                    && (entry.offer.is_some()
+                        || (entry.auto
+                            && entry.resets_at.is_some_and(|at| at + RESET_SLACK_MS > now)))
+            })
+    }
+
+    /// Ends the hold a fired Switch or Resume keeps until its turn is underway; a failed switch puts the limit back, offer spent.
+    pub fn acted(&self, chat_id: &str, failed: bool) {
+        self.update(|stored| {
+            let Some(entry) = stored.acting.remove(chat_id) else {
+                return false;
+            };
+            if failed && !stored.limited.iter().any(|e| e.at.chat_id == chat_id) {
+                stored.limited.push(entry);
+            }
+            true
+        });
     }
 
     pub fn set_auto(&self, chat_id: &str, auto: bool, now: i64) -> bool {
@@ -394,13 +429,7 @@ impl ResumeSchedule {
         tokio::spawn(async move {
             loop {
                 let now = chrono::Utc::now().timestamp_millis();
-                let mut due = Vec::new();
-                let mut next = None;
-                schedule.update(|stored| {
-                    let before = (stored.limited.len(), stored.deferred.len());
-                    (due, next) = stored.take_due(now);
-                    (stored.limited.len(), stored.deferred.len()) != before
-                });
+                let (due, next) = schedule.tick(now);
                 for due in due {
                     fire(due).await;
                 }
@@ -413,6 +442,32 @@ impl ResumeSchedule {
                 }
             }
         });
+    }
+
+    fn tick(&self, now: i64) -> (Vec<Due>, Option<i64>) {
+        let mut due = Vec::new();
+        let mut next = None;
+        self.update(|stored| {
+            let before = stored.shape();
+            let limited = stored.limited.clone();
+            (due, next) = stored.take_due(now);
+            for due in &due {
+                let chat_id = match due {
+                    Due::Resume(at) => &at.chat_id,
+                    Due::Switch(chat_id, _) => chat_id,
+                    Due::Start(_) => continue,
+                };
+                if let Some(entry) = limited.iter().find(|e| &e.at.chat_id == chat_id) {
+                    let entry = Limited {
+                        offer: None,
+                        ..entry.clone()
+                    };
+                    stored.acting.insert(chat_id.clone(), entry);
+                }
+            }
+            stored.shape() != before
+        });
+        (due, next)
     }
 
     fn update(&self, change: impl FnOnce(&mut Stored) -> bool) -> bool {
@@ -588,6 +643,57 @@ mod tests {
     }
 
     #[test]
+    fn a_fired_switch_holds_until_acted_and_a_failed_one_puts_the_limit_back() {
+        let (_dir, schedule) = schedule();
+        schedule.note_limit("c", Some(90_000), None, 1_000);
+        schedule.set_offer("c", offer(OfferChoice::Switch, Some(2_000)));
+        let (due, _) = schedule.tick(2_000);
+        assert!(matches!(&due[..], [Due::Switch(..)]));
+        assert!(schedule.snapshot().chats.is_empty());
+        assert!(schedule.holds("c", 2_000));
+        schedule.acted("c", true);
+        let chats = schedule.snapshot().chats;
+        assert_eq!((chats.len(), chats[0].offer.is_none()), (1, true));
+        assert!(chats[0].auto && schedule.holds("c", 2_000));
+        assert_eq!(
+            schedule.tick(2_000),
+            (vec![], Some(90_000 + RESET_SLACK_MS))
+        );
+    }
+
+    #[test]
+    fn an_expired_wait_offer_is_saved_and_broadcast_cleared() {
+        let (dir, schedule) = schedule();
+        schedule.note_limit("wait", Some(90_000), None, 1_000);
+        schedule.set_offer("wait", offer(OfferChoice::Wait, Some(2_000)));
+        let limits = schedule.watch();
+        assert_eq!(
+            schedule.tick(2_000),
+            (vec![], Some(90_000 + RESET_SLACK_MS))
+        );
+        assert!(limits.has_changed().unwrap());
+        assert_eq!(limits.borrow().chats[0].offer, None);
+        assert_eq!(
+            ResumeSchedule::open(dir.path()).snapshot().chats[0].offer,
+            None
+        );
+    }
+
+    #[test]
+    fn an_unarmed_limit_past_its_reset_waits_for_its_offer() {
+        let (_dir, schedule) = schedule();
+        schedule.note_limit("c", Some(5_000), None, 6_000);
+        schedule.set_offer("c", offer(OfferChoice::Switch, None));
+        assert_eq!(schedule.tick(7_000), (vec![], None));
+        assert!(schedule.snapshot().chats[0].offer.is_some());
+        assert!(schedule.holds("c", 7_000));
+        schedule.resolve_offer("c", OfferResolution::Wait);
+        assert_eq!(schedule.tick(7_000), (vec![], None));
+        assert!(schedule.snapshot().chats.is_empty());
+        assert_eq!(schedule.past_resets(7_000), [("c".to_owned(), 5_000)]);
+    }
+
+    #[test]
     fn hold_clears_the_countdown_and_switch_takes_the_entry() {
         let (_dir, schedule) = schedule();
         schedule.note_limit("c", Some(90_000), None, 1_000);
@@ -601,6 +707,21 @@ mod tests {
                 .is_some()
         );
         assert!(schedule.snapshot().chats.is_empty());
+        assert!(
+            schedule.holds("c", 1_000),
+            "held until the switched turn is underway"
+        );
+        schedule.acted("c", false);
         assert!(!schedule.holds("c", 1_000));
+        schedule.note_limit("c", Some(90_000), None, 1_000);
+        schedule.set_offer(
+            "c",
+            LimitOffer {
+                to: None,
+                ..offer(OfferChoice::Wait, None)
+            },
+        );
+        assert_eq!(schedule.resolve_offer("c", OfferResolution::Switch), None);
+        assert!(schedule.snapshot().chats[0].offer.is_some());
     }
 }

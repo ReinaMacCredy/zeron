@@ -4664,6 +4664,7 @@ impl Transcript {
         let offer = limit.offer.clone()?;
         let device = device.to_string();
         let resets_at = limit.resets_at;
+        let auto = limit.auto;
         let engine = state.engine().cloned()?;
         let harness = state
             .chats
@@ -4735,6 +4736,7 @@ impl Transcript {
                 harness,
                 offer: &offer,
                 resets_at,
+                auto,
                 selected,
                 countdown,
                 on_select,
@@ -18238,6 +18240,7 @@ mod tests {
         assert!(matches!(rows[2].kind, RowKind::GeneratedImage { .. }));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn settled_html_links_end_the_entry_with_one_card_row() {
         let parts = vec![

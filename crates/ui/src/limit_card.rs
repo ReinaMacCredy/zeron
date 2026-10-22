@@ -37,6 +37,7 @@ pub(crate) struct LimitCard<'a> {
     pub harness: Option<HarnessId>,
     pub offer: &'a LimitOffer,
     pub resets_at: Option<i64>,
+    pub auto: bool,
     pub selected: OfferChoice,
     pub countdown: Option<(i64, f32)>,
     pub on_select: Rc<dyn Fn(OfferChoice, &mut Window, &mut App)>,
@@ -106,6 +107,7 @@ pub(crate) fn limit_card(card: LimitCard, theme: &Theme, cx: &App) -> AnyElement
         harness,
         offer,
         resets_at,
+        auto,
         selected,
         countdown,
         on_select,
@@ -207,7 +209,11 @@ pub(crate) fn limit_card(card: LimitCard, theme: &Theme, cx: &App) -> AnyElement
             Some(at) => format!("Wait for reset {at}"),
             None => "Wait for reset".to_string(),
         },
-        format!("Auto-resumes on {name} at reset, as today."),
+        if auto {
+            format!("Auto-resumes on {name} at reset, as today.")
+        } else {
+            "Auto-resume is not armed: the thread stops here and its parent is told.".to_string()
+        },
     );
     let act = match selected {
         OfferChoice::Switch => ("switch", "Switch now"),

@@ -14,6 +14,9 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 use zeron_engine::{AuthState, Engine, EngineConfig, EngineInfo, HarnessId, WorkspaceScope};
 use zeron_rpc::{connect_ws, memory_client, methods};
 
+#[path = "support/discovery_probe.rs"]
+mod discovery_probe;
+
 fn config(
     data_dir: &std::path::Path,
     edge_url: String,
@@ -38,7 +41,7 @@ async fn rejecting_edge() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<
     let seen = requests.clone();
     let task = tokio::spawn(async move {
         loop {
-            let Ok((mut stream, _)) = listener.accept().await else {
+            let Ok((mut stream, _)) = discovery_probe::accept(&listener).await else {
                 return;
             };
             let seen = seen.clone();
