@@ -363,6 +363,18 @@ pub enum SteeringMode {
     TurnBoundary,
 }
 
+/// The caption under the composer when a Steer follow-up will queue because
+/// the agent only takes input between turns.
+pub fn steer_queues_notice(
+    queueing: bool,
+    prefers_steer: bool,
+    steers_mid_turn: bool,
+) -> Option<&'static str> {
+    (queueing && prefers_steer && !steers_mid_turn).then_some(
+        "This agent can't be steered mid-turn. Your message will be queued and sent when the current turn finishes.",
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {

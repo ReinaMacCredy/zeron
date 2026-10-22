@@ -14755,11 +14755,13 @@ impl Render for Composer {
         // With Steer as the default, an agent that only takes input between
         // turns still queues; without this line the queue read as a dropped
         // steer (user report: "my steer didn't apply until grok finished").
-        let steer_queues = mode == SendButtonMode::Queue
-            && crate::settings::current(cx).follow_up_behavior == FollowUpBehavior::Steer
-            && self.pickers.read(cx).resolved_steering_mode(cx)
-                == Some(zeron_proto::SteeringMode::TurnBoundary);
-        let container = container.when(steer_queues, |el| {
+        let steer_queues = zeron_proto::steer_queues_notice(
+            mode == SendButtonMode::Queue,
+            crate::settings::current(cx).follow_up_behavior == FollowUpBehavior::Steer,
+            self.pickers.read(cx).resolved_steering_mode(cx)
+                != Some(zeron_proto::SteeringMode::TurnBoundary),
+        );
+        let container = container.when_some(steer_queues, |el, notice| {
             el.child(
                 div()
                     .mx(px(8.0))
@@ -14767,7 +14769,7 @@ impl Render for Composer {
                     .text_size(px(11.0))
                     .line_height(px(14.0))
                     .text_color(theme.text_faint)
-                    .child("This agent can't be steered mid-turn. Your message will be queued and sent when the current turn finishes."),
+                    .child(notice),
             )
         });
 

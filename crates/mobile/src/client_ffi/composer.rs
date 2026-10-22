@@ -21,3 +21,7 @@ pub fn permission_modes() -> Vec<PermissionModeInfo> {
         .collect()
 }
 
+#[uniffi::export]
+pub fn follow_up_notice(queueing: bool, steer: bool, can_steer: bool) -> Option<String> {
+    zeron_proto::steer_queues_notice(queueing, steer, can_steer).map(str::to_owned)
+}

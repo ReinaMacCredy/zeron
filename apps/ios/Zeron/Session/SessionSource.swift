@@ -12,6 +12,7 @@ struct SessionChrome: Equatable {
         case notDelivered
         case failed(String)
         case editing
+        case notice(String)
     }
 
     struct Question: Equatable {

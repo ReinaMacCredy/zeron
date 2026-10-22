@@ -62,6 +62,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     var onChipTap: ((String, UIView) -> Void)?
     var onHeightChange: (() -> Void)?
     var onFocusChange: ((Bool) -> Void)?
+    var onActionChange: (() -> Void)?
     /// `@` file search (nil disables mentions).
     var mentionSearch: ((String) async -> [FileMatch])?
 
@@ -103,6 +104,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     private var cardConstraints: [NSLayoutConstraint] = []
     private(set) var isCard = false
     private var currentAction: Action = .send
+    var isQueueing: Bool { currentAction == .queue }
     private var mentions = MentionIndex()
     private let suggestions = MentionSuggestions()
     private var mentionQuery: (range: NSRange, query: String)?
@@ -647,6 +649,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         case .queue: actionButton.accessibilityLabel = steering ? "Steer" : "Queue message"
         case .stop: actionButton.accessibilityLabel = "Stop response"
         }
+        if changed { onActionChange?() }
         // Long-press offers the other delivery modes mid-turn.
         if action == .queue {
             var items: [UIMenuElement] = [

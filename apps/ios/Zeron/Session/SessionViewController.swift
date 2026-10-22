@@ -106,6 +106,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         composer.text = Drafts.load(chatId)
         composer.mentionSearch = { [weak self] q in await self?.source.searchFiles(q) ?? [] }
         composer.onHeightChange = { [weak self] in self?.view.setNeedsLayout() }
+        composer.onActionChange = { [weak self] in self?.render(animated: true) }
         questions.onSubmit = { [weak self] answers in
             guard let self, let id = self.shown.questions?.requestId else { return }
             self.source.answer(requestId: id, answers: answers)
@@ -181,6 +182,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         // Coming back on screen (e.g. after a second copy of this chat was
         // popped and detached it): live again.
         if hasAppeared { source.reattach() }
+        composer.preferredDelivery = UserDefaults.standard.string(forKey: "followUpBehavior") == "steer" ? .steer : .queue
+        if hasAppeared { render(animated: false) }
     }
 
     private var hasAppeared = false
@@ -492,7 +495,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     }
 
     private func render(animated: Bool) {
-        let c = source.chrome
+        var c = source.chrome
+        if c.banner == .none, let notice = followUpNotice(queueing: composer.isQueueing, steer: composer.preferredDelivery == .steer, canSteer: c.canSteer) {
+            c.banner = .notice(notice)
+        }
         let old = shown
         shown = c
         titleView.set(title: c.title, subtitle: c.subtitle)
@@ -613,6 +619,7 @@ final class StatusPill: UIControl {
         addSubview(glass)
         label.font = Fonts.ui(.sansMedium, 13)
         label.textColor = Palette.secondary
+        label.numberOfLines = 2
         for v in [grid, label] {
             v.translatesAutoresizingMaskIntoConstraints = false
             glass.contentView.addSubview(v)
@@ -622,7 +629,7 @@ final class StatusPill: UIControl {
             glass.bottomAnchor.constraint(equalTo: bottomAnchor),
             glass.leadingAnchor.constraint(equalTo: leadingAnchor),
             glass.trailingAnchor.constraint(equalTo: trailingAnchor),
-            heightAnchor.constraint(equalToConstant: 30),
+            heightAnchor.constraint(greaterThanOrEqualToConstant: 30),
             grid.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 11),
             grid.centerYAnchor.constraint(equalTo: glass.contentView.centerYAnchor),
             grid.widthAnchor.constraint(equalToConstant: 12),
@@ -630,7 +637,11 @@ final class StatusPill: UIControl {
             label.leadingAnchor.constraint(equalTo: grid.trailingAnchor, constant: 8),
             label.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -12),
             label.centerYAnchor.constraint(equalTo: glass.contentView.centerYAnchor),
+            label.topAnchor.constraint(greaterThanOrEqualTo: glass.contentView.topAnchor, constant: 6),
         ])
+        let compact = heightAnchor.constraint(equalToConstant: 30)
+        compact.priority = .defaultLow
+        compact.isActive = true
         addAction(UIAction { [weak self] _ in self?.onTap?() }, for: .touchUpInside)
     }
 
@@ -668,6 +679,9 @@ final class StatusPill: UIControl {
         case .editing:
             grid.kind = .dot(StatusTone.input)
             label.text = "Editing queued message · Tap to cancel"
+        case let .notice(message):
+            grid.kind = .dot(StatusTone.idle)
+            label.text = message
         }
     }
 
