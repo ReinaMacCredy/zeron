@@ -10,7 +10,7 @@ Click **Usage** in the rail, pick **Usage** in the account menu, or pick **Open 
 
 **Plan limits** has a card for the active account of each agent that reports usage. Each limit, such as **5h** or **Weekly**, shows the percent left and when it resets. The bar turns to a warning color as you near the limit.
 
-Under each bar, Zeron compares your pace with the time left: **in reserve** or **in deficit**, and **Lasts until reset**, **Runs out in** a time, or **Limit reached**. Limits refresh after each turn. Open **Details** for the account and last update time.
+Under each bar, Zeron compares your pace with the time left: **in reserve** or **in deficit**, and **Lasts until reset**, **Runs out in** a time, or **Limit reached**. Limits refresh after each turn. Open **Details** for the account and last update time. [Routing](zeron://docs/routing) reads the same limits to move a delegated child off an agent that is out of quota.
 
 ## Token usage
 

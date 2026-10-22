@@ -33,9 +33,9 @@ pub mod diff_sync;
 pub mod doc_host;
 mod fs_watch;
 pub mod harness_updates;
+pub(crate) mod home_index;
 mod home_widgets;
 mod html_render;
-pub(crate) mod home_index;
 mod http_error;
 pub mod instance_lock;
 pub mod jev;
@@ -46,10 +46,12 @@ pub mod predictions;
 pub mod profile;
 pub mod project_actions;
 pub mod provider_instances;
+pub mod provider_switch;
 pub mod registry;
 pub mod repos;
 pub mod resume_schedule;
 pub mod review;
+pub mod routing;
 pub mod rpc;
 pub mod run_journal;
 pub mod sessions;
@@ -306,9 +308,21 @@ impl EngineCore {
         }
         let restarted = resume_schedule.take_restart(chrono::Utc::now().timestamp_millis());
         let host = doc_host.clone();
-        resume_schedule.spawn(move |continuation| {
+        resume_schedule.spawn(move |due| {
             let host = host.clone();
-            async move { send_continuation(&host, &continuation).await }
+            async move {
+                match due {
+                    resume_schedule::Due::Resume(continuation) => {
+                        send_continuation(&host, &continuation).await
+                    }
+                    resume_schedule::Due::Start(chat_id) => host.start_deferred(&chat_id).await,
+                    resume_schedule::Due::Switch(chat_id, to) => {
+                        if let Err(error) = host.act_on_offer(&chat_id, &to).await {
+                            tracing::warn!(chat = %chat_id, %error, "limit offer switch failed");
+                        }
+                    }
+                }
+            }
         });
         let host = doc_host.clone();
         tokio::spawn(async move {
@@ -377,6 +391,7 @@ impl EngineCore {
         // the P2P service, which serves it to that device alone.
         let agent_accounts =
             AgentAccounts::with_callback_routes(agent_accounts_config, previews.callback_routes());
+        sessions.quota().set_accounts(agent_accounts.clone());
         let harness_updates =
             harness_updates::HarnessUpdateCoordinator::new(data_dir, registry.clone());
         harness_updates.start();

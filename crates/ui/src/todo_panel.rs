@@ -735,6 +735,7 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
             html_render: None,
+            delegate_route: None,
         }
     }
 
@@ -992,6 +993,7 @@ mod composer_tests {
                 subagent_status: None,
                 subagent_tail: None,
                 html_render: None,
+                delegate_route: None,
             }],
             created_at: 0,
             device_id: "d".into(),

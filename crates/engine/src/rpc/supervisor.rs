@@ -331,6 +331,7 @@ impl EngineRpc {
                     title: title.unwrap_or_else(|| step.title.clone()),
                     notes,
                     images: None,
+                    role: None,
                 };
                 let rebrief = tasks::Rebrief {
                     supervisor: from,

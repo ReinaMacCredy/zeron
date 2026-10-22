@@ -2034,6 +2034,7 @@ mod tests {
             subagent_status: status,
             subagent_tail: None,
             html_render: None,
+            delegate_route: None,
         }
     }
 
@@ -2115,6 +2116,7 @@ mod tests {
                 finding_outcomes: Default::default(),
                 findings_handed: Default::default(),
                 findings_announced: Default::default(),
+                route: None,
             });
             chat
         };

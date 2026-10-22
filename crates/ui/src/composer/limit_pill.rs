@@ -32,6 +32,7 @@ impl Composer {
         let (device, limit) = state.limit_resume(&chat_id)?;
         let (text, action) = label(limit.resets_at, limit.auto, Utc::now());
         let auto = limit.auto;
+        let switch_to = limit.offer.as_ref().and_then(|offer| offer.to.clone());
         let device = device.to_owned();
         let engine = state.engine().cloned();
         let pill = pill_frame("limit-pill", theme)
@@ -44,6 +45,33 @@ impl Composer {
                     .into_any_element(),
             ))
             .child(div().text_color(theme.text).child(SharedString::from(text)))
+            .when_some(switch_to.zip(engine.clone()), |el, (to, engine)| {
+                let model = to.model.as_deref().map_or_else(
+                    || to.harness.display_name().to_string(),
+                    |model| crate::pickers::model_display_label(to.harness, model, cx),
+                );
+                let chat_id = chat_id.clone();
+                let device = device.clone();
+                el.child(
+                    div()
+                        .id("limit-pill-switch")
+                        .debug_selector(|| "limit-pill-switch".into())
+                        .ml(px(6.0))
+                        .text_color(theme.accent)
+                        .cursor_pointer()
+                        .hover(|s| s.opacity(0.8))
+                        .child(SharedString::from(format!("Switch to {model}")))
+                        .on_click(move |_, _, cx| {
+                            crate::limit_card::resolve_offer(
+                                engine.clone(),
+                                chat_id.clone(),
+                                device.clone(),
+                                "switch",
+                                cx,
+                            );
+                        }),
+                )
+            })
             .when_some(action.zip(engine), |el, (action, engine)| {
                 el.child(
                     div()

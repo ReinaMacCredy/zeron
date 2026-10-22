@@ -189,6 +189,17 @@ struct CreateThreadParams {
     cwd: Option<String>,
     #[serde(default)]
     task_step_id: Option<String>,
+    #[serde(default)]
+    chosen: Vec<crate::routing::Chosen>,
+    #[serde(default)]
+    quota_choice: Option<crate::routing::quota::QuotaChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolveLimitOfferParams {
+    chat_id: String,
+    choice: crate::resume_schedule::OfferResolution,
 }
 
 #[derive(Debug, Deserialize)]
@@ -898,16 +909,6 @@ struct FetchToolBlobParams {
     blob_ref: String,
 }
 
-/// A host-written transcript boundary riding on a config mutation: the
-/// divider label plus the hint shown behind its info glyph.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SystemNote {
-    text: String,
-    #[serde(default)]
-    hint: Option<String>,
-}
-
 /// The Mutate surface (feature-inventory §2 DataRpc), tagged by `op`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
@@ -1006,7 +1007,7 @@ enum MutateParams {
         chat_id: String,
         config: ChatConfig,
         #[serde(default)]
-        note: Option<SystemNote>,
+        note: Option<crate::provider_switch::SystemNote>,
     },
     /// Tombstone: removes the chats-map row; the session doc remains.
     #[serde(rename_all = "camelCase")]
@@ -1185,6 +1186,8 @@ struct PlannedStep {
     notes: String,
     #[serde(default)]
     thread_id: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1472,6 +1475,186 @@ impl EngineRpc {
         }
     }
 
+    async fn preview_routes(
+        &self,
+        p: crate::routing::preview::PreviewParams,
+    ) -> Result<crate::routing::preview::Preview, RpcError> {
+        use crate::routing::preview;
+        let owner = match p.owner_chat_id.as_deref() {
+            Some(id) => self
+                .workspace
+                .chat(id)
+                .map_err(|e| RpcError::Failed(e.to_string()))?
+                .and_then(|chat| chat.config),
+            None => None,
+        };
+        let base = match (p.base, owner) {
+            (Some(base), _) => base,
+            (None, Some(config)) => zeron_proto::RouteTarget {
+                harness: config.harness,
+                model: config.model,
+                reasoning: config.reasoning,
+            },
+            (None, None) => self.default_route_base().await,
+        };
+        let offered: Vec<HarnessId> = self.registry.offered().iter().map(|d| d.id).collect();
+        let settings = self.registry.routing_settings();
+        let now = crate::now_ms();
+        Ok(preview::preview(&preview::Inputs {
+            settings: &settings,
+            base,
+            roles: preview::roles(p.roles.as_deref()),
+            offered: &offered,
+            price: &crate::model_prices::blended,
+            quota: &|harness| self.sessions.quota().state(harness, now),
+            step: p.steps,
+            now,
+        }))
+    }
+
+    async fn default_route_base(&self) -> zeron_proto::RouteTarget {
+        let harness = self.doc_host.default_harness();
+        let model = match self.registry.resolve(harness) {
+            Ok(resolved) => {
+                crate::model_catalogs::list_with_lease(self.repos.data_dir(), resolved, false, None)
+                    .await
+                    .ok()
+                    .and_then(|models| models.into_iter().next())
+                    .map(|model| model.id)
+            }
+            Err(_) => None,
+        };
+        zeron_proto::RouteTarget {
+            harness,
+            model,
+            reasoning: None,
+        }
+    }
+
+    fn resolve_route(
+        &self,
+        owner_chat_id: &str,
+        request: &crate::routing::Request,
+        step: bool,
+        choice: Option<crate::routing::quota::QuotaChoice>,
+    ) -> Result<crate::routing::quota::Gated, RpcError> {
+        let owner = self
+            .workspace
+            .chat(owner_chat_id)
+            .map_err(|e| RpcError::Failed(e.to_string()))?
+            .and_then(|chat| chat.config)
+            .map(|config| crate::routing::target_of(&config));
+        let offered: Vec<HarnessId> = self.registry.offered().iter().map(|d| d.id).collect();
+        let settings = self.registry.routing_settings();
+        let resolved = crate::routing::resolve(request, owner.as_ref(), &settings, &offered);
+        let quota = self.sessions.quota().clone();
+        let now = crate::now_ms();
+        Ok(crate::routing::quota::gate(
+            resolved,
+            &crate::routing::quota::Gate {
+                settings: &settings,
+                owner,
+                step,
+                offered: &offered,
+                choice,
+                quota: &|harness| quota.state(harness, now),
+                now,
+            },
+        ))
+    }
+
+    fn route_step(
+        &self,
+        p: &mut CreateThreadParams,
+    ) -> Result<Option<zeron_proto::ChildRoute>, RpcError> {
+        let Some(step) = p
+            .task_step_id
+            .as_deref()
+            .and_then(|id| self.workspace.task_step(id))
+        else {
+            return Ok(None);
+        };
+        let role = step.role.as_deref().and_then(crate::routing::Role::parse);
+        let same_agents = self
+            .workspace
+            .task(&step.task_id)
+            .is_some_and(|task| task.same_agents);
+        if role.is_none() || same_agents {
+            return Ok(None);
+        }
+        let gated = self.resolve_route(
+            &p.from_chat_id,
+            &crate::routing::Request {
+                role,
+                chosen: &p.chosen,
+                harness: p.harness,
+                model: p.model.as_deref(),
+                reasoning: p.reasoning,
+                profile: p.profile.profile_id.is_some(),
+            },
+            true,
+            p.quota_choice,
+        )?;
+        let resolved = match gated {
+            crate::routing::quota::Gated::Run(resolved) => resolved,
+            crate::routing::quota::Gated::UseNative { .. } => {
+                return Err(RpcError::Failed(
+                    "a step runs on a thread, not a native sub-agent".into(),
+                ));
+            }
+            crate::routing::quota::Gated::Exhausted(message) => {
+                return Err(RpcError::Failed(message));
+            }
+        };
+        p.harness = resolved.harness;
+        p.model = resolved.model;
+        p.reasoning = resolved.reasoning;
+        Ok(resolved.route)
+    }
+
+    /// `Err(reply)` is the delegate_task answer when no child starts: the agent runs it natively.
+    fn route_delegation(
+        &self,
+        mut p: crate::doc_host::DelegateTaskParams,
+    ) -> Result<Result<crate::doc_host::DelegateTaskParams, serde_json::Value>, RpcError> {
+        let Some(role) = p.role.as_deref().and_then(crate::routing::Role::parse) else {
+            return Ok(Ok(p));
+        };
+        let gated = self.resolve_route(
+            &p.owner_chat_id,
+            &crate::routing::Request {
+                role: Some(role),
+                chosen: &p.chosen,
+                harness: p.harness,
+                model: p.model.as_deref(),
+                reasoning: p.reasoning,
+                profile: p.profile.profile_id.is_some(),
+            },
+            false,
+            p.quota_choice,
+        )?;
+        let resolved = match gated {
+            crate::routing::quota::Gated::Run(resolved) => resolved,
+            crate::routing::quota::Gated::UseNative { route, message } => {
+                self.sessions
+                    .bind_native_fallback(&p.owner_chat_id, &p.task, route.clone());
+                return Ok(Err(serde_json::json!({
+                    "status": "use_native",
+                    "route": route,
+                    "message": message,
+                })));
+            }
+            crate::routing::quota::Gated::Exhausted(message) => {
+                return Err(RpcError::Failed(message));
+            }
+        };
+        p.harness = resolved.harness;
+        p.model = resolved.model;
+        p.reasoning = resolved.reasoning;
+        p.route = resolved.route;
+        Ok(Ok(p))
+    }
+
     async fn start_review(&self, p: StartReviewParams) -> Result<serde_json::Value, RpcError> {
         use crate::review::{PromptInput, ReviewScope, ReviewerOptions};
         let failed = |message: &str| RpcError::Failed(message.to_string());
@@ -1545,17 +1728,7 @@ impl EngineRpc {
             return Err(failed("Nothing to review"));
         }
         let settings = self.registry.review_settings();
-        let mock = std::env::var("ZERON_HARNESS").is_ok_and(|v| v.trim() == "mock");
-        let descriptors: Vec<_> = self
-            .registry
-            .descriptors()
-            .into_iter()
-            .filter(|d| {
-                d.installed
-                    && (crate::registry::descriptor_enabled(d) || (mock && d.id == HarnessId::Mock))
-                    && (mock || d.id != HarnessId::Mock)
-            })
-            .collect();
+        let descriptors = self.registry.offered();
         let options = ReviewerOptions {
             offered: descriptors.iter().map(|d| d.id).collect(),
             levels: descriptors
@@ -1594,7 +1767,7 @@ impl EngineRpc {
                     owner_chat_id: chat.id.clone(),
                     task,
                     title: Some("Review changes".to_string()),
-                    role: Some("review".to_string()),
+                    role: Some("validator".to_string()),
                     harness: reviewer.harness,
                     model: reviewer.model.clone(),
                     reasoning: reviewer.reasoning,
@@ -1612,6 +1785,9 @@ impl EngineRpc {
                     wait: false,
                     wake: Some(p.wake.unwrap_or(zeron_proto::DelegationWake::Never)),
                     client_request_id: Some(request),
+                    chosen: Vec::new(),
+                    route: None,
+                    quota_choice: None,
                 },
                 self.registry.delegation_settings(),
             )
@@ -2317,84 +2493,16 @@ impl EngineRpc {
                 note,
             } => {
                 self.voice.retire_chat(&chat_id);
-                let left_config = self.workspace.chat_config(&chat_id);
-                let left_instance = left_config.as_ref().and_then(|c| c.instance_id.clone());
-                let left_model = left_config.and_then(|c| c.model);
-                let left = self.doc_host.harness_for(&chat_id);
-                // Another instance of the same driver is another home and login: its session cannot resume.
-                let switching = left != config.harness || left_instance != config.instance_id;
-                if switching {
-                    self.sessions
-                        .switch_harness(&chat_id)
-                        .await
-                        .map_err(failed)?;
-                }
-                let handle = (note.is_some() && self.doc_host.is_host(&chat_id))
-                    .then(|| self.doc_host.open(&chat_id))
-                    .transpose()
-                    .map_err(failed)?;
-                // A change on top of a handoff nobody has sent to yet folds
-                // into that divider instead of stacking a second one: the chat
-                // still left the harness the first divider named, and the one
-                // in between never ran, so it leaves no mark either.
-                let replaced = handle
-                    .as_ref()
-                    .and_then(|handle| unanswered_switch_note(handle));
-                if replaced.is_some() && switching {
-                    self.workspace
-                        .set_chat_config_after_unsent_switch(&chat_id, &config)
-                } else {
-                    self.workspace.set_chat_config(&chat_id, &config)
-                }
-                .map_err(failed)?;
-                let (Some(handle), Some(mut note)) = (handle, note) else {
-                    return Ok(());
-                };
-                let handoff = match replaced {
-                    Some(previous) => {
-                        handle
-                            .doc()
-                            .truncate_from(&previous.id)
-                            .map_err(|e| failed(e.into()))?;
-                        match fold_switch_note(&previous, left, &config, &note) {
-                            Some((folded, route)) => {
-                                note = folded;
-                                Some((previous.packet, route))
-                            }
-                            // Back where it started: the transcript shows no
-                            // switch, and the closed session hands over on the
-                            // next turn like any re-sent first turn.
-                            None => return Ok(()),
-                        }
-                    }
-                    // The packet is built now, at the switch, so the divider
-                    // shows it at once; the first run sends this same text.
-                    None => switching.then(|| {
-                        let packet = self
-                            .sessions
-                            .provider_switch_packet(&chat_id)
-                            .unwrap_or_default();
-                        let route = zeron_doc::HandoffRoute {
-                            from_harness: Some(left),
-                            from_model: left_model,
-                            to_model: config.model.clone(),
-                            ..Default::default()
-                        };
-                        (packet, route)
-                    }),
-                };
-                handle
-                    .write_system_note_with(
-                        &crate::new_id(),
-                        &note.text,
-                        note.hint.as_deref(),
-                        handoff.as_ref().map(|(packet, route)| {
-                            (config.harness, packet.as_str(), route.clone())
-                        }),
-                        crate::now_ms(),
-                    )
-                    .map_err(|e| failed(e.into()))?;
-                Ok(())
+                crate::provider_switch::apply(
+                    &self.doc_host,
+                    &self.sessions,
+                    &self.workspace,
+                    &chat_id,
+                    &config,
+                    note,
+                )
+                .await
+                .map_err(failed)
             }
             MutateParams::DeleteChat { chat_id } => self.delete_chat(&chat_id),
             MutateParams::RenameDevice { device_id, name } => self
@@ -2500,7 +2608,7 @@ impl EngineRpc {
             } => {
                 let steps = steps
                     .into_iter()
-                    .map(|step| (step.title, step.notes, step.thread_id))
+                    .map(|step| (step.title, step.notes, step.thread_id, step.role))
                     .collect();
                 self.plan_steps(
                     &task_id,
@@ -2517,7 +2625,7 @@ impl EngineRpc {
                 title,
                 notes,
                 order_key,
-            } => self.create_task_step(task_id, step_id, title, notes, order_key, Vec::new()),
+            } => self.create_task_step(task_id, step_id, title, notes, order_key, Vec::new(), None),
             MutateParams::UpdateTaskStep {
                 step_id,
                 patch,
@@ -2757,89 +2865,6 @@ fn forward_deadline(method: &str) -> std::time::Duration {
     }
 }
 
-/// A handoff divider nothing followed: the chat's newest entry is a system
-/// note carrying a packet whose route names the harness the chat left.
-struct SwitchNote {
-    id: String,
-    text: String,
-    hint: Option<String>,
-    packet: String,
-    route: zeron_doc::HandoffRoute,
-}
-
-fn unanswered_switch_note(handle: &crate::doc_host::ChatDocHandle) -> Option<SwitchNote> {
-    let entries = handle.doc().read_entries().ok()?;
-    let last = entries.last()?;
-    if last.role != zeron_doc::MessageRole::System {
-        return None;
-    }
-    let (packet, route) = last.parts.iter().find_map(|part| match part {
-        MessagePart::Handoff { text, route, .. } if route.from_harness.is_some() => {
-            Some((text.clone(), route.clone()))
-        }
-        _ => None,
-    })?;
-    let mut texts = last.parts.iter().filter_map(|part| match part {
-        MessagePart::Text { text, .. } => Some(text.clone()),
-        _ => None,
-    });
-    Some(SwitchNote {
-        id: last.id.clone(),
-        text: texts.next().unwrap_or_default(),
-        hint: texts.next(),
-        packet,
-        route,
-    })
-}
-
-/// The divider of a change folded onto an unanswered handoff: it keeps the
-/// origin the first divider recorded and takes the new destination. `None`
-/// when that is where the chat already was. A seeded thread's divider is its
-/// only copy of the source conversation, so it is never dropped.
-fn fold_switch_note(
-    previous: &SwitchNote,
-    between: HarnessId,
-    config: &zeron_proto::ChatConfig,
-    next: &SystemNote,
-) -> Option<(SystemNote, zeron_doc::HandoffRoute)> {
-    let origin = previous.route.from_harness?;
-    let route = zeron_doc::HandoffRoute {
-        to_model: config.model.clone(),
-        ..previous.route.clone()
-    };
-    let seeded = route.source_chat_id.is_some();
-    if !seeded && config.harness == origin && config.model == route.from_model {
-        return None;
-    }
-    let note = if seeded || between == config.harness {
-        SystemNote {
-            text: previous.text.clone(),
-            hint: previous.hint.clone(),
-        }
-    } else if config.harness == origin {
-        SystemNote {
-            text: format!(
-                "Model changed from {} to {}.",
-                route.from_model.as_deref().unwrap_or("default"),
-                route.to_model.as_deref().unwrap_or("default"),
-            ),
-            hint: None,
-        }
-    } else {
-        SystemNote {
-            text: format!(
-                "Provider changed from {} to {}.",
-                origin.display_name(),
-                config.harness.display_name()
-            ),
-            hint: next
-                .hint
-                .as_ref()
-                .map(|hint| hint.replace(between.display_name(), origin.display_name())),
-        }
-    };
-    Some((note, route))
-}
 /// How long this device forwards a remote login's callback at most — the
 /// running engine reaps an abandoned login after the same 15 minutes.
 const LOGIN_TUNNEL_TTL: Duration = Duration::from_secs(15 * 60);
@@ -2864,6 +2889,10 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_PREDICTION_SETTINGS
             | methods::GET_DELEGATION_SETTINGS
             | methods::SET_DELEGATION_SETTINGS
+            | methods::GET_ROUTING_SETTINGS
+            | methods::SET_ROUTING_SETTINGS
+            | methods::PREVIEW_ROUTES
+            | methods::RESOLVE_LIMIT_OFFER
             | methods::GET_COMPACTION_SETTINGS
             | methods::SET_COMPACTION_SETTINGS
             | methods::GET_REVIEW_SETTINGS
@@ -3364,6 +3393,35 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&self.registry.delegation_settings())
             }
             methods::GET_REVIEW_SETTINGS => RpcReply::value(&self.registry.review_settings()),
+            methods::GET_ROUTING_SETTINGS => RpcReply::value(&self.registry.routing_settings()),
+            methods::RESOLVE_LIMIT_OFFER => {
+                let p: ResolveLimitOfferParams = parse_params(params)?;
+                let offer = self.sessions.resolve_limit_offer(&p.chat_id, p.choice);
+                if p.choice == crate::resume_schedule::OfferResolution::Switch
+                    && let Some(to) = offer.as_ref().and_then(|offer| offer.to.as_ref())
+                {
+                    self.doc_host
+                        .act_on_offer(&p.chat_id, to)
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                }
+                RpcReply::value(&serde_json::json!({ "changed": offer.is_some() }))
+            }
+            methods::PREVIEW_ROUTES => {
+                let p: crate::routing::preview::PreviewParams = if params.is_null() {
+                    Default::default()
+                } else {
+                    parse_params(params)?
+                };
+                RpcReply::value(&self.preview_routes(p).await?)
+            }
+            methods::SET_ROUTING_SETTINGS => {
+                let p: crate::routing::RoutingSettings = parse_params(params)?;
+                self.registry
+                    .set_routing_settings(p)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&self.registry.routing_settings())
+            }
             methods::GET_SIDEBAR_SETTINGS => RpcReply::value(&self.registry.sidebar_settings()),
             methods::SET_REVIEW_SETTINGS => {
                 let p: crate::review::ReviewSettings = parse_params(params)?;
@@ -3647,8 +3705,9 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&chat)
             }
             methods::CREATE_THREAD => {
-                let p: CreateThreadParams = parse_params(params)?;
+                let mut p: CreateThreadParams = parse_params(params)?;
                 self.supervisor_gate(Some(&p.from_chat_id), |s| s.start_missions, supervisor::START_OFF)?;
+                let route = self.route_step(&mut p)?;
                 let chat_id = self
                     .doc_host
                     .create_step_thread(
@@ -3663,7 +3722,7 @@ impl RpcService for EngineRpc {
                         p.cwd.as_deref(),
                         p.task_step_id
                             .as_deref()
-                            .map(|id| (id, self.registry.delegation_settings())),
+                            .map(|id| (id, self.registry.delegation_settings(), route)),
                     )
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
@@ -3714,6 +3773,10 @@ impl RpcService for EngineRpc {
                     )));
                 }
                 self.supervisor_gate(Some(&p.owner_chat_id), |s| s.start_missions, supervisor::START_OFF)?;
+                let p = match self.route_delegation(p)? {
+                    Ok(p) => p,
+                    Err(native) => return Ok(RpcReply::Value(native)),
+                };
                 let view = self
                     .doc_host
                     .delegate_task(p, self.registry.delegation_settings())
@@ -4585,7 +4648,7 @@ impl RpcService for EngineRpc {
                 {
                     let steps = steps
                         .into_iter()
-                        .map(|step| (step.title, step.notes, step.thread_id))
+                        .map(|step| (step.title, step.notes, step.thread_id, step.role))
                         .collect();
                     let images_moved = self.plan_steps(
                         &task_id,
@@ -6741,82 +6804,6 @@ impl RpcService for EngineRpc {
 mod tests {
     use super::*;
     use crate::commit_messages::tests::git;
-
-    #[test]
-    fn a_folded_switch_note_keeps_the_harness_the_chat_left() {
-        let config = |harness: &str, model: &str| -> zeron_proto::ChatConfig {
-            serde_json::from_value(serde_json::json!({
-                "harness": harness, "model": model, "modelOptions": {},
-                "sandbox": "workspace-write",
-            }))
-            .unwrap()
-        };
-        let previous = SwitchNote {
-            id: "n1".into(),
-            text: "Provider changed from Mock to Codex.".into(),
-            hint: Some("Mock session closed. Handed to Codex.".into()),
-            packet: "packet".into(),
-            route: zeron_doc::HandoffRoute {
-                from_harness: Some(HarnessId::Mock),
-                from_model: Some("m1".into()),
-                to_model: Some("gpt".into()),
-                ..Default::default()
-            },
-        };
-        let next = SystemNote {
-            text: "Provider changed from Codex to Grok.".into(),
-            hint: Some(
-                "Codex session closed. Handed to Grok; Codex's files were not carried.".into(),
-            ),
-        };
-        let (folded, route) =
-            fold_switch_note(&previous, HarnessId::Codex, &config("grok", "g"), &next).unwrap();
-        assert_eq!(folded.text, "Provider changed from Mock to Grok.");
-        assert_eq!(
-            folded.hint.as_deref(),
-            Some("Mock session closed. Handed to Grok; Mock's files were not carried.")
-        );
-        assert_eq!(route.from_harness, Some(HarnessId::Mock));
-        assert_eq!(route.from_model.as_deref(), Some("m1"));
-        assert_eq!(route.to_model.as_deref(), Some("g"));
-
-        // Back where it started, harness and model: no divider at all.
-        assert!(
-            fold_switch_note(&previous, HarnessId::Codex, &config("mock", "m1"), &next).is_none()
-        );
-        // The origin harness on another model is still a handoff, worded as the model change.
-        let (back, _) =
-            fold_switch_note(&previous, HarnessId::Codex, &config("mock", "m2"), &next).unwrap();
-        assert_eq!(back.text, "Model changed from m1 to m2.");
-        assert_eq!(back.hint, None);
-
-        // A model change on the harness the handoff reached keeps its divider.
-        let (same, route) = fold_switch_note(
-            &previous,
-            HarnessId::Codex,
-            &config("codex", "gpt-2"),
-            &SystemNote {
-                text: "Model changed from gpt to gpt-2.".into(),
-                hint: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(same.text, previous.text);
-        assert_eq!(same.hint, previous.hint);
-        assert_eq!(route.to_model.as_deref(), Some("gpt-2"));
-
-        // A seeded thread's divider survives a return to its source's agent.
-        let seeded = SwitchNote {
-            route: zeron_doc::HandoffRoute {
-                source_chat_id: Some("source".into()),
-                ..previous.route.clone()
-            },
-            ..previous
-        };
-        assert!(
-            fold_switch_note(&seeded, HarnessId::Codex, &config("mock", "m1"), &next).is_some()
-        );
-    }
 
     #[test]
     fn create_thread_params_refuse_an_unknown_harness_or_reasoning_level() {
