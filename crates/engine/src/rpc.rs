@@ -7104,7 +7104,7 @@ mod tests {
             format!("http://{}/archive.zip", listener.local_addr().unwrap()).into_boxed_str(),
         );
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
             let mut headers = Vec::new();
             let mut buf = [0; 4096];
             while !headers.windows(4).any(|bytes| bytes == b"\r\n\r\n") {

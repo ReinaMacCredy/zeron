@@ -2842,7 +2842,7 @@ mod tests {
         let bytes = b"\xff\xd8\xffavatar".to_vec();
         let served = bytes.clone();
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
             let mut request = [0_u8; 1024];
             let _ = socket.read(&mut request).await.unwrap();
             socket
