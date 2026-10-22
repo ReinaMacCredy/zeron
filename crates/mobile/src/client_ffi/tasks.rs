@@ -228,6 +228,8 @@ pub enum NeedsYouKind {
         chat_id: String,
         request_id: String,
         questions: Vec<UserInputQuestion>,
+        approval: bool,
+        destructive: bool,
     },
     Plan {
         task_id: String,
@@ -263,6 +265,8 @@ pub struct NeedsYouEntry {
     pub key: String,
     pub host: HostRef,
     pub title: String,
+    pub asker: String,
+    pub supervised: bool,
     pub task_id: Option<String>,
     pub task_title: Option<String>,
     pub chat_id: String,
@@ -280,6 +284,8 @@ impl From<&zc::NeedsYouEntry> for NeedsYouEntry {
             key: e.key.clone(),
             host: (&e.host).into(),
             title: e.title.clone(),
+            asker: e.asker.clone(),
+            supervised: e.supervised,
             task_id: e.task_id.clone(),
             task_title: e.task_title.clone(),
             chat_id: e.chat_id.clone(),
@@ -306,7 +312,11 @@ impl From<&zc::NeedsYouEntry> for NeedsYouEntry {
                     chat_id,
                     request_id,
                     questions,
+                    approval,
+                    destructive,
                 } => NeedsYouKind::Input {
+                    approval: *approval,
+                    destructive: *destructive,
                     chat_id: chat_id.clone(),
                     request_id: request_id.clone(),
                     questions: questions
@@ -357,7 +367,6 @@ impl From<&zc::WakeEntry> for WakeEntry {
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct SupervisorPage {
     pub hosts: Vec<SupervisorHost>,
-    pub needs_you: Vec<NeedsYouEntry>,
     pub done_today: Vec<TaskRow>,
     pub wakes: Vec<WakeEntry>,
 }
@@ -366,7 +375,6 @@ impl From<&zc::SupervisorPage> for SupervisorPage {
     fn from(p: &zc::SupervisorPage) -> Self {
         Self {
             hosts: p.hosts.iter().map(Into::into).collect(),
-            needs_you: p.needs_you.iter().map(Into::into).collect(),
             done_today: task_rows(&p.done_today),
             wakes: p.wakes.iter().map(Into::into).collect(),
         }

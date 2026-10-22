@@ -205,6 +205,7 @@ pub struct WorkspaceSnapshot {
     pub devices: Vec<DeviceView>,
     pub tasks: super::TasksPage,
     pub supervisor: super::SupervisorPage,
+    pub needs_you: Vec<super::NeedsYouEntry>,
     /// Every chat row (archived and children included), by id.
     pub sessions: HashMap<String, Arc<SessionRow>>,
     children: HashMap<String, Vec<Arc<SessionRow>>>,
@@ -324,6 +325,7 @@ pub(crate) struct DeriveContext<'a> {
     pub supervisors:
         &'a std::collections::BTreeMap<String, zeron_proto::supervisor::SupervisorSnapshot>,
     pub item_sends: &'a HashMap<String, super::ItemSend>,
+    pub asks: &'a HashMap<String, super::Ask>,
     /// Oldest-unadopted-send state per chat (open sessions only).
     pub send_states: &'a HashMap<String, SendState>,
     pub synced: bool,
@@ -718,7 +720,7 @@ pub(crate) fn derive(
             .then_with(|| a.id.cmp(&b.id))
     });
 
-    let (tasks, supervisor) = super::tasks::derive(state, &rows, &devices, cx);
+    let (tasks, supervisor, needs_you) = super::tasks::derive(state, &rows, &devices, cx);
     let mut snapshot = WorkspaceSnapshot {
         revision: 0,
         computed_at_ms: now_ms,
@@ -736,6 +738,7 @@ pub(crate) fn derive(
         devices,
         tasks,
         supervisor,
+        needs_you,
         sessions: rows,
         children,
         content_hash: 0,
@@ -779,7 +782,7 @@ fn snapshot_hash(s: &WorkspaceSnapshot) -> u64 {
     for device in &s.devices {
         device.hash(&mut h);
     }
-    format!("{:?}{:?}", s.tasks, s.supervisor).hash(&mut h);
+    format!("{:?}{:?}{:?}", s.tasks, s.supervisor, s.needs_you).hash(&mut h);
     let mut all: Vec<(&String, u64)> = s.sessions.iter().map(|(k, v)| (k, v.revision)).collect();
     all.sort();
     all.hash(&mut h);

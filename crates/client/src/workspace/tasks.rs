@@ -1,15 +1,17 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use zeron_doc::WorkspaceState;
 use zeron_proto::mission::{self, ApprovalState, PlanPhase, Rollup};
 use zeron_proto::supervisor::{
-    ItemWhy, NeedsYouRow, Raiser, SendDest, SupervisorSnapshot, SupervisorState, SupervisorWake,
+    InputAsker, ItemWhy, NeedsYouInput, NeedsYouRow, Raiser, SendDest, SupervisorSnapshot,
+    SupervisorState, SupervisorWake,
 };
 use zeron_proto::{Chat, ChatIndicator, HarnessId, StepStatus, Task, TaskStatus, TaskStep};
 
 use super::view::{DeriveContext, DeviceView, ProjectRef, SessionRow, project_color_index};
+use crate::session::InputRequest;
 
 const WAKE_LOG_ROWS: usize = 30;
 
@@ -81,6 +83,8 @@ pub enum NeedsYouKind {
         chat_id: String,
         request_id: String,
         questions: Vec<zeron_proto::UserInputQuestion>,
+        approval: bool,
+        destructive: bool,
     },
     Plan {
         task_id: String,
@@ -100,6 +104,8 @@ pub struct NeedsYouEntry {
     pub key: String,
     pub host: HostRef,
     pub title: String,
+    pub asker: String,
+    pub supervised: bool,
     pub task_id: Option<String>,
     pub task_title: Option<String>,
     pub chat_id: String,
@@ -109,6 +115,12 @@ pub struct NeedsYouEntry {
     pub dest: String,
     pub send: Option<ItemSend>,
     pub kind: NeedsYouKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Ask {
+    Open(InputRequest),
+    Answered(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -124,7 +136,6 @@ pub struct WakeEntry {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SupervisorPage {
     pub hosts: Vec<SupervisorHost>,
-    pub needs_you: Vec<NeedsYouEntry>,
     pub done_today: Vec<TaskRow>,
     pub wakes: Vec<WakeEntry>,
 }
@@ -295,7 +306,7 @@ pub(crate) fn derive(
     rows: &HashMap<String, Arc<SessionRow>>,
     devices: &[DeviceView],
     cx: &DeriveContext<'_>,
-) -> (TasksPage, SupervisorPage) {
+) -> (TasksPage, SupervisorPage, Vec<NeedsYouEntry>) {
     let ctx = Ctx {
         state,
         steps: cx.steps,
@@ -305,7 +316,11 @@ pub(crate) fn derive(
         item_sends: cx.item_sends,
         now: cx.now,
     };
-    (tasks_page(&ctx), supervisor_page(&ctx))
+    (
+        tasks_page(&ctx),
+        supervisor_page(&ctx),
+        needs_you(&ctx, cx.asks),
+    )
 }
 
 fn tasks_page(ctx: &Ctx<'_>) -> TasksPage {
@@ -338,12 +353,6 @@ fn tasks_page(ctx: &Ctx<'_>) -> TasksPage {
 }
 
 fn supervisor_page(ctx: &Ctx<'_>) -> SupervisorPage {
-    let tasks: HashMap<&str, &Task> = ctx
-        .state
-        .tasks
-        .iter()
-        .map(|task| (task.id.as_str(), task))
-        .collect();
     let mut page = SupervisorPage::default();
     for (device_id, snapshot) in ctx.supervisors {
         let host = ctx.host(device_id);
@@ -368,42 +377,45 @@ fn supervisor_page(ctx: &Ctx<'_>) -> SupervisorPage {
                 .as_ref()
                 .map(|next| next.at.timestamp_millis()),
         });
-        for row in &snapshot.needs_you {
-            let (task_id, chat_id) = row.origin();
-            let item_key = format!("{device_id}/{}", row.key());
-            let group_key = row.group(&|chat| root_id(ctx, chat)).unwrap_or_default();
-            page.needs_you.push(NeedsYouEntry {
-                send: ctx.item_sends.get(&item_key).cloned(),
-                key: item_key,
-                host: host.clone(),
-                title: row.title(),
-                task_id: task_id.map(str::to_owned),
-                task_title: task_id
-                    .and_then(|id| tasks.get(id))
-                    .map(|task| task.title.clone()),
-                chat_id: chat_id.to_owned(),
-                at_ms: row.at().timestamp_millis(),
-                group_title: group_title(ctx, &tasks, &group_key),
-                group_key,
-                dest: row.dest().word().to_owned(),
-                kind: match row {
-                    NeedsYouRow::Item(item) => NeedsYouKind::Item {
-                        item_id: item.id.clone(),
-                        why: item.why,
-                        raised_by_lead: item.raised_by == Raiser::Lead,
-                        detail: item.detail.clone(),
-                        options: item.options.clone(),
-                    },
-                    NeedsYouRow::Input(input) => NeedsYouKind::Input {
-                        chat_id: input.chat_id.clone(),
-                        request_id: input.request_id.clone(),
-                        questions: input.questions.clone(),
-                    },
-                },
-            });
-        }
         page.wakes
             .extend(snapshot.wakes.iter().map(|wake| wake_entry(wake, &host)));
+    }
+    page.wakes
+        .sort_by(|a, b| b.at_ms.cmp(&a.at_ms).then_with(|| a.id.cmp(&b.id)));
+    page.wakes.truncate(WAKE_LOG_ROWS);
+    let today = ctx.now.with_timezone(&chrono::Local).date_naive();
+    page.done_today = mission::missions_done_on(&ctx.state.tasks, today, &chrono::Local)
+        .into_iter()
+        .map(|task| ctx.task_row(task))
+        .collect();
+    page
+}
+
+fn needs_you(ctx: &Ctx<'_>, asks: &HashMap<String, Ask>) -> Vec<NeedsYouEntry> {
+    let names = mission::Names {
+        chats: &ctx.state.chats,
+        tasks: &ctx.state.tasks,
+        steps: ctx.steps,
+        plan_of: |task: &Task| ctx.rollup(task),
+    };
+    let mut entries = Vec::new();
+    let mut asked: HashSet<&str> = HashSet::new();
+    for (device_id, snapshot) in ctx.supervisors {
+        for row in &snapshot.needs_you {
+            let mut host = device_id.as_str();
+            if let NeedsYouRow::Input(input) = row {
+                if matches!(asks.get(&input.chat_id), Some(Ask::Answered(id)) if *id == input.request_id)
+                {
+                    continue;
+                }
+                asked.insert(&input.chat_id);
+                if let Some(chat) = ctx.rows.get(&input.chat_id) {
+                    host = &chat.device_id;
+                }
+            }
+            let key = format!("{device_id}/{}", row.key());
+            entries.push(entry(ctx, &names, row, key, ctx.host(host), true));
+        }
     }
     for task in mission::open_missions(&ctx.state.tasks) {
         let plan = ctx.rollup(task);
@@ -413,7 +425,7 @@ fn supervisor_page(ctx: &Ctx<'_>) -> SupervisorPage {
         let Some(lead) = mission::linked_chat(&ctx.state.chats, task) else {
             continue;
         };
-        page.needs_you.push(NeedsYouEntry {
+        entries.push(NeedsYouEntry {
             key: format!("plan:{}", task.id),
             host: ctx.host(&lead.device_id),
             title: format!(
@@ -421,6 +433,8 @@ fn supervisor_page(ctx: &Ctx<'_>) -> SupervisorPage {
                 plan.steps.len(),
                 if plan.steps.len() == 1 { "" } else { "s" }
             ),
+            asker: format!("Lead · {}", task.title),
+            supervised: true,
             task_id: Some(task.id.clone()),
             task_title: Some(task.title.clone()),
             chat_id: lead.id.clone(),
@@ -439,42 +453,120 @@ fn supervisor_page(ctx: &Ctx<'_>) -> SupervisorPage {
             },
         });
     }
-    page.needs_you
-        .sort_by(|a, b| b.at_ms.cmp(&a.at_ms).then_with(|| a.key.cmp(&b.key)));
-    page.wakes
-        .sort_by(|a, b| b.at_ms.cmp(&a.at_ms).then_with(|| a.id.cmp(&b.id)));
-    page.wakes.truncate(WAKE_LOG_ROWS);
-    let today = ctx.now.with_timezone(&chrono::Local).date_naive();
-    page.done_today = mission::missions_done_on(&ctx.state.tasks, today, &chrono::Local)
-        .into_iter()
-        .map(|task| ctx.task_row(task))
-        .collect();
-    page
-}
-
-fn root_id(ctx: &Ctx<'_>, chat_id: &str) -> Option<String> {
-    let chats = &ctx.state.chats;
-    let chat = chats.iter().find(|chat| chat.id == chat_id)?;
-    zeron_proto::tree_path(chat, chats, &ctx.state.tasks, ctx.steps)
-        .last()
-        .map(|root| root.id.clone())
-}
-
-fn group_title(ctx: &Ctx<'_>, tasks: &HashMap<&str, &Task>, key: &str) -> String {
-    if key.is_empty() {
-        return "Supervisor and shared".to_owned();
+    for chat in ctx.rows.values() {
+        if chat.archived
+            || chat.indicator != ChatIndicator::AwaitingInput
+            || asked.contains(chat.id.as_str())
+        {
+            continue;
+        }
+        let (request_id, questions) = match asks.get(&chat.id) {
+            Some(Ask::Open(request)) => (request.request_id.clone(), request.questions.clone()),
+            Some(Ask::Answered(_)) => continue,
+            None => (String::new(), Vec::new()),
+        };
+        let (asker, task_id, step_id) = match names.mission_thread(&chat.id) {
+            Some(thread) => match thread.role {
+                mission::MissionRole::Lead => (InputAsker::Lead, Some(thread.task_id), None),
+                mission::MissionRole::Step { step_id, .. } => {
+                    (InputAsker::Step, Some(thread.task_id), Some(step_id))
+                }
+            },
+            None => (InputAsker::Thread, None, None),
+        };
+        let row = NeedsYouRow::Input(NeedsYouInput {
+            chat_id: chat.id.clone(),
+            request_id,
+            asker,
+            task_id,
+            step_id,
+            at: DateTime::from_timestamp_millis(chat.last_activity_ms).unwrap_or_default(),
+            questions,
+        });
+        let key = format!("{}/{}", chat.device_id, row.key());
+        entries.push(entry(ctx, &names, &row, key, ctx.host(&chat.device_id), false));
     }
-    tasks
-        .get(key)
-        .map(|task| task.title.clone())
-        .or_else(|| {
-            ctx.state
-                .chats
-                .iter()
-                .find(|chat| chat.id == key)
-                .map(|chat| chat.title.as_deref().unwrap_or("New session").to_owned())
-        })
-        .unwrap_or_else(|| "A mission".to_owned())
+    entries.sort_by(|a, b| b.at_ms.cmp(&a.at_ms).then_with(|| a.key.cmp(&b.key)));
+    entries
+}
+
+fn entry<B>(
+    ctx: &Ctx<'_>,
+    names: &mission::Names<'_, impl Fn(&Task) -> Rollup<B>>,
+    row: &NeedsYouRow,
+    key: String,
+    host: HostRef,
+    supervised: bool,
+) -> NeedsYouEntry {
+    let (task_id, chat_id) = row.origin();
+    let group_key = row
+        .group(&|chat| names.tree_root(chat).map(|root| root.id.clone()))
+        .unwrap_or_default();
+    let group_title = if group_key.is_empty() {
+        "Supervisor and shared".to_owned()
+    } else if let Some(title) = names.mission_title(Some(&group_key)) {
+        title
+    } else {
+        ctx.state
+            .chats
+            .iter()
+            .find(|chat| chat.id == group_key)
+            .map_or_else(|| "A mission".to_owned(), |chat| names.chat_name(chat))
+    };
+    NeedsYouEntry {
+        send: ctx.item_sends.get(&key).cloned(),
+        key,
+        host,
+        title: match row {
+            NeedsYouRow::Input(input) if input.questions.is_empty() => "Waiting for you".to_owned(),
+            row => row.title(),
+        },
+        asker: match row {
+            NeedsYouRow::Item(item) => names.raiser_name(item),
+            NeedsYouRow::Input(input) => names.asker_name(input),
+        },
+        supervised,
+        task_id: task_id.map(str::to_owned),
+        task_title: names.mission_title(task_id),
+        chat_id: chat_id.to_owned(),
+        at_ms: row.at().timestamp_millis(),
+        group_title,
+        group_key,
+        dest: row.dest().word().to_owned(),
+        kind: match row {
+            NeedsYouRow::Item(item) => NeedsYouKind::Item {
+                item_id: item.id.clone(),
+                why: item.why,
+                raised_by_lead: item.raised_by == Raiser::Lead,
+                detail: item.detail.clone(),
+                options: item.options.clone(),
+            },
+            NeedsYouRow::Input(input) => {
+                let approval = input.questions.iter().any(|q| q.approval);
+                NeedsYouKind::Input {
+                    chat_id: input.chat_id.clone(),
+                    request_id: input.request_id.clone(),
+                    questions: input.questions.clone(),
+                    approval,
+                    destructive: approval && destructive_approval(&input.questions),
+                }
+            }
+        },
+    }
+}
+
+fn destructive_approval(questions: &[zeron_proto::UserInputQuestion]) -> bool {
+    const WORDS: &[&str] = &[
+        "delete", "remove", "rm", "rmdir", "unlink", "trash", "push", "edit", "multiedit",
+        "notebookedit", "write", "modify", "patch", "apply_patch",
+    ];
+    questions.iter().filter(|q| q.approval).any(|q| {
+        let text = format!("{} {}", q.header, q.question).to_lowercase();
+        text.contains("file change")
+            || text
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|word| WORDS.contains(&word))
+    })
 }
 
 fn wake_entry(wake: &SupervisorWake, host: &HostRef) -> WakeEntry {

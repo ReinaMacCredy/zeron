@@ -216,18 +216,48 @@ fn still_frames_come_from_an_online_host_only() {
 }
 
 #[test]
-fn pending_inputs_list_waiting_chats_until_answered_here() {
+fn needs_you_lists_each_ask_once_until_answered_here() {
+    use crate::workspace::NeedsYouKind;
     let (client, _dir) = demo(false);
-    wait_for("the awaiting chats", || client.pending_inputs().len() == 3);
-    let pending = client.pending_inputs();
-    let ids: Vec<&str> = pending.iter().map(|p| p.row.id.as_str()).collect();
-    assert_eq!(ids, ["chat-picker", "chat-approve-test", "chat-approve-push"]);
-    assert!(!pending[0].approval && !pending[0].destructive);
-    assert_eq!(pending[0].request.request_id, "req-1");
-    assert!(pending[1].approval && !pending[1].destructive);
-    assert!(pending[2].approval && pending[2].destructive);
+    let inputs = |client: &Client| -> Vec<(String, String, bool, bool)> {
+        client
+            .needs_you()
+            .into_iter()
+            .filter_map(|entry| match entry.kind {
+                NeedsYouKind::Input {
+                    chat_id,
+                    request_id,
+                    approval,
+                    destructive,
+                    ..
+                } => Some((chat_id, request_id, approval, destructive)),
+                _ => None,
+            })
+            .collect()
+    };
+    wait_for("the awaiting chats", || {
+        inputs(&client).iter().all(|(_, request, ..)| !request.is_empty())
+            && inputs(&client).len() == 4
+    });
+    let mut asks = inputs(&client);
+    asks.sort();
+    let asks: Vec<(&str, &str, bool, bool)> = asks
+        .iter()
+        .map(|(chat, request, approval, destructive)| {
+            (chat.as_str(), request.as_str(), *approval, *destructive)
+        })
+        .collect();
+    assert_eq!(
+        asks,
+        [
+            ("chat-approve-push", "req-approve", true, true),
+            ("chat-approve-test", "req-approve", true, false),
+            ("chat-picker", "req-1", false, false),
+            ("chat-shelf-4", "req-shelf", false, false),
+        ]
+    );
 
-    let picker = client.session("chat-picker").expect("opened by pending_inputs");
+    let picker = client.session("chat-picker").expect("opened by needs_you");
     picker
         .respond_input(
             "req-1",
@@ -237,6 +267,7 @@ fn pending_inputs_list_waiting_chats_until_answered_here() {
             }],
         )
         .unwrap();
-    let ids: Vec<String> = client.pending_inputs().into_iter().map(|p| p.row.id.clone()).collect();
-    assert_eq!(ids, ["chat-approve-test", "chat-approve-push"]);
+    wait_for("the answered ask to leave", || {
+        !inputs(&client).iter().any(|(chat, ..)| chat == "chat-picker")
+    });
 }

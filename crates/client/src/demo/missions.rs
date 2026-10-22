@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration, Utc};
@@ -328,6 +328,30 @@ fn item(
     })
 }
 
+fn supervisor_item(
+    id: &str,
+    at: DateTime<Utc>,
+    device: &str,
+    title: &str,
+    detail: &str,
+    options: &[&str],
+) -> NeedsYouRow {
+    NeedsYouRow::Item(SupervisorItem {
+        id: id.into(),
+        at,
+        raised_by: Raiser::Supervisor,
+        raiser_chat_id: format!("{}{device}", zeron_proto::supervisor::CHAT_PREFIX),
+        task_id: None,
+        title: title.into(),
+        why: ItemWhy::Decision,
+        detail: detail.into(),
+        options: options.iter().map(|o| (*o).to_owned()).collect(),
+        answer: None,
+    })
+}
+
+const FLAKY_ITEM: &str = "item-settle";
+
 pub(crate) fn supervisors(now: DateTime<Utc>) -> Vec<(&'static str, SupervisorSnapshot)> {
     use SupervisorEventKind::*;
     let mac = SupervisorSnapshot {
@@ -376,6 +400,14 @@ pub(crate) fn supervisors(now: DateTime<Utc>) -> Vec<(&'static str, SupervisorSn
                 at: now - Duration::minutes(2),
                 questions: super::transcripts::picker_questions(),
             }),
+            supervisor_item(
+                "item-worktrees",
+                now - Duration::minutes(12),
+                MAC,
+                "Remove 4 merged worktrees on this Mac?",
+                "They hold 3.1 GB and every branch is merged.",
+                &["Remove them", "Keep them"],
+            ),
         ],
         interventions: vec![SupervisorIntervention {
             id: "iv-approve-widget".into(),
@@ -425,6 +457,14 @@ pub(crate) fn supervisors(now: DateTime<Utc>) -> Vec<(&'static str, SupervisorSn
                 at: now - Duration::minutes(4),
                 questions: shelf_questions(),
             }),
+            supervisor_item(
+                FLAKY_ITEM,
+                now - Duration::minutes(15),
+                MINI,
+                "Keep 7 days before settling?",
+                "Idle threads move to Settled after this many days.",
+                &["Keep 7 days", "Change to 14 days"],
+            ),
         ],
         ..Default::default()
     };
@@ -434,13 +474,14 @@ pub(crate) fn supervisors(now: DateTime<Utc>) -> Vec<(&'static str, SupervisorSn
 pub(crate) fn host_call(
     client: &Arc<ClientInner>,
     settings: &Mutex<HashMap<String, SupervisorSettings>>,
+    refused: &Mutex<HashSet<String>>,
     device_id: &str,
     method: &str,
     params: &Value,
 ) -> Option<Result<Value>> {
     use zeron_rpc::methods as m;
     Some(match method {
-        m::MUTATE => mutate(client, device_id, params).map(|()| json!({})),
+        m::MUTATE => mutate(client, refused, device_id, params).map(|()| json!({})),
         m::GET_SUPERVISOR_SETTINGS => Ok(json!(
             lock(settings).get(device_id).copied().unwrap_or_default()
         )),
@@ -466,7 +507,12 @@ fn parse<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T> {
     serde_json::from_value(value.clone()).map_err(|e| ClientError::HostError(e.to_string()))
 }
 
-fn mutate(client: &Arc<ClientInner>, device_id: &str, params: &Value) -> Result<()> {
+fn mutate(
+    client: &Arc<ClientInner>,
+    refused: &Mutex<HashSet<String>>,
+    device_id: &str,
+    params: &Value,
+) -> Result<()> {
     let now = Utc::now();
     let id = |key: &str| params[key].as_str().unwrap_or_default().to_owned();
     match params["op"].as_str().unwrap_or_default() {
@@ -514,6 +560,12 @@ fn mutate(client: &Arc<ClientInner>, device_id: &str, params: &Value) -> Result<
                 .flatten()
                 .filter_map(|answer| answer["itemId"].as_str().map(str::to_owned))
                 .collect();
+            if answered.iter().any(|id| id == FLAKY_ITEM) && lock(refused).insert(FLAKY_ITEM.into())
+            {
+                return Err(ClientError::HostUnavailable(
+                    "Mac mini did not answer in time".into(),
+                ));
+            }
             client.workspace.update_supervisor(device_id, |snapshot| {
                 snapshot.needs_you.retain(
                     |row| !matches!(row, NeedsYouRow::Item(item) if answered.contains(&item.id)),

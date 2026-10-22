@@ -638,9 +638,9 @@ fn tasks_and_supervisors_merge_across_macs() {
     assert_eq!(hosts.len(), 2);
     assert!(hosts.contains(&"MacBook Pro") && hosts.contains(&"Mac mini"));
     let tagged: std::collections::BTreeSet<&str> = ws
-        .supervisor
         .needs_you
         .iter()
+        .filter(|n| n.supervised)
         .map(|n| n.host.name.as_str())
         .collect();
     assert_eq!(tagged.len(), 2);
@@ -663,7 +663,15 @@ fn tasks_and_supervisors_merge_across_macs() {
             .plan_ready
     });
 
-    let before = client.workspace().supervisor.needs_you.len();
+    let supervised = |client: &Client| {
+        client
+            .workspace()
+            .needs_you
+            .iter()
+            .filter(|n| n.supervised)
+            .count()
+    };
+    let before = supervised(&client);
     zeron_client::runtime::shared()
         .block_on(client.resolve_supervisor_items(
             "dev-mac",
@@ -671,6 +679,43 @@ fn tasks_and_supervisors_merge_across_macs() {
         ))
         .unwrap();
     wait_for("item resolved", Duration::from_secs(5), || {
-        client.workspace().supervisor.needs_you.len() == before - 1
+        supervised(&client) == before - 1
+    });
+}
+
+#[test]
+fn needs_you_keeps_a_failed_send_with_its_reason_until_it_goes_through() {
+    let (client, _dir) = demo(fast());
+    let settle = |client: &Client| {
+        client
+            .workspace()
+            .needs_you
+            .iter()
+            .find(|n| n.key == "dev-mini/item:item-settle")
+            .cloned()
+    };
+    wait_for("settle item", Duration::from_secs(5), || settle(&client).is_some());
+    let entry = settle(&client).unwrap();
+    assert_eq!(entry.host.name, "Mac mini");
+    assert!(entry.task_id.is_none());
+    assert_eq!(entry.asker, "Supervisor");
+
+    let answer = || vec![("item-settle".to_string(), "Keep 7 days".to_string())];
+    let first = zeron_client::runtime::shared()
+        .block_on(client.resolve_supervisor_items("dev-mini", answer()));
+    assert!(first.is_err());
+    match settle(&client).unwrap().send {
+        Some(zeron_client::ItemSend::Failed { choice, reason }) => {
+            assert_eq!(choice, "Keep 7 days");
+            assert!(reason.contains("did not answer in time"), "{reason}");
+        }
+        other => panic!("expected a failed send, got {other:?}"),
+    }
+
+    zeron_client::runtime::shared()
+        .block_on(client.resolve_supervisor_items("dev-mini", answer()))
+        .unwrap();
+    wait_for("settle item resolved", Duration::from_secs(5), || {
+        settle(&client).is_none()
     });
 }

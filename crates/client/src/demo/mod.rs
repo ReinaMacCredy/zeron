@@ -81,6 +81,7 @@ pub(crate) struct DemoHost {
     leases: Mutex<HashMap<String, Lease>>,
     uploads: Mutex<HashMap<String, Arc<Vec<u8>>>>,
     supervisor_settings: Mutex<HashMap<String, zeron_proto::supervisor::SupervisorSettings>>,
+    refused_sends: Mutex<HashSet<String>>,
     rng: Mutex<Rng>,
     cancel: Mutex<Option<CancellationToken>>,
 }
@@ -102,6 +103,7 @@ impl DemoHost {
             leases: Mutex::new(HashMap::new()),
             uploads: Mutex::new(HashMap::new()),
             supervisor_settings: Mutex::new(HashMap::new()),
+            refused_sends: Mutex::new(HashSet::new()),
             rng: Mutex::new(Rng(0x9e37_79b9_7f4a_7c15)),
             cancel: Mutex::new(None),
         })
@@ -804,6 +806,7 @@ impl DemoHost {
         if let Some(reply) = missions::host_call(
             &client,
             &self.supervisor_settings,
+            &self.refused_sends,
             device_id,
             method,
             &params,

@@ -23,11 +23,9 @@ use crate::error::{ClientError, Result};
 use crate::events::{ClientEvent, ClientListener, EventPump};
 use crate::live::LiveBackend;
 use crate::rpc::{FolderListing, ProgressFn, QUEUED_ATTACHMENTS_MIN, RepoRef, capability};
-use crate::session::{
-    HostCapabilities, InputRequest, OutgoingAttachment, RoomState, SessionCore, SessionHandle,
-};
+use crate::session::{HostCapabilities, OutgoingAttachment, RoomState, SessionCore, SessionHandle};
 use crate::workspace::{
-    ItemSend, SearchHit, SessionRow, TaskDetail, WorkspaceSnapshot, WorkspaceStore,
+    ItemSend, NeedsYouEntry, SearchHit, TaskDetail, WorkspaceSnapshot, WorkspaceStore,
 };
 use crate::{lock, now_ms, read, write};
 
@@ -136,10 +134,15 @@ impl ClientInner {
             .iter()
             .filter_map(|core| core.send_state().map(|s| (core.chat_id.clone(), s)))
             .collect();
+        let asks: HashMap<String, crate::workspace::Ask> = self
+            .cores()
+            .iter()
+            .filter_map(|core| core.ask().map(|ask| (core.chat_id.clone(), ask)))
+            .collect();
         let synced = self.synced.load(Ordering::Acquire);
         if let Some(revision) =
             self.workspace
-                .recompute(&self.config.device_id, &send_states, synced)
+                .recompute(&self.config.device_id, &send_states, &asks, synced)
         {
             self.events.workspace(revision);
             // Host presence / live status feed every open session's snapshot
@@ -1758,30 +1761,17 @@ impl Client {
         }
     }
 
-    pub fn pending_inputs(&self) -> Vec<PendingInput> {
+    pub fn needs_you(&self) -> Vec<NeedsYouEntry> {
         let workspace = self.workspace();
-        let mut rows: Vec<&Arc<SessionRow>> = workspace
-            .sessions
-            .values()
-            .filter(|row| !row.archived && row.indicator == zeron_proto::ChatIndicator::AwaitingInput)
-            .collect();
-        rows.sort_by_key(|row| std::cmp::Reverse(row.last_activity_ms));
-        rows.into_iter()
-            .filter_map(|row| {
-                let session = self.open_session(&row.id).ok()?;
-                let request = session.composer().open_input.clone()?;
-                if session.snapshot().input_answers.contains_key(&request.request_id) {
-                    return None;
-                }
-                let approval = request.questions.iter().any(|q| q.approval);
-                Some(PendingInput {
-                    row: row.clone(),
-                    approval,
-                    destructive: approval && destructive_approval(&request.questions),
-                    request,
-                })
-            })
-            .collect()
+        for row in workspace.sessions.values() {
+            if !row.archived
+                && row.indicator == zeron_proto::ChatIndicator::AwaitingInput
+                && self.inner.session_core(&row.id).is_none()
+            {
+                let _ = self.open_session(&row.id);
+            }
+        }
+        self.workspace().needs_you.clone()
     }
 
     /// Ids of the sessions currently open (warm), most recently used first.
@@ -1790,28 +1780,6 @@ impl Client {
         cores.sort_by_key(|c| std::cmp::Reverse(c.touched_ms()));
         cores.iter().map(|c| c.chat_id.clone()).collect()
     }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PendingInput {
-    pub row: Arc<SessionRow>,
-    pub request: InputRequest,
-    pub approval: bool,
-    pub destructive: bool,
-}
-
-fn destructive_approval(questions: &[zeron_proto::UserInputQuestion]) -> bool {
-    const WORDS: &[&str] = &[
-        "delete", "remove", "rm", "rmdir", "unlink", "trash", "push", "edit", "multiedit",
-        "notebookedit", "write", "modify", "patch", "apply_patch",
-    ];
-    questions.iter().filter(|q| q.approval).any(|q| {
-        let text = format!("{} {}", q.header, q.question).to_lowercase();
-        text.contains("file change")
-            || text
-                .split(|c: char| !c.is_alphanumeric() && c != '_')
-                .any(|word| WORDS.contains(&word))
-    })
 }
 
 /// Seed helpers shared with the demo host.

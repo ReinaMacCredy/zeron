@@ -21,7 +21,7 @@ pub use tasks::{
     ApprovalView, HostRef, ItemSend, MissionStrip, NeedsYouEntry, NeedsYouKind, StepView,
     SupervisorHost, SupervisorPage, TaskDetail, TaskRow, TasksPage, WakeEntry,
 };
-pub(crate) use tasks::{detail as task_detail, strip as mission_strip};
+pub(crate) use tasks::{Ask, detail as task_detail, strip as mission_strip};
 pub(crate) use view::{DeriveContext, device_online};
 pub use view::{
     DeviceView, FrontPage, PROJECT_COLOR_COUNT, ProjectRef, ProjectView, PullRequestGroups,
@@ -207,6 +207,7 @@ impl WorkspaceStore {
         &self,
         self_device_id: &str,
         send_states: &HashMap<String, crate::SendState>,
+        asks: &HashMap<String, Ask>,
         synced: bool,
     ) -> Option<u64> {
         let _serial = lock(&self.recompute);
@@ -228,6 +229,7 @@ impl WorkspaceStore {
                 supervisors: &supervisors,
                 item_sends: &item_sends,
                 send_states,
+                asks,
                 synced,
                 previous: Some(&previous),
             },
