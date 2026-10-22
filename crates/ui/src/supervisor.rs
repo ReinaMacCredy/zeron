@@ -3555,6 +3555,7 @@ impl SupervisorPage {
                     &task.notes,
                     theme,
                     window,
+                    cx,
                 ))
             });
         let mut spec_block = block("SPEC").debug_selector(|| "supervisor-brief-spec".into());
@@ -3568,6 +3569,7 @@ impl SupervisorPage {
                     &task.plan,
                     theme,
                     window,
+                    cx,
                 ))
         };
         if let Some(row) = step {
@@ -3580,6 +3582,7 @@ impl SupervisorPage {
                     &row.step.notes,
                     theme,
                     window,
+                    cx,
                 ))
             };
         }

@@ -193,7 +193,7 @@ fn reorder_keys(
         .filter_map(|id| steps.iter().find(|(step, _)| &step.id == id).copied())
         .collect();
     let unique: std::collections::HashSet<&str> = order.iter().map(String::as_str).collect();
-    if listed.len() != steps.len() || unique.len() != steps.len() {
+    if order.len() != steps.len() || listed.len() != steps.len() || unique.len() != steps.len() {
         return Err("The new order must list every remaining step once");
     }
     let key = |step: &TaskStep| (step.order_key.is_empty(), step.order_key.clone());
@@ -381,7 +381,12 @@ impl EngineRpc {
                         "The chats a mission reads are fixed once it starts; write to its lead instead",
                     ));
                 }
-                self.check_context_chats(context)?;
+                let added: Vec<String> = context
+                    .iter()
+                    .filter(|id| !task.context.contains(id))
+                    .cloned()
+                    .collect();
+                self.check_context_chats(&added)?;
             }
             if leads {
                 self.check_one_plan(&task, patch)?;
@@ -538,7 +543,7 @@ impl EngineRpc {
         &self,
         task_id: &str,
         chat_id: &str,
-        space_id: Option<String>,
+        space_id: Option<Option<String>>,
         config: Option<ChatConfig>,
         lead: Option<Lead>,
     ) -> Result<Option<String>, RpcError> {
@@ -567,7 +572,8 @@ impl EngineRpc {
             return Err(refused("This task already has a chat"));
         }
         let space = match space_id {
-            Some(id) => Some(
+            Some(None) => None,
+            Some(Some(id)) => Some(
                 self.workspace
                     .space(&id)
                     .map_err(failed)?
@@ -611,6 +617,8 @@ impl EngineRpc {
             {
                 let cleared = TaskPatch {
                     chat_id: Some(None),
+                    space_id: task.space_id.is_none().then_some(None),
+                    send_error: task.send_error.clone().map(Some),
                     mode: lead.map(|_| task.mode),
                     plan_pending: lead.map(|_| task.plan_pending),
                     plan_doc: lead.map(|_| task.plan_doc),
@@ -818,9 +826,6 @@ impl EngineRpc {
                 left_out.join(", ")
             ));
         }
-        self.workspace
-            .plan_task_steps(task_id, &steps)
-            .map_err(failed)?;
         let patch = TaskPatch {
             mode,
             plan: overview,
@@ -828,44 +833,12 @@ impl EngineRpc {
             images: (images != task.images).then_some(images),
             ..Default::default()
         };
-        if patch != TaskPatch::default() {
-            self.update_task(task_id, &patch)?;
-        }
+        self.workspace
+            .plan_task_steps(task_id, &steps, &patch)
+            .map_err(failed)?;
         self.doc_host
             .supervisor_replanned(&task, &before, &steps, from_chat_id);
         Ok(moved)
-    }
-
-    pub(super) fn create_task_step(
-        &self,
-        task_id: String,
-        step_id: String,
-        title: String,
-        notes: String,
-        order_key: Option<String>,
-        images: Vec<String>,
-        role: Option<String>,
-    ) -> Result<(), RpcError> {
-        let now = chrono::Utc::now();
-        self.workspace
-            .create_task_step(&TaskStep {
-                id: step_id,
-                task_id,
-                title,
-                notes,
-                order_key: order_key.unwrap_or_default(),
-                chat_id: None,
-                outcome: None,
-                created_at: now,
-                updated_at: now,
-                deleted: false,
-                turn: None,
-                images,
-                role,
-                route: None,
-            })
-            .map_err(failed)
-            .map(drop)
     }
 
     pub(super) fn update_task_step(
@@ -890,21 +863,6 @@ impl EngineRpc {
             true => Ok(()),
             false => Err(refused("Step no longer exists")),
         }
-    }
-
-    pub(super) fn delete_task_step(&self, step_id: &str) -> Result<(), RpcError> {
-        let Some(step) = self.workspace.task_step(step_id) else {
-            return Ok(());
-        };
-        if let Some(chat_id) = step.chat_id.as_deref()
-            && self.workspace.chat(chat_id).map_err(failed)?.is_some()
-        {
-            return Err(refused("This step has a thread; skip it instead"));
-        }
-        self.workspace
-            .delete_task_step(step_id)
-            .map_err(failed)
-            .map(drop)
     }
 
     pub(super) fn plan_awaiting_approval(&self, task_id: &str) -> Result<(Task, String), RpcError> {
@@ -1115,22 +1073,23 @@ impl EngineRpc {
             };
             changes.push(format!("The overview has {what}{note}."));
         }
-        if overview.is_some() || overview_images.is_some() {
-            let patch = TaskPatch {
-                plan: overview,
-                images: overview_images,
-                ..Default::default()
-            };
-            self.update_task(task_id, &patch)?;
-        }
-        if !moves.is_empty() {
-            for (id, key) in &moves {
+        let task_patch = TaskPatch {
+            plan: overview,
+            images: overview_images,
+            ..Default::default()
+        };
+        let mut updates: Vec<(String, TaskStepPatch)> = moves
+            .iter()
+            .map(|(id, key)| {
                 let patch = TaskStepPatch {
                     order_key: Some(key.clone()),
                     ..Default::default()
                 };
-                self.update_task_step(id, &patch, None)?;
-            }
+                (id.clone(), patch)
+            })
+            .collect();
+        let mut creates = Vec::new();
+        if !moves.is_empty() {
             let title = |id: &str| {
                 steps
                     .iter()
@@ -1173,15 +1132,23 @@ impl EngineRpc {
                         _ => None,
                     }
                 });
-                self.create_task_step(
-                    task_id.to_string(),
-                    id.clone(),
-                    title.clone(),
-                    edit.notes,
-                    None,
+                let now = chrono::Utc::now();
+                creates.push(TaskStep {
+                    id: id.clone(),
+                    task_id: task_id.to_string(),
+                    title: title.clone(),
+                    notes: edit.notes,
+                    order_key: String::new(),
+                    chat_id: None,
+                    outcome: None,
+                    created_at: now,
+                    updated_at: now,
+                    deleted: false,
+                    turn: None,
                     images,
                     role,
-                )?;
+                    route: None,
+                });
                 changes.push(format!("New step \"{title}\" (taskStepId {id}){with}."));
                 continue;
             };
@@ -1224,13 +1191,16 @@ impl EngineRpc {
                 (None, None) if patch.role.is_some() => None,
                 (None, None) => continue,
             };
-            self.update_task_step(&id, &patch, None)?;
+            updates.push((id.clone(), patch));
             if let Some(what) = what {
                 changes.push(format!("Step \"{}\" (taskStepId {id}) {what}.", step.title));
             }
         }
+        let deletes: Vec<String> = removed.iter().map(|step| step.id.clone()).collect();
+        self.workspace
+            .edit_task_plan(task_id, &task_patch, &updates, &creates, &deletes)
+            .map_err(failed)?;
         for step in removed {
-            self.delete_task_step(&step.id)?;
             changes.push(format!(
                 "Step \"{}\" (taskStepId {}) is removed.",
                 step.title, step.id
@@ -1280,24 +1250,10 @@ impl EngineRpc {
                 ..lead_patch(chat_id, space_id, task, lead)
             },
         )?;
-        let message_id = crate::new_id();
-        let prompt =
-            crate::doc_host::queued_message_prompt(&first_turn(task, lead, reads), &task.images);
+        let (text, images) =
+            crate::doc_host::images_here(&first_turn(task, lead, reads), task.images.clone());
         self.doc_host
-            .request_from_chat_row(chat_id, &prompt)
-            .ok_or_else(|| crate::EngineError::Other(format!("no such chat: {chat_id}")))
-            .and_then(|mut request| {
-                request.attachments = task.images.clone();
-                self.doc_host.queue_command_with_transfers(
-                    chat_id,
-                    SessionCommandPayload::Run {
-                        request,
-                        message_id: message_id.clone(),
-                    },
-                    Vec::new(),
-                )
-            })
-            .map(|_| message_id)
+            .queue_message_detached(chat_id, &text, images)
             .map_err(failed)
     }
 }
@@ -1417,5 +1373,7 @@ mod tests {
         assert!(reorder(&plan, &["a"]).is_err());
         assert!(reorder(&plan, &["a", "a"]).is_err());
         assert!(reorder(&plan, &["a", "x"]).is_err());
+        let started = [("s0", false), ("s1", true), ("s2", false)];
+        assert!(reorder(&started, &["s2", "s0", "s0", "x"]).is_err());
     }
 }

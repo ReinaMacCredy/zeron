@@ -1994,6 +1994,55 @@ async fn v2_question_forms_answer_through_the_form_route() {
     );
 }
 
+#[tokio::test]
+async fn foreign_or_ownerless_questions_and_forms_stay_unanswered() {
+    let mut wire = TurnWire::start_policy(false, false, false, Some(false)).await;
+    wire.request("/prompt_async").await;
+    let question = |owner: Option<&str>, id: &str| {
+        let mut data = json!({"id": id, "questions": [{
+            "header": "Choice", "question": "Continue?", "options": [{"label": "No"}]
+        }]});
+        if let Some(owner) = owner {
+            data["sessionID"] = json!(owner);
+        }
+        json!({"type": "question.asked", "properties": data})
+    };
+    wire.bus.send(question(Some("foreign"), "foreign")).unwrap();
+    wire.bus.send(question(None, "missing")).unwrap();
+    wire.bus.send(question(Some("fixture"), "own")).unwrap();
+    wire.posted("/question/own/reply").await;
+
+    let mut v2 = TurnWire::start_policy(false, true, false, Some(true)).await;
+    v2.request("/api/model").await;
+    v2.request("/prompt").await;
+    let form = |owner: Option<&str>, id: &str| {
+        let mut form = json!({
+            "id": id, "title": "Questions", "metadata": {"kind": "question"},
+            "fields": [{"key": "q0", "title": "Color", "type": "string",
+                "options": [{"value": "Red", "label": "Red"}], "custom": true}]
+        });
+        if let Some(owner) = owner {
+            form["sessionID"] = json!(owner);
+        }
+        json!({"form": form})
+    };
+    v2.v2("form.created", form(Some("foreign"), "frm_foreign"));
+    v2.v2("form.created", form(None, "frm_missing"));
+    v2.v2("form.created", form(Some("fixture"), "frm_own"));
+    v2.posted("/api/session/fixture/form/frm_own/reply").await;
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    for (wire, kind) in [(&wire, "/question/"), (&v2, "/form/")] {
+        let posts = wire.posts.lock().unwrap();
+        let replies: Vec<_> = posts
+            .iter()
+            .filter(|(p, _)| p.contains(kind))
+            .map(|(p, _)| p.clone())
+            .collect();
+        assert_eq!(replies.len(), 1, "a foreign or ownerless ask was answered: {replies:?}");
+    }
+}
+
 #[test]
 fn v2_tools_are_scoped_and_retired_and_real_failures_are_visible() {
     let mut tools = HashMap::new();

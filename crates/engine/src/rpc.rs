@@ -1055,8 +1055,8 @@ enum MutateParams {
     StartTask {
         task_id: String,
         chat_id: String,
-        #[serde(default)]
-        space_id: Option<String>,
+        #[serde(default, deserialize_with = "zeron_proto::present_nullable")]
+        space_id: Option<Option<String>>,
         #[serde(default)]
         config: Option<ChatConfig>,
         #[serde(default)]
@@ -1099,24 +1099,12 @@ enum MutateParams {
         from_chat_id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
-    CreateTaskStep {
-        task_id: String,
-        step_id: String,
-        title: String,
-        #[serde(default)]
-        notes: String,
-        #[serde(default)]
-        order_key: Option<String>,
-    },
-    #[serde(rename_all = "camelCase")]
     UpdateTaskStep {
         step_id: String,
         patch: zeron_proto::TaskStepPatch,
         #[serde(default)]
         from_chat_id: Option<String>,
     },
-    #[serde(rename_all = "camelCase")]
-    DeleteTaskStep { step_id: String },
     #[serde(rename_all = "camelCase")]
     ApprovePlan { task_id: String },
     #[serde(rename_all = "camelCase")]
@@ -2614,19 +2602,11 @@ impl EngineRpc {
                 )
                 .map(drop)
             }
-            MutateParams::CreateTaskStep {
-                task_id,
-                step_id,
-                title,
-                notes,
-                order_key,
-            } => self.create_task_step(task_id, step_id, title, notes, order_key, Vec::new(), None),
             MutateParams::UpdateTaskStep {
                 step_id,
                 patch,
                 from_chat_id,
             } => self.update_task_step(&step_id, &patch, from_chat_id.as_deref()),
-            MutateParams::DeleteTaskStep { step_id } => self.delete_task_step(&step_id),
             MutateParams::ApprovePlan { task_id } => self.approve_plan(&task_id).await.map(drop),
             MutateParams::TakeBackPlanApproval { task_id } => {
                 self.take_back_plan_approval(&task_id).await
@@ -3858,9 +3838,17 @@ impl RpcService for EngineRpc {
             }
             methods::GET_SESSION_STATS => {
                 let p: ChatsParams = parse_params(params)?;
+                if p.chat_ids.len() > 256 {
+                    return Err(RpcError::BadParams("at most 256 chatIds".into()));
+                }
+                let chat_ids: Vec<String> = p
+                    .chat_ids
+                    .into_iter()
+                    .filter(|id| matches!(self.workspace.chat(id), Ok(Some(_))))
+                    .collect();
                 let host = self.doc_host.clone();
                 let stats = tokio::task::spawn_blocking(move || {
-                    p.chat_ids
+                    chat_ids
                         .into_iter()
                         .filter_map(|id| {
                             let stats = host.open_local(&id).ok()?.doc().session_stats()?;

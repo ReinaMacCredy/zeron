@@ -10,7 +10,7 @@ Zeron checks for a new version shortly after launch and then every hour. When on
 - **Update failed**: click to try again.
 - **Restarting…**: Zeron is quitting to start the new version.
 
-Zeron downloads only when you click, and a downloaded update waits until you restart. (Setting `ZERON_AUTO_UPDATE=1` makes it download on its own and install when you quit; see [Command line and servers](zeron://docs/command-line).)
+Zeron downloads only when you click, and a downloaded update installs only when you restart from the button or the update dialog; quitting Zeron does not install it. (Setting `ZERON_AUTO_UPDATE=1` makes it download on its own and install when you quit; see [Command line and servers](zeron://docs/command-line).)
 
 Some copies of Zeron cannot replace themselves, and the button says so:
 

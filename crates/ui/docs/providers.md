@@ -37,7 +37,7 @@ The account in use is marked **In use**. Click another account to switch to it, 
 ![The Add provider dialog](providers-add.jpg)
 
 1. **Provider**: pick a tile. For Claude, Codex, and Pi, **Sign in with Claude** or **Continue with ChatGPT** creates a numbered instance with a home folder of its own and starts its sign-in in one step. **Configure manually**, or **Next** for the other agents, walks through the rest.
-2. **Identity**: a **Label** shown in the provider list and the model picker, an **Instance ID** (letters, digits, `-`, or `_`), and an optional **Accent color** for the picker.
+2. **Identity**: a **Label** shown in the provider list and the model picker, an **Instance ID** (up to 64 letters, digits, `-`, or `_`, starting with a letter; the id of a built-in agent such as `codex` reads as taken), and an optional **Accent color** for the picker.
 3. **Config**: a **Binary path**, **Launch arguments**, and **Environment** variables set for this instance only. Claude, Codex, and Pi also take a separate home folder, so the instance keeps its own login and settings. Cursor instances take only environment variables.
 
 ## ACP agents
@@ -49,9 +49,9 @@ Below the tiles, **Or choose from ACP Registry** searches the registry of agents
 
 ## Instances on the Providers page
 
-Instances of a built-in agent show under that agent's row; ACP agents get rows of their own. A Claude, Codex, or Pi instance with a home folder of its own shows its own account, or **Sign in** when it has none. Any other instance of a built-in agent shares your login and reads **Uses the default … login**, for example **Uses the default Claude login**. ACP rows always show **Sign in**, which reopens that agent's sign-in step; Zeron does not check whether it is already signed in. The pen (**Edit**) reopens the setup, and the trash asks **Delete?** first. Deleting an instance whose home folder Zeron made also removes that folder and its saved login.
+Instances of a built-in agent show under that agent's row; ACP agents get rows of their own. A Claude, Codex, or Pi instance with a home folder of its own shows its own account, or **Sign in** when it has none. Any other instance of a built-in agent shares your login and reads **Uses the default … login**, for example **Uses the default Claude login**. ACP rows always show **Sign in**, which reopens that agent's sign-in step; Zeron does not check whether it is already signed in. The pen (**Edit**) reopens the setup, and the trash asks **Delete?** first. Deleting an instance whose home folder Zeron made also removes that folder and its saved login. Chats that were using the instance cannot run until you pick another model or instance for them.
 
-Moving a chat that has history to another instance works like switching to another agent: Zeron asks **Switch provider?**, closes the old session, and hands the conversation over as text. See [Models and effort](zeron://docs/models-and-effort).
+Moving a chat that has history to another instance works like switching to another agent: Zeron asks **Switch provider?**, closes the old session, and hands the conversation over as text (the most recent 48,000 characters). See [Models and effort](zeron://docs/models-and-effort).
 
 ## Plan usage in the rail
 

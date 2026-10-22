@@ -778,6 +778,7 @@ impl TaskCenter {
                 &text,
                 theme,
                 window,
+                cx,
             )
         } else {
             div()
@@ -1281,6 +1282,7 @@ impl TaskCenter {
                         &row.step.notes,
                         theme,
                         window,
+                        cx,
                     )
                 };
                 let thumbs = (images > 0).then(|| {
@@ -1567,9 +1569,18 @@ impl TaskCenter {
                             )))
                         }),
                 )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |center, _, _, _| {
+                        let open = center.pop.as_ref().map(|pop| pop.kind);
+                        center.pop_pressed = open.or(center.pop_dismissed) == Some(kind);
+                    }),
+                )
                 .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
                     cx.stop_propagation();
-                    center.toggle_pop(kind, cx)
+                    if !std::mem::take(&mut center.pop_pressed) {
+                        center.toggle_pop(kind, cx)
+                    }
                 })),
             None => pill,
         };
@@ -2055,7 +2066,7 @@ impl TaskCenter {
                 .id(SharedString::from(key.clone()))
                 .debug_selector(move || key.clone())
                 .role(gpui::Role::Button)
-                .aria_label(label)
+                .aria_label(format!("{label} {name}"))
                 .min_h(px(26.0))
                 .rounded_full()
             };
@@ -2064,8 +2075,15 @@ impl TaskCenter {
             } else {
                 Selection::Step(id.clone())
             };
-            let (first, second): (AnyElement, AnyElement) = if pop.kind == Status::Waiting {
-                let open = selection.clone();
+            let open_thread = |selection: Selection, cx: &Context<Self>| {
+                action("Open thread", false, format!("task-center-pop-open-{id}"))
+                    .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
+                        center.pop = None;
+                        center.pick(selection.clone(), cx)
+                    }))
+                    .into_any_element()
+            };
+            let (first, second): (AnyElement, Option<AnyElement>) = if pop.kind == Status::Waiting {
                 let answer = selection.clone();
                 let primary = if lead && text.is_some() {
                     action(
@@ -2086,15 +2104,9 @@ impl TaskCenter {
                         }))
                         .into_any_element()
                 };
-                (
-                    action("Open thread", false, format!("task-center-pop-open-{id}"))
-                        .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
-                            center.pop = None;
-                            center.pick(open.clone(), cx)
-                        }))
-                        .into_any_element(),
-                    primary,
-                )
+                (open_thread(selection, cx), Some(primary))
+            } else if lead {
+                (open_thread(selection, cx), None)
             } else {
                 let skip = id.clone();
                 let retry = id.clone();
@@ -2105,12 +2117,14 @@ impl TaskCenter {
                             center.set_outcome(&skip, Some(StepOutcome::Skipped), cx)
                         }))
                         .into_any_element(),
-                    action("Retry", true, format!("task-center-pop-retry-{id}"))
-                        .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
-                            center.pop = None;
-                            cx.emit(TaskCenterEvent::RetryStep(retry.clone()))
-                        }))
-                        .into_any_element(),
+                    Some(
+                        action("Retry", true, format!("task-center-pop-retry-{id}"))
+                            .on_click(cx.listener(move |center, _: &ClickEvent, _, cx| {
+                                center.pop = None;
+                                cx.emit(TaskCenterEvent::RetryStep(retry.clone()))
+                            }))
+                            .into_any_element(),
+                    ),
                 )
             };
             div()
@@ -2156,7 +2170,7 @@ impl TaskCenter {
                         .gap(px(6.0))
                         .mt(px(4.0))
                         .child(first)
-                        .child(second),
+                        .children(second),
                 )
         });
         let card = popover::popover_card(&popup)
@@ -2170,6 +2184,7 @@ impl TaskCenter {
             .flex()
             .flex_col()
             .on_mouse_down_out(cx.listener(|center, _, _, cx| {
+                center.pop_dismissed = center.pop.as_ref().map(|pop| pop.kind);
                 center.close_pop(cx);
             }))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -2727,18 +2742,16 @@ impl TaskCenter {
         } else {
             top + height + 5.0
         };
-        Some(
-            div()
-                .debug_selector(|| "task-center-drop-line".into())
-                .absolute()
-                .left(px(left - drag.origin.0))
-                .w(px(width))
-                .top(px(y - drag.origin.1))
-                .h(px(2.0))
-                .rounded(px(1.0))
-                .bg(theme.accent)
-                .into_any_element(),
-        )
+        let line = div()
+            .debug_selector(|| "task-center-drop-line".into())
+            .absolute()
+            .left(px(left - drag.origin.0))
+            .w(px(width))
+            .top(px(y - drag.origin.1))
+            .h(px(2.0))
+            .rounded(px(1.0))
+            .bg(theme.accent);
+        Some(gpui::deferred(line).priority(1).into_any_element())
     }
 
     pub(super) fn render_drawer(

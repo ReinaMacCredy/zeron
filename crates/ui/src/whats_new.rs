@@ -296,7 +296,19 @@ pub fn resolve<'a>(entries: &'a [Entry], current: &str, last_seen: Option<&str>)
     if !version_newer(current, last_seen) {
         return Resolution::Noop;
     }
-    entry_for(entries, current).map_or(Resolution::Advance, Resolution::Show)
+    entries
+        .iter()
+        .filter(|entry| {
+            version_newer(&entry.version, last_seen) && !version_newer(&entry.version, current)
+        })
+        .reduce(|newest, entry| {
+            if version_newer(&entry.version, &newest.version) {
+                entry
+            } else {
+                newest
+            }
+        })
+        .map_or(Resolution::Advance, Resolution::Show)
 }
 
 pub fn picture(name: &str) -> Option<&'static Picture> {
@@ -385,9 +397,22 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_past_an_unseen_entry_shows_the_newest_unseen_one() {
+        let entries = [entry("0.2.115"), entry("0.2.113"), entry("0.2.112")];
+        assert_eq!(
+            resolve(&entries, "0.2.114", Some("0.2.112")),
+            Resolution::Show(&entries[1])
+        );
+    }
+
+    #[test]
     fn bundled_changelog_parses_newest_first_with_every_image() {
         let entries = entries();
         assert!(!entries.is_empty());
+        assert_eq!(
+            entries[0].version, CURRENT_VERSION,
+            "a version bump needs its whats_new.toml entry"
+        );
         assert!(
             entries
                 .windows(2)

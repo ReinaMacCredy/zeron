@@ -428,6 +428,7 @@ fn thread_tool_list() -> Value {
                     "send": { "type": "boolean" },
                     "steps": {
                         "type": "array",
+                        "maxItems": zeron_doc::TASK_STEPS_MAX,
                         "items": {
                             "type": "object",
                             "properties": {

@@ -12,7 +12,7 @@ On macOS the **Hotkey** is a chord: press both keys of one modifier at the same 
 
 On Linux you record a regular key combination instead; the default is Ctrl+Alt+Space. Click the field, press the new keys, or press Escape to cancel. On Wayland, Zeron registers the shortcut through your desktop's global shortcuts portal. If your desktop has no such portal, or the shortcut cannot be registered, the status line reads "This shortcut is unavailable. Choose a different key combination." In that case, bind the command `zeron appshot` to a key in your desktop's own keyboard shortcut settings: it takes an Appshot in the running Zeron app, the same as the hotkey. See [Command line and servers](zeron://docs/command-line).
 
-The hotkey lives only on this page; [Settings > Shortcuts](zeron://settings/shortcuts) has no row for it.
+The hotkey lives only on this page; [Settings > Shortcuts](zeron://settings/shortcuts) has no row for it. To change it, open Settings > Appshots > **Hotkey**; searching "capture appshot" in Settings lands on that row.
 
 ## Where the snap goes
 

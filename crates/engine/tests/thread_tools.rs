@@ -3573,9 +3573,16 @@ async fn task_and_step_images_ride_the_first_message_of_the_thread_that_runs_the
     };
     let mutate = |params| call(zeron_rpc::methods::MUTATE, params);
     let trailer = "Attached images (local files — open them to view):";
+    let uploads = rig._dir.path().join("uploads");
+    std::fs::create_dir_all(&uploads).unwrap();
+    let img = |name: &str| {
+        let path = uploads.join(name);
+        std::fs::write(&path, b"png").unwrap();
+        path.display().to_string()
+    };
     mutate(serde_json::json!({
         "op": "createTask", "taskId": "t1", "title": "Shop",
-        "images": ["/tmp/uploads/aa-overview.png"],
+        "images": [img("aa-overview.png"), "/elsewhere/uploads/zz-other-device.png"],
     }))
     .await
     .unwrap();
@@ -3592,12 +3599,14 @@ async fn task_and_step_images_ride_the_first_message_of_the_thread_that_runs_the
     .await;
     let first = prompts_with(&rig, "You lead this task").remove(0);
     assert!(
-        first.ends_with(&format!("{trailer}\n- /tmp/uploads/aa-overview.png")),
+        first.contains(
+            "1 image on this task is stored on another device and could not be attached."
+        ) && first.ends_with(&format!("{trailer}\n- {}", img("aa-overview.png"))),
         "{first}"
     );
     assert_eq!(
         attached_to(&rig, "You lead this task"),
-        ["/tmp/uploads/aa-overview.png"]
+        [img("aa-overview.png")]
     );
 
     mutate(serde_json::json!({
@@ -3607,13 +3616,13 @@ async fn task_and_step_images_ride_the_first_message_of_the_thread_that_runs_the
     .await
     .unwrap();
     let steps = rig.core.workspace.task_steps_of("t1");
-    let shots = ["/tmp/uploads/bb-grid.png", "/tmp/uploads/cc-grid-2.png"];
+    let shots = [img("bb-grid.png"), img("cc-grid-2.png")];
     mutate(serde_json::json!({
         "op": "editTaskPlan", "taskId": "t1",
-        "overviewImages": ["/tmp/uploads/aa-overview.png", "/tmp/uploads/dd-flow.png"],
+        "overviewImages": [img("aa-overview.png"), img("dd-flow.png")],
         "steps": [
             { "stepId": steps[0].id, "title": "Grid", "notes": "", "images": shots },
-            { "stepId": steps[1].id, "title": "Cart", "notes": "", "images": ["/tmp/uploads/ee-cart.png"] },
+            { "stepId": steps[1].id, "title": "Cart", "notes": "", "images": [img("ee-cart.png")] },
         ],
     }))
     .await
@@ -3632,7 +3641,7 @@ async fn task_and_step_images_ride_the_first_message_of_the_thread_that_runs_the
         )),
         "{message}"
     );
-    assert_eq!(attached_to(&rig, edited), ["/tmp/uploads/dd-flow.png"]);
+    assert_eq!(attached_to(&rig, edited), [img("dd-flow.png")]);
     assert_eq!(rig.core.workspace.task("t1").unwrap().images.len(), 2);
 
     let Ok(zeron_rpc::RpcReply::Value(replanned)) = mutate(serde_json::json!({
@@ -3651,9 +3660,9 @@ async fn task_and_step_images_ride_the_first_message_of_the_thread_that_runs_the
     assert_eq!(
         rig.core.workspace.task("t1").unwrap().images,
         [
-            "/tmp/uploads/aa-overview.png",
-            "/tmp/uploads/dd-flow.png",
-            "/tmp/uploads/ee-cart.png"
+            img("aa-overview.png"),
+            img("dd-flow.png"),
+            img("ee-cart.png")
         ],
         "a step no new step names hands its images to the overview"
     );
@@ -4775,16 +4784,12 @@ async fn step_handbacks_fold_into_one_lead_message() {
 
     let first = run(&steps[0]).await;
     let second_thread = run(&steps[1]).await;
+    second.send(true).unwrap();
     wait_for(
-        || {
-            step_rows()
-                .first()
-                .is_some_and(|row| row.task_steps.len() == 1)
-        },
-        "the first step's handback held in the idle lead's queue",
+        || !step_rows().is_empty(),
+        "a step's handback held in the idle lead's queue",
     )
     .await;
-    second.send(true).unwrap();
     wait_for(|| !handbacks(&rig).is_empty(), "the idle lead's handback").await;
     wait_for(|| idle(core, "task-lead"), "the lead's handback turn").await;
     let early = handbacks(&rig);

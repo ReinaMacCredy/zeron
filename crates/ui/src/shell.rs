@@ -888,8 +888,8 @@ impl SettingsSection {
                 ("Next session", &["switcher"]),
                 ("Previous session", &["switcher"]),
                 ("Archive session", &[]),
-                ("Capture Appshot", &["screenshot"]),
             ],
+            SettingsSection::Appshots => &[("Hotkey", &["capture appshot", "shortcut", "keyboard"])],
             SettingsSection::Computer => &[
                 ("Computer control", &["computer use", "desktop"]),
                 ("Cursor colors", &["cursor", "color"]),
@@ -897,6 +897,7 @@ impl SettingsSection {
                 ("Placement", &["rail", "floating"]),
                 ("Developer access", &["javascript", "browser"]),
                 ("Always-allowed apps", &["consent", "allow"]),
+                ("Click sounds", &[]),
                 ("Getting started", &[]),
                 ("Recent Computer actions", &["history", "audit"]),
                 ("Advanced", &["permission", "driver"]),
@@ -905,13 +906,14 @@ impl SettingsSection {
                 ("Device hub", &["simulator", "emulator", "version"]),
                 ("Platform support", &["xcode", "android sdk"]),
                 ("Agent device access", &["agent"]),
+                ("Device hosts", &["ssh", "remote"]),
                 ("Auto-show floating preview", &["float"]),
             ],
             SettingsSection::SourceControl => &[
                 ("Instruction", &["commit message", "prompt", "conventional"]),
                 ("Default model", &["commit message", "haiku"]),
-                ("Style", &["mini chat", "floating", "bottom bar"]),
-                ("Chat history", &["mini chat", "keep per pr", "fresh"]),
+                ("Chat history", &["pr chat", "keep per pr", "fresh"]),
+                ("New chat when idle", &["pr chat", "idle", "expiry"]),
                 ("While an agent is running", &["git", "agent", "busy"]),
             ],
             SettingsSection::Home => &[
@@ -1221,6 +1223,7 @@ impl NavHistory {
     /// equivalent of a `replace: true` navigation (zeron's boot redirect from
     /// `/` into the last-used chat leaves no dead Back target behind).
     pub fn replace(&mut self, entry: NavEntry) {
+        self.entries.truncate(self.index + 1);
         self.entries[self.index] = entry;
     }
 
@@ -2732,6 +2735,7 @@ pub struct Shell {
     _accounts_cache: Subscription,
     rail_usage_menu: popover::Popup<HarnessId>,
     rail_usage_hover: app_rail::RingHover,
+    continuing: std::collections::HashSet<String>,
     harnesses_page: Option<Entity<HarnessesPage>>,
     /// Filters the settings nav; cleared when settings close.
     settings_search: Entity<ComposerInput>,
@@ -3468,6 +3472,7 @@ impl Shell {
             _accounts_cache: accounts_cache_observation,
             rail_usage_menu: popover::Popup::default(),
             rail_usage_hover: app_rail::RingHover::default(),
+            continuing: Default::default(),
             harnesses_page: None,
             settings_search,
             _settings_search_sub: settings_search_sub,
@@ -6352,14 +6357,23 @@ impl Shell {
     pub fn continue_in_new_thread(
         &mut self,
         source_chat_id: String,
-        harness: Option<HarnessId>,
-        model: Option<String>,
+        target: Option<(
+            HarnessId,
+            String,
+            (
+                Option<zeron_proto::ReasoningLevel>,
+                serde_json::Map<String, serde_json::Value>,
+            ),
+        )>,
         target_space_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
+        if !self.continuing.insert(source_chat_id.clone()) {
+            return;
+        }
         let host_device_id = self
             .state
             .read(cx)
@@ -6368,12 +6382,16 @@ impl Shell {
             .find(|chat| chat.id == source_chat_id)
             .map(|chat| chat.device_id.clone());
         let mut params = serde_json::json!({
-            "sourceChatId": source_chat_id,
+            "sourceChatId": source_chat_id.clone(),
             "chatId": uuid::Uuid::new_v4().to_string(),
-            "harness": harness,
-            "model": model,
             "targetSpaceId": target_space_id,
         });
+        if let Some((harness, model, (reasoning, options))) = target {
+            params["harness"] = serde_json::json!(harness);
+            params["model"] = model.into();
+            params["reasoning"] = serde_json::json!(reasoning);
+            params["modelOptions"] = options.into();
+        }
         if let (Some(device), Some(object)) = (host_device_id, params.as_object_mut()) {
             object.insert("targetDeviceId".into(), device.into());
         }
@@ -6387,6 +6405,7 @@ impl Shell {
             )
             .await;
             this.update(cx, |shell, cx| {
+                shell.continuing.remove(&source_chat_id);
                 match reply.map_err(|e| e.to_string()).and_then(|value| {
                     serde_json::from_value::<zeron_proto::Chat>(value).map_err(|e| e.to_string())
                 }) {
@@ -6397,7 +6416,12 @@ impl Shell {
                                 cx.notify();
                             }
                         });
-                        shell.open_chat(chat.id, cx);
+                        let source_shown = shell.route == Route::Chat
+                            && shell.state.read(cx).selected_chat.as_deref()
+                                == Some(source_chat_id.as_str());
+                        if source_shown {
+                            shell.open_chat(chat.id, cx);
+                        }
                     }
                     Err(err) => {
                         tracing::warn!(%err, "ContinueInNewThread failed");
@@ -14273,8 +14297,12 @@ impl Shell {
                                 ),
                                 Flow::Ready { version, .. } => (
                                     format!("Zeron {version} is ready").into(),
-                                    "Restart to finish updating. If you don't, it installs the next time you quit Zeron."
-                                        .into(),
+                                    if update.installs_on_quit() {
+                                        "Restart to finish updating. If you don't, it installs the next time you quit Zeron."
+                                    } else {
+                                        "Restart to finish updating. Quitting Zeron does not install it."
+                                    }
+                                    .into(),
                                     vec![
                                         UpdatePromptButton::Close("Later"),
                                         UpdatePromptButton::Restart,
@@ -14665,6 +14693,13 @@ impl Shell {
                         .collect()
                 })
                 .unwrap_or_default();
+        if self
+            .rail_usage_hover
+            .harness
+            .is_some_and(|harness| !ring_accounts.iter().any(|a| a.harness == harness))
+        {
+            self.rail_usage_hover = app_rail::RingHover::default();
+        }
         if ring_accounts.is_empty() {
             return vec![
                 div()
@@ -14689,7 +14724,7 @@ impl Shell {
                 let open = self.rail_usage_menu.as_open() == Some(&harness);
                 let tooltip = app_rail::ring_tooltip(Some(&account), false);
                 let mut trigger = div()
-                    .id(("rail-usage", ix))
+                    .id(SharedString::from(format!("rail-usage-{}", harness.display_name())))
                     .debug_selector(move || format!("rail-usage-{ix}"))
                     .role(gpui::Role::Button)
                     .aria_label(tooltip)
@@ -20825,8 +20860,22 @@ mod tests {
             vec!["Instruction", "Default model"]
         );
         assert_eq!(
-            SettingsSection::SourceControl.matching_rows("mini chat"),
-            vec!["Style", "Chat history"]
+            SettingsSection::SourceControl.matching_rows("pr chat"),
+            vec!["Chat history", "New chat when idle"]
+        );
+        assert!(
+            SettingsSection::SourceControl
+                .matching_rows("floating")
+                .is_empty()
+        );
+        assert_eq!(
+            SettingsSection::Appshots.matching_rows("capture appshot"),
+            vec!["Hotkey"]
+        );
+        assert!(
+            SettingsSection::Shortcuts
+                .matching_rows("appshot")
+                .is_empty()
         );
     }
 
@@ -22198,6 +22247,14 @@ mod tests {
         assert_eq!(nav.len(), 1);
         assert_eq!(*nav.current(), chat("boot"));
         assert!(!nav.can_back());
+
+        let mut nav = NavHistory::new(chat("a"));
+        nav.push(NavEntry::Draft("d1".into()));
+        nav.push(chat("b"));
+        nav.back();
+        nav.replace(chat("x"));
+        assert!(!nav.can_forward(), "a replaced entry drops what was ahead");
+        assert_eq!(nav.back(), Some(chat("a")));
     }
 
     #[test]

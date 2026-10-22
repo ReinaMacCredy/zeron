@@ -569,8 +569,9 @@ impl DocHost {
         text: &str,
         images: Vec<String>,
     ) -> Result<String, EngineError> {
+        let (text, images) = crate::doc_host::images_here(text, images);
         let sent = self
-            .queue_thread_message_with(chat_id, from_chat_id, text, images)
+            .queue_thread_message_with(chat_id, from_chat_id, &text, images)
             .await;
         let send_error = match &sent {
             Ok(id) if task.send_error.is_none() => return Ok(id.clone()),

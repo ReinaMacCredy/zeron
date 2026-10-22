@@ -14,6 +14,7 @@ pub struct FooterContext {
     composer: WeakEntity<crate::composer::Composer>,
     chat: Option<String>,
     popup: popover::Popup<()>,
+    ticker: Option<gpui::Task<()>>,
     _state: Subscription,
 }
 
@@ -29,6 +30,7 @@ impl FooterContext {
             composer,
             chat: None,
             popup: popover::Popup::default(),
+            ticker: None,
         }
     }
 
@@ -144,6 +146,11 @@ impl Render for FooterContext {
         let theme = Theme::of(cx).clone();
         let context = self.state.read(cx).context_usage_for(self.chat.as_deref());
         let compact = self.compact(cx);
+        if self.popup.get().is_none() {
+            self.ticker = None;
+        } else if self.ticker.is_none() && compact.is_some() {
+            self.ticker = Some(crate::session_stats::tick(1, cx, |_, cx| cx.notify()));
+        }
         let ring = has_window(context).then(|| {
             let chip = chip(context, compact, self.popup.get().is_some(), &theme)
                 .relative()

@@ -30,7 +30,6 @@ pub fn used_fraction(account: &AgentAccount) -> Option<f32> {
         .reduce(f32::max)
 }
 
-/// The harness's live account. Pure.
 pub fn active_account(
     snapshot: &AgentAccountsSnapshot,
     harness: HarnessId,
@@ -58,7 +57,6 @@ fn money(amount: f64, currency: Option<&str>) -> String {
     }
 }
 
-/// Synara's Extra Usage row: spend against the monthly cap, or "No data" when off. Pure.
 pub fn extra_usage_view(extra: &zeron_proto::AgentExtraUsage) -> ExtraUsageView {
     let currency = extra.currency.as_deref();
     match (extra.enabled, extra.used) {
@@ -304,7 +302,6 @@ impl DeviceAccounts {
         self.load_task.is_some()
     }
 
-    /// The last refused switch.
     pub fn error(&self) -> Option<SharedString> {
         self.error.clone()
     }

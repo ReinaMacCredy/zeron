@@ -250,7 +250,9 @@ impl DocHost {
                     continue;
                 }
                 if live(Some(session.status)) {
-                    lock(&self.inner.active_step_threads).insert(thread);
+                    if !session.compacting {
+                        lock(&self.inner.active_step_threads).insert(thread);
+                    }
                     continue;
                 }
                 let was_active = lock(&self.inner.active_step_threads).remove(&thread);

@@ -239,8 +239,9 @@ pub enum MessagePart {
         text: String,
     },
     /// The conversation as text, as handed to `harness` on its first turn
-    /// under an already-running chat (a provider switch). Sits on that turn's
-    /// user entry. Its own kind, not a `Text` part: the next switch's copy
+    /// under an already-running chat (a provider switch). Sits on the switch's
+    /// System divider entry, and on a re-sent first turn's user entry. Its own
+    /// kind, not a `Text` part: the next switch's copy
     /// collects `Text` only (plus the conversation inside a divider's packet,
     /// unwrapped), so a packet never nests inside a later packet, and older
     /// readers degrade it to an empty part like `Reasoning`.
