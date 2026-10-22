@@ -2576,12 +2576,14 @@ impl SupervisorPage {
         let mark = |name: &'static str| icon(name).size(px(13.0)).text_color(tone);
         let live = match mode {
             Mode::Working => {
-                let reduced = motion::reduced_motion(cx);
-                if !reduced {
-                    motion::pulse_lease(cx.entity_id(), cx);
-                }
                 return indicator(div(), "supervisor-dot-working")
-                    .child(crate::tasks::spinner(13.0, tone, reduced))
+                    .child(crate::loaders::mini_glyph_spinner(
+                        "supervisor-working",
+                        3.0,
+                        theme.glyph,
+                        cx.entity_id(),
+                        cx,
+                    ))
                     .into_any_element();
             }
             Mode::Stopped => {
