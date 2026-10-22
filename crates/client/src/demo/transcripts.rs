@@ -1015,7 +1015,7 @@ fn seams(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                     decided_by: zeron_doc::parts::DecidedBy::Stage1,
                     duration_ms: 820,
                     context_tokens: 48_200,
-                    input: "Now profile the scroll path.".into(),
+                    input: "Now profile the scroll path:\n\n- frame time at `120Hz`\n- the $O(n)$ row walk on each fling".into(),
                     reply: "CARRY: same benchmark thread, new surface.".into(),
                     stage2_reply: None,
                     input_tokens: Some(1_240),
@@ -1044,7 +1044,40 @@ fn seams(host: &str, now: i64) -> Vec<SessionMessageEntry> {
             "m10",
             host,
             now - 100_000,
-            vec![text("t0", "Back on the scroll profile.")],
+            vec![
+                tool(
+                    "v0",
+                    ToolCall::Mcp {
+                        server: "zeron".into(),
+                        tool: "device_open".into(),
+                        input: None,
+                    },
+                    false,
+                    None,
+                ),
+                tool(
+                    "v1",
+                    ToolCall::Mcp {
+                        server: "zeron".into(),
+                        tool: "device_screenshot".into(),
+                        input: None,
+                    },
+                    false,
+                    Some(
+                        r#"{"device":{"name":"iPhone 17 Pro"},"screenshot":{"mimeType":"image/png","width":1206,"height":2622}}"#,
+                    ),
+                ),
+                tool(
+                    "a0",
+                    ToolCall::Unknown {
+                        name: zeron_proto::ADVISOR_TOOL_NAME.into(),
+                        input: None,
+                    },
+                    false,
+                    None,
+                ),
+                text("t1", "Back on the scroll profile."),
+            ],
         ),
     ]
 }
