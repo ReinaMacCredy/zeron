@@ -14,15 +14,16 @@ use gpui::{
 };
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::supervisor::{
-    CheckTool, InputAsker, InterventionChip, InterventionKind, InterventionTrigger, LeadQuestion,
-    NeedsYouInput, NeedsYouRow, NextCheckKind, PlanApproval, QuestionState, Raiser, ResourceState,
-    SendDest, SettledBy, SharedResource, SupervisorIntervention, SupervisorItem,
-    SupervisorSettings, SupervisorSnapshot, SupervisorState, SupervisorWake, WAKES_PER_HOUR,
-    WakeDelivery, is_supervisor_chat,
+    BriefSender as Sender, CheckTool, InputAsker, InterventionChip, InterventionKind,
+    InterventionTrigger, LeadQuestion, NeedsYouInput, NeedsYouRow, NextCheckKind, PROFILE_ID,
+    PlanApproval, QuestionState, Raiser, ResourceState, SendDest, SettledBy, SharedResource,
+    SupervisorIntervention, SupervisorItem, SupervisorSettings, SupervisorSnapshot,
+    SupervisorState, SupervisorWake, WAKES_PER_HOUR, brief_sender as sender, is_supervisor_chat,
+    profile_config,
 };
 use zeron_proto::{
-    AgentProfile, Chat, ChatConfig, ChatIndicator, PermissionMode, PlanProgress, SandboxLevel,
-    TaskStatus, UserInputAnswer, UserInputQuestion,
+    AgentProfile, Chat, ChatConfig, ChatIndicator, PermissionMode, PlanProgress, TaskStatus,
+    UserInputAnswer, UserInputQuestion,
 };
 use zeron_rpc::methods;
 
@@ -41,7 +42,6 @@ use feed::{Entry, Feed, Filter, Kind, Memory, Row};
 use rail::{RailMode, RailMotion, mission_tone};
 
 pub(crate) const PLACEHOLDER: &str = "Talk to the Supervisor about architecture and direction…";
-const PROFILE_ID: &str = "slp-supervisor";
 const NOT_CONNECTED: &str = "Not connected to the engine";
 const WATCH_EVERYTHING: &str = "everything";
 const NO_AGENT: &str =
@@ -260,63 +260,19 @@ pub(crate) fn tree_watch(state: &AppState, root: &str) -> Watch {
         .find(|chat| chat.id == root)
         .map(|chat| chat.device_id.as_str());
     let local = state.local_device_id.as_deref();
-    let snapshot = state.supervisor.as_ref();
-    if let Some(task) = zeron_proto::plan_of_chat(&state.tasks, root) {
-        let unwatched = snapshot.map_or(&[][..], |snapshot| snapshot.unwatched.as_slice());
-        return watch_of(&task.id, host, local, unwatched);
+    if let (Some(host), Some(local)) = (host, local)
+        && host != local
+    {
+        return Watch::Elsewhere(host.to_owned());
     }
-    match (host, local) {
-        (Some(host), Some(local)) if host != local => Watch::Elsewhere(host.to_owned()),
-        _ if snapshot.is_some_and(|snapshot| {
-            snapshot.watch_everything || snapshot.watched_roots.iter().any(|id| id == root)
-        }) =>
-        {
-            Watch::Watched
-        }
-        _ => Watch::Unwatched,
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Sender {
-    You,
-    Lead,
-    Supervisor,
-    Step(String),
-    Itself,
-    Thread,
-}
-
-impl Sender {
-    fn tag(&self) -> SharedString {
-        match self {
-            Self::You => "From you".into(),
-            Self::Lead => "From Lead".into(),
-            Self::Supervisor => "From Supervisor".into(),
-            Self::Step(label) => format!("From {label}").into(),
-            Self::Itself => "Auto-continue".into(),
-            Self::Thread => "From another thread".into(),
-        }
-    }
-}
-
-fn sender(
-    from: Option<&str>,
-    own: &str,
-    lead: Option<&str>,
-    step_label: &dyn Fn(&str) -> Option<String>,
-) -> Sender {
-    let Some(from) = from else {
-        return Sender::You;
-    };
-    if is_supervisor_chat(from) {
-        Sender::Supervisor
-    } else if from == own {
-        Sender::Itself
-    } else if Some(from) == lead {
-        Sender::Lead
+    let watched = state.supervisor.as_ref().map_or(
+        zeron_proto::plan_of_chat(&state.tasks, root).is_some(),
+        |snapshot| snapshot.watches(&state.tasks, root),
+    );
+    if watched {
+        Watch::Watched
     } else {
-        step_label(from).map_or(Sender::Thread, Sender::Step)
+        Watch::Unwatched
     }
 }
 
@@ -682,17 +638,6 @@ fn woke_parts(wake: &SupervisorWake, state: &AppState) -> Vec<Part> {
     }
 }
 
-fn held_wakes(snapshot: &SupervisorSnapshot) -> Vec<&SupervisorWake> {
-    let mut held: Vec<&SupervisorWake> = snapshot
-        .wakes
-        .iter()
-        .filter(|wake| wake.delivery == WakeDelivery::HeldByStop)
-        .take(snapshot.waiting)
-        .collect();
-    held.reverse();
-    held
-}
-
 fn held_line(held: &[&SupervisorWake]) -> String {
     let Some(first) = held.first() else {
         return "Nothing held yet. New wakes wait here until you resume.".into();
@@ -821,21 +766,6 @@ fn clip_to(text: &str, chars: usize) -> String {
     match text.char_indices().nth(chars) {
         Some((at, _)) => format!("{}…", &text[..at]),
         None => text.to_owned(),
-    }
-}
-
-fn profile_config(profile: &AgentProfile) -> ChatConfig {
-    ChatConfig {
-        harness: profile.harness,
-        model: profile.model.clone(),
-        reasoning: profile.reasoning,
-        model_options: profile.model_options.clone(),
-        sandbox: SandboxLevel::WorkspaceWrite,
-        permission_mode: profile.permission_mode.unwrap_or(PermissionMode::Full),
-        instructions: profile.instructions.clone(),
-        profile_id: Some(profile.id.clone()),
-        instance_id: None,
-        disabled_tools: profile.disabled_tools.clone(),
     }
 }
 
@@ -2548,7 +2478,7 @@ impl SupervisorPage {
             let mode = mode(snapshot, &self.ensure);
             let empty = SupervisorSnapshot::default();
             let snap = snapshot.unwrap_or(&empty);
-            let held: Vec<String> = held_wakes(snap).iter().map(|w| w.id.clone()).collect();
+            let held: Vec<String> = snap.held_wakes().iter().map(|w| w.id.clone()).collect();
             let turn_since = self
                 .chat_id(cx)
                 .and_then(|id| state.session_for(&id))
@@ -2597,7 +2527,7 @@ impl SupervisorPage {
                             plural(snap.waiting, "wake", "wakes")
                         )
                     }),
-                    vec![("Held", vec![text(held_line(&held_wakes(snap)))])],
+                    vec![("Held", vec![text(held_line(&snap.held_wakes()))])],
                 ),
                 Mode::Off => (
                     ("Off", String::new()),

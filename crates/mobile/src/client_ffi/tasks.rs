@@ -1,7 +1,7 @@
 use zeron_client as zc;
 use zeron_proto::supervisor as sv;
 
-use super::{CoreClient, CoreResult, ProjectRef, UserInputQuestion, on_runtime};
+use super::{ChatConfig, CoreClient, CoreResult, ProjectRef, UserInputQuestion, on_runtime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum TaskStatus {
@@ -393,12 +393,144 @@ pub struct StepView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ContextChat {
+    pub chat_id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct WatchState {
+    pub root_chat_id: String,
+    pub host: HostRef,
+    pub mission: bool,
+    pub watched: bool,
+    pub everything: bool,
+}
+
+impl From<&zc::WatchState> for WatchState {
+    fn from(w: &zc::WatchState) -> Self {
+        Self {
+            root_chat_id: w.root_chat_id.clone(),
+            host: (&w.host).into(),
+            mission: w.mission,
+            watched: w.watched,
+            everything: w.everything,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct TaskDetail {
     pub row: TaskRow,
     pub phase: PlanPhase,
     pub plan: String,
     pub approval: Option<ApprovalView>,
     pub steps: Vec<StepView>,
+    pub images: Vec<String>,
+    pub context: Vec<ContextChat>,
+    pub watch: Option<WatchState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MissionStrip {
+    pub task_id: String,
+    pub title: String,
+    pub role: String,
+    pub step_id: Option<String>,
+    pub done: u32,
+    pub total: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct TaskDraft {
+    pub title: String,
+    pub notes: String,
+    pub space_id: Option<String>,
+    pub images: Vec<String>,
+    pub context: Vec<String>,
+}
+
+impl From<TaskDraft> for zc::TaskDraft {
+    fn from(d: TaskDraft) -> Self {
+        Self {
+            title: d.title,
+            notes: d.notes,
+            space_id: d.space_id,
+            images: d.images,
+            context: d.context,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct MissionOptions {
+    pub approve_plan: bool,
+    pub same_agents: bool,
+    pub plan_doc: bool,
+}
+
+impl From<MissionOptions> for zc::MissionOptions {
+    fn from(o: MissionOptions) -> Self {
+        Self {
+            approve_plan: o.approve_plan,
+            same_agents: o.same_agents,
+            plan_doc: o.plan_doc,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PlanStepEdit {
+    pub step_id: Option<String>,
+    pub title: String,
+    pub notes: String,
+    pub images: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PlanEdit {
+    pub overview: Option<String>,
+    pub steps: Vec<PlanStepEdit>,
+    pub remove_step_ids: Vec<String>,
+    pub order: Vec<String>,
+}
+
+impl From<PlanEdit> for zeron_proto::PlanEdit {
+    fn from(e: PlanEdit) -> Self {
+        Self {
+            overview_images: None,
+            overview: e.overview,
+            steps: e
+                .steps
+                .into_iter()
+                .map(|s| zeron_proto::PlanStepEdit {
+                    step_id: s.step_id,
+                    title: s.title,
+                    notes: s.notes,
+                    images: s.images,
+                })
+                .collect(),
+            remove_step_ids: e.remove_step_ids,
+            order: e.order,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct Brief {
+    pub title: String,
+    pub meta: Vec<String>,
+    pub task: String,
+    pub spec: String,
+    pub thread_chat_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BriefMessage {
+    pub tag: String,
+    pub from_you: bool,
+    pub text: String,
+    pub at_ms: i64,
 }
 
 impl From<&zc::TaskDetail> for TaskDetail {
@@ -426,6 +558,16 @@ impl From<&zc::TaskDetail> for TaskDetail {
                     question: s.question.clone(),
                 })
                 .collect(),
+            images: d.images.clone(),
+            context: d
+                .context
+                .iter()
+                .map(|c| ContextChat {
+                    chat_id: c.chat_id.clone(),
+                    title: c.title.clone(),
+                })
+                .collect(),
+            watch: d.watch.as_ref().map(Into::into),
         }
     }
 }
@@ -524,6 +666,176 @@ impl CoreClient {
             .map(|answer| (answer.item_id, answer.choice))
             .collect();
         on_runtime(async move { client.resolve_supervisor_items(&device_id, answers).await }).await
+    }
+
+    pub fn mission_strip(&self, chat_id: String) -> Option<MissionStrip> {
+        self.client.mission_strip(&chat_id).map(|m| MissionStrip {
+            task_id: m.task_id,
+            title: m.title,
+            role: m.role,
+            step_id: m.step_id,
+            done: m.done,
+            total: m.total,
+        })
+    }
+
+    pub fn watch_state(&self, chat_id: String) -> Option<WatchState> {
+        self.client.watch_state(&chat_id).as_ref().map(Into::into)
+    }
+
+    pub async fn create_task(&self, device_id: String, draft: TaskDraft) -> CoreResult<String> {
+        let client = self.client.clone();
+        on_runtime(async move { client.create_task(&device_id, draft.into()).await }).await
+    }
+
+    pub async fn set_task_images(&self, task_id: String, images: Vec<String>) -> CoreResult<()> {
+        let client = self.client.clone();
+        let patch = zeron_proto::TaskPatch {
+            images: Some(images),
+            ..Default::default()
+        };
+        on_runtime(async move { client.update_task(&task_id, patch).await }).await
+    }
+
+    pub async fn set_task_context(&self, task_id: String, chat_ids: Vec<String>) -> CoreResult<()> {
+        let client = self.client.clone();
+        let patch = zeron_proto::TaskPatch {
+            context: Some(chat_ids),
+            ..Default::default()
+        };
+        on_runtime(async move { client.update_task(&task_id, patch).await }).await
+    }
+
+    pub async fn unassign_task(&self, task_id: String) -> CoreResult<()> {
+        let client = self.client.clone();
+        let patch = zeron_proto::TaskPatch {
+            chat_id: Some(None),
+            ..Default::default()
+        };
+        on_runtime(async move { client.update_task(&task_id, patch).await }).await
+    }
+
+    /// Starts the task in its own project on `device_id`; returns the new chat id.
+    pub async fn start_task(
+        &self,
+        task_id: String,
+        device_id: String,
+        config: Option<ChatConfig>,
+        mission: Option<MissionOptions>,
+    ) -> CoreResult<String> {
+        let client = self.client.clone();
+        let config = config.map(TryInto::try_into).transpose()?;
+        on_runtime(async move {
+            client
+                .start_task(&task_id, &device_id, None, config, mission.map(Into::into))
+                .await
+        })
+        .await
+    }
+
+    pub async fn assign_task(&self, task_id: String, chat_id: String, send: bool) -> CoreResult<()> {
+        let client = self.client.clone();
+        on_runtime(async move { client.assign_task(&task_id, &chat_id, send).await }).await
+    }
+
+    pub async fn start_mission(
+        &self,
+        device_id: String,
+        draft: TaskDraft,
+        config: Option<ChatConfig>,
+        options: MissionOptions,
+    ) -> CoreResult<String> {
+        let client = self.client.clone();
+        let config = config.map(TryInto::try_into).transpose()?;
+        on_runtime(async move {
+            client
+                .start_mission(&device_id, draft.into(), config, options.into())
+                .await
+        })
+        .await
+    }
+
+    pub async fn edit_task_plan(
+        &self,
+        task_id: String,
+        edit: Option<PlanEdit>,
+        approve: bool,
+    ) -> CoreResult<()> {
+        let client = self.client.clone();
+        on_runtime(async move {
+            client
+                .edit_task_plan(&task_id, edit.map(Into::into), approve)
+                .await
+        })
+        .await
+    }
+
+    pub async fn set_watched(&self, chat_id: String, watched: bool) -> CoreResult<()> {
+        let client = self.client.clone();
+        on_runtime(async move { client.set_watched(&chat_id, watched).await }).await
+    }
+
+    pub async fn set_watch_everything(&self, device_id: String, on: bool) -> CoreResult<()> {
+        let client = self.client.clone();
+        on_runtime(async move { client.set_watch_everything(&device_id, on).await }).await
+    }
+
+    pub async fn ensure_supervisor(
+        &self,
+        device_id: String,
+        fallback: Option<ChatConfig>,
+    ) -> CoreResult<String> {
+        let client = self.client.clone();
+        let fallback = fallback.map(TryInto::try_into).transpose()?;
+        on_runtime(async move { client.ensure_supervisor(&device_id, fallback).await }).await
+    }
+
+    pub async fn stop_supervisor(&self, device_id: String) -> CoreResult<()> {
+        let client = self.client.clone();
+        on_runtime(async move { client.stop_supervisor(&device_id).await }).await
+    }
+
+    pub async fn resume_supervisor(&self, device_id: String) -> CoreResult<()> {
+        let client = self.client.clone();
+        on_runtime(async move { client.resume_supervisor(&device_id).await }).await
+    }
+
+    pub fn brief(&self, task_id: String, step_id: Option<String>) -> Option<Brief> {
+        self.client
+            .brief(&task_id, step_id.as_deref())
+            .map(|b| Brief {
+                title: b.title,
+                meta: b.meta,
+                task: b.task,
+                spec: b.spec,
+                thread_chat_id: b.thread_chat_id,
+            })
+    }
+
+    pub async fn brief_messages(
+        &self,
+        task_id: String,
+        step_id: Option<String>,
+    ) -> CoreResult<Vec<BriefMessage>> {
+        let client = self.client.clone();
+        on_runtime(async move {
+            let Some(brief) = client.brief(&task_id, step_id.as_deref()) else {
+                return Ok(Vec::new());
+            };
+            client.brief_messages(&brief).await
+        })
+        .await
+        .map(|messages| {
+            messages
+                .into_iter()
+                .map(|m| BriefMessage {
+                    tag: m.tag,
+                    from_you: m.from_you,
+                    text: m.text,
+                    at_ms: m.at_ms,
+                })
+                .collect()
+        })
     }
 
     pub async fn supervisor_settings(&self, device_id: String) -> CoreResult<SupervisorSettings> {

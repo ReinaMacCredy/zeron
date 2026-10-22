@@ -8,7 +8,7 @@ use std::time::Duration;
 use chrono::{TimeZone, Utc};
 use tokio_util::sync::CancellationToken;
 use zeron_doc::RegistryDoc;
-use zeron_proto::supervisor::SupervisorSettings;
+use zeron_proto::supervisor::{SupervisorSettings, SupervisorSnapshot};
 use zeron_proto::{Chat, ChatConfig, SidebarPinChange, SidebarSectionChange};
 
 use crate::attachments::{self, AttachmentCache};
@@ -24,7 +24,9 @@ use crate::events::{ClientEvent, ClientListener, EventPump};
 use crate::live::LiveBackend;
 use crate::rpc::{FolderListing, ProgressFn, QUEUED_ATTACHMENTS_MIN, RepoRef, capability};
 use crate::session::{HostCapabilities, OutgoingAttachment, RoomState, SessionCore, SessionHandle};
-use crate::workspace::{ItemSend, SearchHit, TaskDetail, WorkspaceSnapshot, WorkspaceStore};
+use crate::workspace::{
+    ItemSend, MissionOptions, SearchHit, TaskDetail, TaskDraft, WorkspaceSnapshot, WorkspaceStore,
+};
 use crate::{lock, now_ms, read, write};
 
 /// Attachment read cache budget.
@@ -735,6 +737,81 @@ impl Client {
         )
     }
 
+    pub fn brief(&self, task_id: &str, step_id: Option<&str>) -> Option<crate::workspace::Brief> {
+        let (state, _) = self.inner.workspace.state();
+        crate::workspace::task_brief(
+            &state,
+            &self.inner.workspace.steps(),
+            &self.workspace(),
+            &self.inner.workspace.supervisors(),
+            task_id,
+            step_id,
+        )
+    }
+
+    /// The user-role entries of the brief's thread, tagged by who sent them.
+    pub async fn brief_messages(
+        &self,
+        brief: &crate::workspace::Brief,
+    ) -> Result<Vec<crate::workspace::BriefMessage>> {
+        let Some(own) = brief.thread_chat_id.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let handle = self.open_session(own)?;
+        let mut rx = handle.subscribe();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(10),
+            rx.wait_for(|snapshot| snapshot.hydrated),
+        )
+        .await;
+        let snapshot = handle.snapshot();
+        let label = |chat: &str| {
+            brief
+                .step_labels
+                .iter()
+                .find(|(id, _)| id == chat)
+                .map(|(_, label)| label.clone())
+        };
+        Ok(snapshot.entries[..snapshot.transcript_len]
+            .iter()
+            .filter(|entry| entry.role() == zeron_doc::MessageRole::User)
+            .map(|entry| {
+                let sender = zeron_proto::supervisor::brief_sender(
+                    entry.message.from_chat_id.as_deref(),
+                    own,
+                    brief.lead_chat_id.as_deref(),
+                    &label,
+                );
+                crate::workspace::BriefMessage {
+                    from_you: sender == zeron_proto::supervisor::BriefSender::You,
+                    tag: sender.tag(),
+                    text: entry
+                        .parts()
+                        .iter()
+                        .filter_map(|part| match part {
+                            zeron_doc::MessagePart::Text { text, .. } => Some(text.trim()),
+                            _ => None,
+                        })
+                        .filter(|text| !text.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n\n"),
+                    at_ms: entry.message.created_at,
+                }
+            })
+            .collect())
+    }
+
+    pub fn watch_state(&self, chat_id: &str) -> Option<crate::workspace::WatchState> {
+        let (state, _) = self.inner.workspace.state();
+        crate::workspace::watch_state(
+            &state,
+            &self.inner.workspace.steps(),
+            &self.workspace(),
+            &self.inner.workspace.supervisors(),
+            chat_id,
+        )
+    }
+
     fn task_host(&self, task_id: &str) -> Result<String> {
         let workspace = self.workspace();
         let page = &workspace.tasks;
@@ -838,6 +915,255 @@ impl Client {
             serde_json::json!({ "op": "deleteTask", "taskId": task_id }),
         )
         .await
+    }
+
+    pub async fn create_task(&self, device_id: &str, draft: TaskDraft) -> Result<String> {
+        let task_id = crate::new_id();
+        let mut params = serde_json::json!({
+            "op": "createTask",
+            "taskId": task_id,
+            "title": draft.title,
+            "notes": draft.notes,
+            "spaceId": draft.space_id,
+            "dueOn": null,
+        });
+        if !draft.images.is_empty() {
+            params["images"] = draft.images.into();
+        }
+        if !draft.context.is_empty() {
+            params["context"] = draft.context.into();
+        }
+        self.mutate(device_id, params).await?;
+        Ok(task_id)
+    }
+
+    pub async fn update_task(&self, task_id: &str, patch: zeron_proto::TaskPatch) -> Result<()> {
+        let host = self.task_host(task_id)?;
+        self.mutate(
+            &host,
+            serde_json::json!({ "op": "updateTask", "taskId": task_id, "patch": patch }),
+        )
+        .await
+    }
+
+    /// The engine creates the chat on whichever Mac receives the call.
+    pub async fn start_task(
+        &self,
+        task_id: &str,
+        device_id: &str,
+        space_id: Option<Option<String>>,
+        config: Option<ChatConfig>,
+        mission: Option<MissionOptions>,
+    ) -> Result<String> {
+        let chat_id = crate::new_id();
+        let mut params = serde_json::json!({
+            "op": "startTask",
+            "taskId": task_id,
+            "chatId": chat_id,
+            "config": config,
+            "orchestrate": mission.is_some(),
+            "approvePlan": mission.is_none_or(|m| m.approve_plan),
+            "sameAgents": mission.is_some_and(|m| m.same_agents),
+            "planDoc": mission.is_some_and(|m| m.plan_doc),
+        });
+        if let Some(space_id) = space_id {
+            params["spaceId"] = space_id.into();
+        }
+        self.mutate(device_id, params).await?;
+        Ok(chat_id)
+    }
+
+    pub async fn assign_task(&self, task_id: &str, chat_id: &str, send: bool) -> Result<()> {
+        let host = self
+            .inner
+            .workspace
+            .chat(chat_id)
+            .map(|chat| chat.device_id)
+            .ok_or_else(|| ClientError::NotFound(chat_id.to_owned()))?;
+        self.mutate(
+            &host,
+            serde_json::json!({
+                "op": "assignTask",
+                "taskId": task_id,
+                "chatId": chat_id,
+                "send": send,
+                "orchestrate": false,
+                "approvePlan": true,
+                "sameAgents": false,
+                "planDoc": false,
+                "attachPlan": false,
+            }),
+        )
+        .await
+    }
+
+    pub async fn start_mission(
+        &self,
+        device_id: &str,
+        draft: TaskDraft,
+        config: Option<ChatConfig>,
+        options: MissionOptions,
+    ) -> Result<String> {
+        let space_id = draft.space_id.clone();
+        let task_id = self.create_task(device_id, draft).await?;
+        let started = self
+            .start_task(&task_id, device_id, Some(space_id), config, Some(options))
+            .await;
+        if let Err(err) = started {
+            let _ = self
+                .mutate(
+                    device_id,
+                    serde_json::json!({ "op": "deleteTask", "taskId": task_id }),
+                )
+                .await;
+            return Err(err);
+        }
+        Ok(task_id)
+    }
+
+    pub async fn edit_task_plan(
+        &self,
+        task_id: &str,
+        edit: Option<zeron_proto::PlanEdit>,
+        approve: bool,
+    ) -> Result<()> {
+        let host = self.task_host(task_id)?;
+        if let Some(edit) = edit {
+            let mut params =
+                serde_json::to_value(edit).map_err(|e| ClientError::HostError(e.to_string()))?;
+            params["op"] = "editTaskPlan".into();
+            params["taskId"] = task_id.into();
+            self.mutate(&host, params).await?;
+        }
+        if approve {
+            self.mutate(
+                &host,
+                serde_json::json!({ "op": "approvePlan", "taskId": task_id }),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn set_watched(&self, chat_id: &str, watched: bool) -> Result<()> {
+        let watch = self
+            .watch_state(chat_id)
+            .ok_or_else(|| ClientError::NotFound(chat_id.to_owned()))?;
+        let (state, _) = self.inner.workspace.state();
+        let params = match zeron_proto::plan_of_chat(&state.tasks, &watch.root_chat_id) {
+            Some(task) => serde_json::json!({
+                "op": "setMissionSupervised",
+                "taskId": task.id,
+                "supervised": watched,
+            }),
+            None => serde_json::json!({
+                "op": "setTreeWatched",
+                "rootChatId": watch.root_chat_id,
+                "watched": watched,
+            }),
+        };
+        self.mutate(&watch.host.device_id, params).await
+    }
+
+    pub async fn set_watch_everything(&self, device_id: &str, on: bool) -> Result<()> {
+        self.mutate(
+            device_id,
+            serde_json::json!({ "op": "setWatchEverything", "on": on }),
+        )
+        .await
+    }
+
+    pub async fn ensure_supervisor(
+        &self,
+        device_id: &str,
+        fallback: Option<ChatConfig>,
+    ) -> Result<String> {
+        let profiles = self
+            .inner
+            .host_rpc(
+                device_id,
+                zeron_rpc::methods::LIST_AGENT_PROFILES,
+                serde_json::json!({}),
+            )
+            .await
+            .ok()
+            .and_then(|reply| {
+                serde_json::from_value::<zeron_proto::AgentProfilesSnapshot>(reply).ok()
+            });
+        let config = profiles
+            .and_then(|snapshot| {
+                snapshot
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == zeron_proto::supervisor::PROFILE_ID)
+                    .map(zeron_proto::supervisor::profile_config)
+            })
+            .or_else(|| {
+                fallback.map(|mut config| {
+                    config.permission_mode = zeron_proto::PermissionMode::Full;
+                    config
+                })
+            })
+            .ok_or_else(|| ClientError::InvalidArgument("pick an agent first".into()))?;
+        let reply = self
+            .inner
+            .host_rpc(
+                device_id,
+                zeron_rpc::methods::ENSURE_SUPERVISOR,
+                serde_json::json!({ "config": config }),
+            )
+            .await?;
+        reply
+            .get("chatId")
+            .and_then(|id| id.as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| ClientError::HostError("EnsureSupervisor sent no chatId".into()))
+    }
+
+    fn supervisor_chat(&self, device_id: &str) -> Result<(String, SupervisorSnapshot)> {
+        let snapshot = self
+            .inner
+            .workspace
+            .supervisors()
+            .get(device_id)
+            .cloned()
+            .ok_or_else(|| ClientError::NotFound(device_id.to_owned()))?;
+        let chat_id = snapshot
+            .chat_id
+            .clone()
+            .ok_or_else(|| ClientError::NotFound("supervisor chat".into()))?;
+        Ok((chat_id, snapshot))
+    }
+
+    /// Stop is an interrupt on the Supervisor chat; the host pauses its queue and reports Stopped.
+    pub async fn stop_supervisor(&self, device_id: &str) -> Result<()> {
+        let (chat_id, _) = self.supervisor_chat(device_id)?;
+        self.inner
+            .host_rpc(
+                device_id,
+                zeron_rpc::methods::QUEUE_COMMAND,
+                serde_json::json!({ "chatId": chat_id, "command": { "kind": "interrupt" } }),
+            )
+            .await
+            .map(drop)
+    }
+
+    pub async fn resume_supervisor(&self, device_id: &str) -> Result<()> {
+        let (chat_id, snapshot) = self.supervisor_chat(device_id)?;
+        for wake in snapshot.held_wakes() {
+            let reply = self
+                .inner
+                .host_rpc(
+                    device_id,
+                    zeron_rpc::methods::STEER_QUEUED_MESSAGE_NOW,
+                    serde_json::json!({ "chatId": chat_id, "id": wake.id }),
+                )
+                .await?;
+            if reply.get("sent").and_then(|sent| sent.as_bool()) == Some(true) {
+                break;
+            }
+        }
+        Ok(())
     }
 
     pub async fn resolve_supervisor_items(
