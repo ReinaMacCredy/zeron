@@ -1124,16 +1124,6 @@ fn watch_params(mission: &Mission, on: bool) -> serde_json::Value {
     }
 }
 
-fn model_label(chat: &Chat, cx: &App) -> Option<String> {
-    let config = chat.config.as_ref()?;
-    let model = config.model.as_deref()?;
-    Some(crate::pickers::model_display_label(
-        config.harness,
-        model,
-        cx,
-    ))
-}
-
 fn run(from: f32, to: f32, spec: MotionSpec, reduced: bool, now: Instant) -> Tween {
     let mut tween = Tween::at(from, now);
     tween.retarget(to, spec, reduced, now);
@@ -3663,7 +3653,10 @@ impl SupervisorPage {
             None => "Brief · Lead".into(),
         };
         let mut meta = vec![task.title.clone()];
-        if let Some(model) = chat.as_ref().and_then(|chat| model_label(chat, cx)) {
+        if let Some(model) = chat
+            .as_ref()
+            .and_then(|chat| crate::tasks::chat_model_label(chat, cx))
+        {
             meta.push(model);
         }
         let started = chat.as_ref().and_then(|chat| match &chat.source_context {
