@@ -131,6 +131,10 @@ final class HostPageViewController: UIViewController, UICollectionViewDelegate {
         if case let .action(destructive) = row.kind {
             c.textProperties.color = destructive ? Palette.danger : Palette.accent
         }
+        if row.id.hasPrefix("accent:#"), let hex = UInt32(row.id.dropFirst(8), radix: 16) {
+            c.image = UIImage(systemName: "circle.fill")
+            c.imageProperties.tintColor = UIColor(hex: hex)
+        }
         cell.contentConfiguration = c
         var accessories: [UICellAccessory] = []
         if let value = row.value, !row.isText {
@@ -178,7 +182,13 @@ final class HostPageViewController: UIViewController, UICollectionViewDelegate {
 
     private func act(_ id: String, value: String?) {
         guard let client = app.client else { return }
+        spinner.startAnimating()
+        collectionView.isUserInteractionEnabled = false
         Task { @MainActor in
+            defer {
+                spinner.stopAnimating()
+                collectionView.isUserInteractionEnabled = true
+            }
             do {
                 let result = try await client.hostAction(deviceId: deviceId, page: pageId, action: id, value: value)
                 if let id = result.pageId { pageId = id }
