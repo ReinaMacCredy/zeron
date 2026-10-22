@@ -368,7 +368,7 @@ fn result_block(ctx: &mut Ctx, st: &Styles, part: &MessagePart) -> Option<Detail
 /// [`THOUGHT_BYTES`], so one huge paragraph streaming in doesn't re-shape its
 /// whole text per delta either: a long thought costs the same per streamed
 /// delta as a short one. `true` = more content follows what's kept.
-fn thought_lines(tree: &BlockTree, cap: usize) -> (Vec<Vec<InlineRun>>, bool) {
+fn thought_lines(tree: &BlockTree, cap: Option<usize>) -> (Vec<Vec<InlineRun>>, bool) {
     let mut out: Vec<Vec<InlineRun>> = Vec::new();
     for top in &tree.blocks {
         if !out.is_empty() {
@@ -376,13 +376,16 @@ fn thought_lines(tree: &BlockTree, cap: usize) -> (Vec<Vec<InlineRun>>, bool) {
             out.push(Vec::new());
         }
         thought_block_lines(&top.block, 0, &mut out);
-        if out.len() > cap {
+        if cap.is_some_and(|cap| out.len() > cap) {
             break;
         }
     }
-    let mut more = out.len() > cap;
-    out.truncate(cap);
-    more |= clip_bytes(&mut out, THOUGHT_BYTES);
+    let mut more = false;
+    if let Some(cap) = cap {
+        more = out.len() > cap;
+        out.truncate(cap);
+        more |= clip_bytes(&mut out, THOUGHT_BYTES);
+    }
     while out.last().is_some_and(|l| l.iter().all(|r| r.text.trim().is_empty())) {
         out.pop();
     }
@@ -585,6 +588,7 @@ pub(crate) struct ThoughtLine {
 pub(crate) struct ThoughtBody {
     lines: Vec<ThoughtLine>,
     more: bool,
+    cap: Option<usize>,
     lh: f32,
 }
 
@@ -604,7 +608,7 @@ pub(crate) struct ThoughtState {
 /// Flattened thought lines at the detail's type size — desktop's
 /// `thought_line_text`: faint prose, semibold bold, mono code, underlined
 /// links (NOT clickable — a thought is a record, not a surface).
-fn prepare_thought(ctx: &mut Ctx, st: &Styles, lines: &[Vec<InlineRun>], more: bool) -> ThoughtBody {
+fn prepare_thought(ctx: &mut Ctx, st: &Styles, lines: &[Vec<InlineRun>], more: bool, cap: Option<usize>) -> ThoughtBody {
     let size = st.size;
     let semi = ctx.typo.style(Family::Sans, Weight::Semibold, false, size);
     let italic = ctx.typo.style(Family::Sans, Weight::Regular, true, size);
@@ -701,17 +705,17 @@ fn prepare_thought(ctx: &mut Ctx, st: &Styles, lines: &[Vec<InlineRun>], more: b
         };
         prepared.push(ThoughtLine { indent, gutter, bars, body: Some(body) });
     }
-    ThoughtBody { lines: prepared, more, lh: st.out_lh }
+    ThoughtBody { lines: prepared, more, cap, lh: st.out_lh }
 }
 
-/// Visual lines a thought fills at body width `bw`, capped at
-/// [`MAX_LINES`]; `true` when content is cut (bottom fade).
+/// Visual lines a thought fills at body width `bw`, capped while it streams;
+/// `true` when content is cut (bottom fade).
 fn thought_extent(t: &ThoughtBody, bw: f32) -> (usize, bool) {
     let mut n = 0usize;
     for line in &t.lines {
         n += line.visual_lines(bw);
-        if n > MAX_LINES {
-            return (MAX_LINES, true);
+        if let Some(cap) = t.cap.filter(|cap| n > *cap) {
+            return (cap, true);
         }
     }
     (n, t.more)
@@ -724,7 +728,7 @@ impl ThoughtLine {
 }
 
 /// Paint a thought's lines from `by`: gutters, wrapped bodies beside them,
-/// quote bars down wrapped lines; cut at [`MAX_LINES`] with a bottom fade.
+/// quote bars down wrapped lines; a streaming one cut with a bottom fade.
 fn place_thought(t: &ThoughtBody, bx: f32, by: f32, bw: f32, o: &mut DisplayBuilder) {
     let (shown, cut) = thought_extent(t, bw);
     let runs_before = o.runs.len();
@@ -774,14 +778,16 @@ impl RowBuilder {
         state.parser.set_text(text);
         state.source = Some(source);
         let tree = if live { state.parser.display_tree() } else { state.parser.tree().clone() };
-        let (lines, more) = thought_lines(&tree, MAX_LINES);
+        let cap = live.then_some(MAX_LINES);
+        let (lines, more) = thought_lines(&tree, cap);
         if let Some(body) = &state.body
             && body.more == more
+            && body.cap == cap
             && state.lines == lines
         {
             return body.clone();
         }
-        let body = Arc::new(prepare_thought(ctx, st, &lines, more));
+        let body = Arc::new(prepare_thought(ctx, st, &lines, more, cap));
         state.lines = lines;
         state.body = Some(body.clone());
         body
@@ -1378,9 +1384,9 @@ mod tests {
     fn thought_lines_stop_at_the_visible_cap() {
         use zeron_markdown::parser::parse_full;
         let long: String = (0..100).map(|i| format!("para {i}\n\n")).collect();
-        let (lines, more) = thought_lines(&parse_full(&long), MAX_LINES);
+        let (lines, more) = thought_lines(&parse_full(&long), Some(MAX_LINES));
         assert!(more && lines.len() <= MAX_LINES && lines.len() >= MAX_LINES - 1, "{}", lines.len());
-        let (lines, more) = thought_lines(&parse_full("one\n\n- two\n\n```\n  three\n```"), MAX_LINES);
+        let (lines, more) = thought_lines(&parse_full("one\n\n- two\n\n```\n  three\n```"), Some(MAX_LINES));
         let text: Vec<String> = lines.iter().map(|l| l.iter().map(|r| r.text.as_str()).collect()).collect();
         assert_eq!(text, ["one", "", "• two", "", "  three"]);
         assert!(!more);
@@ -1390,13 +1396,13 @@ mod tests {
     fn thought_lines_clip_one_huge_paragraph_to_the_byte_budget() {
         use zeron_markdown::parser::parse_full;
         let bytes = |lines: &[Vec<InlineRun>]| lines.iter().flatten().map(|r| r.text.len()).sum::<usize>();
-        let (lines, more) = thought_lines(&parse_full(&"word ".repeat(20_000)), MAX_LINES);
+        let (lines, more) = thought_lines(&parse_full(&"word ".repeat(20_000)), Some(MAX_LINES));
         assert!(more && bytes(&lines) <= THOUGHT_BYTES && bytes(&lines) > THOUGHT_BYTES - 8, "{}", bytes(&lines));
         // The budget lands inside a two-byte char: cut on its boundary.
-        let (lines, more) = thought_lines(&parse_full(&format!("a{}", "é".repeat(THOUGHT_BYTES))), MAX_LINES);
+        let (lines, more) = thought_lines(&parse_full(&format!("a{}", "é".repeat(THOUGHT_BYTES))), Some(MAX_LINES));
         assert!(more && bytes(&lines) == THOUGHT_BYTES - 1, "{}", bytes(&lines));
         // Under budget: untouched.
-        let (lines, more) = thought_lines(&parse_full("short thought"), MAX_LINES);
+        let (lines, more) = thought_lines(&parse_full("short thought"), Some(MAX_LINES));
         assert!(!more && bytes(&lines) == "short thought".len());
     }
 

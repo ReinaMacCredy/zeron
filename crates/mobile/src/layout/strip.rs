@@ -175,13 +175,18 @@ fn flow(items: &[Item], align: Align, px: Px, width: f32) -> (Vec<Slot>, Vec<Lin
         });
         *y += line_h;
     };
-    for item in items {
+    for (i, item) in items.iter().enumerate() {
         let (w, h) = item_size(item, px, width);
         if slots.len() > start && cursor + gap + w > width {
-            let end = slots.len();
+            let glue = i > start + 1 && matches!(items[i - 1], Item::Icon { .. });
+            let end = if glue { i - 1 } else { i };
             finish(&mut slots, start, end, &mut y);
             start = end;
             cursor = 0.0;
+            if glue {
+                slots[end].x = 0.0;
+                cursor = slots[end].w;
+            }
         }
         let x = if slots.len() > start { cursor + gap } else { 0.0 };
         slots.push(Slot { x, y: 0.0, w, h });
