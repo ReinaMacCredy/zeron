@@ -176,6 +176,16 @@ impl Stored {
             .retain(|reset| now - reset.resets_at < RESET_KEPT_MS);
         (due, next)
     }
+
+    fn shape(&self) -> (usize, usize, usize, usize) {
+        let offers = self.limited.iter().filter(|e| e.offer.is_some()).count();
+        (
+            self.limited.len(),
+            offers,
+            self.deferred.len(),
+            self.reset.len(),
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -394,13 +404,7 @@ impl ResumeSchedule {
         tokio::spawn(async move {
             loop {
                 let now = chrono::Utc::now().timestamp_millis();
-                let mut due = Vec::new();
-                let mut next = None;
-                schedule.update(|stored| {
-                    let before = (stored.limited.len(), stored.deferred.len());
-                    (due, next) = stored.take_due(now);
-                    (stored.limited.len(), stored.deferred.len()) != before
-                });
+                let (due, next) = schedule.tick(now);
                 for due in due {
                     fire(due).await;
                 }
@@ -413,6 +417,17 @@ impl ResumeSchedule {
                 }
             }
         });
+    }
+
+    fn tick(&self, now: i64) -> (Vec<Due>, Option<i64>) {
+        let mut due = Vec::new();
+        let mut next = None;
+        self.update(|stored| {
+            let before = stored.shape();
+            (due, next) = stored.take_due(now);
+            stored.shape() != before
+        });
+        (due, next)
     }
 
     fn update(&self, change: impl FnOnce(&mut Stored) -> bool) -> bool {
@@ -585,6 +600,38 @@ mod tests {
             wait.offer.is_none() && wait.auto,
             "today's auto-resume stays armed"
         );
+    }
+
+    #[test]
+    fn an_expired_wait_offer_is_saved_and_broadcast_cleared() {
+        let (dir, schedule) = schedule();
+        schedule.note_limit("wait", Some(90_000), None, 1_000);
+        schedule.set_offer("wait", offer(OfferChoice::Wait, Some(2_000)));
+        let limits = schedule.watch();
+        assert_eq!(
+            schedule.tick(2_000),
+            (vec![], Some(90_000 + RESET_SLACK_MS))
+        );
+        assert!(limits.has_changed().unwrap());
+        assert_eq!(limits.borrow().chats[0].offer, None);
+        assert_eq!(
+            ResumeSchedule::open(dir.path()).snapshot().chats[0].offer,
+            None
+        );
+    }
+
+    #[test]
+    fn an_unarmed_limit_past_its_reset_waits_for_its_offer() {
+        let (_dir, schedule) = schedule();
+        schedule.note_limit("c", Some(5_000), None, 6_000);
+        schedule.set_offer("c", offer(OfferChoice::Switch, None));
+        assert_eq!(schedule.tick(7_000), (vec![], None));
+        assert!(schedule.snapshot().chats[0].offer.is_some());
+        assert!(schedule.holds("c", 7_000));
+        schedule.resolve_offer("c", OfferResolution::Wait);
+        assert_eq!(schedule.tick(7_000), (vec![], None));
+        assert!(schedule.snapshot().chats.is_empty());
+        assert_eq!(schedule.past_resets(7_000), [("c".to_owned(), 5_000)]);
     }
 
     #[test]
