@@ -1699,9 +1699,17 @@ async fn respond_input_resolves_pending_question() {
     );
     // The input part is marked resolved in the doc.
     assert!(entries(&core).iter().any(|e| {
-        e.parts
-            .iter()
-            .any(|p| matches!(p, MessagePart::Input { resolved: true, .. }))
+        e.parts.iter().any(|p| {
+            matches!(
+                p,
+                MessagePart::Input {
+                    resolved: true,
+                    asked_at_ms: Some(_),
+                    answered_at_ms: Some(_),
+                    ..
+                }
+            )
+        })
     }));
     // The run task writes the Complete entry BEFORE settling the status row —
     // wait for the transition instead of asserting the instant in between.

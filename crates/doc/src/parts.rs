@@ -407,19 +407,6 @@ impl MessagePart {
     }
 }
 
-/// Fold one agent event into a parts accumulator, in place.
-///
-/// In place because the fold runs once per streamed event: rebuilding the
-/// accumulator each time made long turns O(n²) in allocations.
-///
-/// Semantics from zeron `foldEventIntoParts`:
-/// - `SessionStarted` / `Steered` reset the accumulator (turn boundary — makes replay safe).
-/// - `TextDelta` appends to the trailing text part, or starts a new one if the trail is not text
-///   (a tool call in between breaks the text block).
-/// - `ToolCall` appends, or refreshes in place when the id already exists (SDK retry idempotence).
-/// - `ToolResult` marks the matching tool part resolved / errored in place.
-/// - `InputRequested` appends an input part; `InputResolved` marks it resolved.
-/// - `Error` and `Done{error}` become visible error parts.
 /// The fold stays pure; the live pump stamps wait times with the wall clock after it.
 pub fn stamp_input_times(parts: &mut [MessagePart], now_ms: i64) {
     for part in parts {
@@ -438,6 +425,19 @@ pub fn stamp_input_times(parts: &mut [MessagePart], now_ms: i64) {
     }
 }
 
+/// Fold one agent event into a parts accumulator, in place.
+///
+/// In place because the fold runs once per streamed event: rebuilding the
+/// accumulator each time made long turns O(n²) in allocations.
+///
+/// Semantics from zeron `foldEventIntoParts`:
+/// - `SessionStarted` / `Steered` reset the accumulator (turn boundary — makes replay safe).
+/// - `TextDelta` appends to the trailing text part, or starts a new one if the trail is not text
+///   (a tool call in between breaks the text block).
+/// - `ToolCall` appends, or refreshes in place when the id already exists (SDK retry idempotence).
+/// - `ToolResult` marks the matching tool part resolved / errored in place.
+/// - `InputRequested` appends an input part; `InputResolved` marks it resolved.
+/// - `Error` and `Done{error}` become visible error parts.
 pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
     match event {
         AgentEvent::SessionStarted { .. } | AgentEvent::Steered { .. } => {

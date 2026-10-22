@@ -7086,7 +7086,12 @@ async fn drive_run(
         let skip_fold = matches!(&event, AgentEvent::SessionStarted { .. }) && !folded.is_empty();
         if !skip_fold {
             fold_event_into_parts(&mut folded, &event);
-            zeron_doc::stamp_input_times(&mut folded, crate::now_ms());
+            if matches!(
+                event,
+                AgentEvent::InputRequested { .. } | AgentEvent::InputResolved { .. }
+            ) {
+                zeron_doc::stamp_input_times(&mut folded, crate::now_ms());
+            }
             if matches!(
                 event,
                 AgentEvent::ToolCall { .. } | AgentEvent::ToolResult { .. }
