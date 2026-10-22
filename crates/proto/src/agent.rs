@@ -186,6 +186,29 @@ pub enum OfferChoice {
     Wait,
 }
 
+impl OfferChoice {
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Switch => "switch",
+            Self::Wait => "wait",
+        }
+    }
+
+    pub fn act_label(self) -> &'static str {
+        match self {
+            Self::Switch => "Switch now",
+            Self::Wait => "Wait now",
+        }
+    }
+
+    pub fn countdown_verb(self) -> &'static str {
+        match self {
+            Self::Switch => "Switching",
+            Self::Wait => "Waiting",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LimitOffer {

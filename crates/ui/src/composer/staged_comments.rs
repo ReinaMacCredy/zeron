@@ -15,8 +15,8 @@ impl Composer {
         let badge = crate::badges::render(
             "composer-comments",
             &crate::badges::MessageBadge {
-                icon: crate::icons::CHAT_ROUND_LINE,
-                label: crate::comments::chip_label(comments.len()).into(),
+                kind: crate::badges::BadgeKind::Comments,
+                label: zeron_proto::badges::comment_label(comments.len()),
                 details: Vec::new(),
             },
             theme,
@@ -25,7 +25,7 @@ impl Composer {
         .role(gpui::Role::Button)
         .aria_label(format!(
             "{}, show list",
-            crate::comments::chip_label(comments.len())
+            zeron_proto::badges::comment_label(comments.len())
         ))
         .hover(|s| s.bg(crate::theme::ink(0.10)))
         .on_mouse_down(

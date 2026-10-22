@@ -26,9 +26,7 @@ use zeron_proto::{ChangeRequestDetail, ChangeRequestListItem};
 use zeron_rpc::methods;
 
 pub use chat::OpenPrChat;
-pub(crate) use chat::{
-    ChatDock, ChatRevision, ContextChip, Orb, PrChatContext, extract_badge, find_checkout,
-};
+pub(crate) use chat::{ChatDock, ChatRevision, ContextChip, Orb, PrChatContext, find_checkout};
 
 #[derive(Clone, PartialEq, Action)]
 #[action(namespace = shell, no_json)]

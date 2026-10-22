@@ -43,6 +43,9 @@ use gpui::{
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
 use zeron_proto::ToolCall;
+use zeron_proto::device_tools::{
+    device_call, device_call_detail, device_call_label, device_group_label,
+};
 
 use crate::route_badge::{self, RouteInfo};
 
@@ -56,9 +59,6 @@ use crate::computer::cards::{
 use crate::computer::presentation::{
     ComputerCall, computer_action_label, computer_call, computer_call_app, computer_call_rows,
     computer_js_action_label, computer_js_actions, computer_output_hidden,
-};
-use crate::device_panel::presentation::{
-    device_call, device_call_detail, device_call_label, device_group_label,
 };
 use crate::markdown::mermaid_cache::{self, MermaidCache};
 use crate::markdown::parser::{
@@ -1678,7 +1678,8 @@ pub fn rows_for_entry(
                 .from_chat_id
                 .as_ref()
                 .and_then(|_| handback_quotes(&text));
-            user_markdown(quoted.as_deref().unwrap_or(&text))
+            crate::markdown::parser::user_markdown(quoted.as_deref().unwrap_or(&text))
+                .map(Arc::new)
         } else {
             None
         };
@@ -2746,7 +2747,7 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
     // The shared rule has no resolution bit; while the advisor is still out
     // the group says so (it is the only chip that waits minutes for an answer).
     if tools.iter().any(|t| t.call.is_advisor() && !t.resolved) {
-        base = base.replace("onsulted advisor", "onsulting advisor");
+        base = zeron_proto::transcript::advisor_out(&base);
     }
     // Thought and note chips ride the group (they are UI-synthesized, so the
     // shared view summary never sees them): name them on the collapsed line.
@@ -2974,14 +2975,9 @@ struct ChipAffordance {
     label: SharedString,
 }
 
-/// User and assistant turns inside a provider-switch packet, counted the way
-/// `bounded_source_copy` wrote them: one `User: ` / `Assistant: ` line each.
-fn handoff_message_count(packet: &str) -> usize {
-    packet
-        .lines()
-        .filter(|line| line.starts_with("User: ") || line.starts_with("Assistant: "))
-        .count()
-}
+#[cfg(test)]
+use zeron_proto::transcript::{handoff_message_count, handoff_size_label};
+use zeron_proto::transcript::{CompactionWait, format_kb};
 
 struct HandoffSide {
     icon: (&'static str, Option<gpui::Hsla>),
@@ -3026,43 +3022,10 @@ impl HandoffSide {
     }
 }
 
-#[derive(Clone, PartialEq)]
-enum CompactionWait {
-    Queued,
-    Classifying {
-        harness: zeron_proto::HarnessId,
-        model: Option<String>,
-        agent_note: bool,
-    },
-    Compacting(Option<(u64, bool)>),
-}
-
-fn boundary_compaction(transcript: &[SessionMessageEntry]) -> Option<(u64, bool)> {
-    let entry = transcript
-        .iter()
-        .rev()
-        .find(|entry| entry.role != MessageRole::User)?;
-    entry.parts.iter().find_map(|part| match part {
-        MessagePart::Classifier { record, .. } => match record.verdict {
-            zeron_doc::ClassifierVerdict::New => Some((record.context_tokens, false)),
-            zeron_doc::ClassifierVerdict::Carry => Some((record.context_tokens, true)),
-            _ => None,
-        },
-        _ => None,
-    })
-}
-
 /// Capture knob (`ZERON_OPEN_HANDOFF=1`): synthetic clicks never reach a Dev bundle.
 fn handoff_open_knob() -> bool {
     static OPEN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OPEN.get_or_init(|| std::env::var_os("ZERON_OPEN_HANDOFF").is_some())
-}
-
-fn handoff_size_label(chars: usize) -> String {
-    format!(
-        "~{} tokens",
-        crate::session_stats::tokens(zeron_engine::estimated_tokens(chars))
-    )
 }
 
 /// Line cap for a FETCHED full output (a defensive ceiling, not a doc cap —
@@ -3092,14 +3055,6 @@ fn blob_detail(text: &str, is_diff: bool) -> Option<ToolDetail> {
     })
 }
 
-/// Compact byte size for the fetch affordance label ("812 B", "12 KB").
-fn format_kb(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else {
-        format!("{} KB", bytes.div_ceil(1024))
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Working indicator flavour (pure; rendered by the shell strip)
@@ -3147,18 +3102,11 @@ pub fn flavour_seed(chat_id: &str) -> u64 {
 /// minutes with nothing streaming, and a rotating "Scheming…" over it read
 /// as a stalled run (user report).
 pub fn consulting_advisor(entries: &[SessionMessageEntry]) -> bool {
-    entries.last().is_some_and(|last| {
-        last.status == Some(MessageStatus::Streaming)
-            && last.parts.iter().any(|part| {
-                matches!(
-                    part,
-                    MessagePart::Tool { call, resolved: false, .. } if call.is_advisor()
-                )
-            })
-    })
+    entries.last().is_some_and(zeron_doc::schema::consulting_advisor)
 }
 
 pub use zeron_proto::RESUME_PROMPT;
+use zeron_proto::transcript::agent_message_display;
 
 /// True when the chat's last turn stopped short and the chat sits idle (the
 /// composer's send circle becomes the resume triangle): the reply was interrupted (its entry is `Aborted`), or the interrupt landed
@@ -3173,12 +3121,7 @@ pub fn resume_offer(entries: &[SessionMessageEntry], indicator: crate::state::In
     ) {
         return false;
     }
-    entries.last().is_some_and(|last| {
-        last.role == MessageRole::User
-            || last.status == Some(MessageStatus::Aborted)
-            || (last.status != Some(MessageStatus::Streaming)
-                && matches!(last.parts.last(), Some(MessagePart::Error { .. })))
-    })
+    entries.last().is_some_and(zeron_doc::schema::turn_stopped)
 }
 
 /// The working trailer's "Sending…" bridge: true while an in-flight send is
@@ -3196,19 +3139,7 @@ pub fn sending_bridge(
     }
 }
 
-/// Compact elapsed formatting, using at most two units up to days.
-pub fn format_elapsed(secs: i64) -> String {
-    let secs = secs.max(0);
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3_600 {
-        format!("{}m {}s", secs / 60, secs % 60)
-    } else if secs < 86_400 {
-        format!("{}h {}m", secs / 3_600, (secs % 3_600) / 60)
-    } else {
-        format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3_600)
-    }
-}
+pub use zeron_proto::transcript::format_elapsed;
 
 fn worked_for_label(secs: i64) -> String {
     format!("Worked for {}", format_elapsed(secs))
@@ -9986,9 +9917,9 @@ impl Transcript {
         }
         let state = self.state.read(cx);
         if state.chat_compacting(chat_id) {
-            return Some(CompactionWait::Compacting(boundary_compaction(
-                &state.transcript,
-            )));
+            return Some(CompactionWait::Compacting(
+                zeron_doc::schema::boundary_compaction(&state.transcript),
+            ));
         }
         let session = state.session_for(chat_id)?;
         let agent = session.compact_plan == Some(zeron_proto::CompactPlan::Agent);
@@ -10042,44 +9973,13 @@ impl Transcript {
                 None => text.into_any_element(),
             }
         };
-        let (lead, chip, tail, timed) = match &wait {
-            CompactionWait::Queued => (
-                "Compaction queued · starts when the turn settles".to_string(),
-                None,
-                None,
-                false,
-            ),
-            CompactionWait::Classifying {
-                harness,
-                model,
-                agent_note,
-            } => (
-                "Classifier".to_string(),
-                Some(HandoffSide::new(*harness, model.as_deref(), cx).chip(&theme)),
-                Some(if *agent_note {
-                    "· checking the agent's note"
-                } else {
-                    "· checking if this is a new task"
-                }),
-                true,
-            ),
-            CompactionWait::Compacting(boundary) => (
-                match boundary {
-                    Some((tokens, carry)) => format!(
-                        "Compacting {}{}",
-                        crate::composer::background::compact_count(*tokens),
-                        if *carry {
-                            ", carrying the last turns over"
-                        } else {
-                            " before the new task"
-                        }
-                    ),
-                    None => "Compacting context".to_string(),
-                },
-                None,
-                None,
-                true,
-            ),
+        let (lead, tail) = wait.words();
+        let timed = wait.timed();
+        let chip = match &wait {
+            CompactionWait::Classifying { harness, model, .. } => {
+                Some(HandoffSide::new(*harness, model.as_deref(), cx).chip(&theme))
+            }
+            _ => None,
         };
         let elapsed = format!(
             "· {}",
@@ -11219,21 +11119,7 @@ impl Transcript {
             )
             .child(to.chip(theme));
         let details = open.then(|| {
-            let messages = handoff_message_count(&text);
-            let context = if text.is_empty() {
-                "None".to_string()
-            } else if pointer {
-                "A link to the source thread".to_string()
-            } else {
-                format!(
-                    "{} · {}",
-                    match messages {
-                        1 => "1 message".to_string(),
-                        n => format!("{n} messages"),
-                    },
-                    handoff_size_label(text.chars().count())
-                )
-            };
+            let context = zeron_proto::transcript::handoff_context_label(&text, pointer);
             let field = |key: &'static str, value: String| {
                 div()
                     .flex()
@@ -11307,11 +11193,7 @@ impl Transcript {
                             div()
                                 .text_size(crate::typography::ui_rems(11.5))
                                 .text_color(theme.text_muted.opacity(0.7))
-                                .child(if pointer {
-                                    "Sent ahead of your next message so the new model reads the source thread itself."
-                                } else {
-                                    "Sent ahead of your next message so the new model can continue this thread."
-                                }),
+                                .child(zeron_proto::transcript::handoff_footnote(pointer)),
                         )
                 })
         });
@@ -11357,12 +11239,7 @@ impl Transcript {
             .clone()
             .filter(|_| record.harness.is_none())
             .map(SharedString::from);
-        let label = |verdict: ClassifierVerdict| match verdict {
-            ClassifierVerdict::New => "New task",
-            ClassifierVerdict::Carry => "Carry over",
-            ClassifierVerdict::Continue => "Same task",
-            ClassifierVerdict::Failed => "No answer",
-        };
+        let label = ClassifierVerdict::label;
         let verdict_color = match record.verdict {
             ClassifierVerdict::New => theme.accent,
             ClassifierVerdict::Carry => theme.success,
@@ -11377,13 +11254,7 @@ impl Transcript {
             && record.stage2_reply.is_some()
             && record.verdict != ClassifierVerdict::Continue;
         let secs = format!("{:.1}s", record.duration_ms as f64 / 1000.0);
-        let decided = match record.decided_by {
-            DecidedBy::Stage1 => "First look",
-            DecidedBy::Stage2 => "Second look",
-            DecidedBy::Streak => "Three same-task verdicts in a row",
-            DecidedBy::Ceiling => "Context near the window, not asked",
-            DecidedBy::AgentNote => "Agent note, compacted without asking",
-        };
+        let decided = record.decided_by.label();
         let toggle_id = row_id.clone();
         let rule = || {
             div()
@@ -12489,96 +12360,6 @@ impl Transcript {
             })
             .into_any_element()
     }
-}
-
-/// A sent message's text with its file-mention chips. The same recipe as the
-/// markdown renderer's inline code (`flat_text_element`): chip ranges shape in
-/// the mono font at the spectrum's `code_text`, [`StyledText`] supplies wrapped glyph
-/// geometry through its layout handle, and a canvas paints the rounded
-/// `code_wash` *beneath* the glyphs — so chips wrap, clip, and scroll exactly
-/// like the text they decorate.
-///
-/// Per-frame cost while an assistant message streams below: shaping hits
-/// gpui's line-layout cache (identical text + runs ⇒ reuse) and the underlay
-/// repaints O(chips) quads — no layout work, no re-projection (spans were
-/// computed once in [`rows_for_entry`]).
-/// The user bubble's text: runs split at mention-chip boundaries (one plain
-/// run when there are none), with the same selection machinery as rendered
-/// markdown — the element registers into the frame's document-ordered
-/// registry, so drags select, span into adjacent rows, and Cmd+C copies.
-/// Keep routing instructions in the stored prompt for agents, but show a
-/// concise attribution in the human transcript (including existing messages).
-fn agent_message_display(text: &str) -> String {
-    let Some(rest) = text.strip_prefix("[Message from Zeron chat ") else {
-        return text.to_owned();
-    };
-    let Some((header, body)) = rest.split_once("]\n\n") else {
-        return text.to_owned();
-    };
-    let Some((label, id)) =
-        header.rsplit_once(". Reply to it with the Zeron `send_message` tool, chat ")
-    else {
-        return text.to_owned();
-    };
-    let Some(id) = id.strip_suffix('.') else {
-        return text.to_owned();
-    };
-    let suffix = format!(" ({id})");
-    let name = label.strip_suffix(&suffix).unwrap_or(label);
-    format!("Message from {name}\n\n{body}")
-}
-
-/// `__init__`, `# comment` lines and indented code are plain developer text, so they stay text.
-fn user_markdown(text: &str) -> Option<Arc<BlockTree>> {
-    let attribution = text
-        .strip_prefix("Message from ")
-        .and_then(|rest| rest.split_once("\n\n"));
-    let body = attribution.map_or(text, |(_, body)| body);
-    let mut tree = crate::markdown::parser::parse_full_line_breaks(body);
-    let typed = |runs: &[InlineRun]| {
-        runs.iter()
-            .any(|run| run.style.code || run.style.math || run.style.link.is_some())
-    };
-    let structured = tree.blocks.iter().any(|top| match &top.block {
-        Block::List { .. }
-        | Block::Table { .. }
-        | Block::BlockQuote { .. }
-        | Block::Math { .. } => true,
-        Block::CodeBlock { .. } => body
-            .get(top.range.clone())
-            .map(|source| source.trim_start_matches(' '))
-            .is_some_and(|source| source.starts_with("```") || source.starts_with("~~~")),
-        Block::Paragraph { runs } | Block::Heading { runs, .. } => typed(runs),
-        Block::Rule => false,
-    });
-    if !structured {
-        return None;
-    }
-    if let Some((name, _)) = attribution {
-        let header = Block::Paragraph {
-            runs: vec![
-                InlineRun {
-                    text: "Message from ".into(),
-                    style: InlineStyle::default(),
-                },
-                InlineRun {
-                    text: name.into(),
-                    style: InlineStyle {
-                        bold: true,
-                        ..InlineStyle::default()
-                    },
-                },
-            ],
-        };
-        tree.blocks.insert(
-            0,
-            Arc::new(crate::markdown::parser::TopBlock {
-                range: 0..0,
-                block: header,
-            }),
-        );
-    }
-    Some(Arc::new(tree))
 }
 
 /// The bubble text's runs: body text in the sans font, chips as labels in it
@@ -14578,17 +14359,6 @@ pub(crate) fn delegate_view(chats: &[zeron_proto::Chat], child_id: &str) -> Dele
     }
 }
 
-fn delegate_status_text(status: Option<zeron_proto::DelegationStatus>) -> &'static str {
-    use zeron_proto::DelegationStatus::*;
-    match status {
-        Some(Running) => "Running",
-        Some(Completed) => "Completed",
-        Some(Failed) => "Failed",
-        Some(Cancelled | Interrupted) => "Stopped",
-        None => "Unavailable",
-    }
-}
-
 fn started_thread_title(
     chats: &[zeron_proto::Chat],
     thread: &str,
@@ -14701,16 +14471,9 @@ fn delegate_chip(
     } else {
         harness.into()
     };
-    let state: SharedString = match (running, view.elapsed_secs) {
-        _ if view.limited => "Hit usage limit".into(),
-        (false, Some(secs)) => format!(
-            "{} in {}",
-            delegate_status_text(view.status),
-            format_elapsed(secs)
-        )
-        .into(),
-        _ => delegate_status_text(view.status).into(),
-    };
+    let state: SharedString =
+        zeron_proto::transcript::delegate_state_text(view.status, view.elapsed_secs, view.limited)
+            .into();
     let a11y_label = if native {
         SharedString::from(format!("{label} {}", view.title))
     } else {
@@ -14828,110 +14591,12 @@ fn delegate_chip(
     agent_chip_card(id, a11y_label, Some("delegate-chip"), rail, on_open, header)
 }
 
-fn handback_status_lines(text: &str) -> impl Iterator<Item = &str> {
-    let mut quoted = false;
-    text.lines().filter(move |line| match *line {
-        "<agent-response>" => {
-            quoted = true;
-            false
-        }
-        "</agent-response>" => {
-            quoted = false;
-            false
-        }
-        _ => !quoted,
-    })
-}
-
-pub(crate) fn wake_task_ids(text: &str) -> Option<Vec<String>> {
-    let ids: Vec<String> = handback_status_lines(text)
-        .filter_map(|line| {
-            let (id, rest) = line.strip_prefix("Delegated task ")?.split_once(" (\"")?;
-            [
-                "completed.",
-                "failed.",
-                "was cancelled.",
-                "was interrupted.",
-                "ended.",
-            ]
-            .iter()
-            .any(|outcome| rest.ends_with(&format!("\") {outcome}")))
-            .then(|| id.to_string())
-        })
-        .collect();
-    if !ids.is_empty() {
-        return Some(ids);
-    }
-    // Saved transcripts keep wakes written before the handback carried the reply.
-    if let Some(rest) = text.strip_prefix("Delegated task ") {
-        let (id, _) = rest.split_once(" reached a terminal state.")?;
-        return Some(vec![id.to_string()]);
-    }
-    let rest = text.strip_prefix("Delegated tasks ")?;
-    let (ids, _) = rest.split_once(" reached terminal states.")?;
-    Some(ids.split(", ").map(str::to_string).collect())
-}
-
-fn handback_quotes(text: &str) -> Option<String> {
-    if wake_task_ids(text).is_none() && step_handback_threads(text).is_empty() {
-        return None;
-    }
-    let mut quoted = false;
-    let lines: Vec<String> = text
-        .lines()
-        .filter_map(|line| match line {
-            "<agent-response>" => {
-                quoted = true;
-                None
-            }
-            "</agent-response>" => {
-                quoted = false;
-                None
-            }
-            "" if quoted => Some(">".to_string()),
-            _ if quoted => Some(format!("> {line}")),
-            _ => Some(line.to_string()),
-        })
-        .collect();
-    Some(lines.join("\n"))
-}
-
-pub(crate) fn step_handback_threads(text: &str) -> Vec<String> {
-    handback_status_lines(text)
-        .filter(|line| line.starts_with("Step \""))
-        .filter_map(|line| {
-            let (_, thread) = line.rsplit_once(" on its thread ")?;
-            thread
-                .strip_suffix('.')
-                .filter(|thread| !thread.contains(char::is_whitespace))
-                .map(str::to_string)
-        })
-        .collect()
-}
+pub(crate) use zeron_proto::transcript::{handback_quotes, step_handback_threads, wake_task_ids};
 
 pub(crate) fn wake_summary(views: &[DelegateView]) -> String {
-    use zeron_proto::DelegationStatus::*;
-    let outcome = if views.iter().any(|v| v.status == Some(Failed)) {
-        "failed"
-    } else if views
-        .iter()
-        .any(|v| matches!(v.status, Some(Cancelled | Interrupted)))
-    {
-        "stopped"
-    } else {
-        "finished"
-    };
-    match views {
-        [one] => format!("Delegated task \u{201c}{}\u{201d} {outcome}", one.title),
-        many => format!(
-            "{} delegated tasks {outcome}: {}",
-            many.len(),
-            many.iter()
-                .map(|v| v.title.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
+    let tasks: Vec<(&str, Option<zeron_proto::DelegationStatus>)> =
+        views.iter().map(|v| (v.title.as_ref(), v.status)).collect();
+    zeron_proto::transcript::wake_summary(&tasks)
 }
 
 /// A spawn chip: same card as [`tool_chip`], but the WHOLE card is the

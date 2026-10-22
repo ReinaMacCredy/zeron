@@ -2,60 +2,25 @@
 //! carries.
 //!
 //! A feature stages context on the composer, folds it into the prompt as plain
-//! text, and registers an [`Extractor`]. [`split`] lifts that block back out of
+//! text, and registers an [`zeron_proto::badges::Extractor`]. [`split`] lifts that block back out of
 //! the sent message so the transcript draws a pill instead of the bullets the
 //! agent reads. Nothing here knows what a diff comment is.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{Context, IntoElement, Render, SharedString, Window, div, prelude::*, px};
+use gpui::{Context, IntoElement, Render, Window, div, prelude::*, px};
 
 use crate::theme::Theme;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MessageBadge {
-    /// An `icons::*` asset name.
-    pub icon: &'static str,
-    pub label: SharedString,
-    /// Empty means the label says everything and the pill carries no card.
-    pub details: Vec<BadgeDetail>,
-}
+pub use zeron_proto::badges::{BadgeDetail, BadgeKind, MessageBadge, split};
 
-/// One row of a hover card. Three generic slots, so a new badge kind fills them
-/// without this module learning what it cites.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BadgeDetail {
-    /// `src/main.rs:42`, a URL, a commit subject.
-    pub location: SharedString,
-    /// `L`/`R` for a diff side, a status, a count.
-    pub tag: Option<SharedString>,
-    pub body: SharedString,
-}
-
-/// Returns the text with this feature's block removed, plus the pill replacing
-/// it. `None` when the message carries nothing of that kind.
-pub type Extractor = fn(&str) -> Option<(String, MessageBadge)>;
-
-const EXTRACTORS: &[Extractor] = &[
-    crate::pull_request_detail::extract_badge,
-    crate::comments::extract_badge,
-    crate::quotes::extract_terminal_badge,
-    crate::quotes::extract_badge,
-];
-
-/// Each extractor sees what the previous ones left behind, so two features can
-/// ride the same prompt.
-pub fn split(text: &str) -> (String, Vec<MessageBadge>) {
-    let mut rest = text.to_string();
-    let mut badges = Vec::new();
-    for extract in EXTRACTORS {
-        if let Some((stripped, badge)) = extract(&rest) {
-            rest = stripped;
-            badges.push(badge);
-        }
+fn icon(kind: BadgeKind) -> &'static str {
+    match kind {
+        BadgeKind::PullRequest => crate::icons::LUCIDE_GIT_PULL_REQUEST,
+        BadgeKind::Comments => crate::icons::CHAT_ROUND_LINE,
+        BadgeKind::Terminal | BadgeKind::Selection => crate::icons::WRAP_TEXT,
     }
-    (rest, badges)
 }
 
 /// The composer sizes its strip arithmetically, so this cannot be a
@@ -88,7 +53,7 @@ pub fn render(
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text_muted)
         .child(
-            crate::icons::icon(badge.icon)
+            crate::icons::icon(icon(badge.kind))
                 .size(px(ICON_SIZE))
                 .text_color(theme.text_muted.opacity(0.7)),
         )
@@ -208,7 +173,7 @@ mod tests {
         let (text, badges) = split(&with_comments("do", &staged));
         assert_eq!(text, "do");
         assert_eq!(badges.len(), 1);
-        assert_eq!(badges[0].label.as_ref(), "2 comments");
+        assert_eq!(badges[0].label.as_str(), "2 comments");
     }
 
     #[test]
@@ -220,10 +185,10 @@ mod tests {
         let (_, badges) = split(&with_comments("look", &staged));
         let details = &badges[0].details;
         assert_eq!(details.len(), 2);
-        assert_eq!(details[0].location.as_ref(), "src/main.rs:42");
+        assert_eq!(details[0].location.as_str(), "src/main.rs:42");
         assert_eq!(details[0].tag.as_deref(), Some("R"));
-        assert_eq!(details[0].body.as_ref(), "early-return here");
-        assert_eq!(details[1].location.as_ref(), "src/lib.rs:7");
+        assert_eq!(details[0].body.as_str(), "early-return here");
+        assert_eq!(details[1].location.as_str(), "src/lib.rs:7");
         assert_eq!(details[1].tag.as_deref(), Some("L"));
     }
 
@@ -236,15 +201,15 @@ mod tests {
             "first\nsecond",
         )];
         let (_, badges) = split(&with_comments("x", &staged));
-        assert_eq!(badges[0].details[0].body.as_ref(), "first\nsecond");
+        assert_eq!(badges[0].details[0].body.as_str(), "first\nsecond");
     }
 
     #[test]
     fn a_path_with_a_colon_still_splits_on_the_side_marker() {
         let staged = vec![ReviewComment::new("odd:name.rs", CommentSide::New, 5, "hm")];
         let (_, badges) = split(&with_comments("x", &staged));
-        assert_eq!(badges[0].details[0].location.as_ref(), "odd:name.rs:5");
-        assert_eq!(badges[0].details[0].body.as_ref(), "hm");
+        assert_eq!(badges[0].details[0].location.as_str(), "odd:name.rs:5");
+        assert_eq!(badges[0].details[0].body.as_str(), "hm");
     }
 
     #[test]
@@ -252,6 +217,6 @@ mod tests {
         let staged = vec![ReviewComment::new("a.rs", CommentSide::New, 3, "fix")];
         let (text, badges) = split(&with_comments("", &staged));
         assert_eq!(text, crate::comments::COMMENT_ONLY_TEXT);
-        assert_eq!(badges[0].label.as_ref(), "1 comment");
+        assert_eq!(badges[0].label.as_str(), "1 comment");
     }
 }

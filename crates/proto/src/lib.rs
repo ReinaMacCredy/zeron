@@ -5,11 +5,13 @@
 
 pub mod agent;
 pub mod attachment_mentions;
+pub mod badges;
 pub mod change_request_assessment;
 pub mod chat_mentions;
 pub mod computer;
 pub mod device_hub;
 pub mod device_paths;
+pub mod device_tools;
 pub mod entities;
 pub mod file_mentions;
 pub mod home;
@@ -23,6 +25,7 @@ pub mod sidebar_pins;
 pub mod source_control;
 pub mod supervisor;
 pub mod tools;
+pub mod transcript;
 pub mod ui_driver;
 pub mod usage;
 pub mod view;

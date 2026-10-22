@@ -450,15 +450,9 @@ impl Shell {
     /// harness: `(label, fraction)`.
     fn summary_usage(&self, chat: &zeron_proto::Chat, cx: &App) -> Option<(String, f32)> {
         let harness = chat.config.as_ref()?.harness;
-        let account = crate::account_usage::active_account(
-            crate::account_usage::local_snapshot(cx)?,
-            harness,
-        )?;
-        account
-            .usage_windows
-            .iter()
-            .max_by(|a, b| a.used_fraction.total_cmp(&b.used_fraction))
-            .map(|window| (window.label.clone(), window.used_fraction.clamp(0.0, 1.0)))
+        crate::account_usage::local_snapshot(cx)?
+            .busiest_window(harness)
+            .map(|(label, fraction)| (label.to_owned(), fraction))
     }
 
     fn sidecar_actions_section(&self, theme: &Theme, cx: &App) -> Option<SidecarSection> {

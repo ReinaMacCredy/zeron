@@ -69,6 +69,10 @@ pub enum ColorRole {
     WarningTile,
     ButtonBorder,
     OnSolid,
+    Cyan,
+    AccentWash,
+    WarningWash,
+    CyanWash,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -257,7 +261,7 @@ pub enum WidgetKind {
     Image { reference: String },
     /// Working indicator at the tail of a live turn. The painter ticks the
     /// elapsed label itself so time never forces a relayout.
-    Working { since_ms: Option<i64>, streaming: bool },
+    Working { since_ms: Option<i64>, word: String, rate: Option<String> },
     /// A small activity spinner (running tools).
     Spinner,
     /// Tap target revealing the full text in `payload` (truncated tool lines).

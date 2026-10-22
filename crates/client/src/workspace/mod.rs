@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use zeron_doc::{RegistryDoc, WorkspaceState};
-use zeron_proto::{CheckoutChangeRequestStatus, SidebarPreferences};
+use zeron_proto::{CheckoutChangeRequestStatus, LimitResume, LimitResumes, SidebarPreferences};
 
 pub(crate) use view::{DeriveContext, device_online};
 pub use view::{
@@ -34,6 +34,8 @@ pub(crate) struct WorkspaceStore {
     doc: Arc<Mutex<RegistryDoc>>,
     presence: Mutex<HashMap<String, i64>>,
     change_requests: Mutex<Vec<CheckoutChangeRequestStatus>>,
+    limits: Mutex<HashMap<String, LimitResumes>>,
+    limits_rev: AtomicU64,
     cache: Mutex<Option<StateCache>>,
     snapshot: RwLock<Arc<WorkspaceSnapshot>>,
     recompute: Mutex<()>,
@@ -46,6 +48,8 @@ impl WorkspaceStore {
             doc: Arc::new(Mutex::new(doc)),
             presence: Mutex::new(HashMap::new()),
             change_requests: Mutex::new(Vec::new()),
+            limits: Mutex::new(HashMap::new()),
+            limits_rev: AtomicU64::new(0),
             cache: Mutex::new(None),
             snapshot: RwLock::new(Arc::new(WorkspaceSnapshot::default())),
             recompute: Mutex::new(()),
@@ -125,6 +129,32 @@ impl WorkspaceStore {
                 && s.checkout_id == status.checkout_id)
         });
         all.push(status);
+    }
+
+    pub(crate) fn put_limits(&self, device_id: &str, limits: LimitResumes) -> bool {
+        let mut all = lock(&self.limits);
+        if all.get(device_id) == Some(&limits) {
+            return false;
+        }
+        all.insert(device_id.to_owned(), limits);
+        self.limits_rev.fetch_add(1, Ordering::AcqRel);
+        true
+    }
+
+    pub(crate) fn limit(&self, chat_id: &str) -> Option<LimitResume> {
+        lock(&self.limits)
+            .values()
+            .flat_map(|l| &l.chats)
+            .find(|c| c.chat_id == chat_id)
+            .cloned()
+    }
+
+    pub(crate) fn limits(&self) -> HashMap<String, LimitResumes> {
+        lock(&self.limits).clone()
+    }
+
+    pub(crate) fn limits_rev(&self) -> u64 {
+        self.limits_rev.load(Ordering::Acquire)
     }
 
     pub(crate) fn snapshot(&self) -> Arc<WorkspaceSnapshot> {

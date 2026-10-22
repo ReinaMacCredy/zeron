@@ -8941,7 +8941,7 @@ impl Composer {
                 .map(|quote| crate::badges::BadgeDetail {
                     location: quote.location().into(),
                     tag: None,
-                    body: quote.text.clone().into(),
+                    body: quote.text.clone(),
                 })
                 .collect();
             let group: SharedString = "composer-quotes".into();
@@ -8954,8 +8954,8 @@ impl Composer {
                     .child(crate::badges::render(
                         "composer-quotes",
                         &crate::badges::MessageBadge {
-                            icon: crate::icons::WRAP_TEXT,
-                            label: crate::quotes::chip_label(quotes.len()).into(),
+                            kind: crate::badges::BadgeKind::Selection,
+                            label: zeron_proto::badges::selection_label(quotes.len()),
                             details,
                         },
                         theme,

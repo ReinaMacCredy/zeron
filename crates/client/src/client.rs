@@ -202,6 +202,7 @@ impl ClientInner {
             self.workspace.replace_presence(presence);
         }
         self.recompute_workspace();
+        self.reconcile_change_request_watches();
     }
 
     pub(crate) fn connectivity_changed(self: &Arc<Self>) {
@@ -234,6 +235,32 @@ impl ClientInner {
             })
             .collect();
         live.relay.reconcile_watches(self, targets);
+        let limits = self
+            .workspace
+            .snapshot()
+            .devices
+            .iter()
+            .filter(|d| {
+                d.online
+                    && d.capabilities
+                        .iter()
+                        .any(|c| c == zeron_proto::capabilities::LIMIT_RESUME_V1)
+            })
+            .map(|d| d.id.clone())
+            .collect();
+        live.relay.reconcile_limit_watches(self, limits);
+    }
+
+    pub(crate) fn limits_changed(
+        self: &Arc<Self>,
+        device_id: &str,
+        limits: zeron_proto::LimitResumes,
+    ) {
+        if self.workspace.put_limits(device_id, limits) {
+            for core in self.cores() {
+                core.refresh();
+            }
+        }
     }
 
     /// Durable wake: retry until the edge accepts it, including after relaunch.
@@ -691,6 +718,85 @@ impl Client {
 
     pub fn connectivity(&self) -> Connectivity {
         self.inner.connectivity()
+    }
+
+    pub fn chat(&self, chat_id: &str) -> Option<zeron_proto::Chat> {
+        self.inner.workspace.chat(chat_id)
+    }
+
+    pub fn limit_resume(&self, chat_id: &str) -> Option<zeron_proto::LimitResume> {
+        self.inner.workspace.limit(chat_id)
+    }
+
+    pub async fn resolve_limit_offer(&self, chat_id: &str, choice: &str) -> Result<bool> {
+        self.limit_rpc(
+            chat_id,
+            zeron_rpc::methods::RESOLVE_LIMIT_OFFER,
+            serde_json::json!({ "chatId": chat_id, "choice": choice }),
+        )
+        .await
+    }
+
+    pub async fn set_limit_resume(&self, chat_id: &str, auto: bool) -> Result<bool> {
+        self.limit_rpc(
+            chat_id,
+            zeron_rpc::methods::SET_LIMIT_RESUME,
+            serde_json::json!({ "chatId": chat_id, "auto": auto }),
+        )
+        .await
+    }
+
+    pub async fn chat_usage(&self, chat_id: &str) -> Result<Option<(String, f32)>> {
+        let chat = self
+            .chat(chat_id)
+            .ok_or_else(|| ClientError::NotFound(chat_id.to_owned()))?;
+        let Some(harness) = chat.config.as_ref().map(|c| c.harness) else {
+            return Ok(None);
+        };
+        let reply = self
+            .inner
+            .host_rpc(
+                &chat.device_id,
+                zeron_rpc::methods::LIST_AGENT_ACCOUNTS,
+                serde_json::json!({ "forceUsage": false }),
+            )
+            .await?;
+        let snapshot: zeron_proto::AgentAccountsSnapshot =
+            serde_json::from_value(reply).map_err(|e| ClientError::HostError(e.to_string()))?;
+        Ok(snapshot
+            .busiest_window(harness)
+            .map(|(label, fraction)| (label.to_owned(), fraction)))
+    }
+
+    pub async fn fetch_tool_blob(&self, blob_ref: &str) -> Result<String> {
+        let chat_id = blob_ref.split_once('/').map_or(blob_ref, |(chat, _)| chat);
+        let device = self
+            .chat(chat_id)
+            .map(|c| c.device_id)
+            .ok_or_else(|| ClientError::NotFound(chat_id.to_owned()))?;
+        let reply = self
+            .inner
+            .host_rpc(
+                &device,
+                zeron_rpc::methods::FETCH_TOOL_BLOB,
+                serde_json::json!({ "blobRef": blob_ref }),
+            )
+            .await?;
+        Ok(reply["text"].as_str().unwrap_or_default().to_owned())
+    }
+
+    async fn limit_rpc(
+        &self,
+        chat_id: &str,
+        method: &'static str,
+        params: serde_json::Value,
+    ) -> Result<bool> {
+        let device = self
+            .chat(chat_id)
+            .map(|c| c.device_id)
+            .ok_or_else(|| ClientError::NotFound(chat_id.to_owned()))?;
+        let reply = self.inner.host_rpc(&device, method, params).await?;
+        Ok(reply["changed"].as_bool().unwrap_or(false))
     }
 
     /// The chat's run configuration (harness/model/effort/options/sandbox).

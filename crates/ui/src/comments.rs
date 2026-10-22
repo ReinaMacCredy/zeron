@@ -1,8 +1,10 @@
 //! Review comments pinned to lines in a diff or editable workspace file,
 //! staged on the composer and folded into the next prompt as plain text.
 //!
-//! [`with_comments`] appends them; [`extract_badge`] reads the same block back
-//! out for the transcript. There is no second data model.
+//! [`with_comments`] appends them; `zeron_proto::badges` reads the same block
+//! back out for the transcript. There is no second data model.
+
+use zeron_proto::badges::{COMMENT_BLOCK_HEADER, REVIEW_COMMENT_BLOCK_HEADER, side_marker};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CommentSide {
@@ -120,14 +122,6 @@ impl ReviewComment {
 
 pub const COMMENT_ONLY_TEXT: &str = "Address the review comments below.";
 
-pub const COMMENT_BLOCK_HEADER: &str = "Comments on the diff (each cites the file and line it belongs to; L = line number in the original file, R = in the changed file):";
-pub const REVIEW_COMMENT_BLOCK_HEADER: &str =
-    "Review comments (each cites the workspace file and line it belongs to):";
-
-fn side_marker(side: CommentSide) -> String {
-    format!(" ({}): ", side.tag())
-}
-
 pub fn with_comments(text: &str, comments: &[ReviewComment]) -> String {
     if comments.is_empty() {
         return text.to_string();
@@ -138,7 +132,7 @@ pub fn with_comments(text: &str, comments: &[ReviewComment]) -> String {
             let body = comment.body.trim().replace('\n', "\n  ");
             let separator = comment
                 .side()
-                .map(side_marker)
+                .map(|side| side_marker(side.tag()))
                 .unwrap_or_else(|| ": ".to_string());
             format!("- {}{separator}{body}", comment.location())
         })
@@ -154,104 +148,6 @@ pub fn with_comments(text: &str, comments: &[ReviewComment]) -> String {
         REVIEW_COMMENT_BLOCK_HEADER
     };
     format!("{body}\n\n{header}\n{}", bullets.join("\n"))
-}
-
-/// [`crate::badges::Extractor`] for the comment block. Matched only as a whole
-/// trailing block, so a prompt quoting the header mid-body is left alone.
-pub fn extract_badge(text: &str) -> Option<(String, crate::badges::MessageBadge)> {
-    let markers = [
-        format!("\n\n{COMMENT_BLOCK_HEADER}\n"),
-        format!("\n\n{REVIEW_COMMENT_BLOCK_HEADER}\n"),
-    ];
-    let (at, marker) = markers
-        .iter()
-        .filter_map(|marker| text.rfind(marker).map(|at| (at, marker)))
-        .max_by_key(|(at, _)| *at)?;
-    let block = &text[at + marker.len()..];
-    if block.is_empty()
-        || !block
-            .lines()
-            .all(|line| line.starts_with("- ") || line.starts_with("  "))
-    {
-        return None;
-    }
-    let details = parse_bullets(block);
-    if details.is_empty() {
-        return None;
-    }
-    Some((
-        text[..at].to_string(),
-        crate::badges::MessageBadge {
-            icon: crate::icons::CHAT_ROUND_LINE,
-            label: chip_label(details.len()).into(),
-            details,
-        },
-    ))
-}
-
-fn parse_bullets(block: &str) -> Vec<crate::badges::BadgeDetail> {
-    let mut details: Vec<crate::badges::BadgeDetail> = Vec::new();
-    for line in block.lines() {
-        let Some(bullet) = line.strip_prefix("- ") else {
-            if let (Some(indented), Some(last)) = (line.strip_prefix("  "), details.last_mut()) {
-                last.body = format!("{}\n{indented}", last.body).into();
-            }
-            continue;
-        };
-        // Earliest marker wins: a body may contain "(L): " itself, and matching
-        // that would swallow the body into the location.
-        let split = [CommentSide::Old, CommentSide::New]
-            .into_iter()
-            .filter_map(|side| {
-                let marker = side_marker(side);
-                bullet.find(&marker).map(|at| (at, marker.len(), side))
-            })
-            .min_by_key(|(at, _, _)| *at);
-        let file_split = split_file_bullet(bullet);
-        if let Some((at, location, body)) = file_split
-            && split.is_none_or(|(side_at, _, _)| at < side_at)
-        {
-            details.push(crate::badges::BadgeDetail {
-                location: location.into(),
-                tag: None,
-                body: body.into(),
-            });
-            continue;
-        }
-        if let Some((at, marker_len, side)) = split {
-            details.push(crate::badges::BadgeDetail {
-                location: bullet[..at].into(),
-                tag: Some(side.tag().into()),
-                body: bullet[at + marker_len..].into(),
-            });
-            continue;
-        }
-        if let Some((_, location, body)) = file_split {
-            details.push(crate::badges::BadgeDetail {
-                location: location.into(),
-                tag: None,
-                body: body.into(),
-            });
-        }
-    }
-    details
-}
-
-fn split_file_bullet(bullet: &str) -> Option<(usize, &str, &str)> {
-    bullet.match_indices(": ").find_map(|(at, separator)| {
-        let location = &bullet[..at];
-        let (_, line) = location.rsplit_once(':')?;
-        line.parse::<u32>().ok()?;
-        Some((at, location, &bullet[at + separator.len()..]))
-    })
-}
-
-pub fn chip_label(count: usize) -> String {
-    if count == 1 {
-        "1 comment".to_string()
-    } else {
-        format!("{count} comments")
-    }
 }
 
 pub const CARD_PAD_V: f32 = 20.0;
@@ -290,6 +186,9 @@ pub fn card_height(body: &str) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeron_proto::badges::{
+        comment_label as chip_label, extract_comment_badge as extract_badge,
+    };
 
     fn comment(path: &str, side: CommentSide, line: u32, body: &str) -> ReviewComment {
         ReviewComment::new(path, side, line, body)
@@ -339,11 +238,11 @@ mod tests {
         let (text, badge) = extract_badge(&out).unwrap();
         assert_eq!(text, "review this");
         assert_eq!(
-            badge.details[0].location.as_ref(),
+            badge.details[0].location.as_str(),
             "crates/ui/src/files/preview.rs:1494"
         );
         assert_eq!(badge.details[0].tag, None);
-        assert_eq!(badge.details[0].body.as_ref(), "Keep this branch explicit");
+        assert_eq!(badge.details[0].body.as_str(), "Keep this branch explicit");
     }
 
     #[test]
@@ -356,17 +255,17 @@ mod tests {
         assert_eq!(text, "x");
         assert_eq!(badge.details.len(), 2);
         assert_eq!(badge.details[0].tag.as_deref(), Some("L"));
-        assert_eq!(badge.details[1].location.as_ref(), "odd:path.rs:8");
-        assert_eq!(badge.details[1].body.as_ref(), "change this: please");
+        assert_eq!(badge.details[1].location.as_str(), "odd:path.rs:8");
+        assert_eq!(badge.details[1].body.as_str(), "change this: please");
     }
 
     #[test]
     fn file_comment_body_may_quote_a_diff_side_marker() {
         let staged = vec![ReviewComment::file("a.rs", 2, "compare with (L): old code")];
         let (_, badge) = extract_badge(&with_comments("x", &staged)).unwrap();
-        assert_eq!(badge.details[0].location.as_ref(), "a.rs:2");
+        assert_eq!(badge.details[0].location.as_str(), "a.rs:2");
         assert_eq!(badge.details[0].tag, None);
-        assert_eq!(badge.details[0].body.as_ref(), "compare with (L): old code");
+        assert_eq!(badge.details[0].body.as_str(), "compare with (L): old code");
     }
 
     #[test]
@@ -387,9 +286,9 @@ mod tests {
         let (text, badge) = extract_badge(&with_comments("x", &staged)).unwrap();
         assert_eq!(text, "x");
         assert_eq!(badge.details.len(), 1);
-        assert_eq!(badge.details[0].location.as_ref(), "a.rs:5");
+        assert_eq!(badge.details[0].location.as_str(), "a.rs:5");
         assert_eq!(badge.details[0].tag.as_deref(), Some("R"));
-        assert_eq!(badge.details[0].body.as_ref(), "see (L): the other one");
+        assert_eq!(badge.details[0].body.as_str(), "see (L): the other one");
     }
 
     #[test]

@@ -69,6 +69,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             self.setJumpVisible(d > 140 && !self.list.following)
         }
         list.onCardAction = { [weak self] action in self?.perform(action) }
+        list.branchBlocked = { [weak self] rewind in await self?.source.branchBlocked(rewind: rewind) }
+        list.onBranch = { [weak self] offer in self?.confirmBranch(offer) }
+        list.onSkill = { [weak self] name, path in self?.openSkill(name, path: path) }
+        list.onLimit = { [weak self] id in self?.openLimitCard(id) }
         view.addSubview(list)
         still.translatesAutoresizingMaskIntoConstraints = false
         still.fetch = { [weak self] in await self?.source.computerStill() }
@@ -123,6 +127,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             guard let self else { return }
             if self.editingQueueId != nil { self.endEdit(commit: nil) }
             if case .notDelivered = self.shown.banner { self.source.retryDelivery() }
+            if case .limit = self.shown.banner { self.limitActions() }
         }
 
         bottom.axis = .vertical
@@ -362,6 +367,126 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         }
     }
 
+    private func confirmBranch(_ offer: BranchOffer) {
+        let sheet = UIAlertController(title: offer.title, message: "\(offer.context)\n\n\(offer.detail)", preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: offer.option, style: offer.rewind ? .destructive : .default) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    if offer.rewind {
+                        self.composer.text = try await self.source.rewind(to: offer.entryId)
+                        self.composer.becomeFirstResponder()
+                    } else {
+                        let id = try await self.source.fork(from: offer.entryId)
+                        (self.view.window?.rootViewController as? AppRouter)?.openSession(id)
+                    }
+                } catch {
+                    Toast.show(Self.branchFailure(error, rewind: offer.rewind), in: self.view.window)
+                }
+            }
+        })
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        sheet.popoverPresentationController?.sourceView = list
+        present(sheet, animated: true)
+    }
+
+    private func openLimitCard(_ id: String) {
+        let open: () -> Void = { [weak self] in (self?.view.window?.rootViewController as? AppRouter)?.openSession(id) }
+        guard let card = source.limitCard(chatId: id) else {
+            open()
+            return
+        }
+        let sheet = LimitCardViewController(card: card)
+        sheet.onResolve = { [weak self] choice in
+            do {
+                try await self?.source.resolveLimit(chatId: id, choice: choice)
+                return true
+            } catch {
+                Toast.show(Self.hostFailure(error, fallback: "Couldn't reach the host. Try again."), in: self?.view.window)
+                return false
+            }
+        }
+        sheet.onOpenChat = open
+        let nav = UINavigationController(rootViewController: sheet)
+        if let s = nav.sheetPresentationController { s.detents = [.medium(), .large()]; s.prefersGrabberVisible = true }
+        present(nav, animated: true)
+    }
+
+    private func openInfo() {
+        let info = SessionInfoViewController(sources: engine.frame().sources())
+        info.loadUsage = { [weak self] in await self?.source.chatUsage() }
+        info.openSource = { [weak self, weak info] item in
+            Task { @MainActor in
+                guard let self, let info, let image = await self.source.image(item.reference) else {
+                    Toast.show("Couldn't load \(item.name). Try again.", in: self?.view.window)
+                    return
+                }
+                info.present(ImageViewer(image: image, source: info.view), animated: true)
+            }
+        }
+        let nav = UINavigationController(rootViewController: info)
+        if let s = nav.sheetPresentationController { s.detents = [.medium(), .large()]; s.prefersGrabberVisible = true }
+        present(nav, animated: true)
+    }
+
+    private func limitActions() {
+        guard let limit = shown.limitPill else { return }
+        let sheet = UIAlertController(title: limit.text, message: nil, preferredStyle: .actionSheet)
+        let run = { [weak self] (work: @escaping (SessionSource) async throws -> Void) in
+            _ = Task { @MainActor in
+                guard let self else { return }
+                do { try await work(self.source) } catch {
+                    Toast.show(Self.hostFailure(error, fallback: "Couldn't reach the host. Try again."), in: self.view.window)
+                }
+            }
+        }
+        let id = chatId
+        if let model = limit.switchTo {
+            sheet.addAction(UIAlertAction(title: "Switch to \(model)", style: .default) { _ in
+                run { try await $0.resolveLimit(chatId: id, choice: "switch") }
+            })
+        }
+        if let action = limit.action {
+            sheet.addAction(UIAlertAction(title: action, style: .default) { _ in
+                run { try await $0.setLimitResume(chatId: id, auto: !limit.auto) }
+            })
+        }
+        sheet.addAction(UIAlertAction(title: "Close", style: .cancel))
+        sheet.popoverPresentationController?.sourceView = pill
+        present(sheet, animated: true)
+    }
+
+    private static func hostFailure(_ error: Error, fallback: String) -> String {
+        switch error as? CoreError {
+        case let .NotFound(text), let .HostError(text): text
+        default: fallback
+        }
+    }
+
+    private func openSkill(_ name: String, path: String?) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let file = try await self.source.skillFile(name: name, path: path)
+                let sheet = SelectTextViewController(text: file.text, title: name, mono: true)
+                self.present(UINavigationController(rootViewController: sheet), animated: true)
+            } catch {
+                let message: String
+                switch error as? CoreError {
+                case let .NotFound(text), let .HostError(text): message = text
+                default: message = "Couldn't open \(name)'s SKILL.md. Try again."
+                }
+                Toast.show(message, in: self.view.window)
+            }
+        }
+    }
+
+    private static func branchFailure(_ error: Error, rewind: Bool) -> String {
+        if case let .HostError(message) = error as? CoreError { return message }
+        return rewind ? "Couldn't rewind. Try again." : "Couldn't fork. Try again."
+    }
+
     @objc private func dismissComposer() {
         if composer.textView.isFirstResponder { composer.resignFirstResponder() }
     }
@@ -502,6 +627,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         titleView.set(title: c.title, subtitle: c.subtitle)
         list.uploadProgress = c.uploadProgress
         composer.running = c.running
+        composer.resumable = c.resumable
         still.working = c.running
         composer.canSteer = c.canSteer
         composer.placeholder = c.placeholder
@@ -547,6 +673,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             let pinned = vm?.pinned ?? false
             done([
                 UIAction(title: pinned ? "Unpin" : "Pin", image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(self.chatId, !pinned) },
+                UIAction(title: "Session Info", image: UIImage(systemName: "info.circle")) { _ in self.openInfo() },
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = self.engine.frame().plainText()
                 },
@@ -672,6 +799,9 @@ final class StatusPill: UIControl {
         case .editing:
             grid.kind = .dot(StatusTone.input)
             label.text = "Editing queued message · Tap to cancel"
+        case let .limit(text):
+            grid.kind = .dot(Palette.warning)
+            label.text = text
         }
     }
 

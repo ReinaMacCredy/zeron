@@ -33,29 +33,7 @@ use crate::theme::Theme;
 // Pure: usage meters + labels
 // ---------------------------------------------------------------------------
 
-pub const USAGE_WARN_FRACTION: f32 = 0.80;
-pub const USAGE_CRITICAL_FRACTION: f32 = 0.95;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UsageLevel {
-    /// < 80% — indigo.
-    Normal,
-    /// ≥ 80% — amber.
-    Warn,
-    /// ≥ 95% — red.
-    Critical,
-}
-
-/// Threshold classification of a usage fraction. Pure.
-pub fn usage_level(fraction: f32) -> UsageLevel {
-    if fraction >= USAGE_CRITICAL_FRACTION {
-        UsageLevel::Critical
-    } else if fraction >= USAGE_WARN_FRACTION {
-        UsageLevel::Warn
-    } else {
-        UsageLevel::Normal
-    }
-}
+pub use zeron_proto::{UsageLevel, usage_level};
 
 /// Usage meter columns: window label, reset time, and the meters' overall
 /// measure — long enough to read at a glance, short of a full-width gauge.

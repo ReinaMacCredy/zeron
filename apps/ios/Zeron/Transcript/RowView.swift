@@ -254,8 +254,8 @@ final class RowView: UIView {
                 view = iv
             case .spinner:
                 view = StatusGlyph(.spinner)
-            case let .working(sinceMs, streaming):
-                view = WorkingIndicatorView(since: sinceMs.map { Date(timeIntervalSince1970: Double($0) / 1000) }, streaming: streaming)
+            case let .working(sinceMs, word, rate):
+                view = WorkingIndicatorView(since: sinceMs.map { Date(timeIntervalSince1970: Double($0) / 1000) }, word: word, rate: rate)
             case let .detail(title):
                 let b = UIControl()
                 b.accessibilityLabel = "\(title) details"
@@ -473,11 +473,13 @@ final class WorkingIndicatorView: UIView {
     private let label = UILabel()
     private let since: Date?
     private let word: String
+    private let rate: String?
     private var timer: Timer?
 
-    init(since: Date?, streaming: Bool) {
+    init(since: Date?, word: String, rate: String?) {
         self.since = since
-        self.word = streaming ? "Writing" : "Working"
+        self.word = word
+        self.rate = rate
         super.init(frame: .zero)
         isUserInteractionEnabled = false
         label.font = Fonts.ui(.sansMedium, UIFontMetrics(forTextStyle: .body).scaledValue(for: 13.5))
@@ -494,6 +496,10 @@ final class WorkingIndicatorView: UIView {
         let text = NSMutableAttributedString(string: "\(word)…", attributes: [.font: label.font as Any, .foregroundColor: Palette.secondary])
         if secs > 0 {
             text.append(NSAttributedString(string: "  \(StatusPill.elapsed(secs))", attributes: [.font: label.font as Any, .foregroundColor: Palette.tertiary]))
+        }
+        if let rate {
+            let small = Fonts.ui(.sans, UIFontMetrics(forTextStyle: .body).scaledValue(for: 11))
+            text.append(NSAttributedString(string: "  \(rate)", attributes: [.font: small, .foregroundColor: Palette.tertiary.withAlphaComponent(0.8)]))
         }
         label.attributedText = text
         label.sizeToFit()

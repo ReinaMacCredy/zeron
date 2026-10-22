@@ -16,13 +16,17 @@ use zeron_doc::parts::MessagePart;
 use zeron_doc::parts::MessageStatus;
 use zeron_doc::schema::{MessageRole, SessionMessageEntry};
 use zeron_markdown::parser::{IncrementalParser, TopBlock};
+use zeron_proto::transcript::CompactionWait;
 use zeron_proto::{HarnessId, UserInputAnswer};
 use zeron_text::WhiteSpace;
 
 use super::cards::{Card, consent_row, denied_row, notice_row, place_card};
-use super::display::{ColorRole, DisplayBuilder, FadeEdge, TextRun, WidgetKind};
+use super::display::{ColorRole, DisplayBuilder, FadeEdge, LinkHit, TextRun, WidgetKind};
 use super::file_icons::file_icon_asset;
-use super::markdown::{Ctx, PBlock, PText, Px, place, place_text, prepare_block, prepare_plain};
+use super::markdown::geom::PARA_GAP;
+use super::markdown::{Ctx, PBlock, PText, Px, place, place_stack, place_text, prepare_block, prepare_plain};
+use super::seams::{self, Chats};
+use super::strip::{Strip, place_strip};
 use super::style::{Family, TYPE, Weight};
 use super::tools::{ThoughtState, ToolGroup, place_tools};
 
@@ -54,9 +58,13 @@ pub struct TranscriptInput {
     /// A turn is running (drives the tail working indicator).
     pub working: bool,
     pub working_since_ms: Option<i64>,
+    pub token_rate: Option<u32>,
+    pub compaction: Option<(zeron_proto::transcript::CompactionWait, i64)>,
     pub streaming: bool,
     pub input_answers: Arc<HashMap<String, Vec<UserInputAnswer>>>,
     pub harness: Option<HarnessId>,
+    pub chat_id: Option<String>,
+    pub chats: Arc<Chats>,
 }
 
 pub(crate) fn row_key(id: &str) -> u64 {
@@ -76,12 +84,21 @@ pub(crate) fn next_version() -> u64 {
 
 pub(crate) struct UserBubble {
     pub text: PText,
+    pub md: Vec<PBlock>,
     pub images: Vec<String>,
     /// Non-image attachments (desktop-sent ZIPs, docs): icon asset + name.
     pub files: Vec<(String, PText)>,
     pub pending: bool,
     pub expanded: bool,
     pub more: PText,
+    pub badges: Vec<UserBadge>,
+}
+
+pub(crate) struct UserBadge {
+    pub icon: &'static str,
+    pub title: String,
+    pub label: PText,
+    pub details: Vec<zeron_proto::badges::BadgeDetail>,
 }
 
 pub(crate) struct Chip {
@@ -98,10 +115,11 @@ pub(crate) enum Content {
     Tools(ToolGroup),
     Chip(Chip),
     Image { reference: String },
-    Working { since_ms: Option<i64>, streaming: bool },
+    Working { since_ms: Option<i64>, word: String, rate: Option<u32> },
     Card(Card),
     /// An agent visual: its height comes from its worker.
     Visual(Arc<crate::visual::VisualSlot>),
+    Strip(Strip),
 }
 
 /// A width-independent row: identity, top gap class and prepared content.
@@ -148,6 +166,7 @@ pub(crate) mod geom {
     pub const BUBBLE_FOLD_SHOW: usize = 6;
     pub const THUMB: f32 = 76.0;
     pub const FILE_PILL: f32 = 32.0;
+    pub const BADGE: f32 = 26.0;
     pub const CHIP_LINE: f32 = 32.0;
     pub const IMAGE: f32 = 260.0;
     pub const WORKING: f32 = 36.0;
@@ -199,6 +218,26 @@ pub(crate) struct RowBuilder {
     /// rebuilds: the worker holds the same slot).
     pub visual_slots: HashMap<String, Arc<crate::visual::VisualSlot>>,
     pub(crate) harness: Option<HarnessId>,
+    in_fold: bool,
+    pub(crate) blobs: HashMap<String, (Blob, u64)>,
+    pub(crate) blob_clock: u64,
+    pub(crate) chat_id: Option<String>,
+}
+
+pub(crate) enum Blob {
+    Loading,
+    Ready(Arc<str>),
+    Failed,
+}
+
+impl Blob {
+    fn tag(&self) -> u64 {
+        match self {
+            Blob::Loading => 1,
+            Blob::Ready(_) => 2,
+            Blob::Failed => 3,
+        }
+    }
 }
 
 pub(crate) fn quick_hash(s: &str) -> u64 {
@@ -218,6 +257,10 @@ impl RowBuilder {
             self.harness = input.harness;
             self.entries.clear();
         }
+        if self.chat_id != input.chat_id {
+            self.chat_id = input.chat_id.clone();
+            self.blobs.clear();
+        }
         let mut out: Vec<Placed> = Vec::with_capacity(self.entries.len() * 2 + 4);
         let mut live_entries: HashSet<&str> = HashSet::with_capacity(input.entries.len());
         let mut live_parts: HashSet<String> = HashSet::new();
@@ -225,7 +268,7 @@ impl RowBuilder {
         for entry in &input.entries {
             live_entries.insert(entry.id.as_str());
             let first = out.is_empty();
-            let sig = self.entry_sig(entry, first, prev_role, &input.input_answers);
+            let sig = self.entry_sig(entry, first, prev_role, input);
             let reuse = self
                 .entries
                 .get(&entry.id)
@@ -241,7 +284,7 @@ impl RowBuilder {
                     rows
                 }
                 None => {
-                    let rows = self.entry_rows(ctx, entry, first, prev_role, &input.input_answers, &mut live_parts);
+                    let rows = self.entry_rows(ctx, entry, first, prev_role, input, &mut live_parts);
                     self.entries.insert(
                         entry.id.clone(),
                         EntryState {
@@ -284,21 +327,36 @@ impl RowBuilder {
         }
         self.pending.retain(|id, _| live_pending.contains(id));
 
-        if input.working {
+        if input.working || input.compaction.is_some() {
+            let (word, since_ms, token_rate) = match &input.compaction {
+                Some((wait, since)) => {
+                    let (lead, tail) = wait.words();
+                    let chip = match wait {
+                        CompactionWait::Classifying { harness, model, .. } => {
+                            Some(format!("· {}", seams::side_detail(*harness, model.as_deref())))
+                        }
+                        _ => None,
+                    };
+                    let word = [Some(lead), chip, tail.map(str::to_owned)].into_iter().flatten().collect::<Vec<_>>().join(" ");
+                    (word, wait.timed().then_some(*since), None)
+                }
+                None if input.entries.last().is_some_and(|e| zeron_doc::schema::consulting_advisor(e)) => {
+                    ("Consulting advisor".to_owned(), input.working_since_ms, input.token_rate)
+                }
+                None if input.streaming => ("Writing".to_owned(), input.working_since_ms, input.token_rate),
+                None => ("Working".to_owned(), input.working_since_ms, input.token_rate),
+            };
             let stale = self
                 .working
                 .as_ref()
-                .is_none_or(|w| !matches!(&w.content, Content::Working { since_ms, streaming } if *since_ms == input.working_since_ms && *streaming == input.streaming));
+                .is_none_or(|w| !matches!(&w.content, Content::Working { since_ms: shown_since, word: shown, rate } if *shown_since == since_ms && *shown == word && *rate == token_rate));
             if stale {
                 self.working = Some(Arc::new(RowCore {
                     key: row_key("#working"),
                     version: next_version(),
                     kind: RowKind::Working,
                     entry_id: Arc::from(""),
-                    content: Content::Working {
-                        since_ms: input.working_since_ms,
-                        streaming: input.streaming,
-                    },
+                    content: Content::Working { since_ms, word, rate: token_rate },
                     copy_text: String::new(),
                 }));
             }
@@ -315,18 +373,38 @@ impl RowBuilder {
         self.pending.retain(|_, (_, row)| row.key != key);
     }
 
-    /// Context outside the entry that changes its rows: gaps, and answers
-    /// on their way to the entry's questions.
-    fn entry_sig(&self, entry: &SessionMessageEntry, first: bool, prev: Option<MessageRole>, sent: &HashMap<String, Vec<UserInputAnswer>>) -> u64 {
+    /// Context outside the entry that changes its rows: gaps, answers on
+    /// their way to the entry's questions, and the chats it names.
+    fn entry_sig(&self, entry: &SessionMessageEntry, first: bool, prev: Option<MessageRole>, input: &TranscriptInput) -> u64 {
         let gaps = (first as u64) | ((prev.map_or(0, |r| r as u64 + 1)) << 1);
-        entry
+        let sig = entry
             .parts
             .iter()
             .filter_map(|p| match p {
-                MessagePart::Input { request_id, .. } => sent.get(request_id),
+                MessagePart::Input { request_id, .. } => input.input_answers.get(request_id),
                 _ => None,
             })
-            .fold(gaps, |sig, answers| sig.rotate_left(7) ^ quick_hash(&format!("{answers:?}")))
+            .fold(gaps, |sig, answers| sig.rotate_left(7) ^ quick_hash(&format!("{answers:?}")));
+        let sig = if self.blobs.is_empty() {
+            sig
+        } else {
+            entry
+                .parts
+                .iter()
+                .flat_map(|p| super::tools::blob_refs(self.chat_id.as_deref(), p))
+                .flatten()
+                .filter_map(|r| self.blobs.get(&r))
+                .fold(sig, |sig, (blob, order)| sig.rotate_left(7) ^ blob.tag() ^ order << 2)
+        };
+        let refs = seams::entry_refs(entry);
+        let native = entry.parts.iter().any(|p| matches!(p, MessagePart::Tool { delegate_route: Some(_), .. }));
+        if refs.is_empty() && !native {
+            return sig;
+        }
+        let own = input.chat_id.as_deref();
+        let chats: Vec<_> = refs.iter().map(|id| input.chats.get(id)).collect();
+        let parent = own.and_then(|id| input.chats.get(id));
+        sig.rotate_left(7) ^ quick_hash(&format!("{own:?}{chats:?}{parent:?}"))
     }
 
     fn entry_rows(
@@ -335,9 +413,12 @@ impl RowBuilder {
         entry: &SessionMessageEntry,
         first: bool,
         prev: Option<MessageRole>,
-        sent: &HashMap<String, Vec<UserInputAnswer>>,
+        input: &TranscriptInput,
         live_parts: &mut HashSet<String>,
     ) -> Vec<Placed> {
+        let sent = &*input.input_answers;
+        let chats = &*input.chats;
+        let own = input.chat_id.as_deref();
         let mut rows: Vec<Placed> = Vec::new();
         let gap_for = |rows: &Vec<Placed>, heading: bool| {
             if rows.is_empty() {
@@ -355,34 +436,84 @@ impl RowBuilder {
             }
         };
         if entry.role == MessageRole::User {
-            let text: String = entry
-                .parts
-                .iter()
-                .filter_map(|p| match p {
-                    MessagePart::Text { text, .. } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            let text = seams::user_text(entry);
             let gap = if first { Gap::First } else { Gap::Turn };
+            if let Some(from) = entry.from_chat_id.as_deref() {
+                if Some(from) == own {
+                    rows.push(Placed { core: Arc::new(seams::auto_continue(ctx, &entry.id)), gap });
+                    rows.push(Placed { core: Arc::new(self.user_row(ctx, &entry.id, &text, false)), gap: Gap::First });
+                    return rows;
+                }
+                let delegate = own.is_some() && chats.get(from).and_then(|c| c.delegated_by.as_deref()) == own;
+                if let Some(ids) = zeron_proto::transcript::wake_task_ids(&text).filter(|_| delegate) {
+                    rows.push(Placed { core: Arc::new(seams::wake_row(ctx, &entry.id, &ids, chats)), gap });
+                    return rows;
+                }
+                let steps = zeron_proto::transcript::step_handback_threads(&text);
+                let ids = if steps.len() > 1 { steps } else { vec![from.to_owned()] };
+                let senders: Vec<(String, String)> = ids.into_iter().map(|id| (seams::sender_title(chats, &id), id)).map(|(t, id)| (id, t)).collect();
+                rows.push(Placed { core: Arc::new(seams::peer_header(ctx, entry, &senders)), gap });
+                let body = zeron_proto::transcript::handback_quotes(&text).unwrap_or_else(|| zeron_proto::transcript::agent_message_display(&text));
+                let pkey = format!("{}#peer", entry.id);
+                live_parts.insert(pkey.clone());
+                for (bi, (_, core)) in self.text_blocks(ctx, &pkey, &body, false).iter().enumerate() {
+                    let heading = matches!(core.content, Content::Block(PBlock::Heading(_)));
+                    rows.push(Placed { core: core.clone(), gap: if heading && bi > 0 { Gap::Heading } else if bi == 0 { Gap::First } else { Gap::Block } });
+                }
+                return rows;
+            }
+            if text.trim() == zeron_proto::RESUME_PROMPT {
+                let core = seams::divider(ctx, format!("{}#resumed", entry.id), &entry.id, "Resumed", Some(zeron_proto::RESUME_PROMPT));
+                rows.push(Placed { core: Arc::new(core), gap });
+                return rows;
+            }
             rows.push(Placed { core: Arc::new(self.user_row(ctx, &entry.id, &text, false)), gap });
             return rows;
         }
         if entry.role == MessageRole::System {
+            let gap = if first { Gap::First } else { Gap::Turn };
+            for part in &entry.parts {
+                let core = match part {
+                    MessagePart::Classifier { id, record } => {
+                        let key = format!("{}#{id}", entry.id);
+                        let open = self.expanded.contains(&row_key(&key));
+                        seams::classifier(ctx, key, &entry.id, record, open)
+                    }
+                    MessagePart::Handoff { id, harness, text, route } => {
+                        let key = format!("{}#{id}", entry.id);
+                        let open = self.expanded.contains(&row_key(&key));
+                        seams::handoff(ctx, key, &entry.id, *harness, text, route, open)
+                    }
+                    _ => continue,
+                };
+                rows.push(Placed { core: Arc::new(core), gap });
+                return rows;
+            }
             let mut texts = entry.parts.iter().filter_map(|p| match p {
                 MessagePart::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             });
             let text = texts.next().unwrap_or_default();
+            let hint = texts.next().filter(|hint| !hint.trim().is_empty());
             if let Some(notice) = computer::notice(text) {
-                let hint = texts.next().filter(|hint| !hint.trim().is_empty());
-                let gap = if first { Gap::First } else { Gap::Turn };
                 let core = notice_row(ctx, &format!("{}#notice", entry.id), &entry.id, notice, text, hint);
                 rows.push(Placed { core: Arc::new(core), gap });
                 return rows;
             }
+            if !text.trim().is_empty() {
+                rows.push(Placed { core: Arc::new(seams::divider(ctx, format!("{}#divider", entry.id), &entry.id, text.trim(), hint)), gap });
+            }
+            return rows;
         }
         let streaming = entry.status == Some(MessageStatus::Streaming);
+        if !streaming && !self.in_fold {
+            self.in_fold = true;
+            let folded = self.work_fold(ctx, entry, first, prev, input, live_parts);
+            self.in_fold = false;
+            if let Some(rows) = folded {
+                return rows;
+            }
+        }
         let mut tools: Vec<&MessagePart> = Vec::new();
         let mut group_ix = 0usize;
         let flush_tools = |this: &mut Self, ctx: &mut Ctx, rows: &mut Vec<Placed>, tools: &mut Vec<&MessagePart>, group_ix: &mut usize, tail: bool| {
@@ -392,8 +523,8 @@ impl RowBuilder {
             let id = format!("{}#g{}", entry.id, group_ix);
             *group_ix += 1;
             let gap = gap_for(rows, false);
-            let agents = tools.iter().any(|p| matches!(p, MessagePart::Tool { call, .. } if call.is_subagent_spawn()));
-            let row = this.tool_row(ctx, &entry.id, &id, tools, streaming && tail, agents);
+            let agents = tools.iter().any(|p| matches!(p, MessagePart::Tool { call, .. } if is_agent_call(call)));
+            let row = this.tool_row(ctx, &entry.id, &id, tools, streaming && tail, agents, chats, own.and_then(|id| chats.get(id)));
             rows.push(Placed { core: Arc::new(row), gap });
             tools.clear();
         };
@@ -403,11 +534,33 @@ impl RowBuilder {
             match part {
                 // Consecutive tools and thoughts share a group; subagent
                 // spawns never share one with ordinary tools (desktop genus).
+                MessagePart::Tool { id, call, subagent_ref: Some(thread), .. } if call.is_create_thread() => {
+                    flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
+                    let input = match call {
+                        zeron_proto::ToolCall::Mcp { input, .. } | zeron_proto::ToolCall::Unknown { input, .. } => input.as_ref(),
+                        _ => None,
+                    };
+                    let title = chats
+                        .get(thread)
+                        .and_then(|c| c.title.clone())
+                        .or_else(|| input.and_then(|i| i.get("title")?.as_str()).map(str::to_owned))
+                        .map(|t| seams::single_line(&t))
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or_else(|| "thread".into());
+                    let gap = gap_for(&rows, false);
+                    let core = seams::started_thread(ctx, format!("{}#{id}-thread", entry.id), &entry.id, thread, &title);
+                    rows.push(Placed { core: Arc::new(core), gap });
+                }
+                MessagePart::Tool { call, subagent_ref: None, delegate_route: Some(_), .. } if call.is_delegate_task() => {
+                    flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
+                    tools.push(part);
+                    flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
+                }
                 MessagePart::Tool { id, call, is_error, output, .. } => {
-                    let spawn = call.is_subagent_spawn();
+                    let genus = Genus::of(call);
                     let genus_flip = tools.iter().any(|p| match p {
-                        MessagePart::Tool { call, .. } => call.is_subagent_spawn() != spawn,
-                        _ => spawn,
+                        MessagePart::Tool { call, .. } => Genus::of(call) != genus,
+                        _ => genus != Genus::Other,
                     });
                     if genus_flip {
                         flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
@@ -424,7 +577,7 @@ impl RowBuilder {
                     }
                 }
                 MessagePart::Reasoning { text, .. } if !text.trim().is_empty() => {
-                    if tools.iter().any(|p| matches!(p, MessagePart::Tool { call, .. } if call.is_subagent_spawn())) {
+                    if tools.iter().any(|p| matches!(p, MessagePart::Tool { call, .. } if Genus::of(call) != Genus::Other)) {
                         flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
                     }
                     live_parts.insert(format!("{}#{}", entry.id, part.id()));
@@ -507,6 +660,59 @@ impl RowBuilder {
         rows
     }
 
+    fn work_fold(
+        &mut self,
+        ctx: &mut Ctx,
+        entry: &SessionMessageEntry,
+        first: bool,
+        prev: Option<MessageRole>,
+        input: &TranscriptInput,
+        live_parts: &mut HashSet<String>,
+    ) -> Option<Vec<Placed>> {
+        let parts = &entry.parts;
+        let prose = |p: &MessagePart| matches!(p, MessagePart::Text { text, .. } if !text.trim().is_empty());
+        let reply_start = parts.iter().rposition(prose).map(|mut start| {
+            while start > 0 && prose(&parts[start - 1]) {
+                start -= 1;
+            }
+            start
+        });
+        let is_work = |ix: usize, part: &MessagePart| match part {
+            MessagePart::Tool { .. } => true,
+            MessagePart::Reasoning { text, .. } => !text.trim().is_empty(),
+            MessagePart::Text { text, .. } => !text.trim().is_empty() && reply_start.is_none_or(|start| ix < start),
+            _ => false,
+        };
+        let first_work = parts.iter().enumerate().position(|(ix, p)| is_work(ix, p))?;
+        let pick = |keep: &dyn Fn(usize, &MessagePart) -> bool| SessionMessageEntry {
+            parts: parts.iter().enumerate().filter(|(ix, p)| keep(*ix, p)).map(|(_, p)| p.clone()).collect(),
+            ..entry.clone()
+        };
+        let before = pick(&|ix, p| ix < first_work && !is_work(ix, p));
+        let work = pick(&|ix, p| is_work(ix, p));
+        let after = pick(&|ix, p| ix > first_work && !is_work(ix, p));
+        let mut rows = if before.parts.is_empty() { Vec::new() } else { self.entry_rows(ctx, &before, first, prev, input, live_parts) };
+        let gap = match (rows.is_empty(), first, prev) {
+            (false, ..) => Gap::Block,
+            (true, true, _) => Gap::First,
+            (true, false, Some(MessageRole::User) | None) => Gap::Reply,
+            (true, false, _) => Gap::Block,
+        };
+        let key = format!("{}#work", entry.id);
+        let open = self.expanded.contains(&row_key(&key));
+        let worked_secs = entry.duration_ms.filter(|ms| *ms > 0).map(|ms| (ms / 1000).max(1));
+        let header = self.work_header(ctx, &entry.id, &key, &work.parts, worked_secs, open);
+        rows.push(Placed { core: Arc::new(header), gap });
+        let settled = Some(MessageRole::Assistant);
+        if open {
+            rows.extend(self.entry_rows(ctx, &work, false, settled, input, live_parts));
+        }
+        if !after.parts.is_empty() {
+            rows.extend(self.entry_rows(ctx, &after, false, settled, input, live_parts));
+        }
+        Some(rows)
+    }
+
     fn text_blocks(&mut self, ctx: &mut Ctx, pkey: &str, text: &str, streaming: bool) -> Vec<(Arc<TopBlock>, Arc<RowCore>)> {
         let hash = quick_hash(text);
         let state = self.parts.entry(pkey.to_owned()).or_insert_with(|| PartState {
@@ -557,7 +763,9 @@ impl RowBuilder {
     fn user_row(&mut self, ctx: &mut Ctx, id: &str, content: &str, pending: bool) -> RowCore {
         let key = row_key(&format!("{id}#u"));
         // Shared parser: strips the image trailer *and* hidden Appshot context.
-        let parsed = zeron_client::attachments::parse_user_message(content);
+        let mut parsed = zeron_client::attachments::parse_user_message(content);
+        let (rest, badges) = zeron_proto::badges::split(&parsed.text);
+        parsed.text = rest;
         let (size, lh) = TYPE.body;
         let style = ctx.typo.style(Family::Sans, Weight::Regular, false, size);
         let lh = ctx.typo.px(lh);
@@ -573,7 +781,11 @@ impl RowBuilder {
                 Some((mention.index, image.path.clone()))
             })
             .collect();
-        let text = prepare_user_text(ctx, parsed.text.trim(), style, lh, &previews);
+        let trimmed = parsed.text.trim();
+        let tree = user_chips(trimmed, &previews).is_empty().then(|| zeron_markdown::parser::user_markdown(trimmed)).flatten();
+        ctx.math_area = 0.0;
+        let md = tree.map_or_else(Vec::new, |tree| tree.blocks.iter().map(|top| prepare_block(ctx, &top.block, 0, false)).collect());
+        let text = prepare_user_text(ctx, trimmed, style, lh, &previews);
         // Copied text reads attachment chips as their plain label.
         let body = zeron_proto::attachment_mentions::attachment_mention_prompt(&parsed.text);
         let (msize, mlh) = TYPE.small;
@@ -593,6 +805,15 @@ impl RowBuilder {
                 (file_icon_asset(name), prepare_plain(ctx, name, mstyle, ctx.typo.px(mlh), ColorRole::Text, WhiteSpace::Pre))
             })
             .collect();
+        let badges = badges
+            .into_iter()
+            .map(|badge| UserBadge {
+                icon: badge_icon(badge.kind),
+                label: prepare_plain(ctx, &badge.label, mstyle, ctx.typo.px(mlh), ColorRole::TextSecondary, WhiteSpace::Pre),
+                title: badge.label,
+                details: badge.details,
+            })
+            .collect();
         let expanded = self.expanded.contains(&key);
         let more = prepare_plain(
             ctx,
@@ -609,16 +830,27 @@ impl RowBuilder {
             entry_id: Arc::from(id),
             content: Content::User(UserBubble {
                 text,
+                md,
                 images,
                 files,
                 pending,
                 expanded,
                 more,
+                badges,
             }),
             copy_text: body,
         }
     }
 
+}
+
+fn badge_icon(kind: zeron_proto::badges::BadgeKind) -> &'static str {
+    use zeron_proto::badges::BadgeKind;
+    match kind {
+        BadgeKind::PullRequest => "arrow.triangle.pull",
+        BadgeKind::Comments => "bubble.left",
+        BadgeKind::Terminal | BadgeKind::Selection => "text.quote",
+    }
 }
 
 /// One chip in a sent prompt: its source range, label and icon, and for an
@@ -760,6 +992,31 @@ fn prepare_user_text(ctx: &mut Ctx, body: &str, style: super::style::Resolved, l
     }
 }
 
+fn is_agent_call(call: &zeron_proto::ToolCall) -> bool {
+    call.is_subagent_spawn() || call.is_delegate_task()
+}
+
+/// Desktop `ToolGenus`: agents and device calls never share a group with
+/// ordinary tools.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Genus {
+    Agent,
+    Device,
+    Other,
+}
+
+impl Genus {
+    fn of(call: &zeron_proto::ToolCall) -> Self {
+        if is_agent_call(call) {
+            Genus::Agent
+        } else if zeron_proto::device_tools::device_call(call).is_some() {
+            Genus::Device
+        } else {
+            Genus::Other
+        }
+    }
+}
+
 fn chip_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, icon: &'static str, color: ColorRole, text: &str) -> RowCore {
     let (size, lh) = TYPE.small;
     let style = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
@@ -827,6 +1084,7 @@ pub(crate) fn place_row(
             side
         }
         Content::Card(card) => place_card(card, px, x, top, cw, out),
+        Content::Strip(strip) => place_strip(strip, px, x, top, cw, out),
         Content::Visual(slot) => {
             // Until its worker has measured it: the loading line.
             let h = visual.unwrap_or(px.v(VISUAL_LOADING));
@@ -835,13 +1093,14 @@ pub(crate) fn place_row(
             }
             h
         }
-        Content::Working { since_ms, streaming } => {
+        Content::Working { since_ms, word, rate } => {
             let h = px.v(WORKING);
             if let Some(out) = out {
                 out.widget(
                     WidgetKind::Working {
                         since_ms: *since_ms,
-                        streaming: *streaming,
+                        word: word.clone(),
+                        rate: rate.map(|rate| format!("· {rate} tok/s")),
                     },
                     (x, top, cw, h),
                     None,
@@ -896,20 +1155,25 @@ fn place_user(u: &UserBubble, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
     let pad_y = px.v(BUBBLE_PAD_Y);
     let max_w = (cw * 0.86).max(cw - px.v(56.0)).min(cw);
     let text_w = (max_w - pad_x * 2.0).max(20.0);
+    let md_h = (!u.md.is_empty()).then(|| place_stack(&u.md, px, 0.0, 0.0, text_w, PARA_GAP, None));
     let stats = u.text.p.stats(text_w);
-    let folds = stats.line_count > BUBBLE_FOLD_LINES;
+    let folds = md_h.is_none() && stats.line_count > BUBBLE_FOLD_LINES;
     let shown = if folds && !u.expanded { BUBBLE_FOLD_SHOW } else { stats.line_count };
-    let text_h = shown as f32 * u.text.lh;
+    let text_h = md_h.unwrap_or(shown as f32 * u.text.lh);
     let more_h = if folds { u.more.lh + px.v(4.0) } else { 0.0 };
-    let bubble_w = if folds { max_w } else { stats.max_line_width.ceil() + pad_x * 2.0 };
-    let bubble_h = if stats.line_count == 0 { 0.0 } else { text_h + more_h + pad_y * 2.0 };
+    let bubble_w = if folds || md_h.is_some() { max_w } else { stats.max_line_width.ceil() + pad_x * 2.0 };
+    let bubble_h = if md_h.is_none() && stats.line_count == 0 { 0.0 } else { text_h + more_h + pad_y * 2.0 };
     let side = px.v(THUMB);
     let gap = px.v(6.0);
     let pill_h = px.v(FILE_PILL);
     // Thumbnails row, then one pill per file, stacked above the bubble.
     let files_y = if u.images.is_empty() { 0.0 } else { side + gap };
     let attach_h = (files_y + u.files.len() as f32 * (pill_h + gap) - gap).max(0.0);
-    let thumbs_h = if attach_h > 0.0 { attach_h + if bubble_h > 0.0 { px.v(8.0) } else { 0.0 } } else { 0.0 };
+    let badge_h = px.v(BADGE);
+    let badge_rows = badge_rows(u, px, max_w);
+    let badges_h = (badge_rows.len() as f32 * (badge_h + gap) - gap).max(0.0);
+    let above = attach_h + if attach_h > 0.0 && badges_h > 0.0 { gap } else { 0.0 } + badges_h;
+    let thumbs_h = if above > 0.0 { above + if bubble_h > 0.0 { px.v(8.0) } else { 0.0 } } else { 0.0 };
     let h = thumbs_h + bubble_h;
     let Some(out) = out else { return h };
     // Thumbnails right-aligned above the bubble.
@@ -933,11 +1197,31 @@ fn place_user(u: &UserBubble, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
         place_text_lines(name, fx + inset, fy + (pill_h - name.lh) / 2.0, name_w, 1, px, out);
         fy += pill_h + gap;
     }
+    let mut by = y + attach_h + if attach_h > 0.0 && badges_h > 0.0 { gap } else { 0.0 };
+    let bs = px.v(12.0);
+    for row in &badge_rows {
+        let mut bx = x + cw - row.iter().map(|(_, w)| w + gap).sum::<f32>() + gap;
+        for &(i, w) in row {
+            let badge = &u.badges[i];
+            out.fill(bx, by, w, badge_h, px.v(8.0), ColorRole::ChipBackground);
+            out.widget(WidgetKind::Icon { name: badge.icon.into(), color: ColorRole::TextTertiary }, (bx + px.v(8.0), by + (badge_h - bs) / 2.0, bs, bs), None);
+            place_text_lines(&badge.label, bx + px.v(26.0), by + (badge_h - badge.label.lh) / 2.0, w - px.v(34.0), 1, px, out);
+            if !badge.details.is_empty() {
+                out.links.push(LinkHit { x: bx, y: by, w, h: badge_h, url: format!("zeron-badge://open?i={i}"), scroller: out.scroller });
+            }
+            bx += w + gap;
+        }
+        by += badge_h + gap;
+    }
     if bubble_h > 0.0 {
         let bx = x + cw - bubble_w;
         let by = y + thumbs_h;
         out.fill(bx, by, bubble_w, bubble_h, px.v(BUBBLE_RADIUS).min(bubble_h / 2.0), ColorRole::UserBubble);
-        place_text_lines(&u.text, bx + pad_x, by + pad_y, text_w, shown, px, out);
+        if md_h.is_some() {
+            place_stack(&u.md, px, bx + pad_x, by + pad_y, text_w, PARA_GAP, Some(&mut *out));
+        } else {
+            place_text_lines(&u.text, bx + pad_x, by + pad_y, text_w, shown, px, out);
+        }
         if folds {
             let my = by + pad_y + text_h + px.v(4.0);
             let mw = u.more.p.max_content_width();
@@ -952,6 +1236,26 @@ fn place_user(u: &UserBubble, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
         }
     }
     h
+}
+
+fn badge_rows(u: &UserBubble, px: Px, max_w: f32) -> Vec<Vec<(usize, f32)>> {
+    let gap = px.v(6.0);
+    let mut rows: Vec<Vec<(usize, f32)>> = Vec::new();
+    let mut used = 0.0;
+    for (i, badge) in u.badges.iter().enumerate() {
+        let w = (px.v(34.0) + badge.label.p.max_content_width().ceil()).min(max_w);
+        match rows.last_mut() {
+            Some(row) if used + gap + w <= max_w => {
+                row.push((i, w));
+                used += gap + w;
+            }
+            _ => {
+                rows.push(vec![(i, w)]);
+                used = w;
+            }
+        }
+    }
+    rows
 }
 
 /// Heap held by a row's prepared text (diagnostics; blocks recurse).
@@ -979,11 +1283,18 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
     }
     match content {
         Content::Block(b) => block(b),
-        Content::User(u) => u.text.p.heap_bytes() + u.more.p.heap_bytes() + u.files.iter().map(|(_, n)| n.p.heap_bytes()).sum::<usize>(),
+        Content::User(u) => {
+            u.text.p.heap_bytes()
+                + u.md.iter().map(block).sum::<usize>()
+                + u.more.p.heap_bytes()
+                + u.files.iter().map(|(_, n)| n.p.heap_bytes()).sum::<usize>()
+                + u.badges.iter().map(|b| b.label.p.heap_bytes()).sum::<usize>()
+        }
         Content::Tools(t) => super::tools::heap_bytes(t),
         Content::Chip(c) => c.text.p.heap_bytes(),
         Content::Image { reference } => reference.len(),
         Content::Working { .. } | Content::Visual(_) => 0,
         Content::Card(card) => super::cards::heap_bytes(card),
+        Content::Strip(strip) => super::strip::heap_bytes(strip),
     }
 }

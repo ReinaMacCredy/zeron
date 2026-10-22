@@ -2127,6 +2127,42 @@ pub struct AgentUsageWindow {
     pub resets_at: Option<DateTime<Utc>>,
 }
 
+pub const USAGE_WARN_FRACTION: f32 = 0.80;
+pub const USAGE_CRITICAL_FRACTION: f32 = 0.95;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageLevel {
+    /// < 80% — indigo.
+    Normal,
+    /// ≥ 80% — amber.
+    Warn,
+    /// ≥ 95% — red.
+    Critical,
+}
+
+/// Threshold classification of a usage fraction. Pure.
+pub fn usage_level(fraction: f32) -> UsageLevel {
+    if fraction >= USAGE_CRITICAL_FRACTION {
+        UsageLevel::Critical
+    } else if fraction >= USAGE_WARN_FRACTION {
+        UsageLevel::Warn
+    } else {
+        UsageLevel::Normal
+    }
+}
+
+impl AgentAccountsSnapshot {
+    pub fn busiest_window(&self, harness: HarnessId) -> Option<(&str, f32)> {
+        self.accounts
+            .iter()
+            .find(|account| account.harness == harness && account.active)?
+            .usage_windows
+            .iter()
+            .max_by(|a, b| a.used_fraction.total_cmp(&b.used_fraction))
+            .map(|window| (window.label.as_str(), window.used_fraction.clamp(0.0, 1.0)))
+    }
+}
+
 /// Claude's usage credits, spent past the plan limits; amounts in `currency` units.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
