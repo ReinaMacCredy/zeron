@@ -1509,12 +1509,11 @@ impl Pickers {
             .as_deref()
             .map(ComposerDefaults::load)
             .unwrap_or_default();
-        ModelLabels::learn(
-            cx,
+        cx.default_global::<ModelLabels>().remembered.extend(
             defaults
                 .model_labels
                 .iter()
-                .map(|(id, label)| (id.as_str(), label.as_str())),
+                .map(|(id, label)| (id.clone(), label.clone())),
         );
         // Restore explicit opt-outs as well as project picks before the first frame.
         if title.is_none() && !detached {
@@ -1988,7 +1987,7 @@ impl Pickers {
                     return;
                 }
                 if let Loadable::Ready(models) = &loaded {
-                    pickers.learn_labels(models, cx);
+                    pickers.learn_labels(harness, models, cx);
                 }
                 pickers.instance_models.insert(id, loaded);
                 pickers.catalog_rev += 1;
@@ -2887,8 +2886,11 @@ impl Pickers {
         self.apply_model_catalog(harness, loaded, cx);
     }
 
-    fn learn_labels(&mut self, models: &[Model], cx: &mut Context<Self>) {
-        ModelLabels::learn(cx, models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
+    fn learn_labels(&mut self, harness: HarnessId, models: &[Model], cx: &mut Context<Self>) {
+        let known = &mut cx.default_global::<ModelLabels>().by_harness;
+        for model in models {
+            known.insert((harness, model.id.clone()), model.label.clone());
+        }
         let fresh = self
             .defaults
             .remember_labels(models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
@@ -2916,7 +2918,7 @@ impl Pickers {
             return;
         }
         if let Loadable::Ready(models) = &loaded {
-            self.learn_labels(models, cx);
+            self.learn_labels(harness, models, cx);
         }
         self.models.insert(harness, loaded);
         self.catalog_rev += 1;
@@ -9138,23 +9140,19 @@ pub(crate) fn chat_marks(chat: &zeron_proto::Chat, cx: &App) -> Vec<InstanceIcon
 
 /// Model labels for surfaces that hold no picker of their own (the transcript).
 #[derive(Default)]
-pub(crate) struct ModelLabels(HashMap<String, String>);
+pub(crate) struct ModelLabels {
+    by_harness: HashMap<(HarnessId, String), String>,
+    remembered: HashMap<String, String>,
+}
 
 impl gpui::Global for ModelLabels {}
 
-impl ModelLabels {
-    fn learn<'a>(cx: &mut App, labels: impl Iterator<Item = (&'a str, &'a str)>) {
-        let known = &mut cx.default_global::<Self>().0;
-        for (id, label) in labels {
-            known.insert(id.to_owned(), label.to_owned());
-        }
-    }
-}
-
 pub(crate) fn model_display_label(harness: HarnessId, id: &str, cx: &App) -> String {
-    cx.try_global::<ModelLabels>()
-        .and_then(|labels| labels.0.get(id).cloned())
+    let labels = cx.try_global::<ModelLabels>();
+    labels
+        .and_then(|labels| labels.by_harness.get(&(harness, id.to_owned())).cloned())
         .or_else(|| curated_model_label(harness, id))
+        .or_else(|| labels.and_then(|labels| labels.remembered.get(id).cloned()))
         .unwrap_or_else(|| id.to_owned())
 }
 
