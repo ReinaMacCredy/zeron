@@ -999,6 +999,10 @@ impl SessionHandle {
         self.core.composer()
     }
 
+    pub fn session_stats(&self) -> Option<zeron_proto::SessionStats> {
+        self.core.doc().session_stats()
+    }
+
     /// Tell the client whether a transcript view is on screen (marks seen on
     /// attach; prioritizes this room's sync in live mode).
     pub fn set_view_attached(&self, attached: bool) {

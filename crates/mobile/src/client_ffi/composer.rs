@@ -1,7 +1,9 @@
 use serde_json::{Map, Value};
 use zeron_client::model_picks;
 
-use super::{ChatConfig, CoreClient, CoreResult, ModelInfo, PermissionMode, on_runtime};
+use super::{
+    ChatConfig, CoreClient, CoreResult, ModelInfo, PermissionMode, SessionHandle, on_runtime,
+};
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct PermissionModeInfo {
@@ -259,5 +261,49 @@ impl CoreClient {
                 .await
         })
         .await
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct StatsRow {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SessionStatsView {
+    pub cost: Option<String>,
+    pub priced: bool,
+    pub cost_note: Option<String>,
+    pub tokens: String,
+    pub split: Vec<StatsRow>,
+    pub rows: Vec<StatsRow>,
+}
+
+#[uniffi::export]
+impl SessionHandle {
+    pub fn stats_view(&self, now_ms: i64) -> Option<SessionStatsView> {
+        use zeron_proto::stats_view::{Cache, cost_headline, cost_note, stats_rows, token_split};
+        use zeron_proto::usage::format_tokens;
+        let stats = self.inner.session_stats()?;
+        let cache = Cache::of(&stats, self.inner.snapshot().working, now_ms);
+        let row = |label: &str, value: String| StatsRow {
+            label: label.to_owned(),
+            value,
+        };
+        Some(SessionStatsView {
+            cost: cost_headline(&stats),
+            priced: stats.cost_usd().is_some(),
+            cost_note: cost_note(&stats),
+            tokens: format!("{} tokens", format_tokens(stats.total_tokens())),
+            split: token_split(&stats)
+                .into_iter()
+                .map(|(label, n)| row(label, format_tokens(n)))
+                .collect(),
+            rows: stats_rows(&stats, cache)
+                .into_iter()
+                .map(|(label, value)| row(label, value))
+                .collect(),
+        })
     }
 }

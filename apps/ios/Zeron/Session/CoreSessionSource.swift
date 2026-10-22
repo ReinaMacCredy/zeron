@@ -91,7 +91,7 @@ final class CoreSessionSource: SessionSource {
                 symbol: fraction >= 0.85 ? "exclamationmark.circle" : "circle.lefthalf.filled",
                 tint: fraction >= 0.85 ? Palette.warning : nil
             ))
-        } else if contextContent().card != nil {
+        } else if contextContent() != .init() {
             chips.append(ComposerChip(id: "context", title: "Context", symbol: "circle.lefthalf.filled"))
         }
         next.chips = chips
@@ -150,8 +150,9 @@ final class CoreSessionSource: SessionSource {
     }
 
     private func contextContent() -> ContextSheetViewController.Content {
-        guard let model = currentModel, let config = client.sessionConfig(chatId: chatId) else { return .init() }
-        return .init(card: contextCard(model: model, config: config, tokens: handle.composer().contextUsage?.tokens))
+        let stats = handle.statsView(nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+        guard let model = currentModel, let config = client.sessionConfig(chatId: chatId) else { return .init(stats: stats) }
+        return .init(card: contextCard(model: model, config: config, tokens: handle.composer().contextUsage?.tokens), stats: stats)
     }
 
     func chipSheet(_ id: String) -> UIViewController? {

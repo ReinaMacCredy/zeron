@@ -9,6 +9,7 @@
 //! id), streaming replies through `SegmentWriter`, flipping session status
 //! rows, draining the queue, and answering relay RPCs.
 
+mod composer;
 mod fixtures;
 mod png;
 mod transcripts;
@@ -223,6 +224,7 @@ impl DemoHost {
         for entry in &entries {
             doc.push_message(entry).map_err(doc_err)?;
         }
+        composer::seed_meta(chat_id, &doc, now_ms()).map_err(doc_err)?;
         Ok(doc)
     }
 

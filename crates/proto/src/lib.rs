@@ -27,6 +27,7 @@ pub mod quotes;
 pub mod routing;
 pub mod sidebar_pins;
 pub mod source_control;
+pub mod stats_view;
 pub mod supervisor;
 pub mod tools;
 pub mod ui_driver;
