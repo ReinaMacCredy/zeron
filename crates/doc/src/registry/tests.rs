@@ -2764,14 +2764,18 @@ fn task_steps_sync_in_order_and_follow_their_task_out() {
 fn a_new_plan_keeps_the_steps_a_thread_or_outcome_holds() {
     let mut doc = RegistryDoc::new("a");
     doc.create_task(&task("t1", "Shop backend")).unwrap();
-    for id in ["run", "open", "done"] {
+    for id in ["run", "open", "done", "gone"] {
         doc.create_task_step(&step(id, "t1", id)).unwrap();
     }
-    let bind = zeron_proto::TaskStepPatch {
-        chat_id: Some(Some("child".into())),
+    doc.upsert_chat(&chat("child", "a")).unwrap();
+    let bind = |chat: &str| zeron_proto::TaskStepPatch {
+        chat_id: Some(Some(chat.into())),
         ..Default::default()
     };
-    doc.update_task_step("run", &bind, ts(3_000)).unwrap();
+    doc.update_task_step("run", &bind("child"), ts(3_000))
+        .unwrap();
+    doc.update_task_step("gone", &bind("deleted-thread"), ts(3_000))
+        .unwrap();
     let finish = zeron_proto::TaskStepPatch {
         outcome: Some(Some(zeron_proto::StepOutcome::Skipped)),
         ..Default::default()
@@ -2782,6 +2786,10 @@ fn a_new_plan_keeps_the_steps_a_thread_or_outcome_holds() {
         .unwrap();
     assert_eq!(step_ids(&doc, "t1"), ["run", "done", "n1", "n2"]);
     assert!(doc.task_step("open").is_none());
+    assert!(
+        doc.task_step("gone").is_none(),
+        "a step whose thread was deleted is unstarted"
+    );
 
     let before = doc.read_task_steps().unwrap();
     let refused = [step("n3", "t1", "Fine"), step("n4", "t1", "  ")];

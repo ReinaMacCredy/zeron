@@ -630,11 +630,7 @@ impl TaskCard {
                 if paths.is_empty() {
                     return;
                 }
-                let room = zeron_doc::TASK_IMAGES_MAX.saturating_sub(open.images.len());
-                if paths.len() > room {
-                    crate::toast::error(cx, "A task holds up to 12 images.");
-                }
-                open.images.extend(paths.into_iter().take(room));
+                images::append(&mut open.images, paths, cx);
                 if open.seen {
                     card.save_images(cx);
                 }

@@ -2016,8 +2016,8 @@ impl Pickers {
         self.state.read(cx).engine().cloned()
     }
 
-    /// The selected target device when it differs from the connected
-    /// engine's own — harness/model catalogs come from the device that RUNS
+    /// The bound chat's device, else the selected target device, when it differs
+    /// from the connected engine's own — harness/model catalogs come from the device that RUNS
     /// the agents (the CLIs live there; the viewer may have neither claude
     /// nor codex installed — user report: "can't load codex models/traits
     /// anywhere" from a Mac without codex).

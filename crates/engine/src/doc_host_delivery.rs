@@ -188,7 +188,7 @@ mod tests {
                 .any(|(key, value)| key == "hostDevice" && value == "remote-host")
         );
         let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
+            let (mut stream, _) = crate::discovery_probe::accept(&listener).await.unwrap();
             let mut request = Vec::new();
             let mut buf = [0; 4096];
             loop {

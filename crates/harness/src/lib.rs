@@ -456,6 +456,9 @@ pub mod install;
 pub(crate) mod jsonrpc;
 mod launch;
 pub use launch::LaunchOverrides;
+#[cfg(test)]
+#[path = "../../engine/tests/support/discovery_probe.rs"]
+mod discovery_probe;
 mod limit_text;
 pub mod mock;
 mod model_context;

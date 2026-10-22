@@ -75,6 +75,10 @@ pub mod workspace_host;
 pub mod workspace_search;
 mod worktree_settings;
 
+#[cfg(test)]
+#[path = "../tests/support/discovery_probe.rs"]
+mod discovery_probe;
+
 pub use agent_accounts::{AgentAccounts, AgentAccountsConfig};
 pub use agent_profiles::AgentProfilesStore;
 pub use auth::{Auth, AuthConfig, AuthState, AuthUser, OrgMembership};

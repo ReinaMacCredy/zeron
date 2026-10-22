@@ -7117,7 +7117,7 @@ mod tests {
             format!("http://{}/archive.zip", listener.local_addr().unwrap()).into_boxed_str(),
         );
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
             let mut headers = Vec::new();
             let mut buf = [0; 4096];
             while !headers.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
@@ -7414,7 +7414,7 @@ mod tests {
     #[tokio::test]
     async fn get_working_tree_reads_space_checkouts_only_and_survives_the_wire() {
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
         let repo = root.join("repo");
         let linked = root.join("linked");
         let outside = root.join("outside");
@@ -7942,6 +7942,7 @@ mod tests {
             std::fs::create_dir(path).unwrap();
         }
         git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "core.autocrlf", "false"]);
         std::fs::write(repo.join("a.txt"), "a\n").unwrap();
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-m", "first"]);
@@ -8463,7 +8464,7 @@ mod tests {
     #[tokio::test]
     async fn sync_branch_checks_the_head_and_the_busy_policy_and_replies_through_the_wire() {
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
         let git = |cwd: &std::path::Path, args: &[&str]| git(cwd, args).trim().to_owned();
         let remote = root.join("remote.git");
         let repo = root.join("repo");
@@ -8622,6 +8623,7 @@ mod tests {
         }
         for args in [
             &["init", "-q", "-b", "main"][..],
+            &["config", "core.autocrlf", "false"],
             &["config", "user.name", "Test"],
             &["config", "user.email", "test@example.com"],
             &["config", "commit.gpgsign", "false"],

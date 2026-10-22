@@ -1999,7 +1999,7 @@ mod pinned_session_tests {
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
         });
-        let (_host, cx) = cx.add_window_view(|_, cx| {
+        let (host, cx) = cx.add_window_view(|_, cx| {
             SidebarHost(cx.new(|cx| {
                 let state = cx.new(|_| AppState::new());
                 let mut shell = Shell::new(
@@ -2055,6 +2055,39 @@ mod pinned_session_tests {
         );
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("sidebar-hover-card").is_none());
+
+        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("sidebar-hover-card").is_some());
+        cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
+        let shell = host.read_with(cx, |host, _| host.0.clone());
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.chats.insert(
+                    0,
+                    serde_json::from_value(serde_json::json!({
+                        "id": "n", "title": "n", "deviceId": "local", "archived": false,
+                        "createdAt": Utc::now() + chrono::Duration::minutes(1),
+                    }))
+                    .unwrap(),
+                );
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        let moved = cx.debug_bounds("chat-a").unwrap();
+        assert!(
+            !moved.contains(&row.center()),
+            "the row moved out from under the pointer"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-hover-card").is_none(),
+            "a card stays beside a row the pointer left without a move"
+        );
     }
 
     #[gpui::test]
@@ -2801,6 +2834,7 @@ pub(super) struct LeadFold {
     pub(super) open: bool,
     pub(super) rollup: SharedString,
     pub(super) asking: bool,
+    pub(super) holds_selected: bool,
 }
 
 pub(super) fn lead_rollup(children: &[(ChatIndicator, bool)]) -> (String, bool) {
@@ -5948,6 +5982,10 @@ impl Shell {
     }
 
     pub(super) fn toggle_sidebar_lead(&mut self, lead: &str, cx: &mut Context<Self>) {
+        let chats = &self.state.read(cx).chats;
+        self.settings
+            .sidebar_collapsed_leads
+            .retain(|id| chats.iter().any(|chat| &chat.id == id));
         if self.sidebar_lead_collapsed(lead) {
             self.settings
                 .sidebar_collapsed_leads
@@ -6327,6 +6365,10 @@ impl Shell {
                         open: !self.sidebar_lead_collapsed(lead),
                         rollup: rollup.into(),
                         asking,
+                        holds_selected: !matches!(self.route, Route::PullRequests)
+                            && children.iter().any(|row| {
+                                state.selected_chat.as_deref() == Some(row.chat.id.as_str())
+                            }),
                     };
                     (lead.clone(), fold)
                 })
@@ -6357,6 +6399,10 @@ impl Shell {
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
         let base_ids: Vec<String> = rows.iter().map(|row| row.chat.id.clone()).collect();
         let ordered_ids = project_pinned_first(&base_ids, pinned_order);
+        if self.sidebar_row_order != ordered_ids {
+            self.chat_hover_resync |= self.chat_status_hover.is_some();
+            self.sidebar_row_order = ordered_ids.clone();
+        }
         let rank: std::collections::HashMap<&str, usize> = ordered_ids
             .iter()
             .enumerate()
@@ -6913,6 +6959,13 @@ impl Shell {
                     continue;
                 }
             }
+            let row_of = |rows: &[(String, f32, AnyElement)], id: &str| {
+                let at = |id: &str| {
+                    rows.iter()
+                        .position(|(row, _, _)| *row == format!("c:{id}"))
+                };
+                at(id).or_else(|| at(lead_of.get(id)?))
+            };
             let collapse_key = self.sidebar_group_collapse_key(&key);
             let motion_key = format!("group:{collapse_key}");
             let collapsed = self.sidebar_collapsed_groups.contains(&collapse_key);
@@ -6929,8 +6982,7 @@ impl Shell {
                         .map(|rename| rename.chat_id.as_str()),
                 ];
                 for id in pulled.into_iter().flatten() {
-                    let key = format!("c:{id}");
-                    if let Some(index) = tail.iter().position(|(row, _, _)| *row == key) {
+                    if let Some(index) = row_of(&tail, id) {
                         rendered_rows.push(tail.remove(index));
                     }
                 }
@@ -6954,10 +7006,7 @@ impl Shell {
             self.begin_queued_sidebar_reveal(&motion_key, !collapsed, body_height);
             let kept_row = (collapsed && shelf.is_some())
                 .then(|| {
-                    let selected = format!("c:{}", selected.as_deref()?);
-                    let index = rendered_rows
-                        .iter()
-                        .position(|(key, _, _)| *key == selected)?;
+                    let index = row_of(&rendered_rows, selected.as_deref()?)?;
                     Some(rendered_rows.remove(index))
                 })
                 .flatten();

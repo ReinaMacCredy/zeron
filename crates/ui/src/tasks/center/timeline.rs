@@ -227,8 +227,9 @@ impl TaskCenter {
         let now = Utc::now();
         let starts: Vec<Option<DateTime<Utc>>> =
             nodes.iter().map(|node| self.started_at(node, cx)).collect();
-        let first = starts.iter().flatten().min().copied().unwrap_or(now);
-        self.refresh_runs(nodes, first, cx);
+        let since = starts.iter().flatten().min().copied().unwrap_or(now);
+        self.refresh_runs(nodes, since, cx);
+        let first = starts[1..].iter().flatten().min().copied().unwrap_or(since);
         let ix = self.picked(nodes);
         let outline = self.render_outline_column(root, &nodes[ix].id, theme, cx);
         let rects = self
@@ -577,6 +578,7 @@ impl TaskCenter {
             .id("task-center-timeline")
             .debug_selector(|| "task-center-timeline".into())
             .relative()
+            .overflow_hidden()
             .left(px(super::view_morph::SLIDE * (1.0 - slid)))
             .opacity(slid)
             .flex_1()

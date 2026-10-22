@@ -116,7 +116,6 @@ fn mission_context(
             context.push(id);
         }
     }
-    context.truncate(zeron_doc::TASK_CONTEXT_MAX);
     context
 }
 
@@ -198,7 +197,19 @@ impl Shell {
             .clone()
             .filter(|_| settings::current(cx).chat_mission == settings::ChatMission::Lead);
         let source = start.chat_id.as_deref().filter(|_| lead.is_none());
-        let context = mission_context(self.state.read(cx), source, &start.text, lead.as_deref());
+        let mut context =
+            mission_context(self.state.read(cx), source, &start.text, lead.as_deref());
+        if context.len() > zeron_doc::TASK_CONTEXT_MAX {
+            context.truncate(zeron_doc::TASK_CONTEXT_MAX);
+            self.show_notice(
+                crate::toast::ToastKind::Info,
+                format!(
+                    "A mission reads at most {} chats, so the later ones were left out",
+                    zeron_doc::TASK_CONTEXT_MAX
+                ),
+                cx,
+            );
+        }
         if let Some(chat_id) = source.filter(|id| context.first().map(String::as_str) != Some(id)) {
             let read = format!(
                 "Before you plan, read the chat this mission came from with read_thread, threadId \"{chat_id}\"."
@@ -826,8 +837,12 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let Some(t) = self.task_slide_t() else {
-            if self.route != Route::TaskCenter && self.task_center_ended(cx) {
-                self.close_task_center(cx);
+            if self.route != Route::TaskCenter {
+                if self.task_center_ended(cx) {
+                    self.close_task_center(cx);
+                } else {
+                    self.watch_task_center_docs(Vec::new(), cx);
+                }
             }
             return None;
         };
@@ -1250,12 +1265,17 @@ impl Shell {
                 .resolve(state)
                 .0
                 .map(|root| {
+                    let held = &self.task_center_docs;
                     let busy = crate::tasks::tree_rows(state, root, false, now)
                         .into_iter()
                         .skip(1)
                         .filter_map(|node| node.chat_id)
-                        .filter(|id| state.running_subagents_for(id, now) > 0);
-                    std::iter::once(root.to_owned()).chain(busy).collect()
+                        .filter(|id| held.contains(id) || state.running_subagents_for(id, now) > 0);
+                    let selected = state.selected_chat.as_deref() == Some(root);
+                    std::iter::once(root.to_owned())
+                        .filter(|_| !selected)
+                        .chain(busy)
+                        .collect()
                 })
                 .unwrap_or_default()
         };
@@ -1697,7 +1717,7 @@ mod tests {
         let many: String = ["a", "b", "c", "d", "e", "f"].map(link).join(" ");
         assert_eq!(
             mission_context(&state, Some("src"), &many, None),
-            ["src", "a", "b", "c", "d"]
+            ["src", "a", "b", "c", "d", "e", "f"]
         );
     }
 }

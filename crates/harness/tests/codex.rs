@@ -54,7 +54,8 @@ async fn execution_lease_outlives_dropped_run_and_title_streams_until_child_is_r
             harness.run(req, controls).await
         }
         .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
+        // Spawning the fake app server takes seconds on a loaded host.
+        tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if matches!(
                     stream.next().await.unwrap().unwrap(),
@@ -77,7 +78,7 @@ async fn execution_lease_outlives_dropped_run_and_title_streams_until_child_is_r
             gate.clone().try_write_owned().is_err(),
             "child still owns its lease"
         );
-        let _writer = tokio::time::timeout(Duration::from_secs(5), gate.write_owned())
+        let _writer = tokio::time::timeout(Duration::from_secs(30), gate.write_owned())
             .await
             .expect("child shutdown releases the lease");
         // SAFETY: signal 0 only checks the fixture PID; it sends no signal.

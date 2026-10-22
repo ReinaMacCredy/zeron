@@ -22,9 +22,20 @@ impl Shell {
         let tree = mission
             .as_ref()
             .filter(|mission| mission.role == crate::tasks::MissionRole::Lead)
-            .map(|mission| self.mission_tree_for(&chat_id, &mission.task_id, cx));
+            .map(|_| self.mission_tree_for(&chat_id, cx));
         if tree.is_none() {
-            self.mission_tree = None;
+            let lead = mission.as_ref().and_then(|mission| {
+                let state = self.state.read(cx);
+                let task = state.tasks.iter().find(|task| task.id == mission.task_id)?;
+                task.chat_id.clone()
+            });
+            let same_mission = self
+                .mission_tree
+                .as_ref()
+                .is_some_and(|(tree, _)| Some(tree.read(cx).root_id()) == lead.as_deref());
+            if !same_mission {
+                self.mission_tree = None;
+            }
         }
         let mission = mission?;
         let theme = Theme::of(cx).for_popup();
@@ -171,7 +182,6 @@ impl Shell {
     fn mission_tree_for(
         &mut self,
         lead_chat_id: &str,
-        task_id: &str,
         cx: &mut Context<Self>,
     ) -> Entity<crate::tasks::StripTree> {
         if let Some((tree, _)) = &self.mission_tree
@@ -185,13 +195,13 @@ impl Shell {
         let tree = cx.new(|cx| {
             crate::tasks::StripTree::new(state, root, true, open, crate::tasks::TreeHost::Strip, cx)
         });
-        let task = task_id.to_string();
+        let lead = lead_chat_id.to_string();
         let events = cx.subscribe(
             &tree,
             move |shell, _, event: &crate::tasks::StripTreeEvent, cx| match event {
                 crate::tasks::StripTreeEvent::Open { selection, chat_id } => match chat_id {
                     Some(chat_id) => shell.open_chat(chat_id.clone(), cx),
-                    None => shell.open_mission(task.clone(), selection.clone(), cx),
+                    None => shell.open_mission(lead.clone(), selection.clone(), cx),
                 },
                 crate::tasks::StripTreeEvent::OpenNative {
                     parent_chat_id,

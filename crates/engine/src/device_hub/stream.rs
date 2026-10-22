@@ -890,15 +890,11 @@ mod tests {
         let (accepted_count, open_count) = (accepted.clone(), open.clone());
         tokio::spawn(async move {
             loop {
-                let (mut socket, _) = listener.accept().await.unwrap();
+                let (mut socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
                 let (accepted_count, open_count) = (accepted_count.clone(), open_count.clone());
                 tokio::spawn(async move {
                     let mut request = [0u8; 1024];
-                    let n = socket.read(&mut request).await.unwrap_or(0);
-                    // A running Zeron's preview discovery probes test listeners with `HEAD /`.
-                    if !request[..n].starts_with(b"GET /vendor/serve-sim/helper/") {
-                        return;
-                    }
+                    let _ = socket.read(&mut request).await;
                     accepted_count.fetch_add(1, Ordering::SeqCst);
                     open_count.fetch_add(1, Ordering::SeqCst);
                     let head = "HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=frame\r\nConnection: close\r\n\r\n";

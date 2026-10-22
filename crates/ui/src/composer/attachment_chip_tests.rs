@@ -880,6 +880,19 @@ fn a_mission_takes_the_pasted_text_images_and_quotes_with_it(cx: &mut gpui::Test
     assert!(!notes.contains("zeron-"), "{notes:?}");
     assert!(notes.contains("keep the retry budget"), "{notes:?}");
     assert_eq!(start.images().len(), 1);
+    let brief = MissionStart {
+        text: "é".repeat(zeron_doc::TASK_TITLE_MAX_CHARS + 5),
+        staged: SidechatStaged::default(),
+        quotes: Vec::new(),
+        comments: Vec::new(),
+        ..start.clone()
+    };
+    let (title, notes) = brief.title_notes();
+    assert_eq!(title.chars().count(), zeron_doc::TASK_TITLE_MAX_CHARS);
+    assert_eq!(
+        notes, brief.text,
+        "a title cut to fit keeps the whole brief in the notes"
+    );
     handle
         .update(cx, |composer, _, cx| composer.mission_failed(&start, cx))
         .unwrap();

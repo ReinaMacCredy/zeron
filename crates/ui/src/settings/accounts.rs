@@ -797,6 +797,7 @@ impl AccountsPage {
         // device's cache is cold).
         self.login = None;
         self.busy_account = None;
+        self.action_task = None;
         self.error = None;
         self.load(force_usage_for(LoadTrigger::Mount), cx);
     }
@@ -1022,6 +1023,9 @@ impl AccountsPage {
         }
         self.busy_account = Some(account.id.clone());
         self.error = None;
+        // A probe started before the action lands is stale and would undo it.
+        self.load_task = None;
+        self.refreshing = false;
         // Tolerant param shape: both `id` and `accountId` plus the harness.
         let params = self.params(serde_json::json!({
             "id": account.id,
@@ -1035,6 +1039,8 @@ impl AccountsPage {
                 page.busy_account = None;
                 match result.map(serde_json::from_value::<AgentAccountsSnapshot>) {
                     Ok(Ok(snapshot)) => {
+                        page.load_task = None;
+                        page.refreshing = false;
                         cache_snapshot(key, &snapshot, cx);
                         page.snapshot = Loadable::Ready(snapshot);
                     }
@@ -2974,5 +2980,84 @@ mod tests {
         let ids: Vec<&str> = rows.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["c2", "x1"]);
         assert!(sidebar_accounts(&AgentAccountsSnapshot::default()).is_empty());
+    }
+
+    #[gpui::test]
+    fn a_switch_on_the_page_outlives_the_probe_that_began_before_it(cx: &mut gpui::TestAppContext) {
+        use crate::pull_request_test_support::{self as fixture, ScriptedRpc};
+        use gpui::AppContext;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let _dir = fixture::settings(cx, Default::default());
+        let account = |id: &str, active: bool| AgentAccount {
+            id: id.into(),
+            harness: HarnessId::Codex,
+            email: None,
+            plan_label: None,
+            active,
+            usage_windows: vec![],
+            usage_fetched_at: None,
+            usage_error: None,
+            display_name: None,
+            organization: None,
+            auth_kind: None,
+            switchable: true,
+            saved_at: None,
+            provider: None,
+            extra_usage: None,
+        };
+        let before = AgentAccountsSnapshot {
+            accounts: vec![account("x1", true), account("x2", false)],
+            warnings: vec![],
+        };
+        let target = before.accounts[1].clone();
+        let mut after = before.clone();
+        mark_switched(&mut after, &target);
+        let probing = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let rpc = ScriptedRpc::new({
+            let (before, probing, release) = (before.clone(), probing.clone(), release.clone());
+            move |method, _| {
+                let (before, after) = (before.clone(), after.clone());
+                let (probing, release) = (probing.clone(), release.clone());
+                async move {
+                    match method.as_str() {
+                        methods::LIST_AGENT_ACCOUNTS => {
+                            probing.store(true, Ordering::SeqCst);
+                            release.notified().await;
+                            zeron_rpc::RpcReply::value(&before)
+                        }
+                        methods::ACTIVATE_AGENT_ACCOUNT => zeron_rpc::RpcReply::value(&after),
+                        other => Err(zeron_rpc::RpcError::UnknownMethod(other.into())),
+                    }
+                }
+            }
+        });
+        let state = cx.update(|cx| fixture::state(cx, Some(rpc.client())));
+        cx.update(|cx| {
+            cx.default_global::<AccountsSnapshotCache>()
+                .0
+                .insert(None, before.clone());
+        });
+        let page = cx.new(|cx| AccountsPage::new_embedded(state, None, HarnessId::Codex, cx));
+        rpc.settle(cx, &runtime, |_| probing.load(Ordering::SeqCst));
+        page.update(cx, |page, cx| {
+            page.account_action(methods::ACTIVATE_AGENT_ACCOUNT, &target, cx)
+        });
+        rpc.settle(cx, &runtime, |cx| {
+            page.read_with(cx, |page, _| page.busy_account.is_none())
+        });
+        release.notify_one();
+        rpc.settle(cx, &runtime, |_| rpc.completed() >= 2);
+        cx.run_until_parked();
+        let active = page.read_with(cx, |page, _| {
+            page.snapshot
+                .ready()
+                .and_then(|snapshot| snapshot.accounts.iter().find(|row| row.active))
+                .map(|row| row.id.clone())
+        });
+        assert_eq!(active.as_deref(), Some("x2"));
     }
 }

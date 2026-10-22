@@ -86,6 +86,10 @@ impl TaskCenter {
     ) -> AnyElement {
         let now = Instant::now();
         let view = self.views.shown.unwrap_or_default();
+        if nodes.is_empty() {
+            self.views.morph = None;
+            self.views.from_view = None;
+        }
         if let Some(from_view) = self.views.from_view
             && self.views.morph.is_none()
         {

@@ -3482,7 +3482,7 @@ impl ComposerInput {
         }
     }
 
-    fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+    pub(crate) fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.cancel_dictation();
         self.last_edit = None;
         let offset = self.projection.normalize_range(offset..offset).start;
@@ -6118,7 +6118,15 @@ impl MissionStart {
         let text = crate::comments::with_comments(&text, &self.comments);
         let text = text.trim();
         let (title, notes) = text.split_once('\n').unwrap_or((text, ""));
-        (title.trim().to_string(), notes.trim().to_string())
+        let title = title.trim();
+        if title.chars().count() > zeron_doc::TASK_TITLE_MAX_CHARS {
+            let cut: String = title
+                .chars()
+                .take(zeron_doc::TASK_TITLE_MAX_CHARS)
+                .collect();
+            return (cut.trim_end().to_string(), text.to_string());
+        }
+        (title.to_string(), notes.trim().to_string())
     }
 
     pub fn images(&self) -> Vec<StagedAttachment> {
@@ -14514,7 +14522,14 @@ impl Render for Composer {
             .filter(|_| self.mission_available())
             .and_then(|chat_id| {
                 let started = self.started_missions.get(&chat_id).cloned()?;
-                Some((chat_id, started))
+                self.state
+                    .read(cx)
+                    .tasks
+                    .iter()
+                    .any(|task| {
+                        task.id == started.0 && !task.deleted && task.completed_at.is_none()
+                    })
+                    .then_some((chat_id, started))
             });
         // The shell owns the width and its route animation. A route-dependent
         // cap here would cut a wide composer before its return glide finishes.

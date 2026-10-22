@@ -1101,7 +1101,7 @@ mod tests {
         let url = format!("ws://{}/", listener.local_addr().unwrap());
         let (seen_tx, mut seen) = mpsc::unbounded_channel::<Vec<u8>>();
         tokio::spawn(async move {
-            let (tcp, _) = listener.accept().await.unwrap();
+            let (tcp, _) = crate::discovery_probe::accept(&listener).await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
             let mut hinges = 0;
             while let Some(Ok(Message::Binary(bytes))) = socket.next().await {

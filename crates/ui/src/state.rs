@@ -1906,8 +1906,10 @@ impl AppState {
         self.sub_transcripts.remove(doc_id);
         self.sub_context_usage.remove(doc_id);
         self.sub_session_stats.remove(doc_id);
-        self.prepared_transcripts.remove(doc_id);
-        self.transcript_baselines.remove(doc_id);
+        if self.selected_chat.as_deref() != Some(doc_id) {
+            self.prepared_transcripts.remove(doc_id);
+            self.transcript_baselines.remove(doc_id);
+        }
     }
 
     pub fn context_usage_for(&self, chat_id: Option<&str>) -> Option<zeron_proto::ContextUsage> {
@@ -5274,6 +5276,17 @@ mod tests {
         state.unwatch_subagent_doc("sub");
         assert!(state.sub_transcript("sub").is_empty());
         assert_ne!(state.transcript_revision, before_close);
+
+        state.selected_chat = Some("picked".into());
+        state.transcript_baselines.insert(
+            "picked".into(),
+            Arc::new(zeron_doc::TranscriptBaseline::default()),
+        );
+        state.unwatch_subagent_doc("picked");
+        assert!(
+            state.transcript_baselines.contains_key("picked"),
+            "releasing a doc watch keeps the selected chat's own rows"
+        );
     }
 
     fn device(id: &str, name: &str) -> Device {

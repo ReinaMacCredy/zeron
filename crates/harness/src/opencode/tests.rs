@@ -160,7 +160,7 @@ impl TurnWire {
         let server = tokio::spawn(async move {
             let mut connections = tokio::task::JoinSet::new();
             loop {
-                let (mut socket, _) = listener.accept().await.unwrap();
+                let (mut socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
                 let bus_rx = bus_rx.clone();
                 let request_tx = request_tx.clone();
                 let recorded = recorded.clone();
@@ -922,7 +922,7 @@ fn http_client_never_proxies_the_loopback_server() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/global/health", listener.local_addr().unwrap());
         tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
             read_http_request_headers(&mut socket).await;
             socket
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
@@ -952,7 +952,7 @@ async fn catalog_decodes_fragmented_http_without_retaining_unused_fields() {
     }).to_string();
     let expected: ProviderCatalog = serde_json::from_str(&body).unwrap();
     let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
+        let (mut socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
         read_http_request_headers(&mut socket).await;
         socket
             .write_all(
@@ -981,7 +981,7 @@ async fn cancelled_catalog_decode_releases_a_stalled_http_body() {
     let address = listener.local_addr().unwrap();
     let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
+        let (mut socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
         read_http_request_headers(&mut socket).await;
         socket
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n{")
@@ -2307,7 +2307,7 @@ async fn detection_routes_and_authentication() {
         let recorded = seen.clone();
         let task = tokio::spawn(async move {
             loop {
-                let (mut socket, _) = listener.accept().await.unwrap();
+                let (mut socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
                 let mut bytes = [0; 4096];
                 let n = socket.read(&mut bytes).await.unwrap();
                 let header = String::from_utf8_lossy(&bytes[..n]);
@@ -2527,7 +2527,7 @@ async fn v2_discovery_settles_and_caches_agents_with_overlapping_models() {
     let recorded = calls.clone();
     let task = tokio::spawn(async move {
         loop {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
             let mut bytes = [0; 4096];
             let n = socket.read(&mut bytes).await.unwrap();
             let request = String::from_utf8_lossy(&bytes[..n]);
@@ -2662,6 +2662,8 @@ async fn stalled_prompt_post_has_a_bounded_timeout() {
     tokio::task::yield_now().await;
     tokio::time::pause();
     tokio::time::advance(CALL_TIMEOUT + Duration::from_secs(1)).await;
+    // A paused clock jumps past done()'s own timeout while the error path waits on real loopback I/O.
+    tokio::time::resume();
     assert_eq!(wire.done().await.0, DoneStatus::Errored);
 }
 
