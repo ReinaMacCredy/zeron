@@ -917,6 +917,30 @@ impl DemoHost {
                     None => serde_json::json!({ "sent": false }),
                 }
             }
+            m::MUTATE if params["op"] == "setChatConfig" => {
+                let config: zeron_proto::ChatConfig =
+                    serde_json::from_value(params["config"].clone())
+                        .map_err(|err| ClientError::InvalidArgument(err.to_string()))?;
+                client.registry_write(|doc| doc.set_chat_config(&chat_id, &config))?;
+                if let Some(note) = params["note"]["text"].as_str() {
+                    let mut parts = vec![transcripts::text("t0", note)];
+                    parts.extend(
+                        params["note"]["hint"]
+                            .as_str()
+                            .map(|hint| transcripts::text("t1", hint)),
+                    );
+                    let host = self.host_of(&client, &chat_id);
+                    let entry = transcripts::entry(
+                        &crate::new_id(),
+                        zeron_doc::MessageRole::System,
+                        &host,
+                        now,
+                        parts,
+                    );
+                    core.write(|doc| doc.push_message(&entry))?;
+                }
+                serde_json::json!({})
+            }
             m::REMOVE_QUEUED_MESSAGE => {
                 let removed = core.write(|doc| doc.remove_queued(&id))?;
                 serde_json::json!({ "removed": removed })

@@ -601,3 +601,44 @@ fn sends_to_an_offline_host_park_as_queued_not_working() {
     assert_eq!(row.send_state, Some(zeron_client::SendState::Queued));
     assert_eq!(row.host_indicator, ChatIndicator::Idle);
 }
+
+#[test]
+fn a_model_switch_on_a_read_chat_asks_then_marks_the_transcript() {
+    let (client, _dir) = demo(fast());
+    let session = client.open_session("chat-home").unwrap();
+    session.set_view_attached(true);
+    wait_for("hydrated", Duration::from_secs(5), || {
+        session.snapshot().hydrated
+    });
+    let config = client.session_config("chat-home").unwrap();
+    let current = config.model.clone().unwrap_or_default();
+    assert!(
+        client
+            .model_switch_prompt("chat-home", &current, "A", "A")
+            .is_none()
+    );
+    let prompt = client
+        .model_switch_prompt("chat-home", "demo-next", "Opus", "Sonnet")
+        .expect("a chat with history asks first");
+    assert_eq!(prompt.title, "Switch model?");
+    let mut next = config.clone();
+    next.model = Some("demo-next".into());
+    zeron_client::runtime::shared()
+        .block_on(client.set_session_config_noted(
+            "chat-home",
+            &next,
+            &prompt.note,
+            &prompt.note_hint,
+        ))
+        .unwrap();
+    assert_eq!(
+        client.session_config("chat-home").unwrap().model.as_deref(),
+        Some("demo-next")
+    );
+    wait_for("the switch note", Duration::from_secs(5), || {
+        session.snapshot().transcript().last().is_some_and(|entry| {
+            entry.role() == MessageRole::System
+                && format!("{:?}", entry.parts()).contains("Model changed from Opus to Sonnet.")
+        })
+    });
+}

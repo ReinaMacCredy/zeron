@@ -5,6 +5,7 @@ import UIKit
 final class CoreSessionSource: SessionSource {
     private(set) var chrome = SessionChrome()
     var onChange: (() -> Void)?
+    var onPresent: ((UIViewController) -> Void)?
     private weak var app: AppModel?
     private let client: CoreClient
     private let handle: SessionHandle
@@ -281,7 +282,7 @@ final class CoreSessionSource: SessionSource {
                     let models = (try? await self.client.listModels(deviceId: self.hostDevice, harness: harness)) ?? fallbackModels(harness: harness)
                     done(models.map { m in
                         UIAction(title: m.label, subtitle: m.description, state: m.id == row.model ? .on : .off) { [weak self] _ in
-                            self?.setConfig { $0.model = m.id }
+                            self?.pickModel(m, among: models)
                         }
                     })
                 }
@@ -334,9 +335,30 @@ final class CoreSessionSource: SessionSource {
     }
 
     private func setConfig(_ change: (inout ChatConfig) -> Void) {
+        try? client.setSessionConfig(chatId: chatId, config: changedConfig(change))
+    }
+
+    private func changedConfig(_ change: (inout ChatConfig) -> Void) -> ChatConfig {
         var config = client.sessionConfig(chatId: chatId) ?? ChatConfig(harness: app?.row(chatId)?.harness ?? "claude-code", model: nil, reasoning: nil, modelOptions: [:], sandbox: .workspaceWrite)
         change(&config)
-        try? client.setSessionConfig(chatId: chatId, config: config)
+        return config
+    }
+
+    private func pickModel(_ model: ModelInfo, among models: [ModelInfo]) {
+        let current = client.sessionConfig(chatId: chatId)?.model
+        let from = models.first { $0.id == current }?.label ?? current ?? ""
+        guard let prompt = client.modelSwitchPrompt(chatId: chatId, toModel: model.id, fromLabel: from, toLabel: model.label) else {
+            return setConfig { $0.model = model.id }
+        }
+        let alert = UIAlertController(title: prompt.title, message: "\(prompt.lead).\n\n\(prompt.body)", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: prompt.cancel, style: .cancel))
+        alert.addAction(UIAlertAction(title: prompt.confirm, style: .default) { [weak self] _ in
+            guard let self else { return }
+            let config = self.changedConfig { $0.model = model.id }
+            Task { try? await self.client.setSessionConfigNoted(chatId: self.chatId, config: config, note: prompt.note, hint: prompt.noteHint) }
+        })
+        alert.preferredAction = alert.actions.last
+        onPresent?(alert)
     }
 
     func searchFiles(_ query: String) async -> [FileMatch] {

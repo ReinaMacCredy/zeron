@@ -1005,57 +1005,10 @@ struct PendingModelSwitch {
     profile: Option<profiles::ProfilePick>,
 }
 
-/// A model pick on an existing chat warns before it lands only when there
-/// is history for the harness to re-read and the pick is a real change.
-fn needs_switch_warning(has_history: bool, current: Option<&str>, next: &str) -> bool {
-    has_history && current != Some(next)
-}
-
-/// The switch-model dialog's body, in the harness's own terms: Claude Code
-/// re-reads the whole cached history on the next turn; Codex warns of
-/// degraded performance and an automatic compaction.
-fn switch_warning(harness: Option<HarnessId>, to: &str) -> String {
-    match harness {
-        Some(HarnessId::ClaudeCode) => format!(
-            "This conversation is cached for the current model. Switching to {to} means the full history gets re-read on your next message."
-        ),
-        Some(HarnessId::Codex) => "Changing models mid-conversation will degrade performance. Context may automatically compact.".into(),
-        _ => format!(
-            "Changing models mid-conversation may degrade performance. Switching to {to} means the full history gets re-read on your next message."
-        ),
-    }
-}
-
-/// The switch-provider dialog's body: the chat's session belongs to the
-/// harness that produced it, so the new one starts fresh with the
-/// conversation handed over as text.
-fn provider_switch_warning(from: &str, to: &str) -> String {
-    format!(
-        "{to} has never seen this chat. The {from} session is closed; on your next message the conversation so far is handed to {to} as plain text. Tool results, open files and {from}'s cache are not carried over."
-    )
-}
-
-/// The transcript divider's hover hint after a provider switch.
-fn provider_switch_hint(from: &str, to: &str) -> String {
-    format!(
-        "{from} session closed. The messages above were handed to {to} as text on the next turn; {from}'s tool results and file state were not carried."
-    )
-}
-
-/// The transcript divider's hover hint once the switch has happened.
-fn switch_hint(harness: Option<HarnessId>) -> &'static str {
-    match harness {
-        Some(HarnessId::ClaudeCode) => {
-            "Changing models mid-conversation drops the prompt cache. The full history is re-read on the next message."
-        }
-        Some(HarnessId::Codex) => {
-            "Changing models mid-conversation will degrade performance. Context may automatically compact."
-        }
-        _ => {
-            "Changing models mid-conversation may degrade performance. The full history is re-read on the next message."
-        }
-    }
-}
+use zeron_proto::model_switch::{
+    model_switch_prompt, needs_switch_warning, provider_switch_hint, provider_switch_warning,
+    switch_warning,
+};
 
 pub struct Pickers {
     state: Entity<AppState>,
@@ -3314,10 +3267,10 @@ impl Pickers {
                     provider_switch_hint(&from, &to),
                 )
             }
-            _ => (
-                format!("Model changed from {} to {}.", pending.from, pending.to),
-                switch_hint(harness).to_string(),
-            ),
+            _ => {
+                let prompt = model_switch_prompt(harness, &pending.from, &pending.to);
+                (prompt.note, prompt.note_hint)
+            }
         }
     }
 
@@ -9608,6 +9561,7 @@ impl Pickers {
             ),
             None => switch_warning(self.effective_harness(cx), &pending.to),
         };
+        let model = model_switch_prompt(self.effective_harness(cx), &pending.from, &pending.to);
         let (title, lead, yes_detail, no_title) = match provider {
             Some(_) => (
                 "Switch provider?",
@@ -9620,9 +9574,9 @@ impl Pickers {
             ),
             None => (
                 "Switch model?",
-                "Your next response will be slower and use more tokens".to_string(),
-                "Applies to this chat only. The change is marked in the transcript.".to_string(),
-                "No, go back".to_string(),
+                model.lead,
+                model.confirm_detail,
+                model.cancel,
             ),
         };
         let option =
@@ -9850,7 +9804,7 @@ mod tests {
         assert!(switch_warning(Some(HarnessId::ClaudeCode), "Opus 5").contains("cached"));
         assert!(switch_warning(Some(HarnessId::Codex), "GPT-5.6 Luna").contains("compact"));
         assert!(switch_warning(Some(HarnessId::Mock), "Mock B").contains("Mock B"));
-        assert!(switch_hint(None).contains("re-read"));
+        assert!(zeron_proto::model_switch::switch_hint(None).contains("re-read"));
     }
 
     struct ModelShortcutHost {

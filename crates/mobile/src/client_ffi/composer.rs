@@ -1,7 +1,7 @@
 use serde_json::{Map, Value};
 use zeron_client::model_picks;
 
-use super::{ChatConfig, CoreClient, ModelInfo, PermissionMode};
+use super::{ChatConfig, CoreClient, CoreResult, ModelInfo, PermissionMode, on_runtime};
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct PermissionModeInfo {
@@ -203,5 +203,61 @@ impl CoreClient {
                 project: t.project,
             })
             .collect()
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ModelSwitchPrompt {
+    pub title: String,
+    pub lead: String,
+    pub body: String,
+    pub confirm: String,
+    pub confirm_detail: String,
+    pub cancel: String,
+    pub cancel_detail: String,
+    pub note: String,
+    pub note_hint: String,
+}
+
+#[uniffi::export]
+impl CoreClient {
+    pub fn model_switch_prompt(
+        &self,
+        chat_id: String,
+        to_model: String,
+        from_label: String,
+        to_label: String,
+    ) -> Option<ModelSwitchPrompt> {
+        let p = self
+            .client
+            .model_switch_prompt(&chat_id, &to_model, &from_label, &to_label)?;
+        Some(ModelSwitchPrompt {
+            title: p.title,
+            lead: p.lead,
+            body: p.body,
+            confirm: p.confirm,
+            confirm_detail: p.confirm_detail,
+            cancel: p.cancel,
+            cancel_detail: p.cancel_detail,
+            note: p.note,
+            note_hint: p.note_hint,
+        })
+    }
+
+    pub async fn set_session_config_noted(
+        &self,
+        chat_id: String,
+        config: ChatConfig,
+        note: String,
+        hint: String,
+    ) -> CoreResult<()> {
+        let config = config.over(self.client.session_config(&chat_id))?;
+        let client = self.client.clone();
+        on_runtime(async move {
+            client
+                .set_session_config_noted(&chat_id, &config, &note, &hint)
+                .await
+        })
+        .await
     }
 }

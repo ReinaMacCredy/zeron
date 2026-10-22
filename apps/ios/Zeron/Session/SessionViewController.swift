@@ -182,6 +182,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         ])
 
         source.onChange = { [weak self] in self?.render(animated: true) }
+        source.onPresent = { [weak self] vc in self?.present(vc, animated: true) }
         source.attach(engine)
         render(animated: false)
         app.markSeen(chatId)
