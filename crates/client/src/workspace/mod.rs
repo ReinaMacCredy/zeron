@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use zeron_doc::{RegistryDoc, WorkspaceState};
 use zeron_proto::supervisor::SupervisorSnapshot;
 use zeron_proto::{
-    AgentAccountsSnapshot, CheckoutChangeRequestStatus, LimitResume, LimitResumes,
-    SidebarPreferences, TaskStep, TodayRuns,
+    AgentAccountsSnapshot, ChangeRequestListItem, CheckoutChangeRequestStatus, LimitResume,
+    LimitResumes, SidebarPreferences, TaskStep, TodayRuns,
 };
 
 pub use tasks::{
@@ -31,7 +31,7 @@ pub(crate) use tasks::{
     Ask, brief as task_brief, detail as task_detail, plan_estimate, strip as mission_strip,
     watch as watch_state,
 };
-pub use today::{TodayPage, TodayPart, TodaySlot, TodayTask, TodayUsage};
+pub use today::{TodayPage, TodayPart, TodayPullRequests, TodaySlot, TodayTask, TodayUsage};
 pub(crate) use view::{DeriveContext, device_online};
 pub use view::{
     DeviceView, FrontGroup, FrontPage, PROJECT_COLOR_COUNT, ProjectRef, ProjectView, PullRequestGroups,
@@ -60,6 +60,7 @@ pub(crate) struct WorkspaceStore {
     active_first: AtomicBool,
     today_runs: Mutex<HashMap<String, TodayRuns>>,
     accounts: Mutex<HashMap<String, AgentAccountsSnapshot>>,
+    today_prs: Mutex<HashMap<String, Vec<ChangeRequestListItem>>>,
     cache: Mutex<Option<StateCache>>,
     snapshot: RwLock<Arc<WorkspaceSnapshot>>,
     recompute: Mutex<()>,
@@ -80,6 +81,7 @@ impl WorkspaceStore {
             active_first: AtomicBool::new(false),
             today_runs: Mutex::new(HashMap::new()),
             accounts: Mutex::new(HashMap::new()),
+            today_prs: Mutex::new(HashMap::new()),
             cache: Mutex::new(None),
             snapshot: RwLock::new(Arc::new(WorkspaceSnapshot::default())),
             recompute: Mutex::new(()),
@@ -239,12 +241,16 @@ impl WorkspaceStore {
         device_id: &str,
         runs: Option<TodayRuns>,
         accounts: Option<AgentAccountsSnapshot>,
+        prs: Option<Vec<ChangeRequestListItem>>,
     ) {
         if let Some(runs) = runs {
             lock(&self.today_runs).insert(device_id.to_owned(), runs);
         }
         if let Some(accounts) = accounts {
             lock(&self.accounts).insert(device_id.to_owned(), accounts);
+        }
+        if let Some(prs) = prs {
+            lock(&self.today_prs).insert(device_id.to_owned(), prs);
         }
     }
 
@@ -289,6 +295,7 @@ impl WorkspaceStore {
         let settle_days = lock(&self.settle_days).clone();
         let today_runs = lock(&self.today_runs).clone();
         let accounts = lock(&self.accounts).clone();
+        let today_prs = lock(&self.today_prs).clone();
         let previous = self.snapshot();
         let mut next = view::derive(
             &state,
@@ -308,6 +315,7 @@ impl WorkspaceStore {
                 active_first: self.active_first.load(Ordering::Acquire),
                 today_runs: &today_runs,
                 accounts: &accounts,
+                today_prs: &today_prs,
                 previous: Some(&previous),
             },
         );

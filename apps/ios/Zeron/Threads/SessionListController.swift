@@ -9,6 +9,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         case session(String)
         case header(String)
         case today
+        case pullRequests
     }
 
     let app: AppModel
@@ -41,6 +42,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     private(set) var collapsed = Set(UserDefaults.standard.stringArray(forKey: "collapsedSections") ?? ["settled"])
     private var headerStates: [String: SectionHeaderCell.State] = [:]
     private var shownToday: TodayPage?
+    private var shownPulls: TodayPullRequests?
 
     init(app: AppModel) {
         self.app = app
@@ -100,9 +102,26 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             guard let page = self?.shownToday else { return }
             cell.configure(page)
         }
+        let pullsReg = UICollectionView.CellRegistration<UICollectionViewListCell, Item> { [weak self] cell, _, _ in
+            guard let pulls = self?.shownPulls else { return }
+            var c = UIListContentConfiguration.subtitleCell()
+            c.image = UIImage(systemName: "arrow.triangle.pull")
+            c.imageProperties.tintColor = StatusTone.input
+            c.text = pulls.title
+            c.textProperties.font = Fonts.ui(.sansMedium, TypeScale.size(16.5))
+            c.textProperties.color = Palette.text
+            c.secondaryText = pulls.meta
+            c.secondaryTextProperties.font = Fonts.ui(.sans, TypeScale.size(13.5))
+            c.secondaryTextProperties.color = Palette.secondary
+            c.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 10, leading: 20, bottom: 10, trailing: 20)
+            cell.contentConfiguration = c
+            cell.accessories = [.disclosureIndicator()]
+            cell.accessibilityIdentifier = "needs-you-prs"
+        }
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { [weak self] cv, path, item in
             switch item {
             case .today: cv.dequeueConfiguredReusableCell(using: todayReg, for: path, item: item)
+            case .pullRequests: cv.dequeueConfiguredReusableCell(using: pullsReg, for: path, item: item)
             case let .session(id): cv.dequeueConfiguredReusableCell(using: sessionReg, for: path, item: id)
             case let .folder(id): cv.dequeueConfiguredReusableCell(using: folderReg, for: path, item: id)
             case let .header(id) where self?.collapsible == true: cv.dequeueConfiguredReusableCell(using: sectionReg, for: path, item: id)
@@ -137,6 +156,11 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
 
     func openToday() {}
 
+    /// The Needs-you section's pull request row (front page).
+    func pullRequestAttention() -> TodayPullRequests? { nil }
+
+    func openPullRequestAttention(_ pulls: TodayPullRequests) {}
+
     func reload(animated: Bool) {
         let sections = buildSections()
         var snapshot = NSDiffableDataSourceSnapshot<String, Item>()
@@ -150,7 +174,11 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             if shownToday != nil, shownToday != today { changed.append(.today) }
         }
         shownToday = today
+        let pulls = pullRequestAttention()
+        if shownPulls != nil, shownPulls != pulls { changed.append(.pullRequests) }
+        shownPulls = pulls
         for s in sections {
+            let attention = s.id == "needs-you" ? pulls : nil
             snapshot.appendSections([s.id])
             var items: [Item] = []
             if let header = s.header {
@@ -160,7 +188,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
                     let state = SectionHeaderCell.State(
                         id: s.id,
                         title: header,
-                        count: s.sessions.count,
+                        count: s.sessions.count + Int(attention?.count ?? 0),
                         collapsed: isCollapsed(s.id),
                         live: s.sessions.contains { $0.status == .working } ? .spinner : s.sessions.contains { $0.status == .awaiting } ? .dot(StatusTone.input) : nil
                     )
@@ -182,6 +210,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
                 nextSessions[r.id] = r
                 items.append(.session(r.id))
             }
+            if attention != nil { items.append(.pullRequests) }
             snapshot.appendItems(items, toSection: s.id)
         }
         sessions = nextSessions
@@ -209,6 +238,8 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             openFolder(id)
         case .today:
             openToday()
+        case .pullRequests:
+            if let shownPulls { openPullRequestAttention(shownPulls) }
         case let .header(id) where collapsible:
             toggleSection(id)
         default:
@@ -556,13 +587,23 @@ class SessionsViewController: SessionListController {
         TodaySheetController.present(app: app, from: self)
     }
 
+    override func pullRequestAttention() -> TodayPullRequests? {
+        query.trimmingCharacters(in: .whitespaces).isEmpty ? app.today.pullRequests : nil
+    }
+
+    override func openPullRequestAttention(_ pulls: TodayPullRequests) {
+        UserDefaults.standard.set(pulls.deviceId, forKey: "pr.device")
+        UserDefaults.standard.set(pulls.repository, forKey: "pr.repository")
+        (view.window?.rootViewController as? AppRouter)?.showPullRequests(git: false, history: false)
+    }
+
     override func buildSections() -> [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] {
         if !query.trimmingCharacters(in: .whitespaces).isEmpty {
             return [("results", nil, [], app.search(query))]
         }
         var out: [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] = []
         let asking = NeedsYou.threads(app)
-        if !asking.isEmpty {
+        if !asking.isEmpty || pullRequestAttention() != nil {
             out.append(("needs-you", "Needs you", [], asking))
         }
         for f in app.frontPage.folders {

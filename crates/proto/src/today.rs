@@ -2,7 +2,11 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Local, NaiveDate, TimeZone, Timelike, Utc};
 
-use crate::{AgentAccount, AgentUsageWindow, Chat, HarnessId, Task, TodayRun, TodayRunStatus};
+use crate::change_request_assessment::{AttentionReason, Facts};
+use crate::{
+    AgentAccount, AgentUsageWindow, ChangeRequestListItem, Chat, HarnessId, Task, TodayRun,
+    TodayRunStatus,
+};
 
 pub const DAY_STARTS_AT_HOUR: u32 = 4;
 pub const SLOTS: [(&str, u32, u32); 3] = [
@@ -50,6 +54,55 @@ pub fn header_line(now: DateTime<Local>, needs: usize, open_tasks: usize) -> Str
         (n, _) => format!(" {n} things need you.{tasks}"),
     };
     format!("{}. {date}.{rest}", greeting(now))
+}
+
+pub fn attention_prs<'a>(
+    items: impl IntoIterator<Item = &'a ChangeRequestListItem>,
+) -> Vec<(&'a ChangeRequestListItem, Vec<AttentionReason>)> {
+    let mut seen = HashSet::new();
+    items
+        .into_iter()
+        .filter(|item| seen.insert(item.url.as_str()))
+        .filter_map(|item| {
+            let attention = Facts::from_item(item).assess().attention;
+            (!attention.is_empty()).then_some((item, attention))
+        })
+        .collect()
+}
+
+fn attention_breakdown(prs: &[(&ChangeRequestListItem, Vec<AttentionReason>)]) -> String {
+    [
+        (AttentionReason::ReviewRequested, "to review"),
+        (AttentionReason::FeedbackOnAuthored, "need changes"),
+        (AttentionReason::FailingCi, "failing CI"),
+    ]
+    .into_iter()
+    .filter_map(|(reason, label)| {
+        let count = prs.iter().filter(|(_, why)| why.contains(&reason)).count();
+        (count > 0).then(|| format!("{count} {label}"))
+    })
+    .collect::<Vec<_>>()
+    .join(" · ")
+}
+
+pub fn attention_row(prs: &[(&ChangeRequestListItem, Vec<AttentionReason>)]) -> (String, String) {
+    let reviews = prs
+        .iter()
+        .all(|(_, why)| why.contains(&AttentionReason::ReviewRequested));
+    let count = plural(prs.len(), "pull request", "pull requests");
+    let title = if reviews {
+        format!("{count} to review")
+    } else if prs.len() == 1 {
+        format!("{count} needs you")
+    } else {
+        format!("{count} need you")
+    };
+    let meta = if reviews {
+        "GitHub".to_owned()
+    } else {
+        format!("GitHub, {}", attention_breakdown(prs))
+    };
+    (title, meta)
 }
 
 pub fn updated_label(updated: Option<DateTime<Local>>, failed: bool) -> Option<String> {
@@ -284,6 +337,49 @@ mod tests {
 
     fn local(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Local> {
         Local.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
+    }
+
+    fn pr(url: &str, authored: bool, requested: bool, ci_failed: bool) -> ChangeRequestListItem {
+        serde_json::from_value(serde_json::json!({
+            "provider": "github",
+            "repository": "reina/zeron",
+            "headRefOid": "0123456789abcdef0123456789abcdef01234567",
+            "ci": { "state": if ci_failed { "failed" } else { "passed" } },
+            "viewerDidAuthor": authored,
+            "viewerReviewRequested": requested,
+            "number": 1,
+            "title": url,
+            "url": url,
+            "state": "open",
+            "isDraft": false,
+            "reviewDecision": "reviewRequired",
+            "additions": 1,
+            "deletions": 1,
+            "mergeability": "mergeable",
+            "createdAt": "2026-10-17T00:00:00Z",
+            "updatedAt": "2026-10-17T00:00:00Z",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn attention_prs_dedupe_by_url_and_skip_quiet_ones() {
+        let mine = [pr("u/1", true, false, true), pr("u/2", true, false, false)];
+        let review = [pr("u/1", true, false, true), pr("u/3", false, true, false)];
+        let flagged = attention_prs(mine.iter().chain(&review));
+        let urls: Vec<&str> = flagged.iter().map(|(item, _)| item.url.as_str()).collect();
+        assert_eq!(urls, ["u/1", "u/3"]);
+        assert_eq!(
+            attention_row(&flagged),
+            (
+                "2 pull requests need you".to_owned(),
+                "GitHub, 1 to review · 1 failing CI".to_owned()
+            )
+        );
+        assert_eq!(
+            attention_row(&flagged[1..]),
+            ("1 pull request to review".to_owned(), "GitHub".to_owned())
+        );
     }
 
     #[test]

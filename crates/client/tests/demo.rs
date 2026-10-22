@@ -1022,6 +1022,18 @@ fn today_card_merges_both_macs_runs_tasks_and_tightest_usage() {
     assert!(!today.greeting.is_empty());
     assert!(today.summary.ends_with("to do."), "{}", today.summary);
 
+    let prs = today.pull_requests.clone().expect("PR attention row");
+    assert_eq!(
+        (prs.title.as_str(), prs.meta.as_str(), prs.count, prs.device_id.as_str()),
+        (
+            "3 pull requests need you",
+            "GitHub, 2 to review · 1 need changes · 1 failing CI",
+            3,
+            "dev-mac"
+        )
+    );
+    assert!(today.summary.contains("things need you"), "{}", today.summary);
+
     let usage = today.usage.expect("tightest window");
     assert_eq!(
         (usage.harness.as_str(), usage.window.as_str(), usage.host.device_id.as_str()),

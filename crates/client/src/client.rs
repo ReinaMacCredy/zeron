@@ -1365,14 +1365,20 @@ impl Client {
 
     pub async fn refresh_today(&self) {
         let since_ms = zeron_proto::today::work_day_start(chrono::Local::now()).timestamp_millis();
-        let hosts: Vec<String> = self
+        let hosts: Vec<(String, bool)> = self
             .workspace()
             .devices
             .iter()
             .filter(|d| d.is_execution_host && d.online)
-            .map(|d| d.id.clone())
+            .map(|d| {
+                let prs = d
+                    .capabilities
+                    .iter()
+                    .any(|c| c == zeron_proto::capabilities::PULL_REQUESTS_PAGE_V1);
+                (d.id.clone(), prs)
+            })
             .collect();
-        let fetches = hosts.iter().map(|device_id| async move {
+        let fetches = hosts.iter().map(|(device_id, prs)| async move {
             let request = zeron_proto::TodayRunsRequest {
                 since_ms,
                 chat_ids: None,
@@ -1397,7 +1403,14 @@ impl Client {
                 .await
                 .ok()
                 .and_then(|reply| serde_json::from_value(reply).ok());
-            self.inner.workspace.put_today(device_id, runs, accounts);
+            let prs = if *prs {
+                self.attention_candidates(device_id).await
+            } else {
+                None
+            };
+            self.inner
+                .workspace
+                .put_today(device_id, runs, accounts, prs);
         });
         futures::future::join_all(fetches).await;
         self.inner.recompute_workspace();

@@ -12,7 +12,17 @@ pub struct TodayPage {
     pub digest: Vec<TodaySentence>,
     pub slots: Vec<TodaySlot>,
     pub usage: Option<TodayUsage>,
+    pub pull_requests: Option<TodayPullRequests>,
     pub runs_loaded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct TodayPullRequests {
+    pub title: String,
+    pub meta: String,
+    pub count: u32,
+    pub device_id: String,
+    pub repository: String,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -115,6 +125,13 @@ impl From<&zc::TodayPage> for TodayPage {
                 used_fraction: u.used_fraction,
                 resets_in: u.resets_in.clone(),
                 host: (&u.host).into(),
+            }),
+            pull_requests: t.pull_requests.as_ref().map(|p| TodayPullRequests {
+                title: p.title.clone(),
+                meta: p.meta.clone(),
+                count: p.count,
+                device_id: p.device_id.clone(),
+                repository: p.repository.clone(),
             }),
             runs_loaded: t.runs_loaded,
         }

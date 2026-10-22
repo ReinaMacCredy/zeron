@@ -1725,29 +1725,18 @@ impl CoreClient {
     }
 
     pub async fn pull_request_repositories(&self, device_id: String) -> Vec<PrRepository> {
-        let projects: Vec<(String, String)> = self
-            .client
-            .workspace()
-            .projects
-            .iter()
-            .filter(|p| p.device_id == device_id && p.git_detected)
-            .map(|p| (p.id.clone(), p.path.clone()))
-            .collect();
-        let mut found: Vec<PrRepository> = Vec::new();
-        for (project_id, path) in projects {
-            let (client, device) = (self.client.clone(), device_id.clone());
-            if let Ok(Some(repository)) =
-                on_runtime(async move { client.checkout_repository(&device, &path, None).await })
-                    .await
-                && !found.iter().any(|known| known.repository == repository)
-            {
-                found.push(PrRepository {
-                    repository,
-                    project_id,
-                });
-            }
-        }
-        found
+        let client = self.client.clone();
+        on_runtime(async move {
+            Ok::<_, zc::ClientError>(client.pull_request_repositories(&device_id).await)
+        })
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(repository, project_id)| PrRepository {
+            repository,
+            project_id,
+        })
+        .collect()
     }
 
     pub fn pull_request_board(

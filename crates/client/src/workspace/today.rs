@@ -18,7 +18,17 @@ pub struct TodayPage {
     pub digest: Vec<Vec<TodayPart>>,
     pub slots: Vec<TodaySlot>,
     pub usage: Option<TodayUsage>,
+    pub pull_requests: Option<TodayPullRequests>,
     pub runs_loaded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TodayPullRequests {
+    pub title: String,
+    pub meta: String,
+    pub count: u32,
+    pub device_id: String,
+    pub repository: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -159,7 +169,24 @@ pub(crate) fn derive(
             _ => None,
         })
         .collect();
-    let line = today::header_line(now, asking.len(), open);
+    let mut hosts: Vec<_> = cx.today_prs.iter().collect();
+    hosts.sort_by(|a, b| a.0.cmp(b.0));
+    let flagged = today::attention_prs(hosts.iter().flat_map(|(_, items)| items.iter()));
+    let pull_requests = flagged.first().map(|(first, _)| {
+        let (title, meta) = today::attention_row(&flagged);
+        TodayPullRequests {
+            title,
+            meta,
+            count: flagged.len() as u32,
+            device_id: hosts
+                .iter()
+                .find(|(_, items)| items.iter().any(|item| item.url == first.url))
+                .map(|(device, _)| (*device).clone())
+                .unwrap_or_default(),
+            repository: first.repository.clone(),
+        }
+    });
+    let line = today::header_line(now, asking.len() + flagged.len(), open);
     let greeting = today::greeting(now);
     TodayPage {
         greeting: greeting.to_owned(),
@@ -185,6 +212,7 @@ pub(crate) fn derive(
             })
             .collect(),
         usage,
+        pull_requests,
         runs_loaded: !cx.today_runs.is_empty(),
     }
 }

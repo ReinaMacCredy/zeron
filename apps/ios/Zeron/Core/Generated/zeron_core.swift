@@ -16016,11 +16016,12 @@ public struct TodayPage: Equatable, Hashable {
     public var digest: [TodaySentence]
     public var slots: [TodaySlot]
     public var usage: TodayUsage?
+    public var pullRequests: TodayPullRequests?
     public var runsLoaded: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(greeting: String, summary: String, tasks: [TodayTask], openTasks: UInt32, prompts: UInt32, digest: [TodaySentence], slots: [TodaySlot], usage: TodayUsage?, runsLoaded: Bool) {
+    public init(greeting: String, summary: String, tasks: [TodayTask], openTasks: UInt32, prompts: UInt32, digest: [TodaySentence], slots: [TodaySlot], usage: TodayUsage?, pullRequests: TodayPullRequests?, runsLoaded: Bool) {
         self.greeting = greeting
         self.summary = summary
         self.tasks = tasks
@@ -16029,6 +16030,7 @@ public struct TodayPage: Equatable, Hashable {
         self.digest = digest
         self.slots = slots
         self.usage = usage
+        self.pullRequests = pullRequests
         self.runsLoaded = runsLoaded
     }
 
@@ -16056,6 +16058,7 @@ public struct FfiConverterTypeTodayPage: FfiConverterRustBuffer {
                 digest: FfiConverterSequenceTypeTodaySentence.read(from: &buf), 
                 slots: FfiConverterSequenceTypeTodaySlot.read(from: &buf), 
                 usage: FfiConverterOptionTypeTodayUsage.read(from: &buf), 
+                pullRequests: FfiConverterOptionTypeTodayPullRequests.read(from: &buf), 
                 runsLoaded: FfiConverterBool.read(from: &buf)
         )
     }
@@ -16069,6 +16072,7 @@ public struct FfiConverterTypeTodayPage: FfiConverterRustBuffer {
         FfiConverterSequenceTypeTodaySentence.write(value.digest, into: &buf)
         FfiConverterSequenceTypeTodaySlot.write(value.slots, into: &buf)
         FfiConverterOptionTypeTodayUsage.write(value.usage, into: &buf)
+        FfiConverterOptionTypeTodayPullRequests.write(value.pullRequests, into: &buf)
         FfiConverterBool.write(value.runsLoaded, into: &buf)
     }
 }
@@ -16086,6 +16090,72 @@ public func FfiConverterTypeTodayPage_lift(_ buf: RustBuffer) throws -> TodayPag
 #endif
 public func FfiConverterTypeTodayPage_lower(_ value: TodayPage) -> RustBuffer {
     return FfiConverterTypeTodayPage.lower(value)
+}
+
+
+public struct TodayPullRequests: Equatable, Hashable {
+    public var title: String
+    public var meta: String
+    public var count: UInt32
+    public var deviceId: String
+    public var repository: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(title: String, meta: String, count: UInt32, deviceId: String, repository: String) {
+        self.title = title
+        self.meta = meta
+        self.count = count
+        self.deviceId = deviceId
+        self.repository = repository
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TodayPullRequests: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTodayPullRequests: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TodayPullRequests {
+        return
+            try TodayPullRequests(
+                title: FfiConverterString.read(from: &buf), 
+                meta: FfiConverterString.read(from: &buf), 
+                count: FfiConverterUInt32.read(from: &buf), 
+                deviceId: FfiConverterString.read(from: &buf), 
+                repository: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TodayPullRequests, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.meta, into: &buf)
+        FfiConverterUInt32.write(value.count, into: &buf)
+        FfiConverterString.write(value.deviceId, into: &buf)
+        FfiConverterString.write(value.repository, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTodayPullRequests_lift(_ buf: RustBuffer) throws -> TodayPullRequests {
+    return try FfiConverterTypeTodayPullRequests.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTodayPullRequests_lower(_ value: TodayPullRequests) -> RustBuffer {
+    return FfiConverterTypeTodayPullRequests.lower(value)
 }
 
 
@@ -24644,6 +24714,30 @@ fileprivate struct FfiConverterOptionTypeTaskDetail: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeTaskDetail.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeTodayPullRequests: FfiConverterRustBuffer {
+    typealias SwiftType = TodayPullRequests?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeTodayPullRequests.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeTodayPullRequests.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }

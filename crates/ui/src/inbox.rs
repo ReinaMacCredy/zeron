@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, Utc};
@@ -6,14 +6,14 @@ use gpui::{
     AnyElement, ClickEvent, Context, Entity, EventEmitter, IntoElement, Render, SharedString,
     Subscription, Task, Window, div, prelude::*, px, relative,
 };
-use zeron_proto::change_request_assessment::{AttentionReason, Facts};
+use zeron_proto::change_request_assessment::AttentionReason;
+use zeron_proto::today::{
+    self, Part, day_slots, digest, header_line, is_overdue, resets_in, today_tasks, work_day,
+    work_day_start,
+};
 use zeron_proto::{
     AgentAccountsSnapshot, AgentUsageWindow, ChangeRequestListItem, Chat, ChatIndicator, HarnessId,
     SessionStatus, TodayRun, TodayRuns, TodayRunsRequest,
-};
-use zeron_proto::today::{
-    self, Part, day_slots, digest, header_line, is_overdue, plural, resets_in, today_tasks,
-    work_day, work_day_start,
 };
 use zeron_rpc::methods;
 
@@ -319,31 +319,7 @@ pub(crate) fn awaiting_chats(state: &AppState, now: DateTime<Utc>) -> Vec<&Chat>
 }
 
 pub(crate) fn attention_prs(prs: &HomePrs) -> Vec<(&ChangeRequestListItem, Vec<AttentionReason>)> {
-    let mut seen = HashSet::new();
-    prs.mine
-        .iter()
-        .chain(&prs.review)
-        .filter(|item| seen.insert(item.url.as_str()))
-        .filter_map(|item| {
-            let attention = Facts::from_item(item).assess().attention;
-            (!attention.is_empty()).then_some((item, attention))
-        })
-        .collect()
-}
-
-fn attention_breakdown(prs: &[(&ChangeRequestListItem, Vec<AttentionReason>)]) -> String {
-    [
-        (AttentionReason::ReviewRequested, "to review"),
-        (AttentionReason::FeedbackOnAuthored, "need changes"),
-        (AttentionReason::FailingCi, "failing CI"),
-    ]
-    .into_iter()
-    .filter_map(|(reason, label)| {
-        let count = prs.iter().filter(|(_, why)| why.contains(&reason)).count();
-        (count > 0).then(|| format!("{count} {label}"))
-    })
-    .collect::<Vec<_>>()
-    .join(" · ")
+    today::attention_prs(prs.mine.iter().chain(&prs.review))
 }
 
 pub(crate) fn tightest_window(
@@ -504,22 +480,7 @@ impl InboxPage {
             })
             .collect();
         if !prs.is_empty() {
-            let reviews = prs
-                .iter()
-                .all(|(_, why)| why.contains(&AttentionReason::ReviewRequested));
-            let count = plural(prs.len(), "pull request", "pull requests");
-            let title = if reviews {
-                format!("{count} to review")
-            } else if prs.len() == 1 {
-                format!("{count} needs you")
-            } else {
-                format!("{count} need you")
-            };
-            let meta = if reviews {
-                "GitHub".to_owned()
-            } else {
-                format!("GitHub, {}", attention_breakdown(prs))
-            };
+            let (title, meta) = today::attention_row(prs);
             rows.push(
                 task_row(theme, "inbox-needs-prs")
                     .child(
@@ -1117,42 +1078,6 @@ impl Render for InboxPage {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn pr(url: &str, authored: bool, requested: bool, ci_failed: bool) -> ChangeRequestListItem {
-        serde_json::from_value(serde_json::json!({
-            "provider": "github",
-            "repository": "reina/zeron",
-            "headRefOid": "0123456789abcdef0123456789abcdef01234567",
-            "ci": { "state": if ci_failed { "failed" } else { "passed" } },
-            "viewerDidAuthor": authored,
-            "viewerReviewRequested": requested,
-            "number": 1,
-            "title": url,
-            "url": url,
-            "state": "open",
-            "isDraft": false,
-            "reviewDecision": "reviewRequired",
-            "additions": 1,
-            "deletions": 1,
-            "mergeability": "mergeable",
-            "createdAt": "2026-10-17T00:00:00Z",
-            "updatedAt": "2026-10-17T00:00:00Z",
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn attention_prs_dedupe_by_url_and_skip_quiet_ones() {
-        let prs = HomePrs {
-            mine: vec![pr("u/1", true, false, true), pr("u/2", true, false, false)],
-            review: vec![pr("u/1", true, false, true), pr("u/3", false, true, false)],
-            ..Default::default()
-        };
-        let flagged = attention_prs(&prs);
-        let urls: Vec<&str> = flagged.iter().map(|(item, _)| item.url.as_str()).collect();
-        assert_eq!(urls, ["u/1", "u/3"]);
-        assert_eq!(attention_breakdown(&flagged), "1 to review · 1 failing CI");
-    }
 
     #[test]
     fn tightest_window_is_the_most_used_active_window() {

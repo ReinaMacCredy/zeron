@@ -356,6 +356,7 @@ pub(crate) struct DeriveContext<'a> {
     pub active_first: bool,
     pub today_runs: &'a HashMap<String, zeron_proto::TodayRuns>,
     pub accounts: &'a HashMap<String, zeron_proto::AgentAccountsSnapshot>,
+    pub today_prs: &'a HashMap<String, Vec<zeron_proto::ChangeRequestListItem>>,
     pub previous: Option<&'a WorkspaceSnapshot>,
 }
 

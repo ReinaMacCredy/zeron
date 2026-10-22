@@ -2,8 +2,8 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 use zeron_proto::{
     ChangeRequestComment, ChangeRequestControls, ChangeRequestDetail, ChangeRequestFilter,
-    ChangeRequestLabelCandidates, ChangeRequestMergeMethod, ChangeRequestPage,
-    ChangeRequestReviewEvent, ChangeRequestReviewerCandidates, CheckoutDiff,
+    ChangeRequestLabelCandidates, ChangeRequestListItem, ChangeRequestMergeMethod,
+    ChangeRequestPage, ChangeRequestReviewEvent, ChangeRequestReviewerCandidates, CheckoutDiff,
     GenerateCommitMessageRequest, GeneratedCommitMessage, GetWorkingTreeFileDiffRequest,
     GetWorkingTreeRequest, GitAgentBusyPolicy, GitHistoryPage, RunWorkingTreeActionRequest,
     SyncBranchReply, SyncBranchRequest, SyncDirection, WorkingTree, WorkingTreeAction,
@@ -69,6 +69,47 @@ impl Client {
             json!({ "cwd": cwd, "repository": repository }),
         )
         .await
+    }
+
+    pub async fn pull_request_repositories(&self, device_id: &str) -> Vec<(String, String)> {
+        let projects: Vec<(String, String)> = self
+            .workspace()
+            .projects
+            .iter()
+            .filter(|p| p.device_id == device_id && p.git_detected)
+            .map(|p| (p.id.clone(), p.path.clone()))
+            .collect();
+        let mut found: Vec<(String, String)> = Vec::new();
+        for (project_id, path) in projects {
+            if let Ok(Some(repository)) = self.checkout_repository(device_id, &path, None).await
+                && !found
+                    .iter()
+                    .any(|(known, _)| known.eq_ignore_ascii_case(&repository))
+            {
+                found.push((repository, project_id));
+            }
+        }
+        found
+    }
+
+    pub(crate) async fn attention_candidates(
+        &self,
+        device_id: &str,
+    ) -> Option<Vec<ChangeRequestListItem>> {
+        let mut items = Vec::new();
+        for (repository, _) in self.pull_request_repositories(device_id).await {
+            for filter in [
+                ChangeRequestFilter::Authored,
+                ChangeRequestFilter::Reviewing,
+            ] {
+                let page = self
+                    .pull_request_page(device_id, &repository, filter, None, false)
+                    .await
+                    .ok()?;
+                items.extend(page.items);
+            }
+        }
+        Some(items)
     }
 
     pub async fn pull_request(

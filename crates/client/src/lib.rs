@@ -60,8 +60,8 @@ pub use workspace::{
     HostRef, ItemSend, MissionOptions, MissionStrip, NeedsYouEntry, NeedsYouKind, PlanEstimate,
     ProjectRef, ProjectView, PullRequestGroups, SearchField, SearchHit, SectionView, SessionRow,
     StepView, SupervisorHost, SupervisorPage, TaskDetail, TaskDraft, TaskRow, TasksPage, TodayPage,
-    TodayPart, TodaySlot, TodayTask, TodayUsage, WakeEntry, WatchState, WorkspaceSnapshot,
-    project_color_index, relative_time_label,
+    TodayPart, TodayPullRequests, TodaySlot, TodayTask, TodayUsage, WakeEntry, WatchState,
+    WorkspaceSnapshot, project_color_index, relative_time_label,
 };
 
 /// Re-exported so consumers (the layout engine) name the exact doc types the

@@ -60,7 +60,7 @@ final class AppModel {
     private(set) var tasks = TasksPage(missions: [], needsYou: [], working: [], toDo: [], done: [], needsYouCount: 0)
     private(set) var supervisor = SupervisorPage(hosts: [], doneToday: [], wakes: [])
     private(set) var needsYou: [NeedsYouEntry] = []
-    private(set) var today = TodayPage(greeting: "", summary: "", tasks: [], openTasks: 0, prompts: 0, digest: [], slots: [], usage: nil, runsLoaded: false)
+    private(set) var today = TodayPage(greeting: "", summary: "", tasks: [], openTasks: 0, prompts: 0, digest: [], slots: [], usage: nil, pullRequests: nil, runsLoaded: false)
     private var needsYouObservers: [UUID: () -> Void] = [:]
     private var rows: [String: SessionRow] = [:]
     private var rawProjects: [ProjectView] = []
