@@ -34,6 +34,7 @@ pub mod connectivity;
 mod demo;
 pub mod error;
 pub mod events;
+pub mod invocations;
 mod live;
 pub mod model_picks;
 pub mod model_switch;

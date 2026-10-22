@@ -55,6 +55,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     private let mark = UIImageView()
     private var draft: NewSessionDraft
     private var models: [ModelChoice] = []
+    private var invocationCatalogs: [String: InvocationCatalog] = [:]
 
     /// Embedded in the iPad split's main column (no sheet chrome).
     private let embedded: Bool
@@ -144,6 +145,14 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         composer.threadSearch = { [weak self] q in
             guard let self, let p = self.project else { return [] }
             return self.app.threadMentions(deviceId: p.device, spaceId: p.id, query: q)
+        }
+        composer.invocationCatalog = { [weak self] skill in
+            guard let self, let client = self.app.client, !self.deviceId.isEmpty else { return nil }
+            let key = "\(self.deviceId)|\(self.project?.id ?? "")|\(self.draft.harness)|\(skill)"
+            if let hit = self.invocationCatalogs[key] { return hit }
+            let found = await client.invocationCatalog(deviceId: self.deviceId, harness: self.draft.harness, chatId: nil, spaceId: self.project?.id, skill: skill)
+            if found.warning == nil { self.invocationCatalogs[key] = found }
+            return found
         }
         composer.onSend = { [weak self] text, images, _ in
             self?.create(text: text, images: images) ?? false ? .sent : .kept

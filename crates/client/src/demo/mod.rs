@@ -793,6 +793,9 @@ impl DemoHost {
             return Err(ClientError::HostUnavailable(device_id.to_owned()));
         }
         tokio::time::sleep(Duration::from_millis(80)).await;
+        if let Some(catalog) = composer::invocation_catalog(method) {
+            return Ok(catalog);
+        }
         let chat_id = params["chatId"].as_str().unwrap_or_default().to_owned();
         let id = params["id"].as_str().unwrap_or_default().to_owned();
         let core = client

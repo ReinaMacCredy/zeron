@@ -18,6 +18,7 @@ final class CoreSessionSource: SessionSource {
     private weak var engine: TranscriptView?
     private var models: [ModelInfo] = []
     private var modelsKey = ""
+    private var invocationCatalogs: [String: InvocationCatalog] = [:]
     private weak var contextSheet: ContextSheetViewController?
 
     init(app: AppModel, client: CoreClient, handle: SessionHandle, chatId: String) {
@@ -396,6 +397,15 @@ final class CoreSessionSource: SessionSource {
 
     func threadMentions(_ query: String) -> [ThreadMention] {
         client.threadMentions(deviceId: hostDevice, spaceId: app?.row(chatId)?.project?.id, exclude: chatId, query: query)
+    }
+
+    func invocationCatalog(skill: Bool) async -> InvocationCatalog? {
+        let harness = app?.row(chatId)?.harness ?? "claude-code"
+        let key = "\(hostDevice)|\(harness)|\(skill)"
+        if let hit = invocationCatalogs[key] { return hit }
+        let found = await client.invocationCatalog(deviceId: hostDevice, harness: harness, chatId: chatId, spaceId: nil, skill: skill)
+        if found.warning == nil { invocationCatalogs[key] = found }
+        return found
     }
 
     private static let images = NSCache<NSString, UIImage>()

@@ -335,3 +335,125 @@ impl SessionHandle {
         self.inner.keep_full_history();
     }
 }
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct InvocationEntry {
+    pub name: String,
+    pub title: String,
+    pub detail: String,
+    pub skill: bool,
+    pub insert: String,
+    pub link: Option<String>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct InvocationCatalog {
+    pub entries: Vec<InvocationEntry>,
+    pub skill: bool,
+    pub supported: bool,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct InvocationMatches {
+    pub entries: Vec<InvocationEntry>,
+    pub note: Option<String>,
+}
+
+fn invocation_entry(
+    candidate: zeron_proto::command_catalog::InvocationCandidate,
+    references: bool,
+) -> InvocationEntry {
+    use zeron_proto::command_catalog::{
+        invocation_detail, invocation_insertion, skill_display_name, zeron_owned_command,
+    };
+    let skill = candidate.invocation.prefix() == '$';
+    let insert = format!("{}{}", candidate.invocation.prefix(), candidate.name);
+    let link = (!zeron_owned_command(&candidate.name))
+        .then(|| invocation_insertion(&candidate.invocation, references))
+        .filter(|link| *link != insert);
+    InvocationEntry {
+        title: if skill {
+            skill_display_name(&candidate.name)
+        } else {
+            insert.clone()
+        },
+        detail: invocation_detail(&candidate.description, candidate.input_hint.as_deref()),
+        name: candidate.name,
+        skill,
+        insert,
+        link,
+    }
+}
+
+#[uniffi::export]
+impl CoreClient {
+    pub async fn invocation_catalog(
+        &self,
+        device_id: String,
+        harness: String,
+        chat_id: Option<String>,
+        space_id: Option<String>,
+        skill: bool,
+    ) -> InvocationCatalog {
+        let client = self.client.clone();
+        let found = on_runtime(async move {
+            Ok(client
+                .invocation_catalog(
+                    &device_id,
+                    &harness,
+                    chat_id.as_deref(),
+                    space_id.as_deref(),
+                    skill,
+                )
+                .await)
+        })
+        .await;
+        match found {
+            Ok(found) => InvocationCatalog {
+                entries: found
+                    .entries
+                    .into_iter()
+                    .map(|c| invocation_entry(c, found.references))
+                    .collect(),
+                skill,
+                supported: found.supported,
+                warning: found.warning,
+            },
+            Err(_) => InvocationCatalog {
+                entries: Vec::new(),
+                skill,
+                supported: true,
+                warning: Some(
+                    zeron_proto::command_catalog::catalog_error_message(
+                        zeron_proto::command_catalog::CatalogFailure::Failed,
+                        skill,
+                    )
+                    .into(),
+                ),
+            },
+        }
+    }
+}
+
+/// The phone keeps `$` skills out of the `/` menu, the desktop default.
+#[uniffi::export]
+pub fn filter_invocations(catalog: InvocationCatalog, query: String) -> InvocationMatches {
+    let names: Vec<&str> = catalog.entries.iter().map(|e| e.name.as_str()).collect();
+    let entries: Vec<InvocationEntry> = zeron_proto::view::filter_indices(&query, &names)
+        .into_iter()
+        .map(|ix| catalog.entries[ix].clone())
+        .collect();
+    let note = catalog.warning.clone().or_else(|| {
+        entries.is_empty().then(|| {
+            zeron_proto::command_catalog::catalog_empty_message(
+                catalog.skill,
+                catalog.supported,
+                catalog.entries.is_empty(),
+                true,
+            )
+            .into()
+        })
+    });
+    InvocationMatches { entries, note }
+}

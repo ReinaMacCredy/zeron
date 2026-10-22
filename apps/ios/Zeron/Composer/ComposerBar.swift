@@ -73,6 +73,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     /// `@` file search (nil disables mentions).
     var mentionSearch: ((String) async -> [FileMatch])?
     var threadSearch: ((String) -> [ThreadMention])?
+    var invocationCatalog: ((Bool) async -> InvocationCatalog?)?
 
     // State
     var running = false { didSet { if running != oldValue { refreshAction(animated: true) } } }
@@ -351,9 +352,24 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     // MARK: Mentions
 
     private func updateMentionQuery() {
-        guard mentionSearch != nil || threadSearch != nil else { return }
-        mentionQuery = MentionIndex.activeQuery(in: textView.text, cursor: textView.selectedRange.location)
+        guard mentionSearch != nil || threadSearch != nil || invocationCatalog != nil else { return }
         mentionTask?.cancel()
+        if let catalog = invocationCatalog, let q = MentionIndex.invocationQuery(in: textView.text, cursor: textView.selectedRange.location) {
+            mentionQuery = (q.range, q.query)
+            mentionTask = Task { [weak self] in
+                guard let found = await catalog(q.skill), !Task.isCancelled, let self, self.mentionQuery?.query == q.query else { return }
+                let matches = filterInvocations(catalog: found, query: q.query)
+                self.suggestions.show(invocations: matches.entries, note: matches.note)
+                self.setSuggestionsVisible(!self.suggestions.isEmpty)
+            }
+            return
+        }
+        guard mentionSearch != nil || threadSearch != nil else {
+            mentionQuery = nil
+            setSuggestionsVisible(false)
+            return
+        }
+        mentionQuery = MentionIndex.activeQuery(in: textView.text, cursor: textView.selectedRange.location)
         guard let q = mentionQuery else {
             setSuggestionsVisible(false)
             return
@@ -391,6 +407,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         switch pick {
         case .file(let file): token = mentions.token(for: file) + " "
         case .thread(let thread): token = mentions.token(for: thread) + " "
+        case .invocation(let entry): token = mentions.token(for: entry) + " "
         }
         let ns = textView.text as NSString
         textView.text = ns.replacingCharacters(in: q.range, with: token)

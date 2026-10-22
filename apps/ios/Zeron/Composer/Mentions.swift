@@ -32,16 +32,32 @@ struct MentionIndex {
         return out
     }
 
+    mutating func token(for entry: InvocationEntry) -> String {
+        if let link = entry.link { tokens[entry.insert] = link }
+        return entry.insert
+    }
+
     mutating func reset() { tokens.removeAll() }
 
+    /// A second `/` makes it a path, and `$5` or `$HOME` is not a skill.
+    static func invocationQuery(in text: String, cursor: Int) -> (range: NSRange, query: String, skill: Bool)? {
+        for (prefix, skill) in [(UInt16(36) /* $ */, true), (UInt16(47) /* / */, false)] {
+            if let q = activeQuery(in: text, cursor: cursor, prefix: prefix), !q.query.contains("/"),
+               !(skill && q.query.first.map { $0.isNumber || $0.isUppercase } == true) {
+                return (q.range, q.query, skill)
+            }
+        }
+        return nil
+    }
+
     /// The `@query` being typed at `cursor`, if any (no whitespace inside).
-    static func activeQuery(in text: String, cursor: Int) -> (range: NSRange, query: String)? {
+    static func activeQuery(in text: String, cursor: Int, prefix: UInt16 = 64 /* @ */) -> (range: NSRange, query: String)? {
         let ns = text as NSString
         guard cursor <= ns.length else { return nil }
         var i = cursor - 1
         while i >= 0 {
             let c = ns.character(at: i)
-            if c == 64 /* @ */ {
+            if c == prefix {
                 let before = i > 0 ? ns.character(at: i - 1) : 32
                 guard before == 32 || before == 10 else { return nil }
                 let range = NSRange(location: i, length: cursor - i)
@@ -57,6 +73,7 @@ struct MentionIndex {
 enum MentionPick {
     case file(FileMatch)
     case thread(ThreadMention)
+    case invocation(InvocationEntry)
 }
 
 /// Glass list of matching threads and files above the composer.
@@ -66,8 +83,10 @@ final class MentionSuggestions: UIView {
     private let stack = UIStackView()
     private(set) var threads: [ThreadMention] = []
     private(set) var files: [FileMatch] = []
+    private(set) var invocations: [InvocationEntry] = []
+    private var note: String?
 
-    var isEmpty: Bool { threads.isEmpty && files.isEmpty }
+    var isEmpty: Bool { threads.isEmpty && files.isEmpty && invocations.isEmpty && note == nil }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -90,7 +109,23 @@ final class MentionSuggestions: UIView {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    func show(invocations: [InvocationEntry], note: String?) {
+        threads = []
+        files = []
+        self.invocations = Array(invocations.prefix(6))
+        self.note = note
+        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        if let note { stack.addArrangedSubview(header(note)) }
+        for (i, entry) in self.invocations.enumerated() {
+            let b = row(symbol: entry.skill ? "sparkles" : "command", title: entry.title, subtitle: entry.detail, mono: false) { [weak self] in self?.onPick?(.invocation(entry)) }
+            b.accessibilityIdentifier = "invocation-\(i)"
+            stack.addArrangedSubview(b)
+        }
+    }
+
     func show(threads: [ThreadMention], files: [FileMatch]) {
+        invocations = []
+        note = nil
         self.threads = threads
         self.files = Array(files.prefix(threads.isEmpty ? 5 : 3))
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
@@ -118,6 +153,7 @@ final class MentionSuggestions: UIView {
         label.text = text
         label.font = Fonts.ui(.sansMedium, 12)
         label.textColor = Palette.tertiary
+        label.numberOfLines = 0
         let wrap = UIView()
         label.translatesAutoresizingMaskIntoConstraints = false
         wrap.addSubview(label)

@@ -667,3 +667,29 @@ fn a_large_idle_claude_chat_offers_compaction_until_it_compacts() {
         composer.resume_compaction.is_none() && !composer.compacting
     });
 }
+
+#[test]
+fn the_demo_catalog_offers_zeron_commands_and_skills_apart() {
+    let (client, _dir) = demo(fast());
+    let session = client.open_session("chat-home").unwrap();
+    let host = session.composer().host.device_id.clone();
+    let rt = zeron_client::runtime::shared();
+    let commands = rt.block_on(client.invocation_catalog(
+        &host,
+        "claude-code",
+        Some("chat-home"),
+        None,
+        false,
+    ));
+    let names: Vec<&str> = commands.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(
+        &names[..4],
+        ["btw", "sidechat", "compact", "computer-use"],
+        "Zeron's own commands ride first"
+    );
+    assert!(names.contains(&"review") && !names.contains(&"pdf"));
+    assert!(commands.warning.is_none());
+    let skills = rt.block_on(client.invocation_catalog(&host, "claude-code", None, None, true));
+    assert!(!skills.entries.is_empty());
+    assert!(skills.entries.iter().all(|e| e.invocation.prefix() == '$'));
+}

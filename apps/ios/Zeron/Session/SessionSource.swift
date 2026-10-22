@@ -89,6 +89,7 @@ protocol SessionSource: AnyObject {
     /// Workspace files for `@` mentions.
     func searchFiles(_ query: String) async -> [FileMatch]
     func threadMentions(_ query: String) -> [ThreadMention]
+    func invocationCatalog(skill: Bool) async -> InvocationCatalog?
     var compactBlocked: String? { get }
     func compact(focus: String?)
     func keepFullHistory()
@@ -96,6 +97,7 @@ protocol SessionSource: AnyObject {
 
 extension SessionSource {
     func chipSheet(_ id: String) -> UIViewController? { nil }
+    func invocationCatalog(skill: Bool) async -> InvocationCatalog? { nil }
     var compactBlocked: String? { nil }
     func compact(focus: String?) {}
     func keepFullHistory() {}

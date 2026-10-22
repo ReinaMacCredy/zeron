@@ -7,6 +7,8 @@ pub const COMPACT_COMMAND: &str = "compact";
 pub const SIDECHAT_COMMAND: &str = "sidechat";
 pub const BTW_COMMAND: &str = "btw";
 
+pub const COMPUTER_USE_COMMAND: &str = "computer-use";
+
 /// `Some(argument)` when the prompt invokes zeron's own `command`: the first
 /// token must be exactly `/command`, and the rest of the line is its argument.
 pub fn app_command_argument(text: &str, command: &str) -> Option<Option<String>> {

@@ -1,5 +1,6 @@
 use zeron_doc::{DocError, SessionDoc};
-use zeron_proto::SessionStats;
+use zeron_proto::invocation::Skill;
+use zeron_proto::{SessionStats, SlashCommand, SlashCommandKind};
 
 pub(super) fn seed_meta(chat_id: &str, doc: &SessionDoc, now: i64) -> Result<(), DocError> {
     if chat_id != "chat-home" {
@@ -24,4 +25,51 @@ pub(super) fn seed_meta(chat_id: &str, doc: &SessionDoc, now: i64) -> Result<(),
         cost_estimated: true,
         ..Default::default()
     })
+}
+
+pub(super) fn invocation_catalog(method: &str) -> Option<serde_json::Value> {
+    let command = |name: &str, description: &str, input_hint: Option<&str>| SlashCommand {
+        name: name.into(),
+        description: description.into(),
+        input_hint: input_hint.map(Into::into),
+        kind: SlashCommandKind::BuiltIn,
+    };
+    let skill = |name: &str, description: &str| Skill {
+        name: name.into(),
+        path: format!("/Users/demo/.claude/skills/{name}/SKILL.md"),
+        description: description.into(),
+        enabled: true,
+        command: None,
+    };
+    match method {
+        zeron_rpc::methods::LIST_COMMANDS => serde_json::to_value(vec![
+            command(
+                "clear",
+                "Clear conversation history and free up context",
+                None,
+            ),
+            command("review", "Review a pull request", Some("pr")),
+            command(
+                "init",
+                "Initialize a CLAUDE.md file with codebase documentation",
+                None,
+            ),
+            command(
+                "cost",
+                "Show the total cost and duration of the current session",
+                None,
+            ),
+        ])
+        .ok(),
+        zeron_rpc::methods::LIST_SKILLS => serde_json::to_value(Some(vec![
+            skill(
+                "frontend-design",
+                "Create distinctive, production-grade frontend interfaces",
+            ),
+            skill("release-notes", "Draft release notes from merged changes"),
+            skill("pdf", "Read, create and edit PDF files"),
+        ]))
+        .ok(),
+        _ => None,
+    }
 }
