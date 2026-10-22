@@ -1517,7 +1517,8 @@ impl SupervisorPage {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus, cx);
-        if self.replies.get(&key).is_some_and(|reply| !reply.failed()) {
+        if !self.still_open(&key, cx) || self.replies.get(&key).is_some_and(|reply| !reply.failed())
+        {
             return;
         }
         self.replies.remove(&key);
@@ -1536,6 +1537,14 @@ impl SupervisorPage {
         }
         self.last_sheet = Some(group);
         cx.notify();
+    }
+
+    fn still_open(&self, key: &str, cx: &App) -> bool {
+        self.state
+            .read(cx)
+            .supervisor
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.needs_you.iter().any(|row| row_key(row) == key))
     }
 
     fn ready(&self, row: &NeedsYouRow) -> Option<(String, Option<Vec<UserInputAnswer>>)> {
@@ -1558,6 +1567,7 @@ impl SupervisorPage {
             .values()
             .filter(|motion| feed::task_of(&motion.row.entry).unwrap_or_default() == group)
             .filter_map(|motion| inbox::sheet_row(&motion.row.entry))
+            .filter(|row| self.still_open(&row_key(row), cx))
             .filter(|row| {
                 self.replies
                     .get(&row_key(row))
@@ -1618,7 +1628,8 @@ impl SupervisorPage {
         let mut inputs = Vec::new();
         for row in &held {
             let key = row_key(row);
-            let Some((choice, answers)) = self.ready(row) else {
+            let ready = self.ready(row).filter(|_| self.still_open(&key, cx));
+            let Some((choice, answers)) = ready else {
                 self.replies.remove(&key);
                 continue;
             };
