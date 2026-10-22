@@ -1228,6 +1228,7 @@ pub struct SupervisorPage {
     last_wake: Option<Option<String>>,
     profiles_task: Option<Task<()>>,
     settings_task: Option<Task<()>>,
+    save_task: Option<Task<()>>,
     ensure_task: Option<Task<()>>,
     effect_task: Option<Task<()>>,
     resuming: bool,
@@ -1302,6 +1303,7 @@ impl SupervisorPage {
             last_wake: None,
             profiles_task: None,
             settings_task: None,
+            save_task: None,
             ensure_task: None,
             effect_task: None,
             resuming: false,
@@ -1791,6 +1793,9 @@ impl SupervisorPage {
                 .await
                 .map_err(|err| err.to_string());
             page.update(cx, |page, cx| {
+                if page.save_task.is_some() {
+                    return;
+                }
                 match result {
                     Ok(settings) => {
                         page.settings = Loadable::Ready(settings);
@@ -1809,12 +1814,14 @@ impl SupervisorPage {
 
     fn save_settings(&mut self, settings: SupervisorSettings, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.settings_error = Some(NOT_CONNECTED.into());
+            cx.notify();
             return;
         };
         let previous = self.settings.ready().copied();
         self.settings = Loadable::Ready(settings);
         self.settings_error = None;
-        self.settings_task = Some(cx.spawn(async move |page, cx| {
+        self.save_task = Some(cx.spawn(async move |page, cx| {
             let saved = engine
                 .client()
                 .call(
@@ -1822,16 +1829,17 @@ impl SupervisorPage {
                     serde_json::to_value(settings).unwrap_or_default(),
                 )
                 .await;
-            if let Err(err) = saved {
-                page.update(cx, |page, cx| {
+            page.update(cx, |page, cx| {
+                page.save_task = None;
+                if let Err(err) = saved {
                     if let Some(previous) = previous {
                         page.settings = Loadable::Ready(previous);
                     }
                     page.settings_error = Some(err.to_string());
-                    cx.notify();
-                })
-                .ok();
-            }
+                }
+                cx.notify();
+            })
+            .ok();
         }));
         cx.notify();
     }
