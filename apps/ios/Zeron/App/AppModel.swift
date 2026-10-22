@@ -44,6 +44,8 @@ final class AppModel {
     private(set) var connectivity: Connectivity?
     /// Front-page sessions that are working / waiting on the user.
     private(set) var live = LiveCounts()
+    private(set) var tasks = TasksPage(missions: [], needsYou: [], working: [], toDo: [], done: [], needsYouCount: 0)
+    private(set) var supervisor = SupervisorPage(hosts: [], needsYou: [], doneToday: [], wakes: [])
     private var rows: [String: SessionRow] = [:]
     private var rawProjects: [ProjectView] = []
     private var lastHosts: [HostOption] = []
@@ -402,8 +404,13 @@ final class AppModel {
         rows = all
         // Devices coming and going (Settings, host pickers) count as changes.
         let hosts = hostOptions
+        let tasksPage = client.tasksPage()
+        let supervisorPage = client.supervisorPage()
         let changed = page != frontPage || archivedVMs != archived || counts != live || hosts != lastHosts
+            || tasksPage != tasks || supervisorPage != supervisor
         lastHosts = hosts
+        tasks = tasksPage
+        supervisor = supervisorPage
         live = counts
         frontPage = page
         archived = archivedVMs

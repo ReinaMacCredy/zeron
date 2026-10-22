@@ -24,6 +24,9 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
         let sessions = UITab(title: "Sessions", image: UIImage(named: "tab-chat"), identifier: "sessions") { [app] _ in
             Self.nav(SessionsViewController(app: app))
         }
+        let tasks = UITab(title: "Tasks", image: UIImage(systemName: "checklist"), identifier: "tasks") { [app] _ in
+            Self.nav(TasksViewController(app: app))
+        }
         let more = UITab(title: "Settings", image: UIImage(named: "tab-settings"), identifier: "more") { [app] _ in
             Self.nav(MoreViewController(app: app))
         }
@@ -31,7 +34,8 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
             Self.nav(SearchViewController(app: app))
         }
         search.automaticallyActivatesSearch = true
-        tabs = [sessions, more, search]
+        tabs = [sessions, tasks, more, search]
+        updateTasksBadge()
         selectedTab = sessions
 
         bottomAccessory = accessory
@@ -42,6 +46,7 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
             self.accessoryContent.update(self.app.live)
             // Hosts come and go with the workspace (online, capabilities).
             self.accessoryContent.updateVoice(self.app.voice)
+            self.updateTasksBadge()
         }
         let voice = accessoryContent.voice
         voice.onStart = { [weak self] source in
@@ -77,6 +82,11 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
         UIView.animate(withDuration: 0.25, delay: 0.12, options: [.curveEaseOut, .allowUserInteraction]) {
             self.accessoryContent.alpha = 1
         }
+    }
+
+    private func updateTasksBadge() {
+        let count = app.tasks.needsYouCount
+        tabs.first { $0.identifier == "tasks" }?.badgeValue = count > 0 ? "\(count)" : nil
     }
 
     private lazy var accessoryContent = AskAnythingAccessory { [weak self] in self?.presentNewSession() }
@@ -153,6 +163,20 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
 
     func showSearch() {
         selectedTab = tabs.first { $0 is UISearchTab }
+    }
+
+    func showTasks(_ path: String) {
+        selectedTab = tabs.first { $0.identifier == "tasks" }
+        guard let nav = selectedTab?.viewController as? UINavigationController,
+              let list = nav.viewControllers.first as? TasksViewController else { return }
+        nav.popToRootViewController(animated: false)
+        if path == "supervisor" {
+            nav.pushViewController(SupervisorViewController(app: app), animated: false)
+        } else if path.hasPrefix("mission:") {
+            list.openMission(String(path.dropFirst("mission:".count)))
+        } else if path.hasPrefix("task:") {
+            list.presentTask(String(path.dropFirst("task:".count)))
+        }
     }
 
     /// From the new-session sheet: the chat goes in under the sheet at once,
