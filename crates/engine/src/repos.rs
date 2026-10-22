@@ -3182,7 +3182,12 @@ tmpfs /run tmpfs rw 0 0
         query: &str,
         featured_paths: &[String],
     ) -> Result<Vec<FileSearchMatch>, EngineError> {
-        super::search_files_blocking(&WorkspaceSearch::new(), root, query, featured_paths)
+        let search = WorkspaceSearch::new();
+        let canonical = super::canonical_search_root(root)?;
+        search.warm(&canonical).unwrap();
+        // A loaded host can outlast the 2s scan budget, which would serve a half-built index.
+        assert!(search.wait_until_indexed(&canonical, Duration::from_secs(30)));
+        super::search_files_blocking(&search, root, query, featured_paths)
     }
 
     #[test]

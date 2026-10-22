@@ -2555,6 +2555,14 @@ mod tests {
         );
     }
 
+    // A loaded host can outlast the 2s scan budget, which would serve a half-built index.
+    fn indexed(root: &Path) -> WorkspaceSearch {
+        let search = WorkspaceSearch::new();
+        search.warm(root).unwrap();
+        assert!(search.wait_until_indexed(root, Duration::from_secs(30)));
+        search
+    }
+
     fn search_workspace_blocking(
         root: &Path,
         query: &str,
@@ -2562,14 +2570,8 @@ mod tests {
         limit: usize,
         cancel: &AtomicBool,
     ) -> Result<Vec<WorkspaceFileSearchMatch>, WorkspaceFilesError> {
-        super::search_workspace_blocking(
-            &WorkspaceSearch::new(),
-            root,
-            query,
-            include_ignored,
-            limit,
-            cancel,
-        )
+        let search = indexed(root);
+        super::search_workspace_blocking(&search, root, query, include_ignored, limit, cancel)
     }
 
     #[test]
