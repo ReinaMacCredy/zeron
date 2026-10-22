@@ -114,6 +114,29 @@ async fn run_sends_catalog_defaults_when_options_are_implicit() {
 }
 
 #[tokio::test]
+async fn one_shot_sends_catalog_defaults() {
+    let (controls, _steer, _token) = controls();
+    let mut req = request("scenario:model-default");
+    req.model = Some("auto-smart".into());
+    let mut stream = harness()
+        .run_one_shot(req, controls, "Write a title.")
+        .await
+        .expect("one-shot starts");
+    let done = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(ev) = stream.next().await {
+            if let AgentEvent::Done { status, .. } = ev.expect("stream event") {
+                return Some(status);
+            }
+        }
+        None
+    })
+    .await
+    .expect("one-shot finished in time");
+
+    assert_eq!(done, Some(DoneStatus::Completed));
+}
+
+#[tokio::test]
 async fn run_preserves_explicit_options_over_catalog_defaults() {
     let (controls, _steer, _token) = controls();
     let mut req = request("scenario:model-override");

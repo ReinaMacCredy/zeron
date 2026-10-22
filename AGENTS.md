@@ -10,7 +10,10 @@ on `main` by default, whatever the size of the change. Take a worktree only
 when another thread is already working in the main checkout: `git status
 --short` shows changes you did not make, or Reina says other threads are
 running. A thread that started on main stays there when others arrive; the
-newcomers take worktrees.
+newcomers take worktrees. A peer that has not edited yet does not show, so
+run `git status --short` again before your first edit and before each
+commit; changes you did not make in a path you touched mean move to a
+worktree.
 
 - In the main checkout:
   - Commit only your own paths: `git commit -m "..." -- <paths>`. Never
@@ -19,6 +22,8 @@ newcomers take worktrees.
     only to verify.
   - Never switch branches here, and never revert, format, or stash files you
     did not change.
+  - When done, quit your `Zeron Dev <N>` and report that the running app
+    carries the old code until Reina rebuilds.
 - In a worktree, `.maestro/worktree/<slug>` on its own branch:
   - Build with its own `CARGO_TARGET_DIR=$PWD/target`, never into the main
     checkout's `target/`.
@@ -29,9 +34,12 @@ newcomers take worktrees.
     project's setup Action.
 - Visual proofs run in an isolated `target/macos-dev<N>/Zeron Dev <N>.app`
   (see `scripts/run-macos-dev.sh`), never in `/Applications/Zeron.app`, which
-  hosts the running sessions. Inspect and drive it with `zeron ui` or the
-  `ui_driver` and `ui_driver_drive` tools (`docs/ui-driver.md`), not
-  computer use.
+  hosts the running sessions. Pick an `N` no other bundle uses and set
+  `ZERON_DEV_ROOT`, `ZERON_DEV_APP_NAME`, `ZERON_DEV_BUNDLE_ID` and
+  `ZERON_DEV_IPC_PORT` from it (`docs/ui-driver.md`, "Launching a Dev
+  bundle to drive"); the defaults are shared by every checkout. Inspect and
+  drive it with `zeron ui` or the `ui_driver` and `ui_driver_drive` tools
+  (`docs/ui-driver.md`), not computer use.
 
 ## Finishing a worktree: merge gate, then clean up
 
@@ -74,5 +82,8 @@ the next session does not mistake them for abandoned.
   main checkout or a worktree. It `cargo clean -p`s each workspace crate whose
   artifacts passed 8G, so stale codegen stops piling up while third-party
   deps stay built. It waits on cargo's lock, so a peer's build is safe.
-- Never `cargo fmt --all`; format only files you changed, with `rustfmt
-  --edition 2024`.
+- Never `cargo fmt --all` or `cargo fmt -p`; format only files you changed,
+  each through stdin: `rustfmt --edition 2024 < f > f.tmp && mv f.tmp f`.
+  `rustfmt <path>` also rewrites the file's `mod` children (`shell.rs`,
+  `transcript.rs`, `crates/ui/src/lib.rs`, `crates/engine/src/lib.rs`,
+  `crates/engine/src/computer/mod.rs` and any other file with `mod x;`).

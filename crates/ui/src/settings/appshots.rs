@@ -230,7 +230,6 @@ impl ShortcutsPage {
 
     /// Codex's hotkey select: the current chord with a chevron, opening a menu
     /// of the three double-modifier chords and None, the current one checked.
-    /// Shared by the Appshots page and the Shortcuts page's Capture row.
     pub(super) fn render_hotkey_dropdown(
         &self,
         slug: &'static str,
@@ -761,7 +760,8 @@ impl ShortcutsPage {
                             .child(section_label(&theme, "Capture"))
                             .child(capture_card)
                             .when(supported, |el| {
-                                el.child(section_label(&theme, "macOS permissions"))
+                                let label = if mac { "macOS permissions" } else { "Permissions" };
+                                el.child(section_label(&theme, label))
                                     .child(permissions_card)
                             })
                             .child(

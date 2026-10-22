@@ -888,8 +888,8 @@ impl SettingsSection {
                 ("Next session", &["switcher"]),
                 ("Previous session", &["switcher"]),
                 ("Archive session", &[]),
-                ("Capture Appshot", &["screenshot"]),
             ],
+            SettingsSection::Appshots => &[("Hotkey", &["capture appshot", "shortcut", "keyboard"])],
             SettingsSection::Computer => &[
                 ("Computer control", &["computer use", "desktop"]),
                 ("Cursor colors", &["cursor", "color"]),
@@ -897,6 +897,7 @@ impl SettingsSection {
                 ("Placement", &["rail", "floating"]),
                 ("Developer access", &["javascript", "browser"]),
                 ("Always-allowed apps", &["consent", "allow"]),
+                ("Click sounds", &[]),
                 ("Getting started", &[]),
                 ("Recent Computer actions", &["history", "audit"]),
                 ("Advanced", &["permission", "driver"]),
@@ -905,13 +906,14 @@ impl SettingsSection {
                 ("Device hub", &["simulator", "emulator", "version"]),
                 ("Platform support", &["xcode", "android sdk"]),
                 ("Agent device access", &["agent"]),
+                ("Device hosts", &["ssh", "remote"]),
                 ("Auto-show floating preview", &["float"]),
             ],
             SettingsSection::SourceControl => &[
                 ("Instruction", &["commit message", "prompt", "conventional"]),
                 ("Default model", &["commit message", "haiku"]),
-                ("Style", &["mini chat", "floating", "bottom bar"]),
-                ("Chat history", &["mini chat", "keep per pr", "fresh"]),
+                ("Chat history", &["pr chat", "keep per pr", "fresh"]),
+                ("New chat when idle", &["pr chat", "idle", "expiry"]),
                 ("While an agent is running", &["git", "agent", "busy"]),
             ],
             SettingsSection::Home => &[
@@ -1221,6 +1223,7 @@ impl NavHistory {
     /// equivalent of a `replace: true` navigation (zeron's boot redirect from
     /// `/` into the last-used chat leaves no dead Back target behind).
     pub fn replace(&mut self, entry: NavEntry) {
+        self.entries.truncate(self.index + 1);
         self.entries[self.index] = entry;
     }
 
@@ -14273,8 +14276,12 @@ impl Shell {
                                 ),
                                 Flow::Ready { version, .. } => (
                                     format!("Zeron {version} is ready").into(),
-                                    "Restart to finish updating. If you don't, it installs the next time you quit Zeron."
-                                        .into(),
+                                    if update.installs_on_quit() {
+                                        "Restart to finish updating. If you don't, it installs the next time you quit Zeron."
+                                    } else {
+                                        "Restart to finish updating. Quitting Zeron does not install it."
+                                    }
+                                    .into(),
                                     vec![
                                         UpdatePromptButton::Close("Later"),
                                         UpdatePromptButton::Restart,
@@ -20825,8 +20832,22 @@ mod tests {
             vec!["Instruction", "Default model"]
         );
         assert_eq!(
-            SettingsSection::SourceControl.matching_rows("mini chat"),
-            vec!["Style", "Chat history"]
+            SettingsSection::SourceControl.matching_rows("pr chat"),
+            vec!["Chat history", "New chat when idle"]
+        );
+        assert!(
+            SettingsSection::SourceControl
+                .matching_rows("floating")
+                .is_empty()
+        );
+        assert_eq!(
+            SettingsSection::Appshots.matching_rows("capture appshot"),
+            vec!["Hotkey"]
+        );
+        assert!(
+            SettingsSection::Shortcuts
+                .matching_rows("appshot")
+                .is_empty()
         );
     }
 
@@ -22198,6 +22219,14 @@ mod tests {
         assert_eq!(nav.len(), 1);
         assert_eq!(*nav.current(), chat("boot"));
         assert!(!nav.can_back());
+
+        let mut nav = NavHistory::new(chat("a"));
+        nav.push(NavEntry::Draft("d1".into()));
+        nav.push(chat("b"));
+        nav.back();
+        nav.replace(chat("x"));
+        assert!(!nav.can_forward(), "a replaced entry drops what was ahead");
+        assert_eq!(nav.back(), Some(chat("a")));
     }
 
     #[test]
