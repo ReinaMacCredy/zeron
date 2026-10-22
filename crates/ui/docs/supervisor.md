@@ -13,13 +13,15 @@ Zeron wakes the Supervisor when something happens in a watched mission: a step f
 In a watched tree, at any depth, it wakes when a thread asks you something, fails, or a delegated thread finishes. It also wakes when work stalls:
 
 - a question has waited 20 minutes with no answer;
-- a thread finished its turn and left files uncommitted in its checkout;
-- a thread finished its turn on a branch that is not merged into the main branch;
+- a thread finished its turn and its checkout holds uncommitted files;
+- a thread finished its turn on a branch that is not merged into the main branch, the local **main** or **master**;
 - a thread stays idle after its usage limit reset, with no resume scheduled;
 - a finished child's report never reached its owner, so the owner sits idle;
-- a branch cannot merge because another chat has the same files uncommitted in the main checkout. The wake names the files and that chat.
+- a branch cannot merge because the main checkout, on the main branch, has the same files uncommitted, renamed files included. The wake names the files and the chat that last edited them there with a file tool in the last day, when there is one.
 
-None of these fire for a thread that only looks idle because you stopped its turn while its sub-agents still run. Events that arrive within a minute of each other come as one wake, and it wakes at most 12 times an hour, also with **Watch everything** on.
+A checkout is read two minutes after a turn ends there and once no thread works in it, and each uncommitted or unmerged state is reported once per checkout and commit, naming the threads whose turns ended there. A branch merged by squash or rebase still reads as unmerged until its commits reach the main branch. A turn that ends in an error raises **failed** instead.
+
+A thread whose sub-agents or background commands still run counts as working: it raises none of these except the 20-minute question, and a delegated task you stopped while they run does not count as finished. Events that arrive within a minute of each other come as one wake, and it wakes at most 12 times an hour, also with **Watch everything** on.
 
 In a mission it acts through the lead, within the switches under **Authority**:
 

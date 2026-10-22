@@ -40,25 +40,40 @@ pub(crate) const TURN_QUIET_MS: i64 = 2 * 60 * 1000;
 pub(crate) const LIMIT_IDLE_MS: i64 = 5 * 60 * 1000;
 pub(crate) const LOST_WAKE_MS: i64 = 5 * 60 * 1000;
 
-pub(crate) fn stall_ms(default: i64) -> i64 {
-    std::env::var("ZERON_SUPERVISOR_STALL_MS")
+/// Unit tests keep the defaults, so a knob exported for a proof cannot fail them.
+fn env_ms(name: &str, default: i64) -> i64 {
+    if cfg!(test) {
+        return default;
+    }
+    std::env::var(name)
         .ok()
         .and_then(|ms| ms.parse().ok())
         .unwrap_or(default)
 }
 
+pub(crate) fn stall_ms(default: i64) -> i64 {
+    env_ms("ZERON_SUPERVISOR_STALL_MS", default)
+}
+
 pub(crate) fn fold_ms() -> i64 {
-    std::env::var("ZERON_SUPERVISOR_FOLD_MS")
-        .ok()
-        .and_then(|ms| ms.parse().ok())
-        .unwrap_or(60_000)
+    env_ms("ZERON_SUPERVISOR_FOLD_MS", 60_000)
 }
 
 pub(crate) fn approval_hold_ms() -> i64 {
-    std::env::var("ZERON_SUPERVISOR_APPROVAL_HOLD_MS")
-        .ok()
-        .and_then(|ms| ms.parse().ok())
-        .unwrap_or(30_000)
+    env_ms("ZERON_SUPERVISOR_APPROVAL_HOLD_MS", 30_000)
+}
+
+/// A dropped event of a passing kind can come true again under the same key, so dropping it must not report it.
+fn burns(event: &SupervisorEventSummary) -> bool {
+    !matches!(
+        event.kind,
+        SupervisorEventKind::Dirty
+            | SupervisorEventKind::Unmerged
+            | SupervisorEventKind::MergeBlocked
+            | SupervisorEventKind::LostWake
+            | SupervisorEventKind::LimitIdle
+            | SupervisorEventKind::MissionSilent
+    )
 }
 
 pub(crate) fn escalated_item(key: &str) -> Option<&str> {
@@ -281,7 +296,11 @@ impl State {
     fn reported_keys(wakes: &[SupervisorWake]) -> HashSet<String> {
         wakes
             .iter()
-            .flat_map(|wake| wake.events.iter().chain(&wake.dropped))
+            .flat_map(|wake| {
+                wake.events
+                    .iter()
+                    .chain(wake.dropped.iter().filter(|e| burns(e)))
+            })
             .map(|event| event.key.clone())
             .collect()
     }
@@ -476,9 +495,18 @@ impl SupervisorStore {
         {
             let mut state = lock(&self.inner.state);
             let key = &event.summary.key;
+            let failed_again = |e: &SupervisorEvent| {
+                event.summary.kind == SupervisorEventKind::NodeFailed
+                    && e.summary.kind == SupervisorEventKind::NodeFailed
+                    && e.summary.thread_id == event.summary.thread_id
+            };
             if !state.file.keeps(&event)
                 || state.router.reported.contains(key)
-                || state.router.pending.iter().any(|e| &e.summary.key == key)
+                || state
+                    .router
+                    .pending
+                    .iter()
+                    .any(|e| &e.summary.key == key || failed_again(e))
             {
                 return;
             }
@@ -590,7 +618,10 @@ impl SupervisorStore {
 
     pub(crate) fn record(&self, wake: SupervisorWake, delivered: Vec<SupervisorEvent>) {
         let mut state = lock(&self.inner.state);
-        let keys = wake.events.iter().chain(&wake.dropped);
+        let keys = wake
+            .events
+            .iter()
+            .chain(wake.dropped.iter().filter(|e| burns(e)));
         let keys: Vec<String> = keys.map(|event| event.key.clone()).collect();
         if wake.woke() {
             state.router.held = Some((wake.id.clone(), delivered));
@@ -617,10 +648,12 @@ impl SupervisorStore {
             .iter()
             .map(|event| event.summary.clone())
             .collect();
-        state
-            .router
-            .reported
-            .extend(added.iter().chain(&dropped).map(|event| event.key.clone()));
+        state.router.reported.extend(
+            added
+                .iter()
+                .chain(dropped.iter().filter(|e| burns(e)))
+                .map(|event| event.key.clone()),
+        );
         if let Some(wake) = state.file.wakes.iter_mut().find(|wake| wake.id == wake_id) {
             wake.events.extend(added);
             wake.dropped.extend(dropped);
@@ -1149,7 +1182,7 @@ impl TreeStall {
     }
 }
 
-/// A busy node (background work or live sub-agents) is never stalled, and wakes no timer.
+/// A busy node (background work or live sub-agents) is never stalled, and wakes no timer; a question waits on the person whatever runs.
 pub(crate) fn tree_stalls(
     now: i64,
     stalls: Vec<TreeStall>,
@@ -1157,7 +1190,10 @@ pub(crate) fn tree_stalls(
 ) -> (Vec<TreeStall>, Option<i64>) {
     let mut due = Vec::new();
     let mut next: Option<i64> = None;
-    for stall in stalls.into_iter().filter(|stall| !stall.node().busy) {
+    let stalled = |stall: &TreeStall| {
+        matches!(stall, TreeStall::QuestionWaiting { .. }) || !stall.node().busy
+    };
+    for stall in stalls.into_iter().filter(stalled) {
         let at = stall.due_at();
         if at > now {
             next = Some(next.map_or(at, |next| next.min(at)));
@@ -1923,7 +1959,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tree_stall_waits_its_threshold_fires_once_and_never_on_a_busy_node() {
+    fn a_tree_stall_waits_its_threshold_fires_once_and_never_on_a_busy_node_but_a_question() {
         let now = 10 * HOUR_MS;
         let node = |busy| StallNode {
             chat_id: "child".into(),
@@ -1968,7 +2004,13 @@ mod tests {
                 false,
                 Some(now + 15 * MIN),
             ),
-            ("busy", question(now - 21 * MIN, true), false, false, None),
+            (
+                "asked 21 min ago while a shell runs",
+                question(now - 21 * MIN, true),
+                false,
+                true,
+                None,
+            ),
             (
                 "reset 6 min ago",
                 limit(now - 6 * MIN, false),
