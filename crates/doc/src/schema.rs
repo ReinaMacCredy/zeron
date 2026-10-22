@@ -1004,6 +1004,7 @@ impl SessionDoc {
         &self,
         request_id: &str,
         answers: Option<&[zeron_proto::UserInputAnswer]>,
+        now_ms: i64,
     ) -> Result<bool, DocError> {
         let messages = self.doc.get_list("messages");
         for i in 0..messages.len() {
@@ -1033,6 +1034,9 @@ impl SessionDoc {
                 );
                 if is_input && id_matches {
                     part.insert("resolved", true)?;
+                    if part.get("answeredAtMs").is_none() {
+                        part.insert("answeredAtMs", now_ms)?;
+                    }
                     if let Some(answers) = answers {
                         part.insert(
                             "answers",
@@ -2297,12 +2301,16 @@ mod tests {
             duration_ms: None,
         })
         .unwrap();
-        assert!(!doc.resolve_input("nope", None).unwrap());
-        assert!(doc.resolve_input("r1", None).unwrap());
+        assert!(!doc.resolve_input("nope", None, 5).unwrap());
+        assert!(doc.resolve_input("r1", None, 5).unwrap());
         let entries = doc.read_entries().unwrap();
         assert!(matches!(
             &entries[0].parts[0],
-            MessagePart::Input { resolved: true, .. }
+            MessagePart::Input {
+                resolved: true,
+                answered_at_ms: Some(5),
+                ..
+            }
         ));
     }
 
@@ -2965,7 +2973,7 @@ mod computer_marker_tests {
             }],
         ))
         .unwrap();
-        assert!(dead.resolve_input("r2", Some(&answers)).unwrap());
+        assert!(dead.resolve_input("r2", Some(&answers), 5).unwrap());
         assert!(matches!(
             &replica(&dead).read_entries().unwrap()[0].parts[0],
             MessagePart::Input { resolved: true, answers: Some(a), .. } if *a == answers

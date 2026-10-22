@@ -364,7 +364,8 @@ impl DemoHost {
                                 if *rid == request_id && questions.iter().any(|q| q.is_consent()))
                         })
                     });
-                    let _ = core.write(|doc| doc.resolve_input(&request_id, Some(&answers)));
+                    let _ =
+                        core.write(|doc| doc.resolve_input(&request_id, Some(&answers), now_ms()));
                     let steps = if consent {
                         transcripts::consent_answered(crate::computer::consent_outcome(
                             true,

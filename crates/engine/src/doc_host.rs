@@ -6473,7 +6473,7 @@ impl DocHost {
                 };
                 // Consent binds only the turn that asked; a new turn must ask again.
                 if questions.iter().any(UserInputQuestion::is_computer) {
-                    if let Err(err) = handle.doc.resolve_input(request_id, None) {
+                    if let Err(err) = handle.doc.resolve_input(request_id, None, now_ms()) {
                         tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
                             "expired consent resolve failed");
                     }
@@ -6508,7 +6508,10 @@ impl DocHost {
                     None,
                     entry.computer_generation,
                 );
-                if let Err(err) = handle.doc.resolve_input(request_id, Some(answers)) {
+                if let Err(err) = handle
+                    .doc
+                    .resolve_input(request_id, Some(answers), now_ms())
+                {
                     tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
                         "orphaned input resolve failed");
                 }
