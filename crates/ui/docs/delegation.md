@@ -24,7 +24,7 @@ A clear **When to use** note, such as "Security reviews of Rust code", is what l
 
 ## In the background or waiting
 
-By default a child runs in the background. The agent gets the task's id and carries on, or ends its turn, and Zeron wakes it when the child is done.
+By default a child runs in the background. The agent gets the task's id and carries on, or ends its turn, and Zeron wakes it when the child is done. If you stop the turn that started the child, the child keeps running, but Zeron does not wake the agent for it; the child's chip and `task_status` still show its result.
 
 When the agent needs the result before it can go on, it can wait for the child instead: up to 10 minutes by default, 30 at most. If that time runs out, the child keeps running and the parent's agent is woken when the result is ready.
 
