@@ -6,7 +6,7 @@ Mission Control introduces itself once, in a four-page sheet that appears after 
 
 Click **Mission Control** in the rail, between **Tasks** and **Supervisor**. The page lists, newest activity first:
 
-- **Running**: every mission that is not done, and every tree whose root is still working or whose threads were active today.
+- **Running**: every mission that is not done, and every tree with a thread still working or waiting on you.
 - **Done today**: missions finished today, and trees you marked done today or whose threads all went idle today.
 
 A chat gets a row when it leads a plan or started another thread: a delegated task, a thread it created with `create_thread`, or a step. A sidechat, a fork, or Claude Code's own built-in sub-agents never make a row by themselves. A thread that belongs to a tree shows inside that tree's row, not as its own.
