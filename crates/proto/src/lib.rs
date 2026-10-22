@@ -20,6 +20,7 @@ pub mod motion;
 pub mod preview;
 pub mod projectless;
 pub mod provider_instance;
+pub mod route_preview;
 pub mod sidebar_pins;
 pub mod source_control;
 pub mod supervisor;

@@ -534,6 +534,25 @@ pub struct Brief {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct EstimateLine {
+    pub step_id: String,
+    pub title: String,
+    pub role: Option<String>,
+    pub runs_on: String,
+    pub multiplier: Option<String>,
+    pub fallback: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PlanEstimate {
+    pub lines: Vec<EstimateLine>,
+    pub mix: Vec<String>,
+    pub cost: String,
+    pub baseline: String,
+    pub raised: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct BriefMessage {
     pub tag: String,
     pub from_you: bool,
@@ -741,7 +760,12 @@ impl CoreClient {
         .await
     }
 
-    pub async fn assign_task(&self, task_id: String, chat_id: String, send: bool) -> CoreResult<()> {
+    pub async fn assign_task(
+        &self,
+        task_id: String,
+        chat_id: String,
+        send: bool,
+    ) -> CoreResult<()> {
         let client = self.client.clone();
         on_runtime(async move { client.assign_task(&task_id, &chat_id, send).await }).await
     }
@@ -844,6 +868,32 @@ impl CoreClient {
                 })
                 .collect()
         })
+    }
+
+    pub async fn plan_estimate(&self, task_id: String) -> CoreResult<Option<PlanEstimate>> {
+        let client = self.client.clone();
+        on_runtime(async move { Ok(client.plan_estimate(&task_id).await) })
+            .await
+            .map(|estimate| {
+                estimate.map(|e| PlanEstimate {
+                    lines: e
+                        .lines
+                        .into_iter()
+                        .map(|l| EstimateLine {
+                            step_id: l.step_id,
+                            title: l.title,
+                            role: l.role,
+                            runs_on: l.runs_on,
+                            multiplier: l.multiplier,
+                            fallback: l.fallback,
+                        })
+                        .collect(),
+                    mix: e.mix,
+                    cost: e.cost,
+                    baseline: e.baseline,
+                    raised: e.raised,
+                })
+            })
     }
 
     pub async fn supervisor_settings(&self, device_id: String) -> CoreResult<SupervisorSettings> {

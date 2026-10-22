@@ -864,7 +864,10 @@ pub(crate) fn brief(
     });
     meta.extend(started);
     let mut spec = task.plan.trim().to_owned();
-    if let Some(notes) = step.map(|row| row.step.notes.trim()).filter(|n| !n.is_empty()) {
+    if let Some(notes) = step
+        .map(|row| row.step.notes.trim())
+        .filter(|n| !n.is_empty())
+    {
         if !spec.is_empty() {
             spec.push_str("\n\n");
         }
@@ -888,4 +891,112 @@ pub(crate) fn brief(
             .filter_map(|row| Some((row.step.chat_id.clone()?, plan.step_label(&row.step.id)?)))
             .collect(),
     })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EstimateLine {
+    pub step_id: String,
+    pub title: String,
+    pub role: Option<String>,
+    pub runs_on: String,
+    pub multiplier: Option<String>,
+    pub fallback: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanEstimate {
+    pub lines: Vec<EstimateLine>,
+    pub mix: Vec<String>,
+    pub cost: String,
+    pub baseline: String,
+    pub raised: Option<String>,
+}
+
+fn model_text(target: &zeron_proto::RouteTarget) -> Option<String> {
+    let model = target.model.as_deref()?;
+    let harness = serde_json::to_value(target.harness).ok()?;
+    Some(crate::catalog::model_label(harness.as_str()?, model))
+}
+
+fn runs_as(target: &zeron_proto::RouteTarget, native: bool) -> String {
+    let harness = target.harness.display_name();
+    if native {
+        return format!("{harness} native");
+    }
+    match model_text(target) {
+        Some(model) => format!("{harness} · {model}"),
+        None => harness.to_owned(),
+    }
+}
+
+pub(crate) fn plan_estimate(
+    steps: &[&TaskStep],
+    chats: &[Chat],
+    lead: Option<&zeron_proto::RouteTarget>,
+    preview: Option<&zeron_proto::route_preview::Preview>,
+) -> PlanEstimate {
+    use zeron_proto::route_preview as rp;
+    let clock = |ms: i64| {
+        DateTime::<Utc>::from_timestamp_millis(ms)
+            .map(|at| at.with_timezone(&chrono::Local).format("%H:%M").to_string())
+    };
+    let labels = rp::Labels {
+        runs_as: &runs_as,
+        clock: &clock,
+    };
+    let lines = rp::plan_lines(steps, chats, lead, preview, &labels);
+    let totals = rp::totals(&lines);
+    let count = lines.len();
+    let raised = (totals.raised > 0 && totals.total > totals.planned + 1e-9).then(|| {
+        let to = lines
+            .iter()
+            .filter(|line| line.fallback.is_some())
+            .filter_map(|line| line.target.as_ref().and_then(model_text))
+            .next()
+            .unwrap_or_else(|| "the chat's model".to_owned());
+        format!(
+            "Relative cost {} → {} because {} {} fell back to {to}",
+            rp::multiplier_text(totals.planned),
+            rp::multiplier_text(totals.total),
+            totals.raised,
+            if totals.raised == 1 {
+                "child"
+            } else {
+                "children"
+            }
+        )
+    });
+    let lead_label = lead
+        .and_then(model_text)
+        .unwrap_or_else(|| "model".to_owned());
+    PlanEstimate {
+        mix: rp::mix(&lines)
+            .into_iter()
+            .map(|(target, native, n)| format!("{n} {}", runs_as(&target, native)))
+            .collect(),
+        cost: format!("Relative cost {}", rp::multiplier_text(totals.total)),
+        baseline: format!("vs {count}.0x if all ran on the lead's {lead_label}"),
+        raised,
+        lines: steps
+            .iter()
+            .zip(lines)
+            .map(|(step, line)| EstimateLine {
+                step_id: step.id.clone(),
+                runs_on: match (&line.target, line.agent_picks) {
+                    (Some(target), true) => format!(
+                        "agent picks · {}",
+                        model_text(target)
+                            .unwrap_or_else(|| target.harness.display_name().to_owned())
+                    ),
+                    (None, true) => "agent picks".to_owned(),
+                    (Some(target), false) => runs_as(target, line.native),
+                    (None, false) => "…".to_owned(),
+                },
+                multiplier: line.multiplier.map(rp::multiplier_text),
+                role: line.role.map(str::to_owned),
+                title: line.title,
+                fallback: line.fallback,
+            })
+            .collect(),
+    }
 }

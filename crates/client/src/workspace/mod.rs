@@ -18,11 +18,14 @@ use zeron_proto::supervisor::SupervisorSnapshot;
 use zeron_proto::{CheckoutChangeRequestStatus, SidebarPreferences, TaskStep};
 
 pub use tasks::{
-    ApprovalView, Brief, BriefMessage, ContextChat, HostRef, ItemSend, MissionOptions, MissionStrip, NeedsYouEntry, NeedsYouKind, StepView,
-    SupervisorHost, SupervisorPage, TaskDetail, TaskDraft, TaskRow, TasksPage, WakeEntry, WatchState,
+    ApprovalView, Brief, BriefMessage, ContextChat, EstimateLine, HostRef, ItemSend,
+    MissionOptions, MissionStrip, NeedsYouEntry, NeedsYouKind, PlanEstimate, StepView,
+    SupervisorHost, SupervisorPage, TaskDetail, TaskDraft, TaskRow, TasksPage, WakeEntry,
+    WatchState,
 };
 pub(crate) use tasks::{
-    Ask, brief as task_brief, detail as task_detail, strip as mission_strip, watch as watch_state,
+    Ask, brief as task_brief, detail as task_detail, plan_estimate, strip as mission_strip,
+    watch as watch_state,
 };
 pub(crate) use view::{DeriveContext, device_online};
 pub use view::{
