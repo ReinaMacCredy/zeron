@@ -83,6 +83,8 @@ pub struct SessionRow {
     /// Host-reported status (45s staleness-gated). Stop/busy logic keys off
     /// this; an outgoing send is not evidence of a running turn.
     pub host_indicator: ChatIndicator,
+    /// Working only because background subagents run: no turn is in flight.
+    pub held_by_subagents: bool,
     /// Run start of the live turn while Working/AwaitingInput.
     pub working_since_ms: Option<i64>,
     /// `last_message_at`, falling back to `created_at` (the sort key).
@@ -395,6 +397,7 @@ fn hash_row(row: &SessionRow) -> u64 {
     row.cwd.hash(&mut h);
     attention_rank(row.indicator).hash(&mut h);
     attention_rank(row.host_indicator).hash(&mut h);
+    row.held_by_subagents.hash(&mut h);
     row.working_since_ms.hash(&mut h);
     row.last_activity_ms.hash(&mut h);
     row.time_label.hash(&mut h);
@@ -495,6 +498,7 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         cwd: chat.cwd.clone(),
         indicator,
         host_indicator,
+        held_by_subagents: session.is_some_and(|s| s.held_by_subagents),
         working_since_ms,
         last_activity_ms: sort_key(chat).timestamp_millis(),
         time_label: relative_time_label(sort_key(chat).timestamp_millis(), now_ms),
