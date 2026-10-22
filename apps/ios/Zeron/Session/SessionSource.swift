@@ -47,12 +47,13 @@ struct SessionChrome: Equatable {
     var questions: (requestId: String, items: [Question])?
     var queue: [QueuedItem] = []
     var error: String?
+    var prediction: String?
 
     static func == (a: SessionChrome, b: SessionChrome) -> Bool {
         a.title == b.title && a.subtitle == b.subtitle && a.running == b.running && a.canSteer == b.canSteer
             && a.placeholder == b.placeholder && a.chips == b.chips && a.banner == b.banner
             && a.questions?.requestId == b.questions?.requestId && a.questions?.items == b.questions?.items
-            && a.queue == b.queue && a.error == b.error
+            && a.queue == b.queue && a.error == b.error && a.prediction == b.prediction
     }
 }
 

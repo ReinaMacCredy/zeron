@@ -10,6 +10,7 @@
 //! The host writes all transcript entries and command outcomes.
 
 mod compaction;
+mod prediction;
 mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -183,6 +184,7 @@ struct CoreState {
     /// This device's own `CompactChat` is in flight.
     compacting: bool,
     kept_full_history: Option<i64>,
+    prediction: Option<zeron_proto::prediction::ComposerPrediction>,
 }
 
 pub(crate) struct SessionCore {
@@ -205,6 +207,7 @@ pub(crate) struct SessionCore {
     /// under it, so an older read can't land after a newer one.
     recompute_gate: Mutex<()>,
     view_attached: AtomicBool,
+    prediction_watch: Mutex<Option<tokio_util::sync::CancellationToken>>,
     /// Last open/attach/detach (warm-set eviction order).
     touched_ms: std::sync::atomic::AtomicI64,
 }
@@ -257,11 +260,13 @@ impl SessionCore {
                 composer_revision: 0,
                 compacting: false,
                 kept_full_history: None,
+                prediction: None,
             }),
             transcript_tx,
             composer: RwLock::new(composer),
             recompute_gate: Mutex::new(()),
             view_attached: AtomicBool::new(false),
+            prediction_watch: Mutex::new(None),
             touched_ms: std::sync::atomic::AtomicI64::new(now_ms()),
         });
         // Coalesced republish for remote imports (a backfill of N rows costs
@@ -583,6 +588,7 @@ impl SessionCore {
             compacting,
             compact_blocked,
             resume_compaction,
+            prediction: st.prediction.as_ref().map(|p| p.text.clone()),
         };
         let current = self.composer();
         next.revision = current.revision;
@@ -686,6 +692,7 @@ fn empty_composer(chat_id: &str) -> ComposerState {
         compacting: false,
         compact_blocked: None,
         resume_compaction: None,
+        prediction: None,
     }
 }
 
@@ -1043,6 +1050,13 @@ impl SessionHandle {
         }
         if attached && !was {
             self.mark_seen();
+            *lock(&self.core.prediction_watch) = prediction::start(&self.core);
+        }
+        if !attached && was {
+            if let Some(watch) = lock(&self.core.prediction_watch).take() {
+                watch.cancel();
+            }
+            self.core.update_state(|st| st.prediction = None);
         }
     }
 
@@ -1163,6 +1177,7 @@ impl SessionHandle {
             let id = message_id.clone();
             self.core.update_state(|st| st.last_submitted = Some(id));
         }
+        self.core.update_state(|st| st.prediction = None);
         client.after_command(&self.core, !refs.is_empty());
         Ok(outcome)
     }

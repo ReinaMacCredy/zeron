@@ -693,3 +693,17 @@ fn the_demo_catalog_offers_zeron_commands_and_skills_apart() {
     assert!(!skills.entries.is_empty());
     assert!(skills.entries.iter().all(|e| e.invocation.prefix() == '$'));
 }
+
+#[test]
+fn an_open_chat_predicts_the_next_message_only_while_on_screen() {
+    let (client, _dir) = demo(fast());
+    let session = client.open_session("chat-home").unwrap();
+    assert_eq!(session.composer().prediction, None);
+    session.set_view_attached(true);
+    assert_eq!(
+        session.composer().prediction.as_deref(),
+        Some("Run the iOS layout tests on the simulator")
+    );
+    session.set_view_attached(false);
+    assert_eq!(session.composer().prediction, None);
+}

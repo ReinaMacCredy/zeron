@@ -117,6 +117,7 @@ final class CoreSessionSource: SessionSource {
             next.banner = .offer(title: offer.title, body: offer.body)
         }
         next.uploadProgress = c.transferProgress
+        next.prediction = c.prediction
         // Working state is shown at the transcript tail (layout engine), not here.
         if let input = c.openInput {
             next.questions = (input.requestId, input.questions.map {

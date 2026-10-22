@@ -466,6 +466,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             composer.images = []
             composer.text = text
             composer.placeholder = "Edit queued message"
+            composer.prediction = nil
             pill.banner = .editing
             pill.superview?.isHidden = false
             composer.becomeFirstResponder()
@@ -526,6 +527,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         still.working = c.running
         composer.canSteer = c.canSteer
         composer.placeholder = c.placeholder
+        composer.prediction = editingQueueId == nil ? c.prediction : nil
         composer.chips = c.chips
         composer.chipMenus = Dictionary(uniqueKeysWithValues: c.chips.map { chip in
             (chip.id, { [weak self] in self?.source.chipMenu(chip.id) })

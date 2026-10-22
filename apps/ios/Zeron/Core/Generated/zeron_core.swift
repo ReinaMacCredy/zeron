@@ -6126,6 +6126,7 @@ public struct ComposerState: Equatable, Hashable {
     public var compacting: Bool
     public var compactBlocked: String?
     public var resumeCompaction: ResumeOffer?
+    public var prediction: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -6153,7 +6154,7 @@ public struct ComposerState: Equatable, Hashable {
          */queueError: String?, 
         /**
          * Scroll-to-own-send target.
-         */lastSubmittedMessageId: String?, contextUsage: ContextUsage?, compacting: Bool, compactBlocked: String?, resumeCompaction: ResumeOffer?) {
+         */lastSubmittedMessageId: String?, contextUsage: ContextUsage?, compacting: Bool, compactBlocked: String?, resumeCompaction: ResumeOffer?, prediction: String?) {
         self.chatId = chatId
         self.revision = revision
         self.title = title
@@ -6172,6 +6173,7 @@ public struct ComposerState: Equatable, Hashable {
         self.compacting = compacting
         self.compactBlocked = compactBlocked
         self.resumeCompaction = resumeCompaction
+        self.prediction = prediction
     }
 
     
@@ -6207,7 +6209,8 @@ public struct FfiConverterTypeComposerState: FfiConverterRustBuffer {
                 contextUsage: FfiConverterOptionTypeContextUsage.read(from: &buf), 
                 compacting: FfiConverterBool.read(from: &buf), 
                 compactBlocked: FfiConverterOptionString.read(from: &buf), 
-                resumeCompaction: FfiConverterOptionTypeResumeOffer.read(from: &buf)
+                resumeCompaction: FfiConverterOptionTypeResumeOffer.read(from: &buf), 
+                prediction: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -6230,6 +6233,7 @@ public struct FfiConverterTypeComposerState: FfiConverterRustBuffer {
         FfiConverterBool.write(value.compacting, into: &buf)
         FfiConverterOptionString.write(value.compactBlocked, into: &buf)
         FfiConverterOptionTypeResumeOffer.write(value.resumeCompaction, into: &buf)
+        FfiConverterOptionString.write(value.prediction, into: &buf)
     }
 }
 
@@ -18691,6 +18695,19 @@ public func pickContext(model: ModelInfo, config: ChatConfig, position: UInt32) 
     )
 })
 }
+/**
+ * The phone draws only the empty-draft prediction; the desktop's inline
+ * remainder needs a Tab key.
+ */
+public func predictionPlaceholder(prediction: String?, text: String) -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_prediction_placeholder(
+        FfiConverterOptionString.lower(prediction),
+        FfiConverterString.lower(text),uniffiCallStatus
+    )
+})
+}
 public func quoteChipLabel(count: UInt32) -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
         uniffiCallStatus in
@@ -18950,6 +18967,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_pick_context() != 60832) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_prediction_placeholder() != 31250) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_quote_chip_label() != 38057) {

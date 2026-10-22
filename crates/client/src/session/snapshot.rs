@@ -303,4 +303,5 @@ pub struct ComposerState {
     pub compacting: bool,
     pub compact_blocked: Option<String>,
     pub resume_compaction: Option<zeron_proto::compaction::ResumeCompaction>,
+    pub prediction: Option<String>,
 }

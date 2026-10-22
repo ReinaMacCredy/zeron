@@ -188,6 +188,13 @@ impl DemoHost {
         lock(&self.cancel).clone().unwrap_or_default()
     }
 
+    pub(crate) fn prediction(
+        &self,
+        chat_id: &str,
+    ) -> Option<zeron_proto::prediction::ComposerPrediction> {
+        composer::prediction(chat_id)
+    }
+
     fn host_of(&self, client: &ClientInner, chat_id: &str) -> String {
         client
             .workspace

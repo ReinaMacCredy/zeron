@@ -1,6 +1,14 @@
 use zeron_doc::{DocError, SessionDoc};
 use zeron_proto::invocation::Skill;
+use zeron_proto::prediction::ComposerPrediction;
 use zeron_proto::{SessionStats, SlashCommand, SlashCommandKind};
+
+pub(super) fn prediction(chat_id: &str) -> Option<ComposerPrediction> {
+    (chat_id == "chat-home").then(|| ComposerPrediction {
+        entry_id: "demo-prediction".into(),
+        text: "Run the iOS layout tests on the simulator".into(),
+    })
+}
 
 pub(super) fn seed_meta(chat_id: &str, doc: &SessionDoc, now: i64) -> Result<(), DocError> {
     if chat_id != "chat-home" {

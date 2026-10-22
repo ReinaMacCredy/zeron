@@ -79,7 +79,8 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     var running = false { didSet { if running != oldValue { refreshAction(animated: true) } } }
     var canSteer = false { didSet { refreshAction(animated: false) } }
     var preferredDelivery: DeliveryMode = .queue { didSet { refreshAction(animated: false) } }
-    var placeholder = "Message" { didSet { placeholderLabel.text = placeholder } }
+    var placeholder = "Message" { didSet { refreshPlaceholder() } }
+    var prediction: String? { didSet { if prediction != oldValue { refreshPlaceholder() } } }
     var chips: [ComposerChip] = [] { didSet { if chips != oldValue { rebuildChips() } } }
     /// Chips with a menu open it on tap (native, glassy, lazily loaded).
     var chipMenus: [String: () -> UIMenu?] = [:] { didSet { applyChipMenus() } }
@@ -100,6 +101,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     let textView = UITextView()
     private let glass = Glass.surface(interactive: false, radius: 25)
     private let placeholderLabel = UILabel()
+    private let acceptBadge = UIButton(type: .system)
     private let attachButton = UIButton(type: .system)
     private let actionButton = UIButton(type: .system)
     private let thumbs = UIStackView()
@@ -188,7 +190,29 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         placeholderLabel.text = placeholder
         placeholderLabel.isUserInteractionEnabled = false
         placeholderLabel.translatesAutoresizingMaskIntoConstraints = false
+        placeholderLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        placeholderLabel.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(acceptPrediction)))
+        placeholderLabel.accessibilityIdentifier = "composer-placeholder"
         content.addSubview(placeholderLabel)
+
+        var badge = UIButton.Configuration.filled()
+        badge.title = "Accept"
+        badge.baseBackgroundColor = Palette.chip
+        badge.baseForegroundColor = Palette.secondary
+        badge.cornerStyle = .capsule
+        badge.contentInsets = NSDirectionalEdgeInsets(top: 1, leading: 6, bottom: 1, trailing: 6)
+        badge.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attrs in
+            var attrs = attrs
+            attrs.font = .systemFont(ofSize: 11, weight: .semibold)
+            return attrs
+        }
+        acceptBadge.configuration = badge
+        acceptBadge.isHidden = true
+        acceptBadge.accessibilityIdentifier = "composer-accept-prediction"
+        acceptBadge.translatesAutoresizingMaskIntoConstraints = false
+        acceptBadge.setContentCompressionResistancePriority(.required, for: .horizontal)
+        acceptBadge.addTarget(self, action: #selector(acceptPrediction), for: .touchUpInside)
+        content.addSubview(acceptBadge)
 
         toolbar.translatesAutoresizingMaskIntoConstraints = false
         toolbar.clipsToBounds = true
@@ -241,6 +265,9 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             placeholderLabel.leadingAnchor.constraint(equalTo: textView.leadingAnchor),
             placeholderLabel.trailingAnchor.constraint(lessThanOrEqualTo: textView.trailingAnchor),
             placeholderLabel.topAnchor.constraint(equalTo: textView.topAnchor, constant: 14),
+            acceptBadge.leadingAnchor.constraint(equalTo: placeholderLabel.trailingAnchor, constant: 6),
+            acceptBadge.trailingAnchor.constraint(lessThanOrEqualTo: textView.trailingAnchor),
+            acceptBadge.centerYAnchor.constraint(equalTo: placeholderLabel.centerYAnchor),
 
             attachButton.widthAnchor.constraint(equalToConstant: c),
             attachButton.heightAnchor.constraint(equalToConstant: c),
@@ -683,8 +710,22 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         textHeight.constant = preview ? max(minHeight, fitting) : min(max(minHeight, fitting), maxHeight)
     }
 
-    private func textChanged() {
+    private func refreshPlaceholder() {
+        let ghost = predictionPlaceholder(prediction: prediction, text: textView.text)
+        placeholderLabel.text = ghost ?? placeholder
         placeholderLabel.isHidden = !textView.text.isEmpty
+        placeholderLabel.isUserInteractionEnabled = ghost != nil
+        acceptBadge.isHidden = ghost == nil
+    }
+
+    @objc private func acceptPrediction() {
+        guard let prediction else { return }
+        text = prediction
+        textView.becomeFirstResponder()
+    }
+
+    private func textChanged() {
+        refreshPlaceholder()
         let before = textHeight.constant
         updateMode(animated: true)
         recomputeTextHeight()

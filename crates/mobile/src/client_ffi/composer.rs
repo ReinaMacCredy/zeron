@@ -457,3 +457,12 @@ pub fn filter_invocations(catalog: InvocationCatalog, query: String) -> Invocati
     });
     InvocationMatches { entries, note }
 }
+
+/// The phone draws only the empty-draft prediction; the desktop's inline
+/// remainder needs a Tab key.
+#[uniffi::export]
+pub fn prediction_placeholder(prediction: Option<String>, text: String) -> Option<String> {
+    zeron_proto::prediction::prediction_display(prediction.as_deref(), &text)
+        .0
+        .map(Into::into)
+}

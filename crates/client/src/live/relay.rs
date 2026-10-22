@@ -158,6 +158,20 @@ impl Relay {
         unreachable!("the second attempt always returns")
     }
 
+    pub(crate) async fn subscribe(
+        &self,
+        device_id: &str,
+        method: &str,
+        params: Value,
+    ) -> std::result::Result<zeron_rpc::RpcSubscription, RpcError> {
+        let client = self.links.client(device_id).await?;
+        let result = client.subscribe_checked(method, params).await;
+        if let Err(RpcError::Closed | RpcError::Transport(_)) = &result {
+            self.links.invalidate(device_id);
+        }
+        result
+    }
+
     /// Chunked upload (`UploadChunk` ×N with `seq`, then `UploadCommit`).
     /// Returns the durable host path. Idempotent per `upload_id`.
     pub(crate) async fn upload(

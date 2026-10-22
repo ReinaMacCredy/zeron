@@ -599,17 +599,11 @@ fn prediction_display(
     text: &str,
     idle: SharedString,
 ) -> (SharedString, Option<SharedString>) {
-    match prediction {
-        Some(prediction) if text.is_empty() => (prediction.to_string().into(), None),
-        Some(prediction) => (
-            idle,
-            prediction
-                .strip_prefix(text)
-                .filter(|rest| !rest.is_empty())
-                .map(|rest| rest.to_string().into()),
-        ),
-        None => (idle, None),
-    }
+    let (placeholder, ghost) = zeron_proto::prediction::prediction_display(prediction, text);
+    (
+        placeholder.map_or(idle, |p| p.to_string().into()),
+        ghost.map(|g| g.to_string().into()),
+    )
 }
 
 /// What the composer holds that a send could carry. A staged image or diff
@@ -7801,8 +7795,7 @@ impl Composer {
         if input.marked_range.is_some()
             || !input.selected_range.is_empty()
             || input.cursor_offset() != input.text().len()
-            || !prediction.starts_with(input.text())
-            || prediction.len() == input.text().len()
+            || !zeron_proto::prediction::accepts_prediction(&prediction, input.text())
         {
             return false;
         }
@@ -15445,29 +15438,6 @@ mod tests {
                     .update(cx, |input, cx| test(input, window, cx));
             })
             .unwrap();
-    }
-
-    #[test]
-    fn prediction_display_follows_the_draft() {
-        let idle = SharedString::from("Do anything…");
-        let fix = Some("Fix the spacing.");
-        assert_eq!(
-            prediction_display(fix, "", idle.clone()),
-            ("Fix the spacing.".into(), None)
-        );
-        assert_eq!(
-            prediction_display(fix, "Fix", idle.clone()),
-            (idle.clone(), Some(" the spacing.".into()))
-        );
-        assert_eq!(
-            prediction_display(fix, "Fix the spacing.", idle.clone()),
-            (idle.clone(), None)
-        );
-        assert_eq!(
-            prediction_display(fix, "Ship", idle.clone()),
-            (idle.clone(), None)
-        );
-        assert_eq!(prediction_display(None, "", idle.clone()), (idle, None));
     }
 
     #[gpui::test]

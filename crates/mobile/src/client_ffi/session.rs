@@ -261,6 +261,7 @@ pub struct ComposerState {
     pub compacting: bool,
     pub compact_blocked: Option<String>,
     pub resume_compaction: Option<super::composer::ResumeOffer>,
+    pub prediction: Option<String>,
 }
 
 impl From<&zc::ComposerState> for ComposerState {
@@ -357,10 +358,13 @@ impl From<&zc::ComposerState> for ComposerState {
             }),
             compacting: c.compacting,
             compact_blocked: c.compact_blocked.clone(),
-            resume_compaction: c.resume_compaction.map(|offer| super::composer::ResumeOffer {
-                title: zeron_proto::compaction::RESUME_COMPACTION_TITLE.into(),
-                body: offer.body(),
-            }),
+            resume_compaction: c
+                .resume_compaction
+                .map(|offer| super::composer::ResumeOffer {
+                    title: zeron_proto::compaction::RESUME_COMPACTION_TITLE.into(),
+                    body: offer.body(),
+                }),
+            prediction: c.prediction.clone(),
         }
     }
 }

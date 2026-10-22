@@ -752,12 +752,7 @@ pub(crate) struct CanvasTarget {
     device: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ComposerPrediction {
-    pub entry_id: String,
-    pub text: String,
-}
+pub use zeron_proto::prediction::ComposerPrediction;
 
 /// Root application state. Reducer methods (`apply_*`, [`Self::session_for`], …)
 /// are plain `&mut self` functions so tests construct the struct directly; gpui
