@@ -1,4 +1,5 @@
 mod accounts;
+mod instances;
 mod mac;
 mod profiles;
 mod providers;
@@ -147,6 +148,13 @@ impl Client {
                 profiles::page(self, device_id, profiles).await
             }
             signin if signin.starts_with("signin:") => signin::page(self, device_id, signin).await,
+            instance
+                if instance == "add-provider"
+                    || instance.starts_with("acp-search")
+                    || instance.starts_with("instance:") =>
+            {
+                instances::page(self, device_id, instance).await
+            }
             other => Err(ClientError::NotFound(other.to_owned())),
         }
     }
@@ -170,6 +178,10 @@ impl Client {
         }
         if page.starts_with("signin:") {
             return signin::act(self, device_id, page, action, value).await;
+        }
+        if page == "add-provider" || page.starts_with("acp-search") || page.starts_with("instance:")
+        {
+            return instances::act(self, device_id, page, action, value).await;
         }
         let on = value.as_deref() == Some("true");
         let mut gone = false;

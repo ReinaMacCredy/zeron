@@ -601,3 +601,49 @@ fn sends_to_an_offline_host_park_as_queued_not_working() {
     assert_eq!(row.send_state, Some(zeron_client::SendState::Queued));
     assert_eq!(row.host_indicator, ChatIndicator::Idle);
 }
+
+#[test]
+fn a_provider_added_on_the_phone_is_edited_and_an_acp_agent_installs() {
+    let (client, _dir) = demo(fast());
+    let host = client
+        .open_session("chat-home")
+        .unwrap()
+        .composer()
+        .host
+        .device_id
+        .clone();
+    let rt = zeron_client::runtime::shared();
+    let row = |page: &zeron_client::host_settings::Page, id: &str| {
+        page.sections
+            .iter()
+            .flat_map(|s| &s.rows)
+            .find(|r| r.id == id)
+            .cloned()
+    };
+
+    let added = rt
+        .block_on(client.host_action(&host, "add-provider", "add:codex", None))
+        .unwrap();
+    let codex = added.page_id.unwrap();
+    rt.block_on(client.host_action(&host, &codex, "label", Some("Codex Work".into())))
+        .unwrap();
+    let page = rt.block_on(client.host_page(&host, &codex)).unwrap();
+    assert_eq!(
+        row(&page, "label").unwrap().value.as_deref(),
+        Some("Codex Work")
+    );
+
+    let search = rt
+        .block_on(client.host_page(&host, "acp-search:goose"))
+        .unwrap();
+    let goose = row(&search, "prepare:goose").unwrap();
+    assert!(goose.actions.iter().any(|a| a.confirm.is_some()));
+    let installed = rt
+        .block_on(client.host_action(&host, "acp-search:goose", "prepare:goose", None))
+        .unwrap();
+    let goose = installed.page_id.unwrap();
+
+    let providers = rt.block_on(client.host_page(&host, "providers")).unwrap();
+    assert!(row(&providers, &codex).is_some());
+    assert!(row(&providers, &goose).is_some());
+}

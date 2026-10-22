@@ -1,5 +1,7 @@
 use zeron_proto::account_usage::signs_in;
-use zeron_proto::provider_instance::{InstanceConfig, ProviderInstancesSnapshot};
+use zeron_proto::provider_instance::{
+    ProviderInstancesSnapshot, acp_source_summary, has_own_login,
+};
 use zeron_proto::{HarnessId, HarnessUpdatePhase, HarnessUpdateStatus};
 use zeron_rpc::methods;
 
@@ -144,46 +146,45 @@ pub(super) fn build(
     ));
     let mut sections = vec![Section {
         title: Some("Providers".into()),
-        footer: Some("Add providers and accounts on the Mac.".into()),
+        footer: None,
         rows,
     }];
-    if !instances.is_empty() {
-        sections.push(Section {
-            title: Some("Instances".into()),
-            footer: None,
-            rows: instances
-                .iter()
-                .map(|instance| {
-                    let native = matches!(instance.config, InstanceConfig::Native { .. });
-                    let mut detail = vec![instance.id.clone()];
-                    if native && signs_in(instance.driver) {
-                        detail.push(format!(
-                            "Uses the default {} login",
-                            instance.driver.display_name()
-                        ));
-                    }
-                    let title = if instance.label.is_empty() {
-                        instance.id.clone()
-                    } else {
-                        instance.label.clone()
-                    };
-                    let mut row = Row::new(
-                        format!("instance:{}", instance.id),
-                        title.clone(),
-                        RowKind::Info,
-                    )
-                    .subtitle(Some(detail.join(" · ")));
-                    row.actions.push(RowAction {
-                        id: format!("delete:{}", instance.id),
-                        title: "Delete".into(),
-                        destructive: true,
-                        confirm: Some(format!("Delete {title}?")),
-                    });
-                    row
-                })
-                .collect(),
-        });
-    }
+    let mut instance_rows: Vec<Row> = instances
+        .iter()
+        .map(|instance| {
+            let mut detail = vec![instance.id.clone()];
+            if let Some(source) = acp_source_summary(instance) {
+                detail.push(source);
+            } else if signs_in(instance.driver) && !has_own_login(instance) {
+                detail.push(format!(
+                    "Uses the default {} login",
+                    instance.driver.display_name()
+                ));
+            }
+            let title = if instance.label.is_empty() {
+                instance.id.clone()
+            } else {
+                instance.label.clone()
+            };
+            let mut row = Row::link(&format!("instance:{}", instance.id), &title, None)
+                .subtitle(Some(detail.join(" · ")));
+            row.actions.push(RowAction {
+                id: format!("delete:{}", instance.id),
+                title: "Delete".into(),
+                destructive: true,
+                confirm: Some(format!("Delete {title}?")),
+            });
+            row
+        })
+        .collect();
+    instance_rows.push(Row::link("add-provider", "Add provider", None));
+    sections.push(Section {
+        title: Some("Instances".into()),
+        footer: Some(
+            "Instances run a provider with their own name, sign-in, binary or environment.".into(),
+        ),
+        rows: instance_rows,
+    });
     Page {
         title: "Providers".into(),
         sections,

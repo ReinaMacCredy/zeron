@@ -1,7 +1,7 @@
 use zeron_proto::account_usage::{is_openable_login_url, login_options, provider_name};
 use zeron_proto::{
-    AgentAccountsSnapshot, AgentLoginMode, AgentLoginPoll, AgentLoginStart, AgentLoginStatus,
-    HarnessId,
+    AcpAuthMethod, AgentAccountsSnapshot, AgentLoginMode, AgentLoginPoll, AgentLoginStart,
+    AgentLoginStatus, HarnessId, ProviderInstancesSnapshot,
 };
 use zeron_rpc::methods;
 
@@ -13,6 +13,7 @@ use crate::error::{ClientError, Result};
 struct Login<'a> {
     key: &'a str,
     harness: HarnessId,
+    instance: Option<&'a str>,
     id: Option<&'a str>,
     paste: bool,
     on_mac: bool,
@@ -25,18 +26,32 @@ fn parse(page: &str) -> Result<Login<'_>> {
         .ok_or_else(|| ClientError::NotFound(page.to_owned()))?;
     let mut parts = rest.splitn(4, ':');
     let key = parts.next().unwrap_or_default();
-    let harness = serde_json::from_value(serde_json::Value::String(key.to_owned()))
+    let (harness, instance) = match key.split_once('/') {
+        Some((harness, instance)) => (harness, Some(instance)),
+        None => (key, None),
+    };
+    let harness = serde_json::from_value(serde_json::Value::String(harness.to_owned()))
         .map_err(|_| ClientError::NotFound(page.to_owned()))?;
     let id = parts.next();
     let mode = parts.next().unwrap_or_default();
     Ok(Login {
         key,
         harness,
+        instance,
         id,
         paste: mode == "paste",
         on_mac: mode == "mac",
         url: parts.next().unwrap_or_default(),
     })
+}
+
+impl Login<'_> {
+    fn params(&self, mut params: serde_json::Value) -> serde_json::Value {
+        if let Some(instance) = self.instance {
+            params["instanceId"] = instance.into();
+        }
+        params
+    }
 }
 
 fn page_id(key: &str, id: &str, mode: &str, url: &str) -> String {
@@ -54,13 +69,13 @@ fn mode_of(start: &AgentLoginStart) -> &'static str {
 pub(super) async fn page(client: &Client, device_id: &str, page: &str) -> Result<Page> {
     let login = parse(page)?;
     let Some(id) = login.id else {
-        return Ok(start_page(login.harness));
+        return start(client, device_id, &login).await;
     };
     let poll = client
         .host_call::<AgentLoginPoll>(
             device_id,
             methods::POLL_AGENT_LOGIN,
-            serde_json::json!({ "loginId": id }),
+            login.params(serde_json::json!({ "loginId": id })),
         )
         .await?;
     Ok(progress_page(&login, &poll))
@@ -74,13 +89,19 @@ pub(super) async fn act(
     value: Option<String>,
 ) -> Result<ActionResult> {
     let login = parse(page)?;
-    if let Some(provider) = action.strip_prefix("start") {
-        let provider = provider.strip_prefix(':');
+    if let Some(choice) = action.strip_prefix("start") {
+        let choice = choice.strip_prefix(':');
+        let harness = serde_json::to_value(login.harness).unwrap_or_default();
+        let params = if login.harness == HarnessId::Acp {
+            serde_json::json!({ "harness": harness, "methodId": choice })
+        } else {
+            serde_json::json!({ "harness": harness, "provider": choice })
+        };
         let start = client
             .host_call::<AgentLoginStart>(
                 device_id,
                 methods::START_AGENT_LOGIN,
-                serde_json::json!({ "harness": login.key, "provider": provider }),
+                login.params(params),
             )
             .await?;
         let mode = mode_of(&start);
@@ -119,7 +140,7 @@ pub(super) async fn act(
                 .host_call::<AgentAccountsSnapshot>(
                     device_id,
                     methods::COMPLETE_AGENT_LOGIN,
-                    serde_json::json!({ "loginId": id, "code": code.trim() }),
+                    login.params(serde_json::json!({ "loginId": id, "code": code.trim() })),
                 )
                 .await?;
             Ok(gone)
@@ -130,7 +151,7 @@ pub(super) async fn act(
                 .host_rpc(
                     device_id,
                     methods::CANCEL_AGENT_LOGIN,
-                    serde_json::json!({ "loginId": id }),
+                    login.params(serde_json::json!({ "loginId": id })),
                 )
                 .await?;
             Ok(gone)
@@ -145,7 +166,7 @@ pub(super) async fn act(
                 .host_call::<AgentLoginPoll>(
                     device_id,
                     methods::POLL_AGENT_LOGIN,
-                    serde_json::json!({ "loginId": id }),
+                    login.params(serde_json::json!({ "loginId": id })),
                 )
                 .await?;
             if poll.status == AgentLoginStatus::Done {
@@ -173,7 +194,65 @@ pub(super) async fn act(
     }
 }
 
-fn start_page(harness: HarnessId) -> Page {
+async fn start(client: &Client, device_id: &str, login: &Login<'_>) -> Result<Page> {
+    let Some(instance) = login.instance else {
+        return Ok(start_page(login.harness, None));
+    };
+    let label = client
+        .host_call::<ProviderInstancesSnapshot>(
+            device_id,
+            methods::LIST_PROVIDER_INSTANCES,
+            serde_json::json!({}),
+        )
+        .await
+        .ok()
+        .and_then(|s| s.instances.into_iter().find(|i| i.id == instance))
+        .map_or_else(|| instance.to_owned(), |i| i.label);
+    if login.harness != HarnessId::Acp {
+        return Ok(start_page(login.harness, Some(&label)));
+    }
+    let methods = client
+        .host_call::<Vec<AcpAuthMethod>>(
+            device_id,
+            methods::LIST_ACP_AUTH_METHODS,
+            serde_json::json!({ "instanceId": instance }),
+        )
+        .await?;
+    Ok(acp_start_page(&label, &methods))
+}
+
+fn acp_start_page(label: &str, methods: &[AcpAuthMethod]) -> Page {
+    let rows: Vec<Row> = methods
+        .iter()
+        .map(|method| {
+            Row::new(
+                format!("start:{}", method.id),
+                method.name.clone(),
+                if method.signs_in_app() {
+                    RowKind::Action { destructive: false }
+                } else {
+                    RowKind::Info
+                },
+            )
+            .subtitle(method.description.clone())
+        })
+        .collect();
+    let in_app = methods.iter().any(AcpAuthMethod::signs_in_app);
+    Page {
+        title: format!("Sign in to {label}"),
+        sections: vec![Section {
+            title: (!rows.is_empty()).then(|| "Sign in with".into()),
+            footer: Some(if in_app {
+                "The sign-in page opens in this phone's browser.".into()
+            } else {
+                "No in-app sign-in advertised. Follow the provider's docs to finish setup.".into()
+            }),
+            rows,
+        }],
+    }
+}
+
+fn start_page(harness: HarnessId, label: Option<&str>) -> Page {
     let options = login_options(harness);
     let rows = if options.len() == 1 {
         vec![Row::new(
@@ -194,7 +273,10 @@ fn start_page(harness: HarnessId) -> Page {
             .collect()
     };
     Page {
-        title: format!("Sign in to {}", harness.display_name()),
+        title: format!(
+            "Sign in to {}",
+            label.unwrap_or_else(|| harness.display_name())
+        ),
         sections: vec![Section {
             title: (options.len() > 1).then(|| "Sign in with".into()),
             footer: Some(

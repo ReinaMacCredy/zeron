@@ -34,6 +34,9 @@ pub(crate) fn deadline(method: &str) -> Duration {
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         methods::LIST_MODELS => Duration::from_secs(100),
         methods::UPLOAD_COMMIT => Duration::from_secs(150),
+        methods::CHECK_HARNESS_UPDATES => Duration::from_secs(4 * 60),
+        methods::PREPARE_ACP_AGENT => Duration::from_secs(15 * 60),
+        methods::APPLY_HARNESS_UPDATE => Duration::from_secs(20 * 60),
         _ => CALL_TIMEOUT,
     }
 }

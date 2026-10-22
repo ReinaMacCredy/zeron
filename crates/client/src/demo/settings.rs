@@ -86,10 +86,14 @@ impl HostSettings {
             profiles,
             system_prompt: String::new(),
             disabled_harnesses: Vec::new(),
-            instances: json!({ "instances": [{
-                "id": "claude-work", "driver": "claude-code", "label": "Work",
-                "config": { "kind": "native" }
-            }]}),
+            instances: json!({ "instances": [
+                { "id": "claude-work", "driver": "claude-code", "label": "Work",
+                  "accent": "#3e9cf0",
+                  "config": { "kind": "native", "homeDir": { "kind": "managed" } } },
+                { "id": "acp_gemini_cli", "driver": "acp", "label": "Gemini CLI",
+                  "config": { "kind": "acp", "source": { "kind": "registry",
+                    "agentId": "gemini", "version": "0.9.1", "distribution": "npx" } } }
+            ]}),
             updates: json!([
                 { "harness": "claude-code", "installedVersion": "2.1.3", "latestVersion": "2.1.4",
                   "phase": "available", "canApply": true },
@@ -136,6 +140,10 @@ impl HostSettings {
                 | m::SET_HARNESS_ENABLED
                 | m::LIST_PROVIDER_INSTANCES
                 | m::DELETE_PROVIDER_INSTANCE
+                | m::UPSERT_PROVIDER_INSTANCE
+                | m::SEARCH_ACP_REGISTRY
+                | m::PREPARE_ACP_AGENT
+                | m::LIST_ACP_AUTH_METHODS
                 | m::GET_USAGE_SUMMARY
                 | m::START_AGENT_LOGIN
                 | m::POLL_AGENT_LOGIN
@@ -312,6 +320,62 @@ impl HostSettings {
                 }
                 Ok(self.instances.clone())
             }
+            m::UPSERT_PROVIDER_INSTANCE => {
+                let instance = params["instance"].clone();
+                if instance["label"]
+                    .as_str()
+                    .is_none_or(|l| l.trim().is_empty())
+                {
+                    return Err(ClientError::HostError(
+                        "Provider instance label is required".into(),
+                    ));
+                }
+                if let Some(list) = self.instances["instances"].as_array_mut() {
+                    match list.iter_mut().find(|i| i["id"] == instance["id"]) {
+                        Some(slot) => *slot = instance,
+                        None => list.push(instance),
+                    }
+                }
+                Ok(self.instances.clone())
+            }
+            m::SEARCH_ACP_REGISTRY => {
+                let query = params["query"].as_str().unwrap_or_default().to_lowercase();
+                let agents = registry()
+                    .into_iter()
+                    .filter(|a| {
+                        query.is_empty()
+                            || a["id"].as_str().unwrap_or_default().contains(&query)
+                            || a["name"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_lowercase()
+                                .contains(&query)
+                    })
+                    .collect::<Vec<_>>();
+                Ok(json!(agents))
+            }
+            m::PREPARE_ACP_AGENT => {
+                let id = params["agentId"].as_str().unwrap_or_default();
+                let agent = registry()
+                    .into_iter()
+                    .find(|a| a["id"] == id)
+                    .ok_or_else(|| ClientError::HostError(format!("No ACP agent '{id}'")))?;
+                if agent["unverified"] == json!(true) && params["allowUnverified"] != json!(true) {
+                    return Err(ClientError::HostError(
+                        "No checksum for this download".into(),
+                    ));
+                }
+                Ok(json!({
+                    "agentId": agent["id"], "version": agent["version"],
+                    "distribution": agent["distributions"][0], "displayName": agent["name"]
+                }))
+            }
+            m::LIST_ACP_AUTH_METHODS => Ok(json!([
+                { "id": "oauth-personal", "name": "Log in with Google", "type": "agent",
+                  "description": "Opens Google sign-in in the browser." },
+                { "id": "gemini-api-key", "name": "Use a Gemini API key", "type": "env_var",
+                  "description": "Set GEMINI_API_KEY in this instance's environment." }
+            ])),
             m::GET_SYSTEM_PROMPT => Ok(json!({ "prompt": self.system_prompt })),
             m::SET_SYSTEM_PROMPT => {
                 self.system_prompt = params["prompt"]
@@ -362,6 +426,19 @@ impl HostSettings {
             chats: Vec::new(),
         })
     }
+}
+
+fn registry() -> Vec<Value> {
+    vec![
+        json!({ "id": "gemini", "name": "Gemini CLI", "version": "0.9.1",
+                "description": "Google's coding agent", "distributions": ["npx"], "installed": true }),
+        json!({ "id": "goose", "name": "Goose", "version": "1.8.0",
+                "description": "Block's open agent", "distributions": ["binary"], "unverified": true }),
+        json!({ "id": "qwen-code", "name": "Qwen Code", "version": "0.2.0",
+                "description": "Qwen's terminal agent", "distributions": ["npx"] }),
+        json!({ "id": "fast-agent", "name": "fast-agent", "version": "0.3.4",
+                "description": "MCP-native agent framework", "distributions": ["uvx"] }),
+    ]
 }
 
 fn to_json<T: serde::Serialize + ?Sized>(value: &T) -> Result<Value> {
