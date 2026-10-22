@@ -552,6 +552,10 @@ fn checked_path(path: &str) -> Result<(), EngineError> {
         || path.len() > MAX_PATH_BYTES
         || path.contains('\0')
         || path.starts_with('/')
+        || matches!(
+            Path::new(path).components().next(),
+            Some(std::path::Component::Prefix(_))
+        )
         || path.split(['/', '\\']).any(|part| {
             part.is_empty() || part == "." || part == ".." || part.eq_ignore_ascii_case(".git")
         });
@@ -1634,6 +1638,7 @@ mod tests {
     fn committed_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         run(dir.path(), &["init", "-b", "main", "."]);
+        run(dir.path(), &["config", "core.autocrlf", "false"]);
         std::fs::write(dir.path().join("tracked.txt"), "one\n").unwrap();
         std::fs::write(dir.path().join("old name.txt"), "rename me\n").unwrap();
         run(dir.path(), &["add", "."]);
@@ -1653,6 +1658,10 @@ mod tests {
         }
     }
 
+    #[cfg_attr(
+        windows,
+        ignore = "`:(glob)*` is not a legal Windows file name, so the pathspec bait cannot be created"
+    )]
     #[tokio::test]
     async fn staging_treats_every_name_as_a_literal_path() {
         let dir = committed_repo();
@@ -2216,6 +2225,10 @@ mod tests {
             .collect()
     }
 
+    #[cfg_attr(
+        windows,
+        ignore = "`:(glob)*` is not a legal Windows file name, so the pathspec bait cannot be created"
+    )]
     #[tokio::test]
     async fn discard_restores_the_unstaged_side_and_removes_exact_untracked_files() {
         let dir = committed_repo();

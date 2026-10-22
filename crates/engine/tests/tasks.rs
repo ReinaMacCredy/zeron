@@ -407,6 +407,18 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
     .await
     .expect("a lead re-plans its mission beside a duplicate open plan from before the rule");
     core.workspace.update_task("t5", &reopen(true)).unwrap();
+    core.workspace.create_sidechat("talk", "talk-side").unwrap();
+    mutate(json!({ "op": "createTask", "taskId": "t8", "title": "Shop side" }))
+        .await
+        .unwrap();
+    let err = refusal(
+        mutate(json!({
+            "op": "assignTask", "taskId": "t8", "chatId": "talk-side", "orchestrate": true,
+        }))
+        .await,
+    );
+    assert!(err.contains("side chat cannot lead"), "{err}");
+    assert_eq!(core.workspace.task("t8").unwrap().chat_id, None);
 
     let unapproved = core.workspace.task("t2").unwrap();
     assert_eq!(unapproved.mode, zeron_proto::TaskMode::Orchestrated);
@@ -436,6 +448,28 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
         None,
         "a send that lands clears the old failure"
     );
+
+    core.workspace
+        .create_chat_from("quiet", None, Some("dev-a"), None, None, None)
+        .unwrap();
+    mutate(json!({ "op": "createTask", "taskId": "t9", "title": "Shop search" }))
+        .await
+        .unwrap();
+    assert!(
+        mutate(json!({
+            "op": "assignTask", "taskId": "t9", "chatId": "quiet", "orchestrate": true,
+            "fromChatId": "ghost",
+        }))
+        .await
+        .is_err()
+    );
+    let unled = core.workspace.task("t9").unwrap();
+    assert_eq!(
+        unled.chat_id, None,
+        "a lead that never got its brief is unlinked"
+    );
+    assert_eq!(unled.mode, zeron_proto::TaskMode::Single);
+    assert!(!unled.plan_pending);
 }
 
 #[tokio::test]

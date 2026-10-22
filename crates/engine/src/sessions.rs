@@ -7055,12 +7055,7 @@ async fn drive_run(
                 }
             }
             AgentEvent::InputResolved { request_id, .. } => {
-                let resolved_consent = folded.iter().any(|part| {
-                    matches!(part, MessagePart::Input { request_id: rid, questions, .. }
-                        if rid == request_id && questions.iter().any(UserInputQuestion::is_computer))
-                });
-                let question_open =
-                    resolved_consent && inner.awaits_person(&chat_id, &run_id, Some(request_id));
+                let question_open = inner.awaits_person(&chat_id, &run_id, Some(request_id));
                 let status = if question_open {
                     SessionStatus::AwaitingInput
                 } else {

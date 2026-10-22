@@ -253,3 +253,23 @@ fn the_steps_window_button_closes_its_own_window(cx: &mut TestAppContext) {
     click(cx, "task-center-pop-waiting");
     assert!(cx.debug_bounds("task-center-pop").is_some());
 }
+
+#[gpui::test]
+fn an_idle_tasks_page_stops_asking_for_frames(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _guard = runtime.enter();
+    let (_lab, state) = lab(cx);
+    mission(&state, cx);
+    let (_page, cx) = cx.add_window_view(|_, cx| TasksPage::new(state, cx));
+    cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
+    cx.run_until_parked();
+    let frames: Vec<usize> = (0..6)
+        .map(|_| {
+            cx.update(|window, cx| window.draw(cx).clear());
+            let queued = cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+            queued
+        })
+        .collect();
+    assert_eq!(frames[1..], [0; 5], "{frames:?}");
+}

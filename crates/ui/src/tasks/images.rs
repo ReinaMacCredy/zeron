@@ -102,6 +102,20 @@ pub(crate) fn upload(
         paths
     })
 }
+
+pub(crate) fn append(images: &mut Vec<String>, paths: Vec<String>, cx: &mut App) {
+    let room = zeron_doc::TASK_IMAGES_MAX.saturating_sub(images.len());
+    if paths.len() > room {
+        crate::toast::error(
+            cx,
+            format!(
+                "A task or step holds up to {} images.",
+                zeron_doc::TASK_IMAGES_MAX
+            ),
+        );
+    }
+    images.extend(paths.into_iter().take(room));
+}
 fn image_at(
     state: &Entity<AppState>,
     path: &str,

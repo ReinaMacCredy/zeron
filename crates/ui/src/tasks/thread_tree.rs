@@ -234,7 +234,8 @@ impl<'a> Walk<'a> {
     }
 }
 
-fn children_by_parent(state: &AppState) -> HashMap<&str, Vec<&Chat>> {
+pub(super) fn children_by_parent(state: &AppState) -> HashMap<&str, Vec<&Chat>> {
+    let ids: HashSet<&str> = state.chats.iter().map(|chat| chat.id.as_str()).collect();
     let mut children: HashMap<&str, Vec<&Chat>> = HashMap::new();
     for chat in state.chats.iter().filter(|chat| !chat.archived) {
         let Some(link) = zeron_proto::thread_link(chat, &state.tasks, &state.task_steps) else {
@@ -243,10 +244,10 @@ fn children_by_parent(state: &AppState) -> HashMap<&str, Vec<&Chat>> {
         if !matches!(link.kind, LinkKind::Delegated | LinkKind::OpenedFrom) {
             continue;
         }
-        let Some(parent) = state.chats.iter().find(|parent| parent.id == link.parent) else {
+        let Some(&parent) = ids.get(link.parent.as_str()) else {
             continue;
         };
-        children.entry(parent.id.as_str()).or_default().push(chat);
+        children.entry(parent).or_default().push(chat);
     }
     for kids in children.values_mut() {
         kids.sort_by_key(|chat| chat.created_at);
