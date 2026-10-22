@@ -786,6 +786,23 @@ fn thread_sent_rows_route_by_sender() {
 }
 
 #[test]
+fn structured_user_text_is_markdown_and_prose_stays_plain() {
+    use zeron_doc::schema::MessageRole::User;
+    let mut w = worker(390.0);
+    w.input = TranscriptInput {
+        entries: vec![
+            message("a", User, vec![text_part("t0", "Two things:\n\n- one\n- two")]),
+            message("b", User, vec![text_part("t0", "plain prose")]),
+        ],
+        ..Default::default()
+    };
+    let frame = w.pass();
+    let text = |i| frame.display(i).unwrap().text;
+    assert!(text(0).contains("one") && !text(0).contains("- one"), "{}", text(0));
+    assert_eq!(text(1), "plain prose");
+}
+
+#[test]
 fn consent_is_a_card_with_its_choices_until_an_answer_settles_it() {
     use zeron_client::computer::CONSENT_ALLOW;
     use zeron_doc::schema::MessageRole::Assistant;

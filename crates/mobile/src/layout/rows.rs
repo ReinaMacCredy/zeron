@@ -22,7 +22,8 @@ use zeron_text::WhiteSpace;
 use super::cards::{Card, consent_row, denied_row, notice_row, place_card};
 use super::display::{ColorRole, DisplayBuilder, FadeEdge, TextRun, WidgetKind};
 use super::file_icons::file_icon_asset;
-use super::markdown::{Ctx, PBlock, PText, Px, place, place_text, prepare_block, prepare_plain};
+use super::markdown::geom::PARA_GAP;
+use super::markdown::{Ctx, PBlock, PText, Px, place, place_stack, place_text, prepare_block, prepare_plain};
 use super::seams::{self, Chats};
 use super::strip::{Strip, place_strip};
 use super::style::{Family, TYPE, Weight};
@@ -80,6 +81,9 @@ pub(crate) fn next_version() -> u64 {
 
 pub(crate) struct UserBubble {
     pub text: PText,
+    /// Structured text (`zeron_markdown::parser::user_markdown`) drawn as
+    /// markdown in place of `text`; empty for plain prose.
+    pub md: Vec<PBlock>,
     pub images: Vec<String>,
     /// Non-image attachments (desktop-sent ZIPs, docs): icon asset + name.
     pub files: Vec<(String, PText)>,
@@ -654,7 +658,11 @@ impl RowBuilder {
                 Some((mention.index, image.path.clone()))
             })
             .collect();
-        let text = prepare_user_text(ctx, parsed.text.trim(), style, lh, &previews);
+        let trimmed = parsed.text.trim();
+        let tree = user_chips(trimmed, &previews).is_empty().then(|| zeron_markdown::parser::user_markdown(trimmed)).flatten();
+        ctx.math_area = 0.0;
+        let md = tree.map_or_else(Vec::new, |tree| tree.blocks.iter().map(|top| prepare_block(ctx, &top.block, 0, false)).collect());
+        let text = prepare_user_text(ctx, trimmed, style, lh, &previews);
         // Copied text reads attachment chips as their plain label.
         let body = zeron_proto::attachment_mentions::attachment_mention_prompt(&parsed.text);
         let (msize, mlh) = TYPE.small;
@@ -690,6 +698,7 @@ impl RowBuilder {
             entry_id: Arc::from(id),
             content: Content::User(UserBubble {
                 text,
+                md,
                 images,
                 files,
                 pending,
@@ -982,13 +991,14 @@ fn place_user(u: &UserBubble, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
     let pad_y = px.v(BUBBLE_PAD_Y);
     let max_w = (cw * 0.86).max(cw - px.v(56.0)).min(cw);
     let text_w = (max_w - pad_x * 2.0).max(20.0);
+    let md_h = (!u.md.is_empty()).then(|| place_stack(&u.md, px, 0.0, 0.0, text_w, PARA_GAP, None));
     let stats = u.text.p.stats(text_w);
-    let folds = stats.line_count > BUBBLE_FOLD_LINES;
+    let folds = md_h.is_none() && stats.line_count > BUBBLE_FOLD_LINES;
     let shown = if folds && !u.expanded { BUBBLE_FOLD_SHOW } else { stats.line_count };
-    let text_h = shown as f32 * u.text.lh;
+    let text_h = md_h.unwrap_or(shown as f32 * u.text.lh);
     let more_h = if folds { u.more.lh + px.v(4.0) } else { 0.0 };
-    let bubble_w = if folds { max_w } else { stats.max_line_width.ceil() + pad_x * 2.0 };
-    let bubble_h = if stats.line_count == 0 { 0.0 } else { text_h + more_h + pad_y * 2.0 };
+    let bubble_w = if folds || md_h.is_some() { max_w } else { stats.max_line_width.ceil() + pad_x * 2.0 };
+    let bubble_h = if md_h.is_none() && stats.line_count == 0 { 0.0 } else { text_h + more_h + pad_y * 2.0 };
     let side = px.v(THUMB);
     let gap = px.v(6.0);
     let pill_h = px.v(FILE_PILL);
@@ -1023,7 +1033,11 @@ fn place_user(u: &UserBubble, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
         let bx = x + cw - bubble_w;
         let by = y + thumbs_h;
         out.fill(bx, by, bubble_w, bubble_h, px.v(BUBBLE_RADIUS).min(bubble_h / 2.0), ColorRole::UserBubble);
-        place_text_lines(&u.text, bx + pad_x, by + pad_y, text_w, shown, px, out);
+        if md_h.is_some() {
+            place_stack(&u.md, px, bx + pad_x, by + pad_y, text_w, PARA_GAP, Some(&mut *out));
+        } else {
+            place_text_lines(&u.text, bx + pad_x, by + pad_y, text_w, shown, px, out);
+        }
         if folds {
             let my = by + pad_y + text_h + px.v(4.0);
             let mw = u.more.p.max_content_width();
@@ -1065,7 +1079,12 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
     }
     match content {
         Content::Block(b) => block(b),
-        Content::User(u) => u.text.p.heap_bytes() + u.more.p.heap_bytes() + u.files.iter().map(|(_, n)| n.p.heap_bytes()).sum::<usize>(),
+        Content::User(u) => {
+            u.text.p.heap_bytes()
+                + u.md.iter().map(block).sum::<usize>()
+                + u.more.p.heap_bytes()
+                + u.files.iter().map(|(_, n)| n.p.heap_bytes()).sum::<usize>()
+        }
         Content::Tools(t) => super::tools::heap_bytes(t),
         Content::Chip(c) => c.text.p.heap_bytes(),
         Content::Image { reference } => reference.len(),
