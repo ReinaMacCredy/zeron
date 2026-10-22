@@ -29,6 +29,7 @@ const RIGHT_PANE_HEADER_CONTROLS_MIN_WIDTH: f32 = 8.0 + 4.0 + 4.0 + 28.0;
 /// to the min before the strip scrolls.
 const TAB_MAX_WIDTH: f32 = 216.0;
 const TAB_MIN_WIDTH: f32 = 144.0;
+const TAB_GROUP_TITLE_MIN_WIDTH: f32 = 72.0;
 const TAB_HEIGHT: f32 = 32.0;
 /// Flex gap between tabs — part of the drop-index slot width.
 const TAB_GAP: f32 = 4.0;
@@ -124,6 +125,28 @@ pub(super) fn group_tab_order(
         out.extend(group.into_iter().cloned());
     }
     out
+}
+
+fn strip_child_index<'a>(
+    ids: impl Iterator<Item = &'a str>,
+    selected: &str,
+    members: &std::collections::HashMap<String, crate::tasks::TabMember>,
+    split_right: Option<&str>,
+) -> Option<usize> {
+    let mut children = 0usize;
+    let mut prev_task = None;
+    for id in ids {
+        let task = members.get(id).map(|member| member.task_id.as_str());
+        let joins = Some(id) == split_right || (task.is_some() && task == prev_task);
+        if !joins {
+            children += 1;
+        }
+        if id == selected {
+            return children.checked_sub(1);
+        }
+        prev_task = task;
+    }
+    None
 }
 
 /// The strip hugs its tabs until they shrink, then fills the row.
@@ -1341,7 +1364,12 @@ impl Shell {
         // off-screen).
         match selected.as_deref() {
             Some(sel) if self.tabs_scrolled_to.as_deref() != Some(sel) => {
-                if let Some(ix) = order.iter().position(|id| id == sel) {
+                if let Some(ix) = strip_child_index(
+                    tabs.iter().map(|(id, ..)| id.as_str()),
+                    sel,
+                    &members,
+                    group.as_ref().map(|(_, right)| right.as_str()),
+                ) {
                     self.tabs_scroll.scroll_to_item(ix);
                 }
                 self.tabs_scrolled_to = Some(sel.to_string());
@@ -1734,6 +1762,7 @@ impl Shell {
         let menu =
             menu_open.then(|| self.render_tab_group_menu(&task_id, &ids, tabs, selected, cx));
         let reduced = self.reduced_motion;
+        let mut min_width = TAB_GROUP_TITLE_MIN_WIDTH;
         let members: Vec<AnyElement> = group
             .into_iter()
             .filter_map(|(id, element)| {
@@ -1744,9 +1773,11 @@ impl Shell {
                     reduced,
                 );
                 if t >= 1.0 {
+                    min_width += TAB_MIN_WIDTH;
                     return Some(element);
                 }
                 (t > 0.0).then(|| {
+                    min_width += width * t;
                     div()
                         .flex_none()
                         .w(px(width * t))
@@ -1767,7 +1798,7 @@ impl Shell {
             .aria_label(title.clone())
             .aria_expanded(!collapsed)
             .relative()
-            .flex_none()
+            .min_w(px(TAB_GROUP_TITLE_MIN_WIDTH))
             .max_w(px(TAB_MAX_WIDTH))
             .h(px(TAB_HEIGHT))
             .flex()
@@ -1818,7 +1849,7 @@ impl Shell {
             .children(menu);
         div()
             .id(SharedString::from(format!("tab-group-box-{task_id}")))
-            .min_w_0()
+            .min_w(px(min_width))
             .h(px(TAB_HEIGHT))
             .flex()
             .flex_row()
@@ -3439,7 +3470,7 @@ mod close_tests {
 
 #[cfg(test)]
 mod tab_group_tests {
-    use super::group_tab_order;
+    use super::{group_tab_order, strip_child_index};
     use crate::tasks::TabMember;
 
     #[test]
@@ -3462,6 +3493,13 @@ mod tab_group_tests {
             ["a", "lead", "s1", "s2", "b", "c"]
                 .map(String::from)
                 .to_vec()
+        );
+        let strip = ["a", "lead", "s1", "s2", "b", "c"];
+        let ix = |selected| strip_child_index(strip.into_iter(), selected, &members, Some("c"));
+        assert_eq!(
+            ["a", "s2", "b", "c"].map(ix),
+            [Some(0), Some(1), Some(2), Some(2)],
+            "a group and a split pair each scroll as one child"
         );
     }
 }
