@@ -164,6 +164,8 @@ fn index_row(
         format!("Needs you \u{b7} {} asks", asker.title)
     } else if root_waits {
         format!("Needs you \u{b7} {}", nodes[0].title)
+    } else if task.is_some_and(|task| crate::supervisor::approval_held(state, &task.id, now)) {
+        crate::supervisor::HELD_APPROVAL.into()
     } else if done.is_some() {
         "Done".into()
     } else if steps_running + agents_running > 0 {

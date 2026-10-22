@@ -743,8 +743,10 @@ fn mission_row_of(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>
     let plan = crate::tasks::rollup(state, task, now);
     let phase = plan.phase(task);
     let (word, status) = plan.label(task);
+    let held = crate::supervisor::approval_held(state, &task.id, now);
     let label = match phase {
         PlanPhase::PlanReady => "Needs you · plan review".to_owned(),
+        _ if held => crate::supervisor::HELD_APPROVAL.to_owned(),
         PlanPhase::Planning => "Planning".to_owned(),
         PlanPhase::Status(TaskStatus::NeedsYou) => plan
             .steps
@@ -775,7 +777,7 @@ fn mission_row_of(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>
         task_id: task.id.clone(),
         title: task.title.clone(),
         progress: plan.progress,
-        status,
+        status: if held { TaskStatus::Working } else { status },
         label,
     }
 }

@@ -13,7 +13,7 @@ Widgets refresh only while the grid is visible.
 | Widget | What it shows |
 | --- | --- |
 | **Working now** | Chats with a running turn, their elapsed time and current command. Click a row to open the chat. |
-| **Missions** | Mission Control tasks you have not marked done, with a progress ring and what each is doing: **Planning**, **Step 2/5 · Working**, **Needs you · plan review**, **Needs you · step 3** for the step that stopped, or just **Needs you** when the lead waits on you or has stopped and no step is stuck. Tasks that need you come first. Up to four show; **+2 more · Open Tasks** opens Tasks. With none, it reads **No missions running**. Click a row to open that task in [Mission Control](zeron://docs/mission-control). |
+| **Missions** | Mission Control tasks you have not marked done, with a progress ring and what each is doing: **Planning**, **Step 2/5 · Working**, **Needs you · plan review**, **Plan approved · can take back** while the [Supervisor](zeron://docs/supervisor)'s approval waits out its 30 seconds, **Needs you · step 3** for the step that stopped, or just **Needs you** when the lead waits on you or has stopped and no step is stuck. Tasks that need you come first. Up to four show; **+2 more · Open Tasks** opens Tasks. With none, it reads **No missions running**. Click a row to open that task in [Mission Control](zeron://docs/mission-control). |
 | **Pull requests** | Pull requests waiting on your review, and your own open ones with their status and CI. |
 | **Git activity** | Your commits over the last 14 days, across all projects or one at a time. |
 | **This Mac** | CPU, memory, and disk use of this machine. |

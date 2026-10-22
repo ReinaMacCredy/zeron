@@ -236,6 +236,15 @@ pub(crate) fn plan_approval(
     approval_state(row, state, now)
 }
 
+pub(crate) const HELD_APPROVAL: &str = "Plan approved · can take back";
+
+pub(crate) fn approval_held(state: &AppState, task_id: &str, now: DateTime<Utc>) -> bool {
+    matches!(
+        plan_approval(state, task_id, now),
+        Some(ApprovalState::Held { .. })
+    )
+}
+
 fn take_back_key(task_id: &str) -> String {
     format!("take-back:{task_id}")
 }
@@ -4597,6 +4606,11 @@ mod tests {
             approval_state(&taken, &state, now),
             Some(ApprovalState::TakenBack)
         );
+        state.supervisor = Some(SupervisorSnapshot {
+            interventions: vec![held.clone()],
+            ..Default::default()
+        });
+        assert!(approval_held(&state, "t", now), "lists show the hold");
         state.task_steps = vec![
             serde_json::from_value(serde_json::json!({
                 "id": "s", "taskId": "t", "title": "s", "orderKey": "a",
@@ -4604,6 +4618,7 @@ mod tests {
             }))
             .unwrap(),
         ];
+        assert!(!approval_held(&state, "t", now));
         for row in [&held, &sent] {
             let started = approval_state(row, &state, now);
             assert_eq!(started, Some(ApprovalState::Started));
