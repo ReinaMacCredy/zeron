@@ -1166,9 +1166,17 @@ impl SessionsEngine {
             .is_some_and(is_active)
     }
 
-    /// Whether the chat's live runtime reports background work (subagents,
-    /// background shells) still running — parked or not.
+    /// Whether the chat's live runtime still runs background work (subagents,
+    /// background shells) — parked or not: what its driver reports, or the
+    /// subagents its session is parked on.
     pub fn holds_background_work(&self, chat_id: &str) -> bool {
+        self.driver_reports_background(chat_id)
+            || self
+                .session_status(chat_id)
+                .is_some_and(|s| s.held_by_subagents)
+    }
+
+    fn driver_reports_background(&self, chat_id: &str) -> bool {
         lock(&self.inner.runs)
             .get(chat_id)
             .is_some_and(|h| h.turn.background_live())
@@ -1183,7 +1191,7 @@ impl SessionsEngine {
             )
         });
         (
-            tasks.max(usize::from(self.holds_background_work(chat_id))),
+            tasks.max(usize::from(self.driver_reports_background(chat_id))),
             subagents,
         )
     }

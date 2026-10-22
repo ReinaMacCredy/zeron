@@ -109,7 +109,7 @@ impl Harness for FeedHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        if request.prompt != self.main_prompt {
+        if !request.prompt.contains(&self.main_prompt) {
             let events = vec![Ok(done(DoneStatus::Completed))];
             return Ok(futures::stream::iter(events).boxed());
         }
@@ -336,6 +336,98 @@ async fn a_teardown_stamps_a_live_subagent_stopped_not_failed() {
     )
     .await;
     assert_eq!(chip_status(&core), Some(SubagentStatus::Stopped));
+
+    core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn task_cancel_tears_down_a_child_parked_on_its_subagents() {
+    init_env();
+    let (feed, rx) = mpsc::unbounded_channel();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(FeedHarness {
+        main_prompt: "probe the cache".into(),
+        feed: Mutex::new(Some(rx)),
+    }));
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    core.workspace
+        .create_space("space-c", "dev-a", "/tmp", None, false)
+        .expect("space");
+    core.workspace
+        .create_chat("lead", Some("space-c"), None, None, None)
+        .expect("lead chat");
+    let params = serde_json::from_value(
+        serde_json::json!({ "ownerChatId": "lead", "task": "probe the cache" }),
+    )
+    .unwrap();
+    let child = core
+        .doc_host
+        .delegate_task(params, Default::default())
+        .await
+        .unwrap()
+        .task_id;
+    for event in [
+        AgentEvent::SessionStarted {
+            harness: HarnessId::Mock,
+            model: "mock-1".into(),
+            tools: vec![],
+            cwd: "/tmp".into(),
+            session_id: "hs-c".into(),
+            assistant_message_id: "a-c".into(),
+        },
+        AgentEvent::ToolCall {
+            id: SPAWN.into(),
+            call: ToolCall::Unknown {
+                name: "Agent: scout".into(),
+                input: Some(serde_json::json!({"description": "scout", "prompt": "look"})),
+            },
+        },
+        AgentEvent::ToolResult {
+            id: SPAWN.into(),
+            is_error: false,
+            output: None,
+            diff: None,
+        },
+        done(DoneStatus::Completed),
+        tagged(AgentEvent::TextDelta {
+            text: "digging. ".into(),
+        }),
+    ] {
+        feed.send(event).unwrap();
+    }
+    wait_for(
+        || {
+            core.sessions
+                .session_status(&child)
+                .is_some_and(|s| s.held_by_subagents)
+        },
+        "the child to park on its subagent",
+    )
+    .await;
+
+    assert_eq!(
+        core.doc_host.task_cancel("lead", &child).await.unwrap(),
+        "cancel_requested"
+    );
+    assert!(
+        feed.is_closed(),
+        "the cancel left the child's runtime running"
+    );
+    wait_for(
+        || {
+            core.workspace
+                .chat(&child)
+                .ok()
+                .flatten()
+                .and_then(|chat| chat.delegation)
+                .is_some_and(|d| d.status == zeron_proto::DelegationStatus::Cancelled)
+        },
+        "the cancelled child to settle",
+    )
+    .await;
 
     core.sessions.shutdown().await;
 }

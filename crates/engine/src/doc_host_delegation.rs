@@ -1138,9 +1138,7 @@ impl DocHost {
                 handle.publish_queue();
             }
         }
-        if let Some(sessions) = self.sessions()
-            && sessions.turn_in_flight(task_id)
-        {
+        if let Some(sessions) = self.sessions() {
             self.interrupt_and_pause_queue(&sessions, &handle, true)
                 .await?;
         }
