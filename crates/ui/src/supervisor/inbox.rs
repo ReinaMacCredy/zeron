@@ -790,15 +790,17 @@ impl SupervisorPage {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let group = SharedString::from(format!("supervisor-row-{key}"));
-        let reply = icon_button(
-            theme,
-            format!("{selector}-discuss"),
-            "Reply (Discuss)",
-            icons::LUCIDE_MESSAGE_SQUARE,
-        )
-        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-            cx.emit(SupervisorEvent::Discuss(quote.clone()))
-        }));
+        let reply = self.pane.is_some().then(|| {
+            icon_button(
+                theme,
+                format!("{selector}-discuss"),
+                "Reply (Discuss)",
+                icons::LUCIDE_MESSAGE_SQUARE,
+            )
+            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                cx.emit(SupervisorEvent::Discuss(quote.clone()))
+            }))
+        });
         let open = thread.map(|chat_id| {
             icon_button(
                 theme,
@@ -832,7 +834,7 @@ impl SupervisorPage {
                     .opacity(0.0)
                     .group_hover(group, |s| s.opacity(1.0))
                     .children(open)
-                    .child(reply),
+                    .children(reply),
             )
     }
 
@@ -910,32 +912,34 @@ impl SupervisorPage {
             let chat_id = input.chat_id.clone();
             let supervisor = input.asker == InputAsker::Supervisor;
             let reply_quote = quote.clone();
-            let link = div()
-                .id(SharedString::from(format!("{sel}-reply")))
-                .debug_selector({
-                    let sel = sel.clone();
-                    move || format!("{sel}-reply")
-                })
-                .role(gpui::Role::Button)
-                .flex_none()
-                .cursor_pointer()
-                .text_size(ui_rems(12.0))
-                .text_color(theme.text_muted)
-                .hover(|s| s.text_color(theme.text))
-                .child("Reply in conversation")
-                .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
-                    if supervisor {
-                        page.open_conversation(cx);
-                        cx.emit(SupervisorEvent::Discuss(reply_quote.clone()));
-                    } else {
-                        cx.emit(SupervisorEvent::OpenChat(chat_id.clone()));
-                    }
-                }));
+            let link = (!supervisor || self.pane.is_some()).then(|| {
+                div()
+                    .id(SharedString::from(format!("{sel}-reply")))
+                    .debug_selector({
+                        let sel = sel.clone();
+                        move || format!("{sel}-reply")
+                    })
+                    .role(gpui::Role::Button)
+                    .flex_none()
+                    .cursor_pointer()
+                    .text_size(ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .hover(|s| s.text_color(theme.text))
+                    .child("Reply in conversation")
+                    .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
+                        if supervisor {
+                            page.open_conversation(cx);
+                            cx.emit(SupervisorEvent::Discuss(reply_quote.clone()));
+                        } else {
+                            cx.emit(SupervisorEvent::OpenChat(chat_id.clone()));
+                        }
+                    }))
+            });
             return self
                 .row_shell(key, sel, title.clone(), theme)
                 .child(mark(unread(theme)))
                 .child(question_cell(theme, title, q_width, None))
-                .child(link)
+                .children(link)
                 .child(faint(theme, "Typed answer".into()))
                 .child(time_cell(theme, clock(input.at)))
                 .into_any_element();
@@ -1237,19 +1241,20 @@ impl SupervisorPage {
                     })
                     .child(format!("{picked} of {total} picked")),
             )
-            .child("·")
-            .child(
-                div()
-                    .id(SharedString::from(reply_sel.clone()))
-                    .debug_selector(move || reply_sel.clone())
-                    .role(gpui::Role::Button)
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme.text))
-                    .child("Reply with a note")
-                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                        cx.emit(SupervisorEvent::Discuss(quote.clone()))
-                    })),
-            )
+            .when(self.pane.is_some(), |el| {
+                el.child("·").child(
+                    div()
+                        .id(SharedString::from(reply_sel.clone()))
+                        .debug_selector(move || reply_sel.clone())
+                        .role(gpui::Role::Button)
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.text))
+                        .child("Reply with a note")
+                        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                            cx.emit(SupervisorEvent::Discuss(quote.clone()))
+                        })),
+                )
+            })
             .child(div().flex_1())
             .child(
                 div()
