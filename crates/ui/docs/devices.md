@@ -64,6 +64,6 @@ Some features work against the machine in front of you:
 
 - Device tabs (simulators and emulators) need the chat to run on this computer.
 - A browser tab in a remote chat opens localhost on this device. To reach a dev server on the other machine, open the preview Zeron detects for it from a new tab.
-- Voice mode keeps audio here. **Codex voice device** in [Settings > Voice](zeron://settings/voice) chooses which device runs Codex for the call.
+- Voice mode uses this device's microphone and speaker, and streams the audio straight to OpenAI's voice service, not through the device that runs Codex. **Codex voice device** in [Settings > Voice](zeron://settings/voice) chooses which device runs Codex for the call.
 
 > A device shows as **Online** when it has checked in within roughly the last minute; a running Zeron checks in every 15 seconds.

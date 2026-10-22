@@ -374,7 +374,7 @@ extension UIViewController {
         let hosts = app.voice.hosts
         let message = hosts.isEmpty
             ? "No online device can host Codex voice. Start Zeron with remote voice enabled on your Mac or server."
-            : "Audio stays on this iPhone. Codex and its tools run on the device you pick."
+            : "Audio goes from this iPhone straight to OpenAI's voice service. Codex and its tools run on the device you pick."
         let sheet = UIAlertController(title: "Talk to Codex on…", message: message, preferredStyle: .actionSheet)
         for device in hosts {
             sheet.addAction(UIAlertAction(title: device.name, style: .default) { [weak self] _ in

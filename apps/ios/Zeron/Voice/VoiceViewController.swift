@@ -127,7 +127,7 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
         switch section {
         case .hosts: app.voice.live
             ? "End the call to change devices."
-            : "Audio stays on this iPhone. Codex, its sign-in and its tools run on the device you choose."
+            : "Audio goes from this iPhone straight to OpenAI's voice service. Codex, its sign-in and its tools run on the device you choose."
         case .voice: "Applies to your next call."
         default: nil
         }

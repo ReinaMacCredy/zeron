@@ -63,7 +63,7 @@ Turn them on or off in the phone's **Settings** tab under **Notifications**, wit
 
 ## Voice
 
-Voice mode on the phone is a call with Codex: the audio stays on your iPhone, while Codex and its tools run on one of your computers. It appears once one of your Macs or servers runs a Zeron version that supports it; a device that needs an update says "Update Zeron and enable remote voice". Codex must be signed in on that computer.
+Voice mode on the phone is a call with Codex: your iPhone streams the audio straight to OpenAI's voice service, not through your computer, while Codex and its tools run on one of your computers. It appears once one of your Macs or servers runs a Zeron version that supports it; a device that needs an update says "Update Zeron and enable remote voice". Codex must be signed in on that computer.
 
 Tap the waveform next to **New session** to call. Touch and hold it to choose the device (**Codex runs on**) and the voice style. During a call the bar shows the call with its timer and mute and hang-up buttons. Tap it to open the call screen, which shows what is happening (**Listening**, **Speaking**, **Working on it…**, **Codex needs your answer**, **Muted**) and can open the voice session's transcript.
 
