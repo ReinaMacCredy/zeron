@@ -231,6 +231,12 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             Row(id: "groupByProject", title: "Group by Project", subtitle: "Sessions outside your sections, under their project", symbol: "square.stack.3d.up", accessory: .toggle(app.groupByProject)),
             Row(id: "archived", title: "Archived Sessions", symbol: "archivebox"),
         ])
+        s.appendSections(["Composer"])
+        let steer = UserDefaults.standard.string(forKey: "followUpBehavior") == "steer"
+        s.appendItems([
+            Row(id: "followUp:queue", title: "Queue", subtitle: "Queue follow-ups while the agent runs", symbol: "text.line.last.and.arrowtriangle.forward", accessory: .check(!steer)),
+            Row(id: "followUp:steer", title: "Steer", subtitle: "Steer the current run", symbol: "arrow.triangle.turn.up.right.diamond", accessory: .check(steer)),
+        ])
         s.appendSections(["Help"])
         s.appendItems([
             Row(id: "whatsnew", title: "What's New", subtitle: whatsNew().map { "v\($0.version) · \($0.date)" }, symbol: "sparkles"),
@@ -248,6 +254,9 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         case "voice": navigationController?.pushViewController(VoiceViewController(app: app), animated: true)
         case let id where id.hasPrefix("device:"):
             navigationController?.pushViewController(HostPageViewController(app: app, deviceId: String(id.dropFirst(7)), page: "mac", title: row.title), animated: true)
+        case let id where id.hasPrefix("followUp:"):
+            UserDefaults.standard.set(String(id.dropFirst(9)), forKey: "followUpBehavior")
+            reload()
         case let id where id.hasPrefix("appearance:"):
             let style = Int(id.dropFirst(11)) ?? 0
             UserDefaults.standard.set(style, forKey: "appearance")
