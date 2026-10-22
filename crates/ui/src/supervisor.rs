@@ -442,75 +442,32 @@ fn step_name(state: &AppState, task_id: &str, step_id: &str, now: DateTime<Utc>)
     ))
 }
 
-fn mission_title(state: &AppState, task_id: Option<&str>) -> Option<String> {
-    let task_id = task_id?;
-    state
-        .tasks
-        .iter()
-        .find(|task| task.id == task_id)
-        .map(|task| task.title.clone())
+fn names(
+    state: &AppState,
+    now: DateTime<Utc>,
+) -> zeron_proto::mission::Names<'_, impl Fn(&zeron_proto::Task) -> Rollup + '_> {
+    zeron_proto::mission::Names {
+        chats: &state.chats,
+        tasks: &state.tasks,
+        steps: &state.task_steps,
+        plan_of: move |task: &zeron_proto::Task| rollup(state, task, now),
+    }
 }
 
-fn plan_thread(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> Option<(String, String)> {
-    let thread = crate::tasks::mission_thread(state, chat_id, now)?;
-    let who = match thread.role {
-        crate::tasks::MissionRole::Lead => "Lead".to_owned(),
-        crate::tasks::MissionRole::Step { step_id, label } => {
-            let step = state.task_steps.iter().find(|step| step.id == step_id)?;
-            format!("{label} · {}", step.title)
-        }
-    };
-    Some((who, thread.title))
+fn mission_title(state: &AppState, task_id: Option<&str>) -> Option<String> {
+    names(state, Utc::now()).mission_title(task_id)
 }
 
 fn thread_name(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> String {
-    if is_supervisor_chat(chat_id) {
-        return "Supervisor".into();
-    }
-    if let Some((who, mission)) = plan_thread(state, chat_id, now) {
-        return format!("{who} · {mission}");
-    }
-    state
-        .chats
-        .iter()
-        .find(|chat| chat.id == chat_id)
-        .map(|chat| crate::transcript::single_line(&crate::home::chat_title(chat)))
-        .unwrap_or_else(|| "a thread".into())
+    names(state, now).thread_name(chat_id)
 }
 
 fn asker_name(input: &NeedsYouInput, state: &AppState, now: DateTime<Utc>) -> String {
-    if matches!(input.asker, InputAsker::Step | InputAsker::Lead)
-        && let Some((who, mission)) = plan_thread(state, &input.chat_id, now)
-    {
-        return format!("{who} · {mission}");
-    }
-    let mission = mission_title(state, input.task_id.as_deref());
-    let who = match input.asker {
-        InputAsker::Supervisor => return "Supervisor".into(),
-        InputAsker::Thread => {
-            let name = thread_name(state, &input.chat_id, now);
-            let root = tree_root(state, &input.chat_id)
-                .filter(|root| root.id != input.chat_id)
-                .map(|root| crate::transcript::single_line(&crate::home::chat_title(root)));
-            match root {
-                Some(root) => format!("{name} · {root}"),
-                None => name,
-            }
-        }
-        InputAsker::Step => "A step".into(),
-        InputAsker::Lead => "Lead".into(),
-    };
-    match mission {
-        Some(mission) => format!("{who} · {mission}"),
-        None => who,
-    }
+    names(state, now).asker_name(input)
 }
 
 fn tree_root<'a>(state: &'a AppState, chat_id: &str) -> Option<&'a Chat> {
-    let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
-    zeron_proto::tree_path(chat, &state.chats, &state.tasks, &state.task_steps)
-        .last()
-        .copied()
+    names(state, Utc::now()).tree_root(chat_id)
 }
 
 fn root_id(state: &AppState) -> impl Fn(&str) -> Option<String> + '_ {

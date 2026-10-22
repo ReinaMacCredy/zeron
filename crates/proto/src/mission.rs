@@ -1,6 +1,9 @@
 use chrono::{DateTime, Utc};
 
-use crate::supervisor::{InterventionKind, NeedsYouRow, PlanApproval, SupervisorIntervention};
+use crate::supervisor::{
+    InputAsker, InterventionKind, NeedsYouInput, NeedsYouRow, PlanApproval, Raiser,
+    SupervisorIntervention, SupervisorItem, is_supervisor_chat,
+};
 use crate::{
     Chat, ChatIndicator, PlanProgress, StepStatus, Task, TaskStatus, TaskStep, plan_of_chat,
     plan_progress, step_status, task_status,
@@ -353,4 +356,103 @@ pub fn plan_approval(
         row.kind == InterventionKind::Approve && row.task_id.as_deref() == Some(task_id)
     })?;
     approval_state(row, steps, now)
+}
+
+pub struct Names<'a, F> {
+    pub chats: &'a [Chat],
+    pub tasks: &'a [Task],
+    pub steps: &'a [TaskStep],
+    pub plan_of: F,
+}
+
+impl<'a, B, F: Fn(&Task) -> Rollup<B>> Names<'a, F> {
+    pub fn mission_title(&self, task_id: Option<&str>) -> Option<String> {
+        let task_id = task_id?;
+        self.tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .map(|task| task.title.clone())
+    }
+
+    pub fn mission_thread(&self, chat_id: &str) -> Option<MissionThread> {
+        mission_thread(self.tasks, self.steps, chat_id, |task| (self.plan_of)(task))
+    }
+
+    pub fn plan_thread(&self, chat_id: &str) -> Option<(String, String)> {
+        let thread = self.mission_thread(chat_id)?;
+        let who = match thread.role {
+            MissionRole::Lead => "Lead".to_owned(),
+            MissionRole::Step { step_id, label } => {
+                let step = self.steps.iter().find(|step| step.id == step_id)?;
+                format!("{label} · {}", step.title)
+            }
+        };
+        Some((who, thread.title))
+    }
+
+    pub fn chat_name(&self, chat: &Chat) -> String {
+        crate::view::single_line(&chat.display_title())
+    }
+
+    pub fn thread_name(&self, chat_id: &str) -> String {
+        if is_supervisor_chat(chat_id) {
+            return "Supervisor".into();
+        }
+        if let Some((who, mission)) = self.plan_thread(chat_id) {
+            return format!("{who} · {mission}");
+        }
+        self.chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .map(|chat| self.chat_name(chat))
+            .unwrap_or_else(|| "a thread".into())
+    }
+
+    pub fn tree_root(&self, chat_id: &str) -> Option<&'a Chat> {
+        let chat = self.chats.iter().find(|chat| chat.id == chat_id)?;
+        crate::tree_path(chat, self.chats, self.tasks, self.steps)
+            .last()
+            .copied()
+    }
+
+    pub fn asker_name(&self, input: &NeedsYouInput) -> String {
+        if matches!(input.asker, InputAsker::Step | InputAsker::Lead)
+            && let Some((who, mission)) = self.plan_thread(&input.chat_id)
+        {
+            return format!("{who} · {mission}");
+        }
+        let mission = self.mission_title(input.task_id.as_deref());
+        let who = match input.asker {
+            InputAsker::Supervisor => return "Supervisor".into(),
+            InputAsker::Thread => self.thread_asker(&input.chat_id),
+            InputAsker::Step => "A step".into(),
+            InputAsker::Lead => "Lead".into(),
+        };
+        match mission {
+            Some(mission) => format!("{who} · {mission}"),
+            None => who,
+        }
+    }
+
+    pub fn thread_asker(&self, chat_id: &str) -> String {
+        let name = self.thread_name(chat_id);
+        match self
+            .tree_root(chat_id)
+            .filter(|root| root.id != chat_id)
+            .map(|root| self.chat_name(root))
+        {
+            Some(root) => format!("{name} · {root}"),
+            None => name,
+        }
+    }
+
+    pub fn raiser_name(&self, item: &SupervisorItem) -> String {
+        match item.raised_by {
+            Raiser::Supervisor => "Supervisor".into(),
+            Raiser::Lead => match self.mission_title(item.task_id.as_deref()) {
+                Some(mission) => format!("Lead · {mission}"),
+                None => "Lead".into(),
+            },
+        }
+    }
 }

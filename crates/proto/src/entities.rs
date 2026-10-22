@@ -492,6 +492,17 @@ impl Chat {
 }
 
 impl Chat {
+    pub fn display_title(&self) -> String {
+        self.title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or("New session")
+            .to_owned()
+    }
+}
+
+impl Chat {
     /// Ignores the live status; Working and AwaitingInput chats never settle.
     /// A chat with no messages never settles on its own, as in T3.
     pub fn settled_at(&self, after_days: u32, now: DateTime<Utc>) -> Option<DateTime<Utc>> {

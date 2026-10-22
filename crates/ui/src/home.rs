@@ -559,12 +559,7 @@ fn local_git_projects(state: &AppState) -> Vec<String> {
 }
 
 pub(crate) fn chat_title(chat: &Chat) -> String {
-    chat.title
-        .as_deref()
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .unwrap_or("New session")
-        .to_owned()
+    chat.display_title()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
