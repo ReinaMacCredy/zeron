@@ -139,6 +139,13 @@ pub struct EvaluationContext<'a> {
     pub turn_is_past: &'a dyn Fn(&str) -> bool,
 }
 
+fn tears_down(entry: &SessionCommandEntry) -> bool {
+    matches!(
+        entry.payload,
+        SessionCommandPayload::Interrupt { teardown: true }
+    )
+}
+
 /// Rule 3 — pure evaluation of a single pending command.
 pub fn evaluate_command(
     entry: &SessionCommandEntry,
@@ -152,6 +159,7 @@ pub fn evaluate_command(
     }
     // Interrupts are redundant control signals; steers are distinct user messages.
     // Coalescing steers loses prompts when remote sync delivers a batch.
+    // A plain Stop never covers a teardown: it would leave the runtime running.
     let kind = entry.kind();
     if kind == SessionCommandKind::Interrupt {
         let has_newer_same_kind = cx.entries.iter().any(|other| {
@@ -159,6 +167,7 @@ pub fn evaluate_command(
                 && other.kind() == kind
                 && other.status == SessionCommandStatus::Pending
                 && other.issued_at > entry.issued_at
+                && (tears_down(other) || !tears_down(entry))
         });
         if has_newer_same_kind {
             return CommandDisposition::Superseded;
@@ -307,6 +316,29 @@ mod tests {
         assert_eq!(
             evaluate_command(&entries[1], &context),
             CommandDisposition::Execute
+        );
+    }
+
+    #[test]
+    fn a_newer_plain_stop_never_supersedes_an_older_teardown() {
+        let teardown = |teardown| SessionCommandPayload::Interrupt { teardown };
+        let entries = vec![
+            entry("pause", teardown(true), 1_000),
+            entry("stop", teardown(false), 2_000),
+        ];
+        let context = cx(&entries, &NEVER, &NEVER, 3_000, None);
+        assert_eq!(
+            evaluate_command(&entries[0], &context),
+            CommandDisposition::Execute
+        );
+        let entries = vec![
+            entry("stop", teardown(false), 1_000),
+            entry("pause", teardown(true), 2_000),
+        ];
+        let context = cx(&entries, &NEVER, &NEVER, 3_000, None);
+        assert_eq!(
+            evaluate_command(&entries[0], &context),
+            CommandDisposition::Superseded
         );
     }
 
