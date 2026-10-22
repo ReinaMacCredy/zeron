@@ -1478,11 +1478,7 @@ impl EngineRpc {
         };
         let base = match (p.base, owner) {
             (Some(base), _) => base,
-            (None, Some(config)) => zeron_proto::RouteTarget {
-                harness: config.harness,
-                model: config.model,
-                reasoning: config.reasoning,
-            },
+            (None, Some(config)) => crate::routing::target_of(&config),
             (None, None) => self.default_route_base().await,
         };
         let offered: Vec<HarnessId> = self.registry.offered().iter().map(|d| d.id).collect();
@@ -3380,10 +3376,11 @@ impl RpcService for EngineRpc {
                 if p.choice == crate::resume_schedule::OfferResolution::Switch
                     && let Some(to) = offer.as_ref().and_then(|offer| offer.to.as_ref())
                 {
-                    self.doc_host
-                        .act_on_offer(&p.chat_id, to)
-                        .await
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    let switched = self.doc_host.act_on_offer(&p.chat_id, to).await;
+                    if let Some(schedule) = self.sessions.resume_schedule() {
+                        schedule.acted(&p.chat_id, switched.is_err());
+                    }
+                    switched.map_err(|e| RpcError::Failed(e.to_string()))?;
                 }
                 RpcReply::value(&serde_json::json!({ "changed": offer.is_some() }))
             }
@@ -3753,9 +3750,13 @@ impl RpcService for EngineRpc {
                     )));
                 }
                 self.supervisor_gate(Some(&p.owner_chat_id), |s| s.start_missions, supervisor::START_OFF)?;
-                let p = match self.route_delegation(p)? {
-                    Ok(p) => p,
-                    Err(native) => return Ok(RpcReply::Value(native)),
+                let p = if self.doc_host.delegated_before(&p) {
+                    p
+                } else {
+                    match self.route_delegation(p)? {
+                        Ok(p) => p,
+                        Err(native) => return Ok(RpcReply::Value(native)),
+                    }
                 };
                 let view = self
                     .doc_host

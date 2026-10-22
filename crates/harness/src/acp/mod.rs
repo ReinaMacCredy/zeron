@@ -6108,7 +6108,7 @@ mod tests {
             matches!(
                 &events[..],
                 [
-                    AgentEvent::UsageLimit { resets_at: None },
+                    AgentEvent::UsageLimit { resets_at: Some(_) },
                     AgentEvent::Done {
                         status: DoneStatus::Errored,
                         ..

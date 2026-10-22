@@ -1711,6 +1711,7 @@ impl SessionsEngine {
         self.inner.inject_branch(chat_id, &mut request);
         lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
         let title_instance = instance_id.as_ref().map(|_| harness.clone());
+        let default_instance = instance_id.is_none();
 
         let RunSetup {
             handle: mut run,
@@ -1792,6 +1793,7 @@ impl SessionsEngine {
                 turn_computer,
                 fork_history_sent,
                 started,
+                default_instance,
             },
             turn,
         ));
@@ -5663,6 +5665,8 @@ struct RunResumeState {
     fork_history_sent: Arc<std::sync::atomic::AtomicBool>,
     /// Set once the harness stream is open (see [`RunHandle::started`]).
     started: Arc<std::sync::atomic::AtomicBool>,
+    /// Routes name a harness, so only its default instance speaks for its quota.
+    default_instance: bool,
 }
 
 fn cursor_unstarted_history(
@@ -7061,7 +7065,9 @@ async fn drive_run(
 
         if let AgentEvent::UsageLimit { resets_at } = &event {
             turn_limit = Some(resets_at.or(turn_limit.flatten()));
-            inner.quota.note_limit(harness_id, *resets_at, now_ms());
+            if resume_state.default_instance {
+                inner.quota.note_limit(harness_id, *resets_at, now_ms());
+            }
         }
         if let AgentEvent::Done {
             status,
@@ -7087,6 +7093,9 @@ async fn drive_run(
                     queued.finish(result.clone(), failure);
                 })
                 .is_some();
+            if *status == DoneStatus::Completed && resume_state.default_instance {
+                inner.quota.clear(harness_id);
+            }
             if let Some(resets_at) = turn_limit.take()
                 && !interrupted
                 && let Some(schedule) = inner.resume_schedule.get()
