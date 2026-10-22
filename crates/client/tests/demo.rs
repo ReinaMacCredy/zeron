@@ -835,3 +835,33 @@ fn phone_stops_resumes_and_starts_supervisors() {
         .unwrap();
     assert_eq!(chat, "supervisor-dev-mini");
 }
+
+#[test]
+fn plan_estimate_prices_children_against_the_lead() {
+    let (client, _dir) = demo(fast());
+    let rt = zeron_client::runtime::shared();
+    let estimate = rt
+        .block_on(client.plan_estimate("task-ios-install"))
+        .unwrap();
+    assert_eq!(estimate.lines.len(), 6);
+    assert_eq!(estimate.lines[0].multiplier.as_deref(), Some("0.4x"));
+    assert!(estimate.lines[0].runs_on.starts_with("Codex"));
+    let validator = &estimate.lines[2];
+    assert_eq!(validator.role.as_deref(), Some("validator"));
+    assert_eq!(validator.multiplier.as_deref(), Some("0.6x"));
+    assert!(
+        validator
+            .fallback
+            .as_deref()
+            .is_some_and(|f| f.contains("Codex out of quota"))
+    );
+    assert!(estimate.lines[5].runs_on.starts_with("agent picks"));
+    assert_eq!(estimate.cost, "Relative cost 3.2x");
+    assert!(
+        estimate
+            .raised
+            .as_deref()
+            .is_some_and(|r| r.contains("3x → 3.2x"))
+    );
+    assert!(estimate.baseline.starts_with("vs 6.0x"));
+}

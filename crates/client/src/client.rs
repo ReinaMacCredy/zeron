@@ -749,6 +749,44 @@ impl Client {
         )
     }
 
+    pub async fn plan_estimate(&self, task_id: &str) -> Option<crate::workspace::PlanEstimate> {
+        use zeron_proto::route_preview as rp;
+        let (state, _) = self.inner.workspace.state();
+        let all = self.inner.workspace.steps();
+        let steps = rp::plan_steps(task_id, &all);
+        let task = state.tasks.iter().find(|task| task.id == task_id)?;
+        if steps.is_empty() {
+            return None;
+        }
+        let lead = task
+            .chat_id
+            .as_deref()
+            .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
+            .and_then(|chat| chat.config.as_ref())
+            .map(rp::target_of);
+        let roles = rp::preview_roles(&steps);
+        let preview = if roles.is_empty() {
+            Some(rp::Preview::default())
+        } else {
+            let host = self.task_host(task_id).ok()?;
+            self.inner
+                .host_rpc(
+                    &host,
+                    zeron_rpc::methods::PREVIEW_ROUTES,
+                    serde_json::json!({ "ownerChatId": task.chat_id, "roles": roles, "steps": true }),
+                )
+                .await
+                .ok()
+                .and_then(|reply| serde_json::from_value(reply).ok())
+        };
+        Some(crate::workspace::plan_estimate(
+            &steps,
+            &state.chats,
+            lead.as_ref(),
+            preview.as_ref(),
+        ))
+    }
+
     /// The user-role entries of the brief's thread, tagged by who sent them.
     pub async fn brief_messages(
         &self,

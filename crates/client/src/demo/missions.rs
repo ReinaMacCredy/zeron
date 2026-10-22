@@ -254,10 +254,56 @@ pub(crate) fn seed(doc: &mut RegistryDoc, now: DateTime<Utc>) -> Result<(), zero
             false,
         ),
     ];
-    for step in &steps {
-        doc.create_task_step(step)?;
+    for mut step in steps {
+        if step.task_id == PLAN_READY {
+            step.role = Some(plan_role(&step.id).into());
+        }
+        doc.create_task_step(&step)?;
     }
     Ok(())
+}
+
+fn plan_role(step_id: &str) -> &'static str {
+    match step_id.rsplit('-').next() {
+        Some("s3") => "validator",
+        Some("s6") => "general",
+        _ => "worker",
+    }
+}
+
+fn route_preview(params: &Value) -> Value {
+    let roles: Vec<&str> = params["roles"]
+        .as_array()
+        .map(|roles| roles.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let rows: Vec<Value> = roles
+        .into_iter()
+        .map(|role| match role {
+            "worker" => json!({
+                "role": role,
+                "source": "routed",
+                "target": { "harness": "codex", "model": "gpt-5.5" },
+                "multiplier": 0.4,
+            }),
+            "validator" => json!({
+                "role": role,
+                "source": "routed",
+                "target": { "harness": "codex", "model": "gpt-5.5" },
+                "multiplier": 0.4,
+                "fallback": {
+                    "target": { "harness": "claude-code", "model": "claude-sonnet-5" },
+                    "reason": "Codex out of quota",
+                    "multiplier": 0.6,
+                },
+            }),
+            _ => json!({ "role": role, "source": "off", "multiplier": 1.0 }),
+        })
+        .collect();
+    json!({
+        "base": { "harness": "claude-code", "model": "claude-opus-5" },
+        "rows": rows,
+        "guidance": "",
+    })
 }
 
 pub(crate) fn shelf_questions() -> Vec<UserInputQuestion> {
@@ -444,6 +490,7 @@ pub(crate) fn host_call(
     Some(match method {
         m::MUTATE => mutate(client, device_id, params).map(|()| json!({})),
         m::LIST_AGENT_PROFILES => Ok(json!({ "profiles": [] })),
+        m::PREVIEW_ROUTES => Ok(route_preview(params)),
         m::ENSURE_SUPERVISOR => {
             let chat_id = format!("{}{}", zeron_proto::supervisor::CHAT_PREFIX, device_id);
             client.workspace.update_supervisor(device_id, |snapshot| {
@@ -599,7 +646,14 @@ fn mutate(client: &Arc<ClientInner>, device_id: &str, params: &Value) -> Result<
                 .filter(|c| !c.is_null())
                 .map(parse)
                 .transpose()?;
-            let chat = lead_chat(&chat_id, device_id, space_id.clone(), &task.title, config, now);
+            let chat = lead_chat(
+                &chat_id,
+                device_id,
+                space_id.clone(),
+                &task.title,
+                config,
+                now,
+            );
             let orchestrate = params["orchestrate"].as_bool().unwrap_or(false);
             let mut patch = TaskPatch {
                 chat_id: Some(Some(chat_id.clone())),
