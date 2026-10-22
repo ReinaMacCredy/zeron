@@ -298,6 +298,7 @@ pub enum NextCheckKind {
     Heartbeat,
     HeldWake,
     Resource,
+    Tree,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

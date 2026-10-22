@@ -1197,6 +1197,9 @@ impl DocHost {
         for stall in tree_due {
             self.supervisor_event(self.tree_stall_event(workspace, stall, now));
         }
+        if let Some(at) = tree_next.into_iter().chain(round.quiet_until).min() {
+            sooner(at, NextCheckKind::Tree);
+        }
         for check in std::mem::take(&mut round.checks) {
             self.spawn_checkout_check(check);
         }
