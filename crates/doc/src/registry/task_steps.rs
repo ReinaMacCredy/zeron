@@ -230,6 +230,15 @@ impl RegistryDoc {
         Ok(ops)
     }
 
+    /// A step whose thread was deleted counts as unstarted, so a re-plan drops it.
+    pub fn step_started(&self, step: &TaskStep) -> bool {
+        step.outcome.is_some()
+            || step
+                .chat_id
+                .as_deref()
+                .is_some_and(|id| self.row_exists(KIND_CHATS, id))
+    }
+
     /// One batch with the task patch, so a refused row leaves the old plan whole.
     pub fn plan_task_steps(
         &mut self,
@@ -244,7 +253,7 @@ impl RegistryDoc {
         let (kept, dropped): (Vec<TaskStep>, Vec<TaskStep>) = self
             .task_steps_of(task_id)
             .into_iter()
-            .partition(|step| step.chat_id.is_some() || step.outcome.is_some());
+            .partition(|step| self.step_started(step));
         check_step_count(kept.len() + steps.len())?;
         let task_op = self.task_patch_op(task_id, patch, now)?;
         let ops = self.new_step_ops(task_id, steps, self.last_step_key(task_id))?;
