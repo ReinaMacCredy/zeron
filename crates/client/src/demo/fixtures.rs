@@ -386,7 +386,7 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         },
         DemoChat {
             harness: ClaudeCode,
-            model: "claude-opus-5-5",
+            model: "claude-opus-5",
             last_ago_ms: 18 * HOUR,
             ..chat(
                 "chat-seams",

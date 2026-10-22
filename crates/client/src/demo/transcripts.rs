@@ -850,26 +850,7 @@ fn agents(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                 spawn("s2", "Port the veil to Android", Some("openai/gpt-5.6-sol"), SubagentStatus::Done),
                 spawn("s3", "Review the edge worker", Some("xai/grok-4.5"), SubagentStatus::Running),
                 spawn("s4", "Summarize the CRDT notes", None, SubagentStatus::Done),
-                text("t1", "Four agents reported back. Delegating the rest:"),
-                delegate(
-                    "d1",
-                    "Raise the tab bar hit targets",
-                    Some("chat-cursor"),
-                    None,
-                ),
-                delegate("d2", "Find the flaky e2e on CI", Some("chat-devin"), None),
-                delegate("d3", "Tune the edge cache headers", Some("chat-grok"), None),
-                delegate(
-                    "d4",
-                    "Map the Android bindings",
-                    None,
-                    Some(zeron_proto::ChildRoute {
-                        source: zeron_proto::ChildRoute::CHOSEN_BY_AGENT.into(),
-                        role: Some("explorer".into()),
-                        ..Default::default()
-                    }),
-                ),
-                started_thread("c1", "Changelog draft", "chat-hermes"),
+                text("t1", "Four agents reported back."),
             ],
         ),
         from_thread(
@@ -906,7 +887,28 @@ fn agents(host: &str, now: i64) -> Vec<SessionMessageEntry> {
             "m8",
             host,
             now - 80_000,
-            vec![text("t0", "Waiting on the explorer.")],
+            vec![
+                text("t0", "Delegating the remaining surfaces:"),
+                delegate(
+                    "d1",
+                    "Raise the tab bar hit targets",
+                    Some("chat-cursor"),
+                    None,
+                ),
+                delegate("d2", "Find the flaky e2e on CI", Some("chat-devin"), None),
+                delegate("d3", "Tune the edge cache headers", Some("chat-grok"), None),
+                delegate(
+                    "d4",
+                    "Map the Android bindings",
+                    None,
+                    Some(zeron_proto::ChildRoute {
+                        source: zeron_proto::ChildRoute::CHOSEN_BY_AGENT.into(),
+                        role: Some("explorer".into()),
+                        ..Default::default()
+                    }),
+                ),
+                started_thread("c1", "Changelog draft", "chat-hermes"),
+            ],
         ),
     ]
 }
@@ -987,14 +989,18 @@ fn seams(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                 route: zeron_doc::parts::HandoffRoute {
                     from_harness: Some(zeron_proto::HarnessId::Codex),
                     from_model: Some("gpt-5.6-sol".into()),
-                    to_model: Some("claude-opus-5-5".into()),
+                    to_model: Some("claude-opus-5".into()),
                     source_chat_id: Some("chat-pi".into()),
                     source_title: Some("Bench the layout pass".into()),
                     kind: Default::default(),
                 },
             }],
         ),
-        user("m4", now - 400_000, "Now profile the scroll path."),
+        user(
+            "m4",
+            now - 400_000,
+            "Now profile the scroll path:\n\n- frame time at `120Hz`\n- the $O(n)$ row walk on each fling",
+        ),
         system(
             "m5",
             host,
@@ -1003,7 +1009,7 @@ fn seams(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                 id: "k0".into(),
                 record: zeron_doc::parts::ClassifierRecord {
                     harness: Some(zeron_proto::HarnessId::ClaudeCode),
-                    model: Some("claude-haiku-5-5".into()),
+                    model: Some("claude-sonnet-5".into()),
                     verdict: zeron_doc::parts::ClassifierVerdict::Carry,
                     classifier_verdict: None,
                     decided_by: zeron_doc::parts::DecidedBy::Stage1,
