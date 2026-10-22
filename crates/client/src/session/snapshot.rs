@@ -100,6 +100,9 @@ pub struct SessionSnapshot {
     pub working: bool,
     /// Run start of the live turn, when the host reported one.
     pub working_since_ms: Option<i64>,
+    pub token_rate: Option<u32>,
+    pub limits_rev: u64,
+    pub compaction: Option<(zeron_proto::transcript::CompactionWait, i64)>,
     /// This device's unadopted sends, oldest first. Their echo entries are
     /// `entries[transcript_len..]` (same order, same ids).
     pub pending: Vec<PendingSend>,
@@ -304,4 +307,5 @@ pub struct ComposerState {
     /// The last message this device submitted (scroll-to-own-send target).
     pub last_submitted_message_id: Option<String>,
     pub context_usage: Option<ContextUsage>,
+    pub limit: Option<zeron_proto::LimitResume>,
 }

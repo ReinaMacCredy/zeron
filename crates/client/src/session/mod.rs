@@ -26,7 +26,7 @@ use zeron_doc::{
 };
 use zeron_proto::{
     ChatIndicator, ContextUsage, RunRequest, SandboxLevel, UserInputAnswer, UserInputQuestion,
-    WorktreeSpec,
+    WorktreeSpec, transcript::CompactionWait,
 };
 
 pub use snapshot::{
@@ -107,6 +107,13 @@ pub enum SendOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillFile {
+    pub path: String,
+    pub text: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueEditLease {
     pub row_id: String,
     pub lease_id: String,
@@ -179,6 +186,8 @@ struct CoreState {
     hydrated: bool,
     transcript_revision: u64,
     composer_revision: u64,
+    token_rate: Option<u32>,
+    compaction: Option<(CompactionWait, i64)>,
 }
 
 pub(crate) struct SessionCore {
@@ -201,6 +210,7 @@ pub(crate) struct SessionCore {
     /// under it, so an older read can't land after a newer one.
     recompute_gate: Mutex<()>,
     view_attached: AtomicBool,
+    rate_watch: Mutex<Option<tokio_util::sync::CancellationToken>>,
     /// Last open/attach/detach (warm-set eviction order).
     touched_ms: std::sync::atomic::AtomicI64,
 }
@@ -251,11 +261,14 @@ impl SessionCore {
                 hydrated: false,
                 transcript_revision: 0,
                 composer_revision: 0,
+                token_rate: None,
+                compaction: None,
             }),
             transcript_tx,
             composer: RwLock::new(composer),
             recompute_gate: Mutex::new(()),
             view_attached: AtomicBool::new(false),
+            rate_watch: Mutex::new(None),
             touched_ms: std::sync::atomic::AtomicI64::new(now_ms()),
         });
         // Coalesced republish for remote imports (a backfill of N rows costs
@@ -432,14 +445,16 @@ impl SessionCore {
         let dirty = std::mem::take(&mut *lock(&self.dirty));
         let now = now_ms();
         let degraded = client.chat_delivery_degraded(&self.chat_id);
-        let (indicator_working, working_since_ms) = client
+        let (indicator_working, working_since_ms, compacting, classifying) = client
             .workspace
             .snapshot()
             .session(&self.chat_id)
-            .map_or((false, None), |row| {
+            .map_or((false, None, false, None), |row| {
                 (
                     row.host_indicator == ChatIndicator::Working,
                     row.working_since_ms,
+                    row.compacting,
+                    row.classifying.clone(),
                 )
             });
         let mut transcript_event = None;
@@ -466,12 +481,36 @@ impl SessionCore {
                 .entries()
                 .last()
                 .is_some_and(|e| e.is_streaming());
+            let working = indicator_working || streaming;
+            let wait = if compacting {
+                Some(CompactionWait::Compacting(
+                    zeron_doc::schema::boundary_compaction(
+                        st.tracker.entries().iter().map(|e| &*e.message),
+                    ),
+                ))
+            } else {
+                classifying.map(|run| CompactionWait::Classifying {
+                    harness: run.harness,
+                    model: run.model,
+                    agent_note: false,
+                })
+            };
+            st.compaction = match (wait, st.compaction.take()) {
+                (Some(wait), Some((last, since))) if wait == last => Some((wait, since)),
+                (wait, _) => wait.map(|wait| (wait, now)),
+            };
             let live = LiveFlags {
-                working: indicator_working || streaming,
+                working,
                 working_since_ms,
+                token_rate: st.token_rate.filter(|_| working),
+                limits_rev: client.workspace.limits_rev(),
+                compaction: st.compaction.clone(),
             };
             let live_changed = previous.working != live.working
+                || previous.compaction != live.compaction
                 || previous.working_since_ms != live.working_since_ms
+                || previous.token_rate != live.token_rate
+                || previous.limits_rev != live.limits_rev
                 || previous.hydrated != st.hydrated;
             let answers = sent_answers(&st.commands, now);
             let answers_changed = *previous.input_answers != answers;
@@ -579,6 +618,7 @@ impl SessionCore {
             queue_error: st.queue_error.clone(),
             last_submitted_message_id: st.last_submitted.clone(),
             context_usage: st.context_usage,
+            limit: client.workspace.limit(&self.chat_id),
         };
         let current = self.composer();
         next.revision = current.revision;
@@ -649,6 +689,61 @@ impl SessionCore {
     pub(crate) fn touched_ms(&self) -> i64 {
         self.touched_ms.load(Ordering::Acquire)
     }
+
+    pub(crate) fn set_token_rate(&self, rate: Option<u32>) {
+        let changed = std::mem::replace(&mut lock(&self.state).token_rate, rate) != rate;
+        if changed {
+            self.schedule_refresh();
+        }
+    }
+
+    fn follow_token_rate(self: &Arc<Self>, on: bool) {
+        let mut slot = lock(&self.rate_watch);
+        if let Some(cancel) = slot.take() {
+            cancel.cancel();
+        }
+        if !on {
+            drop(slot);
+            self.set_token_rate(None);
+            return;
+        }
+        let Ok(client) = self.client() else { return };
+        let Some(live) = client.live() else { return };
+        let Some(chat) = client.workspace.chat(&self.chat_id) else {
+            return;
+        };
+        let cancel = self.tasks.child_token();
+        *slot = Some(cancel.clone());
+        drop(slot);
+        let weak = Arc::downgrade(self);
+        live.relay.follow(
+            chat.device_id.clone(),
+            zeron_rpc::methods::WATCH_TOKEN_RATE,
+            serde_json::json!({ "chatId": self.chat_id }),
+            cancel,
+            move |item| {
+                let Some(core) = weak.upgrade() else {
+                    return false;
+                };
+                let rate = item["rate"].as_u64().map(|rate| rate as u32);
+                core.set_token_rate(rate);
+                true
+            },
+            || {},
+        );
+    }
+}
+
+fn host_reason(err: ClientError) -> ClientError {
+    match err {
+        ClientError::HostError(message) => ClientError::HostError(
+            message
+                .split_once(": ")
+                .map_or(message.as_str(), |(_, reason)| reason)
+                .to_owned(),
+        ),
+        other => other,
+    }
 }
 
 fn empty_composer(chat_id: &str) -> ComposerState {
@@ -680,6 +775,7 @@ fn empty_composer(chat_id: &str) -> ComposerState {
         queue_error: None,
         last_submitted_message_id: None,
         context_usage: None,
+        limit: None,
     }
 }
 
@@ -871,10 +967,13 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
     changed
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct LiveFlags {
     working: bool,
     working_since_ms: Option<i64>,
+    token_rate: Option<u32>,
+    limits_rev: u64,
+    compaction: Option<(CompactionWait, i64)>,
 }
 
 fn sent_answers(
@@ -929,6 +1028,9 @@ fn build_snapshot(
         streaming,
         working: live.working,
         working_since_ms: live.working_since_ms,
+        token_rate: live.token_rate,
+        limits_rev: live.limits_rev,
+        compaction: live.compaction,
         pending: st.pending.clone(),
         context_usage: st.context_usage,
         hydrated: st.hydrated,
@@ -1034,6 +1136,9 @@ impl SessionHandle {
         }
         if attached && !was {
             self.mark_seen();
+        }
+        if attached != was {
+            self.core.follow_token_rate(attached);
         }
     }
 
@@ -1487,6 +1592,113 @@ impl SessionHandle {
 
     pub fn clear_queue_error(&self) {
         self.core.update_state(|st| st.queue_error = None);
+    }
+
+    pub async fn fork_from(&self, entry_id: &str) -> Result<String> {
+        let chat_id = crate::new_id();
+        let reply = self
+            .queue_rpc(
+                zeron_rpc::methods::FORK_CHAT,
+                serde_json::json!({
+                    "sourceChatId": self.core.chat_id,
+                    "entryId": entry_id,
+                    "chatId": chat_id,
+                }),
+            )
+            .await
+            .map_err(host_reason)?;
+        Ok(reply["id"].as_str().map_or(chat_id, str::to_owned))
+    }
+
+    pub async fn rewind_to(&self, entry_id: &str) -> Result<String> {
+        let reply = self
+            .queue_rpc(
+                zeron_rpc::methods::REWIND_CHAT,
+                serde_json::json!({ "chatId": self.core.chat_id, "entryId": entry_id }),
+            )
+            .await
+            .map_err(host_reason)?;
+        Ok(reply["prompt"].as_str().unwrap_or_default().to_owned())
+    }
+
+    pub async fn skill_file(&self, name: &str, path: Option<&str>) -> Result<SkillFile> {
+        let path = match path {
+            Some(path) => path.to_owned(),
+            None => {
+                let harness = self
+                    .core
+                    .client()?
+                    .workspace
+                    .chat(&self.core.chat_id)
+                    .and_then(|chat| chat.config)
+                    .map(|config| config.harness)
+                    .ok_or_else(|| {
+                        ClientError::NotFound(format!("Can't find the file for {name} here"))
+                    })?;
+                let skills = self
+                    .queue_rpc(
+                        zeron_rpc::methods::LIST_SKILLS,
+                        serde_json::json!({ "harness": harness, "chatId": self.core.chat_id }),
+                    )
+                    .await?;
+                serde_json::from_value::<Option<Vec<zeron_proto::invocation::Skill>>>(skills)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|skill| {
+                        skill.name == name
+                            && !zeron_proto::invocation::native_skill_identity(&skill.path)
+                    })
+                    .map(|skill| skill.path)
+                    .ok_or_else(|| ClientError::NotFound(format!("No SKILL.md found for {name}")))?
+            }
+        };
+        // An absolute path outside the workspace reads only with the chat named.
+        let file = self
+            .queue_rpc(
+                zeron_rpc::methods::READ_WORKSPACE_FILE,
+                serde_json::json!({ "chatId": self.core.chat_id, "path": path }),
+            )
+            .await
+            .map_err(host_reason)?;
+        let file: zeron_proto::WorkspaceFileText =
+            serde_json::from_value(file).map_err(|err| ClientError::Internal(err.to_string()))?;
+        Ok(SkillFile {
+            path: file.path,
+            text: file.text.unwrap_or_default(),
+            truncated: file.truncated,
+        })
+    }
+
+    // An unanswered harness probe allows it; the host still refuses.
+    pub async fn branch_blocked(&self, rewind: bool) -> Option<String> {
+        if rewind
+            && matches!(
+                self.composer().live.indicator,
+                ChatIndicator::Working | ChatIndicator::AwaitingInput
+            )
+        {
+            return Some("Stop the running turn before rewinding".into());
+        }
+        let harness = self
+            .core
+            .client()
+            .ok()?
+            .workspace
+            .chat(&self.core.chat_id)?
+            .config?
+            .harness;
+        let reply = self
+            .queue_rpc(
+                zeron_rpc::methods::HARNESS_COMPACTION,
+                serde_json::json!({ "harness": harness }),
+            )
+            .await
+            .ok()?;
+        let probe: zeron_proto::HarnessCompactionResult = serde_json::from_value(reply).ok()?;
+        (!probe.branching)
+            .then(|| format!("{} does not support fork or rewind", harness.display_name()))
     }
 
     /// "Not delivered — tap to retry": restart grace clocks, re-issue dead

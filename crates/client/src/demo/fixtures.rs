@@ -6,8 +6,8 @@ use zeron_doc::RegistryDoc;
 use zeron_proto::{
     ChangeRequestState, ChangeRequestSummary, Chat, ChatConfig, CheckoutChangeRequestStatus,
     ChildRoute, ConversationSourceContext, Delegation, DelegationStatus, DelegationWake, Device,
-    HarnessId, ReasoningLevel, RouteTarget, SandboxLevel, Session, SessionStatus, SidebarPinChange,
-    SidebarSectionChange, Space,
+    HarnessId, LimitOffer, LimitResume, LimitResumes, OfferChoice, ReasoningLevel, RouteTarget,
+    SandboxLevel, Session, SessionStatus, SidebarPinChange, SidebarSectionChange, Space,
 };
 
 use crate::client::ms;
@@ -36,6 +36,7 @@ pub(crate) struct DemoChat {
     pub archived: bool,
     pub parent: Option<&'static str>,
     pub delegated: Option<(DelegationStatus, Option<ChildRoute>)>,
+    pub compacting: bool,
 }
 
 const MIN: i64 = 60_000;
@@ -64,6 +65,7 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         archived: false,
         parent: None,
         delegated: None,
+        compacting: false,
     };
     vec![
         DemoChat {
@@ -388,6 +390,8 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             harness: ClaudeCode,
             model: "claude-opus-5",
             last_ago_ms: 18 * HOUR,
+            status: Some(SessionStatus::Idle),
+            compacting: true,
             ..chat(
                 "chat-seams",
                 Some("space-agents"),
@@ -522,6 +526,7 @@ pub(crate) const ONLINE: &[&str] = &[MAC, VPS];
 
 pub(crate) struct Seeded {
     pub change_requests: Vec<CheckoutChangeRequestStatus>,
+    pub limits: Vec<(&'static str, LimitResumes)>,
 }
 
 /// Write the whole dataset into the replica (as local writes, which the
@@ -542,14 +547,20 @@ pub(crate) fn seed(
                 doc.upsert_device(phone)?;
             }
             doc.reconcile_sidebar_pins(true)?;
-            return Ok(Seeded { change_requests });
+            return Ok(Seeded {
+                change_requests,
+                limits: Vec::new(),
+            });
         }
         DemoFixture::NoProjects => {
             for device in &all_devices {
                 doc.upsert_device(device)?;
             }
             doc.reconcile_sidebar_pins(true)?;
-            return Ok(Seeded { change_requests });
+            return Ok(Seeded {
+                change_requests,
+                limits: Vec::new(),
+            });
         }
         DemoFixture::Standard => {}
     }
@@ -651,7 +662,7 @@ pub(crate) fn seed(
                 started_at: Some(ms(now - 95_000)),
                 updated_at: Utc::now(),
                 held_by_subagents: false,
-                compacting: false,
+                compacting: demo.compacting,
                 background_tasks: Vec::new(),
             })?;
         }
@@ -709,5 +720,28 @@ pub(crate) fn seed(
             })?;
         }
     }
-    Ok(Seeded { change_requests })
+    let limits = vec![(
+        MAC,
+        LimitResumes {
+            auto_resume: true,
+            chats: vec![LimitResume {
+                chat_id: "chat-devin".into(),
+                resets_at: Some(now + 72 * 60_000),
+                auto: true,
+                offer: Some(LimitOffer {
+                    to: Some(RouteTarget {
+                        harness: HarnessId::ClaudeCode,
+                        model: Some("claude-opus-5".into()),
+                        reasoning: None,
+                    }),
+                    preselect: OfferChoice::Switch,
+                    act_at: Some(now + 5 * 60_000),
+                }),
+            }],
+        },
+    )];
+    Ok(Seeded {
+        change_requests,
+        limits,
+    })
 }

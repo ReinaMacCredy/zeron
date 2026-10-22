@@ -101,6 +101,8 @@ pub struct SessionRow {
     pub parent_chat_id: Option<String>,
     /// Sync room generation (2 = chat2; 1 = legacy, not dialable).
     pub room_gen: u32,
+    pub compacting: bool,
+    pub classifying: Option<zeron_proto::Classifying>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -412,6 +414,11 @@ fn hash_row(row: &SessionRow) -> u64 {
     row.send_state.hash(&mut h);
     row.parent_chat_id.hash(&mut h);
     row.room_gen.hash(&mut h);
+    row.compacting.hash(&mut h);
+    row.classifying
+        .as_ref()
+        .map(|c| (c.harness, &c.model))
+        .hash(&mut h);
     h.finish()
 }
 
@@ -507,6 +514,8 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         send_state,
         parent_chat_id: chat.created_by_chat_id.clone(),
         room_gen: chat.room_gen.unwrap_or(1),
+        compacting: session.is_some_and(|s| s.compacting),
+        classifying: session.and_then(|s| s.classifying.clone()),
     };
     row.revision = hash_row(&row);
     // Unchanged rows keep their Arc across snapshots (pointer-equal diffing).

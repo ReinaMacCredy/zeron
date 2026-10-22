@@ -1079,6 +1079,32 @@ fn seams(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                 text("t1", "Back on the scroll profile."),
             ],
         ),
+        user(
+            "m11",
+            now - 60_000,
+            &format!(
+                "Address these before merging.\n\n{}\n- crates/mobile/src/layout/rows.rs:412 (R): The divider should keep its hint.\n\n{}\n> Pull request #94 in zeron-sh/zeron: Transcript seams on iOS\n> Adds peer rows, delegate chips and dividers to the phone transcript.\n\n> Checks: 2 of 3 passed\n> ios-build: pending",
+                zeron_proto::badges::COMMENT_BLOCK_HEADER,
+                zeron_proto::badges::PR_CONTEXT_HEADER,
+            ),
+        ),
+        assistant(
+            "m12",
+            host,
+            now - 50_000,
+            vec![
+                tool(
+                    "t-skill",
+                    ToolCall::Unknown {
+                        name: "Skill".into(),
+                        input: Some(serde_json::json!({ "skill": "review" })),
+                    },
+                    false,
+                    Some("Launching skill: review"),
+                ),
+                text("t0", "Kept the hint on the divider; `ios-build` is green now."),
+            ],
+        ),
     ]
 }
 
