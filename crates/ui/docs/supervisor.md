@@ -60,7 +60,7 @@ The widths count the window without the sidebar, so an open sidebar narrows the 
 
 ## The inbox
 
-The inbox groups everything open by mission. Each mission gets one surface with a header row: its progress ring, its name, how many decisions wait (**5 to answer**, in amber) and how many updates it has. A mission's decisions come first, newest first, then its updates. Missions with decisions come first, newest first; rows with no mission, and resources, gather under **Supervisor and shared**.
+The inbox groups everything open by mission. Each mission gets one surface with a header row: its progress ring, its name, how many decisions wait (**5 to answer**, in amber) and how many updates it has. A mission's decisions come first, newest first, then its updates. Missions with decisions come first, newest first. A watched tree without a plan groups its threads' questions under the tree's name, and its rail row counts them. Rows with no mission or tree, and resources, gather under **Supervisor and shared**.
 
 The tabs above the inbox count the open rows of each kind: **All**, **Needs you**, **Questions**, **Interventions** and **Resources**. A tab with nothing open is faint, and the **Needs you** count is amber while anything waits on you. Click a tab to show only that kind; click it again, or **All**, to show everything. A new decision brings the inbox back to **All**.
 

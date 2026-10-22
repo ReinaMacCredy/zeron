@@ -224,7 +224,7 @@ impl SupervisorPage {
                     .open
                     .iter()
                     .filter(|row| {
-                        row.kind == Kind::Needs && feed::task_of(&row.entry) == Some(id.as_str())
+                        row.kind == Kind::Needs && row.group.as_deref() == Some(id.as_str())
                     })
                     .count();
                 let tick = self

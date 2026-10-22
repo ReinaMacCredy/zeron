@@ -464,23 +464,31 @@ impl SupervisorPage {
         let key = group.key();
         let mission = group
             .task
-            .and_then(|task| missions.iter().find(|m| m.plan && m.key == task));
+            .and_then(|task| missions.iter().find(|m| m.key == task));
         let title = match (group.task, mission) {
             (None, _) => "Supervisor and shared".to_owned(),
             (Some(_), Some(mission)) => mission.title.clone(),
-            (Some(task), None) => {
-                mission_title(self.state.read(cx), Some(task)).unwrap_or_else(|| "A mission".into())
+            (Some(key), None) => {
+                let state = self.state.read(cx);
+                mission_title(state, Some(key))
+                    .or_else(|| {
+                        let root = state.chats.iter().find(|chat| chat.id == key)?;
+                        Some(crate::transcript::single_line(&crate::home::chat_title(
+                            root,
+                        )))
+                    })
+                    .unwrap_or_else(|| "A mission".into())
             }
         };
         let open_needs = feed
             .open
             .iter()
-            .filter(|row| row.kind == Kind::Needs && feed::task_of(&row.entry) == group.task)
+            .filter(|row| row.kind == Kind::Needs && row.group.as_deref() == group.task)
             .count();
         let updates = feed
             .open
             .iter()
-            .filter(|row| row.kind != Kind::Needs && feed::task_of(&row.entry) == group.task)
+            .filter(|row| row.kind != Kind::Needs && row.group.as_deref() == group.task)
             .count();
         let tick = self
             .groups
@@ -650,9 +658,9 @@ impl SupervisorPage {
                     self.render_answer(row, needs, reply, mission, now, theme, cx)
                 }
                 _ => match needs {
-                    NeedsYouRow::Item(item) => self.render_item(&row.key, item, q_width, theme, cx),
+                    NeedsYouRow::Item(item) => self.render_item(row, item, q_width, theme, cx),
                     NeedsYouRow::Input(input) => {
-                        self.render_input(&row.key, input, q_width, mission, theme, cx)
+                        self.render_input(row, input, q_width, mission, theme, cx)
                     }
                 },
             },
@@ -840,14 +848,15 @@ impl SupervisorPage {
 
     fn render_item(
         &self,
-        key: &str,
+        row: &Row,
         item: &SupervisorItem,
         q_width: f32,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let sel = format!("supervisor-needs-item-{}", item.id);
-        let group = item.task_id.clone().unwrap_or_default();
+        let key = row.key.as_str();
+        let group = row.group.clone().unwrap_or_default();
         let picked = self.staged(key, "");
         let mission_name = mission_title(self.state.read(cx), item.task_id.as_deref());
         let title = strip_mission(&item.title, mission_name.as_deref());
@@ -891,13 +900,14 @@ impl SupervisorPage {
 
     fn render_input(
         &self,
-        key: &str,
+        shown: &Row,
         input: &NeedsYouInput,
         q_width: f32,
         mission: Option<&str>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let key = shown.key.as_str();
         let sel = format!(
             "supervisor-needs-input-{}",
             input.request_id.replace(':', "-")
@@ -944,7 +954,7 @@ impl SupervisorPage {
                 .child(time_cell(theme, clock(input.at)))
                 .into_any_element();
         }
-        let group = input.task_id.clone().unwrap_or_default();
+        let group = shown.group.clone().unwrap_or_default();
         let multi = input.questions.len() > 1;
         let mut lines = div().flex().flex_col();
         for (qx, question) in input.questions.iter().enumerate() {

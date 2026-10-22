@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Utc};
 use zeron_proto::supervisor::{
-    InterventionChip, InterventionKind, LeadQuestion, NeedsYouRow, QuestionState, ResourceState,
-    SharedResource, SupervisorIntervention, SupervisorSnapshot,
+    InputAsker, InterventionChip, InterventionKind, LeadQuestion, NeedsYouRow, QuestionState,
+    ResourceState, SharedResource, SupervisorIntervention, SupervisorSnapshot,
 };
 
 use super::{no_effect_yet, row_key, row_origin};
@@ -80,6 +80,7 @@ pub(crate) struct Row {
     pub kind: Kind,
     pub at: DateTime<Utc>,
     pub entry: Entry,
+    pub group: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -109,11 +110,26 @@ impl Feed {
     }
 }
 
-pub(crate) fn task_of(entry: &Entry) -> Option<&str> {
+/// A watched plain tree has no task, so its threads' asks group under the tree's root chat.
+pub(crate) fn needs_group(
+    row: &NeedsYouRow,
+    root_of: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    match row {
+        NeedsYouRow::Input(input)
+            if input.task_id.is_none() && input.asker != InputAsker::Supervisor =>
+        {
+            root_of(&input.chat_id)
+        }
+        row => row_origin(row).0.map(str::to_owned),
+    }
+}
+
+fn group_of(entry: &Entry, root_of: &dyn Fn(&str) -> Option<String>) -> Option<String> {
     match entry {
-        Entry::Needs(row) | Entry::Answered(Answered { row, .. }) => row_origin(row).0,
-        Entry::Question(question) => Some(&question.task_id),
-        Entry::Intervention(intervention) => intervention.task_id.as_deref(),
+        Entry::Needs(row) | Entry::Answered(Answered { row, .. }) => needs_group(row, root_of),
+        Entry::Question(question) => Some(question.task_id.clone()),
+        Entry::Intervention(intervention) => intervention.task_id.clone(),
         Entry::Resource(_) => None,
     }
 }
@@ -132,7 +148,7 @@ impl Group<'_> {
 pub(crate) fn grouped<'a>(rows: impl IntoIterator<Item = &'a Row>) -> Vec<Group<'a>> {
     let mut groups: Vec<Group<'a>> = Vec::new();
     for row in rows {
-        let task = task_of(&row.entry);
+        let task = row.group.as_deref();
         match groups.iter_mut().find(|group| group.task == task) {
             Some(group) => group.rows.push(row),
             None => groups.push(Group {
@@ -227,7 +243,12 @@ fn newest_first(rows: &mut [Row]) {
     rows.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.key.cmp(&b.key)));
 }
 
-pub(crate) fn feed(snapshot: &SupervisorSnapshot, memory: &Memory, now: DateTime<Utc>) -> Feed {
+pub(crate) fn feed(
+    snapshot: &SupervisorSnapshot,
+    memory: &Memory,
+    now: DateTime<Utc>,
+    root_of: &dyn Fn(&str) -> Option<String>,
+) -> Feed {
     let mut open: Vec<Row> = snapshot
         .needs_you
         .iter()
@@ -236,6 +257,7 @@ pub(crate) fn feed(snapshot: &SupervisorSnapshot, memory: &Memory, now: DateTime
             kind: Kind::Needs,
             at: needs_at(row),
             entry: Entry::Needs(row.clone()),
+            group: None,
         })
         .collect();
     newest_first(&mut open);
@@ -246,6 +268,7 @@ pub(crate) fn feed(snapshot: &SupervisorSnapshot, memory: &Memory, now: DateTime
             kind: Kind::Question,
             at: question.at,
             entry: Entry::Question(question.clone()),
+            group: None,
         };
         match question.state {
             QuestionState::Open => rest.push(row),
@@ -258,6 +281,7 @@ pub(crate) fn feed(snapshot: &SupervisorSnapshot, memory: &Memory, now: DateTime
             kind: Kind::Intervention,
             at: intervention.at,
             entry: Entry::Intervention(intervention.clone()),
+            group: None,
         };
         if intervention_open(intervention, now) {
             rest.push(row);
@@ -272,6 +296,7 @@ pub(crate) fn feed(snapshot: &SupervisorSnapshot, memory: &Memory, now: DateTime
                 kind: Kind::Resource,
                 at: resource_at(resource),
                 entry: Entry::Resource(resource.clone()),
+                group: None,
             };
             if resource_open(resource.state) {
                 rest.push(row);
@@ -295,6 +320,7 @@ pub(crate) fn feed(snapshot: &SupervisorSnapshot, memory: &Memory, now: DateTime
                     kind: Kind::Resource,
                     at: *at,
                     entry: Entry::Resource(resource.clone()),
+                    group: None,
                 }),
         );
     }
@@ -303,10 +329,14 @@ pub(crate) fn feed(snapshot: &SupervisorSnapshot, memory: &Memory, now: DateTime
         kind: Kind::Needs,
         at: answered.at,
         entry: Entry::Answered(answered.clone()),
+        group: None,
     }));
     newest_first(&mut rest);
     newest_first(&mut earlier);
     open.extend(rest);
+    for row in open.iter_mut().chain(&mut declared).chain(&mut earlier) {
+        row.group = group_of(&row.entry, root_of);
+    }
     Feed {
         open,
         declared,
@@ -509,7 +539,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let feed = feed(&snapshot, &Memory::default(), now);
+        let feed = feed(&snapshot, &Memory::default(), now, &|_| None);
         let mut want = vec![
             "item:new",
             "input:step:ask",
@@ -605,7 +635,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let feed = feed(&snapshot, &Memory::default(), now);
+        let feed = feed(&snapshot, &Memory::default(), now, &|_| None);
         let open: Vec<&str> = feed
             .open
             .iter()
@@ -686,7 +716,7 @@ mod tests {
         assert!(memory.answered.is_empty());
         let third = snapshot(vec![item("b", now)], ResourceState::Clear);
         assert!(memory.observe(Some(&third), &choices, now).is_empty());
-        let earlier = feed(&third, &memory, now).earlier;
+        let earlier = feed(&third, &memory, now, &|_| None).earlier;
         let answered: Vec<Option<String>> = earlier
             .iter()
             .filter_map(|row| match &row.entry {
@@ -702,7 +732,7 @@ mod tests {
         let fourth = snapshot(vec![item("b", now)], ResourceState::Contended);
         memory.observe(Some(&fourth), &choices, now);
         assert!(
-            !feed(&fourth, &memory, now)
+            !feed(&fourth, &memory, now, &|_| None)
                 .earlier
                 .iter()
                 .any(|row| row.kind == Kind::Resource)
@@ -744,7 +774,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let first = feed(&snapshot, &Memory::default(), now);
+        let first = feed(&snapshot, &Memory::default(), now, &|_| None);
         let groups: Vec<(Option<&str>, Vec<&str>)> = grouped(&first.open)
             .into_iter()
             .map(|group| (group.task, keys_of(&group.rows)))
@@ -761,7 +791,7 @@ mod tests {
         );
         let mut snapshot = snapshot;
         snapshot.interventions[0].task_id = Some("a".into());
-        let second = feed(&snapshot, &Memory::default(), now);
+        let second = feed(&snapshot, &Memory::default(), now, &|_| None);
         let a = grouped(&second.open)
             .into_iter()
             .find(|group| group.task == Some("a"))
@@ -770,6 +800,39 @@ mod tests {
             a,
             Some(vec!["item:new", "item:old", "intervention:i"]),
             "a mission's decisions come before its updates, however new the update"
+        );
+        let ask = |chat: &str, asker: InputAsker| {
+            NeedsYouRow::Input(NeedsYouInput {
+                chat_id: chat.into(),
+                request_id: chat.into(),
+                asker,
+                task_id: None,
+                step_id: None,
+                at: now,
+                questions: Vec::new(),
+            })
+        };
+        let plain = SupervisorSnapshot {
+            needs_you: vec![
+                ask("child", InputAsker::Thread),
+                ask("supervisor-1", InputAsker::Supervisor),
+            ],
+            ..Default::default()
+        };
+        let root_of = |chat: &str| (chat != "supervisor-1").then(|| "root".to_owned());
+        let shown = feed(&plain, &Memory::default(), now, &root_of);
+        let groups: Vec<(Option<String>, &str)> = shown
+            .open
+            .iter()
+            .map(|row| (row.group.clone(), row.key.as_str()))
+            .collect();
+        assert_eq!(
+            groups,
+            vec![
+                (Some("root".into()), "input:child:child"),
+                (None, "input:supervisor-1:supervisor-1"),
+            ],
+            "a plain tree's ask groups under its root; the Supervisor's own stays shared"
         );
     }
 

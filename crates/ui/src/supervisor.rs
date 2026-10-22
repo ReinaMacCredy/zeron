@@ -612,16 +612,9 @@ fn asker_name(input: &NeedsYouInput, state: &AppState, now: DateTime<Utc>) -> St
         (InputAsker::Supervisor, _, _) => return "Supervisor".into(),
         (InputAsker::Thread, _, _) => {
             let name = thread_name(state, &input.chat_id, now);
-            let root = state
-                .chats
-                .iter()
-                .find(|chat| chat.id == input.chat_id)
-                .and_then(|chat| {
-                    zeron_proto::tree_path(chat, &state.chats, &state.tasks, &state.task_steps)
-                        .last()
-                        .filter(|root| root.id != chat.id)
-                        .map(|root| crate::transcript::single_line(&crate::home::chat_title(root)))
-                });
+            let root = tree_root(state, &input.chat_id)
+                .filter(|root| root.id != input.chat_id)
+                .map(|root| crate::transcript::single_line(&crate::home::chat_title(root)));
             match root {
                 Some(root) => format!("{name} · {root}"),
                 None => name,
@@ -637,6 +630,17 @@ fn asker_name(input: &NeedsYouInput, state: &AppState, now: DateTime<Utc>) -> St
         Some(mission) => format!("{who} · {mission}"),
         None => who,
     }
+}
+
+fn tree_root<'a>(state: &'a AppState, chat_id: &str) -> Option<&'a Chat> {
+    let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
+    zeron_proto::tree_path(chat, &state.chats, &state.tasks, &state.task_steps)
+        .last()
+        .copied()
+}
+
+fn root_id(state: &AppState) -> impl Fn(&str) -> Option<String> + '_ {
+    |chat_id| tree_root(state, chat_id).map(|root| root.id.clone())
 }
 
 fn clock(at: DateTime<Utc>) -> String {
@@ -1434,14 +1438,13 @@ impl SupervisorPage {
         }
         if !arrived.is_empty() {
             let (reduced, now) = (motion::reduced_motion(cx), Instant::now());
-            let tasks: Vec<String> = self
-                .state
-                .read(cx)
+            let state = self.state.read(cx);
+            let tasks: Vec<String> = state
                 .supervisor
                 .iter()
                 .flat_map(|snapshot| &snapshot.needs_you)
                 .filter(|row| arrived.contains(&row_key(row)))
-                .filter_map(|row| row_origin(row).0.map(str::to_owned))
+                .filter_map(|row| feed::needs_group(row, &root_id(state)))
                 .collect();
             for task in tasks {
                 self.glows
@@ -1580,7 +1583,7 @@ impl SupervisorPage {
         let ready: Vec<(String, String)> = self
             .rows
             .values()
-            .filter(|motion| feed::task_of(&motion.row.entry).unwrap_or_default() == group)
+            .filter(|motion| motion.row.group.as_deref().unwrap_or_default() == group)
             .filter_map(|motion| inbox::sheet_row(&motion.row.entry))
             .filter(|row| self.still_open(&row_key(row), cx))
             .filter(|row| {
@@ -1631,7 +1634,7 @@ impl SupervisorPage {
         let held: Vec<NeedsYouRow> = self
             .rows
             .values()
-            .filter(|motion| feed::task_of(&motion.row.entry).unwrap_or_default() == group)
+            .filter(|motion| motion.row.group.as_deref().unwrap_or_default() == group)
             .filter_map(|motion| inbox::sheet_row(&motion.row.entry).cloned())
             .filter(|row| {
                 self.replies
@@ -2269,9 +2272,7 @@ impl SupervisorPage {
         });
         let mut open_groups: HashMap<String, bool> = HashMap::new();
         for motion in self.rows.values() {
-            let key = feed::task_of(&motion.row.entry)
-                .unwrap_or_default()
-                .to_owned();
+            let key = motion.row.group.clone().unwrap_or_default();
             *open_groups.entry(key).or_default() |= motion.fold.tween.target() > 0.0;
         }
         if self
@@ -2286,7 +2287,7 @@ impl SupervisorPage {
                 .open
                 .iter()
                 .filter(|row| {
-                    row.kind == Kind::Needs && feed::task_of(&row.entry).unwrap_or_default() == key
+                    row.kind == Kind::Needs && row.group.as_deref().unwrap_or_default() == key
                 })
                 .count();
             match self.groups.get_mut(key) {
@@ -4031,7 +4032,9 @@ impl Render for SupervisorPage {
         let (feed, calm) = {
             let snapshot = self.state.read(cx).supervisor.as_ref();
             let feed = snapshot
-                .map(|snapshot| feed::feed(snapshot, &self.memory, utc))
+                .map(|snapshot| {
+                    feed::feed(snapshot, &self.memory, utc, &root_id(self.state.read(cx)))
+                })
                 .unwrap_or_default();
             let calm = calm_line(snapshot, &feed, self.list_filter, watched, watches.len());
             (feed, calm)
@@ -4424,6 +4427,7 @@ mod tests {
                 page.state.read(cx).supervisor.as_ref().unwrap(),
                 &page.memory,
                 Utc::now(),
+                &|_| None,
             );
             page.sync_motion(&feed, &[], Instant::now(), true);
             for id in ["a", "b", "c"] {
