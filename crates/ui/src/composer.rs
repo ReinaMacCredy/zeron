@@ -125,7 +125,14 @@ impl MissionMotion {
     }
 
     fn on(&self) -> bool {
-        self.border.target() > 0.5
+        self.placeholder.target() > 0.5
+    }
+
+    fn light(&mut self, lit: bool, reduced: bool, now: Instant) {
+        let to = if lit { 1.0 } else { 0.0 };
+        if self.border.target() != to {
+            self.border.retarget(to, MISSION_BORDER, reduced, now);
+        }
     }
 
     fn retarget(&mut self, on: bool, placeholder_from: SharedString, reduced: bool, now: Instant) {
@@ -7377,6 +7384,15 @@ impl Composer {
         self.chat_override.is_none() && !self.side_chat && !self.btw && !self.pr_chat
     }
 
+    fn leads_open_mission(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        self.mission_available()
+            && state
+                .selected_chat
+                .as_deref()
+                .is_some_and(|chat_id| zeron_proto::plan_of_chat(&state.tasks, chat_id).is_some())
+    }
+
     fn set_mission(&mut self, on: bool, cx: &mut Context<Self>) {
         let on = on && self.mission_available();
         if self.mission == on {
@@ -14299,6 +14315,9 @@ impl Render for Composer {
                 Instant::now(),
             );
         }
+        let lit = self.mission || self.leads_open_mission(cx);
+        self.mission_motion
+            .light(lit, motion::reduced_motion(cx), Instant::now());
         self.sync_prediction(cx);
         let mission_now = Instant::now();
         if !self.mission_motion.settled_at(mission_now) {
