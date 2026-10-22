@@ -2601,6 +2601,7 @@ impl EngineRpc {
                     resources,
                     from_chat_id.as_deref(),
                 )
+                .await
                 .map(drop)
             }
             MutateParams::UpdateTaskStep {
@@ -2642,7 +2643,7 @@ impl EngineRpc {
             MutateParams::SetMissionSupervised {
                 task_id,
                 supervised,
-            } => self.set_mission_supervised(&task_id, supervised),
+            } => self.set_mission_supervised(&task_id, supervised).await,
             MutateParams::SetTreeWatched {
                 root_chat_id,
                 watched,
@@ -3409,6 +3410,7 @@ impl RpcService for EngineRpc {
             }
             methods::START_REVIEW => {
                 let p: StartReviewParams = parse_params(params)?;
+                self.supervisor_gate(Some(&p.owner_chat_id), |s| s.start_missions, supervisor::START_OFF)?;
                 RpcReply::value(&Box::pin(self.start_review(p)).await?)
             }
             methods::SET_DELEGATION_SETTINGS => {
@@ -3444,6 +3446,7 @@ impl RpcService for EngineRpc {
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;
                 update_harness_enabled(&self.registry, p.harness, p.enabled).await?;
+                self.doc_host.supervisor_stale();
                 if let Some(coordinator) = &self.harness_updates {
                     coordinator.refresh_enabled();
                 }
@@ -4639,13 +4642,15 @@ impl RpcService for EngineRpc {
                         .into_iter()
                         .map(|step| (step.title, step.notes, step.thread_id, step.role))
                         .collect();
-                    let images_moved = self.plan_steps(
-                        &task_id,
-                        steps,
-                        overview,
-                        resources,
-                        from_chat_id.as_deref(),
-                    )?;
+                    let images_moved = self
+                        .plan_steps(
+                            &task_id,
+                            steps,
+                            overview,
+                            resources,
+                            from_chat_id.as_deref(),
+                        )
+                        .await?;
                     return RpcReply::value(&serde_json::json!({
                         "ok": true,
                         "task": self.workspace.task(&task_id),

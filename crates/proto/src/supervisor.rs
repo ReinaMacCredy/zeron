@@ -319,6 +319,9 @@ pub struct SupervisorSnapshot {
     pub waiting: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_check: Option<NextCheck>,
+    /// Why the Supervisor's agent cannot run on this Mac; wakes wait while it is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<String>,
     #[serde(default)]
     pub wakes: Vec<SupervisorWake>,
     #[serde(default)]

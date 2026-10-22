@@ -1052,12 +1052,46 @@ pub(crate) async fn toplevel(root: &Path) -> Option<PathBuf> {
     (!top.is_empty()).then(|| PathBuf::from(top))
 }
 
-/// Paths the branch changed since it left `base`.
+pub(crate) struct Changes {
+    pub head_sha: Option<String>,
+    pub branch: Option<String>,
+    pub files: Vec<WorkingTreeFile>,
+}
+
+/// The uncommitted files, branch and head from one `git status`, for checks that need no line counts.
+pub(crate) async fn changes(root: &Path) -> Result<Changes, EngineError> {
+    let out = git(
+        root,
+        &[
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--branch",
+            "--untracked-files=all",
+        ],
+    )
+    .await?;
+    let status = parse_status(&out.stdout, out.truncated);
+    Ok(Changes {
+        head_sha: status.head_sha,
+        branch: status.branch,
+        files: status.files,
+    })
+}
+
+/// Paths the branch changed since it left `base`; a rename lists both names.
 pub(crate) async fn branch_paths(root: &Path, base: &str) -> Vec<String> {
     let range = format!("{base}...HEAD");
     git(
         root,
-        &["diff", "--name-only", "-z", "--no-ext-diff", &range],
+        &[
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-ext-diff",
+            "--no-renames",
+            &range,
+        ],
     )
     .await
     .map(|out| {

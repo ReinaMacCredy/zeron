@@ -405,15 +405,18 @@ impl EngineHandle {
                 }
             };
 
-            match Engine::assemble_runtime_with_lock(&engine_config, auth, profile, lock).await {
+            let tool_server_port = ipc_bound.then_some(engine_config.ipc_port);
+            match Engine::assemble_runtime_with_lock(
+                &engine_config,
+                auth,
+                profile,
+                lock,
+                tool_server_port,
+            )
+            .await
+            {
                 Ok(engine_runtime) => {
                     let service: Arc<dyn RpcService> = engine_runtime.core().rpc_service();
-                    if ipc_bound {
-                        engine_runtime
-                            .core()
-                            .sessions
-                            .set_tool_server_port(engine_config.ipc_port);
-                    }
                     *runtime_for_boot.lock().await = Some(engine_runtime);
                     if service_for_boot.set(service).is_err() {
                         state_tx.send_replace(DeferredEngineState::Failed(
