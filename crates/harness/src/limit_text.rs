@@ -1,17 +1,41 @@
 use zeron_proto::{AgentEvent, DoneStatus};
 
-const PHRASES: [&str; 5] = [
+const PHRASES: [&str; 8] = [
     "rate limit",
-    "quota",
     "resource exhausted",
     "usage limit",
-    "credits",
+    "quota exceeded",
+    "quota exhausted",
+    "exceeded your quota",
+    "out of credits",
+    "insufficient credits",
 ];
+const LOCAL_QUOTAS: [&str; 2] = ["disk quota", "storage quota"];
+const THROTTLES: [&str; 3] = ["too many requests", "per minute", "slow down"];
+const PLAN_WORDS: [&str; 5] = ["usage limit", "quota", "credit", "exhausted", "plan"];
+const THROTTLE_MS: i64 = 60_000;
 
 pub fn is_usage_limit(message: &str) -> bool {
     let lower = message.to_lowercase();
     let spaced = lower.replace(['_', '-'], " ");
-    has_status_429(&lower) || PHRASES.iter().any(|phrase| spaced.contains(phrase))
+    has_status_429(&lower)
+        || (PHRASES.iter().any(|phrase| spaced.contains(phrase))
+            && !LOCAL_QUOTAS.iter().any(|phrase| spaced.contains(phrase)))
+}
+
+/// A per-minute throttle passes in about a minute, not the hour an unknown plan limit is held for.
+fn throttled(message: &str) -> bool {
+    let lower = message.to_lowercase().replace(['_', '-'], " ");
+    (has_status_429(&lower) || THROTTLES.iter().any(|phrase| lower.contains(phrase)))
+        && !PLAN_WORDS.iter().any(|word| lower.contains(word))
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 pub fn done_events(
@@ -19,9 +43,13 @@ pub fn done_events(
     error: Option<String>,
     session_id: Option<String>,
 ) -> Vec<AgentEvent> {
-    let limited = status == DoneStatus::Errored && error.as_deref().is_some_and(is_usage_limit);
-    limited
-        .then_some(AgentEvent::UsageLimit { resets_at: None })
+    let limit = error
+        .as_deref()
+        .filter(|error| status == DoneStatus::Errored && is_usage_limit(error))
+        .map(|error| AgentEvent::UsageLimit {
+            resets_at: throttled(error).then(|| now_ms() + THROTTLE_MS),
+        });
+    limit
         .into_iter()
         .chain([AgentEvent::Done {
             status,
@@ -91,8 +119,36 @@ mod tests {
             "request abc-429-def failed [code=internal, requestId=req_429a]",
             "build 1.429.0 crashed after 0.429s",
             "The agent failed to complete the turn.",
+            "Error: EDQUOT: Disk quota exceeded, write '/tmp/x'",
+            "Storage quota exceeded for this workspace",
         ] {
             assert!(!is_usage_limit(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_throttle_resets_in_a_minute_and_a_plan_limit_stays_unknown() {
+        let reset = |text: &str| match done_events(DoneStatus::Errored, Some(text.into()), None)[..]
+        {
+            [
+                AgentEvent::UsageLimit { resets_at },
+                AgentEvent::Done { .. },
+            ] => resets_at,
+            ref other => panic!("{text}: {other:?}"),
+        };
+        for text in [
+            "harness protocol error: session/prompt: 429 Too Many Requests",
+            "You have exceeded the rate limit of 30 requests per minute for the get_models endpoint",
+        ] {
+            let at = reset(text).expect(text);
+            assert!((at - now_ms() - THROTTLE_MS).abs() < 5_000, "{text}");
+        }
+        for text in [
+            "harness protocol error: session/prompt: Quota exhausted.",
+            "Error 429, Message: Resource has been exhausted (e.g. check quota)., Status: RESOURCE_EXHAUSTED",
+            "You've hit the rate limit for your plan. Upgrade your account or try again later.",
+        ] {
+            assert_eq!(reset(text), None, "{text}");
         }
     }
 }
