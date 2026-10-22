@@ -141,6 +141,10 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             guard let self, let p = self.project else { return [] }
             return await self.app.searchFiles(deviceId: p.device, spaceId: p.id, query: q)
         }
+        composer.threadSearch = { [weak self] q in
+            guard let self, let p = self.project else { return [] }
+            return self.app.threadMentions(deviceId: p.device, spaceId: p.id, query: q)
+        }
         composer.onSend = { [weak self] text, images, _ in
             self?.create(text: text, images: images) ?? false ? .sent : .kept
         }

@@ -110,6 +110,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         composer.onStop = { [weak self] in self?.source.stop() }
         composer.text = Drafts.load(chatId)
         composer.mentionSearch = { [weak self] q in await self?.source.searchFiles(q) ?? [] }
+        composer.threadSearch = { [weak self] q in self?.source.threadMentions(q) ?? [] }
         composer.onHeightChange = { [weak self] in self?.view.setNeedsLayout() }
         composer.onActionChange = { [weak self] in self?.render(animated: true) }
         composer.onChipTap = { [weak self] id, _ in

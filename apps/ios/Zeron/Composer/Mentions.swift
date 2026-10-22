@@ -1,26 +1,33 @@
 import UIKit
 
-/// `@file` mentions: the composer shows `@name` tokens; on send they become
-/// the canonical `[name](zeron-file:path)` links the host resolves.
+/// `@` mentions: the composer shows `@name` tokens; on send they become the
+/// canonical links the host resolves (`zeron-file:` files, `zeron-chat:` threads).
 struct MentionIndex {
-    private(set) var tokens: [String: FileMatch] = [:]
+    private(set) var tokens: [String: String] = [:]
 
     /// Token for a file, disambiguated by parent folder on basename clashes.
     mutating func token(for file: FileMatch) -> String {
+        let link = fileMentionLink(path: file.path, isDir: file.isDir)
         let parts = file.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).split(separator: "/")
         var token = "@" + (parts.last.map(String.init) ?? file.path)
-        if let existing = tokens[token], existing.path != file.path, parts.count > 1 {
+        if let existing = tokens[token], existing != link, parts.count > 1 {
             token = "@" + parts.suffix(2).joined(separator: "/")
         }
-        tokens[token] = file
+        tokens[token] = link
+        return token
+    }
+
+    mutating func token(for thread: ThreadMention) -> String {
+        let token = "@" + thread.title
+        tokens[token] = thread.link
         return token
     }
 
     /// Replace live tokens with canonical links; forget tokens no longer present.
     func encode(_ text: String) -> String {
         var out = text
-        for (token, file) in tokens.sorted(by: { $0.key.count > $1.key.count }) where out.contains(token) {
-            out = out.replacingOccurrences(of: token, with: fileMentionLink(path: file.path, isDir: file.isDir))
+        for (token, link) in tokens.sorted(by: { $0.key.count > $1.key.count }) where out.contains(token) {
+            out = out.replacingOccurrences(of: token, with: link)
         }
         return out
     }
@@ -47,12 +54,20 @@ struct MentionIndex {
     }
 }
 
-/// Glass list of matching files above the composer.
+enum MentionPick {
+    case file(FileMatch)
+    case thread(ThreadMention)
+}
+
+/// Glass list of matching threads and files above the composer.
 final class MentionSuggestions: UIView {
-    var onPick: ((FileMatch) -> Void)?
+    var onPick: ((MentionPick) -> Void)?
     private let card = Glass.surface(radius: 18)
     private let stack = UIStackView()
+    private(set) var threads: [ThreadMention] = []
     private(set) var files: [FileMatch] = []
+
+    var isEmpty: Bool { threads.isEmpty && files.isEmpty }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -75,31 +90,65 @@ final class MentionSuggestions: UIView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func show(_ files: [FileMatch]) {
-        self.files = Array(files.prefix(5))
+    func show(threads: [ThreadMention], files: [FileMatch]) {
+        self.threads = threads
+        self.files = Array(files.prefix(threads.isEmpty ? 5 : 3))
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        if !threads.isEmpty {
+            stack.addArrangedSubview(header("Threads"))
+            for (i, thread) in threads.enumerated() {
+                let detail = [thread.project, thread.status].compactMap { $0 }.joined(separator: " · ")
+                let b = row(symbol: "bubble.left", title: thread.title, subtitle: detail, mono: false) { [weak self] in self?.onPick?(.thread(thread)) }
+                b.accessibilityIdentifier = "mention-thread-\(i)"
+                stack.addArrangedSubview(b)
+            }
+            if !self.files.isEmpty { stack.addArrangedSubview(header("Files")) }
+        }
         for (i, file) in self.files.enumerated() {
-            var c = UIButton.Configuration.plain()
             let name = file.path.split(separator: "/").last.map(String.init) ?? file.path
             let dir = file.path.components(separatedBy: "/").dropLast().joined(separator: "/")
-            c.image = UIImage(systemName: file.isDir ? "folder" : "doc.text", withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .medium))
-            c.imagePadding = 10
-            c.baseForegroundColor = Palette.text
-            var title = AttributedString(name)
-            title.font = Fonts.ui(.sansMedium, 15)
-            c.attributedTitle = title
-            if !dir.isEmpty {
-                var sub = AttributedString(dir)
-                sub.font = Fonts.ui(.mono, 11.5)
-                sub.foregroundColor = Palette.tertiary
-                c.attributedSubtitle = sub
-            }
-            c.titleAlignment = .leading
-            c.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14)
-            let b = UIButton(configuration: c, primaryAction: UIAction { [weak self] _ in self?.onPick?(file) })
-            b.contentHorizontalAlignment = .leading
+            let b = row(symbol: file.isDir ? "folder" : "doc.text", title: name, subtitle: dir, mono: true) { [weak self] in self?.onPick?(.file(file)) }
             b.accessibilityIdentifier = "mention-\(i)"
             stack.addArrangedSubview(b)
         }
+    }
+
+    private func header(_ text: String) -> UIView {
+        let label = UILabel()
+        label.text = text
+        label.font = Fonts.ui(.sansMedium, 12)
+        label.textColor = Palette.tertiary
+        let wrap = UIView()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        wrap.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: 14),
+            label.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -14),
+            label.topAnchor.constraint(equalTo: wrap.topAnchor, constant: 6),
+            label.bottomAnchor.constraint(equalTo: wrap.bottomAnchor, constant: -2),
+        ])
+        return wrap
+    }
+
+    private func row(symbol: String, title: String, subtitle: String, mono: Bool, pick: @escaping () -> Void) -> UIButton {
+        var c = UIButton.Configuration.plain()
+        c.image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .medium))
+        c.imagePadding = 10
+        c.baseForegroundColor = Palette.text
+        var t = AttributedString(title)
+        t.font = Fonts.ui(.sansMedium, 15)
+        c.attributedTitle = t
+        if !subtitle.isEmpty {
+            var sub = AttributedString(subtitle)
+            sub.font = mono ? Fonts.ui(.mono, 11.5) : Fonts.ui(.sans, 12)
+            sub.foregroundColor = Palette.tertiary
+            c.attributedSubtitle = sub
+        }
+        c.titleAlignment = .leading
+        c.titleLineBreakMode = .byTruncatingTail
+        c.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14)
+        let b = UIButton(configuration: c, primaryAction: UIAction { _ in pick() })
+        b.contentHorizontalAlignment = .leading
+        return b
     }
 }

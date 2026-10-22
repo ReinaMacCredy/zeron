@@ -1,7 +1,7 @@
 use serde_json::{Map, Value};
 use zeron_client::model_picks;
 
-use super::{ChatConfig, ModelInfo, PermissionMode};
+use super::{ChatConfig, CoreClient, ModelInfo, PermissionMode};
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct PermissionModeInfo {
@@ -142,4 +142,36 @@ pub fn toggle_speed(model: ModelInfo, config: ChatConfig) -> ChatConfig {
 #[uniffi::export]
 pub fn fast_mode_on(model: ModelInfo, config: ChatConfig) -> bool {
     zeron_proto::model_options::fast_mode_on(&options_of(&model), &picks_of(&config))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ThreadMention {
+    pub chat_id: String,
+    pub title: String,
+    pub link: String,
+    pub status: Option<String>,
+    pub project: String,
+}
+
+#[uniffi::export]
+impl CoreClient {
+    pub fn thread_mentions(
+        &self,
+        device_id: String,
+        space_id: Option<String>,
+        exclude: Option<String>,
+        query: String,
+    ) -> Vec<ThreadMention> {
+        self.client
+            .thread_mentions(&device_id, space_id.as_deref(), exclude.as_deref(), &query)
+            .into_iter()
+            .map(|t| ThreadMention {
+                chat_id: t.chat_id,
+                title: t.title,
+                link: t.link,
+                status: t.status,
+                project: t.project,
+            })
+            .collect()
+    }
 }

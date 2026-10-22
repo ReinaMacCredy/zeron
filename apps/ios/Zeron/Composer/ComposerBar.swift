@@ -65,6 +65,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     var onActionChange: (() -> Void)?
     /// `@` file search (nil disables mentions).
     var mentionSearch: ((String) async -> [FileMatch])?
+    var threadSearch: ((String) -> [ThreadMention])?
 
     // State
     var running = false { didSet { if running != oldValue { refreshAction(animated: true) } } }
@@ -270,7 +271,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         chipScroll.alpha = 0
         suggestions.isHidden = true
         suggestions.translatesAutoresizingMaskIntoConstraints = false
-        suggestions.onPick = { [weak self] file in self?.insertMention(file) }
+        suggestions.onPick = { [weak self] pick in self?.insertMention(pick) }
         refreshAction(animated: false)
     }
 
@@ -343,20 +344,23 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     // MARK: Mentions
 
     private func updateMentionQuery() {
-        guard mentionSearch != nil else { return }
+        guard mentionSearch != nil || threadSearch != nil else { return }
         mentionQuery = MentionIndex.activeQuery(in: textView.text, cursor: textView.selectedRange.location)
         mentionTask?.cancel()
         guard let q = mentionQuery else {
             setSuggestionsVisible(false)
             return
         }
+        let threads = threadSearch?(q.query) ?? []
+        suggestions.show(threads: threads, files: suggestions.files)
+        setSuggestionsVisible(!suggestions.isEmpty)
         mentionTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(120))
             guard !Task.isCancelled, let self, let search = self.mentionSearch else { return }
             let files = await search(q.query)
             guard !Task.isCancelled, self.mentionQuery?.query == q.query else { return }
-            self.suggestions.show(files)
-            self.setSuggestionsVisible(!files.isEmpty)
+            self.suggestions.show(threads: threads, files: files)
+            self.setSuggestionsVisible(!self.suggestions.isEmpty)
         }
     }
 
@@ -373,10 +377,14 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         }
     }
 
-    private func insertMention(_ file: FileMatch) {
+    private func insertMention(_ pick: MentionPick) {
         guard let q = mentionQuery else { return }
         UISelectionFeedbackGenerator().selectionChanged()
-        let token = mentions.token(for: file) + " "
+        let token: String
+        switch pick {
+        case .file(let file): token = mentions.token(for: file) + " "
+        case .thread(let thread): token = mentions.token(for: thread) + " "
+        }
         let ns = textView.text as NSString
         textView.text = ns.replacingCharacters(in: q.range, with: token)
         textView.selectedRange = NSRange(location: q.range.location + (token as NSString).length, length: 0)

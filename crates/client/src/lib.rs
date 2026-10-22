@@ -39,6 +39,7 @@ pub mod model_picks;
 pub mod rpc;
 pub mod runtime;
 pub mod session;
+pub mod thread_mentions;
 pub mod workspace;
 
 pub use client::{Client, NewSession, PRELOAD_CAP, PushPrefs, SessionTarget, WARM_SESSION_CAP};

@@ -85,6 +85,7 @@ protocol SessionSource: AnyObject {
     func image(_ reference: String) async -> UIImage?
     /// Workspace files for `@` mentions.
     func searchFiles(_ query: String) async -> [FileMatch]
+    func threadMentions(_ query: String) -> [ThreadMention]
 }
 
 extension SessionSource {
@@ -243,4 +244,5 @@ final class FixtureSessionSource: SessionSource {
     func loadImage(_ reference: String, into view: UIImageView) {}
     func image(_ reference: String) async -> UIImage? { nil }
     func searchFiles(_ query: String) async -> [FileMatch] { [] }
+    func threadMentions(_ query: String) -> [ThreadMention] { [] }
 }

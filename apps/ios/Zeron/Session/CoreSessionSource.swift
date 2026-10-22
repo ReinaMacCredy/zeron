@@ -343,6 +343,10 @@ final class CoreSessionSource: SessionSource {
         (try? await client.searchFiles(deviceId: hostDevice, chatId: chatId, spaceId: nil, query: query)) ?? []
     }
 
+    func threadMentions(_ query: String) -> [ThreadMention] {
+        client.threadMentions(deviceId: hostDevice, spaceId: app?.row(chatId)?.project?.id, exclude: chatId, query: query)
+    }
+
     private static let images = NSCache<NSString, UIImage>()
 
     func image(_ reference: String) async -> UIImage? {

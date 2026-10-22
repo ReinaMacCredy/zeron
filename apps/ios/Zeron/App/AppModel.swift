@@ -618,6 +618,10 @@ final class AppModel {
         return (try? await client.searchFiles(deviceId: deviceId, chatId: nil, spaceId: spaceId, query: query)) ?? []
     }
 
+    func threadMentions(deviceId: String, spaceId: String, query: String) -> [ThreadMention] {
+        client?.threadMentions(deviceId: deviceId, spaceId: spaceId, exclude: nil, query: query) ?? []
+    }
+
     func refs(projectId: String) async -> [String] {
         guard let client, let p = rawProjects.first(where: { $0.id == projectId }) else { return [] }
         let refs = (try? await client.listRefs(deviceId: p.deviceId, repoPath: p.path)) ?? []

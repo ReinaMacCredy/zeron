@@ -6831,27 +6831,9 @@ pub(crate) struct ThreadMatch {
     pub(crate) project: String,
 }
 
-/// Where the prompt will run and read from: the device `read_thread`
-/// resolves ids on, the project whose threads list first, and the chat
-/// being composed for (which can't mention itself).
-pub(crate) struct MentionScope<'a> {
-    pub(crate) device_id: &'a str,
-    pub(crate) space_id: Option<&'a str>,
-    pub(crate) exclude: Option<&'a str>,
-}
+pub(crate) use zeron_proto::chat_mentions::MentionScope;
+use zeron_proto::chat_mentions::chat_mention_title;
 
-const THREAD_MENTION_LIMIT: usize = 6;
-
-/// The sidebar title as the chip label; an untitled chat mentions as the
-/// same placeholder the sidebar shows for it.
-fn chat_mention_title(chat: &zeron_proto::Chat) -> String {
-    crate::transcript::single_line(chat.title.as_deref().unwrap_or("New session"))
-}
-
-/// Threads whose title contains the query (case-insensitive) or whose id
-/// starts with it, on the scope's device, minus the composed-for chat and
-/// drafts (nothing to read). The scope's own project lists first, then the
-/// rest, each in sidebar (recency) order. An empty query lists the first few.
 pub(crate) fn thread_matches<'a>(
     chats: impl Iterator<Item = &'a zeron_proto::Chat>,
     query: &str,
@@ -6860,26 +6842,9 @@ pub(crate) fn thread_matches<'a>(
     project_of: impl Fn(&zeron_proto::Chat) -> String,
     marks_of: impl Fn(&zeron_proto::Chat) -> Vec<crate::provider_instances::InstanceIcon>,
 ) -> Vec<ThreadMatch> {
-    let query = query.trim().to_lowercase();
-    let mut matches: Vec<(bool, String, &zeron_proto::Chat)> = chats
-        .filter(|chat| {
-            chat.device_id == scope.device_id
-                && Some(chat.id.as_str()) != scope.exclude
-                && !is_draft(&chat.id)
-        })
-        .filter_map(|chat| {
-            let title = chat_mention_title(chat);
-            (query.is_empty()
-                || title.to_lowercase().contains(&query)
-                || chat.id.to_lowercase().starts_with(&query))
-            .then(|| (chat.space_id.as_deref() != scope.space_id, title, chat))
-        })
-        .collect();
-    matches.sort_by_key(|(other_project, _, _)| *other_project);
-    matches
+    zeron_proto::chat_mentions::thread_matches(chats, query, scope, is_draft)
         .into_iter()
-        .take(THREAD_MENTION_LIMIT)
-        .map(|(_, title, chat)| ThreadMatch {
+        .map(|(chat, title)| ThreadMatch {
             chat_id: chat.id.clone(),
             title,
             marks: marks_of(chat),
@@ -10017,13 +9982,7 @@ impl Composer {
             let selected = self.mention.active == Some(ix);
             let (status, ring) = statuses[ix];
             let status_color = crate::shell::status_dot_color(status, theme);
-            let status_label = match status {
-                zeron_proto::ChatIndicator::Working => Some("Working"),
-                zeron_proto::ChatIndicator::AwaitingInput => Some("Input"),
-                zeron_proto::ChatIndicator::Errored => Some("Failed"),
-                zeron_proto::ChatIndicator::Completed => Some("Done"),
-                zeron_proto::ChatIndicator::Idle => None,
-            };
+            let status_label = zeron_proto::chat_mentions::thread_status_label(status);
             let status_badge = match (status_label, ring) {
                 (None, Some(count)) => Some(background::sidebar_ring_mark(count, theme)),
                 (None, None) => None,

@@ -1262,6 +1262,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func workspaceRevision()  -> UInt64
     
+    func threadMentions(deviceId: String, spaceId: String?, exclude: String?, query: String)  -> [ThreadMention]
+    
     /**
      * Returns immediately. Callbacks are dispatched on the core runtime; the
      * platform must hop to its media/UI executor and call complete_media.
@@ -2095,6 +2097,19 @@ open func workspaceRevision() -> UInt64  {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_method_coreclient_workspace_revision(
             self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func threadMentions(deviceId: String, spaceId: String?, exclude: String?, query: String) -> [ThreadMention]  {
+    return try!  FfiConverterSequenceTypeThreadMention.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_thread_mentions(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(deviceId),
+        FfiConverterOptionString.lower(spaceId),
+        FfiConverterOptionString.lower(exclude),
+        FfiConverterString.lower(query),uniffiCallStatus
     )
 })
 }
@@ -6214,6 +6229,80 @@ public func FfiConverterTypeConnectivity_lower(_ value: Connectivity) -> RustBuf
 }
 
 
+public struct ContextCard: Equatable, Hashable {
+    public var longContext: Bool
+    public var shortLabel: String
+    public var windowLabel: String
+    public var thresholdLabel: String
+    public var stops: [String]
+    public var position: UInt32
+    public var warning: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(longContext: Bool, shortLabel: String, windowLabel: String, thresholdLabel: String, stops: [String], position: UInt32, warning: String?) {
+        self.longContext = longContext
+        self.shortLabel = shortLabel
+        self.windowLabel = windowLabel
+        self.thresholdLabel = thresholdLabel
+        self.stops = stops
+        self.position = position
+        self.warning = warning
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ContextCard: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeContextCard: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ContextCard {
+        return
+            try ContextCard(
+                longContext: FfiConverterBool.read(from: &buf), 
+                shortLabel: FfiConverterString.read(from: &buf), 
+                windowLabel: FfiConverterString.read(from: &buf), 
+                thresholdLabel: FfiConverterString.read(from: &buf), 
+                stops: FfiConverterSequenceString.read(from: &buf), 
+                position: FfiConverterUInt32.read(from: &buf), 
+                warning: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ContextCard, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.longContext, into: &buf)
+        FfiConverterString.write(value.shortLabel, into: &buf)
+        FfiConverterString.write(value.windowLabel, into: &buf)
+        FfiConverterString.write(value.thresholdLabel, into: &buf)
+        FfiConverterSequenceString.write(value.stops, into: &buf)
+        FfiConverterUInt32.write(value.position, into: &buf)
+        FfiConverterOptionString.write(value.warning, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeContextCard_lift(_ buf: RustBuffer) throws -> ContextCard {
+    return try FfiConverterTypeContextCard.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeContextCard_lower(_ value: ContextCard) -> RustBuffer {
+    return FfiConverterTypeContextCard.lower(value)
+}
+
+
 public struct ContextUsage: Equatable, Hashable {
     public var tokens: UInt64?
     public var window: UInt64?
@@ -8165,6 +8254,68 @@ public func FfiConverterTypePendingSend_lower(_ value: PendingSend) -> RustBuffe
 }
 
 
+public struct PermissionModeInfo: Equatable, Hashable {
+    public var mode: PermissionMode
+    public var label: String
+    public var shortLabel: String
+    public var description: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(mode: PermissionMode, label: String, shortLabel: String, description: String) {
+        self.mode = mode
+        self.label = label
+        self.shortLabel = shortLabel
+        self.description = description
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PermissionModeInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePermissionModeInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PermissionModeInfo {
+        return
+            try PermissionModeInfo(
+                mode: FfiConverterTypePermissionMode.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                shortLabel: FfiConverterString.read(from: &buf), 
+                description: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PermissionModeInfo, into buf: inout [UInt8]) {
+        FfiConverterTypePermissionMode.write(value.mode, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterString.write(value.shortLabel, into: &buf)
+        FfiConverterString.write(value.description, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePermissionModeInfo_lift(_ buf: RustBuffer) throws -> PermissionModeInfo {
+    return try FfiConverterTypePermissionModeInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePermissionModeInfo_lower(_ value: PermissionModeInfo) -> RustBuffer {
+    return FfiConverterTypePermissionModeInfo.lower(value)
+}
+
+
 public struct ProjectRef: Equatable, Hashable {
     public var id: String
     public var name: String
@@ -9431,6 +9582,7 @@ public struct SessionRow: Equatable, Hashable {
      * Run start of the live turn while Working/AwaitingInput.
      */
     public var workingSinceMs: Int64?
+    public var heldBySubagents: Bool
     public var lastActivityMs: Int64
     /**
      * `now` / `34m` / `4h` / `2d` at derive time.
@@ -9447,6 +9599,9 @@ public struct SessionRow: Equatable, Hashable {
      */
     public var sendState: SendState?
     public var parentChatId: String?
+    public var sidechatOf: String?
+    public var sidechatExpired: Bool
+    public var sidechats: [String]
     /**
      * 2 = chat2; 1 = legacy (not dialable).
      */
@@ -9478,13 +9633,13 @@ public struct SessionRow: Equatable, Hashable {
          */hostIndicator: ChatIndicator, 
         /**
          * Run start of the live turn while Working/AwaitingInput.
-         */workingSinceMs: Int64?, lastActivityMs: Int64, 
+         */workingSinceMs: Int64?, heldBySubagents: Bool, lastActivityMs: Int64, 
         /**
          * `now` / `34m` / `4h` / `2d` at derive time.
          */timeLabel: String, createdAtMs: Int64, unseen: Bool, archived: Bool, pinned: Bool, sectionId: String?, pullRequest: PullRequest?, 
         /**
          * Oldest unadopted send from this device (open sessions only).
-         */sendState: SendState?, parentChatId: String?, 
+         */sendState: SendState?, parentChatId: String?, sidechatOf: String?, sidechatExpired: Bool, sidechats: [String], 
         /**
          * 2 = chat2; 1 = legacy (not dialable).
          */roomGen: UInt32) {
@@ -9507,6 +9662,7 @@ public struct SessionRow: Equatable, Hashable {
         self.indicator = indicator
         self.hostIndicator = hostIndicator
         self.workingSinceMs = workingSinceMs
+        self.heldBySubagents = heldBySubagents
         self.lastActivityMs = lastActivityMs
         self.timeLabel = timeLabel
         self.createdAtMs = createdAtMs
@@ -9517,6 +9673,9 @@ public struct SessionRow: Equatable, Hashable {
         self.pullRequest = pullRequest
         self.sendState = sendState
         self.parentChatId = parentChatId
+        self.sidechatOf = sidechatOf
+        self.sidechatExpired = sidechatExpired
+        self.sidechats = sidechats
         self.roomGen = roomGen
     }
 
@@ -9555,6 +9714,7 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
                 indicator: FfiConverterTypeChatIndicator.read(from: &buf), 
                 hostIndicator: FfiConverterTypeChatIndicator.read(from: &buf), 
                 workingSinceMs: FfiConverterOptionInt64.read(from: &buf), 
+                heldBySubagents: FfiConverterBool.read(from: &buf), 
                 lastActivityMs: FfiConverterInt64.read(from: &buf), 
                 timeLabel: FfiConverterString.read(from: &buf), 
                 createdAtMs: FfiConverterInt64.read(from: &buf), 
@@ -9565,6 +9725,9 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
                 pullRequest: FfiConverterOptionTypePullRequest.read(from: &buf), 
                 sendState: FfiConverterOptionTypeSendState.read(from: &buf), 
                 parentChatId: FfiConverterOptionString.read(from: &buf), 
+                sidechatOf: FfiConverterOptionString.read(from: &buf), 
+                sidechatExpired: FfiConverterBool.read(from: &buf), 
+                sidechats: FfiConverterSequenceString.read(from: &buf), 
                 roomGen: FfiConverterUInt32.read(from: &buf)
         )
     }
@@ -9589,6 +9752,7 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
         FfiConverterTypeChatIndicator.write(value.indicator, into: &buf)
         FfiConverterTypeChatIndicator.write(value.hostIndicator, into: &buf)
         FfiConverterOptionInt64.write(value.workingSinceMs, into: &buf)
+        FfiConverterBool.write(value.heldBySubagents, into: &buf)
         FfiConverterInt64.write(value.lastActivityMs, into: &buf)
         FfiConverterString.write(value.timeLabel, into: &buf)
         FfiConverterInt64.write(value.createdAtMs, into: &buf)
@@ -9599,6 +9763,9 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
         FfiConverterOptionTypePullRequest.write(value.pullRequest, into: &buf)
         FfiConverterOptionTypeSendState.write(value.sendState, into: &buf)
         FfiConverterOptionString.write(value.parentChatId, into: &buf)
+        FfiConverterOptionString.write(value.sidechatOf, into: &buf)
+        FfiConverterBool.write(value.sidechatExpired, into: &buf)
+        FfiConverterSequenceString.write(value.sidechats, into: &buf)
         FfiConverterUInt32.write(value.roomGen, into: &buf)
     }
 }
@@ -9857,6 +10024,72 @@ public func FfiConverterTypeTextRun_lift(_ buf: RustBuffer) throws -> TextRun {
 #endif
 public func FfiConverterTypeTextRun_lower(_ value: TextRun) -> RustBuffer {
     return FfiConverterTypeTextRun.lower(value)
+}
+
+
+public struct ThreadMention: Equatable, Hashable {
+    public var chatId: String
+    public var title: String
+    public var link: String
+    public var status: String?
+    public var project: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(chatId: String, title: String, link: String, status: String?, project: String) {
+        self.chatId = chatId
+        self.title = title
+        self.link = link
+        self.status = status
+        self.project = project
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ThreadMention: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeThreadMention: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ThreadMention {
+        return
+            try ThreadMention(
+                chatId: FfiConverterString.read(from: &buf), 
+                title: FfiConverterString.read(from: &buf), 
+                link: FfiConverterString.read(from: &buf), 
+                status: FfiConverterOptionString.read(from: &buf), 
+                project: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ThreadMention, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.chatId, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.link, into: &buf)
+        FfiConverterOptionString.write(value.status, into: &buf)
+        FfiConverterString.write(value.project, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeThreadMention_lift(_ buf: RustBuffer) throws -> ThreadMention {
+    return try FfiConverterTypeThreadMention.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeThreadMention_lower(_ value: ThreadMention) -> RustBuffer {
+    return FfiConverterTypeThreadMention.lower(value)
 }
 
 
@@ -15818,6 +16051,30 @@ fileprivate struct FfiConverterOptionTypeComputerStill: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeContextCard: FfiConverterRustBuffer {
+    typealias SwiftType = ContextCard?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeContextCard.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeContextCard.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeContextUsage: FfiConverterRustBuffer {
     typealias SwiftType = ContextUsage?
 
@@ -16750,6 +17007,31 @@ fileprivate struct FfiConverterSequenceTypePendingSend: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypePermissionModeInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [PermissionModeInfo]
+
+    public static func write(_ value: [PermissionModeInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePermissionModeInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PermissionModeInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PermissionModeInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePermissionModeInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeProjectView: FfiConverterRustBuffer {
     typealias SwiftType = [ProjectView]
 
@@ -16992,6 +17274,31 @@ fileprivate struct FfiConverterSequenceTypeTextRun: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeTextRun.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeThreadMention: FfiConverterRustBuffer {
+    typealias SwiftType = [ThreadMention]
+
+    public static func write(_ value: [ThreadMention], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeThreadMention.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ThreadMention] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ThreadMention]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeThreadMention.read(from: &buf))
         }
         return seq
     }
@@ -17492,6 +17799,96 @@ public func workosAuthorizeUrl(state: String) -> String  {
     )
 })
 }
+public func contextCard(model: ModelInfo, config: ChatConfig, tokens: UInt64?) -> ContextCard?  {
+    return try!  FfiConverterOptionTypeContextCard.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_context_card(
+        FfiConverterTypeModelInfo_lower(model),
+        FfiConverterTypeChatConfig_lower(config),
+        FfiConverterOptionUInt64.lower(tokens),uniffiCallStatus
+    )
+})
+}
+public func fastModeOn(model: ModelInfo, config: ChatConfig) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_fast_mode_on(
+        FfiConverterTypeModelInfo_lower(model),
+        FfiConverterTypeChatConfig_lower(config),uniffiCallStatus
+    )
+})
+}
+public func followUpNotice(queueing: Bool, steer: Bool, canSteer: Bool) -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_follow_up_notice(
+        FfiConverterBool.lower(queueing),
+        FfiConverterBool.lower(steer),
+        FfiConverterBool.lower(canSteer),uniffiCallStatus
+    )
+})
+}
+public func permissionModes() -> [PermissionModeInfo]  {
+    return try!  FfiConverterSequenceTypePermissionModeInfo.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_permission_modes(uniffiCallStatus
+    )
+})
+}
+public func pickContext(model: ModelInfo, config: ChatConfig, position: UInt32) -> ChatConfig  {
+    return try!  FfiConverterTypeChatConfig_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_pick_context(
+        FfiConverterTypeModelInfo_lower(model),
+        FfiConverterTypeChatConfig_lower(config),
+        FfiConverterUInt32.lower(position),uniffiCallStatus
+    )
+})
+}
+public func quoteChipLabel(count: UInt32) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_quote_chip_label(
+        FfiConverterUInt32.lower(count),uniffiCallStatus
+    )
+})
+}
+public func speedToggle(model: ModelInfo, config: ChatConfig) -> Bool?  {
+    return try!  FfiConverterOptionBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_speed_toggle(
+        FfiConverterTypeModelInfo_lower(model),
+        FfiConverterTypeChatConfig_lower(config),uniffiCallStatus
+    )
+})
+}
+public func toggleLongContext(model: ModelInfo, config: ChatConfig) -> ChatConfig  {
+    return try!  FfiConverterTypeChatConfig_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_toggle_long_context(
+        FfiConverterTypeModelInfo_lower(model),
+        FfiConverterTypeChatConfig_lower(config),uniffiCallStatus
+    )
+})
+}
+public func toggleSpeed(model: ModelInfo, config: ChatConfig) -> ChatConfig  {
+    return try!  FfiConverterTypeChatConfig_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_toggle_speed(
+        FfiConverterTypeModelInfo_lower(model),
+        FfiConverterTypeChatConfig_lower(config),uniffiCallStatus
+    )
+})
+}
+public func withQuotes(text: String, quotes: [String]) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_with_quotes(
+        FfiConverterString.lower(text),
+        FfiConverterSequenceString.lower(quotes),uniffiCallStatus
+    )
+})
+}
 /**
  * The canonical mention link the host understands (`[name](zeron-file:path)`).
  */
@@ -17677,6 +18074,36 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_workos_authorize_url() != 35994) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_context_card() != 21031) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_fast_mode_on() != 11254) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_follow_up_notice() != 30722) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_permission_modes() != 56977) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_pick_context() != 60832) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_quote_chip_label() != 38057) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_speed_toggle() != 27003) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_toggle_long_context() != 29810) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_toggle_speed() != 34779) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_with_quotes() != 52382) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_file_mention_link() != 14340) {
@@ -17887,6 +18314,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_workspace_revision() != 48105) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_thread_mentions() != 27556) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_start_voice() != 62086) {
