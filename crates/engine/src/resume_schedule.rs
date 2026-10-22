@@ -269,11 +269,12 @@ impl ResumeSchedule {
     pub fn resolve_offer(&self, chat_id: &str, choice: OfferResolution) -> Option<LimitOffer> {
         let mut taken = None;
         self.update(|stored| {
-            let Some(at) = stored
-                .limited
-                .iter()
-                .position(|entry| entry.at.chat_id == chat_id && entry.offer.is_some())
-            else {
+            let Some(at) = stored.limited.iter().position(|entry| {
+                entry.at.chat_id == chat_id
+                    && entry.offer.as_ref().is_some_and(|offer| {
+                        choice != OfferResolution::Switch || offer.to.is_some()
+                    })
+            }) else {
                 return false;
             };
             match choice {
@@ -649,5 +650,15 @@ mod tests {
         );
         assert!(schedule.snapshot().chats.is_empty());
         assert!(!schedule.holds("c", 1_000));
+        schedule.note_limit("c", Some(90_000), None, 1_000);
+        schedule.set_offer(
+            "c",
+            LimitOffer {
+                to: None,
+                ..offer(OfferChoice::Wait, None)
+            },
+        );
+        assert_eq!(schedule.resolve_offer("c", OfferResolution::Switch), None);
+        assert!(schedule.snapshot().chats[0].offer.is_some());
     }
 }
