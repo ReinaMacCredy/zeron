@@ -806,6 +806,9 @@ impl DemoHost {
         if method == m::CONTINUE_IN_NEW_THREAD {
             return composer::continue_in_new_thread(&client, &params);
         }
+        if method == m::CREATE_SIDECHAT {
+            return composer::create_sidechat(&client, &params);
+        }
         let chat_id = params["chatId"].as_str().unwrap_or_default().to_owned();
         let id = params["id"].as_str().unwrap_or_default().to_owned();
         let core = client

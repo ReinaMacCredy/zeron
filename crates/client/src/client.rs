@@ -1070,6 +1070,20 @@ impl Client {
         Ok(())
     }
 
+    /// A chat the host just created reaches this device by registry sync;
+    /// opening it before then finds nothing.
+    pub(crate) async fn host_created_chat(&self, reply: serde_json::Value) -> Result<String> {
+        let chat: Chat =
+            serde_json::from_value(reply).map_err(|err| ClientError::HostError(err.to_string()))?;
+        for _ in 0..100 {
+            if self.inner.workspace.chat(&chat.id).is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok(chat.id)
+    }
+
     // ── sessions ───────────────────────────────────────────────────────────
 
     /// Open (or return the already-open) session. Instant: the local

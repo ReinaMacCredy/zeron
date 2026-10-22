@@ -42,6 +42,7 @@ pub mod model_switch;
 pub mod rpc;
 pub mod runtime;
 pub mod session;
+pub mod sidechat;
 pub mod thread_mentions;
 pub mod workspace;
 

@@ -106,6 +106,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 DispatchQueue.main.async { self.composer.resignFirstResponder() }
                 return .sent
             }
+            if let command = sidechatCommand(text: text) {
+                DispatchQueue.main.async { self.composer.resignFirstResponder() }
+                self.presentSidechats()?.openSidechat(prompt: command.prompt)
+                return .sent
+            }
             let queued = self.shown.running && mode == .queue
             guard self.source.send(text: text, images: images, mode: mode) else { return .kept }
             // Sending puts the keyboard away (the composer rests as the capsule).
@@ -580,6 +585,21 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         present(sheet, animated: true)
     }
 
+    private func sidechatAction() -> UIAction? {
+        guard app.row(chatId)?.sidechatOf == nil else { return nil }
+        return UIAction(title: newSidechatLabel(), image: UIImage(systemName: "bubble.left.and.bubble.right")) { [weak self] _ in
+            self?.presentSidechats()
+        }
+    }
+
+    @discardableResult
+    private func presentSidechats() -> SidechatSheetViewController? {
+        guard let client = app.client else { return nil }
+        let sheet = SidechatSheetViewController(app: app, client: client, sourceId: chatId, sourceTitle: app.row(chatId)?.title ?? "")
+        present(sheet.wrapped, animated: true)
+        return sheet
+    }
+
     private func sessionMenu() -> UIMenu {
         UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
             guard let self else { return done([]) }
@@ -590,8 +610,9 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = self.engine.frame().plainText()
                 },
-                self.compactAction(),
+                self.sidechatAction(),
                 self.source.handoffMenu { [weak self] id in self?.router?.openSession(id) },
+                self.compactAction(),
                 UIAction(title: "Archive", image: UIImage(systemName: "archivebox"), attributes: .destructive) { _ in
                     self.app.archive(self.chatId)
                     // Beside the iPad sidebar there's nothing to pop back to.

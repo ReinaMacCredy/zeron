@@ -730,3 +730,37 @@ fn continuing_in_a_new_thread_lands_on_the_picked_agent() {
         zeron_proto::HarnessId::ClaudeCode
     );
 }
+
+#[test]
+fn a_bare_btw_reopens_the_live_sidechat_and_a_prompt_starts_a_new_one() {
+    let (client, _dir) = demo(fast());
+    let rt = zeron_client::runtime::shared();
+    let first = rt
+        .block_on(client.open_sidechat("chat-home", None))
+        .unwrap();
+    assert_eq!(
+        rt.block_on(client.open_sidechat("chat-home", None))
+            .unwrap(),
+        first
+    );
+    let second = rt
+        .block_on(client.open_sidechat("chat-home", Some("Why 2ⁿ and not jitter?".into())))
+        .unwrap();
+    assert_ne!(second, first);
+    let rows = client.sidechats_of("chat-home");
+    assert_eq!(
+        rows.iter().map(|r| r.chat_id.as_str()).collect::<Vec<_>>(),
+        [&first, &second]
+    );
+    assert!(rows[0].time_left.ends_with("left of 24 h"));
+    let sent = client.open_session(&second).unwrap();
+    wait_for("the prompt is sent", Duration::from_secs(5), || {
+        let snapshot = sent.snapshot();
+        snapshot.pending.iter().any(|p| p.text.contains("jitter"))
+            || snapshot
+                .entries
+                .iter()
+                .any(|e| e.role() == zeron_doc::MessageRole::User)
+    });
+    assert!(rt.block_on(client.create_sidechat(&second)).is_err());
+}

@@ -31,6 +31,7 @@ pub mod provider_instance;
 pub mod quotes;
 pub mod routing;
 pub mod sidebar_pins;
+pub mod sidechat;
 pub mod source_control;
 pub mod stats_view;
 pub mod supervisor;

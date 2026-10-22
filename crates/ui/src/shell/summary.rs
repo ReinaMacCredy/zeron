@@ -817,11 +817,15 @@ impl Shell {
                 .collect();
             if let Some(source) = source {
                 entries.push(
-                    SidecarEntry::new("new-sidechat", 0, icons::ASTRA_PLUS, "New sidechat").action(
-                        move |this, _, cx| {
-                            this.create_sidechat(source.clone(), None, Default::default(), cx)
-                        },
-                    ),
+                    SidecarEntry::new(
+                        "new-sidechat",
+                        0,
+                        icons::ASTRA_PLUS,
+                        zeron_proto::sidechat::NEW_SIDECHAT,
+                    )
+                    .action(move |this, _, cx| {
+                        this.create_sidechat(source.clone(), None, Default::default(), cx)
+                    }),
                 );
             }
             entries.push(

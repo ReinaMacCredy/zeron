@@ -564,3 +564,70 @@ impl SessionHandle {
         self.inner.handoff_blocked()
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SidechatCommand {
+    pub prompt: Option<String>,
+}
+
+#[uniffi::export]
+pub fn sidechat_command(text: String) -> Option<SidechatCommand> {
+    zeron_proto::app_commands::sidechat_prompt(text.trim()).map(|prompt| SidechatCommand { prompt })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SidechatRow {
+    pub chat_id: String,
+    pub title: String,
+    pub time_left: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SidechatSheet {
+    pub title: String,
+    pub context: String,
+    pub section: Option<String>,
+    pub rows: Vec<SidechatRow>,
+}
+
+#[uniffi::export]
+impl CoreClient {
+    pub fn sidechat_sheet(&self, source_chat_id: String, source_title: String) -> SidechatSheet {
+        let rows: Vec<SidechatRow> = self
+            .client
+            .sidechats_of(&source_chat_id)
+            .into_iter()
+            .map(|row| SidechatRow {
+                chat_id: row.chat_id,
+                title: row.title,
+                time_left: row.time_left,
+            })
+            .collect();
+        SidechatSheet {
+            title: zeron_proto::sidechat::NEW_SIDECHAT.into(),
+            context: zeron_proto::sidechat::sidechat_context_line(&source_title),
+            section: (!rows.is_empty())
+                .then(|| zeron_proto::sidechat::sidechat_tab_label(rows.len())),
+            rows,
+        }
+    }
+
+    pub async fn open_sidechat(
+        &self,
+        source_chat_id: String,
+        prompt: Option<String>,
+    ) -> CoreResult<String> {
+        let client = self.client.clone();
+        on_runtime(async move { client.open_sidechat(&source_chat_id, prompt).await }).await
+    }
+
+    pub async fn create_sidechat(&self, source_chat_id: String) -> CoreResult<String> {
+        let client = self.client.clone();
+        on_runtime(async move { client.create_sidechat(&source_chat_id).await }).await
+    }
+}
+
+#[uniffi::export]
+pub fn new_sidechat_label() -> String {
+    zeron_proto::sidechat::NEW_SIDECHAT.into()
+}

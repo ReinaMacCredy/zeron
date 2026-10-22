@@ -149,3 +149,38 @@ pub(super) fn continue_in_new_thread(
     client.registry_write(|doc| doc.upsert_chat(&chat))?;
     Ok(serde_json::to_value(chat).unwrap_or_default())
 }
+
+pub(super) fn create_sidechat(
+    client: &Arc<ClientInner>,
+    params: &Value,
+) -> crate::error::Result<Value> {
+    let source_id = params["sourceChatId"].as_str().unwrap_or_default();
+    let source = client
+        .workspace
+        .chat(source_id)
+        .ok_or_else(|| ClientError::NotFound(source_id.to_owned()))?;
+    if source.sidechat_source_chat_id.is_some() {
+        return Err(ClientError::HostError(
+            "nested sidechats are not supported".into(),
+        ));
+    }
+    let seed = source.title.clone().unwrap_or_else(|| "chat".into());
+    let chat = Chat {
+        id: params["chatId"].as_str().unwrap_or_default().to_owned(),
+        title: Some(format!("Sidechat: {seed}")),
+        sidechat_source_chat_id: Some(source_id.to_owned()),
+        last_message_preview: None,
+        last_message_at: None,
+        created_at: chrono::Utc::now(),
+        harness_session_id: None,
+        last_seen_at: None,
+        created_by_chat_id: None,
+        forked_from_chat_id: None,
+        delegation: None,
+        settle: None,
+        unsettled_at: None,
+        ..source
+    };
+    client.registry_write(|doc| doc.upsert_chat(&chat))?;
+    Ok(serde_json::to_value(chat).unwrap_or_default())
+}

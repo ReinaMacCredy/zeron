@@ -1264,15 +1264,21 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func continueInNewThread(sourceChatId: String, harness: String?, model: String?, targetSpaceId: String?) async throws  -> String
     
+    func createSidechat(sourceChatId: String) async throws  -> String
+    
     func handoffTargets(deviceId: String) async  -> [HandoffTarget]
     
     func invocationCatalog(deviceId: String, harness: String, chatId: String?, spaceId: String?, skill: Bool) async  -> InvocationCatalog
     
     func modelSwitchPrompt(chatId: String, toModel: String, fromLabel: String, toLabel: String)  -> ModelSwitchPrompt?
     
+    func openSidechat(sourceChatId: String, prompt: String?) async throws  -> String
+    
     func providerSwitchPrompt(chatId: String, fromProvider: String, toProvider: String, fromModel: String, toModel: String)  -> ModelSwitchPrompt?
     
     func setSessionConfigNoted(chatId: String, config: ChatConfig, note: String, hint: String) async throws 
+    
+    func sidechatSheet(sourceChatId: String, sourceTitle: String)  -> SidechatSheet
     
     func threadMentions(deviceId: String, spaceId: String?, exclude: String?, query: String)  -> [ThreadMention]
     
@@ -2129,6 +2135,22 @@ open func continueInNewThread(sourceChatId: String, harness: String?, model: Str
         )
 }
     
+open func createSidechat(sourceChatId: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_create_sidechat(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(sourceChatId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
 open func handoffTargets(deviceId: String)async  -> [HandoffTarget]  {
     return
         try!  await uniffiRustCallAsync(
@@ -2176,6 +2198,22 @@ open func modelSwitchPrompt(chatId: String, toModel: String, fromLabel: String, 
 })
 }
     
+open func openSidechat(sourceChatId: String, prompt: String?)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_open_sidechat(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(sourceChatId),FfiConverterOptionString.lower(prompt)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
 open func providerSwitchPrompt(chatId: String, fromProvider: String, toProvider: String, fromModel: String, toModel: String) -> ModelSwitchPrompt?  {
     return try!  FfiConverterOptionTypeModelSwitchPrompt.lift(try! rustCall() {
         uniffiCallStatus in
@@ -2204,6 +2242,17 @@ open func setSessionConfigNoted(chatId: String, config: ChatConfig, note: String
             liftFunc: { $0 },
             errorHandler: FfiConverterTypeCoreError_lift
         )
+}
+    
+open func sidechatSheet(sourceChatId: String, sourceTitle: String) -> SidechatSheet  {
+    return try!  FfiConverterTypeSidechatSheet_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_sidechat_sheet(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(sourceChatId),
+        FfiConverterString.lower(sourceTitle),uniffiCallStatus
+    )
+})
 }
     
 open func threadMentions(deviceId: String, spaceId: String?, exclude: String?, query: String) -> [ThreadMention]  {
@@ -10578,6 +10627,176 @@ public func FfiConverterTypeSessionStatsView_lower(_ value: SessionStatsView) ->
 }
 
 
+public struct SidechatCommand: Equatable, Hashable {
+    public var prompt: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(prompt: String?) {
+        self.prompt = prompt
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SidechatCommand: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSidechatCommand: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SidechatCommand {
+        return
+            try SidechatCommand(
+                prompt: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SidechatCommand, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.prompt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSidechatCommand_lift(_ buf: RustBuffer) throws -> SidechatCommand {
+    return try FfiConverterTypeSidechatCommand.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSidechatCommand_lower(_ value: SidechatCommand) -> RustBuffer {
+    return FfiConverterTypeSidechatCommand.lower(value)
+}
+
+
+public struct SidechatRow: Equatable, Hashable {
+    public var chatId: String
+    public var title: String
+    public var timeLeft: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(chatId: String, title: String, timeLeft: String) {
+        self.chatId = chatId
+        self.title = title
+        self.timeLeft = timeLeft
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SidechatRow: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSidechatRow: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SidechatRow {
+        return
+            try SidechatRow(
+                chatId: FfiConverterString.read(from: &buf), 
+                title: FfiConverterString.read(from: &buf), 
+                timeLeft: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SidechatRow, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.chatId, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.timeLeft, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSidechatRow_lift(_ buf: RustBuffer) throws -> SidechatRow {
+    return try FfiConverterTypeSidechatRow.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSidechatRow_lower(_ value: SidechatRow) -> RustBuffer {
+    return FfiConverterTypeSidechatRow.lower(value)
+}
+
+
+public struct SidechatSheet: Equatable, Hashable {
+    public var title: String
+    public var context: String
+    public var section: String?
+    public var rows: [SidechatRow]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(title: String, context: String, section: String?, rows: [SidechatRow]) {
+        self.title = title
+        self.context = context
+        self.section = section
+        self.rows = rows
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SidechatSheet: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSidechatSheet: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SidechatSheet {
+        return
+            try SidechatSheet(
+                title: FfiConverterString.read(from: &buf), 
+                context: FfiConverterString.read(from: &buf), 
+                section: FfiConverterOptionString.read(from: &buf), 
+                rows: FfiConverterSequenceTypeSidechatRow.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SidechatSheet, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.context, into: &buf)
+        FfiConverterOptionString.write(value.section, into: &buf)
+        FfiConverterSequenceTypeSidechatRow.write(value.rows, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSidechatSheet_lift(_ buf: RustBuffer) throws -> SidechatSheet {
+    return try FfiConverterTypeSidechatSheet.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSidechatSheet_lower(_ value: SidechatSheet) -> RustBuffer {
+    return FfiConverterTypeSidechatSheet.lower(value)
+}
+
+
 public struct StatsRow: Equatable, Hashable {
     public var label: String
     public var value: String
@@ -17257,6 +17476,30 @@ fileprivate struct FfiConverterOptionTypeSessionStatsView: FfiConverterRustBuffe
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeSidechatCommand: FfiConverterRustBuffer {
+    typealias SwiftType = SidechatCommand?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeSidechatCommand.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeSidechatCommand.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWorktreeSpec: FfiConverterRustBuffer {
     typealias SwiftType = WorktreeSpec?
 
@@ -18224,6 +18467,31 @@ fileprivate struct FfiConverterSequenceTypeSessionRow: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeSidechatRow: FfiConverterRustBuffer {
+    typealias SwiftType = [SidechatRow]
+
+    public static func write(_ value: [SidechatRow], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSidechatRow.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SidechatRow] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SidechatRow]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSidechatRow.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeStatsRow: FfiConverterRustBuffer {
     typealias SwiftType = [StatsRow]
 
@@ -18880,6 +19148,13 @@ public func handoffLabels() -> HandoffLabels  {
     )
 })
 }
+public func newSidechatLabel() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_new_sidechat_label(uniffiCallStatus
+    )
+})
+}
 public func nextPastedTextName(staged: [String]) -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
         uniffiCallStatus in
@@ -18941,6 +19216,14 @@ public func quoteChipLabel(count: UInt32) -> String  {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_func_quote_chip_label(
         FfiConverterUInt32.lower(count),uniffiCallStatus
+    )
+})
+}
+public func sidechatCommand(text: String) -> SidechatCommand?  {
+    return try!  FfiConverterOptionTypeSidechatCommand.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_sidechat_command(
+        FfiConverterString.lower(text),uniffiCallStatus
     )
 })
 }
@@ -19188,6 +19471,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_handoff_labels() != 17516) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_func_new_sidechat_label() != 39414) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_func_next_pasted_text_name() != 13940) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19207,6 +19493,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_quote_chip_label() != 38057) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_sidechat_command() != 31806) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_speed_toggle() != 27003) {
@@ -19434,6 +19723,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_continue_in_new_thread() != 58949) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_create_sidechat() != 65484) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_handoff_targets() != 35638) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19443,10 +19735,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_model_switch_prompt() != 452) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_open_sidechat() != 37619) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_provider_switch_prompt() != 48492) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_set_session_config_noted() != 45535) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_sidechat_sheet() != 17177) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_thread_mentions() != 27556) {

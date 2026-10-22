@@ -2390,20 +2390,12 @@ fn btw_tab_title(
     chat: &zeron_proto::Chat,
     now: chrono::DateTime<Utc>,
 ) -> SharedString {
-    let title = state
-        .first_prompt_of(&chat.id)
-        .or_else(|| {
-            (!state.unstarted_sidechat(chat, now))
-                .then(|| chat.last_message_preview.clone())
-                .flatten()
-        })
-        .and_then(|text| {
-            text.lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .map(str::to_string)
-        });
-    title.unwrap_or_else(|| "New btw".to_string()).into()
+    let prompt = state.first_prompt_of(&chat.id).or_else(|| {
+        (!state.unstarted_sidechat(chat, now))
+            .then(|| chat.last_message_preview.clone())
+            .flatten()
+    });
+    zeron_proto::sidechat::sidechat_tab_title(prompt.as_deref()).into()
 }
 
 /// Sidebar render identity lets transcript/caret frames reuse its GPUI scene.
@@ -17713,9 +17705,9 @@ impl Shell {
                                 .text_size(crate::typography::ui_rems(11.0))
                                 .text_color(theme.text_muted)
                                 .truncate()
-                                .child(SharedString::from(format!(
-                                    "Sidechat of {source_title} · source transcript copied as reference-only context"
-                                ))),
+                                .child(SharedString::from(
+                                    zeron_proto::sidechat::sidechat_context_line(&source_title),
+                                )),
                         )
                         .child(div().flex_1().min_h_0().child(transcript))
                         .child(div().flex_none().child(composer))
@@ -17860,7 +17852,7 @@ impl Shell {
                             row(
                                 "surface-card-sidechat",
                                 icons::CHAT_ROUND_LINE,
-                                "New sidechat",
+                                zeron_proto::sidechat::NEW_SIDECHAT,
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if let Some(source) = this.sidechat_source_chat(cx) {
@@ -18535,7 +18527,9 @@ impl Shell {
                                             .size(px(13.0))
                                             .text_color(theme.text_muted),
                                     )
-                                    .child(SharedString::from("New sidechat")),
+                                    .child(SharedString::from(
+                                        zeron_proto::sidechat::NEW_SIDECHAT,
+                                    )),
                             )
                         })
                         .when(git_surfaces, |menu| {

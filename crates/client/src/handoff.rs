@@ -1,5 +1,4 @@
 use zeron_doc::MessageRole;
-use zeron_proto::Chat;
 use zeron_proto::handoff::handoff_blocked;
 use zeron_rpc::methods;
 
@@ -64,9 +63,7 @@ impl Client {
             .inner
             .host_rpc(&device_id, methods::CONTINUE_IN_NEW_THREAD, params)
             .await?;
-        let chat: Chat =
-            serde_json::from_value(reply).map_err(|err| ClientError::HostError(err.to_string()))?;
-        Ok(chat.id)
+        self.host_created_chat(reply).await
     }
 }
 

@@ -6350,6 +6350,7 @@ use zeron_proto::command_catalog::{
 use zeron_proto::compaction::{
     RESUME_COMPACTION_TITLE, ResumeCompaction, compact_outcome_notice, resume_compaction_due,
 };
+use zeron_proto::sidechat::{SIDECHAT_TAB_PREFIX, sidechat_tab_label};
 
 /// Remote hosts own their grants, so only a macOS UI on the chat's host checks them.
 fn computer_preflight_applies(
@@ -6376,16 +6377,8 @@ fn zeron_owned_command_range(raw: &str) -> Option<Range<usize>> {
     zeron_owned_command(name).then(|| end - name.len() - 1..end)
 }
 
-const SIDECHAT_TAB_PREFIX: &str = "Sidechats (btw) \u{b7} ";
 const SIDECHAT_COUNT_ROLL: motion::MotionSpec =
     motion::MotionSpec::new(180, motion::EASE_OUT_QUINT);
-
-fn sidechat_tab_label(live: usize) -> String {
-    match live {
-        0 => "New sidechat (btw)".to_string(),
-        count => format!("{SIDECHAT_TAB_PREFIX}{count}"),
-    }
-}
 
 /// The catalog's names live on the engine's harness descriptors, which the
 /// composer never holds; this is the same list, for one sentence of copy.
@@ -19055,12 +19048,6 @@ mod tests {
             settle: None,
             unsettled_at: None,
         }
-    }
-
-    #[test]
-    fn the_tab_counts_the_live_sidechats() {
-        assert_eq!(sidechat_tab_label(0), "New sidechat (btw)");
-        assert_eq!(sidechat_tab_label(2), "Sidechats (btw) \u{b7} 2");
     }
 
     #[gpui::test]
