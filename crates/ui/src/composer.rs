@@ -1048,13 +1048,13 @@ const MENTION_TOOLTIP_HEIGHT: f32 = 24.0;
 // rest of the padding, while preserving the chip's atomic wrapping and
 // source/caret projection.
 const MENTION_SIDE_PAD: &str = "\u{00A0}";
-/// A private URI scheme keeps file mentions distinguishable from ordinary
-/// Markdown links pasted into the composer.
-use zeron_proto::file_mentions::{FILE_MENTION_SCHEME, local_file_link, local_path_is_safe};
 /// A thread mention names another chat by id; the agent reads it through
 /// the `zeron` MCP server's `read_thread`, so the prompt carries the id
 /// verbatim and the label is only the title at insert time.
-const THREAD_MENTION_SCHEME: &str = "zeron-thread:";
+use zeron_proto::chat_mentions::THREAD_MENTION_SCHEME;
+/// A private URI scheme keeps file mentions distinguishable from ordinary
+/// Markdown links pasted into the composer.
+use zeron_proto::file_mentions::{FILE_MENTION_SCHEME, local_file_link, local_path_is_safe};
 const THREAD_ICON_SIZE: f32 = 14.0;
 
 /// The mark painted in a thread chip's icon slot: the thread's current
