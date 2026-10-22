@@ -18,6 +18,14 @@ enum WallpaperStore {
     private static var imageURL: URL { directory.appendingPathComponent("wallpaper.jpg") }
 
     static var isSet: Bool { FileManager.default.fileExists(atPath: imageURL.path) }
+
+    static var behindChats: Bool {
+        get { UserDefaults.standard.bool(forKey: "chatBackground") }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "chatBackground")
+            NotificationCenter.default.post(name: didChange, object: nil)
+        }
+    }
     static var name: String? { UserDefaults.standard.string(forKey: "wallpaperName") }
 
     static var effect: WallpaperEffect {
@@ -199,6 +207,7 @@ final class WallpaperView: UIView {
     var scrollFade: CGFloat = 1 { didSet { applyAlpha() } }
     /// A rect (in this view's coordinates) to soften — the composer.
     var cutout: CGRect? { didSet { if cutout != oldValue { setNeedsLayout() } } }
+    var behindChat = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -227,6 +236,7 @@ final class WallpaperView: UIView {
         let dark = traitCollection.userInterfaceStyle == .dark
         WallpaperStore.render(dark: dark) { [weak self] render in
             guard let self else { return }
+            let render = self.behindChat && !WallpaperStore.behindChats ? nil : render
             let first = self.render == nil
             self.render = render
             self.imageView.image = render?.image

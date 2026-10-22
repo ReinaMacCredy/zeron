@@ -148,6 +148,10 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             app.groupByProject = on
             return
         }
+        if id == "wallpaper:chats" {
+            WallpaperStore.behindChats = on
+            return
+        }
         if id == "math:render" {
             MathSettings.render = on
             return reload()
@@ -209,6 +213,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         var wall = [Row(id: "wallpaper:choose", title: WallpaperStore.isSet ? "Change Wallpaper…" : "Choose Wallpaper…", subtitle: WallpaperStore.isSet ? WallpaperStore.name : "Shown behind new chats and the sessions list", symbol: "photo")]
         if WallpaperStore.isSet {
             let effect = WallpaperStore.effect
+            wall.append(Row(id: "wallpaper:chats", title: "Chat background", subtitle: "Show the artwork behind open conversations.", symbol: "bubble.left.and.text.bubble.right", accessory: .toggle(WallpaperStore.behindChats)))
             wall.append(Row(id: "wallpaper:effect", title: "Effect", subtitle: "\(WallpaperStore.label(effect)) — \(WallpaperStore.detail(effect))", symbol: "wand.and.stars"))
             wall.append(Row(id: "wallpaper:remove", title: "Remove Wallpaper", symbol: "trash", accessory: .none, destructive: true))
         }
