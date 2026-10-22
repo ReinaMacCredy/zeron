@@ -102,6 +102,7 @@ pub struct SessionRow {
     pub parent_chat_id: Option<String>,
     /// On the Settled shelf by its host's `settle_after_days` or a Settle.
     pub settled: bool,
+    pub expired: bool,
     /// Sync room generation (2 = chat2; 1 = legacy, not dialable).
     pub room_gen: u32,
 }
@@ -224,6 +225,7 @@ pub struct WorkspaceSnapshot {
     pub tasks: super::TasksPage,
     pub supervisor: super::SupervisorPage,
     pub needs_you: Vec<super::NeedsYouEntry>,
+    pub today: super::TodayPage,
     /// Every chat row (archived and children included), by id.
     pub sessions: HashMap<String, Arc<SessionRow>>,
     children: HashMap<String, Vec<Arc<SessionRow>>>,
@@ -350,6 +352,8 @@ pub(crate) struct DeriveContext<'a> {
     /// Each host's `settle_after_days`, where fetched.
     pub settle_days: &'a HashMap<String, u32>,
     pub active_first: bool,
+    pub today_runs: &'a HashMap<String, zeron_proto::TodayRuns>,
+    pub accounts: &'a HashMap<String, zeron_proto::AgentAccountsSnapshot>,
     pub previous: Option<&'a WorkspaceSnapshot>,
 }
 
@@ -499,6 +503,7 @@ fn hash_row(row: &SessionRow) -> u64 {
     row.send_state.hash(&mut h);
     row.parent_chat_id.hash(&mut h);
     row.settled.hash(&mut h);
+    row.expired.hash(&mut h);
     row.room_gen.hash(&mut h);
     h.finish()
 }
@@ -595,6 +600,7 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         send_state,
         parent_chat_id: chat.created_by_chat_id.clone(),
         settled: cx.settled_at(chat, indicator).is_some(),
+        expired: chat.sidechat_expired(cx.now),
         room_gen: chat.room_gen.unwrap_or(1),
     };
     row.revision = hash_row(&row);
@@ -855,6 +861,7 @@ pub(crate) fn derive(
     });
 
     let (tasks, supervisor, needs_you) = super::tasks::derive(state, &rows, &devices, cx);
+    let today = super::today::derive(state, &rows, &devices, &needs_you, cx);
     let mut snapshot = WorkspaceSnapshot {
         revision: 0,
         computed_at_ms: now_ms,
@@ -876,6 +883,7 @@ pub(crate) fn derive(
         tasks,
         supervisor,
         needs_you,
+        today,
         sessions: rows,
         children,
         content_hash: 0,
@@ -931,7 +939,7 @@ fn snapshot_hash(s: &WorkspaceSnapshot) -> u64 {
     for device in &s.devices {
         device.hash(&mut h);
     }
-    format!("{:?}{:?}{:?}", s.tasks, s.supervisor, s.needs_you).hash(&mut h);
+    format!("{:?}{:?}{:?}{:?}", s.tasks, s.supervisor, s.needs_you, s.today).hash(&mut h);
     let mut all: Vec<(&String, u64)> = s.sessions.iter().map(|(k, v)| (k, v.revision)).collect();
     all.sort();
     all.hash(&mut h);

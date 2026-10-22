@@ -509,6 +509,7 @@ pub struct SessionRow {
     pub parent_chat_id: Option<String>,
     /// On the Settled shelf (its host's `settle_after_days`, or a Settle).
     pub settled: bool,
+    pub expired: bool,
     /// 2 = chat2; 1 = legacy (not dialable).
     pub room_gen: u32,
 }
@@ -550,6 +551,7 @@ impl From<&zc::SessionRow> for SessionRow {
             send_state: r.send_state.map(Into::into),
             parent_chat_id: r.parent_chat_id.clone(),
             settled: r.settled,
+            expired: r.expired,
             room_gen: r.room_gen,
         }
     }

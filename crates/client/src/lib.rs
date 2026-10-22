@@ -59,8 +59,9 @@ pub use workspace::{
     ApprovalView, Brief, BriefMessage, ContextChat, DeviceView, EstimateLine, FrontGroup, FrontPage,
     HostRef, ItemSend, MissionOptions, MissionStrip, NeedsYouEntry, NeedsYouKind, PlanEstimate,
     ProjectRef, ProjectView, PullRequestGroups, SearchField, SearchHit, SectionView, SessionRow,
-    StepView, SupervisorHost, SupervisorPage, TaskDetail, TaskDraft, TaskRow, TasksPage, WakeEntry,
-    WatchState, WorkspaceSnapshot, project_color_index, relative_time_label,
+    StepView, SupervisorHost, SupervisorPage, TaskDetail, TaskDraft, TaskRow, TasksPage, TodayPage,
+    TodayPart, TodaySlot, TodayTask, TodayUsage, WakeEntry, WatchState, WorkspaceSnapshot,
+    project_color_index, relative_time_label,
 };
 
 /// Re-exported so consumers (the layout engine) name the exact doc types the

@@ -279,13 +279,7 @@ impl Ctx<'_> {
     }
 
     fn task_device(&self, task: &Task) -> Option<String> {
-        mission::linked_chat(&self.state.chats, task)
-            .map(|chat| chat.device_id.clone())
-            .or_else(|| {
-                let space = task.space_id.as_deref()?;
-                let space = self.state.spaces.iter().find(|s| s.id == space)?;
-                Some(space.device_id.clone())
-            })
+        task_device(self.state, task)
     }
 
     fn approval(&self, task: &Task) -> Option<ApprovalState> {
@@ -383,6 +377,16 @@ fn brand(chat: &Chat) -> Option<String> {
         .ok()?
         .as_str()
         .map(str::to_owned)
+}
+
+pub(crate) fn task_device(state: &WorkspaceState, task: &Task) -> Option<String> {
+    mission::linked_chat(&state.chats, task)
+        .map(|chat| chat.device_id.clone())
+        .or_else(|| {
+            let space = task.space_id.as_deref()?;
+            let space = state.spaces.iter().find(|s| s.id == space)?;
+            Some(space.device_id.clone())
+        })
 }
 
 pub(crate) fn derive(

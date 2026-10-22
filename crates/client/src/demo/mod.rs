@@ -806,6 +806,9 @@ impl DemoHost {
             return Err(ClientError::HostUnavailable(device_id.to_owned()));
         }
         tokio::time::sleep(Duration::from_millis(80)).await;
+        if let Some(reply) = fixtures::today_reply(device_id, method, now_ms()) {
+            return Ok(reply);
+        }
         if let Some(reply) = missions::host_call(
             &client,
             &self.supervisor_settings,

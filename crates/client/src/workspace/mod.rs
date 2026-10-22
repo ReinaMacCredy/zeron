@@ -7,6 +7,7 @@
 //! re-derivation (staleness, presence expiry, send grace) never re-decodes.
 
 mod tasks;
+mod today;
 mod view;
 
 use std::collections::{BTreeMap, HashMap};
@@ -15,7 +16,9 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use zeron_doc::{RegistryDoc, WorkspaceState};
 use zeron_proto::supervisor::SupervisorSnapshot;
-use zeron_proto::{CheckoutChangeRequestStatus, SidebarPreferences, TaskStep};
+use zeron_proto::{
+    AgentAccountsSnapshot, CheckoutChangeRequestStatus, SidebarPreferences, TaskStep, TodayRuns,
+};
 
 pub use tasks::{
     ApprovalView, Brief, BriefMessage, ContextChat, EstimateLine, HostRef, ItemSend,
@@ -27,6 +30,7 @@ pub(crate) use tasks::{
     Ask, brief as task_brief, detail as task_detail, plan_estimate, strip as mission_strip,
     watch as watch_state,
 };
+pub use today::{TodayPage, TodayPart, TodaySlot, TodayTask, TodayUsage};
 pub(crate) use view::{DeriveContext, device_online};
 pub use view::{
     DeviceView, FrontGroup, FrontPage, PROJECT_COLOR_COUNT, ProjectRef, ProjectView, PullRequestGroups,
@@ -51,6 +55,8 @@ pub(crate) struct WorkspaceStore {
     item_sends: Mutex<HashMap<String, ItemSend>>,
     settle_days: Mutex<HashMap<String, u32>>,
     active_first: AtomicBool,
+    today_runs: Mutex<HashMap<String, TodayRuns>>,
+    accounts: Mutex<HashMap<String, AgentAccountsSnapshot>>,
     cache: Mutex<Option<StateCache>>,
     snapshot: RwLock<Arc<WorkspaceSnapshot>>,
     recompute: Mutex<()>,
@@ -67,6 +73,8 @@ impl WorkspaceStore {
             item_sends: Mutex::new(HashMap::new()),
             settle_days: Mutex::new(HashMap::new()),
             active_first: AtomicBool::new(false),
+            today_runs: Mutex::new(HashMap::new()),
+            accounts: Mutex::new(HashMap::new()),
             cache: Mutex::new(None),
             snapshot: RwLock::new(Arc::new(WorkspaceSnapshot::default())),
             recompute: Mutex::new(()),
@@ -195,6 +203,20 @@ impl WorkspaceStore {
         lock(&self.settle_days).insert(device_id.to_owned(), days);
     }
 
+    pub(crate) fn put_today(
+        &self,
+        device_id: &str,
+        runs: Option<TodayRuns>,
+        accounts: Option<AgentAccountsSnapshot>,
+    ) {
+        if let Some(runs) = runs {
+            lock(&self.today_runs).insert(device_id.to_owned(), runs);
+        }
+        if let Some(accounts) = accounts {
+            lock(&self.accounts).insert(device_id.to_owned(), accounts);
+        }
+    }
+
     pub(crate) fn set_active_first(&self, on: bool) {
         self.active_first.store(on, Ordering::Release);
     }
@@ -234,6 +256,8 @@ impl WorkspaceStore {
         let supervisors = self.supervisors();
         let item_sends = lock(&self.item_sends).clone();
         let settle_days = lock(&self.settle_days).clone();
+        let today_runs = lock(&self.today_runs).clone();
+        let accounts = lock(&self.accounts).clone();
         let previous = self.snapshot();
         let mut next = view::derive(
             &state,
@@ -251,6 +275,8 @@ impl WorkspaceStore {
                 synced,
                 settle_days: &settle_days,
                 active_first: self.active_first.load(Ordering::Acquire),
+                today_runs: &today_runs,
+                accounts: &accounts,
                 previous: Some(&previous),
             },
         );

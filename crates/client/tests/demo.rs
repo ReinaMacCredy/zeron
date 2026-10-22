@@ -82,11 +82,14 @@ fn front_page_mirrors_the_desktop_sidebar() {
             "chat-acp",
             "chat-deploy",
             "chat-computer",
+            "chat-btw",
             "chat-old-mini"
         ]
     );
     assert_eq!(ids(&ws.archived), ["chat-oklch", "chat-presence"]);
     assert_eq!(ids(ws.children("chat-veil")), ["chat-side"]);
+    let expired = |id: &str| ws.session(id).unwrap().expired;
+    assert!(expired("chat-btw") && !expired("chat-side"));
 
     let veil = ws.session("chat-veil").unwrap();
     assert_eq!(veil.indicator, ChatIndicator::Working);
@@ -997,4 +1000,39 @@ fn plan_estimate_prices_children_against_the_lead() {
             .is_some_and(|r| r.contains("3x → 3.2x"))
     );
     assert!(estimate.baseline.starts_with("vs 6.0x"));
+}
+
+#[test]
+fn today_card_merges_both_macs_runs_tasks_and_tightest_usage() {
+    let (client, _dir) = demo(fast());
+    let before = client.workspace().today.clone();
+    assert!(!before.runs_loaded);
+    assert!(before.usage.is_none());
+    zeron_client::runtime::shared().block_on(client.refresh_today());
+    let today = client.workspace().today.clone();
+    assert!(today.runs_loaded);
+    assert!(today.prompts > 7, "runs from both Macs: {}", today.prompts);
+    assert!(!today.greeting.is_empty());
+    assert!(today.summary.ends_with("to do."), "{}", today.summary);
+
+    let usage = today.usage.expect("tightest window");
+    assert_eq!(
+        (usage.harness.as_str(), usage.window.as_str(), usage.host.device_id.as_str()),
+        ("claude-code", "5h", "dev-mac")
+    );
+    assert_eq!(usage.resets_in.as_deref(), Some("2h 5m"));
+
+    let task = |id: &str| today.tasks.iter().find(|t| t.id == id).cloned();
+    let signin = task("task-signin-fix").expect("linked task");
+    let picker = client.workspace().session("chat-picker").unwrap().title.clone();
+    assert_eq!(signin.meta, Some(format!("In {picker}")));
+    assert_eq!(signin.host.map(|h| h.device_id), Some("dev-mac".into()));
+    let done = task("task-notes-115").expect("done today");
+    assert!(done.done && done.meta.is_none());
+    let docs = task("task-relay-docs").expect("due yesterday");
+    assert_eq!(docs.meta.as_deref(), Some(if docs.overdue { "Overdue" } else { "Today" }));
+    assert_eq!(
+        today.open_tasks as usize,
+        today.tasks.iter().filter(|t| !t.done).count()
+    );
 }

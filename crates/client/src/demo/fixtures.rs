@@ -35,6 +35,7 @@ pub(crate) struct DemoChat {
     pub seen: bool,
     pub archived: bool,
     pub parent: Option<&'static str>,
+    pub side_of: Option<&'static str>,
     /// (settled, how long ago) of a Settle / Unsettle.
     pub settle: Option<(bool, i64)>,
 }
@@ -67,6 +68,7 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         seen: true,
         archived: false,
         parent: None,
+        side_of: None,
         settle: None,
     };
     vec![
@@ -259,6 +261,18 @@ pub(crate) fn chats() -> Vec<DemoChat> {
                 MAC,
                 "Side chat: veil timing",
                 "α = 0.2 over inter-append gaps",
+            )
+        },
+        DemoChat {
+            side_of: Some("chat-blog"),
+            last_ago_ms: 26 * HOUR,
+            created_ago_ms: 30 * HOUR,
+            ..chat(
+                "chat-btw",
+                Some("space-zeron"),
+                MAC,
+                "btw: launch post tone",
+                "Keep it plain; no superlatives.",
             )
         },
         DemoChat {
@@ -783,7 +797,7 @@ pub(crate) fn seed(
             space_id: demo.space.map(str::to_owned),
             last_seen_at: Some(ms(if demo.seen { last } else { last - MIN })),
             room_gen: Some(2),
-            sidechat_source_chat_id: None,
+            sidechat_source_chat_id: demo.side_of.map(str::to_owned),
             created_by_chat_id: demo.parent.map(str::to_owned),
             forked_from_chat_id: None,
             previous_harnesses: Vec::new(),
@@ -874,3 +888,82 @@ pub(crate) fn seed(
         missions: true,
     })
 }
+
+pub(crate) fn today_reply(device_id: &str, method: &str, now_ms: i64) -> Option<serde_json::Value> {
+    use serde_json::json;
+    use zeron_rpc::methods as m;
+    let min = 60_000;
+    match method {
+        m::GET_TODAY_RUNS => {
+            let runs: &[(&str, i64, Option<i64>)] = match device_id {
+                MAC => &[
+                    ("chat-lead-shelf", 5, None),
+                    ("chat-visuals", 25, Some(9)),
+                    ("chat-lead-shelf", 40, Some(14)),
+                    ("chat-blog", 70, Some(6)),
+                    ("chat-visuals", 95, Some(18)),
+                    ("chat-deploy", 130, Some(11)),
+                    ("chat-blog", 180, Some(7)),
+                ],
+                MINI => &[
+                    ("chat-old-mini", 12, Some(8)),
+                    ("chat-old-mini", 55, Some(21)),
+                    ("chat-approve-push", 150, Some(5)),
+                ],
+                _ => &[],
+            };
+            let since = chrono::DateTime::from_timestamp_millis(now_ms).map_or(0, |now| {
+                zeron_proto::today::work_day_start(now.with_timezone(&chrono::Local))
+                    .timestamp_millis()
+            });
+            // Early in the work day the offsets shrink so every run stays today.
+            let (elapsed, span) = ((now_ms - since).max(0), 181 * min);
+            Some(json!({
+                "runs": runs
+                    .iter()
+                    .map(|(chat, ago, minutes)| json!({
+                        "chatId": chat,
+                        "startedAtMs": now_ms - ago * min * elapsed.min(span) / span,
+                        "durationMs": minutes.map(|m| m * min),
+                        "status": if minutes.is_some() { "complete" } else { "running" },
+                    }))
+                    .collect::<Vec<_>>(),
+                "waits": [],
+            }))
+        }
+        m::LIST_AGENT_ACCOUNTS => {
+            let at = |ms: i64| chrono::DateTime::from_timestamp_millis(now_ms + ms);
+            let (harness, windows) = match device_id {
+                MAC => (
+                    "claude-code",
+                    json!([
+                        { "label": "5h", "usedFraction": 0.38, "resetsAt": at(125 * min) },
+                        { "label": "Week", "usedFraction": 0.21, "resetsAt": at(3 * 24 * 60 * min) },
+                    ]),
+                ),
+                MINI => (
+                    "codex",
+                    json!([
+                        { "label": "5h", "usedFraction": 0.12, "resetsAt": at(200 * min) },
+                        { "label": "Week", "usedFraction": 0.30, "resetsAt": at(5 * 24 * 60 * min) },
+                    ]),
+                ),
+                _ => return None,
+            };
+            Some(json!({
+                "accounts": [{
+                    "id": format!("{device_id}-{harness}"),
+                    "harness": harness,
+                    "email": null,
+                    "planLabel": "Max",
+                    "active": true,
+                    "switchable": true,
+                    "usageWindows": windows,
+                }],
+                "warnings": [],
+            }))
+        }
+        _ => None,
+    }
+}
+

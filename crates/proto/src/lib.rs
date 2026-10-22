@@ -24,6 +24,7 @@ pub mod route_preview;
 pub mod sidebar_pins;
 pub mod source_control;
 pub mod supervisor;
+pub mod today;
 pub mod tools;
 pub mod ui_driver;
 pub mod usage;
