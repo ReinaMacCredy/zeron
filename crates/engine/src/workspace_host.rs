@@ -1375,6 +1375,10 @@ impl WorkspaceHost {
         self.read(|doc| doc.task_steps_of(task_id))
     }
 
+    pub fn step_started(&self, step: &TaskStep) -> bool {
+        self.read(|doc| doc.step_started(step))
+    }
+
     pub(crate) fn mission_thread(&self, chat_id: &str) -> bool {
         self.inner.tasks_tx.borrow().iter().any(|task| {
             task.has_plan() && !task.deleted && task.chat_id.as_deref() == Some(chat_id)

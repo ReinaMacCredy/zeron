@@ -39,14 +39,23 @@ pub(super) enum Key {
 pub(super) type Rects = HashMap<Key, Bounds<Pixels>>;
 pub(super) type Painted = Rc<RefCell<Rects>>;
 
-/// Taffy lays an absolute child out inside the parent's border, so the insets pin it to the border box.
+/// Layout reads these sizes on the next render, so a new size must schedule one.
 pub(super) fn measure(painted: &Painted, key: Key, border: Edges<f32>) -> impl IntoElement {
+    probe(painted, key, border, true)
+}
+
+/// The Tasks page empties its map every render, so scheduling there would redraw forever.
+pub(super) fn record(painted: &Painted, key: Key, border: Edges<f32>) -> impl IntoElement {
+    probe(painted, key, border, false)
+}
+
+/// Taffy lays an absolute child out inside the parent's border, so the insets pin it to the border box.
+fn probe(painted: &Painted, key: Key, border: Edges<f32>, relayout: bool) -> impl IntoElement {
     let painted = painted.clone();
     gpui::canvas(
         move |bounds, window, _| {
             let previous = painted.borrow_mut().insert(key, bounds);
-            // Layout reads these sizes on the next render, so a new size must schedule one.
-            if previous.is_none_or(|previous| previous.size != bounds.size) {
+            if relayout && previous.is_none_or(|previous| previous.size != bounds.size) {
                 window.request_animation_frame();
             }
         },

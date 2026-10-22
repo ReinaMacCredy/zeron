@@ -4,6 +4,7 @@ use chrono::{TimeZone, Utc};
 use gpui::{
     AnyElement, App, Context, ElementId, Hsla, Render, SharedString, Window, div, prelude::*, px,
 };
+pub(crate) use zeron_engine::routing::target_of;
 use zeron_proto::{Chat, ChildRoute, RouteTarget};
 
 use crate::theme::Theme;
@@ -56,14 +57,6 @@ impl RouteInfo {
                 .map(target_of),
             native: false,
         }
-    }
-}
-
-pub(crate) fn target_of(config: &zeron_proto::ChatConfig) -> RouteTarget {
-    RouteTarget {
-        harness: config.harness,
-        model: config.model.clone(),
-        reasoning: config.reasoning,
     }
 }
 

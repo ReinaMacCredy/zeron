@@ -440,6 +440,10 @@ mod tests {
         assert!(!second.truncated);
     }
 
+    #[cfg_attr(
+        windows,
+        ignore = "audit_file::identity is a path hash on Windows (stable std has no file index), so a rotated or replaced file keeps its identity"
+    )]
     #[test]
     fn reads_known_rotations_and_preserves_distinct_identical_records() {
         let (_dir, path) = fixture();
@@ -469,6 +473,10 @@ mod tests {
         );
     }
 
+    #[cfg_attr(
+        windows,
+        ignore = "audit_file::identity is a path hash on Windows (stable std has no file index), so a rotated or replaced file keeps its identity"
+    )]
     #[test]
     fn does_not_guess_an_ambiguous_duplicate_cursor_after_compaction() {
         let (_dir, path) = fixture();

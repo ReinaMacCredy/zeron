@@ -69,9 +69,12 @@ impl Harness for RecordingHarness {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(8);
         let steers = self.steers.clone();
         let confirm = tx.clone();
+        let ended = Arc::new(tokio::sync::Mutex::new(false));
+        let steer_ended = ended.clone();
         tokio::spawn(async move {
             while let Some(message) = controls.steering.recv().await {
                 steers.lock().unwrap().push(message.prompt);
+                let ended = steer_ended.lock().await;
                 // A real harness confirms the fold; without it the engine
                 // treats the steer as lost and re-runs it at turn end.
                 let _ = confirm
@@ -80,6 +83,17 @@ impl Harness for RecordingHarness {
                         next_assistant_message_id: Some("a-rec-2".into()),
                     }))
                     .await;
+                // A steer that lands after Done opens a new turn, which a real harness ends with its own Done.
+                if *ended {
+                    let _ = confirm
+                        .send(Ok(AgentEvent::Done {
+                            status: DoneStatus::Completed,
+                            result: None,
+                            error: None,
+                            session_id: Some("hs-rec".into()),
+                        }))
+                        .await;
+                }
             }
         });
         let delay = self.step_delay;
@@ -142,9 +156,12 @@ impl Harness for RecordingHarness {
                         return;
                     }
                 }
+                let mut ended = ended.lock().await;
+                let done = matches!(event, AgentEvent::Done { .. });
                 if tx.send(Ok(event)).await.is_err() {
                     return;
                 }
+                *ended = done;
             }
         });
         Ok(futures::stream::unfold(rx, |mut rx| async move {
@@ -1318,8 +1335,7 @@ async fn an_exhausted_route_follows_the_out_of_quota_policy() {
     rig.core.shutdown().await;
 }
 
-#[tokio::test]
-async fn a_child_that_hits_its_limit_mid_run_switches_to_its_owner() {
+fn codex_rig_that_limits() -> Rig {
     use zeron_engine::routing::{Role, RoleRoute};
     let rig = routed_rig();
     rig.core.registry.register(Arc::new(RecordingHarness {
@@ -1359,6 +1375,20 @@ async fn a_child_that_hits_its_limit_mid_run_switches_to_its_owner() {
         }),
     );
     rig.core.registry.set_routing_settings(routing).unwrap();
+    rig
+}
+
+fn limit_offer(rig: &Rig, chat_id: &str) -> Option<zeron_proto::LimitOffer> {
+    rig.core
+        .resume_schedule
+        .snapshot()
+        .chats
+        .into_iter()
+        .find(|chat| chat.chat_id == chat_id)
+        .and_then(|chat| chat.offer)
+}
+
+async fn limited_child(rig: &Rig) -> String {
     let client = zeron_rpc::memory_client(rig.core.rpc_service());
     let view = client
         .call(
@@ -1368,17 +1398,16 @@ async fn a_child_that_hits_its_limit_mid_run_switches_to_its_owner() {
         .await
         .unwrap();
     let child = view["taskId"].as_str().unwrap().to_string();
-    let offer = || {
-        rig.core
-            .resume_schedule
-            .snapshot()
-            .chats
-            .into_iter()
-            .find(|chat| chat.chat_id == child)
-            .and_then(|chat| chat.offer)
-    };
-    wait_for(|| offer().is_some(), "the mid-run offer").await;
-    let offer = offer().unwrap();
+    wait_for(|| limit_offer(rig, &child).is_some(), "the mid-run offer").await;
+    child
+}
+
+#[tokio::test]
+async fn a_child_that_hits_its_limit_mid_run_switches_to_its_owner() {
+    let rig = codex_rig_that_limits();
+    let client = zeron_rpc::memory_client(rig.core.rpc_service());
+    let child = limited_child(&rig).await;
+    let offer = limit_offer(&rig, &child).unwrap();
     assert_eq!(offer.preselect, zeron_proto::OfferChoice::Switch);
     assert_eq!(
         offer.to.as_ref().map(|to| to.harness),
@@ -1427,6 +1456,81 @@ async fn a_child_that_hits_its_limit_mid_run_switches_to_its_owner() {
         "the resumed turn",
     )
     .await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_cancelled_child_drops_its_pending_limit() {
+    let rig = codex_rig_that_limits();
+    let child = limited_child(&rig).await;
+    rig.core
+        .doc_host
+        .task_cancel("lead", &child)
+        .await
+        .expect("cancel");
+    assert_eq!(
+        delegation(&rig.core, &child).status,
+        zeron_proto::DelegationStatus::Cancelled
+    );
+    assert!(
+        rig.core
+            .resume_schedule
+            .snapshot()
+            .chats
+            .iter()
+            .all(|chat| chat.chat_id != child),
+        "no switch or resume is left for a cancelled child"
+    );
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_step_thread_is_not_settled_while_its_limit_offer_waits() {
+    let rig = codex_rig_that_limits();
+    let rpc = rig.core.rpc_service();
+    let call = |method: &'static str, params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move {
+            match zeron_rpc::RpcService::handle(&*rpc, method, params).await {
+                Ok(zeron_rpc::RpcReply::Value(value)) => value,
+                Ok(_) => panic!("a value"),
+                Err(err) => panic!("{method}: {err}"),
+            }
+        }
+    };
+    let mutate = |params| call(zeron_rpc::methods::MUTATE, params);
+    mutate(serde_json::json!({ "op": "createTask", "taskId": "t1", "title": "Ship it" })).await;
+    mutate(serde_json::json!({
+        "op": "startTask", "taskId": "t1", "chatId": "lead-1", "spaceId": "space-tt",
+        "orchestrate": true,
+    }))
+    .await;
+    mutate(serde_json::json!({
+        "op": "planSteps", "taskId": "t1", "fromChatId": "lead-1",
+        "steps": [{ "title": "Build it", "role": "worker" }],
+    }))
+    .await;
+    mutate(serde_json::json!({ "op": "approvePlan", "taskId": "t1" })).await;
+    let step = rig.core.workspace.task_steps_of("t1").remove(0);
+    let thread = call(
+        zeron_rpc::methods::CREATE_THREAD,
+        serde_json::json!({ "fromChatId": "lead-1", "prompt": "LIMIT ME: build it", "taskStepId": step.id }),
+    )
+    .await["chatId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    wait_for(
+        || limit_offer(&rig, &thread).is_some(),
+        "the step thread's offer",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        rig.core.workspace.task_step(&step.id).unwrap().turn,
+        None,
+        "the lead is not told the step failed while its offer waits"
+    );
     rig.core.shutdown().await;
 }
 

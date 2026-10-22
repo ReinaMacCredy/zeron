@@ -148,11 +148,12 @@ fn carry_roles(before: &[TaskStep], steps: &mut [TaskStep]) {
     }
 }
 
-fn carry_images(before: &[TaskStep], steps: &mut [TaskStep]) -> (Vec<String>, Vec<String>) {
-    let replaced: Vec<&TaskStep> = before
-        .iter()
-        .filter(|step| step.chat_id.is_none() && step.outcome.is_none())
-        .collect();
+fn carry_images(
+    before: &[TaskStep],
+    started: impl Fn(&TaskStep) -> bool,
+    steps: &mut [TaskStep],
+) -> (Vec<String>, Vec<String>) {
+    let replaced: Vec<&TaskStep> = before.iter().filter(|step| !started(step)).collect();
     let mut moved = Vec::new();
     let mut orphans = Vec::new();
     for old in replaced.iter().filter(|step| !step.images.is_empty()) {
@@ -416,6 +417,15 @@ impl EngineRpc {
         else {
             return Ok(());
         };
+        if !task.is_open_plan_of(chat_id)
+            && self
+                .workspace
+                .chat(chat_id)
+                .map_err(failed)?
+                .is_some_and(|chat| chat.sidechat_source_chat_id.is_some())
+        {
+            return Err(refused("A side chat cannot lead a mission"));
+        }
         let tasks = self.workspace.read_tasks().map_err(failed)?;
         if tasks
             .iter()
@@ -512,15 +522,24 @@ impl EngineRpc {
         if task.context.is_empty() || !self.sessions.reads_threads(config) {
             return None;
         }
+        let device = self.doc_host.device_id();
         let chats: Vec<ContextChat> = task
             .context
             .iter()
             .filter_map(|id| self.workspace.chat(id).ok().flatten())
+            .filter(|chat| chat.device_id == device)
             .map(|chat| ContextChat {
                 title: chat
                     .title
                     .as_deref()
-                    .map(|title| title.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .map(|title| {
+                        let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+                        title
+                            .replace('"', "'")
+                            .chars()
+                            .take(120)
+                            .collect::<String>()
+                    })
                     .filter(|title| !title.is_empty())
                     .unwrap_or_else(|| "Untitled chat".into()),
                 project: chat
@@ -667,14 +686,29 @@ impl EngineRpc {
             },
         )?;
         if send {
-            self.send_to_task_thread(
-                &task,
-                chat_id,
-                from_chat_id,
-                &first_turn(&task, lead, reads.as_deref()),
-                task.images.clone(),
-            )
-            .await?;
+            let sent = self
+                .send_to_task_thread(
+                    &task,
+                    chat_id,
+                    from_chat_id,
+                    &first_turn(&task, lead, reads.as_deref()),
+                    task.images.clone(),
+                )
+                .await;
+            if sent.is_err() && lead.is_some() {
+                let restore = TaskPatch {
+                    chat_id: Some(task.chat_id.clone()),
+                    space_id: task.space_id.is_none().then_some(None),
+                    completed: task.completed_at.is_some().then_some(true),
+                    mode: Some(task.mode),
+                    plan_pending: Some(task.plan_pending),
+                    plan_doc: Some(task.plan_doc),
+                    same_agents: Some(task.same_agents),
+                    ..Default::default()
+                };
+                self.workspace.update_task(task_id, &restore).ok();
+            }
+            sent?;
         }
         Ok(())
     }
@@ -806,7 +840,11 @@ impl EngineRpc {
             })
             .collect();
         carry_roles(&before, &mut steps);
-        let (mut moved, orphans) = carry_images(&before, &mut steps);
+        let (moved, orphans) = carry_images(
+            &before,
+            |step| self.workspace.step_started(step),
+            &mut steps,
+        );
         let mut images = task.images.clone();
         let mut left_out = Vec::new();
         for image in orphans {
@@ -820,11 +858,11 @@ impl EngineRpc {
             }
         }
         if !left_out.is_empty() {
-            moved.push(format!(
-                "The overview holds {} images, so these were left out; tell the person: {}",
+            return Err(refused(&format!(
+                "This plan replaces steps whose images do not fit on the overview, which holds {}: {} would be lost. Keep those steps' titles so their images stay with them, or ask the person which images to drop.",
                 zeron_doc::TASK_IMAGES_MAX,
-                left_out.join(", ")
-            ));
+                left_out.len()
+            )));
         }
         let patch = TaskPatch {
             mode,
@@ -888,14 +926,19 @@ impl EngineRpc {
     pub(super) async fn approve_plan(&self, task_id: &str) -> Result<String, RpcError> {
         let (task, lead) = self.plan_awaiting_approval(task_id)?;
         self.set_plan_pending(task_id, false)?;
-        self.send_to_task_thread(
-            &task,
-            &lead,
-            None,
-            "The plan is approved. Run it.",
-            Vec::new(),
-        )
-        .await
+        let sent = self
+            .send_to_task_thread(
+                &task,
+                &lead,
+                None,
+                "The plan is approved. Run it.",
+                Vec::new(),
+            )
+            .await;
+        if sent.is_err() {
+            self.set_plan_pending(task_id, true).ok();
+        }
+        sent
     }
 
     /// Returns the plan to review while no step has started; the lead hears of it only if the approval reached it.
@@ -911,7 +954,7 @@ impl EngineRpc {
             return Err(refused("This approval is already taken back"));
         }
         for step in self.workspace.task_steps_of(task_id) {
-            if !self.unstarted(&step)? {
+            if !self.unstarted(&step) {
                 return Err(refused(
                     "A step already started, so the approval stays. Edit the plan in Mission Control or message the lead to change course.",
                 ));
@@ -954,14 +997,8 @@ impl EngineRpc {
             .map(drop)
     }
 
-    fn unstarted(&self, step: &TaskStep) -> Result<bool, RpcError> {
-        if step.outcome.is_some() {
-            return Ok(false);
-        }
-        match step.chat_id.as_deref() {
-            Some(chat_id) => Ok(self.workspace.chat(chat_id).map_err(failed)?.is_none()),
-            None => Ok(true),
-        }
+    fn unstarted(&self, step: &TaskStep) -> bool {
+        !self.workspace.step_started(step)
     }
 
     /// Every edit is checked before the first write, so a refusal applies nothing.
@@ -1000,7 +1037,7 @@ impl EngineRpc {
         let mut removed = Vec::new();
         for id in remove_step_ids {
             let step = find(id)?;
-            if !self.unstarted(step)? {
+            if !self.unstarted(step) {
                 return Err(refused(&format!(
                     "Step \"{}\" has started, so it cannot be removed; skip it instead",
                     step.title
@@ -1048,7 +1085,7 @@ impl EngineRpc {
                 .iter()
                 .filter(|step| !remove_step_ids.contains(&step.id))
             {
-                remaining.push((step, !self.unstarted(step)?));
+                remaining.push((step, !self.unstarted(step)));
             }
             moves = reorder_keys(&remaining, order, crate::new_id).map_err(refused)?;
         }
@@ -1120,8 +1157,7 @@ impl EngineRpc {
                 let images = edit.images.unwrap_or_default();
                 let with = match images.len() {
                     0 => String::new(),
-                    1 => " with 1 image".to_string(),
-                    n => format!(" with {n} images"),
+                    n => format!(" with {}", count_images(n)),
                 };
                 let role = edit.role.as_deref().and_then(canonical_role).or_else(|| {
                     let mut namesakes = removed
@@ -1154,7 +1190,7 @@ impl EngineRpc {
             };
             let step = find(&id)?;
             let images = edit.images.filter(|images| *images != step.images);
-            let started = !self.unstarted(step)?;
+            let started = !self.unstarted(step);
             let image_note = images.as_deref().and_then(|images| {
                 let what = image_change(&step.images, images)?;
                 Some(

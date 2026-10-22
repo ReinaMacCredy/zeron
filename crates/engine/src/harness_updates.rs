@@ -3075,7 +3075,7 @@ esac
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
             let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
             let server = tokio::spawn(async move {
-                let (mut socket, _) = listener.accept().await.unwrap();
+                let (mut socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
                 let mut request = Vec::new();
                 while !request.ends_with(b"\r\n\r\n") {
                     request.push(socket.read_u8().await.unwrap());

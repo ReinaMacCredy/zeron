@@ -2809,6 +2809,7 @@ pub struct Shell {
     /// under a still pointer would otherwise never show its archive pill;
     /// while set, rows adopt the hover from a paint-time hit test instead.
     chat_hover_resync: bool,
+    sidebar_row_order: Vec<String>,
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
     sidebar_row_tops:
@@ -3520,6 +3521,7 @@ impl Shell {
             sidebar_hover_card: None,
             sidebar_hover_card_closed: None,
             chat_hover_resync: false,
+            sidebar_row_order: Vec::new(),
             sidebar_scroll: gpui::ScrollHandle::new(),
             sidebar_row_tops: Default::default(),
             sidebar_windowing: false,
@@ -9372,6 +9374,10 @@ impl Shell {
             self.chat_status_hover = None;
         }
         motion::set_hover(&format!("{row_id}-hover"), hovered, self.reduced_motion);
+        if self.sidebar_hover_card.is_some() && self.sidebar_hover_card != self.chat_status_hover {
+            self.sidebar_hover_card = None;
+            self.sidebar_hover_card_closed = Some(std::time::Instant::now());
+        }
         cx.notify();
     }
 
@@ -11985,7 +11991,11 @@ impl Shell {
                 .child(corner_body)
                 .into_any_element()
         };
-        let secondary = split_side.is_some() && !selected && self.split.is_some();
+        let secondary = !selected
+            && (split_side.is_some() && self.split.is_some()
+                || lead
+                    .as_ref()
+                    .is_some_and(|fold| !fold.open && fold.holds_selected));
         let (hover, text) = (theme.glass_hover(), theme.text);
         let selected_wash = crate::theme::glass_selected_bg();
         let subline = if search_query.is_some() {
@@ -12420,7 +12430,9 @@ impl Shell {
             .role(gpui::Role::Button)
             .aria_label(label)
             .aria_expanded(fold.open)
+            .tab_index(0)
             .opacity(if hovered || !fold.open { 1.0 } else { 0.0 })
+            .focus_visible(|style| style.opacity(1.0).border_1().border_color(theme.accent))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
@@ -12526,7 +12538,11 @@ impl Shell {
                 .and_then(|fold| lead_rollup_label(fold, theme))
         };
         let unsent = crate::draft_store::has_content(&id, cx) && !selected;
-        let secondary = split_side.is_some() && !selected && self.split.is_some();
+        let secondary = !selected
+            && (split_side.is_some() && self.split.is_some()
+                || lead
+                    .as_ref()
+                    .is_some_and(|fold| !fold.open && fold.holds_selected));
         let bg = if selected {
             crate::theme::glass_selected_bg()
         } else if secondary {

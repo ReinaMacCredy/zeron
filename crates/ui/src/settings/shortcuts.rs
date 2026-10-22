@@ -1695,6 +1695,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[gpui::test]
     fn appshots_setup_can_be_enabled_and_configured_by_keyboard(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
@@ -2069,19 +2070,21 @@ mod tests {
             page
         });
         cx.run_until_parked();
+        let macos = cfg!(target_os = "macos");
+        let mut expected = vec![
+            PermissionPane::ScreenRecording,
+            PermissionPane::Accessibility,
+        ];
+        if macos {
+            expected.insert(0, PermissionPane::InputMonitoring);
+        }
         page.update(cx, |page, _| {
-            assert_eq!(
-                page.permissions.guide.rendered,
-                vec![
-                    PermissionPane::InputMonitoring,
-                    PermissionPane::ScreenRecording,
-                    PermissionPane::Accessibility,
-                ]
-            );
+            assert_eq!(page.permissions.guide.rendered, expected);
         });
-        assert!(
+        assert_eq!(
             cx.debug_bounds("appshot-permission-row-input-monitoring")
-                .is_some()
+                .is_some(),
+            macos
         );
     }
 }

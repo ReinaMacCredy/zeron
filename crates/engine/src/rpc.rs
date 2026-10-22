@@ -1480,11 +1480,7 @@ impl EngineRpc {
         };
         let base = match (p.base, owner) {
             (Some(base), _) => base,
-            (None, Some(config)) => zeron_proto::RouteTarget {
-                harness: config.harness,
-                model: config.model,
-                reasoning: config.reasoning,
-            },
+            (None, Some(config)) => crate::routing::target_of(&config),
             (None, None) => self.default_route_base().await,
         };
         let offered: Vec<HarnessId> = self.registry.offered().iter().map(|d| d.id).collect();
@@ -3382,10 +3378,11 @@ impl RpcService for EngineRpc {
                 if p.choice == crate::resume_schedule::OfferResolution::Switch
                     && let Some(to) = offer.as_ref().and_then(|offer| offer.to.as_ref())
                 {
-                    self.doc_host
-                        .act_on_offer(&p.chat_id, to)
-                        .await
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    let switched = self.doc_host.act_on_offer(&p.chat_id, to).await;
+                    if let Some(schedule) = self.sessions.resume_schedule() {
+                        schedule.acted(&p.chat_id, switched.is_err());
+                    }
+                    switched.map_err(|e| RpcError::Failed(e.to_string()))?;
                 }
                 RpcReply::value(&serde_json::json!({ "changed": offer.is_some() }))
             }
@@ -3755,9 +3752,13 @@ impl RpcService for EngineRpc {
                     )));
                 }
                 self.supervisor_gate(Some(&p.owner_chat_id), |s| s.start_missions, supervisor::START_OFF)?;
-                let p = match self.route_delegation(p)? {
-                    Ok(p) => p,
-                    Err(native) => return Ok(RpcReply::Value(native)),
+                let p = if self.doc_host.delegated_before(&p) {
+                    p
+                } else {
+                    match self.route_delegation(p)? {
+                        Ok(p) => p,
+                        Err(native) => return Ok(RpcReply::Value(native)),
+                    }
                 };
                 let view = self
                     .doc_host
@@ -7114,7 +7115,7 @@ mod tests {
             format!("http://{}/archive.zip", listener.local_addr().unwrap()).into_boxed_str(),
         );
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
             let mut headers = Vec::new();
             let mut buf = [0; 4096];
             while !headers.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
@@ -7411,7 +7412,7 @@ mod tests {
     #[tokio::test]
     async fn get_working_tree_reads_space_checkouts_only_and_survives_the_wire() {
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
         let repo = root.join("repo");
         let linked = root.join("linked");
         let outside = root.join("outside");
@@ -7939,6 +7940,7 @@ mod tests {
             std::fs::create_dir(path).unwrap();
         }
         git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "core.autocrlf", "false"]);
         std::fs::write(repo.join("a.txt"), "a\n").unwrap();
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-m", "first"]);
@@ -8460,7 +8462,7 @@ mod tests {
     #[tokio::test]
     async fn sync_branch_checks_the_head_and_the_busy_policy_and_replies_through_the_wire() {
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
         let git = |cwd: &std::path::Path, args: &[&str]| git(cwd, args).trim().to_owned();
         let remote = root.join("remote.git");
         let repo = root.join("repo");
@@ -8619,6 +8621,7 @@ mod tests {
         }
         for args in [
             &["init", "-q", "-b", "main"][..],
+            &["config", "core.autocrlf", "false"],
             &["config", "user.name", "Test"],
             &["config", "user.email", "test@example.com"],
             &["config", "commit.gpgsign", "false"],

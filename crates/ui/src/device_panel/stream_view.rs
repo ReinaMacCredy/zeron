@@ -2154,6 +2154,21 @@ mod tests {
             )
         });
         cx.run_until_parked();
+        if !cfg!(target_os = "macos") {
+            // MJPEG re-decodes the shown frame for the new rotation; restore a portrait frame like H.264 keeps.
+            wait(cx, |cx| {
+                view.read_with(cx, |view, _| {
+                    view.image.as_ref().map(|frame| frame.rotation)
+                        == Some(DeviceOrientation::LandscapeLeft)
+                })
+            });
+            view.update(cx, |view, cx| {
+                let item = json!({ "seq": 2, "jpeg": jpeg() });
+                *view.slot.lock().unwrap() = decode(item, DeviceOrientation::Portrait);
+                view.take_frame(cx);
+            });
+            cx.run_until_parked();
+        }
         let tap = |cx: &mut VisualTestContext| {
             inputs.lock().unwrap().clear();
             let frame = view.read_with(cx, |view, _| view.frame_box().unwrap());
@@ -3262,7 +3277,7 @@ mod tests {
                 Default::default(),
             )
         });
-        cx.simulate_keystrokes("cmd-r");
+        cx.simulate_keystrokes(&crate::settings::platform_combo("mod-r"));
         wait(cx, |_| inputs_of(&inputs, "key").len() >= 4);
         assert_eq!(
             inputs_of(&inputs, "key"),

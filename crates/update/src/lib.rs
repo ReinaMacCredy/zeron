@@ -1404,6 +1404,10 @@ fn now_ms() -> i64 {
 }
 
 #[cfg(test)]
+#[path = "../../engine/tests/support/discovery_probe.rs"]
+mod discovery_probe;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1415,7 +1419,7 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let server = tokio::spawn(async move {
-                let (mut socket, _) = listener.accept().await.unwrap();
+                let (mut socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
                 let mut request = [0; 4096];
                 socket.read(&mut request).await.unwrap();
                 if stall_body {
@@ -1447,7 +1451,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
             let mut request = [0; 4096];
             socket.read(&mut request).await.unwrap();
             socket
@@ -1485,7 +1489,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
             let mut request = [0; 4096];
             socket.read(&mut request).await.unwrap();
             socket
@@ -1510,7 +1514,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
             let mut request = [0; 4096];
             socket.read(&mut request).await.unwrap();
             socket
@@ -1534,7 +1538,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
             let mut request = [0; 4096];
             socket.read(&mut request).await.unwrap();
             socket
@@ -1566,7 +1570,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let (_socket, _) = listener.accept().await.unwrap();
+            let (_socket, _) = crate::discovery_probe::accept(&listener).await.unwrap();
             tokio::time::sleep(Duration::from_secs(2)).await;
         });
         let client =
