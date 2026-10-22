@@ -1192,6 +1192,7 @@ pub struct SupervisorPage {
     ensured: Option<String>,
     opened: HashMap<String, bool>,
     drawer: Option<Owner>,
+    drawer_doc: Option<String>,
     drawer_open: bool,
     drawer_slide: Tween,
     pane: Option<Pane>,
@@ -1267,6 +1268,7 @@ impl SupervisorPage {
             ensured: None,
             opened: HashMap::new(),
             drawer: None,
+            drawer_doc: None,
             drawer_open: false,
             drawer_slide: Tween::at(0.0, now),
             pane: None,
@@ -1369,6 +1371,7 @@ impl SupervisorPage {
             self.ensure = Ensure::Idle;
         }
         self.drawer = None;
+        self.drawer_doc = None;
         self.drawer_open = false;
         self.drawer_slide = Tween::at(0.0, Instant::now());
         self.gear = Popup::default();
@@ -1460,7 +1463,19 @@ impl SupervisorPage {
         self.picks.retain(|key, _| open.contains(key));
         self.schedule_effect_check(cx);
         self.try_ensure(cx);
+        self.follow_drawer_thread(cx);
         cx.notify();
+    }
+
+    fn follow_drawer_thread(&mut self, cx: &mut Context<Self>) {
+        let Some(owner) = &self.drawer else {
+            return;
+        };
+        let thread = self.owner_thread(owner, cx);
+        if thread != self.drawer_doc {
+            self.drawer_doc = thread.clone();
+            cx.emit(SupervisorEvent::WatchDoc(thread));
+        }
     }
 
     fn schedule_effect_check(&mut self, cx: &mut Context<Self>) {
@@ -2012,6 +2027,7 @@ impl SupervisorPage {
     fn open_drawer(&mut self, owner: Owner, cx: &mut Context<Self>) {
         let thread = self.owner_thread(&owner, cx);
         self.drawer = Some(owner);
+        self.drawer_doc = thread.clone();
         self.drawer_open = true;
         self.drawer_slide.retarget(
             1.0,
@@ -2037,6 +2053,7 @@ impl SupervisorPage {
             cx.background_executor().timer(wait).await;
             page.update(cx, |page, cx| {
                 if !page.drawer_open && page.drawer.take().is_some() {
+                    page.drawer_doc = None;
                     cx.emit(SupervisorEvent::WatchDoc(None));
                 }
                 cx.notify();
@@ -3570,12 +3587,14 @@ impl SupervisorPage {
                 .unwrap_or_default();
             (chat, entries)
         };
+        let removed = owner.step_id.is_some() && step.is_none();
         let title = match step {
             Some(row) => format!(
                 "Brief · {} · {}",
                 plan.step_label(&row.step.id).unwrap_or_default(),
                 row.step.title
             ),
+            None if removed => "Brief · A removed step".into(),
             None => "Brief · Lead".into(),
         };
         let mut meta = vec![task.title.clone()];
@@ -3676,6 +3695,7 @@ impl SupervisorPage {
         let mut messages =
             block("MESSAGES IT GOT").debug_selector(|| "supervisor-brief-messages".into());
         messages = match received {
+            None if removed => messages.child(muted("This step was removed from the plan.")),
             None => messages.child(muted("This step has no thread yet.")),
             Some(received) if received.is_empty() => messages.child(muted("No messages yet.")),
             Some(received) => {
@@ -4469,6 +4489,70 @@ mod tests {
             assert!(page.list_switch.is_none());
             assert!(!page.animating(later));
         });
+    }
+
+    #[gpui::test]
+    fn the_brief_watches_a_step_thread_that_starts_while_it_is_open(cx: &mut gpui::TestAppContext) {
+        use crate::pull_request_test_support as fixture;
+        use std::sync::{Arc, Mutex};
+
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let _settings = fixture::settings(cx, crate::settings::UiSettings::default());
+        let now = Utc::now();
+        let step = |chat: Option<&str>| -> zeron_proto::TaskStep {
+            serde_json::from_value(serde_json::json!({
+                "id": "s", "taskId": "t", "title": "s", "orderKey": "a",
+                "chatId": chat, "createdAt": now, "updatedAt": now,
+            }))
+            .unwrap()
+        };
+        let state = cx.update(|cx| fixture::state(cx, None));
+        state.update(cx, |state, _| {
+            state.tasks = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "t", "title": "t", "mode": "orchestrated",
+                    "createdAt": now, "updatedAt": now,
+                }))
+                .unwrap(),
+            ];
+            state.task_steps = vec![step(None)];
+        });
+        let page = cx.new(|cx| SupervisorPage::new(state.clone(), cx));
+        let watched = Arc::new(Mutex::new(Vec::new()));
+        let _events = cx.update(|cx| {
+            let watched = watched.clone();
+            cx.subscribe(&page, move |_, event: &SupervisorEvent, _| {
+                if let SupervisorEvent::WatchDoc(doc) = event {
+                    watched.lock().unwrap().push(doc.clone());
+                }
+            })
+        });
+        page.update(cx, |page, cx| {
+            page.open_drawer(
+                Owner {
+                    task_id: "t".into(),
+                    step_id: Some("s".into()),
+                },
+                cx,
+            )
+        });
+        state.update(cx, |state, cx| {
+            state.chats = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "step-chat", "title": "s", "deviceId": "mac",
+                    "archived": false, "createdAt": now,
+                }))
+                .unwrap(),
+            ];
+            state.task_steps = vec![step(Some("step-chat"))];
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            *watched.lock().unwrap(),
+            vec![None, Some("step-chat".to_owned())]
+        );
     }
 
     #[test]
