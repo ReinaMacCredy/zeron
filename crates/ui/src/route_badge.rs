@@ -75,14 +75,7 @@ pub(crate) fn clock(ms: i64) -> Option<String> {
 }
 
 fn short_reason(route: &ChildRoute) -> String {
-    let reason = route.reason.as_deref().unwrap_or("route unavailable");
-    let short = match reason.strip_suffix(" out of quota") {
-        Some(harness) => format!("{harness} quota"),
-        None => match reason.strip_suffix(" is not available") {
-            Some(harness) => format!("{harness} unavailable"),
-            None => reason.to_string(),
-        },
-    };
+    let short = zeron_proto::transcript::route_short_reason(route);
     match route.resets_at.and_then(clock) {
         Some(at) => format!("{short}, resets {at}"),
         None => short,

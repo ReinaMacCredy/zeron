@@ -23,6 +23,7 @@ pub mod sidebar_pins;
 pub mod source_control;
 pub mod supervisor;
 pub mod tools;
+pub mod transcript;
 pub mod ui_driver;
 pub mod usage;
 pub mod view;

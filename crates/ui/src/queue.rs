@@ -623,32 +623,19 @@ impl Composer {
 
         // A row another thread sent (thread tools) says so, and that it waits
         // for the turn to end (d26 C); the human's own rows carry no line.
-        let from_thread: Option<SharedString> = item
-            .from_chat_id
-            .as_ref()
-            .filter(|from| from.as_str() != chat_id)
-            .map(|from| {
-                let state = self.state.read(cx);
-                let senders = crate::transcript::step_handback_threads(&item.text);
-                let senders = if senders.len() > 1 {
-                    senders
-                } else {
-                    vec![from.clone()]
-                };
-                let titles: Vec<String> = senders
-                    .iter()
-                    .map(|from| {
-                        let title = state
-                            .chats
-                            .iter()
-                            .find(|chat| &chat.id == from)
-                            .and_then(|chat| chat.title.clone())
-                            .unwrap_or_else(|| from.clone());
-                        one_line(&title).to_string()
-                    })
-                    .collect();
-                SharedString::from(format!("from {} · held for turn end", titles.join(", ")))
-            });
+        let from_thread: Option<SharedString> = {
+            let state = self.state.read(cx);
+            zeron_proto::transcript::queue_from_label(
+                chat_id,
+                item.from_chat_id.as_deref(),
+                &item.text,
+                |id| {
+                    let chat = state.chats.iter().find(|chat| chat.id == id)?;
+                    chat.title.clone()
+                },
+            )
+            .map(SharedString::from)
+        };
 
         let drag_chat = chat_id.to_string();
         let queue_marker = div()
