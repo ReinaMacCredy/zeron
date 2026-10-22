@@ -43,10 +43,10 @@ What each level exposes:
   and the raw socket have no such check: an agent with a shell can still reach its own app.
   Turn `ui_driver_drive` off in Settings > Tools to keep reading without driving; turning
   `ui_driver` off turns both off.
-- `ui_driver_drive` carries a destructive hint, so Codex asks before every call, and Zeron
-  declines that request. A Codex chat at Full gets the tool pre-approved in its thread config
-  (`mcp_servers.zeron.tools.ui_driver_drive.approval_mode = "approve"`), so only a Full chat
-  drives. `device_close` is pre-approved in every mode.
+- `ui_driver_drive` carries a destructive hint, so a Codex chat at Ask or Auto asks the person
+  before every call ("Approve UI drive"). A Codex chat at Full gets the tool pre-approved in its
+  thread config (`mcp_servers.zeron.tools.ui_driver_drive.approval_mode = "approve"`), so it
+  drives without asking. `device_close` is pre-approved in every mode.
 
 ## Reaching a target
 
@@ -598,7 +598,7 @@ The lead then checks the claims against the excerpts and snapshots, not against 
 | `<label> (pid n) did not answer within N s` | The main thread is blocked, or a drive call waited behind another long drive. Check `state` from a second call. The timed-out drive stops when the app sees the connection close, so a retry does not repeat it. |
 | `` `timeoutMs` must be at most 60000 ms `` | Waits are capped at 60 s. Wait on an element or for `idle` in steps instead of one long wait. |
 | `` `text` must not be empty `` | A `text` or `gone` wait (or a scenario `text` assert) got `""`, which every node contains. Pass the text to wait for. |
-| `user rejected MCP tool call` on `ui_driver_drive` in a Codex chat | The chat is at Ask or Auto, where Zeron declines Codex's approval request. Drive from a chat at Full. |
+| `user rejected MCP tool call` on `ui_driver_drive` in a Codex chat | The person answered No to "Approve UI drive" (the chat is at Ask or Auto). Ask them, or drive from a chat at Full. |
 | `the window drew no frame after the accessibility tree was enabled` | The window is minimized or fully hidden, so gpui does not draw. Bring it back on screen and retry. |
 | `give one of ref, select, or x and y` | The request mixed target kinds, or gave `x` without `y` or `nth` without `select`. |
 | `` `path` must end in .png `` / `is not a regular file` | Snapshot paths are absolute `.png` files; pick a new file name, not a link or folder. |

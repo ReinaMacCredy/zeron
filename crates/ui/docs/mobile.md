@@ -53,7 +53,7 @@ Tap **New session**. Describe the task under "What are we building?", then set w
 
 If Zeron cannot tell where to run it, it says **Couldn't start the session**: choose a project or a host.
 
-**New Project…** browses folders on one of your computers (switch computers with the **Device** button). Open folders to find yours, then tap **Use “<folder>”**. With no computers in your workspace yet, it says "No desktop devices yet — open Zeron on a computer to add one."
+**New Project…** browses folders on one of your computers (switch computers with the button at the top right, which shows the current computer's name). Open folders to find yours, then tap **Use “<folder>”**. With no computers in your workspace yet, it says "No desktop devices yet — open Zeron on a computer to add one."
 
 ## Notifications
 
@@ -63,7 +63,7 @@ Turn them on or off in the phone's **Settings** tab under **Notifications**, wit
 
 ## Voice
 
-Voice mode on the phone is a call with Codex: the audio stays on your iPhone, while Codex and its tools run on one of your computers. It appears once one of your Macs or servers runs a Zeron version that supports it; a device that needs an update says "Update Zeron and enable remote voice". Codex must be signed in on that computer.
+Voice mode on the phone is a call with Codex: your iPhone streams the audio straight to Codex's voice service, not through your computer, while Codex and its tools run on one of your computers. It appears once one of your Macs or servers runs a Zeron version that supports it; a device that needs an update says "Update Zeron and enable remote voice". Codex must be signed in on that computer.
 
 Tap the waveform next to **New session** to call. Touch and hold it to choose the device (**Codex runs on**) and the voice style. During a call the bar shows the call with its timer and mute and hang-up buttons. Tap it to open the call screen, which shows what is happening (**Listening**, **Speaking**, **Working on it…**, **Codex needs your answer**, **Muted**) and can open the voice session's transcript.
 
@@ -86,7 +86,7 @@ The **Settings** tab has:
 | **Math** | **Render Math** (off shows LaTeX source), **Math Font**, and **Math Size**. |
 | **Sessions** | **Group by Project** and **Archived Sessions**. |
 
-**Sign Out** at the bottom signs the phone out. Drafts you have not sent stay on the phone.
+**Sign Out** at the bottom signs the phone out and removes the account's data from it, including messages still waiting to send and the **New session** draft. Text left in a session's composer stays on the phone.
 
 ## iPad keyboard shortcuts
 

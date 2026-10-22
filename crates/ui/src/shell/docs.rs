@@ -42,7 +42,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn run_docs_action(&mut self, action: Action, cx: &mut Context<Self>) {
+    pub(super) fn run_docs_action(&mut self, action: Action, cx: &mut Context<Self>) {
         match action {
             Action::Tasks => self.open_tasks(cx),
             Action::Supervisor => self.open_supervisor(cx),

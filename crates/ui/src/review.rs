@@ -15,6 +15,7 @@ use crate::changes::{FileDiff, line_anchor};
 use crate::comments::{CommentSide, ReviewComment};
 
 pub const CARD_PREFIX: &str = "review-finding:";
+pub const STAGED_PREFIX: &str = "review-staged:";
 const REANCHOR_WINDOW: u32 = 40;
 
 pub fn brand(
@@ -123,8 +124,10 @@ impl ChatReview {
                 .cloned()
                 .collect(),
         };
-        run.handed_here
-            .extend(staged.iter().map(|finding| finding.id.clone()));
+        for finding in &staged {
+            run.withdrawn.remove(&finding.id);
+            run.handed_here.insert(finding.id.clone());
+        }
         staged.iter().map(Finding::comment).collect()
     }
 
@@ -244,6 +247,7 @@ pub struct ReviewRun {
     pub delegation: Option<Delegation>,
     pub owner_working: bool,
     pub handed_here: BTreeSet<String>,
+    pub withdrawn: BTreeSet<String>,
 }
 
 impl ReviewRun {
@@ -262,6 +266,7 @@ impl ReviewRun {
             delegation: None,
             owner_working: false,
             handed_here: BTreeSet::new(),
+            withdrawn: BTreeSet::new(),
         }
     }
 
@@ -271,10 +276,11 @@ impl ReviewRun {
 
     pub fn state(&self, id: &str) -> FindingState {
         let handed = self.handed_here.contains(id)
-            || self
-                .delegation
-                .as_ref()
-                .is_some_and(|d| d.finding_handed(id));
+            || !self.withdrawn.contains(id)
+                && self
+                    .delegation
+                    .as_ref()
+                    .is_some_and(|d| d.finding_handed(id));
         match self.outcome(id).map(|outcome| outcome.outcome) {
             Some(FindingOutcomeKind::Fixed) => FindingState::Fixed,
             Some(FindingOutcomeKind::Skipped) => FindingState::Skipped,
@@ -294,10 +300,28 @@ impl ReviewRun {
 
     fn handed(&self, id: &str) -> bool {
         self.handed_here.contains(id)
-            || self
-                .delegation
-                .as_ref()
-                .is_some_and(|d| d.findings_handed.contains(id))
+            || !self.withdrawn.contains(id)
+                && self
+                    .delegation
+                    .as_ref()
+                    .is_some_and(|d| d.findings_handed.contains(id))
+    }
+
+    pub fn withdraw(&mut self, id: &str) {
+        self.handed_here.remove(id);
+        self.withdrawn.insert(id.to_owned());
+    }
+
+    pub fn unsent_withdrawals(&self) -> Vec<String> {
+        self.withdrawn
+            .iter()
+            .filter(|id| {
+                self.delegation
+                    .as_ref()
+                    .is_some_and(|d| d.findings_handed.contains(*id))
+            })
+            .cloned()
+            .collect()
     }
 
     pub fn unsent_hands(&self) -> Vec<String> {
@@ -426,7 +450,10 @@ impl Finding {
             body.push('\n');
             body.push_str(self.body.trim());
         }
-        ReviewComment::new(self.path.clone(), self.side, self.line, body)
+        ReviewComment {
+            id: format!("{STAGED_PREFIX}{}", self.id),
+            ..ReviewComment::new(self.path.clone(), self.side, self.line, body)
+        }
     }
 
     fn card(&self) -> ReviewComment {
@@ -716,6 +743,21 @@ mod tests {
             review.take_fixable(Some("F3")).is_empty(),
             "a second Fix never stages a handed row again"
         );
+        assert_eq!(staged[0].id, format!("{STAGED_PREFIX}F3"));
+        let run = review.run.as_mut().unwrap();
+        run.delegation
+            .as_mut()
+            .unwrap()
+            .findings_handed
+            .insert("F3".into());
+        run.withdraw("F3");
+        assert_eq!(run.unsent_withdrawals(), ["F3"]);
+        assert_eq!(
+            review.take_fixable(Some("F3")).len(),
+            1,
+            "removing the staged comment hands the row back"
+        );
+        assert!(review.run.as_ref().unwrap().unsent_withdrawals().is_empty());
     }
 
     #[test]

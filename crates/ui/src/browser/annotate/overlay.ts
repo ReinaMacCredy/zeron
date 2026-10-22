@@ -1,5 +1,6 @@
 // Ported from T3 Code apps/desktop/src/preview/PickPreload.ts (MIT, T3 Tools Inc.).
 import { previewAnnotationStyles } from "./styles.generated.ts";
+import { wellFormed } from "./well-formed.ts";
 
 interface AnnotationTheme {
   colorScheme: string;
@@ -73,10 +74,6 @@ interface StyleChange {
   previousValue: string;
   value: string;
 }
-
-// A cut emoji or a page title like "\uD800" leaves a lone surrogate, which serde_json refuses.
-const wellFormed = (_key: string, value: unknown): unknown =>
-  typeof value === "string" ? value.toWellFormed() : value;
 
 const isSubmitKey = (event: KeyboardEvent): boolean =>
   event.key === "Enter" && !event.shiftKey && !event.isComposing;

@@ -42,11 +42,13 @@ Each tool has its own switch in Settings > Tools, under its group. The names are
 
 The threads tools are described from your side in [Agents and other threads](zeron://docs/threads).
 
+The Supervisor's own chat also gets `supervisor`, which acts on Mission Control missions within the Authority you set. It has no switch in Settings > Tools; see [Supervisor](zeron://docs/supervisor).
+
 ## Built-in limits
 
 - Project actions only touch the project of the chat that calls them.
 - The UI driving tool only drives Zeron Dev builds, and never the app that serves the agent's own chat. Reading the UI works in every build and includes text typed into fields. Turning the reading tool off turns the driving tool off too.
-- In a Codex chat, closing a device runs without asking for approval. Driving the UI runs only when the chat is at **Full access**; at Ask or Auto, Codex's approval request for it is declined.
+- In a Codex chat, closing a device runs without asking for approval. Driving the UI runs without asking only when the chat is at **Full access**; at Ask or Auto, you approve each call.
 - An agent's actions toward other chats (messages, new chats, interrupts, answers) are capped at 16 per turn.
 - An agent can answer another chat's permission request only when its own chat runs at **Full access**.
 - A child agent, or a profile an agent applies, never gets a higher permission mode than the chat that started it.
@@ -64,7 +66,7 @@ The picture at the top of the page lights a wire for each group that is on, and 
 
 Some tools depend on another. When you turn one off, the tools that need it are off too and say so, for example **Off while delegate_task is off**.
 
-The **Computer** group is the same switch as [Settings > Computer](zeron://settings/computer), and the **Device hub** group is the same switch as agent access in [Settings > Device hub](zeron://settings/device-hub). Both start off. While the Device hub itself is off, the group's switch is greyed out and reads **Turn on Device hub first**.
+The **Computer** group is the same switch as [Settings > Computer](zeron://settings/computer), and the **Device hub** group is the same switch as agent access in [Settings > Device hub](zeron://settings/device-hub). Both start off. While the Device hub itself is off, the group's switch is greyed out and its link reads **Turn on Device hub first**.
 
 A chat that is already running keeps its tool list until its next turn, but a call to a tool you turned off is refused right away.
 

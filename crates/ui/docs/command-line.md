@@ -82,8 +82,8 @@ When the service is running, the desktop app on the same machine connects to it 
 
 A Linux server can run your agents while you drive them from your computer or phone.
 
-1. Install: `curl -fsSL https://zeron.sh/install.sh | sh`. This installs `zeron`, sets up `zeron.service` as a systemd user service, starts it, and turns on lingering so the engine keeps running after you log out. If it cannot turn on lingering, run `sudo loginctl enable-linger $USER`. Without systemd it tells you to run `zeron headless` yourself.
-2. Install the agents you want on the server (Claude Code, Codex, and so on) and sign in to them there. The installer reminds you when the Claude Code CLI is missing.
+1. Install: download `zeron-<version>-linux-x86_64.tar.gz` (or `-aarch64`) from [the latest release](https://github.com/ReinaMacCredy/zeron/releases/latest), unpack it, and run its `install.sh`, which installs `zeron` into `~/.local/bin`. Then `zeron daemon install` sets up `zeron.service` as a systemd user service and starts it, and `sudo loginctl enable-linger $USER` keeps the engine running after you log out. Without systemd, run `zeron headless` yourself. The `curl -fsSL https://zeron.sh/install.sh | sh` installer fetches upstream Zeron, not this build, and that copy updates from upstream.
+2. Install the agents you want on the server (Claude Code, Codex, and so on) and sign in to them there.
 3. Sign in so the server joins your synced workspace. The service starts local-only, so stop it, sign in, and start it again (the commands are below).
 
 ```

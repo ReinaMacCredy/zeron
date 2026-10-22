@@ -1163,6 +1163,7 @@ impl AppState {
     }
 
     pub fn remove_review_comment(&mut self, key: &str, id: &str) {
+        self.withdraw_staged_finding(key, id);
         if let Some(list) = self.review_comments.get_mut(key) {
             list.retain(|c| c.id != id);
             if list.is_empty() {
@@ -1212,7 +1213,20 @@ impl AppState {
 
     pub fn purge_review_comments(&mut self, key: &str) {
         self.review_comment_flushes.remove(key);
-        self.review_comments.remove(key);
+        for comment in self.review_comments.remove(key).unwrap_or_default() {
+            self.withdraw_staged_finding(key, &comment.id);
+        }
+    }
+
+    fn withdraw_staged_finding(&mut self, key: &str, comment_id: &str) {
+        if let Some(finding) = comment_id.strip_prefix(crate::review::STAGED_PREFIX)
+            && let Some(run) = self
+                .reviews
+                .get_mut(key)
+                .and_then(|review| review.run.as_mut())
+        {
+            run.withdraw(finding);
+        }
     }
 
     pub fn quotes(&self, key: &str) -> &[Quote] {

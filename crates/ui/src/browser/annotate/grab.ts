@@ -1,6 +1,7 @@
 // Page world: React fiber expandos live on the page's DOM wrappers, invisible to the overlay's world.
 import { isSourceFile } from "bippy/source";
 import { getElementContext } from "react-grab/primitives";
+import { wellFormed } from "./well-formed.ts";
 
 const ELEMENT_ATTRIBUTE = "data-zeron-annotate";
 const ELEMENT_CONTEXT_TIMEOUT_MS = 2_000;
@@ -66,6 +67,4 @@ async function grab(id: string) {
 (globalThis as { __zeronAnnotateGrab?: unknown }).__zeronAnnotateGrab = async (
   ids: string[],
 ): Promise<string> =>
-  JSON.stringify((await Promise.all(ids.map(grab))).filter(Boolean), (_key, value: unknown) =>
-    typeof value === "string" ? value.toWellFormed() : value,
-  );
+  JSON.stringify((await Promise.all(ids.map(grab))).filter(Boolean), wellFormed);

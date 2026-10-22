@@ -8,7 +8,7 @@ The chevron at the top collapses the column to a narrow rail of icons, and the r
 
 The column collapses to the rail by itself when the conversation is narrower than about 640 pixels, and whenever the right pane is open. With the right pane open, the rail's chevron opens the same content as a **Live state** popover instead (**Close live state** closes it).
 
-The column is not shown on New chat or while a [split view](zeron://docs/split-view) is open. Each section shows at most 8 rows.
+The column is not shown on New chat or while a [split view](zeron://docs/split-view) is open. Each section shows at most 8 rows, except **Actions** and a section's **Previous agents** fold, which list all of theirs.
 
 ## On your project
 

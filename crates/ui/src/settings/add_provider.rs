@@ -1220,7 +1220,13 @@ impl AddProviderDialog {
                         .when(!preparing, |el| {
                             el.on_click(cx.listener(|this, _, _, cx| this.acp_next(cx)))
                         })
-                        .child(if preparing { "Preparing…" } else { "Next" }),
+                        .child(if preparing {
+                            "Preparing…"
+                        } else if self.manual_unverified_armed(cx) {
+                            "Add anyway"
+                        } else {
+                            "Next"
+                        }),
                 );
             }
             Step::Provider => {
