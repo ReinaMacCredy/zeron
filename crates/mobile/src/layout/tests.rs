@@ -813,6 +813,31 @@ fn device_calls_group_apart_with_their_own_wording() {
 }
 
 #[test]
+fn a_file_change_line_carries_its_added_and_deleted_counts() {
+    use zeron_doc::schema::MessageRole::Assistant;
+    let mut part = computer_part("t1", "x", None, false, None);
+    if let MessagePart::Tool { call, diff_stats, .. } = &mut part {
+        *call = zeron_proto::ToolCall::ApplyPatch { path: None };
+        *diff_stats = Some(vec![
+            zeron_doc::parts::ToolDiffStat { path: "a.rs".into(), additions: 2, deletions: 1 },
+            zeron_doc::parts::ToolDiffStat { path: "b.rs".into(), additions: 3, deletions: 2 },
+        ]);
+    }
+    let mut w = worker(390.0);
+    w.input = TranscriptInput {
+        entries: vec![Arc::new(SessionMessageEntry {
+            status: Some(MessageStatus::Streaming),
+            ..(*message("a", Assistant, vec![part])).clone()
+        })],
+        working: true,
+        streaming: true,
+        ..Default::default()
+    };
+    let text = w.pass().display(0).unwrap().text;
+    assert!(text.contains("+5") && text.contains("−3"), "{text}");
+}
+
+#[test]
 fn an_advisor_call_names_the_wait_until_it_answers() {
     use zeron_doc::schema::MessageRole::Assistant;
     let frame = |resolved: bool| {
