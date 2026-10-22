@@ -321,11 +321,7 @@ impl TasksPage {
         self.add_uploads.push(cx.spawn(async move |page, cx| {
             let paths = upload.await;
             page.update(cx, |page, cx| {
-                let room = zeron_doc::TASK_IMAGES_MAX.saturating_sub(page.add_images.len());
-                if paths.len() > room {
-                    crate::toast::error(cx, "A task holds up to 12 images.");
-                }
-                page.add_images.extend(paths.into_iter().take(room));
+                images::append(&mut page.add_images, paths, cx);
                 cx.notify();
             })
             .ok();

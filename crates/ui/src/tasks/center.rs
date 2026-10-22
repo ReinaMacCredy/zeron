@@ -21,6 +21,7 @@ use super::{Rollup, StepRow, chat_brand, linked_chat, rollup, step_chat};
 use crate::attachments;
 use crate::composer::{Composer, ComposerInput, ComposerInputEvent, Submit};
 use crate::icons::{self, icon};
+use crate::markdown::render::{MD_LINE_HEIGHT, MD_TEXT_SIZE};
 use crate::motion::{self, MotionSpec, Tween};
 use crate::popover;
 use crate::settings::widgets;
@@ -35,6 +36,8 @@ mod timeline;
 mod view_morph;
 mod watch_sheet;
 
+/// The read title has no line height of its own and inherits 1.61 x 13.
+const TITLE_LINE: f32 = 21.0;
 const EDIT_GROW: MotionSpec = MotionSpec::new(280, motion::EASE_DRAWER);
 const EDIT_LEAVE: MotionSpec = MotionSpec::new(220, motion::EASE_DRAWER);
 const EDIT_FADE: MotionSpec = MotionSpec::new(150, motion::LINEAR);
@@ -707,7 +710,7 @@ impl TaskCenter {
             cx.new(|cx| {
                 let mut input = ComposerInput::new("Step title", cx)
                     .with_wrapping()
-                    .with_text_metrics(13.0, 18.0)
+                    .with_text_metrics(13.0, TITLE_LINE)
                     .with_max_chars(zeron_doc::TASK_TITLE_MAX_CHARS);
                 input.set_text(text.title.clone(), cx);
                 input
@@ -721,9 +724,12 @@ impl TaskCenter {
             let mut input =
                 ComposerInput::new(placeholder, cx).with_max_chars(zeron_doc::TASK_NOTES_MAX_CHARS);
             if matches!(target, EditTarget::Step(_)) {
-                input = input.with_text_metrics(12.5, 18.0);
+                input = input.with_text_metrics(MD_TEXT_SIZE, MD_LINE_HEIGHT);
             }
             input.set_text(text.notes, cx);
+            if matches!(target, EditTarget::Step(_)) {
+                input.move_to(0, cx);
+            }
             input
         });
         let mut subscriptions: Vec<Subscription> = title
@@ -816,11 +822,7 @@ impl TaskCenter {
                     else {
                         return;
                     };
-                    let room = zeron_doc::TASK_IMAGES_MAX.saturating_sub(editor.images.len());
-                    if paths.len() > room {
-                        crate::toast::error(cx, "A step or overview holds up to 12 images.");
-                    }
-                    editor.images.extend(paths.into_iter().take(room));
+                    images::append(&mut editor.images, paths, cx);
                     cx.notify();
                 })
                 .ok();
@@ -853,7 +855,7 @@ impl TaskCenter {
             return;
         }
         let upload = images::upload(&self.state, staged, cx);
-        self.picking = Some(cx.spawn(async move |center, cx| {
+        cx.spawn(async move |center, cx| {
             let paths = upload.await;
             center
                 .update(cx, |center, cx| {
@@ -864,11 +866,7 @@ impl TaskCenter {
                     let Some(mut text) = center.shown_text(&target, cx) else {
                         return;
                     };
-                    let room = zeron_doc::TASK_IMAGES_MAX.saturating_sub(text.images.len());
-                    if paths.len() > room {
-                        crate::toast::error(cx, "A step holds up to 12 images.");
-                    }
-                    text.images.extend(paths.into_iter().take(room));
+                    images::append(&mut text.images, paths, cx);
                     if let Some((_, added)) =
                         center.draft.added.iter_mut().find(|(id, _)| *id == step_id)
                     {
@@ -880,7 +878,8 @@ impl TaskCenter {
                     cx.notify();
                 })
                 .ok();
-        }));
+        })
+        .detach();
     }
 
     fn remove_image(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1330,13 +1329,8 @@ impl TaskCenter {
         }
     }
 
-    fn ask_count(&self, row: &StepRow) -> Option<usize> {
-        match row
-            .step
-            .chat_id
-            .as_deref()
-            .and_then(|chat| self.asks.get(chat))
-        {
+    fn ask_count(&self, chat: Option<&str>) -> Option<usize> {
+        match chat.and_then(|chat| self.asks.get(chat)) {
             Some(Ask::Ready(questions)) => Some(questions.len().max(1)),
             Some(Ask::Loading { .. }) => None,
             None => Some(1),
@@ -1362,6 +1356,7 @@ impl TaskCenter {
     fn sync_asks(
         &mut self,
         shown: &[(StepRow, Option<Tag>, Option<Thread>)],
+        lead: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let awaiting: Vec<String> = shown
@@ -1370,6 +1365,7 @@ impl TaskCenter {
                 thread.is_some() && row.indicator == Some(ChatIndicator::AwaitingInput)
             })
             .filter_map(|(row, ..)| row.step.chat_id.clone())
+            .chain(lead)
             .collect();
         self.asks.retain(|chat, _| awaiting.contains(chat));
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -1536,6 +1532,9 @@ impl TaskCenter {
             .iter()
             .filter_map(|chat_id| super::card::context_chip(state, chat_id, home, theme, now))
             .collect();
+        if chips.is_empty() {
+            return None;
+        }
         Some(
             div()
                 .id("task-center-reads")
@@ -1642,7 +1641,7 @@ impl TaskCenter {
         div()
             .id("task-center-edit-body")
             .debug_selector(|| "task-center-edit-body".into())
-            .text_size(ui_rems(12.5))
+            .text_size(ui_rems(MD_TEXT_SIZE))
             .text_color(theme.text)
             .capture_action(cx.listener(move |_, _: &Submit, window, cx| {
                 if body.focus_handle(cx).is_focused(window) {

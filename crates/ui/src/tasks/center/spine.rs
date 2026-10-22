@@ -922,7 +922,12 @@ impl TaskCenter {
                     .text_size(ui_rems(13.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child(crate::composer::growing_field(input, 18.0, 36.0, cx))
+                    .child(crate::composer::growing_field(
+                        input,
+                        TITLE_LINE,
+                        2.0 * TITLE_LINE,
+                        cx,
+                    ))
                     .into_any_element()
             }
             None if running && !reduced => {
@@ -1264,7 +1269,7 @@ impl TaskCenter {
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
-                    .child(self.edit_notes(editor, 54.0, theme, cx))
+                    .child(self.edit_notes(editor, 3.0 * MD_LINE_HEIGHT, theme, cx))
                     .child(self.edit_tray(editor, theme, cx))
                     .child(self.edit_footer(theme, cx).mr(px(-4.0)).pt(px(7.0)))
                     .into_any_element(),
@@ -1648,8 +1653,11 @@ impl TaskCenter {
                     parts.push("plan review".to_string());
                 }
                 if asking.iter().any(|row| row.asks.is_none()) {
-                    let steps = asking.len();
-                    parts.push(format!("{steps} {}", plural(steps, "step", "steps")));
+                    let threads = asking.len();
+                    parts.push(format!(
+                        "{threads} {}",
+                        plural(threads, "thread", "threads")
+                    ));
                 } else {
                     let questions: usize = asking.iter().filter_map(|row| row.asks).sum();
                     if questions > 0 {
@@ -2203,16 +2211,20 @@ impl TaskCenter {
         shown: &[(StepRow, Option<Tag>, Option<Thread>)],
         cx: &mut Context<Self>,
     ) -> Facts {
-        self.sync_asks(shown, cx);
         let state = self.state.clone();
-        let (lead_chat, lead_agent) = {
+        let (lead_chat, lead_agent, lead_asking) = {
             let state = state.read(cx);
             let chat = linked_chat(&state.chats, task);
             (
                 chat.map(|chat| chat.id.clone()),
                 chat.and_then(|chat| agent_of(chat, cx)),
+                chat.filter(|chat| {
+                    state.display_status_for(chat, Utc::now()) == ChatIndicator::AwaitingInput
+                })
+                .map(|chat| chat.id.clone()),
             )
         };
+        self.sync_asks(shown, lead_asking, cx);
         let mut chat_ids: Vec<String> = shown
             .iter()
             .filter(|(_, _, thread)| thread.is_some())
@@ -2230,7 +2242,7 @@ impl TaskCenter {
             title: task.title.clone(),
             text: (plan.phase(task) == super::super::PlanPhase::PlanReady)
                 .then(|| "Plan ready: approve to start running the steps.".to_string()),
-            asks: Some(1),
+            asks: self.ask_count(lead_chat.as_deref()),
         }];
         rows.extend(shown.iter().enumerate().map(|(ix, (row, _, thread))| {
             let (status, word) = Status::of_step(
@@ -2247,7 +2259,7 @@ impl TaskCenter {
                 name: format!("Step {}", ix + 1),
                 title: row.step.title.clone(),
                 text: text.map(|text| crate::transcript::single_line(&text)),
-                asks: self.ask_count(row),
+                asks: self.ask_count(row.step.chat_id.as_deref()),
             }
         }));
         let (tokens, lead_tokens): (Vec<Option<u64>>, Option<u64>) = {
@@ -3327,5 +3339,122 @@ mod tests {
             more > grown,
             "a growing card moves what follows without row steps"
         );
+    }
+
+    struct Quiet;
+
+    #[async_trait::async_trait]
+    impl zeron_rpc::RpcService for Quiet {
+        async fn handle(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+        ) -> Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
+            zeron_rpc::RpcReply::value(&serde_json::json!({}))
+        }
+    }
+
+    #[gpui::test]
+    fn no_card_overlaps_the_card_two_rows_above_while_specs_and_edits_tween(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::{AppContext as _, VisualTestContext};
+        use serde_json::json;
+        const CARDS: [&str; 5] = [
+            "task-center-step-s1",
+            "task-center-step-s2",
+            "task-center-step-s3",
+            "task-center-step-s4",
+            "task-center-step-s5",
+        ];
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            let mut spine = crate::settings::UiSettings::default();
+            spine.tree_view = crate::settings::TreeView::Spine;
+            crate::settings::init(spine, dir.path(), cx);
+        });
+        cx.executor().allow_parking();
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::memory_client(std::sync::Arc::new(Quiet)),
+            ));
+            state.tasks = vec![
+                serde_json::from_value(json!({
+                    "id": "orch", "title": "Build it", "orderKey": "a", "chatId": "lead",
+                    "mode": "orchestrated",
+                }))
+                .unwrap(),
+            ];
+            state.chats = vec![
+                serde_json::from_value(json!({
+                    "id": "lead", "title": "lead", "deviceId": "mac", "archived": false,
+                    "createdAt": "2026-10-18T00:00:00Z",
+                }))
+                .unwrap(),
+            ];
+            state.task_steps = [
+                ("s1", "Build the thing.\n\n".repeat(6)),
+                ("s2", "short".into()),
+                ("s3", "line of the spec\n\n".repeat(5)),
+                ("s4", "x".into()),
+                ("s5", "more words here\n\n".repeat(4)),
+            ]
+            .into_iter()
+            .map(|(id, notes)| {
+                serde_json::from_value(json!({
+                    "id": id, "taskId": "orch", "title": id, "notes": notes, "orderKey": id,
+                }))
+                .unwrap()
+            })
+            .collect();
+        });
+        let (center, cx) = cx.add_window_view(|_, cx| TaskCenter::new(state, "orch".into(), cx));
+        let sweep = |cx: &mut VisualTestContext, label: &str| {
+            for draw in 0..30 {
+                cx.update(|window, cx| window.draw(cx).clear());
+                cx.update(|window, cx| window.simulate_next_frame(cx));
+                cx.run_until_parked();
+                let rows: Vec<Option<(f32, f32)>> = CARDS
+                    .iter()
+                    .map(|card| {
+                        cx.debug_bounds(card)
+                            .map(|b| (f32::from(b.origin.y), f32::from(b.origin.y + b.size.height)))
+                    })
+                    .collect();
+                for i in 0..rows.len() - 2 {
+                    if let (Some(above), Some(below)) = (rows[i], rows[i + 2]) {
+                        assert!(
+                            below.0 >= above.1,
+                            "{label}, draw {draw}: card {} overlaps card {}: {rows:?}",
+                            i + 3,
+                            i + 1
+                        );
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(12));
+            }
+        };
+        sweep(cx, "settled");
+        center.update_in(cx, |center, _, cx| center.toggle_spec("s1", cx));
+        sweep(cx, "s1 spec opening");
+        center.update_in(cx, |center, _, cx| center.toggle_spec("s3", cx));
+        sweep(cx, "s3 spec opening");
+        center.update_in(cx, |center, _, cx| center.toggle_spec("s1", cx));
+        sweep(cx, "s1 spec closing");
+        center.update_in(cx, |center, window, cx| {
+            center.start_edit(EditTarget::Step("s3".into()), window, cx)
+        });
+        sweep(cx, "s3 edit entering");
+        center.update_in(cx, |center, window, cx| {
+            center.start_edit(EditTarget::Step("s5".into()), window, cx)
+        });
+        sweep(cx, "edit s3 to s5");
+        center.update_in(cx, |center, _, cx| center.cancel_edit(cx));
+        sweep(cx, "s5 edit leaving");
     }
 }
