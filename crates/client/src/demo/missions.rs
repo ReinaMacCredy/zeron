@@ -488,6 +488,7 @@ pub(crate) fn host_call(
 ) -> Option<Result<Value>> {
     use zeron_rpc::methods as m;
     Some(match method {
+        m::MUTATE if params["op"] == "setChatConfig" => return None,
         m::MUTATE => mutate(client, device_id, params).map(|()| json!({})),
         m::PREVIEW_ROUTES => Ok(route_preview(params)),
         m::ENSURE_SUPERVISOR => {
