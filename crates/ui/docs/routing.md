@@ -77,4 +77,4 @@ When a mission's lead writes its plan, the plan shows in the lead's transcript a
 - **Relative cost**, a bar comparing the plan with running every step on the lead's model;
 - a line for each step that falls back for quota, and a warning when the fallbacks raise the cost.
 
-The multipliers are a floor: retries and reviews add runs. **Edit routing** opens Settings > Routing. **Start mission** approves the plan, as **Approve and run** does in Mission Control; it reads **Start with fallback** when a step falls back.
+The multipliers are a floor: retries and reviews add runs. **Edit routing** opens Settings > Routing. **Start mission** approves the plan, as **Approve and run** does on the mission's page; it reads **Start with fallback** when a step falls back.
