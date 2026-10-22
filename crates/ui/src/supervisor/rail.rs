@@ -83,7 +83,6 @@ pub(super) fn mission_tone(mission: &Mission, theme: &Theme) -> Hsla {
     let tone = |indicator| crate::shell::chat_status_tone(indicator, theme).2;
     match mission.status {
         TaskStatus::NeedsYou => tone(ChatIndicator::AwaitingInput),
-        TaskStatus::Working => tone(ChatIndicator::Working),
         _ => tone(ChatIndicator::Completed),
     }
 }

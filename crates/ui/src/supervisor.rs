@@ -22,7 +22,7 @@ use zeron_proto::supervisor::{
 };
 use zeron_proto::{
     AgentProfile, Chat, ChatConfig, ChatIndicator, PermissionMode, PlanProgress, SandboxLevel,
-    StepStatus, TaskStatus, UserInputAnswer, UserInputQuestion,
+    TaskStatus, UserInputAnswer, UserInputQuestion,
 };
 use zeron_rpc::methods;
 
@@ -1029,21 +1029,7 @@ fn missions(state: &AppState, now: DateTime<Utc>) -> Vec<Mission> {
                 row.progress.total,
                 clock(at)
             ),
-            None => task
-                .map(|task| rollup(state, task, now))
-                .and_then(|plan| {
-                    let step = plan
-                        .steps
-                        .iter()
-                        .find(|step| !matches!(step.status, StepStatus::Done | StepStatus::Skipped))
-                        .or(plan.steps.last())?;
-                    Some(format!(
-                        "{} · {}",
-                        plan.step_label(&step.step.id)?,
-                        step.step.title
-                    ))
-                })
-                .unwrap_or_else(|| row.label.clone()),
+            None => row.current.unwrap_or(row.label),
         };
         Mission {
             root: task.and_then(|task| task.chat_id.clone()),
