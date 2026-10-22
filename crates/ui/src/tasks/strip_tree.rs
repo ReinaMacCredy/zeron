@@ -466,6 +466,9 @@ impl Render for StripTree {
         };
         self.fold_deep(&rows);
         self.sync(&rows, reduced, now);
+        if !self.is_open() && self.open.settled_at(now) {
+            return div().into_any_element();
+        }
         let chat_ids: Vec<String> = rows.iter().filter_map(|row| row.chat_id.clone()).collect();
         let state = self.state.clone();
         self.stats

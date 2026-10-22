@@ -4158,8 +4158,12 @@ impl DocHost {
         if let Some(title) = title {
             workspace.rename_chat(&chat_id, title)?;
         }
+        let discard = |chat_id: &str| {
+            workspace.delete_chat(chat_id).ok();
+            self.purge_chat(chat_id);
+        };
         if let Some(step) = &step {
-            workspace.update_task_step(
+            let bound = workspace.update_task_step(
                 &step.id,
                 &zeron_proto::TaskStepPatch {
                     chat_id: Some(Some(chat_id.clone())),
@@ -4167,19 +4171,38 @@ impl DocHost {
                     route: Some(route.clone()),
                     ..Default::default()
                 },
-            )?;
+            );
+            if !matches!(bound, Ok(true)) {
+                discard(&chat_id);
+                bound?;
+                return Err(EngineError::Other("the step no longer exists".into()));
+            }
         }
         drop(admitting);
         if let Some(sessions) = self.sessions() {
             sessions.bind_delegate(from_chat_id, prompt, &chat_id);
         }
+        let step_id = step.as_ref().map(|step| step.id.clone());
         let (prompt, images) =
             images_here(prompt, step.map(|step| step.images).unwrap_or_default());
-        if self.defers(&chat_id, route.as_ref()) {
-            self.push_thread_row(&chat_id, Some(from_chat_id), &prompt, Vec::new(), images)?;
+        let sent = if self.defers(&chat_id, route.as_ref()) {
+            self.push_thread_row(&chat_id, Some(from_chat_id), &prompt, Vec::new(), images)
+                .map(drop)
         } else {
             self.queue_thread_message_with(&chat_id, Some(from_chat_id), &prompt, images)
-                .await?;
+                .await
+                .map(drop)
+        };
+        if let Err(err) = sent {
+            if let Some(step_id) = step_id {
+                let unbind = zeron_proto::TaskStepPatch {
+                    chat_id: Some(None),
+                    ..Default::default()
+                };
+                workspace.update_task_step(&step_id, &unbind).ok();
+            }
+            discard(&chat_id);
+            return Err(err);
         }
         Ok(chat_id)
     }

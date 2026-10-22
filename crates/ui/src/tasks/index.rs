@@ -6,7 +6,7 @@ use gpui::{
     AnyElement, ClickEvent, Context, Entity, EventEmitter, Hsla, IntoElement, Render, ScrollHandle,
     SharedString, Subscription, Window, div, prelude::*, px,
 };
-use zeron_proto::{Chat, LinkKind, PlanProgress};
+use zeron_proto::{Chat, PlanProgress};
 
 use super::strip_tree::{StripTree, StripTreeEvent, TreeHost};
 use super::thread_tree::{NodeKind, TreeNode, tree_rows};
@@ -55,36 +55,33 @@ fn is_today(at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
     at.with_timezone(&Local).date_naive() == now.with_timezone(&Local).date_naive()
 }
 
-fn roots_a_tree(state: &AppState, chat: &Chat, children: &HashSet<&str>) -> bool {
+fn roots_a_tree(
+    state: &AppState,
+    chat: &Chat,
+    children: &HashMap<&str, Vec<&Chat>>,
+    nested: &HashSet<&str>,
+) -> bool {
     if chat.archived || chat.is_system() || state.is_hidden_chat(&chat.id) {
         return false;
     }
-    let nested =
-        zeron_proto::tree_path(chat, &state.chats, &state.tasks, &state.task_steps).len() > 1;
-    !nested
-        && (plan_led_by(&state.tasks, &chat.id).is_some() || children.contains(chat.id.as_str()))
+    !nested.contains(chat.id.as_str())
+        && (plan_led_by(&state.tasks, &chat.id).is_some()
+            || children.contains_key(chat.id.as_str()))
 }
 
 pub(crate) fn index_rows(state: &AppState, now: DateTime<Utc>) -> IndexRows {
-    let parents: HashSet<&str> = state
-        .chats
+    let children = super::thread_tree::children_by_parent(state);
+    let nested: HashSet<&str> = children
         .iter()
-        .filter(|chat| !chat.archived)
-        .filter_map(|chat| {
-            let link = zeron_proto::thread_link(chat, &state.tasks, &state.task_steps)?;
-            matches!(link.kind, LinkKind::Delegated | LinkKind::OpenedFrom).then_some(link.parent)
-        })
-        .filter_map(|parent| {
-            state
-                .chats
-                .iter()
-                .find(|chat| chat.id == parent)
-                .map(|chat| chat.id.as_str())
+        .flat_map(|(parent, kids)| {
+            kids.iter()
+                .filter(move |kid| kid.id != *parent)
+                .map(|kid| kid.id.as_str())
         })
         .collect();
     let mut rows = IndexRows::default();
     for chat in &state.chats {
-        if !roots_a_tree(state, chat, &parents) {
+        if !roots_a_tree(state, chat, &children, &nested) {
             continue;
         }
         let nodes = tree_rows(state, &chat.id, false, now);
@@ -107,9 +104,9 @@ pub(crate) fn index_rows(state: &AppState, now: DateTime<Utc>) -> IndexRows {
             .map(|settle| settle.at);
         let done = match task {
             Some(task) => match task.completed_at {
-                Some(at) if is_today(at, now) => Some(at),
-                Some(_) => continue,
-                None => None,
+                Some(at) if !live && is_today(at, now) => Some(at),
+                Some(_) if !live => continue,
+                _ => None,
             },
             None => match settled_today {
                 Some(at) if is_today(at, now) => Some(at),
@@ -186,6 +183,8 @@ fn index_row(
         Status::Done
     } else if asker.is_some() || root_waits {
         Status::Waiting
+    } else if nodes[0].status == Status::Done && nodes.iter().any(|node| node.status.live()) {
+        Status::Running
     } else {
         nodes[0].status
     };
@@ -924,5 +923,87 @@ mod tests {
             .unwrap();
         assert_eq!((parent.agents, parent.nested), (2, 1));
         assert_eq!(parent.kind, Kind::Tree);
+    }
+
+    #[test]
+    fn a_finished_plan_whose_lead_still_runs_an_agent_stays_running() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        state.local_device_id = Some("mac".into());
+        let mut agent = chat("agent", now);
+        agent.created_by_chat_id = Some("lead".into());
+        state.chats = vec![chat("lead", now), agent, chat("quiet-lead", now)];
+        let task = |id: &str, lead: &str, done: DateTime<Utc>| -> zeron_proto::Task {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "title": id, "orderKey": id, "chatId": lead,
+                "mode": "orchestrated", "completedAt": done,
+            }))
+            .unwrap()
+        };
+        state.tasks = vec![
+            task("old-plan", "lead", now - chrono::Duration::days(3)),
+            task("today-plan", "quiet-lead", now),
+        ];
+        state.sessions = vec![
+            serde_json::from_value(serde_json::json!({
+                "chatId": "agent", "deviceId": "mac", "status": "working", "updatedAt": now,
+            }))
+            .unwrap(),
+        ];
+        let rows = index_rows(&state, now);
+        let running: Vec<&IndexRow> = rows.running.iter().collect();
+        assert_eq!(
+            running.len(),
+            1,
+            "{:?}",
+            running.iter().map(|r| &r.root).collect::<Vec<_>>()
+        );
+        assert_eq!(running[0].root, "lead");
+        assert_eq!(running[0].status, Status::Running);
+        let done: Vec<&str> = rows
+            .done_today
+            .iter()
+            .map(|row| row.root.as_str())
+            .collect();
+        assert_eq!(done, ["quiet-lead"]);
+    }
+
+    #[test]
+    fn only_a_local_live_main_chat_without_an_open_plan_can_add_one() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        state.local_device_id = Some("mac".into());
+        let mut remote = chat("remote", now);
+        remote.device_id = "pc".into();
+        let mut archived = chat("archived", now);
+        archived.archived = true;
+        let mut side = chat("side", now);
+        side.sidechat_source_chat_id = Some("plain".into());
+        state.chats = vec![
+            chat("plain", now),
+            remote,
+            archived,
+            side,
+            chat("planned", now),
+            chat("was-planned", now),
+        ];
+        let task = |id: &str, lead: &str, done: Option<DateTime<Utc>>| -> zeron_proto::Task {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "title": id, "orderKey": id, "chatId": lead,
+                "mode": "orchestrated", "completedAt": done,
+            }))
+            .unwrap()
+        };
+        state.tasks = vec![
+            task("open", "planned", None),
+            task("done", "was-planned", Some(now)),
+        ];
+        let can: Vec<&str> = state
+            .chats
+            .iter()
+            .filter(|chat| crate::tasks::can_add_plan(&state, chat))
+            .map(|chat| chat.id.as_str())
+            .collect();
+        assert_eq!(can, ["plain", "was-planned"]);
     }
 }

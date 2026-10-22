@@ -83,10 +83,10 @@ The list is fixed once the mission starts, and the Mission Control page shows it
 
 You do not need a task card to start a mission. On the New chat canvas, the **Mission Control** tab starts one from what you type: see [Start a new chat](zeron://docs/new-chat).
 
-In an open chat, press Shift+Tab in the composer, or click **Mission Control** under it, to turn the composer into a mission. Pick **plan.md** or **Steps only**, leave **Review plan first** on or turn it off, type the mission and click **Start mission**. The first line becomes the task's title and the rest its notes. Chats you mention in the text with **@** become the chats the lead reads, up to 5, as on the card; the lead's own chat is left out. A mission started from a composer has no **Steps** choice: the lead picks per step. Shift+Tab again goes back to the chat, and so does starting the mission. What happens next follows **In a chat, Mission Control** in [Settings > General](zeron://settings/general):
+In an open chat, press Shift+Tab in the composer, or click **Mission Control** under it, to turn the composer into a mission. Pick **plan.md** or **Steps only**, leave **Review plan first** on or turn it off, type the mission and click **Start mission**. The first line becomes the task's title and the rest its notes; a first line too long for a title is cut for the title, and the whole text goes to the notes. Chats you mention in the text with **@** become the chats the lead reads, up to 5, as on the card; past 5, a notice says the later ones were left out. The lead's own chat is left out. A mission started from a composer has no **Steps** choice: the lead picks per step. Shift+Tab again goes back to the chat, and so does starting the mission. What happens next follows **In a chat, Mission Control** in [Settings > General](zeron://settings/general):
 
 - **This chat leads**, the default: the chat becomes the mission's lead. It keeps its name and its agent, and the task with the lead's instructions arrives in it as a message, so the agent plans from the conversation you already had. If the agent is working, the message steers its turn instead of stopping it. The step threads show in the sidebar under this chat. A chat leads one unfinished mission at a time: while it still leads one, Zeron refuses a second and gives your text back.
-- **New mission reads this chat**: Zeron starts a new lead with the chat's agent, model, permissions and project, and this chat is the first of the chats the lead reads before it plans. The chat shows **Started mission** with the task's name. Click **Open** for its Mission Control page, or **Dismiss** to hide the notice.
+- **New mission reads this chat**: Zeron starts a new lead with the chat's agent, model, permissions and project, and this chat is the first of the chats the lead reads before it plans. The chat shows **Started mission** with the task's name until the mission is done or deleted. Click **Open** for its Mission Control page, or **Dismiss** to hide the notice.
 
 ## A mission's page
 
@@ -147,7 +147,7 @@ Thumbnails show under the overview once you click **Overview** to open it, and i
 
 The images go to the agent that does the work, the same way an image you attach in a chat does: the overview's images with the lead's first message (images added to the overview later go with the **Send to lead** message), and a step's images with the first message of the step's thread. An image added to a step whose thread has already started does not reach that thread; the edit card says so. The overview's images are the task's own, so images the task had before you started the mission show under the overview.
 
-When the lead rewrites the plan, a step that has not started keeps its images if the new plan has exactly one step with the same title. Otherwise its images move to the overview, up to 12; the lead is told which images moved, and which did not fit.
+When the lead rewrites the plan, a step that has not started keeps its images if the new plan has exactly one step with the same title. Otherwise its images move to the overview, up to 12, and the lead is told which images moved. A rewrite whose images would not fit on the overview is refused, so no image is lost.
 
 ## While the steps run
 
