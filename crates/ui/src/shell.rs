@@ -11668,8 +11668,14 @@ impl Shell {
                     cx,
                 )
             });
+        let mission = search_query
+            .is_none()
+            .then(|| spaces::SidebarMission::of(self.state.read(cx), &id))
+            .flatten()
+            .filter(|_| !nested);
         let lead_rollup = lead
             .as_ref()
+            .filter(|_| mission.is_none())
             .and_then(|fold| lead_rollup_label(fold, theme));
         let archived_muted = archived && search_query.is_none() && !selected && !corner_hovered;
         let project_icon = project_icon.map(|icon| {
@@ -11751,7 +11757,9 @@ impl Shell {
             })
         };
         let compact_status = compact.then(|| {
-            let glyph = if ring.is_some() {
+            let glyph = if let Some(mission) = &mission {
+                mission.ring(12.0, theme)
+            } else if ring.is_some() {
                 crate::composer::background::sidebar_ring_mark(0, theme).into_any_element()
             } else if working {
                 loaders::mini_glyph_spinner(
@@ -12095,6 +12103,7 @@ impl Shell {
             rename_input.is_some(),
             corner_hovered,
             &fade_key,
+            mission.as_ref().map(|mission| mission.task_id.clone()),
             cx,
         )
         .h(px(legacy_height))
@@ -12320,7 +12329,11 @@ impl Shell {
                                         .text_right()
                                         .text_size(crate::typography::ui_rems(11.0))
                                         .text_color(subline)
-                                        .child(compact_jump_label.unwrap_or(time_ago))
+                                        .child(
+                                            compact_jump_label
+                                                .or(mission.as_ref().map(|m| m.count()))
+                                                .unwrap_or(time_ago),
+                                        )
                                         .into_any_element()
                                 }),
                         )
@@ -12476,7 +12489,7 @@ impl Shell {
         let row_id = format!("chat-{id}");
         let fade_key = format!("{row_id}-hover");
         let now = Utc::now();
-        let (device, remote, queued, undelivered, expired, started_at, subagents) = {
+        let (device, remote, queued, undelivered, expired, started_at, subagents, asks, mission) = {
             let state = self.state.read(cx);
             let chat = state.chats.iter().find(|chat| chat.id == id);
             (
@@ -12491,6 +12504,10 @@ impl Shell {
                     .session_for(&id)
                     .and_then(|session| session.started_at),
                 state.running_subagents_for(&id, now),
+                nested && chat.is_some_and(|chat| spaces::step_needs_you(state, chat, status)),
+                (!nested)
+                    .then(|| spaces::SidebarMission::of(state, &id))
+                    .flatten(),
             )
         };
         let queued = queued && !undelivered;
@@ -12522,6 +12539,12 @@ impl Shell {
                     icons::LUCIDE_CIRCLE_DOT_DASHED,
                     theme.warning,
                 )
+            } else if asks {
+                (
+                    Some("asks you".into()),
+                    icons::LUCIDE_MESSAGE_CIRCLE_QUESTION,
+                    theme.warning,
+                )
             } else {
                 let (label, icon, color) = chat_status_tone(status, theme);
                 (work_label.map(SharedString::from).or(label), icon, color)
@@ -12538,6 +12561,7 @@ impl Shell {
             .map(|fold| self.lead_chevron(&row_id, &id, fold, hovered, 10.0, theme, cx));
         let lead_rollup = || {
             lead.as_ref()
+                .filter(|_| mission.is_none())
                 .and_then(|fold| lead_rollup_label(fold, theme))
         };
         let unsent = crate::draft_store::has_content(&id, cx) && !selected;
@@ -12746,6 +12770,7 @@ impl Shell {
                 rename_input.is_some(),
                 hovered,
                 &fade_key,
+                mission.as_ref().map(|mission| mission.task_id.clone()),
                 cx,
             )
             .when_some(hover_card, |el, card| el.child(card));
@@ -12763,6 +12788,11 @@ impl Shell {
                     .h_full()
                     .children(pin_action)
                     .child(settle_action.unwrap_or(archive_action))
+                    .into_any_element()
+            } else if let Some(mission) = &mission {
+                div()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .child(mission.mark(theme))
                     .into_any_element()
             } else {
                 div()
@@ -12866,6 +12896,8 @@ impl Shell {
                 .child(archive_action)
                 .children(settle_action)
                 .into_any_element()
+        } else if let Some(mission) = &mission {
+            mission.mark(theme)
         } else {
             status_el()
         };
@@ -13309,6 +13341,7 @@ impl Shell {
         has_rename: bool,
         corner_hovered: bool,
         fade_key: &str,
+        mission: Option<String>,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let select_id = id.to_string();
@@ -13362,6 +13395,8 @@ impl Shell {
                     // double-click edits the title in place.
                     if event.click_count() >= 2 && search_query_none {
                         this.open_rename_chat(select_id.clone(), cx);
+                    } else if let Some(task_id) = &mission {
+                        this.open_task_center(task_id.clone(), cx);
                     } else {
                         this.open_chat(select_id.clone(), cx);
                     }
