@@ -3737,9 +3737,13 @@ impl RpcService for EngineRpc {
                     )));
                 }
                 self.supervisor_gate(Some(&p.owner_chat_id), |s| s.start_missions, supervisor::START_OFF)?;
-                let p = match self.route_delegation(p)? {
-                    Ok(p) => p,
-                    Err(native) => return Ok(RpcReply::Value(native)),
+                let p = if self.doc_host.delegated_before(&p) {
+                    p
+                } else {
+                    match self.route_delegation(p)? {
+                        Ok(p) => p,
+                        Err(native) => return Ok(RpcReply::Value(native)),
+                    }
                 };
                 let view = self
                     .doc_host

@@ -302,6 +302,20 @@ fn owned_by<'a>(chat: &'a Chat, owner: &str) -> Option<&'a Delegation> {
         .filter(|d| d.delegated_by_chat_id == owner)
 }
 
+fn request_key(params: &DelegateTaskParams) -> Option<&str> {
+    params
+        .client_request_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+}
+
+fn requested_child<'a>(chats: &'a [Chat], owner: &str, key: &str) -> Option<&'a Chat> {
+    chats.iter().find(|chat| {
+        owned_by(chat, owner).is_some_and(|d| d.client_request_id.as_deref() == Some(key))
+    })
+}
+
 /// A session reads Idle before a fresh turn starts, so only an answer to the
 /// latest user entry (`reply`) ends a task.
 pub(super) fn child_outcome(
@@ -471,6 +485,16 @@ impl DocHost {
         Ok(config)
     }
 
+    /// A retried request names its first child, so it must not be routed again.
+    pub fn delegated_before(&self, params: &DelegateTaskParams) -> bool {
+        let (Some(workspace), Some(key)) = (self.workspace(), request_key(params)) else {
+            return false;
+        };
+        workspace
+            .read_chats()
+            .is_ok_and(|chats| requested_child(&chats, &params.owner_chat_id, key).is_some())
+    }
+
     pub(crate) fn child_owner(&self, chat_id: &str) -> Option<Chat> {
         let workspace = self.workspace()?;
         let owner = match workspace.chat(chat_id).ok()??.delegation {
@@ -612,17 +636,8 @@ impl DocHost {
         }
         let admitting = self.inner.delegation_lock.lock().await;
         let chats = workspace.read_chats()?;
-        let key = params
-            .client_request_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|key| !key.is_empty());
-        if let Some(key) = key
-            && let Some(existing) = chats.iter().find(|chat| {
-                owned_by(chat, &owner.id)
-                    .is_some_and(|d| d.client_request_id.as_deref() == Some(key))
-            })
-        {
+        let key = request_key(&params);
+        if let Some(existing) = key.and_then(|key| requested_child(&chats, &owner.id, key)) {
             return Ok(self.task_view(existing, &chats));
         }
         let depth = owner.delegation.as_ref().map_or(0, |d| d.depth) + 1;
