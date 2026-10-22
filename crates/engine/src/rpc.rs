@@ -1207,6 +1207,7 @@ pub struct EngineRpc {
     device_hub: Option<std::sync::Arc<crate::device_hub::DeviceHub>>,
     html_preview: std::sync::Arc<crate::html_render::PreviewHost>,
     starting_tasks: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    plan_writes: std::sync::Arc<std::sync::Mutex<()>>,
     engine_info: EngineInfo,
 }
 
@@ -1262,6 +1263,7 @@ impl EngineRpc {
             device_hub: None,
             html_preview: Default::default(),
             starting_tasks: Default::default(),
+            plan_writes: Default::default(),
             engine_info,
         }
     }

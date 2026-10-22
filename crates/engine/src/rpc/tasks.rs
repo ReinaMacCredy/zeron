@@ -373,6 +373,7 @@ impl EngineRpc {
 
     pub(super) fn update_task(&self, task_id: &str, patch: &TaskPatch) -> Result<(), RpcError> {
         let leads = patch.chat_id.is_some() || patch.mode.is_some() || patch.completed.is_some();
+        let _plans = leads.then(|| self.plan_writes());
         if patch.context.is_some() || leads {
             let task = self.task_or_refuse(task_id)?;
             if let Some(context) = &patch.context {
@@ -396,6 +397,13 @@ impl EngineRpc {
             true => Ok(()),
             false => Err(refused("Task no longer exists")),
         }
+    }
+
+    /// Held from a plan check to its write, so two calls cannot both pass the check.
+    fn plan_writes(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.plan_writes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn check_one_plan(&self, task: &Task, patch: &TaskPatch) -> Result<(), RpcError> {
@@ -761,6 +769,7 @@ impl EngineRpc {
         resources: Option<Vec<String>>,
         from_chat_id: Option<&str>,
     ) -> Result<Vec<String>, RpcError> {
+        let plans = self.plan_writes();
         let task = self.task_or_refuse(task_id)?;
         Self::check_lead(&task, from_chat_id, "writes its plan")?;
         let mode = (task.mode != TaskMode::Orchestrated).then_some(TaskMode::Orchestrated);
@@ -839,6 +848,7 @@ impl EngineRpc {
         self.workspace
             .plan_task_steps(task_id, &steps, &patch)
             .map_err(failed)?;
+        drop(plans);
         self.doc_host
             .supervisor_replanned(&task, &before, &steps, from_chat_id);
         Ok(moved)
