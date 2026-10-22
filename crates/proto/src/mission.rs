@@ -319,6 +319,35 @@ impl ApprovalState {
 
 pub const HELD_APPROVAL: &str = "Plan approved · can take back";
 
+pub const START_MISSION: &str = "Start mission";
+pub const REVIEW_PLAN_FIRST: &str = "Review plan first";
+pub const PLAN_DOC: &str = "plan.md";
+pub const STEPS_ONLY: &str = "Steps only";
+
+pub fn mission_placeholder(from_chat: bool) -> &'static str {
+    if from_chat {
+        "Turn this chat into a mission: what should the team build?"
+    } else {
+        "Describe the mission. A lead plans it and runs each step on its own thread."
+    }
+}
+
+pub fn mission_staged_error(images: usize, max: usize, other_file: Option<&str>) -> Option<String> {
+    if let Some(name) = other_file {
+        return Some(format!("A mission takes images and pasted text; remove {name}."));
+    }
+    (images > max).then(|| format!("A mission holds up to {max} images."))
+}
+
+/// Phone pastes are staged files with no mention, and a mission carries only images.
+pub fn mission_text(text: &str, pasted: &[String]) -> String {
+    std::iter::once(text.trim())
+        .chain(pasted.iter().map(|paste| paste.trim()))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 pub fn approval_state(
     row: &SupervisorIntervention,
     steps: &[TaskStep],
@@ -353,4 +382,22 @@ pub fn plan_approval(
         row.kind == InterventionKind::Approve && row.task_id.as_deref() == Some(task_id)
     })?;
     approval_state(row, steps, now)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_mission_names_the_file_it_cannot_take_before_the_image_cap() {
+        assert_eq!(mission_staged_error(12, 12, None), None);
+        assert_eq!(
+            mission_staged_error(13, 12, None).as_deref(),
+            Some("A mission holds up to 12 images.")
+        );
+        assert_eq!(
+            mission_staged_error(13, 12, Some("log.zip")).as_deref(),
+            Some("A mission takes images and pasted text; remove log.zip.")
+        );
+    }
 }

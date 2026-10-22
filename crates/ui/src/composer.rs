@@ -102,7 +102,7 @@ const MISSION_EXTRAS: motion::MotionSpec =
     motion::MotionSpec::new(280, motion::EASE).with_delay(60);
 const MISSION_SEND: motion::MotionSpec = motion::MotionSpec::new(280, motion::EASE_BOUNCE);
 const HOME_TAB_SLIDE: motion::MotionSpec = motion::MotionSpec::new(260, motion::EASE_BOUNCE);
-const START_MISSION_LABEL: &str = "Start mission";
+const START_MISSION_LABEL: &str = zeron_proto::mission::START_MISSION;
 
 struct MissionMotion {
     border: motion::Tween,
@@ -7754,13 +7754,7 @@ impl Composer {
         }
         let prediction = self.active_prediction(cx);
         let idle = if self.mission {
-            match self.bound_chat_id(cx) {
-                Some(_) => "Turn this chat into a mission: what should the team build?".into(),
-                None => {
-                    "Describe the mission. A lead plans it and runs each step on its own thread."
-                        .into()
-                }
-            }
+            zeron_proto::mission::mission_placeholder(self.bound_chat_id(cx).is_some()).into()
         } else if !self.side_chat
             && self.bound_chat_id(cx).is_none()
             && self.state.read(cx).no_project
@@ -11304,26 +11298,23 @@ impl Composer {
                 .selected_space_row()
                 .map(|space| space.id.clone()),
         };
-        if let Some(file) = self.staged().iter().find(|att| {
+        let file = self.staged().iter().find(|att| {
             att.image().is_none()
                 && zeron_proto::attachment_mentions::pasted_text_index_from_name(&att.name)
                     .is_none()
-        }) {
-            let message = format!(
-                "A mission takes images and pasted text; remove {}.",
-                file.name
-            );
-            crate::toast::error(cx, message);
-            return;
-        }
+        });
         let images = self
             .staged()
             .iter()
             .filter(|att| att.image().is_some())
             .count()
             + self.staged_appshots().len();
-        if images > zeron_doc::TASK_IMAGES_MAX {
-            crate::toast::error(cx, "A mission holds up to 12 images.");
+        if let Some(message) = zeron_proto::mission::mission_staged_error(
+            images,
+            zeron_doc::TASK_IMAGES_MAX,
+            file.map(|att| att.name.as_str()),
+        ) {
+            crate::toast::error(cx, message);
             return;
         }
         let key = self.current_key.clone();
@@ -13523,7 +13514,10 @@ impl Composer {
         let plan = crate::settings::widgets::segmented(
             theme,
             "composer-mission-plan",
-            &[(true, "plan.md"), (false, "Steps only")],
+            &[
+                (true, zeron_proto::mission::PLAN_DOC),
+                (false, zeron_proto::mission::STEPS_ONLY),
+            ],
             self.mission_plan_doc,
             move |plan_doc, _, cx| {
                 composer
@@ -13540,7 +13534,7 @@ impl Composer {
             .id("composer-mission-review")
             .debug_selector(|| "composer-mission-review".into())
             .role(Role::Switch)
-            .aria_label("Review plan first")
+            .aria_label(zeron_proto::mission::REVIEW_PLAN_FIRST)
             .aria_toggled(if review {
                 gpui::Toggled::True
             } else {
@@ -13565,7 +13559,7 @@ impl Composer {
                 review,
                 "composer-mission-review-switch",
             ))
-            .child("Review plan first")
+            .child(zeron_proto::mission::REVIEW_PLAN_FIRST)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.mission_review = !review;
                 cx.notify();
@@ -13641,7 +13635,7 @@ impl Composer {
         let theme = Theme::of(cx).clone();
         let blocked = self.send_blocked(cx);
         let (id, label) = if self.mission {
-            ("composer-start-mission", "Start mission")
+            ("composer-start-mission", START_MISSION_LABEL)
         } else {
             ("composer-send", "Send message")
         };

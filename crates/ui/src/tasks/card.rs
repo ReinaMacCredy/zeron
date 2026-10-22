@@ -1435,7 +1435,7 @@ impl TaskCard {
                         match &elsewhere {
                             Some(label) => label.clone().into(),
                             None if starting => "Starting…".into(),
-                            None => "Start mission".into(),
+                            None => zeron_proto::mission::START_MISSION.into(),
                         },
                         ready && !blocked,
                         theme,
@@ -1664,7 +1664,10 @@ impl TaskCard {
         let plan_mode = widgets::segmented(
             theme,
             "task-card-plan-mode",
-            &[(true, "plan.md"), (false, "Steps only")],
+            &[
+                (true, zeron_proto::mission::PLAN_DOC),
+                (false, zeron_proto::mission::STEPS_ONLY),
+            ],
             choice.plan_doc,
             move |plan_doc, _, cx| {
                 weak.update(cx, |card, cx| {

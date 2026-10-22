@@ -772,6 +772,41 @@ pub struct ProfileMenuLabels {
     pub retry: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MissionComposerLabels {
+    pub start: String,
+    pub review_plan_first: String,
+    pub plan_doc: String,
+    pub steps_only: String,
+    pub placeholder: String,
+}
+
+#[uniffi::export]
+pub fn mission_composer_labels(from_chat: bool) -> MissionComposerLabels {
+    use zeron_proto::mission as m;
+    MissionComposerLabels {
+        start: m::START_MISSION.into(),
+        review_plan_first: m::REVIEW_PLAN_FIRST.into(),
+        plan_doc: m::PLAN_DOC.into(),
+        steps_only: m::STEPS_ONLY.into(),
+        placeholder: m::mission_placeholder(from_chat).into(),
+    }
+}
+
+#[uniffi::export]
+pub fn mission_staged_error(images: u32, other_file: Option<String>) -> Option<String> {
+    zeron_proto::mission::mission_staged_error(
+        images as usize,
+        zeron_doc::TASK_IMAGES_MAX,
+        other_file.as_deref(),
+    )
+}
+
+#[uniffi::export]
+pub fn mission_text(text: String, pasted: Vec<String>) -> String {
+    zeron_proto::mission::mission_text(&text, &pasted)
+}
+
 #[uniffi::export]
 pub fn profile_menu_labels() -> ProfileMenuLabels {
     use zeron_proto::picker as p;

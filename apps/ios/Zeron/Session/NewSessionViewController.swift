@@ -56,6 +56,9 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     private var draft: NewSessionDraft
     private var models: [ModelChoice] = []
     private var invocationCatalogs: [String: InvocationCatalog] = [:]
+    private var mission = false
+    private var missionReview = true
+    private var missionPlanDoc = true
 
     /// Embedded in the iPad split's main column (no sheet chrome).
     private let embedded: Bool
@@ -135,9 +138,12 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         view.addSubview(heroStack)
 
         composer.translatesAutoresizingMaskIntoConstraints = false
-        composer.placeholder = "Describe the task"
         composer.chipsAlwaysVisible = true
-        composer.onChipTap = { _, _ in }
+        composer.onChipTap = { [weak self] id, _ in
+            guard let self, id == "mission" else { return }
+            self.mission.toggle()
+            self.refreshChips()
+        }
         composer.mentionSearch = { [weak self] q in
             guard let self, let p = self.project else { return [] }
             return await self.app.searchFiles(deviceId: p.device, spaceId: p.id, query: q)
@@ -155,7 +161,12 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             return found
         }
         composer.onSend = { [weak self] text, images, _ in
-            self?.create(text: text, images: images) ?? false ? .sent : .kept
+            guard let self else { return .kept }
+            if self.mission {
+                self.startMission(text: text, images: images)
+                return .kept
+            }
+            return self.create(text: text, images: images) ? .sent : .kept
         }
         view.addSubview(composer)
         heroStack.leadingAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 24).isActive = true
@@ -275,6 +286,12 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         if let efforts = model?.efforts, !efforts.isEmpty {
             chips.append(ComposerChip(id: "effort", title: (draft.effort ?? efforts[efforts.count / 2]).capitalized, symbol: "gauge.with.dots.needle.67percent"))
         }
+        let labels = missionComposerLabels(fromChat: false)
+        chips.append(ComposerChip(id: "mission", title: labels.start, symbol: "target", tint: mission ? Palette.accent : nil))
+        if mission {
+            chips.append(ComposerChip(id: "mission-plan", title: missionPlanDoc ? labels.planDoc : labels.stepsOnly, symbol: missionReview ? "checklist" : "doc.text"))
+        }
+        composer.placeholder = mission ? labels.placeholder : "Describe the task"
         composer.chips = chips
         composer.chipMenus = [
             "project": { [weak self] in self?.projectMenu() },
@@ -282,6 +299,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             "branch": { [weak self] in self?.branchMenu() },
             "model": { [weak self] in self?.modelMenu() },
             "effort": { [weak self] in self?.effortMenu() },
+            "mission-plan": { [weak self] in self?.missionPlanMenu() },
         ]
         mark.image = BrandMarks.image(for: draft.harness, side: 34)
     }
@@ -412,13 +430,57 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         })
     }
 
+    private func missionPlanMenu() -> UIMenu {
+        let labels = missionComposerLabels(fromChat: false)
+        return UIMenu(title: labels.start, children: [
+            UIMenu(options: .displayInline, children: [(true, labels.planDoc), (false, labels.stepsOnly)].map { planDoc, title in
+                UIAction(title: title, state: planDoc == missionPlanDoc ? .on : .off) { [weak self] _ in
+                    self?.missionPlanDoc = planDoc
+                    self?.refreshChips()
+                }
+            }),
+            UIAction(title: labels.reviewPlanFirst, state: missionReview ? .on : .off) { [weak self] _ in
+                self?.missionReview.toggle()
+                self?.refreshChips()
+            },
+        ])
+    }
+
+    private func startMission(text: String, images: [StagedImage]) {
+        let device = deviceId
+        let pictures = images.filter(\.isImage)
+        if let error = missionStagedError(images: UInt32(pictures.count), otherFile: nil) {
+            return Toast.show(error, in: view.window)
+        }
+        guard !device.isEmpty else { return showCreateFailed() }
+        app.lastDraft = draft
+        let brief = missionText(text: text, pasted: images.filter { !$0.isImage }.map { String(decoding: $0.data, as: UTF8.self) })
+        let options = MissionOptions(approvePlan: missionReview, sameAgents: false, planDoc: missionPlanDoc)
+        let host = (presentingViewController as? UITabBarController)?.selectedViewController ?? self
+        Task { @MainActor [weak self] in
+            guard let self, await MissionStart.run(app: self.app, deviceId: device, text: brief, spaceId: self.project?.id, images: pictures, config: self.draft.config, options: options, from: host) != nil else { return }
+            self.created = true
+            self.app.newSessionText = ""
+            self.app.newSessionImages = []
+            self.composer.text = ""
+            self.composer.images = []
+            self.mission = false
+            self.refreshChips()
+            if !self.embedded { self.dismiss(animated: true) }
+        }
+    }
+
+    private func showCreateFailed() {
+        let alert = UIAlertController(title: "Couldn't start the session", message: "Choose a project or a host that can run it.", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
+    }
+
     /// False when the session couldn't be created (the prompt stays put).
     private func create(text: String, images: [StagedImage]) -> Bool {
         app.lastDraft = draft
         guard let chatId = app.createSession(draft: draft, text: text, images: images) else {
-            let alert = UIAlertController(title: "Couldn't start the session", message: "Choose a project or a host that can run it.", preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "OK", style: .default))
-            present(alert, animated: true)
+            showCreateFailed()
             return false
         }
         created = true

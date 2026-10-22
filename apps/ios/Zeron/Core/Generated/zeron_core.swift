@@ -9657,6 +9657,72 @@ public func FfiConverterTypeLiveStatus_lower(_ value: LiveStatus) -> RustBuffer 
 }
 
 
+public struct MissionComposerLabels: Equatable, Hashable {
+    public var start: String
+    public var reviewPlanFirst: String
+    public var planDoc: String
+    public var stepsOnly: String
+    public var placeholder: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(start: String, reviewPlanFirst: String, planDoc: String, stepsOnly: String, placeholder: String) {
+        self.start = start
+        self.reviewPlanFirst = reviewPlanFirst
+        self.planDoc = planDoc
+        self.stepsOnly = stepsOnly
+        self.placeholder = placeholder
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MissionComposerLabels: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMissionComposerLabels: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MissionComposerLabels {
+        return
+            try MissionComposerLabels(
+                start: FfiConverterString.read(from: &buf), 
+                reviewPlanFirst: FfiConverterString.read(from: &buf), 
+                planDoc: FfiConverterString.read(from: &buf), 
+                stepsOnly: FfiConverterString.read(from: &buf), 
+                placeholder: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MissionComposerLabels, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.start, into: &buf)
+        FfiConverterString.write(value.reviewPlanFirst, into: &buf)
+        FfiConverterString.write(value.planDoc, into: &buf)
+        FfiConverterString.write(value.stepsOnly, into: &buf)
+        FfiConverterString.write(value.placeholder, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMissionComposerLabels_lift(_ buf: RustBuffer) throws -> MissionComposerLabels {
+    return try FfiConverterTypeMissionComposerLabels.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMissionComposerLabels_lower(_ value: MissionComposerLabels) -> RustBuffer {
+    return FfiConverterTypeMissionComposerLabels.lower(value)
+}
+
+
 public struct MissionOptions: Equatable, Hashable {
     public var approvePlan: Bool
     public var sameAgents: Bool
@@ -23090,6 +23156,32 @@ public func handoffLabels() -> HandoffLabels  {
     )
 })
 }
+public func missionComposerLabels(fromChat: Bool) -> MissionComposerLabels  {
+    return try!  FfiConverterTypeMissionComposerLabels_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_mission_composer_labels(
+        FfiConverterBool.lower(fromChat),uniffiCallStatus
+    )
+})
+}
+public func missionStagedError(images: UInt32, otherFile: String?) -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_mission_staged_error(
+        FfiConverterUInt32.lower(images),
+        FfiConverterOptionString.lower(otherFile),uniffiCallStatus
+    )
+})
+}
+public func missionText(text: String, pasted: [String]) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_mission_text(
+        FfiConverterString.lower(text),
+        FfiConverterSequenceString.lower(pasted),uniffiCallStatus
+    )
+})
+}
 public func newSidechatLabel() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
         uniffiCallStatus in
@@ -23418,6 +23510,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_handoff_labels() != 17516) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_mission_composer_labels() != 37363) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_mission_staged_error() != 33724) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_mission_text() != 54320) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_new_sidechat_label() != 39414) {
