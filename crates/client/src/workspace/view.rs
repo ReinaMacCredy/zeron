@@ -101,6 +101,10 @@ pub struct SessionRow {
     /// Oldest unadopted send from this device, if any.
     pub send_state: Option<SendState>,
     pub parent_chat_id: Option<String>,
+    pub sidechat_of: Option<String>,
+    /// Fixed 24 h from creation; an expired sidechat takes no more sends.
+    pub sidechat_expired: bool,
+    pub sidechats: Vec<String>,
     /// Sync room generation (2 = chat2; 1 = legacy, not dialable).
     pub room_gen: u32,
 }
@@ -414,6 +418,9 @@ fn hash_row(row: &SessionRow) -> u64 {
     }
     row.send_state.hash(&mut h);
     row.parent_chat_id.hash(&mut h);
+    row.sidechat_of.hash(&mut h);
+    row.sidechat_expired.hash(&mut h);
+    row.sidechats.hash(&mut h);
     row.room_gen.hash(&mut h);
     h.finish()
 }
@@ -425,6 +432,7 @@ struct RowContext<'a> {
     sessions: HashMap<&'a str, &'a Session>,
     pinned: HashSet<&'a str>,
     section_of: HashMap<&'a str, &'a str>,
+    sidechats: HashMap<&'a str, Vec<&'a Chat>>,
 }
 
 fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<SessionRow> {
@@ -511,6 +519,13 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         pull_request: change_request_for_chat(chat, cx.change_requests).cloned(),
         send_state,
         parent_chat_id: chat.created_by_chat_id.clone(),
+        sidechat_of: chat.sidechat_source_chat_id.clone(),
+        sidechat_expired: chat.sidechat_expired(cx.now),
+        sidechats: rc
+            .sidechats
+            .get(chat.id.as_str())
+            .map(|list| list.iter().map(|c| c.id.clone()).collect())
+            .unwrap_or_default(),
         room_gen: chat.room_gen.unwrap_or(1),
     };
     row.revision = hash_row(&row);
@@ -522,6 +537,13 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         return previous.clone();
     }
     Arc::new(row)
+}
+
+/// The host mints a sidechat when the btw sheet opens; it lists only once used.
+fn unstarted_sidechat(chat: &Chat, cx: &DeriveContext<'_>) -> bool {
+    chat.sidechat_source_chat_id.is_some()
+        && chat.last_message_at.is_none()
+        && !cx.send_states.contains_key(&chat.id)
 }
 
 /// Build the whole snapshot. Pure given its inputs.
@@ -550,6 +572,18 @@ pub(crate) fn derive(
             .collect(),
         pinned: pinned_order.iter().map(String::as_str).collect(),
         section_of,
+        sidechats: {
+            let mut by_source: HashMap<&str, Vec<&Chat>> = HashMap::new();
+            for chat in &state.chats {
+                if let Some(source) = chat.live_sidechat_source(cx.now) {
+                    by_source.entry(source).or_default().push(chat);
+                }
+            }
+            for list in by_source.values_mut() {
+                list.sort_by_key(|c| c.created_at);
+            }
+            by_source
+        },
     };
 
     let rows: HashMap<String, Arc<SessionRow>> = state
@@ -563,6 +597,7 @@ pub(crate) fn derive(
         .chats
         .iter()
         .filter(|c| !c.archived && c.is_top_level())
+        .filter(|c| !unstarted_sidechat(c, cx))
         .filter(|c| {
             c.space_id
                 .as_deref()

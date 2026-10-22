@@ -464,6 +464,12 @@ impl Chat {
             && now.signed_duration_since(self.created_at) >= chrono::Duration::hours(24)
     }
 
+    pub fn live_sidechat_source(&self, now: DateTime<Utc>) -> Option<&str> {
+        self.sidechat_source_chat_id
+            .as_deref()
+            .filter(|_| !self.archived && !self.sidechat_expired(now))
+    }
+
     /// A session the user sees in chat lists: neither a delegated child nor a
     /// hidden system chat.
     pub fn is_top_level(&self) -> bool {

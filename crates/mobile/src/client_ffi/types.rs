@@ -508,6 +508,9 @@ pub struct SessionRow {
     /// Oldest unadopted send from this device (open sessions only).
     pub send_state: Option<SendState>,
     pub parent_chat_id: Option<String>,
+    pub sidechat_of: Option<String>,
+    pub sidechat_expired: bool,
+    pub sidechats: Vec<String>,
     /// 2 = chat2; 1 = legacy (not dialable).
     pub room_gen: u32,
 }
@@ -549,6 +552,9 @@ impl From<&zc::SessionRow> for SessionRow {
             pull_request: r.pull_request.as_ref().map(PullRequest::from),
             send_state: r.send_state.map(Into::into),
             parent_chat_id: r.parent_chat_id.clone(),
+            sidechat_of: r.sidechat_of.clone(),
+            sidechat_expired: r.sidechat_expired,
+            sidechats: r.sidechats.clone(),
             room_gen: r.room_gen,
         }
     }

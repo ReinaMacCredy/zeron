@@ -2820,11 +2820,7 @@ impl AppState {
         let mut sidechats: Vec<&Chat> = self
             .chats
             .iter()
-            .filter(|c| {
-                c.sidechat_source_chat_id.as_deref() == Some(chat_id)
-                    && !c.archived
-                    && !c.sidechat_expired(now)
-            })
+            .filter(|c| c.live_sidechat_source(now) == Some(chat_id))
             .collect();
         sidechats.sort_by_key(|c| c.created_at);
         sidechats
