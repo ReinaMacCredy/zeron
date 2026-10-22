@@ -43,7 +43,7 @@ While a call is live, the rail button turns into an animated orb. Click it to br
 
 ## Voice settings
 
-- **Codex voice device** picks which of your devices runs Codex for the call. The audio goes from this device straight to OpenAI's voice service, not through the device you pick. You cannot change it during a call.
+- **Codex voice device** picks which of your devices runs Codex for the call. The audio goes from this device straight to Codex's voice service, not through the device you pick. You cannot change it during a call.
 - **Codex voice style** picks the voice, or **Codex default**. The list offers **Juniper**, **Maple**, **Spruce**, **Ember**, **Vale**, **Breeze**, **Arbor**, **Sol**, and **Cove**; when a call reports its own list of voices, the menu shows that list instead. A change applies to your next voice session.
 
 A call plays a short chime when it starts and when it ends. You can also call Codex from your phone; see [Zeron on iPhone](zeron://docs/mobile).
