@@ -7334,6 +7334,7 @@ public func FfiConverterTypeDeviceView_lower(_ value: DeviceView) -> RustBuffer 
 
 
 public struct EstimateLine: Equatable, Hashable {
+    public var stepId: String
     public var title: String
     public var role: String?
     public var runsOn: String
@@ -7342,7 +7343,8 @@ public struct EstimateLine: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(title: String, role: String?, runsOn: String, multiplier: String?, fallback: String?) {
+    public init(stepId: String, title: String, role: String?, runsOn: String, multiplier: String?, fallback: String?) {
+        self.stepId = stepId
         self.title = title
         self.role = role
         self.runsOn = runsOn
@@ -7366,6 +7368,7 @@ public struct FfiConverterTypeEstimateLine: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EstimateLine {
         return
             try EstimateLine(
+                stepId: FfiConverterString.read(from: &buf), 
                 title: FfiConverterString.read(from: &buf), 
                 role: FfiConverterOptionString.read(from: &buf), 
                 runsOn: FfiConverterString.read(from: &buf), 
@@ -7375,6 +7378,7 @@ public struct FfiConverterTypeEstimateLine: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: EstimateLine, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.stepId, into: &buf)
         FfiConverterString.write(value.title, into: &buf)
         FfiConverterOptionString.write(value.role, into: &buf)
         FfiConverterString.write(value.runsOn, into: &buf)

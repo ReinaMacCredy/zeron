@@ -527,6 +527,7 @@ pub struct Brief {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct EstimateLine {
+    pub step_id: String,
     pub title: String,
     pub role: Option<String>,
     pub runs_on: String,
@@ -871,6 +872,7 @@ impl CoreClient {
                         .lines
                         .into_iter()
                         .map(|l| EstimateLine {
+                            step_id: l.step_id,
                             title: l.title,
                             role: l.role,
                             runs_on: l.runs_on,

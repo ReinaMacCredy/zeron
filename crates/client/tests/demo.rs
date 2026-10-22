@@ -848,6 +848,7 @@ fn plan_estimate_prices_children_against_the_lead() {
     assert!(estimate.lines[0].runs_on.starts_with("Codex"));
     let validator = &estimate.lines[2];
     assert_eq!(validator.role.as_deref(), Some("validator"));
+    assert_eq!(validator.step_id, "task-ios-install-s3");
     assert_eq!(validator.multiplier.as_deref(), Some("0.6x"));
     assert!(
         validator

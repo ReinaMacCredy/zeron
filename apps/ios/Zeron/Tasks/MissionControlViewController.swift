@@ -193,6 +193,7 @@ final class MissionControlViewController: UIViewController, UICollectionViewDele
             return
         }
         self.detail = detail
+        refreshEstimate(detail)
         let task = detail.row
         var snap = NSDiffableDataSourceSnapshot<String, Row>()
         snap.appendSections([" header"])
@@ -222,11 +223,11 @@ final class MissionControlViewController: UIViewController, UICollectionViewDele
                     glyph: .symbol("doc.text")
                 ))
             }
+            rows += costRow
             if !detail.plan.isEmpty {
                 plan.show(detail.plan)
                 rows.append(Row(id: "plan-text", title: ""))
             }
-            rows += estimateRows(detail)
             if ready {
                 rows.append(Row(id: "approve", title: draft.count > 0 ? "Approve and run with \(changes)" : "Approve and run", glyph: .symbol("play.fill"), tint: Palette.accent, action: true))
             }
@@ -240,10 +241,12 @@ final class MissionControlViewController: UIViewController, UICollectionViewDele
                 var sub = [TaskGlyph.word(step.status)]
                 if let question = step.question { sub.append(question) }
                 if draft.edited[step.id] != nil { sub.append("Edited") }
+                let line = estimate?.lines.first { $0.stepId == step.id }
+                if let line { sub += [line.runsOn, line.multiplier].compactMap { $0 } }
                 return Row(
                     id: "step:\(step.id)",
                     title: "\(step.label) · \(step.title)",
-                    subtitle: sub.joined(separator: " · "),
+                    subtitle: ([sub.joined(separator: " · ")] + [line?.fallback].compactMap { $0 }).joined(separator: "\n"),
                     glyph: .step(step.status),
                     brand: step.brand,
                     editable: step.status == .planned
@@ -281,7 +284,7 @@ final class MissionControlViewController: UIViewController, UICollectionViewDele
         }
     }
 
-    private func estimateRows(_ detail: TaskDetail) -> [Row] {
+    private func refreshEstimate(_ detail: TaskDetail) {
         let key = detail.steps.map { "\($0.id)=\($0.status)" }.joined(separator: ",")
         if key != estimateKey, let client = app.client {
             estimateKey = key
@@ -293,24 +296,17 @@ final class MissionControlViewController: UIViewController, UICollectionViewDele
                 self.reload()
             }
         }
+    }
+
+    private var costRow: [Row] {
         guard let estimate, !estimate.lines.isEmpty else { return [] }
-        var rows = estimate.lines.enumerated().map { ix, line in
-            Row(
-                id: "est:\(ix)",
-                title: line.title,
-                subtitle: ([line.role, line.runsOn, line.multiplier].compactMap { $0 } + [line.fallback].compactMap { $0 }).joined(separator: " · "),
-                glyph: .symbol(line.fallback == nil ? "cpu" : "exclamationmark.triangle"),
-                tint: line.fallback == nil ? Palette.text : Palette.warning
-            )
-        }
-        rows.append(Row(
+        return [Row(
             id: "est-cost",
             title: "\(estimate.cost) \(estimate.baseline)",
             subtitle: ([estimate.mix.joined(separator: ", ")] + [estimate.raised].compactMap { $0 }).joined(separator: "\n"),
             glyph: .symbol("gauge.with.dots.needle.33percent"),
             tint: estimate.raised == nil ? Palette.text : Palette.warning
-        ))
-        return rows
+        )]
     }
 
     private var changes: String { draft.count == 1 ? "1 change" : "\(draft.count) changes" }

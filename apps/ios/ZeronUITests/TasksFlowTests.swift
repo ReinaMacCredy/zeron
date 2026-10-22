@@ -23,16 +23,16 @@ final class TasksFlowTests: XCTestCase {
         app.cells[id].firstMatch
     }
 
-    private func scrollTo(_ element: XCUIElement, in list: XCUIElement) {
+    private func scrollTo(_ element: XCUIElement, in list: XCUIElement, back: Bool = false) {
         for _ in 0..<8 where !(element.exists && element.isHittable) {
-            list.swipeUp()
+            if back { list.swipeDown() } else { list.swipeUp() }
         }
     }
 
     func testApproveAndRun() {
         let app = launch("tasks:mission:task-ios-install")
         let approve = cell(app, "mc-approve")
-        XCTAssertTrue(approve.waitForExistence(timeout: 15))
+        XCTAssertTrue(cell(app, "mc-plan").waitForExistence(timeout: 15))
         XCTAssertTrue(app.descendants(matching: .any)["plan-markdown"].waitForExistence(timeout: 5))
         snapshot(app, "mission-plan-ready")
         let cost = cell(app, "mc-est-cost")
@@ -40,7 +40,13 @@ final class TasksFlowTests: XCTestCase {
         XCTAssertTrue(cost.waitForExistence(timeout: 10))
         XCTAssertTrue(cost.label.contains("Relative cost 3.2x"))
         snapshot(app, "mission-plan-estimate")
-        scrollTo(approve, in: app.collectionViews["mission-control"])
+        let validator = cell(app, "mc-step:task-ios-install-s3")
+        scrollTo(validator, in: app.collectionViews["mission-control"])
+        XCTAssertTrue(validator.label.contains("0.6x"))
+        XCTAssertTrue(validator.label.contains("Codex out of quota"))
+        snapshot(app, "mission-step-estimates")
+        scrollTo(approve, in: app.collectionViews["mission-control"], back: true)
+        XCTAssertTrue(approve.waitForExistence(timeout: 5))
         approve.tap()
         XCTAssertTrue(approve.waitForNonExistence(timeout: 10))
         snapshot(app, "mission-approved")

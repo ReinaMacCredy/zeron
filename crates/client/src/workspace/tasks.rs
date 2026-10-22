@@ -803,6 +803,7 @@ pub(crate) fn brief(
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EstimateLine {
+    pub step_id: String,
     pub title: String,
     pub role: Option<String>,
     pub runs_on: String,
@@ -884,9 +885,11 @@ pub(crate) fn plan_estimate(
         cost: format!("Relative cost {}", rp::multiplier_text(totals.total)),
         baseline: format!("vs {count}.0x if all ran on the lead's {lead_label}"),
         raised,
-        lines: lines
-            .into_iter()
-            .map(|line| EstimateLine {
+        lines: steps
+            .iter()
+            .zip(lines)
+            .map(|(step, line)| EstimateLine {
+                step_id: step.id.clone(),
                 runs_on: match (&line.target, line.agent_picks) {
                     (Some(target), true) => format!(
                         "agent picks · {}",
