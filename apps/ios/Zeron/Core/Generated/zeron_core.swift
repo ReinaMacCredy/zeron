@@ -1124,6 +1124,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func movePin(chatId: String, after: String?, before: String?) throws 
     
+    func moveSection(sectionId: String, after: String?, before: String?) throws 
+    
     func needsYou()  -> [NeedsYouEntry]
     
     /**
@@ -1209,6 +1211,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func sessionRow(chatId: String)  -> SessionRow?
     
+    func setActiveFirst(on: Bool) 
+    
     /**
      * OS network path: `false` only for a definitive "unsatisfied".
      */
@@ -1217,6 +1221,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func setSectionCollapsed(sectionId: String, collapsed: Bool) throws 
     
     func setSessionConfig(chatId: String, config: ChatConfig) throws 
+    
+    func setSessionSettled(chatId: String, settled: Bool) throws 
     
     /**
      * Stop all background work (sign-out). Snapshots stay readable.
@@ -1710,6 +1716,17 @@ open func movePin(chatId: String, after: String?, before: String?)throws   {try 
 }
 }
     
+open func moveSection(sectionId: String, after: String?, before: String?)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_move_section(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(sectionId),
+        FfiConverterOptionString.lower(after),
+        FfiConverterOptionString.lower(before),uniffiCallStatus
+    )
+}
+}
+    
 open func needsYou() -> [NeedsYouEntry]  {
     return try!  FfiConverterSequenceTypeNeedsYouEntry.lift(try! rustCall() {
         uniffiCallStatus in
@@ -1989,6 +2006,15 @@ open func sessionRow(chatId: String) -> SessionRow?  {
 })
 }
     
+open func setActiveFirst(on: Bool)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_set_active_first(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(on),uniffiCallStatus
+    )
+}
+}
+    
     /**
      * OS network path: `false` only for a definitive "unsatisfied".
      */
@@ -2017,6 +2043,16 @@ open func setSessionConfig(chatId: String, config: ChatConfig)throws   {try rust
             self.uniffiCloneHandle(),
         FfiConverterString.lower(chatId),
         FfiConverterTypeChatConfig_lower(config),uniffiCallStatus
+    )
+}
+}
+    
+open func setSessionSettled(chatId: String, settled: Bool)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_set_session_settled(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(chatId),
+        FfiConverterBool.lower(settled),uniffiCallStatus
     )
 }
 }
@@ -7702,6 +7738,64 @@ public func FfiConverterTypeFrameImage_lower(_ value: FrameImage) -> RustBuffer 
 }
 
 
+public struct FrontGroup: Equatable, Hashable {
+    public var id: String
+    public var name: String
+    public var sessions: [SessionRow]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String, sessions: [SessionRow]) {
+        self.id = id
+        self.name = name
+        self.sessions = sessions
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FrontGroup: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFrontGroup: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FrontGroup {
+        return
+            try FrontGroup(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                sessions: FfiConverterSequenceTypeSessionRow.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FrontGroup, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterSequenceTypeSessionRow.write(value.sessions, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFrontGroup_lift(_ buf: RustBuffer) throws -> FrontGroup {
+    return try FfiConverterTypeFrontGroup.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFrontGroup_lower(_ value: FrontGroup) -> RustBuffer {
+    return FfiConverterTypeFrontGroup.lower(value)
+}
+
+
 /**
  * The Threads page — the desktop sidebar order.
  */
@@ -7715,9 +7809,21 @@ public struct FrontPage: Equatable, Hashable {
      */
     public var sections: [SectionView]
     /**
-     * Everything else, by recency.
+     * Everything else unsettled, in Inbox order (Active first when set).
      */
     public var recent: [SessionRow]
+    /**
+     * `recent` by project, the projectless Chats group first.
+     */
+    public var groups: [FrontGroup]
+    /**
+     * The Settled shelf, newest settle first.
+     */
+    public var settled: [SessionRow]
+    /**
+     * Step threads and agent-opened chats, by the lead or creator they draw under.
+     */
+    public var nested: [String: [SessionRow]]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -7729,11 +7835,23 @@ public struct FrontPage: Equatable, Hashable {
          * User sections ("folders"), each in recency order.
          */sections: [SectionView], 
         /**
-         * Everything else, by recency.
-         */recent: [SessionRow]) {
+         * Everything else unsettled, in Inbox order (Active first when set).
+         */recent: [SessionRow], 
+        /**
+         * `recent` by project, the projectless Chats group first.
+         */groups: [FrontGroup], 
+        /**
+         * The Settled shelf, newest settle first.
+         */settled: [SessionRow], 
+        /**
+         * Step threads and agent-opened chats, by the lead or creator they draw under.
+         */nested: [String: [SessionRow]]) {
         self.pinned = pinned
         self.sections = sections
         self.recent = recent
+        self.groups = groups
+        self.settled = settled
+        self.nested = nested
     }
 
     
@@ -7754,7 +7872,10 @@ public struct FfiConverterTypeFrontPage: FfiConverterRustBuffer {
             try FrontPage(
                 pinned: FfiConverterSequenceTypeSessionRow.read(from: &buf), 
                 sections: FfiConverterSequenceTypeSectionView.read(from: &buf), 
-                recent: FfiConverterSequenceTypeSessionRow.read(from: &buf)
+                recent: FfiConverterSequenceTypeSessionRow.read(from: &buf), 
+                groups: FfiConverterSequenceTypeFrontGroup.read(from: &buf), 
+                settled: FfiConverterSequenceTypeSessionRow.read(from: &buf), 
+                nested: FfiConverterDictionaryStringSequenceTypeSessionRow.read(from: &buf)
         )
     }
 
@@ -7762,6 +7883,9 @@ public struct FfiConverterTypeFrontPage: FfiConverterRustBuffer {
         FfiConverterSequenceTypeSessionRow.write(value.pinned, into: &buf)
         FfiConverterSequenceTypeSectionView.write(value.sections, into: &buf)
         FfiConverterSequenceTypeSessionRow.write(value.recent, into: &buf)
+        FfiConverterSequenceTypeFrontGroup.write(value.groups, into: &buf)
+        FfiConverterSequenceTypeSessionRow.write(value.settled, into: &buf)
+        FfiConverterDictionaryStringSequenceTypeSessionRow.write(value.nested, into: &buf)
     }
 }
 
@@ -10640,6 +10764,10 @@ public struct SessionRow: Equatable, Hashable {
     public var sendState: SendState?
     public var parentChatId: String?
     /**
+     * On the Settled shelf (its host's `settle_after_days`, or a Settle).
+     */
+    public var settled: Bool
+    /**
      * 2 = chat2; 1 = legacy (not dialable).
      */
     public var roomGen: UInt32
@@ -10678,6 +10806,9 @@ public struct SessionRow: Equatable, Hashable {
          * Oldest unadopted send from this device (open sessions only).
          */sendState: SendState?, parentChatId: String?, 
         /**
+         * On the Settled shelf (its host's `settle_after_days`, or a Settle).
+         */settled: Bool, 
+        /**
          * 2 = chat2; 1 = legacy (not dialable).
          */roomGen: UInt32) {
         self.id = id
@@ -10709,6 +10840,7 @@ public struct SessionRow: Equatable, Hashable {
         self.pullRequest = pullRequest
         self.sendState = sendState
         self.parentChatId = parentChatId
+        self.settled = settled
         self.roomGen = roomGen
     }
 
@@ -10757,6 +10889,7 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
                 pullRequest: FfiConverterOptionTypePullRequest.read(from: &buf), 
                 sendState: FfiConverterOptionTypeSendState.read(from: &buf), 
                 parentChatId: FfiConverterOptionString.read(from: &buf), 
+                settled: FfiConverterBool.read(from: &buf), 
                 roomGen: FfiConverterUInt32.read(from: &buf)
         )
     }
@@ -10791,6 +10924,7 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
         FfiConverterOptionTypePullRequest.write(value.pullRequest, into: &buf)
         FfiConverterOptionTypeSendState.write(value.sendState, into: &buf)
         FfiConverterOptionString.write(value.parentChatId, into: &buf)
+        FfiConverterBool.write(value.settled, into: &buf)
         FfiConverterUInt32.write(value.roomGen, into: &buf)
     }
 }
@@ -19211,6 +19345,31 @@ fileprivate struct FfiConverterSequenceTypeFolderEntry: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeFrontGroup: FfiConverterRustBuffer {
+    typealias SwiftType = [FrontGroup]
+
+    public static func write(_ value: [FrontGroup], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFrontGroup.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FrontGroup] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FrontGroup]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFrontGroup.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeGlyphPrim: FfiConverterRustBuffer {
     typealias SwiftType = [GlyphPrim]
 
@@ -20058,6 +20217,32 @@ fileprivate struct FfiConverterDictionaryStringString: FfiConverterRustBuffer {
         return dict
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterDictionaryStringSequenceTypeSessionRow: FfiConverterRustBuffer {
+    public static func write(_ value: [String: [SessionRow]], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for (key, value) in value {
+            FfiConverterString.write(key, into: &buf)
+            FfiConverterSequenceTypeSessionRow.write(value, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String: [SessionRow]] {
+        let len: Int32 = try readInt(&buf)
+        var dict = [String: [SessionRow]]()
+        dict.reserveCapacity(Int(len))
+        for _ in 0..<len {
+            let key = try FfiConverterString.read(from: &buf)
+            let value = try FfiConverterSequenceTypeSessionRow.read(from: &buf)
+            dict[key] = value
+        }
+        return dict
+    }
+}
 private let UNIFFI_RUST_FUTURE_POLL_READY: Int8 = 0
 private let UNIFFI_RUST_FUTURE_POLL_WAKE: Int8 = 1
 
@@ -20630,6 +20815,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_move_pin() != 26081) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_move_section() != 7279) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_needs_you() != 27106) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -20699,6 +20887,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_session_row() != 10938) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_set_active_first() != 4085) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_set_network_online() != 33835) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -20706,6 +20897,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_set_session_config() != 56055) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_set_session_settled() != 49025) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_shutdown() != 4352) {

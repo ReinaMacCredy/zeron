@@ -10,12 +10,15 @@ final class AppModel {
         var folders: [FolderRowVM] = []
         var sessions: [SessionRowVM] = []
         var sectionSessions: [String: [SessionRowVM]] = [:]
-        /// `sessions` grouped by repository project, groups in recency order.
+        /// `sessions` grouped by repository project, the Chats group first.
         var projectGroups: [ProjectGroupVM] = []
+        var settled: [SessionRowVM] = []
+        /// Step threads and agent-opened chats, by the lead they draw under.
+        var nested: [String: [SessionRowVM]] = [:]
     }
 
     struct ProjectGroupVM: Equatable {
-        /// Section id: `project:<group key>` (`home:<device>` without a project).
+        /// Section id: `group:<project key>` (`group:chats` without a project).
         let id: String
         var name: String
         var sessions: [SessionRowVM]
@@ -29,6 +32,16 @@ final class AppModel {
             guard newValue != groupByProject else { return }
             UserDefaults.standard.set(newValue, forKey: "groupByProject")
             observers.values.forEach { $0() }
+        }
+    }
+
+    /// Live sessions lead the Inbox (the desktop's "Active first"). Local to this phone.
+    var activeFirst: Bool {
+        get { UserDefaults.standard.bool(forKey: "activeFirst") }
+        set {
+            guard newValue != activeFirst else { return }
+            UserDefaults.standard.set(newValue, forKey: "activeFirst")
+            client?.setActiveFirst(on: newValue)
         }
     }
 
@@ -172,6 +185,7 @@ final class AppModel {
         )
         do {
             client = try CoreClient(config: config, credentials: credentials, listener: bridge)
+            client?.setActiveFirst(on: activeFirst)
             // Only real accounts persist; dev bearers come from launch args
             // (and would be rejected by the production edge next launch).
             if case .workOs = credentials { Credentials.store(credentials) }
@@ -392,11 +406,13 @@ final class AppModel {
         page.sectionSessions["pinned"] = pinned
         for s in ws.front.sections {
             let list = s.sessions.map(vm)
-            page.folders.append(FolderRowVM(id: s.id, name: s.name, count: list.count, symbol: "folder"))
+            page.folders.append(FolderRowVM(id: s.id, name: s.name, count: list.count, symbol: "folder", collapsed: s.collapsed))
             page.sectionSessions[s.id] = list
         }
         page.sessions = ws.front.recent.map(vm)
-        page.projectGroups = Self.projectGroups(ws.front.recent, page.sessions, projects: ws.projects)
+        page.projectGroups = ws.front.groups.map { ProjectGroupVM(id: "group:" + $0.id, name: $0.name, sessions: $0.sessions.map(vm)) }
+        page.settled = ws.front.settled.map(vm)
+        page.nested = ws.front.nested.mapValues { $0.map(vm) }
         rawProjects = ws.projects
         // Sessions reachable only through their project still resolve by id.
         for p in ws.projects {
@@ -405,7 +421,7 @@ final class AppModel {
         let archivedVMs = ws.archived.map(vm)
         var counts = LiveCounts()
         var seen = Set<String>()
-        for row in page.sessions + page.sectionSessions.values.flatMap({ $0 }) where seen.insert(row.id).inserted {
+        for row in page.sessions + page.sectionSessions.values.flatMap({ $0 }) + page.nested.values.flatMap({ $0 }) where seen.insert(row.id).inserted {
             if row.status == .working { counts.working += 1 }
         }
         let nextNeeds = client.needsYou()
@@ -433,34 +449,6 @@ final class AppModel {
         guard next != needsYou else { return }
         needsYou = next
         needsYouObservers.values.forEach { $0() }
-    }
-
-    /// Like the desktop's project grouping: checkouts of one repository
-    /// share a group (named for its representative), project-less sessions
-    /// group per device. Groups and rows keep the incoming recency order.
-    private static func projectGroups(_ rows: [SessionRow], _ vms: [SessionRowVM], projects: [ProjectView]) -> [ProjectGroupVM] {
-        let byId = Dictionary(projects.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        var groups: [ProjectGroupVM] = []
-        var index: [String: Int] = [:]
-        for (row, vm) in zip(rows, vms) {
-            let id: String
-            let name: String
-            if let ref = row.project {
-                let project = byId[ref.id]
-                id = "project:" + (project?.groupKey ?? ref.id)
-                name = project?.groupName ?? ref.name
-            } else {
-                id = "home:" + row.deviceId
-                name = row.deviceName.map { "Home · \($0)" } ?? "Home"
-            }
-            if let i = index[id] {
-                groups[i].sessions.append(vm)
-            } else {
-                index[id] = groups.count
-                groups.append(ProjectGroupVM(id: id, name: name, sessions: [vm]))
-            }
-        }
-        return groups
     }
 
     static func status(_ i: ChatIndicator) -> SessionRowVM.Status {
@@ -495,7 +483,8 @@ final class AppModel {
             timeLabel: r.timeLabel,
             unseen: r.unseen,
             pinned: r.pinned,
-            sendFailed: r.sendState == .failed
+            sendFailed: r.sendState == .failed,
+            settled: r.settled
         )
     }
 
@@ -516,7 +505,6 @@ final class AppModel {
         guard let client, !q.isEmpty else { return frontPage.sessions }
         return client.search(query: q, limit: 60).map { Self.vm($0.session) }
     }
-
 
     // MARK: Writes
 
@@ -545,6 +533,21 @@ final class AppModel {
     /// Move into a section between its members (`nil` at either end).
     func place(_ id: String, inSection section: String, after: String?, before: String?) {
         attempt("assign") { try client?.placeSession(chatId: id, sectionId: section, after: after, before: before) }
+    }
+    func setSettled(_ id: String, _ settled: Bool) {
+        attempt("settle") { try client?.setSessionSettled(chatId: id, settled: settled) }
+    }
+    func setSectionCollapsed(_ id: String, _ collapsed: Bool) {
+        attempt("fold section") { try client?.setSectionCollapsed(sectionId: id, collapsed: collapsed) }
+    }
+    /// Move Up (-1) / Move Down (+1) among the user's sections.
+    func moveSection(_ id: String, by step: Int) {
+        let ids = frontPage.folders.map(\.id).filter { $0 != "pinned" }
+        guard let at = ids.firstIndex(of: id), ids.indices.contains(at + step) else { return }
+        let neighbour = ids[at + step]
+        attempt("move section") {
+            try client?.moveSection(sectionId: id, after: step > 0 ? neighbour : nil, before: step < 0 ? neighbour : nil)
+        }
     }
     func renameSection(_ id: String, _ name: String) { attempt("rename section") { try client?.renameSection(sectionId: id, name: name) } }
     func deleteSection(_ id: String) { attempt("delete section") { try client?.deleteSection(sectionId: id) } }
