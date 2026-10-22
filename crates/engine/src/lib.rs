@@ -245,24 +245,43 @@ impl EngineCore {
         default_harness: HarnessId,
         edge: Option<EdgeConfig>,
     ) -> Result<Self, EngineError> {
+        Self::assemble_with_profile_unlocked(profile, registry, default_harness, edge, None)
+    }
+
+    fn assemble_with_profile_unlocked(
+        profile: EngineProfile,
+        registry: Arc<HarnessRegistry>,
+        default_harness: HarnessId,
+        edge: Option<EdgeConfig>,
+        tool_server_port: Option<u16>,
+    ) -> Result<Self, EngineError> {
         let data_dir = profile.device_root();
         std::fs::create_dir_all(data_dir)?;
         // Single-instance guard: two engines on one data dir would race the
         // SQLite snapshots + journals. Taken before any store opens or the IPC
         // port binds; held (and kernel-released on crash) for the engine's life.
         let lock = InstanceLock::acquire(data_dir)?;
-        Self::assemble_with_profile_locked(profile, registry, default_harness, edge, lock)
+        Self::assemble_with_profile_locked(
+            profile,
+            registry,
+            default_harness,
+            edge,
+            lock,
+            tool_server_port,
+        )
     }
 
     /// Assemble against a pre-acquired [`InstanceLock`]. The headed app takes
     /// the lock before binding the IPC port so the listener owner and the
     /// data-dir owner cannot diverge when several viewports bootstrap at once.
+    /// `tool_server_port` is set before boot revives any run, so a revived run gets the zeron tools.
     pub fn assemble_with_profile_locked(
         profile: EngineProfile,
         registry: Arc<HarnessRegistry>,
         default_harness: HarnessId,
         edge: Option<EdgeConfig>,
         lock: InstanceLock,
+        tool_server_port: Option<u16>,
     ) -> Result<Self, EngineError> {
         let data_dir = profile.device_root();
         std::fs::create_dir_all(data_dir)?;
@@ -275,6 +294,9 @@ impl EngineCore {
         let store_for_import = store.clone();
         let journal = Arc::new(RunJournal::open(profile.store_root().join("journals"))?);
         let sessions = SessionsEngine::new(device_id.clone(), journal, registry.clone());
+        if let Some(port) = tool_server_port {
+            sessions.set_tool_server_port(port);
+        }
         let doc_host = DocHost::new(
             store.clone(),
             DocHostConfig {
@@ -891,7 +913,7 @@ impl Engine {
         auth: Auth,
         profile: EngineProfile,
     ) -> anyhow::Result<EngineRuntime> {
-        Self::assemble_runtime_inner(config, auth, profile, None).await
+        Self::assemble_runtime_inner(config, auth, profile, None, None).await
     }
 
     /// Like [`Self::assemble_runtime`], but against an [`InstanceLock`] the
@@ -902,8 +924,9 @@ impl Engine {
         auth: Auth,
         profile: EngineProfile,
         lock: InstanceLock,
+        tool_server_port: Option<u16>,
     ) -> anyhow::Result<EngineRuntime> {
-        Self::assemble_runtime_inner(config, auth, profile, Some(lock)).await
+        Self::assemble_runtime_inner(config, auth, profile, Some(lock), tool_server_port).await
     }
 
     async fn assemble_runtime_inner(
@@ -911,6 +934,7 @@ impl Engine {
         auth: Auth,
         profile: EngineProfile,
         lock: Option<InstanceLock>,
+        tool_server_port: Option<u16>,
     ) -> anyhow::Result<EngineRuntime> {
         let edge_enabled = match profile.scope() {
             WorkspaceScope::Local => false,
@@ -956,12 +980,14 @@ impl Engine {
                 config.default_harness,
                 edge.clone(),
                 lock,
+                tool_server_port,
             )?,
-            None => EngineCore::assemble_with_profile(
+            None => EngineCore::assemble_with_profile_unlocked(
                 profile,
                 Arc::new(default_registry()),
                 config.default_harness,
                 edge.clone(),
+                tool_server_port,
             )?,
         };
         core.set_auth(auth.clone());
@@ -1060,7 +1086,9 @@ impl Engine {
         let profile = profile
             .ok_or_else(|| EngineError::Other("synced workspace profile is not ready".into()))?;
 
-        let runtime = Self::assemble_runtime(&config, auth, profile).await?;
+        let runtime =
+            Self::assemble_runtime_inner(&config, auth, profile, None, Some(config.ipc_port))
+                .await?;
         // The desktop app or `zeron update` may install a newer binary under
         // a running service; restart into it once no run or terminal is live.
         if let Some(updater) = runtime.core().updater() {
@@ -1076,10 +1104,6 @@ impl Engine {
             stop_tx,
         });
         let server = serve_ipc(config.ipc_port, service).await?;
-        runtime
-            .core()
-            .sessions
-            .set_tool_server_port(config.ipc_port);
 
         tokio::select! {
             result = shutdown_signal() => result?,

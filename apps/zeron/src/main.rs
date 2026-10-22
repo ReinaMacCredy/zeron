@@ -454,9 +454,21 @@ fn harness_from_env() -> zeron_engine::HarnessId {
 /// stdout is the MCP wire, so nothing else may print there: tracing already
 /// goes to stderr, and every failure below is returned, not printed.
 async fn mcp_cli(chat: String, ipc_port: u16) -> anyhow::Result<()> {
-    let client = zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
-        .await
-        .map_err(|e| anyhow::anyhow!("no engine listening on 127.0.0.1:{ipc_port} ({e})"))?;
+    let url = format!("ws://127.0.0.1:{ipc_port}");
+    // A run the headless engine revives at boot can start before the engine binds its port.
+    let mut attempts = 0;
+    let client = loop {
+        match zeron_rpc::connect_ws(&url).await {
+            Ok(client) => break client,
+            Err(e) if attempts >= 40 => {
+                anyhow::bail!("no engine listening on 127.0.0.1:{ipc_port} ({e})")
+            }
+            Err(_) => {
+                attempts += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        }
+    };
     if let Ok(secret) = std::env::var(zeron_rpc::COMPUTER_RUN_SECRET_ENV)
         && let Err(error) = client
             .call(
