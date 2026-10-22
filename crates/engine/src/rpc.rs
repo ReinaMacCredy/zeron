@@ -3006,6 +3006,8 @@ fn forwardable(method: &str) -> bool {
             | methods::COMPLETE_AGENT_LOGIN
             | methods::POLL_AGENT_LOGIN
             | methods::CANCEL_AGENT_LOGIN
+            // The usage summary reads this device's agent session logs.
+            | methods::GET_USAGE_SUMMARY
             // Uploads/attachments target the chat's host device (the agent reads
             // the committed file from that device's disk).
             | methods::UPLOAD_CHUNK
@@ -7358,6 +7360,7 @@ mod tests {
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));
         assert!(forwardable(methods::QUEUE_COMMAND));
+        assert!(forwardable(methods::GET_USAGE_SUMMARY));
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));
         assert!(forwardable(methods::FETCH_ALL));
