@@ -44,6 +44,8 @@ use gpui::{
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
 use zeron_proto::ToolCall;
 
+use crate::route_badge::{self, RouteInfo};
+
 use crate::computer::cards::{
     ApprovalCard, CardAction, CardTone, ComputerNotice, ComputerRequest, ConsentChoice,
     ConsentOutcome, approval_card, computer_card, computer_event_row, computer_notice,
@@ -1138,6 +1140,14 @@ enum HtmlFileState {
 
 #[derive(Clone)]
 pub enum RowKind {
+    PlanEstimate {
+        task_id: SharedString,
+        tool: Arc<ToolItem>,
+    },
+    NativeRoute {
+        route: zeron_proto::ChildRoute,
+        title: SharedString,
+    },
     /// A page the agent published with `html_render`, shown live above its
     /// reply.
     HtmlRender {
@@ -1849,6 +1859,7 @@ pub fn rows_for_entry(
                 subagent_ref,
                 subagent_status,
                 subagent_tail,
+                delegate_route,
                 ..
             } => {
                 let computer = computer_call(call);
@@ -1918,6 +1929,66 @@ pub fn rows_for_entry(
                     kind: ToolItemKind::Call,
                     images: crate::tool_images::image_paths(call, output.as_deref()),
                 };
+                if let Some(task_id) = crate::plan_estimate::plan_task_id(call) {
+                    if !compact {
+                        flush_group(
+                            &mut rows,
+                            &mut pending_group,
+                            &mut group_ix,
+                            group_last_part_ix,
+                        );
+                    }
+                    rows.push(Row {
+                        id: format!("{}#{}-plan", entry.id, part.id()).into(),
+                        version: tool_fingerprint(std::slice::from_ref(&item), false),
+                        turn_start: false,
+                        kind: RowKind::PlanEstimate {
+                            task_id: task_id.into(),
+                            tool: Arc::new(item),
+                        },
+                        entry_id: entry_id.clone(),
+                        timestamp: None,
+                        copy_text: None,
+                        compact_fold: None,
+                    });
+                    continue;
+                }
+                if let Some(route) = delegate_route.clone().filter(|_| subagent_ref.is_none()) {
+                    if !compact {
+                        flush_group(
+                            &mut rows,
+                            &mut pending_group,
+                            &mut group_ix,
+                            group_last_part_ix,
+                        );
+                    }
+                    let input = match call {
+                        ToolCall::Mcp { input, .. } | ToolCall::Unknown { input, .. } => {
+                            input.as_ref()
+                        }
+                        _ => None,
+                    };
+                    let title = input
+                        .and_then(|input| input.get("title")?.as_str())
+                        .or(call.delegate_task_text())
+                        .map(single_line)
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or_else(|| "Delegated task".into());
+                    rows.push(Row {
+                        id: format!("{}#{}-native", entry.id, part.id()).into(),
+                        version: 1,
+                        turn_start: false,
+                        kind: RowKind::NativeRoute {
+                            route,
+                            title: title.into(),
+                        },
+                        entry_id: entry_id.clone(),
+                        timestamp: None,
+                        copy_text: None,
+                        compact_fold: None,
+                    });
+                    continue;
+                }
                 if compact {
                     // Compact mode keeps ONE group for the whole turn —
                     // agent chips fold in with everything else, so the genus
@@ -2333,7 +2404,10 @@ pub fn rows_for_entry(
             inner.retain(|row| {
                 !matches!(
                     row.kind,
-                    RowKind::ComputerNotice { .. } | RowKind::HtmlRender { .. }
+                    RowKind::ComputerNotice { .. }
+                        | RowKind::HtmlRender { .. }
+                        | RowKind::NativeRoute { .. }
+                        | RowKind::PlanEstimate { .. }
                 )
             });
             for row in &mut inner {
@@ -4216,6 +4290,12 @@ pub struct Transcript {
     foreground_sent: HashSet<SharedString>,
     html_files: HashMap<std::path::PathBuf, HtmlFileState>,
     html_pages: html_card::HtmlPages,
+    plan_previews: HashMap<SharedString, PlanPreview>,
+    limit_choices: HashMap<String, zeron_proto::OfferChoice>,
+    limit_spans: HashMap<String, (i64, i64)>,
+    limit_rows: HashMap<SharedString, usize>,
+    limit_live: bool,
+    limit_tick: Option<Task<()>>,
     html_apps: Option<Arc<Vec<crate::html_open::AppChoice>>>,
     html_apps_task: Option<Task<()>>,
     html_menu: Option<SharedString>,
@@ -4354,11 +4434,349 @@ pub enum TranscriptEvent {
     Computer {
         request: ComputerRequest,
     },
+    RouteLink {
+        link: route_badge::RouteLink,
+    },
+    ApprovePlan {
+        task_id: String,
+    },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
 
+struct PlanPreview {
+    key: String,
+    preview: Option<Rc<crate::plan_estimate::Preview>>,
+    layout: Option<(usize, usize, bool, bool)>,
+    _fetch: Option<Task<()>>,
+}
+
 impl Transcript {
+    fn render_native_route(
+        &self,
+        row_id: &SharedString,
+        route: &zeron_proto::ChildRoute,
+        title: &SharedString,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let parent = self.chat_id.as_deref().and_then(|id| {
+            let state = self.state.read(cx);
+            let chat = state.chats.iter().find(|chat| chat.id == id)?;
+            chat.config.as_ref().map(route_badge::target_of)
+        });
+        let view = DelegateView {
+            title: title.clone(),
+            harness: parent.as_ref().map(|parent| parent.harness),
+            model: parent
+                .as_ref()
+                .and_then(|parent| parent.model.clone())
+                .map(SharedString::from),
+            status: None,
+            elapsed_secs: None,
+            role: route.role.clone().map(SharedString::from),
+            route: Some(route.clone()),
+            limited: false,
+        };
+        let badge = route_badge::route_badge(
+            SharedString::from(format!("{row_id}-route")),
+            RouteInfo {
+                route: route.clone(),
+                ran: parent.clone(),
+                parent,
+                native: true,
+            },
+            self.route_links(cx),
+            theme,
+        );
+        delegate_chip(
+            &view,
+            badge,
+            row_id.clone(),
+            None::<fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>,
+            false,
+            theme,
+            cx.entity_id(),
+            cx,
+        )
+    }
+
+    fn render_plan_estimate(
+        &mut self,
+        row_id: &SharedString,
+        task_id: &SharedString,
+        tool: &ToolItem,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use crate::plan_estimate as plan;
+        let latest = self.rows.iter().rev().find_map(|row| match &row.kind {
+            RowKind::PlanEstimate { task_id: id, .. } if id == task_id => Some(&row.id),
+            _ => None,
+        });
+        let state = self.state.read(cx);
+        let task = state
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id.as_ref() && !task.deleted)
+            .filter(|_| latest == Some(row_id))
+            .cloned();
+        let Some(task) = task else {
+            return tool_chip(
+                row_id.clone(),
+                tool,
+                false,
+                false,
+                false,
+                1.0,
+                1.0,
+                1.0,
+                None,
+                theme,
+                cx.entity_id(),
+                cx,
+            );
+        };
+        let steps = plan::plan_steps(&task.id, &state.task_steps);
+        let key = plan::preview_key(&steps);
+        let roles = plan::preview_roles(&steps);
+        let lead_chat = task.chat_id.clone();
+        let stale = self
+            .plan_previews
+            .get(task_id)
+            .is_none_or(|cached| cached.key != key);
+        if stale {
+            self.fetch_plan_preview(task_id.clone(), key, lead_chat.clone(), roles, cx);
+        }
+        let state = self.state.read(cx);
+        let steps = plan::plan_steps(&task.id, &state.task_steps);
+        let lead = lead_chat
+            .as_deref()
+            .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
+            .and_then(|chat| chat.config.as_ref())
+            .map(route_badge::target_of);
+        let cached = self.plan_previews.get(task_id);
+        let preview = cached.and_then(|cached| cached.preview.clone());
+        let lines = plan::plan_lines(&steps, &state.chats, lead.as_ref(), preview.as_deref(), cx);
+        let layout = (
+            lines.len(),
+            lines.iter().filter(|line| line.fallback.is_some()).count(),
+            plan::totals(&lines).raised > 0,
+            task.plan_pending,
+        );
+        if cached.is_some_and(|cached| cached.layout != Some(layout)) {
+            if let Some(cached) = self.plan_previews.get_mut(task_id) {
+                cached.layout = Some(layout);
+            }
+            let row = row_id.clone();
+            cx.spawn(async move |this, cx| {
+                this.update(cx, |this, cx| this.diagram_layout_changed(&[row], cx))
+                    .ok();
+            })
+            .detach();
+        }
+        let transcript = cx.weak_entity();
+        let approve = task.id.clone();
+        plan::plan_card(
+            plan::PlanCard {
+                id: row_id.clone(),
+                task: &task,
+                lines,
+                lead,
+                on_link: self.route_links(cx),
+                on_start: Rc::new(move |_, cx| {
+                    transcript
+                        .update(cx, |_, cx| {
+                            cx.emit(TranscriptEvent::ApprovePlan {
+                                task_id: approve.clone(),
+                            })
+                        })
+                        .ok();
+                }),
+            },
+            theme,
+            cx,
+        )
+    }
+
+    fn fetch_plan_preview(
+        &mut self,
+        task_id: SharedString,
+        key: String,
+        owner: Option<String>,
+        roles: Vec<&'static str>,
+        cx: &mut Context<Self>,
+    ) {
+        let previous = self
+            .plan_previews
+            .get(&task_id)
+            .and_then(|cached| cached.preview.clone());
+        let engine = self.state.read(cx).engine().cloned();
+        let fetch = engine.filter(|_| !roles.is_empty()).map(|engine| {
+            let task_id = task_id.clone();
+            let params =
+                serde_json::json!({ "ownerChatId": owner, "roles": roles, "steps": true });
+            cx.spawn(async move |this, cx| {
+                let preview = engine
+                    .client()
+                    .call_as::<crate::plan_estimate::Preview>(
+                        zeron_rpc::methods::PREVIEW_ROUTES,
+                        params,
+                    )
+                    .await
+                    .ok();
+                this.update(cx, |this, cx| {
+                    if let Some(cached) = this.plan_previews.get_mut(&task_id) {
+                        cached.preview = preview.map(Rc::new);
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+        });
+        let preview = if roles.is_empty() {
+            Some(Rc::new(crate::plan_estimate::Preview::default()))
+        } else {
+            previous
+        };
+        self.plan_previews.insert(
+            task_id,
+            PlanPreview {
+                key,
+                preview,
+                layout: None,
+                _fetch: fetch,
+            },
+        );
+    }
+
+    fn render_limit_card(
+        &mut self,
+        row_id: &SharedString,
+        child: &SharedString,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use zeron_proto::OfferChoice;
+        let state = self.state.read(cx);
+        let (device, limit) = state.limit_resume(child)?;
+        let offer = limit.offer.clone()?;
+        let device = device.to_string();
+        let resets_at = limit.resets_at;
+        let engine = state.engine().cloned()?;
+        let harness = state
+            .chats
+            .iter()
+            .find(|chat| chat.id == child.as_ref())
+            .and_then(|chat| chat.config.as_ref())
+            .map(|config| config.harness);
+        let now = chrono::Utc::now().timestamp_millis();
+        let countdown = offer.act_at.filter(|at| *at > now).map(|at| {
+            let span = self
+                .limit_spans
+                .entry(child.to_string())
+                .or_insert((at, at - now));
+            if span.0 != at {
+                *span = (at, at - now);
+            }
+            let left = at - now;
+            ((left + 999) / 1000, left as f32 / span.1.max(1) as f32)
+        });
+        if countdown.is_some() {
+            self.limit_live = true;
+            self.ensure_limit_tick(cx);
+        }
+        let selected = match self.limit_choices.get(child.as_ref()).copied() {
+            _ if offer.to.is_none() => OfferChoice::Wait,
+            Some(choice) => choice,
+            None => offer.preselect,
+        };
+        let transcript = cx.weak_entity();
+        let on_select = {
+            let child = child.to_string();
+            let engine = engine.clone();
+            let device = device.clone();
+            let counting = offer.act_at.is_some();
+            let preselect = offer.preselect;
+            Rc::new(move |choice: OfferChoice, _: &mut Window, cx: &mut gpui::App| {
+                if counting && choice != preselect {
+                    crate::limit_card::resolve_offer(
+                        engine.clone(),
+                        child.clone(),
+                        device.clone(),
+                        "hold",
+                        cx,
+                    );
+                }
+                transcript
+                    .update(cx, |this, cx| {
+                        this.limit_choices.insert(child.clone(), choice);
+                        cx.notify();
+                    })
+                    .ok();
+            })
+        };
+        let on_resolve = {
+            let child = child.to_string();
+            Rc::new(move |choice: &'static str, _: &mut Window, cx: &mut gpui::App| {
+                crate::limit_card::resolve_offer(
+                    engine.clone(),
+                    child.clone(),
+                    device.clone(),
+                    choice,
+                    cx,
+                );
+            })
+        };
+        Some(crate::limit_card::limit_card(
+            crate::limit_card::LimitCard {
+                id: SharedString::from(format!("{row_id}-limit-{child}")),
+                harness,
+                offer: &offer,
+                resets_at,
+                selected,
+                countdown,
+                on_select,
+                on_resolve,
+            },
+            theme,
+            cx,
+        ))
+    }
+
+    fn ensure_limit_tick(&mut self, cx: &mut Context<Self>) {
+        if self.limit_tick.is_some() {
+            return;
+        }
+        self.limit_tick = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let live = this
+                    .update(cx, |this, cx| {
+                        let live = std::mem::take(&mut this.limit_live);
+                        if !live {
+                            this.limit_tick = None;
+                        }
+                        cx.notify();
+                        live
+                    })
+                    .unwrap_or(false);
+                if !live {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn route_links(&self, cx: &Context<Self>) -> route_badge::OnRouteLink {
+        let transcript = cx.weak_entity();
+        Rc::new(move |link, _, cx| {
+            transcript
+                .update(cx, |_, cx| cx.emit(TranscriptEvent::RouteLink { link }))
+                .ok();
+        })
+    }
+
     fn render_wake_row(
         &self,
         row_id: &SharedString,
@@ -4793,6 +5211,12 @@ impl Transcript {
             foreground_sent: HashSet::new(),
             html_files: HashMap::new(),
             html_pages: html_card::HtmlPages::new(cx),
+            plan_previews: HashMap::new(),
+            limit_choices: HashMap::new(),
+            limit_spans: HashMap::new(),
+            limit_rows: HashMap::new(),
+            limit_live: false,
+            limit_tick: None,
             html_apps: None,
             html_apps_task: None,
             html_menu: None,
@@ -10179,6 +10603,12 @@ impl Transcript {
                 self.render_visual(&row.id, owner, path, title, cx)
             }
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
+            RowKind::NativeRoute { route, title } => {
+                self.render_native_route(&row.id, route, title, &theme, cx)
+            }
+            RowKind::PlanEstimate { task_id, tool } => {
+                self.render_plan_estimate(&row.id, task_id, tool, &theme, cx)
+            }
             RowKind::ComputerConsent {
                 request_id,
                 question_id,
@@ -11655,11 +12085,26 @@ impl Transcript {
                     tool_connector_continuation(connector_progress.get(ix + 1).copied());
                 let row_height = row_heights[ix];
                 if let Some(thread) = tool.subagent_ref.clone().filter(|_| is_thread_link(tool)) {
-                    let title =
-                        started_thread_title(&self.state.read(cx).chats, &thread, &tool.call);
+                    let state = self.state.read(cx);
+                    let title = started_thread_title(&state.chats, &thread, &tool.call);
+                    let badge = state
+                        .task_steps
+                        .iter()
+                        .filter(|step| !step.deleted && step.chat_id.as_deref() == Some(&thread))
+                        .find_map(|step| step.route.clone())
+                        .map(|route| RouteInfo::for_child(&state.chats, &thread, route))
+                        .and_then(|info| {
+                            route_badge::route_badge(
+                                SharedString::from(format!("{row_id}#s{ix}-route")),
+                                info,
+                                self.route_links(cx),
+                                theme,
+                            )
+                        });
                     return started_thread_line(
                         SharedString::from(format!("{row_id}#s{ix}")),
                         title,
+                        badge,
                         row_height,
                         cx.listener(move |_, _, _, cx| {
                             cx.emit(TranscriptEvent::OpenChat {
@@ -11677,15 +12122,33 @@ impl Transcript {
                     .clone()
                     .filter(|_| tool.call.is_delegate_task())
                 {
-                    let view = delegate_view(&self.state.read(cx).chats, &child);
+                    let state = self.state.read(cx);
+                    let chats = &state.chats;
+                    let mut view = delegate_view(chats, &child);
+                    view.limited = state
+                        .limit_resume(&child)
+                        .is_some_and(|(_, limit)| limit.offer.is_some());
+                    let badge = view
+                        .route
+                        .clone()
+                        .map(|route| RouteInfo::for_child(chats, &child, route))
+                        .and_then(|info| {
+                            route_badge::route_badge(
+                                SharedString::from(format!("{row_id}#s{ix}-route")),
+                                info,
+                                self.route_links(cx),
+                                theme,
+                            )
+                        });
                     return delegate_chip(
                         &view,
+                        badge,
                         SharedString::from(format!("{row_id}#s{ix}")),
-                        cx.listener(move |_, _, _, cx| {
+                        Some(cx.listener(move |_, _, _, cx| {
                             cx.emit(TranscriptEvent::OpenDelegate {
                                 chat_id: child.to_string(),
                             });
-                        }),
+                        })),
                         collapses,
                         theme,
                         cx.entity_id(),
@@ -11960,6 +12423,26 @@ impl Transcript {
                 .into_any_element()
         };
 
+        let limit_cards: Vec<AnyElement> = if collapses {
+            Vec::new()
+        } else {
+            tools
+                .iter()
+                .filter(|tool| tool.call.is_delegate_task() || is_thread_link(tool))
+                .filter_map(|tool| tool.subagent_ref.clone())
+                .filter_map(|child| self.render_limit_card(row_id, &child, theme, cx))
+                .collect()
+        };
+        let layout = limit_cards.len();
+        if self.limit_rows.get(row_id).copied().unwrap_or(0) != layout {
+            self.limit_rows.insert(row_id.clone(), layout);
+            let row = row_id.clone();
+            cx.spawn(async move |this, cx| {
+                this.update(cx, |this, cx| this.diagram_layout_changed(&[row], cx))
+                    .ok();
+            })
+            .detach();
+        }
         let view = cx.entity_id();
         div()
             .relative()
@@ -11976,6 +12459,7 @@ impl Transcript {
                 ))
             })
             .child(body)
+            .children(limit_cards)
             .when(motion_active || animate_worked, |group| {
                 group.child(
                     canvas(
@@ -14048,6 +14532,9 @@ pub(crate) struct DelegateView {
     pub model: Option<SharedString>,
     pub status: Option<zeron_proto::DelegationStatus>,
     pub elapsed_secs: Option<i64>,
+    pub role: Option<SharedString>,
+    pub route: Option<zeron_proto::ChildRoute>,
+    pub limited: bool,
 }
 
 pub(crate) fn delegate_view(chats: &[zeron_proto::Chat], child_id: &str) -> DelegateView {
@@ -14068,6 +14555,11 @@ pub(crate) fn delegate_view(chats: &[zeron_proto::Chat], child_id: &str) -> Dele
             let end = d.completed_at.unwrap_or_else(chrono::Utc::now);
             (end - d.started_at).num_seconds()
         }),
+        role: delegation
+            .and_then(|d| d.route.as_ref()?.role.clone())
+            .map(SharedString::from),
+        route: delegation.and_then(|d| d.route.clone()),
+        limited: false,
     }
 }
 
@@ -14108,6 +14600,7 @@ fn started_thread_title(
 fn started_thread_line(
     id: SharedString,
     title: SharedString,
+    badge: Option<AnyElement>,
     height: f32,
     on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
     theme: &Theme,
@@ -14138,6 +14631,7 @@ fn started_thread_line(
                 .text_color(theme.text.opacity(0.8))
                 .child(title.clone()),
         )
+        .children(badge)
         .child(div().flex_none().child("·"))
         .child(
             div()
@@ -14170,8 +14664,9 @@ fn started_thread_line(
 #[allow(clippy::too_many_arguments)]
 fn delegate_chip(
     view: &DelegateView,
+    badge: Option<AnyElement>,
     id: SharedString,
-    on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    on_open: Option<impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static>,
     rail: bool,
     theme: &Theme,
     entity: gpui::EntityId,
@@ -14181,12 +14676,18 @@ fn delegate_chip(
     let running = view.status == Some(DelegationStatus::Running);
     let failed = view.status == Some(DelegationStatus::Failed);
     let (glyph, tint) = crate::pickers::agent_brand_icon(view.harness, view.model.as_deref());
-    let label: SharedString = view
+    let native = on_open.is_none();
+    let harness = view
         .harness
         .map(crate::composer::harness_display_name)
-        .unwrap_or("Agent")
-        .into();
+        .unwrap_or("Agent");
+    let label: SharedString = if native {
+        format!("{harness} native").into()
+    } else {
+        harness.into()
+    };
     let state: SharedString = match (running, view.elapsed_secs) {
+        _ if view.limited => "Hit usage limit".into(),
         (false, Some(secs)) => format!(
             "{} in {}",
             delegate_status_text(view.status),
@@ -14195,7 +14696,20 @@ fn delegate_chip(
         .into(),
         _ => delegate_status_text(view.status).into(),
     };
-    let a11y_label = SharedString::from(format!("{label} {} {state}", view.title));
+    let a11y_label = if native {
+        SharedString::from(format!("{label} {}", view.title))
+    } else {
+        SharedString::from(format!("{label} {} {state}", view.title))
+    };
+    let model = view.model.as_ref().map(|model| match view.harness {
+        Some(harness) => crate::pickers::model_display_label(harness, model, cx),
+        None => model.to_string(),
+    });
+    let meta: Option<SharedString> = match (view.role.as_ref(), model) {
+        (Some(role), Some(model)) => Some(format!("{role} · {model}").into()),
+        (Some(role), None) => Some(role.clone()),
+        (None, model) => model.map(SharedString::from),
+    };
     let header = div()
         .h(px(CHIP_HEADER_HEIGHT))
         .w_full()
@@ -14245,26 +14759,31 @@ fn delegate_chip(
                 })
                 .child(view.title.clone()),
         )
-        .when_some(view.model.clone(), |row, model| {
+        .when_some(meta, |row, meta| {
             row.child(
                 div()
                     .flex_none()
                     .text_size(px(11.0))
                     .text_color(theme.text_faint)
-                    .child(model),
+                    .child(meta),
             )
         })
-        .child(
-            div()
-                .flex_none()
-                .text_size(px(11.0))
-                .text_color(if failed {
-                    theme.danger
-                } else {
-                    theme.text_faint
-                })
-                .child(state),
-        )
+        .children(badge)
+        .when(!native, |row| {
+            row.child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(if failed {
+                        theme.danger
+                    } else if view.limited {
+                        theme.warning
+                    } else {
+                        theme.text_faint
+                    })
+                    .child(state),
+            )
+        })
         .when(running, |row| {
             row.child(div().flex_none().child(crate::loaders::mini_glyph_spinner(
                 format!("delegate-chip-{}", id),
@@ -14274,21 +14793,23 @@ fn delegate_chip(
                 cx,
             )))
         })
-        .child(
-            div()
-                .size(px(18.0))
-                .flex_none()
-                .rounded(px(5.0))
-                .bg(crate::theme::ink(0.06))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
-                        .size(px(11.0))
-                        .text_color(theme.text_muted.opacity(0.8)),
-                ),
-        );
+        .when(!native, |row| {
+            row.child(
+                div()
+                    .size(px(18.0))
+                    .flex_none()
+                    .rounded(px(5.0))
+                    .bg(crate::theme::ink(0.06))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
+                            .size(px(11.0))
+                            .text_color(theme.text_muted.opacity(0.8)),
+                    ),
+            )
+        });
     agent_chip_card(id, a11y_label, Some("delegate-chip"), rail, on_open, header)
 }
 
@@ -14418,7 +14939,7 @@ fn subagent_chip(
         chip_a11y_label(tool),
         None,
         rail,
-        on_open,
+        Some(on_open),
         chip_header_row(
             tool,
             Some(mark),
@@ -14436,7 +14957,7 @@ fn agent_chip_card(
     label: SharedString,
     debug_selector: Option<&'static str>,
     rail: bool,
-    on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    on_open: Option<impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static>,
     header: impl IntoElement,
 ) -> AnyElement {
     div()
@@ -14475,9 +14996,11 @@ fn agent_chip_card(
                 .border_1()
                 .border_color(crate::theme::hairline(0.07))
                 .bg(crate::theme::ink(0.03))
-                .cursor_pointer()
-                .hover(|s| s.bg(crate::theme::ink(0.05)))
-                .on_click(on_open)
+                .when_some(on_open, |card, on_open| {
+                    card.cursor_pointer()
+                        .hover(|s| s.bg(crate::theme::ink(0.05)))
+                        .on_click(on_open)
+                })
                 .child(header),
         )
         .into_any_element()
@@ -18437,6 +18960,7 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
             html_render: None,
+            delegate_route: None,
         }
     }
 
@@ -18468,6 +18992,7 @@ mod tests {
                 subagent_status: None,
                 subagent_tail: None,
                 html_render: None,
+                delegate_route: None,
             }
         };
         let entry = assistant(
@@ -18653,6 +19178,7 @@ mod tests {
             subagent_status: Some(SubagentStatus::Running),
             subagent_tail: None,
             html_render: None,
+            delegate_route: None,
         }
     }
 
@@ -18708,6 +19234,9 @@ mod tests {
             model: None,
             status: Some(status),
             elapsed_secs: Some(3),
+            role: None,
+            route: None,
+            limited: false,
         };
         use zeron_proto::DelegationStatus::*;
         assert_eq!(
@@ -18741,6 +19270,7 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
             html_render: None,
+            delegate_route: None,
         };
         let entry = assistant(
             "m-del",
@@ -21730,6 +22260,7 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
             html_render: None,
+            delegate_route: None,
         }
     }
 
@@ -22793,6 +23324,7 @@ mod computer_tests {
                 subagent_status,
                 subagent_tail,
                 html_render: None,
+                delegate_route: None,
             },
             other => other,
         };

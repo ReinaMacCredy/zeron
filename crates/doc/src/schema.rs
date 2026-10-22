@@ -151,6 +151,8 @@ struct DocPartJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     html_render: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    delegate_route: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     from_harness: Option<HarnessId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     from_model: Option<String>,
@@ -237,6 +239,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             subagent_status,
             subagent_tail,
             html_render,
+            delegate_route,
         } => DocPartJson {
             id: id.clone(),
             kind: "tool".into(),
@@ -261,6 +264,10 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             }),
             subagent_tail: subagent_tail.clone(),
             html_render: html_render.as_ref().map(serde_json::to_value).transpose()?,
+            delegate_route: delegate_route
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()?,
             ..Default::default()
         },
         MessagePart::Input {
@@ -337,6 +344,9 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 }),
                 subagent_tail: p.subagent_tail,
                 html_render: p.html_render.and_then(|r| serde_json::from_value(r).ok()),
+                delegate_route: p
+                    .delegate_route
+                    .and_then(|r| serde_json::from_value(r).ok()),
             },
             None => MessagePart::Text {
                 id: p.id,
@@ -1257,6 +1267,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(html_render) = &doc_part.html_render {
         map.insert("htmlRender", loro_value_from_json(html_render))?;
     }
+    if let Some(delegate_route) = &doc_part.delegate_route {
+        map.insert("delegateRoute", loro_value_from_json(delegate_route))?;
+    }
     if let Some(classifier) = &doc_part.classifier {
         map.insert("classifier", loro_value_from_json(classifier))?;
     }
@@ -1436,6 +1449,7 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
             subagent_status: None,
             subagent_tail: None,
             html_render: None,
+            delegate_route: None,
         });
     }
     if let Some(message) = obj.get("message").and_then(|x| x.as_str()) {
@@ -1736,6 +1750,9 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     }
     if let Some(html_render) = &doc_part.html_render {
         map.insert("htmlRender", loro_value_from_json(html_render))?;
+    }
+    if let Some(delegate_route) = &doc_part.delegate_route {
+        map.insert("delegateRoute", loro_value_from_json(delegate_route))?;
     }
     if let Some(text) = &doc_part.text {
         // Defensive path only — the fold never rewrites earlier text.
@@ -2076,6 +2093,7 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
             html_render: None,
+            delegate_route: None,
         };
         let doc = SessionDoc::init("c1").unwrap();
         let mut w = SegmentWriter::begin(&doc, "e1", "dev", 1).unwrap();
@@ -2141,6 +2159,7 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
             html_render: None,
+            delegate_route: None,
         };
         w.sync(std::slice::from_ref(&part)).unwrap();
         if let MessagePart::Tool {
@@ -2194,6 +2213,7 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
             html_render: None,
+            delegate_route: None,
         };
         let parts = vec![
             tool(
@@ -2508,6 +2528,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_stamped_delegate_route_round_trips_through_the_segment_writer() {
+        let doc = SessionDoc::init("chat-4").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 5).unwrap();
+        let mut folded = Vec::new();
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::ToolCall {
+                id: "t1".into(),
+                call: ToolCall::Mcp {
+                    server: "zeron".into(),
+                    tool: "delegate_task".into(),
+                    input: Some(serde_json::json!({ "task": "write the parser" })),
+                },
+            },
+        );
+        writer.sync(&folded).unwrap();
+        let route = zeron_proto::ChildRoute {
+            source: "fell_back".into(),
+            role: Some("worker".into()),
+            reason: Some("Codex out of quota".into()),
+            resets_at: Some(9_000),
+            ..Default::default()
+        };
+        if let MessagePart::Tool { delegate_route, .. } = &mut folded[0] {
+            *delegate_route = Some(route.clone());
+        }
+        writer.sync(&folded).unwrap();
+        writer.finish(&folded, MessageStatus::Complete).unwrap();
+        match &doc.read_entries().unwrap()[0].parts[0] {
+            MessagePart::Tool { delegate_route, .. } => {
+                assert_eq!(delegate_route.as_ref(), Some(&route));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
     /// Old pre-strip docs carry inline `output`/`diff` — they must still read
     /// back (schema changes are serde-additive ONLY; old readers, old docs).
     #[test]
@@ -2538,6 +2595,7 @@ mod tests {
                 subagent_status: None,
                 subagent_tail: None,
                 html_render: None,
+                delegate_route: None,
             }],
             created_at: 1,
             device_id: "dev-a".into(),

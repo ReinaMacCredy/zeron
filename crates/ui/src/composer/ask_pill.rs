@@ -1044,6 +1044,7 @@ mod tests {
                         subagent_status: Some(zeron_doc::SubagentStatus::Running),
                         subagent_tail: None,
                         html_render: None,
+                        delegate_route: None,
                     }],
                     ..asking("unused").remove(0)
                 },
