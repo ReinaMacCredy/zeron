@@ -3821,11 +3821,10 @@ pub(crate) fn ok_tone(theme: &Theme) -> Hsla {
 }
 
 fn kind_tone(theme: &Theme, kind: Kind) -> Option<Hsla> {
-    let dark = theme.appearance == crate::theme::Appearance::Dark;
     match kind {
         Kind::Needs => Some(needs_tone(theme)),
         Kind::Question => Some(crate::shell::chat_status_tone(ChatIndicator::Working, theme).2),
-        Kind::Intervention => Some(gpui::rgb(if dark { 0xc084fc } else { 0x9333ea }).into()),
+        Kind::Intervention => Some(theme.violet),
         Kind::Resource => None,
     }
 }

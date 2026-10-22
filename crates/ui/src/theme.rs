@@ -693,6 +693,7 @@ pub struct Theme {
     pub glyph: GlyphPalette,
     /// Softer success for text on a success-tinted chip.
     pub success_muted: Hsla,
+    pub violet: Hsla,
 
     // ---- paint: components ----
     /// Hover tone for an *opaque* raised pill. Hover must brighten the plate in
@@ -1231,6 +1232,7 @@ impl Theme {
             busy: accent.activity,
             glyph: accent.glyph,
             success_muted: oklch(0.845, 0.143, 164.978), // emerald-300
+            violet: oklch(0.714, 0.203, 305.504),
             surface_raised_hover: neutral(0.29),
             band: band_for(Appearance::Dark),
             input_bg: hsla(0.0, 0.0, 1.0, 0.03),
@@ -1328,6 +1330,7 @@ impl Theme {
             busy: accent.activity,
             glyph: accent.glyph,
             success_muted: oklch(0.508, 0.118, 165.612), // emerald-700
+            violet: oklch(0.558, 0.288, 302.321),
             // Opaque pills darken on hover here rather than brighten — same
             // "brighten the plate, don't wash it out" rule, read the other way.
             surface_raised_hover: neutral(0.900),
