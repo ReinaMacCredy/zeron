@@ -328,7 +328,7 @@ pub(crate) enum Watch {
     Elsewhere(String),
 }
 
-pub(crate) fn watch_of(
+fn watch_of(
     task_id: &str,
     host: Option<&str>,
     local: Option<&str>,
@@ -366,7 +366,7 @@ pub(crate) fn tree_watch(state: &AppState, root: &str) -> Watch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Sender {
+enum Sender {
     You,
     Lead,
     Supervisor,
@@ -388,7 +388,7 @@ impl Sender {
     }
 }
 
-pub(crate) fn sender(
+fn sender(
     from: Option<&str>,
     own: &str,
     lead: Option<&str>,
@@ -409,13 +409,13 @@ pub(crate) fn sender(
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Received {
-    pub sender: Sender,
-    pub text: String,
-    pub at: Option<DateTime<Utc>>,
+struct Received {
+    sender: Sender,
+    text: String,
+    at: Option<DateTime<Utc>>,
 }
 
-pub(crate) fn messages_it_got(
+fn messages_it_got(
     entries: &[SessionMessageEntry],
     own: &str,
     lead: Option<&str>,

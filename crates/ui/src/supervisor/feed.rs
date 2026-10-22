@@ -9,7 +9,7 @@ use zeron_proto::supervisor::{
 
 use super::{no_effect_yet, row_key, row_origin};
 
-pub(crate) const OPEN_HOURS: i64 = 24;
+const OPEN_HOURS: i64 = 24;
 const MEMORY_ROWS: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -188,14 +188,14 @@ pub(crate) fn grouped<'a>(rows: impl IntoIterator<Item = &'a Row>) -> Vec<Group<
     groups
 }
 
-pub(crate) fn needs_at(row: &NeedsYouRow) -> DateTime<Utc> {
+fn needs_at(row: &NeedsYouRow) -> DateTime<Utc> {
     match row {
         NeedsYouRow::Item(item) => item.at,
         NeedsYouRow::Input(input) => input.at,
     }
 }
 
-pub(crate) fn question_key(question: &LeadQuestion) -> String {
+fn question_key(question: &LeadQuestion) -> String {
     format!("question:{}:{}", question.chat_id, question.request_id)
 }
 
