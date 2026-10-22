@@ -667,13 +667,17 @@ enum Mode {
     Stopped,
     Off,
     Failed(String),
+    Blocked(String),
 }
 
 fn mode(snapshot: Option<&SupervisorSnapshot>, ensure: &Ensure) -> Mode {
     match (live_state(snapshot), ensure) {
         (SupervisorState::Off, Ensure::Failed(error)) => Mode::Failed(error.clone()),
         (SupervisorState::Off, _) => Mode::Off,
-        (SupervisorState::Asleep, _) => Mode::Watching,
+        (SupervisorState::Asleep, _) => match snapshot.and_then(|s| s.blocked.as_ref()) {
+            Some(reason) => Mode::Blocked(reason.clone()),
+            None => Mode::Watching,
+        },
         (SupervisorState::Awake, _) => Mode::Working,
         (SupervisorState::Stopped, _) => Mode::Stopped,
     }
@@ -2604,7 +2608,7 @@ impl SupervisorPage {
                     .child(mark(icons::LUCIDE_SQUARE))
                     .into_any_element();
             }
-            Mode::Failed(_) => {
+            Mode::Failed(_) | Mode::Blocked(_) => {
                 return indicator(div(), "supervisor-dot-failed")
                     .child(mark(icons::DANGER_TRIANGLE))
                     .into_any_element();
@@ -2747,11 +2751,25 @@ impl SupervisorPage {
                     None,
                     vec![("", vec![text(error.clone())])],
                 ),
+                Mode::Blocked(reason) => (
+                    ("Couldn't run", "the Supervisor".to_owned()),
+                    (snap.waiting > 0).then(|| {
+                        format!(
+                            "{} {} waiting",
+                            snap.waiting,
+                            plural(snap.waiting, "wake", "wakes")
+                        )
+                    }),
+                    vec![("", vec![text(reason.clone())])],
+                ),
             };
             (mode, head, right, lines, turn_since, held)
         };
         let tone = status_tone(&mode, theme);
-        let action = matches!(mode, Mode::Stopped | Mode::Off | Mode::Failed(_));
+        let action = matches!(
+            mode,
+            Mode::Stopped | Mode::Off | Mode::Failed(_) | Mode::Blocked(_)
+        );
         let tint = |el: gpui::Div| el.when(action, |el| el.bg(tone.opacity(0.05)));
         let line = |key: &str, parts: Vec<Part>| {
             let row = div()
@@ -2878,7 +2896,7 @@ impl SupervisorPage {
             .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.open_conversation(cx)))
         };
         let actions = match &mode {
-            Mode::Working => Some(actions.child(conversation())),
+            Mode::Working | Mode::Blocked(_) => Some(actions.child(conversation())),
             Mode::Stopped => Some(
                 actions
                     .when(!held.is_empty(), |el| {
@@ -3821,6 +3839,7 @@ fn status_tone(mode: &Mode, theme: &Theme) -> Hsla {
         Mode::Stopped => needs_tone(theme),
         Mode::Off => theme.text_faint,
         Mode::Failed(_) => theme.danger,
+        Mode::Blocked(_) => needs_tone(theme),
     }
 }
 
@@ -4078,6 +4097,7 @@ impl Render for SupervisorPage {
                 Mode::Stopped => "stopped",
                 Mode::Off => "off",
                 Mode::Failed(_) => "failed",
+                Mode::Blocked(_) => "blocked",
             },
             now,
             reduced,
@@ -4091,7 +4111,10 @@ impl Render for SupervisorPage {
             });
         }
         let inline_status = (frame.shown == RailMode::Strip
-            && matches!(mode, Mode::Stopped | Mode::Off | Mode::Failed(_)))
+            && matches!(
+                mode,
+                Mode::Stopped | Mode::Off | Mode::Failed(_) | Mode::Blocked(_)
+            ))
         .then(|| self.render_status(watched, false, now, &theme, cx));
         let header = enter_block(
             self.enter_progress(0, now),
@@ -4335,6 +4358,26 @@ mod tests {
             Watch::Unwatched,
             "a mission left off stays off under Watch everything"
         );
+    }
+
+    #[test]
+    fn a_supervisor_whose_agent_cannot_run_reads_blocked_not_watching() {
+        let snapshot = |state, blocked: Option<&str>| SupervisorSnapshot {
+            chat_id: Some("sup".into()),
+            state,
+            blocked: blocked.map(str::to_owned),
+            ..Default::default()
+        };
+        let off = "Claude Code is turned off in Settings > Providers.";
+        let asleep = snapshot(SupervisorState::Asleep, None);
+        assert_eq!(mode(Some(&asleep), &Ensure::Idle), Mode::Watching);
+        let blocked = snapshot(SupervisorState::Asleep, Some(off));
+        assert_eq!(
+            mode(Some(&blocked), &Ensure::Idle),
+            Mode::Blocked(off.into())
+        );
+        let stopped = snapshot(SupervisorState::Stopped, Some(off));
+        assert_eq!(mode(Some(&stopped), &Ensure::Idle), Mode::Stopped);
     }
 
     #[test]
