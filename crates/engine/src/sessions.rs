@@ -3944,6 +3944,7 @@ struct HarnessPrompt {
 struct Owed {
     carry: Option<String>,
     note: Option<String>,
+    agent_compacted: bool,
 }
 
 #[derive(Default)]
@@ -3972,8 +3973,10 @@ impl Inner {
         let owed = Owed {
             carry: self.take_carry(chat_id, typed),
             note: self.take_compact_note(chat_id, typed),
+            agent_compacted: zeron_proto::invocation::leading_command(typed).is_none()
+                && lock(&self.agent_compacted).remove(chat_id),
         };
-        let nudge = self.context_nudge(chat_id, harness_id, typed, owed.note.as_deref());
+        let nudge = self.context_nudge(chat_id, harness_id, typed, &owed);
         if nudge.is_none() && owed.carry.is_none() {
             return (wrapped, owed);
         }
@@ -4000,6 +4003,9 @@ impl Inner {
             lock(&self.compact_owed)
                 .entry(chat_id.to_string())
                 .or_insert(note);
+        }
+        if owed.agent_compacted {
+            lock(&self.agent_compacted).insert(chat_id.to_string());
         }
     }
 
@@ -4126,12 +4132,12 @@ impl Inner {
         chat_id: &str,
         harness_id: HarnessId,
         typed: &str,
-        owed: Option<&str>,
+        owed: &Owed,
     ) -> Option<String> {
         if zeron_proto::invocation::leading_command(typed).is_some() {
             return None;
         }
-        let reminder = if lock(&self.agent_compacted).remove(chat_id)
+        let reminder = if owed.agent_compacted
             || self.registry.compaction_settings().mode != CompactionMode::Threshold
         {
             None
@@ -4145,10 +4151,14 @@ impl Inner {
             })
         };
         let findings = self.findings_reminder(chat_id);
-        let lines: Vec<&str> = [owed, findings.as_deref(), reminder.as_deref()]
-            .into_iter()
-            .flatten()
-            .collect();
+        let lines: Vec<&str> = [
+            owed.note.as_deref(),
+            findings.as_deref(),
+            reminder.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         (!lines.is_empty()).then(|| {
             format!(
                 "<system-reminder>\n{}\n</system-reminder>",
