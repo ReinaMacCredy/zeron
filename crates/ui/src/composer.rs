@@ -26,8 +26,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use zeron_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry};
 use zeron_proto::{
-    FileSearchMatch, HarnessId, RunRequest, SandboxLevel, SlashCommand, SlashCommandKind,
-    UserInputAnswer, UserInputQuestion, capabilities,
+    FileSearchMatch, HarnessId, RunRequest, SandboxLevel, SlashCommand, UserInputAnswer,
+    UserInputQuestion, capabilities,
 };
 use zeron_rpc::{RpcError, methods};
 
@@ -6341,8 +6341,7 @@ fn invocation_token(text: &str, cursor: usize, prefix: char) -> Option<MentionTo
 }
 
 use zeron_proto::app_commands::{
-    BTW_COMMAND, COMPACT_COMMAND, COMPUTER_USE_COMMAND, SIDECHAT_COMMAND, compact_focus,
-    sidechat_prompt,
+    COMPACT_COMMAND, COMPUTER_USE_COMMAND, compact_focus, sidechat_prompt,
 };
 use zeron_proto::command_catalog::{
     CatalogFailure, catalog_empty_message, catalog_error_message, invocation_detail,
@@ -21211,15 +21210,6 @@ mod computer_use_tests {
     use super::*;
     use gpui::TestAppContext;
     use zeron_proto::computer::ComputerPermission;
-
-    fn command(name: &str) -> SlashCommand {
-        SlashCommand {
-            name: name.into(),
-            description: "native".into(),
-            input_hint: None,
-            kind: SlashCommandKind::BuiltIn,
-        }
-    }
 
     #[test]
     fn the_preflight_runs_only_in_a_mac_ui_on_the_chats_host() {
