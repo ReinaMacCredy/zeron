@@ -3,19 +3,12 @@ pub mod preview;
 pub mod quota;
 
 use serde::{Deserialize, Serialize};
-use zeron_proto::{ChatConfig, ChildRoute, HarnessId, ReasoningLevel, RouteTarget};
+use zeron_proto::{ChildRoute, HarnessId, ReasoningLevel, RouteTarget};
 
+pub use zeron_proto::route_preview::target_of;
 pub use zeron_proto::routing::{
     MidRun, NativePolicy, OutOfQuota, QuotaState, Role, RoleRoute, RoutingSettings,
 };
-
-pub fn target_of(config: &ChatConfig) -> RouteTarget {
-    RouteTarget {
-        harness: config.harness,
-        model: config.model.clone(),
-        reasoning: config.reasoning,
-    }
-}
 
 pub fn check_target(target: &RouteTarget, known: impl Fn(HarnessId) -> bool) -> Result<(), String> {
     if target.harness == HarnessId::Acp || !known(target.harness) {
@@ -165,6 +158,7 @@ pub fn resolve(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use zeron_proto::ChatConfig;
 
     #[test]
     fn roles_parse_their_names_and_the_old_aliases() {

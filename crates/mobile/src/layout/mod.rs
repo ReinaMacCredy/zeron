@@ -429,7 +429,12 @@ impl TranscriptView {
             return false;
         };
         let tx = Mutex::new(self.tx.lock().unwrap().clone());
+        let weak = Arc::downgrade(&client);
         let guard = handle.watch(move |snap| {
+            let harness = weak.upgrade().and_then(|client| {
+                let wire = client.client.workspace().session(&chat_id)?.harness.clone()?;
+                serde_json::from_value(serde_json::Value::String(wire)).ok()
+            });
             let input = TranscriptInput {
                 entries: snap.transcript_messages(),
                 pending: snap
@@ -444,6 +449,7 @@ impl TranscriptView {
                 working_since_ms: snap.working_since_ms,
                 streaming: snap.streaming,
                 input_answers: snap.input_answers.clone(),
+                harness,
             };
             let _ = tx.lock().unwrap().send(Msg::Input(input));
         });
@@ -538,6 +544,7 @@ pub(crate) fn debug_input(entries: Vec<DebugEntry>, working: bool) -> Transcript
         working_since_ms: None,
         streaming: working,
         input_answers: Default::default(),
+        harness: None,
     }
 }
 

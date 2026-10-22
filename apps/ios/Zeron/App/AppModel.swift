@@ -44,6 +44,8 @@ final class AppModel {
     private(set) var connectivity: Connectivity?
     /// Front-page sessions that are working / waiting on the user.
     private(set) var live = LiveCounts()
+    private(set) var tasks = TasksPage(missions: [], needsYou: [], working: [], toDo: [], done: [], needsYouCount: 0)
+    private(set) var supervisor = SupervisorPage(hosts: [], needsYou: [], doneToday: [], wakes: [])
     private var rows: [String: SessionRow] = [:]
     private var rawProjects: [ProjectView] = []
     private var lastHosts: [HostOption] = []
@@ -402,8 +404,13 @@ final class AppModel {
         rows = all
         // Devices coming and going (Settings, host pickers) count as changes.
         let hosts = hostOptions
+        let tasksPage = client.tasksPage()
+        let supervisorPage = client.supervisorPage()
         let changed = page != frontPage || archivedVMs != archived || counts != live || hosts != lastHosts
+            || tasksPage != tasks || supervisorPage != supervisor
         lastHosts = hosts
+        tasks = tasksPage
+        supervisor = supervisorPage
         live = counts
         frontPage = page
         archived = archivedVMs
@@ -639,9 +646,8 @@ final class AppModel {
         } else {
             return nil
         }
-        let config = ChatConfig(harness: draft.harness, model: draft.model, reasoning: draft.effort, modelOptions: [:], sandbox: .workspaceWrite)
         do {
-            let chatId = try client.createSession(newSession: NewSession(target: target, config: config, branch: draft.worktree ? nil : draft.branch, cwd: nil, title: nil))
+            let chatId = try client.createSession(newSession: NewSession(target: target, config: draft.config, branch: draft.worktree ? nil : draft.branch, cwd: nil, title: nil))
             let handle = try client.openSession(chatId: chatId)
             let project = rawProjects.first { $0.id == draft.projectId }
             let worktree = draft.worktree ? project.map { WorktreeSpec(repoPath: $0.path, base: draft.branch ?? "HEAD", spaceId: $0.id) } : nil
@@ -654,6 +660,10 @@ final class AppModel {
             return nil
         }
     }
+}
+
+extension NewSessionDraft {
+    var config: ChatConfig { ChatConfig(harness: harness, model: model, reasoning: effort, modelOptions: [:], sandbox: .workspaceWrite) }
 }
 
 extension StagedImage {

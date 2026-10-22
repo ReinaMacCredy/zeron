@@ -391,8 +391,8 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     private func modelMenu() -> UIMenu {
         let byHarness = Dictionary(grouping: models, by: \.harness)
         return UIMenu(title: "Model", children: byHarness.keys.sorted().map { h in
-            UIMenu(title: byHarness[h]!.first!.harnessLabel, image: BrandMarks.image(for: h, side: 16), options: .displayInline, children: byHarness[h]!.map { m in
-                UIAction(title: m.label, state: m.harness == draft.harness && m.id == draft.model ? .on : .off) { [weak self] _ in
+            UIMenu(title: byHarness[h]!.first!.harnessLabel, options: .displayInline, children: byHarness[h]!.map { m in
+                UIAction(title: m.label, image: BrandMarks.image(for: h, side: 16), state: m.harness == draft.harness && m.id == draft.model ? .on : .off) { [weak self] _ in
                     self?.draft.harness = m.harness
                     self?.draft.model = m.id
                     self?.draft.effort = nil

@@ -82,28 +82,7 @@ pub enum TaskCenterEvent {
     Back,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanEdit {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub overview: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub overview_images: Option<Vec<String>>,
-    pub steps: Vec<PlanStepEdit>,
-    pub remove_step_ids: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub order: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanStepEdit {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub step_id: Option<String>,
-    pub title: String,
-    pub notes: String,
-    pub images: Vec<String>,
-}
+pub use zeron_proto::{PlanEdit, PlanStepEdit};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selection {

@@ -68,6 +68,9 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                 if route == "new" { router.presentNewSession(prompt: nil) }
                 if route == "more" { router.showSettings() }
                 if route == "search" { router.showSearch() }
+                if route.hasPrefix("tasks"), let shell = router as? MainTabController {
+                    shell.showTasks(String(route.dropFirst(6)))
+                }
             }
         }
     }

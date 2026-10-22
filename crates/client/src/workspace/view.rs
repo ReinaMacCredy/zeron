@@ -210,6 +210,8 @@ pub struct WorkspaceSnapshot {
     pub pull_requests: PullRequestGroups,
     pub archived: Vec<Arc<SessionRow>>,
     pub devices: Vec<DeviceView>,
+    pub tasks: super::TasksPage,
+    pub supervisor: super::SupervisorPage,
     /// Every chat row (archived and children included), by id.
     pub sessions: HashMap<String, Arc<SessionRow>>,
     children: HashMap<String, Vec<Arc<SessionRow>>>,
@@ -325,6 +327,10 @@ pub(crate) struct DeriveContext<'a> {
     /// Newest presence heartbeat per device (epoch ms).
     pub presence: &'a HashMap<String, i64>,
     pub change_requests: &'a [CheckoutChangeRequestStatus],
+    pub steps: &'a [zeron_proto::TaskStep],
+    pub supervisors:
+        &'a std::collections::BTreeMap<String, zeron_proto::supervisor::SupervisorSnapshot>,
+    pub item_sends: &'a HashMap<String, super::ItemSend>,
     /// Oldest-unadopted-send state per chat (open sessions only).
     pub send_states: &'a HashMap<String, SendState>,
     pub synced: bool,
@@ -755,6 +761,7 @@ pub(crate) fn derive(
             .then_with(|| a.id.cmp(&b.id))
     });
 
+    let (tasks, supervisor) = super::tasks::derive(state, &rows, &devices, cx);
     let mut snapshot = WorkspaceSnapshot {
         revision: 0,
         computed_at_ms: now_ms,
@@ -770,6 +777,8 @@ pub(crate) fn derive(
         pull_requests,
         archived,
         devices,
+        tasks,
+        supervisor,
         sessions: rows,
         children,
         content_hash: 0,
@@ -813,6 +822,7 @@ fn snapshot_hash(s: &WorkspaceSnapshot) -> u64 {
     for device in &s.devices {
         device.hash(&mut h);
     }
+    format!("{:?}{:?}", s.tasks, s.supervisor).hash(&mut h);
     let mut all: Vec<(&String, u64)> = s.sessions.iter().map(|(k, v)| (k, v.revision)).collect();
     all.sort();
     all.hash(&mut h);

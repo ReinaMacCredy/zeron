@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use zeron_doc::parts::{MessagePart, SubagentStatus};
 use zeron_markdown::parser::{Block, BlockTree, IncrementalParser, InlineRun, InlineStyle};
-use zeron_proto::ToolCall;
+use zeron_proto::{HarnessId, ToolCall};
 use zeron_text::WhiteSpace;
 
 use super::display::{ColorRole, Decoration, DisplayBuilder, FadeEdge, WidgetKind};
@@ -135,6 +135,13 @@ fn tool_icon(call: &ToolCall) -> &'static str {
         ToolCall::Unknown { name, .. } if name == "Agent" || name.starts_with("Agent: ") || name.eq_ignore_ascii_case("wait for agents") => "tool-bot",
         ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => "tool-widget",
     }
+}
+
+fn agent_icon(harness: Option<HarnessId>, call: &ToolCall) -> String {
+    HarnessId::brand_of(harness, call.subagent_model())
+        .and_then(|h| serde_json::to_value(h).ok())
+        .and_then(|v| v.as_str().map(|id| format!("mark-{id}")))
+        .unwrap_or_else(|| "tool-bot".to_owned())
 }
 
 fn file_path(call: &ToolCall) -> Option<&str> {
@@ -828,7 +835,11 @@ impl RowBuilder {
                             body.extend(result_block(ctx, &st, part));
                         }
                         lines.push(ToolLine {
-                            icon: computer.map_or(tool_icon(call), |_| "cursorarrow").to_owned(),
+                            icon: match (computer, agents) {
+                                (Some(_), _) => "cursorarrow".to_owned(),
+                                (None, true) if subagent_ref.is_some() => agent_icon(self.harness, call),
+                                (None, _) => tool_icon(call).to_owned(),
+                            },
                             label: prepare_plain(ctx, label, if agents { medium } else { st.label }, st.lh, color, WhiteSpace::Pre),
                             detail,
                             badge,

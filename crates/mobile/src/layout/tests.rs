@@ -601,9 +601,9 @@ fn folded_user_message_fades_its_last_line() {
 fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
     use zeron_doc::parts::{MessagePart, MessageStatus, SubagentStatus};
     use zeron_doc::schema::{MessageRole, SessionMessageEntry};
-    let spawn = |status: SubagentStatus| MessagePart::Tool {
+    let spawn_with = |status: SubagentStatus, input: Option<serde_json::Value>| MessagePart::Tool {
         id: "k1".into(),
-        call: zeron_proto::ToolCall::Unknown { name: "Agent: scan the repo".into(), input: None },
+        call: zeron_proto::ToolCall::Unknown { name: "Agent: scan the repo".into(), input },
         is_error: false,
         // Eager-done: the spawn call resolved while the subagent still runs.
         resolved: true,
@@ -619,13 +619,14 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
         html_render: None,
         delegate_route: None,
     };
-    let frame_for = |status: SubagentStatus| {
+    let spawn = |status: SubagentStatus| spawn_with(status, None);
+    let frame_with = |part: MessagePart, harness: Option<zeron_proto::HarnessId>| {
         let mut w = worker(390.0);
         w.input = TranscriptInput {
             entries: vec![Arc::new(SessionMessageEntry {
                 id: "a".into(),
                 role: MessageRole::Assistant,
-                parts: vec![spawn(status)],
+                parts: vec![part],
                 created_at: 0,
                 device_id: String::new(),
                 status: Some(MessageStatus::Complete),
@@ -635,15 +636,29 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
                 fork_import: false,
                 answers_request_id: None,
             })],
+            harness,
             ..Default::default()
         };
         w.pass()
     };
+    let frame_for = |status: SubagentStatus| frame_with(spawn(status), None);
     let spinners = |f: &LayoutFrame| f.display(0).unwrap().widgets.iter().filter(|w| matches!(w.kind, display::WidgetKind::Spinner)).count();
     assert_eq!(spinners(&frame_for(SubagentStatus::Running)), 1, "running subagent spins");
     assert_eq!(spinners(&frame_for(SubagentStatus::Done)), 0, "finished subagent is quiet");
     let failed = frame_for(SubagentStatus::Failed);
     assert!(failed.display(0).unwrap().runs.iter().any(|r| r.color == display::ColorRole::Danger), "failed subagent is tinted danger");
+
+    let icon = |f: &LayoutFrame| {
+        f.display(0).unwrap().widgets.iter().find_map(|w| match &w.kind {
+            display::WidgetKind::Icon { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+    };
+    let codex = Some(zeron_proto::HarnessId::Codex);
+    let haiku = Some(serde_json::json!({ "model": "claude-haiku-5-5" }));
+    assert_eq!(icon(&frame_with(spawn_with(SubagentStatus::Done, haiku), codex)).as_deref(), Some("mark-claude-code"), "the model's maker wins");
+    assert_eq!(icon(&frame_with(spawn(SubagentStatus::Done), codex)).as_deref(), Some("mark-codex"), "no model: the chat's harness");
+    assert_eq!(icon(&frame_for(SubagentStatus::Done)).as_deref(), Some("tool-bot"), "neither: the bot");
 }
 
 #[test]

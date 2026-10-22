@@ -271,7 +271,10 @@ final class RowView: UIView {
             case let .icon(name, color):
                 // Desktop icon assets (tool-*, fileicon-*), else an SF symbol.
                 let iv: UIImageView
-                if let asset = RowView.asset(name) {
+                if name.hasPrefix("mark-") {
+                    iv = UIImageView(image: BrandMarks.image(for: String(name.dropFirst(5)), side: rect.height))
+                    iv.contentMode = .scaleAspectFit
+                } else if let asset = RowView.asset(name) {
                     iv = UIImageView(image: asset)
                     iv.contentMode = .scaleAspectFit
                 } else {

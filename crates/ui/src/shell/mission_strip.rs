@@ -43,7 +43,7 @@ impl Shell {
         let zeron_proto::PlanProgress { done, total } = mission.progress;
         let percent = (done * 100).checked_div(total).unwrap_or(0).min(100) as u8;
         let task_id = mission.task_id.clone();
-        let selection = mission.role.selection();
+        let selection = crate::tasks::mission_selection(&mission.role);
         let tree_height = match &tree {
             Some(tree) => {
                 let (height, moving) = tree.update(cx, |tree, cx| tree.band(cx));
