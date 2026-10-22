@@ -4,8 +4,6 @@ use zeron_doc::{MessageRole, MessageStatus};
 use zeron_proto::ChatIndicator;
 
 impl Shell {
-    /// d119: no handoff mid-turn, while the chat waits on the person, or
-    /// before it has a finished message to carry over.
     fn handoff_blocked(&self, cx: &App) -> bool {
         let state = self.state.read(cx);
         let Some(chat) = state.selected_chat_row() else {
@@ -128,7 +126,14 @@ impl Shell {
             .map(|target| {
                 handoff_row(&popup, "new", target, cx, |this, harness, model, cx| {
                     if let Some(chat_id) = this.state.read(cx).selected_chat.clone() {
-                        this.continue_in_new_thread(chat_id, Some(harness), Some(model), None, cx);
+                        let picks = this
+                            .composer
+                            .read(cx)
+                            .pickers()
+                            .read(cx)
+                            .new_thread_picks(harness, &model);
+                        let target = Some((harness, model, picks));
+                        this.continue_in_new_thread(chat_id, target, None, cx);
                     }
                 })
             })
@@ -242,7 +247,7 @@ fn handoff_project_row(
         .on_click(cx.listener(move |this, _, _, cx| {
             this.close_handoff_menu(cx);
             if let Some(chat_id) = this.state.read(cx).selected_chat.clone() {
-                this.continue_in_new_thread(chat_id, None, None, Some(space_id.clone()), cx);
+                this.continue_in_new_thread(chat_id, None, Some(space_id.clone()), cx);
             }
         }))
         .into_any_element()

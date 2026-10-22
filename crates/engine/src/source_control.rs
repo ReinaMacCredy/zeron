@@ -1542,7 +1542,7 @@ struct GhPrMetadata {
     review_requests: Option<GhReviewRequests>,
     // Missing and explicit null have different meanings (unavailable vs no checks).
     #[serde(default)]
-    #[serde(deserialize_with = "present_nullable")]
+    #[serde(deserialize_with = "zeron_proto::present_nullable")]
     status_check_rollup: Option<Option<GhCiRollup>>,
     /// The signed-in account, read beside the pull request (`viewer`).
     #[serde(skip)]
@@ -1676,14 +1676,6 @@ impl GhPrMetadata {
             requested,
         )
     }
-}
-
-fn present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]

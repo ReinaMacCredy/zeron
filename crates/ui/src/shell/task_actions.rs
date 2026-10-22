@@ -171,6 +171,26 @@ impl Shell {
         start: crate::composer::MissionStart,
         cx: &mut Context<Self>,
     ) {
+        let staged = start.images();
+        if staged.is_empty() {
+            self.start_mission_with(start, Vec::new(), cx);
+            return;
+        }
+        let upload = crate::tasks::images::upload(&self.state, staged, cx);
+        cx.spawn(async move |this, cx| {
+            let images = upload.await;
+            this.update(cx, |shell, cx| shell.start_mission_with(start, images, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn start_mission_with(
+        &mut self,
+        start: crate::composer::MissionStart,
+        images: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
         let task_id = uuid::Uuid::new_v4().to_string();
         let (title, mut notes) = start.title_notes();
         let lead = start
@@ -193,6 +213,9 @@ impl Shell {
         if !context.is_empty() {
             create["context"] = context.into();
         }
+        if !images.is_empty() {
+            create["images"] = images.into();
+        }
         let orchestrate = start.orchestrate;
         let (space_id, config) = (start.space_id.clone(), start.config.clone());
         let origin = TaskOrigin::Mission { start, create };
@@ -200,7 +223,14 @@ impl Shell {
             Some(chat_id) => {
                 self.assign_task(origin, &task_id, &chat_id, true, Some(orchestrate), cx)
             }
-            None => self.start_task(origin, &task_id, space_id, config, Some(orchestrate), cx),
+            None => self.start_task(
+                origin,
+                &task_id,
+                Some(space_id),
+                config,
+                Some(orchestrate),
+                cx,
+            ),
         }
     }
 
@@ -304,7 +334,7 @@ impl Shell {
         &mut self,
         origin: TaskOrigin,
         task_id: &str,
-        space_id: Option<String>,
+        space_id: Option<Option<String>>,
         config: Option<ChatConfig>,
         orchestrate: Option<crate::tasks::Orchestrate>,
         cx: &mut Context<Self>,
@@ -315,15 +345,18 @@ impl Shell {
         };
         let chat_id = uuid::Uuid::new_v4().to_string();
         let update = origin.first_step(task_id);
-        let start = serde_json::json!({
-            "op": "startTask", "taskId": task_id, "chatId": chat_id,
-            "spaceId": space_id, "config": config,
+        let mut start = serde_json::json!({
+            "op": "startTask", "taskId": task_id, "chatId": chat_id, "config": config,
             "orchestrate": orchestrate.is_some(),
             "approvePlan": orchestrate.is_none_or(|o| o.approve_plan),
             "sameAgents": orchestrate.is_some_and(|o| o.same_agents),
             "planDoc": orchestrate.is_some_and(|o| o.plan_doc),
         });
+        if let Some(space_id) = space_id {
+            start["spaceId"] = space_id.into();
+        }
         let task_id = task_id.to_string();
+        let route = self.route;
         cx.spawn(async move |this, cx| {
             let saving = update.is_some();
             for (step, params) in update.into_iter().chain([start]).enumerate() {
@@ -366,7 +399,7 @@ impl Shell {
                 let opened = this
                     .update(cx, |shell, cx| {
                         let landed = shell.state.read(cx).chats.iter().any(|c| c.id == chat_id);
-                        if landed {
+                        if landed && shell.route == route {
                             shell.open_chat(chat_id.clone(), cx);
                         }
                         landed
@@ -1537,7 +1570,7 @@ impl Shell {
 
     pub(super) fn render_tasks_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let view = settings::current(cx).tasks_view;
+        let view = crate::tasks::tasks_view(cx);
         let thumb = motion::state_t(
             "tasks-view-thumb",
             view == settings::TasksView::Kanban,

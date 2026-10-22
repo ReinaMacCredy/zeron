@@ -396,7 +396,7 @@ impl EngineRpc {
                     attach: false,
                 };
                 let message_id = match self
-                    .start_task(&task_id, &lead, project_id, config, Some(lead_brief))
+                    .start_task(&task_id, &lead, Some(project_id), config, Some(lead_brief))
                     .await
                 {
                     Ok(message_id) => message_id,

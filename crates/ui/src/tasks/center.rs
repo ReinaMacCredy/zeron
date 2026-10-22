@@ -417,6 +417,8 @@ pub struct TaskCenter {
     folded: bool,
     fold_turn: Tween,
     pop: Option<spine::Pop>,
+    pop_dismissed: Option<super::tree::Status>,
+    pop_pressed: bool,
     painted: Painted,
     scroll: ScrollHandle,
     menu: popover::Popup<StepMenu>,
@@ -487,6 +489,8 @@ impl TaskCenter {
             folded: false,
             fold_turn: Tween::at(0.0, Instant::now()),
             pop: None,
+            pop_dismissed: None,
+            pop_pressed: false,
             painted: Painted::default(),
             scroll: ScrollHandle::new(),
             menu: popover::Popup::default(),
@@ -1216,7 +1220,8 @@ impl TaskCenter {
         let (top, height) = drag.rows[drag.from];
         let first = drag.rows[lo.min(drag.from)];
         let last = drag.rows[hi.max(drag.from)];
-        drag.dy = (y - drag.start).clamp(first.0 - top - 6.0, last.0 + last.1 - top - height + 6.0);
+        let (min, max) = (first.0 - top - 6.0, last.0 + last.1 - top - height + 6.0);
+        drag.dy = (y - drag.start).clamp(min.min(max), max.max(min));
         drag.over = drop_index(&drag.rows, drag.from, drag.range, drag.dy);
         cx.notify();
     }
@@ -2208,6 +2213,7 @@ impl TaskCenter {
 
 impl Render for TaskCenter {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.pop_dismissed = None;
         let theme = Theme::of(cx).clone();
         let found = self.task_and_plan(cx);
         let Some((task, plan)) = found else {

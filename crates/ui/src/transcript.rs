@@ -1254,8 +1254,9 @@ pub enum RowKind {
         hint: Option<SharedString>,
     },
     /// The conversation as text, as the engine handed it to `harness` on the
-    /// first turn after a provider switch (`MessagePart::Handoff`): a divider
-    /// naming both sides that expands to exactly what crossed.
+    /// first turn after a provider switch or a Continue in a new thread
+    /// (`MessagePart::Handoff`): a divider naming both sides that expands to
+    /// exactly what crossed.
     Handoff {
         harness: zeron_proto::HarnessId,
         text: SharedString,
@@ -2367,7 +2368,7 @@ pub fn rows_for_entry(
                         });
                     }
                     // Tools and thoughts are grouped by the outer arms;
-                    // nothing reaches here. A handoff lives on user entries.
+                    // nothing reaches here. A handoff lives on user and System entries.
                     MessagePart::Tool { .. }
                     | MessagePart::Reasoning { .. }
                     | MessagePart::Handoff { .. }

@@ -67,7 +67,8 @@ pub struct InboxPage {
     prs_fetched: Option<Instant>,
     prs_task: Option<Task<()>>,
     projects_seen: Vec<String>,
-    runs: Option<Result<TodayRuns, String>>,
+    runs: Option<TodayRuns>,
+    runs_failed: bool,
     runs_fetched: Option<Instant>,
     runs_updated: Option<DateTime<Local>>,
     runs_task: Option<Task<()>>,
@@ -133,6 +134,7 @@ impl InboxPage {
             prs_task: None,
             projects_seen: Vec::new(),
             runs: None,
+            runs_failed: false,
             runs_fetched: None,
             runs_updated: None,
             runs_task: None,
@@ -171,7 +173,7 @@ impl InboxPage {
         cx.emit(InboxEvent::CreateTask {
             task_id: task_id.clone(),
             title: title.clone(),
-            due_on: Local::now().date_naive().format("%Y-%m-%d").to_string(),
+            due_on: work_day(Local::now()).format("%Y-%m-%d").to_string(),
         });
         if window.is_some() {
             self.card.update(cx, |card, cx| {
@@ -197,8 +199,8 @@ impl InboxPage {
             today_tasks(
                 &state.tasks,
                 &state.chats,
-                now.date_naive(),
-                local_midnight(now).with_timezone(&Utc),
+                work_day(now),
+                work_day_start(now).with_timezone(&Utc),
             )
             .into_iter()
             .find(|task| task.completed_at.is_none())
@@ -297,10 +299,11 @@ impl InboxPage {
             this.update(cx, |this, cx| {
                 this.runs_task = None;
                 this.runs_fetched = Some(Instant::now());
-                if result.is_ok() {
+                this.runs_failed = result.is_err();
+                if let Ok(runs) = result {
                     this.runs_updated = Some(Local::now());
+                    this.runs = Some(runs);
                 }
-                this.runs = Some(result);
                 cx.notify();
             })
             .ok();
@@ -349,11 +352,10 @@ pub(crate) fn header_line(now: DateTime<Local>, needs: usize, open_tasks: usize)
     format!("{}. {date}.{rest}", greeting(now))
 }
 
-fn local_midnight(now: DateTime<Local>) -> DateTime<Local> {
-    now.date_naive()
-        .and_hms_opt(0, 0, 0)
-        .and_then(|midnight| Local.from_local_datetime(&midnight).earliest())
-        .unwrap_or(now)
+fn is_overdue(task: &zeron_proto::Task, chats: &[zeron_proto::Chat], today: &str) -> bool {
+    task.completed_at.is_none()
+        && crate::tasks::linked_chat(chats, task).is_none()
+        && task.due_on.as_deref().is_some_and(|due| due < today)
 }
 
 pub(crate) fn resets_in(resets_at: DateTime<Utc>, now: DateTime<Utc>) -> Option<String> {
@@ -799,8 +801,8 @@ impl InboxPage {
         now: DateTime<Local>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let day_start = local_midnight(now).with_timezone(&Utc);
-        let today = now.date_naive();
+        let day_start = work_day_start(now).with_timezone(&Utc);
+        let today = work_day(now);
         let today_key = today.format("%Y-%m-%d").to_string();
         let selected = self.card.read(cx).task_id().map(str::to_owned);
         let state = self.state.read(cx);
@@ -813,18 +815,16 @@ impl InboxPage {
             .iter()
             .map(|task| {
                 let done = task.completed_at.is_some();
+                let overdue = is_overdue(task, &state.chats, &today_key);
                 let meta = if done {
                     None
                 } else if let Some(chat) = crate::tasks::linked_chat(&state.chats, task) {
                     Some(format!("In {}", chat_title(chat)))
+                } else if overdue {
+                    Some("Overdue".to_owned())
                 } else {
-                    match task.due_on.as_deref() {
-                        Some(due) if due < today_key.as_str() => Some("Overdue".to_owned()),
-                        Some(_) => Some("Today".to_owned()),
-                        None => None,
-                    }
+                    task.due_on.as_ref().map(|_| "Today".to_owned())
                 };
-                let overdue = meta.as_deref() == Some("Overdue");
                 let task_id = task.id.clone();
                 let accent = theme.accent;
                 let check = div()
@@ -969,28 +969,21 @@ impl InboxPage {
         now: DateTime<Local>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let runs: &[TodayRun] = match &self.runs {
-            Some(Ok(runs)) => &runs.runs,
-            _ => &[],
-        };
+        let runs: &[TodayRun] = self.runs.as_ref().map_or(&[], |runs| &runs.runs);
         let slots = day_slots(runs, now);
         let (open, done, overdue) = {
             let state = self.state.read(cx);
-            let today_key = now.date_naive().format("%Y-%m-%d").to_string();
+            let today_key = work_day(now).format("%Y-%m-%d").to_string();
             let tasks = today_tasks(
                 &state.tasks,
                 &state.chats,
-                now.date_naive(),
-                local_midnight(now).with_timezone(&Utc),
+                work_day(now),
+                work_day_start(now).with_timezone(&Utc),
             );
             let open: Vec<_> = tasks.iter().filter(|t| t.completed_at.is_none()).collect();
             let overdue = open
                 .iter()
-                .filter(|t| {
-                    t.due_on
-                        .as_deref()
-                        .is_some_and(|due| due < today_key.as_str())
-                })
+                .filter(|task| is_overdue(task, &state.chats, &today_key))
                 .count();
             (open.len(), tasks.len() - open.len(), overdue)
         };
@@ -1003,16 +996,22 @@ impl InboxPage {
             .text_size(ui_rems(12.5))
             .text_color(theme.text_muted)
             .child("Your day so far")
-            .children(self.runs_updated.map(|at| {
-                div().opacity(0.8).child(SharedString::from(format!(
-                    "Updated {}",
-                    at.format("%I:%M %p")
-                )))
-            }));
+            .children(
+                match (self.runs_updated, self.runs_failed) {
+                    (Some(at), false) => Some(format!("Updated {}", at.format("%I:%M %p"))),
+                    (Some(at), true) => {
+                        Some(format!("Updated {}, refresh failed", at.format("%I:%M %p")))
+                    }
+                    (None, true) => Some("Runs did not load".to_string()),
+                    (None, false) => None,
+                }
+                .map(|label| div().opacity(0.8).child(SharedString::from(label))),
+            );
         let body = if sentences.is_empty() {
-            let copy = match &self.runs {
-                Some(Err(_)) => "Today’s runs did not load.",
-                _ => "Nothing ran yet today. This fills in as your agents work.",
+            let copy = if self.runs_failed && self.runs.is_none() {
+                "Today’s runs did not load."
+            } else {
+                "Nothing ran yet today. This fills in as your agents work."
             };
             div()
                 .text_size(ui_rems(16.0))
@@ -1252,8 +1251,8 @@ impl Render for InboxPage {
             today_tasks(
                 &state.tasks,
                 &state.chats,
-                now.date_naive(),
-                local_midnight(now).with_timezone(&Utc),
+                work_day(now),
+                work_day_start(now).with_timezone(&Utc),
             )
             .iter()
             .filter(|task| task.completed_at.is_none())

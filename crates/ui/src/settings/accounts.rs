@@ -474,10 +474,10 @@ pub fn compact_extra_usage(extra: &zeron_proto::AgentExtraUsage, theme: &Theme) 
                 .w(px(30.0))
                 .flex_none()
                 .text_right()
-                .child(SharedString::from(if on {
-                    format!("{}%", (view.used_fraction * 100.0).round() as u32)
-                } else {
-                    view.amount.clone()
+                .child(SharedString::from(match (on, extra.limit) {
+                    (true, Some(_)) => format!("{}%", (view.used_fraction * 100.0).round() as u32),
+                    (true, None) => String::new(),
+                    (false, _) => view.amount.clone(),
                 })),
         )
         .child(

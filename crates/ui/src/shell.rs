@@ -2735,6 +2735,7 @@ pub struct Shell {
     _accounts_cache: Subscription,
     rail_usage_menu: popover::Popup<HarnessId>,
     rail_usage_hover: app_rail::RingHover,
+    continuing: std::collections::HashSet<String>,
     harnesses_page: Option<Entity<HarnessesPage>>,
     /// Filters the settings nav; cleared when settings close.
     settings_search: Entity<ComposerInput>,
@@ -3471,6 +3472,7 @@ impl Shell {
             _accounts_cache: accounts_cache_observation,
             rail_usage_menu: popover::Popup::default(),
             rail_usage_hover: app_rail::RingHover::default(),
+            continuing: Default::default(),
             harnesses_page: None,
             settings_search,
             _settings_search_sub: settings_search_sub,
@@ -6355,14 +6357,23 @@ impl Shell {
     pub fn continue_in_new_thread(
         &mut self,
         source_chat_id: String,
-        harness: Option<HarnessId>,
-        model: Option<String>,
+        target: Option<(
+            HarnessId,
+            String,
+            (
+                Option<zeron_proto::ReasoningLevel>,
+                serde_json::Map<String, serde_json::Value>,
+            ),
+        )>,
         target_space_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
+        if !self.continuing.insert(source_chat_id.clone()) {
+            return;
+        }
         let host_device_id = self
             .state
             .read(cx)
@@ -6371,12 +6382,16 @@ impl Shell {
             .find(|chat| chat.id == source_chat_id)
             .map(|chat| chat.device_id.clone());
         let mut params = serde_json::json!({
-            "sourceChatId": source_chat_id,
+            "sourceChatId": source_chat_id.clone(),
             "chatId": uuid::Uuid::new_v4().to_string(),
-            "harness": harness,
-            "model": model,
             "targetSpaceId": target_space_id,
         });
+        if let Some((harness, model, (reasoning, options))) = target {
+            params["harness"] = serde_json::json!(harness);
+            params["model"] = model.into();
+            params["reasoning"] = serde_json::json!(reasoning);
+            params["modelOptions"] = options.into();
+        }
         if let (Some(device), Some(object)) = (host_device_id, params.as_object_mut()) {
             object.insert("targetDeviceId".into(), device.into());
         }
@@ -6390,6 +6405,7 @@ impl Shell {
             )
             .await;
             this.update(cx, |shell, cx| {
+                shell.continuing.remove(&source_chat_id);
                 match reply.map_err(|e| e.to_string()).and_then(|value| {
                     serde_json::from_value::<zeron_proto::Chat>(value).map_err(|e| e.to_string())
                 }) {
@@ -6400,7 +6416,12 @@ impl Shell {
                                 cx.notify();
                             }
                         });
-                        shell.open_chat(chat.id, cx);
+                        let source_shown = shell.route == Route::Chat
+                            && shell.state.read(cx).selected_chat.as_deref()
+                                == Some(source_chat_id.as_str());
+                        if source_shown {
+                            shell.open_chat(chat.id, cx);
+                        }
                     }
                     Err(err) => {
                         tracing::warn!(%err, "ContinueInNewThread failed");
@@ -14672,6 +14693,13 @@ impl Shell {
                         .collect()
                 })
                 .unwrap_or_default();
+        if self
+            .rail_usage_hover
+            .harness
+            .is_some_and(|harness| !ring_accounts.iter().any(|a| a.harness == harness))
+        {
+            self.rail_usage_hover = app_rail::RingHover::default();
+        }
         if ring_accounts.is_empty() {
             return vec![
                 div()
@@ -14696,7 +14724,7 @@ impl Shell {
                 let open = self.rail_usage_menu.as_open() == Some(&harness);
                 let tooltip = app_rail::ring_tooltip(Some(&account), false);
                 let mut trigger = div()
-                    .id(("rail-usage", ix))
+                    .id(SharedString::from(format!("rail-usage-{}", harness.display_name())))
                     .debug_selector(move || format!("rail-usage-{ix}"))
                     .role(gpui::Role::Button)
                     .aria_label(tooltip)

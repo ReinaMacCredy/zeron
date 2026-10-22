@@ -47,7 +47,7 @@ pub enum TaskCardEvent {
     Start {
         task_id: String,
         patch: Option<TaskPatch>,
-        space_id: Option<String>,
+        space_id: Option<Option<String>>,
         config: Option<ChatConfig>,
         orchestrate: Option<Orchestrate>,
     },
@@ -103,6 +103,7 @@ struct Open {
     notes: Entity<ComposerInput>,
     saved_title: String,
     saved_notes: String,
+    stored: (String, String),
     images: Vec<String>,
     uploads: Vec<Task<()>>,
     refused: bool,
@@ -291,10 +292,13 @@ impl TaskCard {
             .as_ref()
             .map(|task| task.images.clone())
             .unwrap_or_default();
-        let context = row
+        let context: Vec<String> = row
             .as_ref()
             .map(|task| task.context.clone())
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|id| self.state.read(cx).chats.iter().any(|chat| &chat.id == id))
+            .collect();
         self.menu = popover::Popup::default();
         self.fetch_tool_settings(cx);
         let title_input = cx.new(|cx| {
@@ -373,6 +377,7 @@ impl TaskCard {
             task_id,
             title: title_input,
             notes: notes_input,
+            stored: (saved_title.clone(), saved_notes.clone()),
             saved_title,
             saved_notes,
             images: saved_images,
@@ -464,16 +469,67 @@ impl TaskCard {
         let Some(open) = self.open.as_mut() else {
             return;
         };
-        let present = self
-            .state
-            .read(cx)
+        let state = self.state.read(cx);
+        let row = state
             .tasks
             .iter()
-            .any(|task| task.id == open.task_id && !task.deleted);
-        if present {
-            open.seen = true;
-        } else if open.seen {
-            self.dismiss(None, cx);
+            .find(|task| task.id == open.task_id && !task.deleted);
+        open.context
+            .retain(|id| state.chats.iter().any(|chat| &chat.id == id));
+        let arrived = match row {
+            Some(row) if !open.seen => {
+                open.seen = true;
+                let added: Vec<String> = std::mem::take(&mut open.images)
+                    .into_iter()
+                    .filter(|path| !row.images.contains(path))
+                    .collect();
+                open.images = row.images.clone();
+                open.images.extend(added);
+                open.images.truncate(zeron_doc::TASK_IMAGES_MAX);
+                if open.context.is_empty() {
+                    open.context = row.context.clone();
+                }
+                open.images != row.images
+            }
+            Some(_) => false,
+            None => {
+                if open.seen {
+                    self.dismiss(None, cx);
+                }
+                return;
+            }
+        };
+        if arrived {
+            self.save_images(cx);
+        }
+        self.adopt_stored_text(cx);
+    }
+
+    fn adopt_stored_text(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        let state = self.state.read(cx);
+        let Some(row) = state.tasks.iter().find(|task| task.id == open.task_id) else {
+            return;
+        };
+        let (stored_title, stored_notes) = &open.stored;
+        let title = (row.title != *stored_title
+            && row.title != open.saved_title
+            && open.title.read(cx).text().trim() == open.saved_title)
+            .then(|| row.title.clone());
+        let notes = (row.notes != *stored_notes
+            && row.notes != open.saved_notes
+            && open.notes.read(cx).text() == open.saved_notes)
+            .then(|| row.notes.clone());
+        open.stored = (row.title.clone(), row.notes.clone());
+        if let Some(title) = title {
+            open.saved_title = title.clone();
+            open.title.update(cx, |input, cx| input.set_text(title, cx));
+        }
+        if let Some(notes) = notes {
+            open.saved_notes = notes.clone();
+            open.notes.update(cx, |input, cx| input.set_text(notes, cx));
         }
     }
 
@@ -579,7 +635,9 @@ impl TaskCard {
                     crate::toast::error(cx, "A task holds up to 12 images.");
                 }
                 open.images.extend(paths.into_iter().take(room));
-                card.save_images(cx);
+                if open.seen {
+                    card.save_images(cx);
+                }
             })
             .ok();
         }));
@@ -652,7 +710,17 @@ impl TaskCard {
         let Some(saved_context) = row.map(|task| task.context.clone()) else {
             return;
         };
-        if self.is_starting(&task_id) {
+        if self.is_starting(&task_id) || self.runs_elsewhere(cx).is_some() {
+            return;
+        }
+        if let Some(open) = self.open.as_mut() {
+            open.refused = false;
+        }
+        let taken = self.take_patch(cx);
+        if self.open.as_ref().is_some_and(|open| open.refused) {
+            if let Some((task_id, patch)) = taken {
+                cx.emit(TaskCardEvent::Update { task_id, patch });
+            }
             return;
         }
         self.starting.insert(task_id.clone(), Instant::now());
@@ -661,15 +729,11 @@ impl TaskCard {
             card.update(cx, |_, cx| cx.notify()).ok();
         })
         .detach();
-        let mut patch = self.take_patch(cx).map(|(_, patch)| patch);
+        let mut patch = taken.map(|(_, patch)| patch);
         if orchestrate.is_some() && context != saved_context {
             patch.get_or_insert_default().context = Some(context);
         }
-        let space_id = self
-            .open
-            .as_ref()
-            .and_then(|open| open.run_in.clone())
-            .flatten();
+        let space_id = self.open.as_ref().and_then(|open| open.run_in.clone());
         let config = self.agent.read(cx).resolved(cx).chat_config();
         cx.emit(TaskCardEvent::Start {
             task_id,
@@ -882,6 +946,9 @@ impl TaskCard {
     }
 
     fn pick_folder(&mut self, cx: &mut Context<Self>) {
+        let Some(task_id) = self.task_id().map(str::to_owned) else {
+            return;
+        };
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -895,14 +962,14 @@ impl TaskCard {
                 if let Ok(Ok(Some(paths))) = picked
                     && let Some(path) = paths.into_iter().next()
                 {
-                    card.run_in_folder(path.to_string_lossy().into_owned(), cx);
+                    card.run_in_folder(&task_id, path.to_string_lossy().into_owned(), cx);
                 }
             })
             .ok();
         }));
     }
 
-    fn run_in_folder(&mut self, path: String, cx: &mut Context<Self>) {
+    fn run_in_folder(&mut self, task_id: &str, path: String, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         let Some(device_id) = state.local_device_id.clone() else {
             return;
@@ -914,6 +981,9 @@ impl TaskCard {
                 space.device_id == device_id && crate::pickers::same_folder_path(&space.path, &path)
             })
             .map(|space| space.id.clone());
+        let Some(open) = self.open.as_mut().filter(|open| open.task_id == task_id) else {
+            return;
+        };
         let space_id = existing.unwrap_or_else(|| {
             let space_id = uuid::Uuid::new_v4().to_string();
             cx.emit(TaskCardEvent::CreateSpace {
@@ -923,10 +993,8 @@ impl TaskCard {
             });
             space_id
         });
-        if let Some(open) = self.open.as_mut() {
-            open.run_in = Some(Some(space_id));
-            open.folder = Some(path);
-        }
+        open.run_in = Some(Some(space_id));
+        open.folder = Some(path);
         cx.notify();
     }
 
@@ -1182,12 +1250,19 @@ impl TaskCard {
                         .map(|(_, name)| widgets::SelectOption::new(name.clone()).leading(folder)),
                 )
                 .collect();
-        let selected = match &pending_folder {
-            Some(name) => {
+        let elsewhere = self.runs_elsewhere(cx);
+        let selected = match (&pending_folder, elsewhere) {
+            (Some(name), _) => {
                 options.push(widgets::SelectOption::new(name.clone()).leading(folder));
                 options.len() - 1
             }
-            None => run_in
+            (None, Some((space, device))) => {
+                options.push(
+                    widgets::SelectOption::new(format!("{space} on {device}")).leading(folder),
+                );
+                options.len() - 1
+            }
+            (None, None) => run_in
                 .as_deref()
                 .and_then(|id| spaces.iter().position(|(sid, _)| sid == id))
                 .map_or(0, |ix| ix + 1),
@@ -1252,6 +1327,25 @@ impl TaskCard {
             .into_any_element()
     }
 
+    fn runs_elsewhere(&self, cx: &App) -> Option<(String, String)> {
+        let open = self.open.as_ref()?;
+        let state = self.state.read(cx);
+        let saved = state
+            .tasks
+            .iter()
+            .find(|task| task.id == open.task_id)
+            .and_then(|task| task.space_id.clone());
+        let space_id = open.run_in.clone().unwrap_or(saved)?;
+        let space = state.spaces.iter().find(|space| space.id == space_id)?;
+        let local = state.local_device_id.as_deref()?;
+        (space.device_id != local).then(|| {
+            let device = state
+                .device_name(&space.device_id)
+                .unwrap_or("another device");
+            (space.display_name().to_string(), device.to_string())
+        })
+    }
+
     fn run_in(open: Option<&Open>, row: Option<&Row>) -> Option<String> {
         open.and_then(|open| open.run_in.clone())
             .unwrap_or_else(|| row.and_then(|row| row.task.space_id.clone()))
@@ -1264,7 +1358,7 @@ impl TaskCard {
     fn solid_button(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: SharedString,
         enabled: bool,
         theme: &Theme,
     ) -> gpui::Stateful<gpui::Div> {
@@ -1272,7 +1366,7 @@ impl TaskCard {
             .id(id)
             .debug_selector(move || id.into())
             .role(gpui::Role::Button)
-            .aria_label(label)
+            .aria_label(label.clone())
             .track_focus(&self.start_focus)
             .tab_index(0)
             .rounded_full()
@@ -1310,13 +1404,20 @@ impl TaskCard {
         )
         .debug_selector(|| "task-card-hand-off-mode".into());
         let starting = self.is_starting(task_id);
-        let ready = row.is_some() && !starting;
+        let elsewhere = self
+            .runs_elsewhere(cx)
+            .map(|(_, device)| format!("Runs on {device}"));
+        let ready = row.is_some() && !starting && elsewhere.is_none();
         let (pane, footer) = match tab {
             HandOff::NewChat => {
                 let start = self
                     .solid_button(
                         "task-card-start",
-                        if starting { "Starting…" } else { "Start" },
+                        match &elsewhere {
+                            Some(label) => label.clone().into(),
+                            None if starting => "Starting…".into(),
+                            None => "Start".into(),
+                        },
                         ready,
                         theme,
                     )
@@ -1335,10 +1436,10 @@ impl TaskCard {
                 let start = self
                     .solid_button(
                         "task-card-orchestrate",
-                        if starting {
-                            "Starting…"
-                        } else {
-                            "Start mission"
+                        match &elsewhere {
+                            Some(label) => label.clone().into(),
+                            None if starting => "Starting…".into(),
+                            None => "Start mission".into(),
                         },
                         ready && !blocked,
                         theme,
@@ -1517,7 +1618,12 @@ impl TaskCard {
             .when(!enabled, |el| el.opacity(0.4))
             .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.assign(false, cx)));
         let send = self
-            .solid_button("task-card-assign-button", "Send task", enabled, theme)
+            .solid_button(
+                "task-card-assign-button",
+                "Send task".into(),
+                enabled,
+                theme,
+            )
             .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.assign(true, cx)));
         (
             div()
@@ -2932,6 +3038,39 @@ mod tests {
     }
 
     #[gpui::test]
+    fn an_open_card_keeps_its_save_in_flight_and_takes_a_save_from_elsewhere(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _dir = init(cx);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| state.tasks = vec![task("plain", false)]);
+        let (card, cx) = cx.add_window_view(|_, cx| TaskCard::new(state.clone(), cx));
+        card.update(cx, |card, cx| {
+            card.open("plain".into(), None, CardFocus::Title, None, cx)
+        });
+        cx.run_until_parked();
+        let notes = |card: &Entity<TaskCard>, cx: &mut gpui::VisualTestContext| {
+            card.read_with(cx, |card, cx| {
+                card.open.as_ref().unwrap().notes.read(cx).text().to_string()
+            })
+        };
+        card.update(cx, |card, cx| {
+            let input = card.open.as_ref().unwrap().notes.clone();
+            input.update(cx, |input, cx| input.set_text("typed", cx));
+            card.flush(cx);
+        });
+        state.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(notes(&card, cx), "typed");
+        state.update(cx, |state, cx| {
+            state.tasks[0].notes = "from the inbox".into();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(notes(&card, cx), "from the inbox");
+    }
+
+    #[gpui::test]
     fn orchestrate_starts_the_task_with_the_chosen_options(cx: &mut gpui::TestAppContext) {
         let _dir = init(cx);
         let state = cx.new(|_| AppState::new());
@@ -2988,6 +3127,40 @@ mod tests {
                 plan_doc: false,
             })]
         );
+    }
+
+    #[gpui::test]
+    fn start_tells_no_project_apart_from_the_tasks_own(cx: &mut gpui::TestAppContext) {
+        let _dir = init(cx);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            let mut plain = task("plain", false);
+            plain.space_id = Some("shop".into());
+            state.tasks = vec![plain];
+        });
+        let (card, cx) = cx.add_window_view(|_, cx| TaskCard::new(state, cx));
+        let starts = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = starts.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&card, move |_, event: &TaskCardEvent, _| {
+                if let TaskCardEvent::Start { space_id, .. } = event {
+                    sink.borrow_mut().push(space_id.clone());
+                }
+            })
+            .detach();
+        });
+        for run_in in [None, Some(None)] {
+            card.update(cx, |card, cx| {
+                card.starting.clear();
+                card.open("plain".into(), None, CardFocus::Title, None, cx);
+                card.open.as_mut().unwrap().run_in = run_in;
+            });
+            cx.run_until_parked();
+            let at = cx.debug_bounds("task-card-start").unwrap().center();
+            cx.simulate_click(at, gpui::Modifiers::none());
+            cx.run_until_parked();
+        }
+        assert_eq!(*starts.borrow(), [None, Some(None)]);
     }
 
     #[gpui::test]

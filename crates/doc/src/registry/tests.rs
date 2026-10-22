@@ -2778,19 +2778,74 @@ fn a_new_plan_keeps_the_steps_a_thread_or_outcome_holds() {
     };
     doc.update_task_step("done", &finish, ts(3_000)).unwrap();
     let plan = [step("n1", "t1", "First"), step("n2", "t1", "Second")];
-    doc.plan_task_steps("t1", &plan, ts(4_000)).unwrap();
+    doc.plan_task_steps("t1", &plan, &Default::default(), ts(4_000))
+        .unwrap();
     assert_eq!(step_ids(&doc, "t1"), ["run", "done", "n1", "n2"]);
     assert!(doc.task_step("open").is_none());
 
     let before = doc.read_task_steps().unwrap();
     let refused = [step("n3", "t1", "Fine"), step("n4", "t1", "  ")];
-    assert!(doc.plan_task_steps("t1", &refused, ts(5_000)).is_err());
+    assert!(
+        doc.plan_task_steps("t1", &refused, &Default::default(), ts(5_000))
+            .is_err()
+    );
     assert_eq!(
         doc.read_task_steps().unwrap(),
         before,
         "a refused plan writes nothing"
     );
-    assert!(doc.plan_task_steps("gone", &plan, ts(5_000)).is_err());
+    let notes = zeron_proto::TaskPatch {
+        notes: Some("n".repeat(10_000)),
+        ..Default::default()
+    };
+    doc.update_task("t1", &notes, ts(5_000)).unwrap();
+    let overview = zeron_proto::TaskPatch {
+        plan: Some("o".repeat(10_000)),
+        ..Default::default()
+    };
+    let fits = [step("n5", "t1", "Fits")];
+    assert!(
+        doc.plan_task_steps("t1", &fits, &overview, ts(5_000))
+            .is_err(),
+        "notes and overview share the row's op budget"
+    );
+    let renamed = zeron_proto::TaskStepPatch {
+        title: Some("Renamed".into()),
+        ..Default::default()
+    };
+    let edits = [
+        ("n1".to_string(), renamed.clone()),
+        ("open".to_string(), renamed),
+    ];
+    assert!(
+        doc.edit_task_plan("t1", &Default::default(), &edits, &fits, &[], ts(5_000))
+            .is_err()
+    );
+    assert!(
+        doc.edit_task_plan("t1", &overview, &[], &fits, &["n2".into()], ts(5_000))
+            .is_err()
+    );
+    assert_eq!(
+        doc.read_task_steps().unwrap(),
+        before,
+        "a refused plan or plan edit writes nothing"
+    );
+    assert_eq!(doc.task("t1").unwrap().plan, "");
+    doc.edit_task_plan(
+        "t1",
+        &Default::default(),
+        &edits[..1],
+        &fits,
+        &["n2".into()],
+        ts(6_000),
+    )
+    .unwrap();
+    assert_eq!(step_ids(&doc, "t1"), ["run", "done", "n1", "n5"]);
+    assert_eq!(doc.task_step("n1").unwrap().title, "Renamed");
+    assert!(
+        doc.plan_task_steps("gone", &plan, &Default::default(), ts(5_000))
+            .is_err()
+    );
 
     let lead = zeron_proto::TaskPatch {
         mode: Some(zeron_proto::TaskMode::Orchestrated),
