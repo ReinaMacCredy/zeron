@@ -591,9 +591,14 @@ impl Composer {
                 run.owner_working = owner_working;
                 cx.notify();
             }
-            Some(run.unsent_hands()).filter(|ids| !ids.is_empty())
+            let withdrawals = run.unsent_withdrawals();
+            if withdrawals.is_empty() {
+                Some((run.unsent_hands(), false)).filter(|(ids, _)| !ids.is_empty())
+            } else {
+                Some((withdrawals, true))
+            }
         });
-        let Some(ids) = unsent.filter(|_| self.review.hand_task.is_none()) else {
+        let Some((ids, withdraw)) = unsent.filter(|_| self.review.hand_task.is_none()) else {
             return;
         };
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -605,7 +610,7 @@ impl Composer {
                 .client()
                 .call(
                     methods::HAND_REVIEW_FINDINGS,
-                    serde_json::json!({ "ownerChatId": owner, "taskId": task_id, "ids": ids }),
+                    serde_json::json!({ "ownerChatId": owner, "taskId": task_id, "ids": ids, "withdraw": withdraw }),
                 )
                 .await;
             this.update(cx, |composer, cx| {
@@ -614,7 +619,12 @@ impl Composer {
                     tracing::warn!(error = %err, "review findings not handed");
                     composer.set_run(&owner, cx, |run| {
                         if run.task_id.as_deref() == Some(task_id.as_str()) {
-                            run.handed_here.retain(|id| !ids.contains(id));
+                            let sent = if withdraw {
+                                &mut run.withdrawn
+                            } else {
+                                &mut run.handed_here
+                            };
+                            sent.retain(|id| !ids.contains(id));
                         }
                     });
                 }

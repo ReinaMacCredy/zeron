@@ -2164,6 +2164,21 @@ async fn a_handed_finding_is_named_to_the_owner_in_one_reminder() {
         .await
         .unwrap();
     assert_eq!(handed["handed"], serde_json::json!(["F1", "F3"]));
+    client
+        .call(
+            zeron_rpc::methods::HAND_REVIEW_FINDINGS,
+            serde_json::json!({ "ownerChatId": "lead", "taskId": review, "ids": ["F2"] }),
+        )
+        .await
+        .unwrap();
+    let handed = client
+        .call(
+            zeron_rpc::methods::HAND_REVIEW_FINDINGS,
+            serde_json::json!({ "ownerChatId": "lead", "taskId": review, "ids": ["F2"], "withdraw": true }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(handed["handed"], serde_json::json!(["F1", "F3"]));
     assert!(
         reminders(&rig).is_empty(),
         "nothing reminds before a prompt"

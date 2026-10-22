@@ -230,6 +230,8 @@ struct HandFindingsParams {
     owner_chat_id: String,
     task_id: String,
     ids: Vec<String>,
+    #[serde(default)]
+    withdraw: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3794,7 +3796,7 @@ impl RpcService for EngineRpc {
                 let p: HandFindingsParams = parse_params(params)?;
                 let handed = self
                     .doc_host
-                    .hand_review_findings(&p.owner_chat_id, &p.task_id, p.ids)
+                    .hand_review_findings(&p.owner_chat_id, &p.task_id, p.ids, p.withdraw)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "handed": handed }))
             }
