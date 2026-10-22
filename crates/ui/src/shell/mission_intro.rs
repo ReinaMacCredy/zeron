@@ -17,7 +17,7 @@ struct Page {
 const PAGES: [Page; 4] = [
     Page {
         title: "Start with a goal",
-        body: "Press Shift+Tab in the composer, or pick Mission Control on a task\u{2019}s card, and describe what you want done. Add up to five chats for the lead to read before it plans.",
+        body: "Press Shift+Tab in the composer, or turn on Plan first on a task\u{2019}s card, and describe what you want done. Add up to five chats for the lead to read before it plans.",
     },
     Page {
         title: "Approve the plan",

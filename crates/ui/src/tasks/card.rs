@@ -87,7 +87,6 @@ impl Default for Orchestrate {
 enum HandOff {
     NewChat,
     Thread,
-    Mission,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -112,6 +111,7 @@ struct Open {
     run_in: Option<Option<String>>,
     folder: Option<String>,
     tab: HandOff,
+    plan_first: bool,
     assign: Entity<ComposerInput>,
     assign_pick: Option<(String, String)>,
     assign_hidden: bool,
@@ -387,11 +387,8 @@ impl TaskCard {
             save: None,
             run_in: None,
             folder: None,
-            tab: if context.is_empty() {
-                HandOff::NewChat
-            } else {
-                HandOff::Mission
-            },
+            tab: HandOff::NewChat,
+            plan_first: !context.is_empty(),
             assign: assign_input,
             assign_pick: None,
             assign_hidden: false,
@@ -689,7 +686,7 @@ impl TaskCard {
 
     fn start(&mut self, cx: &mut Context<Self>) {
         let Some((task_id, orchestrate, context)) = self.open.as_ref().map(|open| {
-            let mission = (open.tab == HandOff::Mission).then_some(open.mission);
+            let mission = open.plan_first.then_some(open.mission);
             (open.task_id.clone(), mission, open.context.clone())
         }) else {
             return;
@@ -994,6 +991,13 @@ impl TaskCard {
         cx.notify();
     }
 
+    fn set_plan_first(&mut self, plan_first: bool, cx: &mut Context<Self>) {
+        if let Some(open) = self.open.as_mut() {
+            open.plan_first = plan_first;
+        }
+        cx.notify();
+    }
+
     fn set_mission(&mut self, mission: Orchestrate, cx: &mut Context<Self>) {
         if let Some(open) = self.open.as_mut() {
             open.mission = mission;
@@ -1032,7 +1036,7 @@ impl TaskCard {
         let reads = shown(open.reads_hidden, &open.reads);
         match open.tab {
             HandOff::Thread if assign => open.assign_hidden = true,
-            HandOff::Mission if reads => open.reads_hidden = true,
+            HandOff::NewChat if open.plan_first && reads => open.reads_hidden = true,
             _ => return false,
         }
         cx.notify();
@@ -1388,11 +1392,7 @@ impl TaskCard {
         let tabs = widgets::segmented_fill(
             theme,
             "task-card-hand-off-mode",
-            &[
-                (HandOff::NewChat, "New chat"),
-                (HandOff::Thread, "Thread"),
-                (HandOff::Mission, "Mission Control"),
-            ],
+            &[(HandOff::NewChat, "New chat"), (HandOff::Thread, "Thread")],
             tab,
             move |tab, _, cx| {
                 weak.update(cx, |card, cx| card.set_tab(tab, cx)).ok();
@@ -1406,6 +1406,7 @@ impl TaskCard {
         let ready = row.is_some() && !starting && elsewhere.is_none();
         let (pane, footer) = match tab {
             HandOff::NewChat => {
+                let blocked = open.plan_first && !open.context.is_empty() && self.reads_off(cx);
                 let start = self
                     .solid_button(
                         "task-card-start",
@@ -1414,38 +1415,29 @@ impl TaskCard {
                             None if starting => "Starting…".into(),
                             None => "Start".into(),
                         },
-                        ready,
+                        ready && !blocked,
                         theme,
                     )
                     .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.start(cx)));
                 let pane = div()
                     .flex()
                     .flex_col()
-                    .gap(px(2.0))
-                    .child(self.render_agent())
-                    .child(self.render_run_line(row, theme, cx));
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(self.render_agent())
+                            .child(self.render_run_line(row, theme, cx)),
+                    )
+                    .child(self.render_plan_first(open.plan_first, theme, cx))
+                    .when(open.plan_first, |el| {
+                        el.child(self.render_plan_options(open.mission, row, theme, cx))
+                    });
                 (pane.into_any_element(), vec![start.into_any_element()])
             }
             HandOff::Thread => self.render_thread_tab(theme, cx),
-            HandOff::Mission => {
-                let blocked = !open.context.is_empty() && self.reads_off(cx);
-                let start = self
-                    .solid_button(
-                        "task-card-orchestrate",
-                        match &elsewhere {
-                            Some(label) => label.clone().into(),
-                            None if starting => "Starting…".into(),
-                            None => "Start mission".into(),
-                        },
-                        ready && !blocked,
-                        theme,
-                    )
-                    .on_click(cx.listener(|card, _: &ClickEvent, _, cx| card.start(cx)));
-                (
-                    self.render_mission_tab(open.mission, row, theme, cx),
-                    vec![start.into_any_element()],
-                )
-            }
         };
         div()
             .id("task-card-hand-off")
@@ -1633,7 +1625,54 @@ impl TaskCard {
         )
     }
 
-    fn render_mission_tab(
+    fn render_plan_first(&self, on: bool, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .flex()
+            .items_start()
+            .gap(px(10.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(ui_rems(12.5))
+                            .text_color(theme.text)
+                            .child("Plan first"),
+                    )
+                    .child(
+                        div()
+                            .text_size(ui_rems(12.0))
+                            .text_color(theme.text_muted)
+                            .child(
+                                "The lead writes steps before it starts. You can also Add plan later.",
+                            ),
+                    ),
+            )
+            .child(
+                widgets::toggle_switch(theme, on, "task-card-plan-first")
+                    .id("task-card-plan-first")
+                    .debug_selector(|| "task-card-plan-first".into())
+                    .flex_none()
+                    .cursor_pointer()
+                    .tab_index(0)
+                    .role(gpui::Role::Switch)
+                    .aria_label("Plan first")
+                    .aria_toggled(if on {
+                        gpui::Toggled::True
+                    } else {
+                        gpui::Toggled::False
+                    })
+                    .on_click(cx.listener(move |card, _: &ClickEvent, _, cx| {
+                        card.set_plan_first(!on, cx)
+                    })),
+            )
+    }
+
+    fn render_plan_options(
         &self,
         choice: Orchestrate,
         row: Option<&Row>,
@@ -1674,18 +1713,10 @@ impl TaskCard {
             },
         )
         .debug_selector(|| "task-card-plan-mode".into());
-        let (description, review) = if choice.plan_doc {
-            (
-                "A lead agent writes a plan you can read and edit, runs each step on its \
-                 own thread, checks the results and reports back here.",
-                "Let me review the plan before it runs",
-            )
+        let review = if choice.plan_doc {
+            "Let me review the plan before it runs"
         } else {
-            (
-                "A lead agent plans the work into steps, runs each step on its own \
-                 thread, checks the results and reports back here.",
-                "Show me the plan before it runs",
-            )
+            "Show me the plan before it runs"
         };
         let on = choice.approve_plan;
         let approve = div()
@@ -1736,31 +1767,16 @@ impl TaskCard {
                 )
                 .child(div().flex_1().min_w_0().child(control))
         };
-        let lead = div()
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .child(self.render_agent())
-            .child(self.render_run_line(row, theme, cx))
-            .into_any_element();
         div()
-            .debug_selector(|| "task-card-orchestrate-pane".into())
+            .debug_selector(|| "task-card-plan-options".into())
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .child(
-                div()
-                    .debug_selector(|| "task-card-mission-description".into())
-                    .text_size(ui_rems(12.0))
-                    .text_color(theme.text_muted)
-                    .child(description),
-            )
             .child(field(
                 "Plan",
                 false,
                 div().flex().child(plan_mode).into_any_element(),
             ))
-            .child(field("Lead", true, lead))
             .child(field("Reads", true, self.render_reads(row, theme, cx)))
             .child(field(
                 "Steps",
@@ -3095,13 +3111,10 @@ mod tests {
         };
         assert!(cx.debug_bounds("task-card-start").is_some());
         assert!(cx.debug_bounds("task-card-assign").is_none());
-        let at = cx
-            .debug_bounds("task-card-hand-off-mode-2")
-            .unwrap()
-            .center();
+        assert!(cx.debug_bounds("task-card-reads").is_none());
+        let at = cx.debug_bounds("task-card-plan-first").unwrap().center();
         cx.simulate_click(at, gpui::Modifiers::none());
         cx.run_until_parked();
-        assert!(cx.debug_bounds("task-card-start").is_none());
         assert!(cx.debug_bounds("task-card-reads").is_some());
         let at = cx.debug_bounds("task-card-approve-plan").unwrap().center();
         cx.simulate_click(at, gpui::Modifiers::none());
@@ -3112,7 +3125,7 @@ mod tests {
         let at = right_half(cx, "task-card-plan-mode");
         cx.simulate_click(at, gpui::Modifiers::none());
         cx.run_until_parked();
-        let at = cx.debug_bounds("task-card-orchestrate").unwrap().center();
+        let at = cx.debug_bounds("task-card-start").unwrap().center();
         cx.simulate_click(at, gpui::Modifiers::none());
         cx.run_until_parked();
         assert_eq!(
@@ -3328,7 +3341,7 @@ mod tests {
             cx.simulate_click(at, gpui::Modifiers::none());
             cx.run_until_parked();
         };
-        click(cx, "task-card-hand-off-mode-2");
+        click(cx, "task-card-plan-first");
         for query in ["@rev", "@red"] {
             card.update(cx, |card, cx| {
                 let input = card.open.as_ref().unwrap().reads.clone();
@@ -3363,14 +3376,14 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("task-card-reads-off").is_some());
-        click(cx, "task-card-orchestrate");
+        click(cx, "task-card-start");
         assert_eq!(
             events.borrow().len(),
             3,
             "a lead that cannot read them does not start"
         );
         click(cx, "task-card-reads-remove-review");
-        click(cx, "task-card-orchestrate");
+        click(cx, "task-card-start");
         assert_eq!(events.borrow()[3..], ["save []", "start"]);
     }
 }
