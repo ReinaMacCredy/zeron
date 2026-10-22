@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -20,6 +19,7 @@ use crate::lock;
 
 pub(crate) const PLAN_READY: &str = "task-ios-install";
 pub(crate) const RUNNING: &str = "task-settle-shelf";
+pub(crate) const HELD: &str = "task-widget";
 pub(crate) const SHELF_QUESTION: &str = "req-shelf";
 
 fn task(id: &str, title: &str, fields: Value, now: DateTime<Utc>) -> Task {
@@ -84,6 +84,17 @@ pub(crate) fn seed(doc: &mut RegistryDoc, now: DateTime<Utc>) -> Result<(), zero
                 "chatId": "chat-lead-shelf",
                 "mode": "orchestrated",
                 "plan": "Settled chats move to a shelf after the host's settle_after_days.",
+            }),
+            now,
+        ),
+        task(
+            HELD,
+            "Needs you widget",
+            json!({
+                "spaceId": "space-zeron",
+                "chatId": "chat-lead-widget",
+                "mode": "orchestrated",
+                "plan": "## Needs you widget\n\n- A small widget with the **Needs you** count\n- A medium widget listing the first three asks\n- Deep links into the Tasks tab",
             }),
             now,
         ),
@@ -225,6 +236,23 @@ pub(crate) fn seed(doc: &mut RegistryDoc, now: DateTime<Utc>) -> Result<(), zero
             false,
         ),
         step(RUNNING, 5, "Docs", "Update the Inbox article.", None, false),
+        step(HELD, 1, "Small widget", "The Needs you count.", None, false),
+        step(
+            HELD,
+            2,
+            "Medium widget",
+            "The first three asks.",
+            None,
+            false,
+        ),
+        step(
+            HELD,
+            3,
+            "Deep links",
+            "Open the Tasks tab at the ask.",
+            None,
+            false,
+        ),
     ];
     for step in &steps {
         doc.create_task_step(step)?;
@@ -323,7 +351,11 @@ pub(crate) fn supervisors(now: DateTime<Utc>) -> Vec<(&'static str, SupervisorSn
                 WakeDelivery::Steered,
             ),
         ],
-        watched_roots: vec!["chat-lead-ios".into(), "chat-picker".into()],
+        watched_roots: vec![
+            "chat-lead-ios".into(),
+            "chat-lead-widget".into(),
+            "chat-picker".into(),
+        ],
         needs_you: vec![
             item(
                 "item-testflight",
@@ -346,15 +378,15 @@ pub(crate) fn supervisors(now: DateTime<Utc>) -> Vec<(&'static str, SupervisorSn
             }),
         ],
         interventions: vec![SupervisorIntervention {
-            id: "iv-approve-ios".into(),
+            id: "iv-approve-widget".into(),
             at: now - Duration::minutes(1),
             kind: InterventionKind::Approve,
-            task_id: Some(PLAN_READY.into()),
+            task_id: Some(HELD.into()),
             step_ids: Vec::new(),
             target: None,
             message_id: None,
             request_id: None,
-            text: "Approved the plan: six steps, each scoped to one screen.".into(),
+            text: "Approved the plan: three steps, each scoped to one widget size.".into(),
             trigger: None,
             chips: Vec::new(),
             item: None,

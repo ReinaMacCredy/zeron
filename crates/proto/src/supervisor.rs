@@ -264,7 +264,39 @@ fn clip(text: &str, chars: usize) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendDest {
+    Lead,
+    Step,
+    Supervisor,
+    Thread,
+}
+
+impl SendDest {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Lead => "the Lead",
+            Self::Step => "the step",
+            Self::Thread => "the thread",
+            Self::Supervisor => "the Supervisor",
+        }
+    }
+}
+
 impl NeedsYouRow {
+    pub fn dest(&self) -> SendDest {
+        match self {
+            Self::Item(item) if item.task_id.is_some() => SendDest::Lead,
+            Self::Item(_) => SendDest::Supervisor,
+            Self::Input(input) => match input.asker {
+                InputAsker::Lead => SendDest::Lead,
+                InputAsker::Step => SendDest::Step,
+                InputAsker::Thread => SendDest::Thread,
+                InputAsker::Supervisor => SendDest::Supervisor,
+            },
+        }
+    }
+
     pub fn title(&self) -> String {
         match self {
             Self::Item(item) => clip(&item.title, TITLE_CHARS),

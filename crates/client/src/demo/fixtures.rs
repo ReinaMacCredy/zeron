@@ -380,6 +380,18 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         },
         DemoChat {
             model: "claude-opus-5",
+            last_ago_ms: 5 * MIN,
+            created_ago_ms: 25 * MIN,
+            ..chat(
+                "chat-lead-widget",
+                Some("space-zeron"),
+                MAC,
+                "Needs you widget",
+                "The Supervisor approved the plan; step 1 starts after the hold.",
+            )
+        },
+        DemoChat {
+            model: "claude-opus-5",
             status: Some(SessionStatus::Working),
             last_ago_ms: 30_000,
             created_ago_ms: 3 * HOUR,

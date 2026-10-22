@@ -26,7 +26,9 @@ use crate::rpc::{FolderListing, ProgressFn, QUEUED_ATTACHMENTS_MIN, RepoRef, cap
 use crate::session::{
     HostCapabilities, InputRequest, OutgoingAttachment, RoomState, SessionCore, SessionHandle,
 };
-use crate::workspace::{SearchHit, SessionRow, TaskDetail, WorkspaceSnapshot, WorkspaceStore};
+use crate::workspace::{
+    ItemSend, SearchHit, SessionRow, TaskDetail, WorkspaceSnapshot, WorkspaceStore,
+};
 use crate::{lock, now_ms, read, write};
 
 /// Attachment read cache budget.
@@ -718,7 +720,6 @@ impl Client {
         self.workspace().search(query, limit)
     }
 
-
     pub fn task_detail(&self, task_id: &str) -> Option<TaskDetail> {
         let (state, _) = self.inner.workspace.state();
         crate::workspace::task_detail(
@@ -727,6 +728,17 @@ impl Client {
             &self.workspace(),
             &self.inner.workspace.supervisors(),
             task_id,
+        )
+    }
+
+    pub fn mission_strip(&self, chat_id: &str) -> Option<crate::workspace::MissionStrip> {
+        let (state, _) = self.inner.workspace.state();
+        crate::workspace::mission_strip(
+            &state,
+            &self.inner.workspace.steps(),
+            &self.workspace(),
+            &self.inner.workspace.supervisors(),
+            chat_id,
         )
     }
 
@@ -835,20 +847,46 @@ impl Client {
         .await
     }
 
-    pub async fn resolve_supervisor_item(
+    pub async fn resolve_supervisor_items(
         &self,
         device_id: &str,
-        item_id: &str,
-        choice: &str,
+        answers: Vec<(String, String)>,
     ) -> Result<()> {
-        self.mutate(
-            device_id,
-            serde_json::json!({
-                "op": "resolveSupervisorItems",
-                "answers": [{ "itemId": item_id, "choice": choice }],
-            }),
-        )
-        .await
+        let keys: Vec<String> = answers
+            .iter()
+            .map(|(item_id, _)| format!("{device_id}/item:{item_id}"))
+            .collect();
+        for ((_, choice), key) in answers.iter().zip(&keys) {
+            self.inner.workspace.set_item_send(
+                key.clone(),
+                Some(ItemSend::Sending {
+                    choice: choice.clone(),
+                }),
+            );
+        }
+        self.inner.recompute_workspace();
+        let body: Vec<serde_json::Value> = answers
+            .iter()
+            .map(|(item_id, choice)| serde_json::json!({ "itemId": item_id, "choice": choice }))
+            .collect();
+        let result = self
+            .mutate(
+                device_id,
+                serde_json::json!({ "op": "resolveSupervisorItems", "answers": body }),
+            )
+            .await;
+        for ((_, choice), key) in answers.into_iter().zip(keys) {
+            let send = match &result {
+                Ok(()) => ItemSend::Sent { choice },
+                Err(err) => ItemSend::Failed {
+                    choice,
+                    reason: err.to_string(),
+                },
+            };
+            self.inner.workspace.set_item_send(key, Some(send));
+        }
+        self.inner.recompute_workspace();
+        result
     }
 
     pub async fn supervisor_settings(&self, device_id: &str) -> Result<SupervisorSettings> {

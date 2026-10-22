@@ -17,11 +17,11 @@ use zeron_doc::{RegistryDoc, WorkspaceState};
 use zeron_proto::supervisor::SupervisorSnapshot;
 use zeron_proto::{CheckoutChangeRequestStatus, SidebarPreferences, TaskStep};
 
-pub(crate) use tasks::detail as task_detail;
 pub use tasks::{
-    ApprovalView, HostRef, NeedsYouEntry, NeedsYouKind, StepView, SupervisorHost, SupervisorPage,
-    TaskDetail, TaskRow, TasksPage, WakeEntry,
+    ApprovalView, HostRef, ItemSend, MissionStrip, NeedsYouEntry, NeedsYouKind, StepView,
+    SupervisorHost, SupervisorPage, TaskDetail, TaskRow, TasksPage, WakeEntry,
 };
+pub(crate) use tasks::{detail as task_detail, strip as mission_strip};
 pub(crate) use view::{DeriveContext, device_online};
 pub use view::{
     DeviceView, FrontPage, PROJECT_COLOR_COUNT, ProjectRef, ProjectView, PullRequestGroups,
@@ -43,6 +43,7 @@ pub(crate) struct WorkspaceStore {
     presence: Mutex<HashMap<String, i64>>,
     change_requests: Mutex<Vec<CheckoutChangeRequestStatus>>,
     supervisors: Mutex<BTreeMap<String, SupervisorSnapshot>>,
+    item_sends: Mutex<HashMap<String, ItemSend>>,
     cache: Mutex<Option<StateCache>>,
     snapshot: RwLock<Arc<WorkspaceSnapshot>>,
     recompute: Mutex<()>,
@@ -56,6 +57,7 @@ impl WorkspaceStore {
             presence: Mutex::new(HashMap::new()),
             change_requests: Mutex::new(Vec::new()),
             supervisors: Mutex::new(BTreeMap::new()),
+            item_sends: Mutex::new(HashMap::new()),
             cache: Mutex::new(None),
             snapshot: RwLock::new(Arc::new(WorkspaceSnapshot::default())),
             recompute: Mutex::new(()),
@@ -162,7 +164,22 @@ impl WorkspaceStore {
     }
 
     pub(crate) fn put_supervisor(&self, device_id: &str, snapshot: SupervisorSnapshot) {
+        let open: Vec<String> = snapshot
+            .needs_you
+            .iter()
+            .map(|row| format!("{device_id}/{}", row.key()))
+            .collect();
+        let prefix = format!("{device_id}/");
+        lock(&self.item_sends).retain(|key, _| !key.starts_with(&prefix) || open.contains(key));
         lock(&self.supervisors).insert(device_id.to_owned(), snapshot);
+    }
+
+    pub(crate) fn set_item_send(&self, key: String, send: Option<ItemSend>) {
+        let mut sends = lock(&self.item_sends);
+        match send {
+            Some(send) => sends.insert(key, send),
+            None => sends.remove(&key),
+        };
     }
 
     pub(crate) fn drop_supervisor(&self, device_id: &str) -> bool {
@@ -197,6 +214,7 @@ impl WorkspaceStore {
         let presence = self.presence();
         let change_requests = lock(&self.change_requests).clone();
         let supervisors = self.supervisors();
+        let item_sends = lock(&self.item_sends).clone();
         let previous = self.snapshot();
         let mut next = view::derive(
             &state,
@@ -208,6 +226,7 @@ impl WorkspaceStore {
                 change_requests: &change_requests,
                 steps: &steps,
                 supervisors: &supervisors,
+                item_sends: &item_sends,
                 send_states,
                 synced,
                 previous: Some(&previous),

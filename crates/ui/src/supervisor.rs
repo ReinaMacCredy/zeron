@@ -16,9 +16,9 @@ use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::supervisor::{
     CheckTool, InputAsker, InterventionChip, InterventionKind, InterventionTrigger, LeadQuestion,
     NeedsYouInput, NeedsYouRow, NextCheckKind, PlanApproval, QuestionState, Raiser, ResourceState,
-    SettledBy, SharedResource, SupervisorIntervention, SupervisorItem, SupervisorSettings,
-    SupervisorSnapshot, SupervisorState, SupervisorWake, WAKES_PER_HOUR, WakeDelivery,
-    is_supervisor_chat,
+    SendDest, SettledBy, SharedResource, SupervisorIntervention, SupervisorItem,
+    SupervisorSettings, SupervisorSnapshot, SupervisorState, SupervisorWake, WAKES_PER_HOUR,
+    WakeDelivery, is_supervisor_chat,
 };
 use zeron_proto::{
     AgentProfile, Chat, ChatConfig, ChatIndicator, PermissionMode, PlanProgress, SandboxLevel,

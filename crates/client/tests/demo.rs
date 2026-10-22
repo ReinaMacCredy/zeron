@@ -68,6 +68,7 @@ fn front_page_mirrors_the_desktop_sidebar() {
             "chat-lead-ios",
             "chat-shelf-4",
             "chat-approve-test",
+            "chat-lead-widget",
             "chat-approve-push",
             "chat-cjk",
             "chat-side",
@@ -664,10 +665,9 @@ fn tasks_and_supervisors_merge_across_macs() {
 
     let before = client.workspace().supervisor.needs_you.len();
     zeron_client::runtime::shared()
-        .block_on(client.resolve_supervisor_item(
+        .block_on(client.resolve_supervisor_items(
             "dev-mac",
-            "item-testflight",
-            "Wait for the widget",
+            vec![("item-testflight".into(), "Wait for the widget".into())],
         ))
         .unwrap();
     wait_for("item resolved", Duration::from_secs(5), || {
