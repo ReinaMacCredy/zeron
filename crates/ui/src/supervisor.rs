@@ -1425,7 +1425,12 @@ impl SupervisorPage {
         let choices: HashMap<String, String> = self
             .replies
             .iter()
-            .filter(|(_, reply)| matches!(reply.stage, Stage::Sending | Stage::Sent(_)))
+            .filter(|(key, reply)| match reply.stage {
+                Stage::Sending | Stage::Sent(_) => true,
+                // A failed batch still answered the items that leave; the engine reverts the rest.
+                Stage::Failed(_) => key.starts_with("item:"),
+                _ => false,
+            })
             .map(|(key, reply)| (key.clone(), reply.choice.clone()))
             .collect();
         let (arrived, wake) = {
