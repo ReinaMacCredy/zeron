@@ -1,7 +1,7 @@
 //! Exercise the explorer and editors against an isolated real workspace/RPC.
 //! Set ZERON_FILES_CAPTURES to a directory to run on X11 and capture the fixture.
 use super::*;
-use crate::settings::{FILES_PANEL_DEFAULT, RIGHT_PANE_DEFAULT};
+use crate::settings::{CHAT_PANEL_MIN, FILES_PANEL_DEFAULT, RIGHT_PANE_DEFAULT};
 use gpui::{AppContext, AsyncApp, WindowHandle};
 use std::{path::Path, sync::Arc};
 
