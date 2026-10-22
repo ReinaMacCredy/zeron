@@ -285,8 +285,12 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 frame(window, cx, output.as_deref(), "01b-picker-files-compact").await;
                 window
                     .update(cx, |shell, window, cx| {
-                        assert_eq!(shell.files_visible_width(cx), 284.0);
-                        assert_eq!(shell.files_reserved_width(cx), 284.0);
+                        let squeezed = shell.content_width()
+                            - shell.sidebar_now()
+                            - CHAT_PANEL_MIN
+                            - RIGHT_PANE_MIN;
+                        assert_eq!(shell.files_visible_width(cx), squeezed);
+                        assert_eq!(shell.files_reserved_width(cx), squeezed);
                         assert_eq!(shell.right_visible_width(cx), RIGHT_PANE_MIN);
                         // Squeezed by the narrow window, Files keeps its own
                         // width for when there is room again.
@@ -392,7 +396,10 @@ fn files_panel_workspace_navigation_and_external_updates() {
                         // The narrow fit already hid the sidebar. Takeover must
                         // keep it hidden and give only the chat's space to the editor.
                         assert_eq!(shell.sidebar_now(), 0.0);
-                        assert_eq!(shell.right_visible_width(cx), 1000.0 - FILES_PANEL_DEFAULT);
+                        assert_eq!(
+                            shell.right_visible_width(cx),
+                            shell.content_width() - FILES_PANEL_DEFAULT
+                        );
                         shell.toggle_right_pane_expand(cx);
                     })
                     .unwrap();
