@@ -1549,7 +1549,22 @@ impl DocHost {
     ) {
         let host = self.clone();
         self.spawn_worker(async move {
-            while statuses.changed().await.is_ok() {
+            let mut limits = None;
+            loop {
+                if limits.is_none() {
+                    limits = host
+                        .sessions()
+                        .and_then(|sessions| sessions.resume_schedule().map(|s| s.watch()));
+                }
+                tokio::select! {
+                    changed = statuses.changed() => if changed.is_err() { return },
+                    changed = async {
+                        match limits.as_mut() {
+                            Some(limits) => limits.changed().await,
+                            None => std::future::pending().await,
+                        }
+                    } => if changed.is_err() { return },
+                }
                 host.settle_delegations(None).await;
                 host.settle_task_steps().await;
             }

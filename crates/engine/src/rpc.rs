@@ -3364,10 +3364,11 @@ impl RpcService for EngineRpc {
                 if p.choice == crate::resume_schedule::OfferResolution::Switch
                     && let Some(to) = offer.as_ref().and_then(|offer| offer.to.as_ref())
                 {
-                    self.doc_host
-                        .act_on_offer(&p.chat_id, to)
-                        .await
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    let switched = self.doc_host.act_on_offer(&p.chat_id, to).await;
+                    if let Some(schedule) = self.sessions.resume_schedule() {
+                        schedule.acted(&p.chat_id, switched.is_err());
+                    }
+                    switched.map_err(|e| RpcError::Failed(e.to_string()))?;
                 }
                 RpcReply::value(&serde_json::json!({ "changed": offer.is_some() }))
             }

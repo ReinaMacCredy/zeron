@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
@@ -82,6 +83,8 @@ struct Stored {
     reset: Vec<Reset>,
     #[serde(default)]
     deferred: Vec<Deferred>,
+    #[serde(skip)]
+    acting: HashMap<String, Limited>,
 }
 
 fn enabled() -> bool {
@@ -97,6 +100,7 @@ impl Default for Stored {
             restart_recorded_at: 0,
             reset: Vec::new(),
             deferred: Vec::new(),
+            acting: HashMap::new(),
         }
     }
 }
@@ -278,7 +282,11 @@ impl ResumeSchedule {
                 return false;
             };
             match choice {
-                OfferResolution::Switch => taken = stored.limited.remove(at).offer,
+                OfferResolution::Switch => {
+                    let mut entry = stored.limited.remove(at);
+                    taken = entry.offer.take();
+                    stored.acting.insert(chat_id.to_owned(), entry);
+                }
                 OfferResolution::Wait => taken = stored.limited[at].offer.take(),
                 OfferResolution::Hold => {
                     if let Some(offer) = stored.limited[at].offer.as_mut() {
@@ -293,11 +301,27 @@ impl ResumeSchedule {
     }
 
     pub fn holds(&self, chat_id: &str, now: i64) -> bool {
-        lock(&self.inner.stored).limited.iter().any(|entry| {
-            entry.at.chat_id == chat_id
-                && (entry.offer.is_some()
-                    || (entry.auto && entry.resets_at.is_some_and(|at| at + RESET_SLACK_MS > now)))
-        })
+        let stored = lock(&self.inner.stored);
+        stored.acting.contains_key(chat_id)
+            || stored.limited.iter().any(|entry| {
+                entry.at.chat_id == chat_id
+                    && (entry.offer.is_some()
+                        || (entry.auto
+                            && entry.resets_at.is_some_and(|at| at + RESET_SLACK_MS > now)))
+            })
+    }
+
+    /// Ends the hold a fired Switch or Resume keeps until its turn is underway; a failed switch puts the limit back, offer spent.
+    pub fn acted(&self, chat_id: &str, failed: bool) {
+        self.update(|stored| {
+            let Some(entry) = stored.acting.remove(chat_id) else {
+                return false;
+            };
+            if failed && !stored.limited.iter().any(|e| e.at.chat_id == chat_id) {
+                stored.limited.push(entry);
+            }
+            true
+        });
     }
 
     pub fn set_auto(&self, chat_id: &str, auto: bool, now: i64) -> bool {
@@ -425,7 +449,22 @@ impl ResumeSchedule {
         let mut next = None;
         self.update(|stored| {
             let before = stored.shape();
+            let limited = stored.limited.clone();
             (due, next) = stored.take_due(now);
+            for due in &due {
+                let chat_id = match due {
+                    Due::Resume(at) => &at.chat_id,
+                    Due::Switch(chat_id, _) => chat_id,
+                    Due::Start(_) => continue,
+                };
+                if let Some(entry) = limited.iter().find(|e| &e.at.chat_id == chat_id) {
+                    let entry = Limited {
+                        offer: None,
+                        ..entry.clone()
+                    };
+                    stored.acting.insert(chat_id.clone(), entry);
+                }
+            }
             stored.shape() != before
         });
         (due, next)
@@ -604,6 +643,25 @@ mod tests {
     }
 
     #[test]
+    fn a_fired_switch_holds_until_acted_and_a_failed_one_puts_the_limit_back() {
+        let (_dir, schedule) = schedule();
+        schedule.note_limit("c", Some(90_000), None, 1_000);
+        schedule.set_offer("c", offer(OfferChoice::Switch, Some(2_000)));
+        let (due, _) = schedule.tick(2_000);
+        assert!(matches!(&due[..], [Due::Switch(..)]));
+        assert!(schedule.snapshot().chats.is_empty());
+        assert!(schedule.holds("c", 2_000));
+        schedule.acted("c", true);
+        let chats = schedule.snapshot().chats;
+        assert_eq!((chats.len(), chats[0].offer.is_none()), (1, true));
+        assert!(chats[0].auto && schedule.holds("c", 2_000));
+        assert_eq!(
+            schedule.tick(2_000),
+            (vec![], Some(90_000 + RESET_SLACK_MS))
+        );
+    }
+
+    #[test]
     fn an_expired_wait_offer_is_saved_and_broadcast_cleared() {
         let (dir, schedule) = schedule();
         schedule.note_limit("wait", Some(90_000), None, 1_000);
@@ -649,6 +707,11 @@ mod tests {
                 .is_some()
         );
         assert!(schedule.snapshot().chats.is_empty());
+        assert!(
+            schedule.holds("c", 1_000),
+            "held until the switched turn is underway"
+        );
+        schedule.acted("c", false);
         assert!(!schedule.holds("c", 1_000));
         schedule.note_limit("c", Some(90_000), None, 1_000);
         schedule.set_offer(
