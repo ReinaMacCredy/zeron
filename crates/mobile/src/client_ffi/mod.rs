@@ -234,8 +234,17 @@ impl CoreClient {
         Ok(self.client.set_session_settled(&chat_id, settled)?)
     }
 
-    pub fn set_active_first(&self, on: bool) {
-        self.client.set_active_first(on);
+    pub fn set_sidebar_view(
+        &self,
+        organization: SidebarOrganization,
+        sort: SidebarSort,
+        active_first: bool,
+    ) {
+        self.client.set_sidebar_view(zc::SidebarView {
+            organization: organization.into(),
+            sort: sort.into(),
+            active_first,
+        });
     }
 
     pub fn rename_session(&self, chat_id: String, title: String) -> CoreResult<()> {

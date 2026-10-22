@@ -577,14 +577,58 @@ pub struct FrontPage {
     pub pinned: Vec<SessionRow>,
     /// User sections ("folders"), each in recency order.
     pub sections: Vec<SectionView>,
-    /// Everything else unsettled, in Inbox order (Active first when set).
+    /// Everything else unsettled, in the view's order.
     pub recent: Vec<SessionRow>,
-    /// `recent` by project, the projectless Chats group first.
+    /// `recent` by project or by device; empty when the view is one list.
     pub groups: Vec<FrontGroup>,
-    /// The Settled shelf, newest settle first.
+    /// The Settled shelf (Inbox only), newest settle first.
     pub settled: Vec<SessionRow>,
     /// Step threads and agent-opened chats, by the lead or creator they draw under.
     pub nested: HashMap<String, Vec<SessionRow>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum SidebarOrganization {
+    ByProject,
+    ByDevice,
+    InOneList,
+    Inbox,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum SidebarSort {
+    LastUpdated,
+    Created,
+}
+
+impl From<SidebarOrganization> for zc::SidebarOrganization {
+    fn from(o: SidebarOrganization) -> Self {
+        match o {
+            SidebarOrganization::ByProject => Self::ByProject,
+            SidebarOrganization::ByDevice => Self::ByDevice,
+            SidebarOrganization::InOneList => Self::InOneList,
+            SidebarOrganization::Inbox => Self::Inbox,
+        }
+    }
+}
+
+impl From<SidebarSort> for zc::SidebarSort {
+    fn from(s: SidebarSort) -> Self {
+        match s {
+            SidebarSort::LastUpdated => Self::LastUpdated,
+            SidebarSort::Created => Self::Created,
+        }
+    }
+}
+
+#[uniffi::export]
+pub fn shelf_visible(shown: u32, total: u32) -> u32 {
+    zeron_proto::sidebar_view::shelf_visible(shown as usize, total as usize) as u32
+}
+
+#[uniffi::export]
+pub fn shelf_next(shown: u32) -> u32 {
+    zeron_proto::sidebar_view::shelf_next(shown as usize) as u32
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]

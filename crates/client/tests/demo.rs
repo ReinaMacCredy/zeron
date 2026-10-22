@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use zeron_client::events::NullListener;
 use zeron_client::{
     ChatIndicator, Client, ClientConfig, Credentials, DemoFixture, DemoOptions, MessageRole,
-    MessageStatus, SendOutcome, SendRequest, StreamSpeed, TranscriptScale,
+    MessageStatus, SendOutcome, SendRequest, SidebarOrganization, SidebarSort, SidebarView,
+    StreamSpeed, TranscriptScale,
 };
 
 fn demo(options: DemoOptions) -> (Client, tempfile::TempDir) {
@@ -144,7 +145,20 @@ fn settled_shelf_uses_each_hosts_days_and_settle_writes() {
     // MacBook Pro settles after 3 days, the Mac mini after 7; the studio keeps the default 3.
     assert_eq!(
         ids(&ws.front.settled),
-        ["chat-settled", "chat-old-mac", "chat-blog"]
+        [
+            "chat-settled",
+            "chat-old-mac",
+            "chat-blog",
+            "chat-old-1",
+            "chat-old-2",
+            "chat-old-3",
+            "chat-old-4",
+            "chat-old-5",
+            "chat-old-6",
+            "chat-old-7",
+            "chat-old-8",
+            "chat-old-9"
+        ]
     );
     assert!(ws.session("chat-old-mac").unwrap().settled);
     assert!(!ws.session("chat-old-mini").unwrap().settled);
@@ -153,12 +167,7 @@ fn settled_shelf_uses_each_hosts_days_and_settle_writes() {
     let recent = ids(&ws.front.recent);
     let at = |id: &str| recent.iter().position(|r| *r == id).unwrap();
     assert!(at("chat-unsettled") < at("chat-old-mini"));
-    // The projectless Chats group leads; groups partition the Inbox.
-    assert_eq!(ws.front.groups[0].name, "Chats");
-    assert_eq!(
-        ws.front.groups.iter().map(|g| g.sessions.len()).sum::<usize>(),
-        ws.front.recent.len()
-    );
+    assert!(ws.front.groups.is_empty());
 
     client.set_session_settled("chat-deploy", true).unwrap();
     let ws = client.workspace();
@@ -189,9 +198,44 @@ fn step_threads_and_opened_chats_nest_under_their_lead() {
 }
 
 #[test]
-fn active_first_and_section_moves_reorder_the_front_page() {
+fn organize_and_sort_follow_the_desktop_menu() {
     let (client, _dir) = demo(fast());
-    client.set_active_first(true);
+    let inbox = ids(&client.workspace().front.recent)
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>();
+    let view = |organization, sort, active_first| SidebarView {
+        organization,
+        sort,
+        active_first,
+    };
+
+    // Sort and Active first are inert under Inbox, as on the desktop.
+    client.set_sidebar_view(view(SidebarOrganization::Inbox, SidebarSort::Created, true));
+    assert_eq!(ids(&client.workspace().front.recent), inbox);
+
+    // Other views drop the Settled shelf and take the chosen sort.
+    client.set_sidebar_view(view(
+        SidebarOrganization::InOneList,
+        SidebarSort::LastUpdated,
+        false,
+    ));
+    let ws = client.workspace();
+    assert!(ws.front.settled.is_empty() && ws.front.groups.is_empty());
+    assert!(ids(&ws.front.recent).contains(&"chat-old-9"));
+    let updated = |r: &zeron_client::SessionRow| r.last_activity_ms;
+    assert!(
+        ws.front
+            .recent
+            .windows(2)
+            .all(|w| updated(&w[0]) >= updated(&w[1]))
+    );
+
+    client.set_sidebar_view(view(
+        SidebarOrganization::InOneList,
+        SidebarSort::Created,
+        true,
+    ));
     let ws = client.workspace();
     let live = ws
         .front
@@ -200,10 +244,51 @@ fn active_first_and_section_moves_reorder_the_front_page() {
         .take_while(|r| r.indicator != ChatIndicator::Idle)
         .count();
     assert!(live > 0);
-    assert!(ws.front.recent[live..]
-        .iter()
-        .all(|r| r.indicator == ChatIndicator::Idle));
-    client.set_active_first(false);
+    let idle = &ws.front.recent[live..];
+    assert!(idle.iter().all(|r| r.indicator == ChatIndicator::Idle));
+    assert!(
+        idle.windows(2)
+            .all(|w| w[0].created_at_ms >= w[1].created_at_ms)
+    );
+
+    // By project: the projectless Chats group leads and groups partition the list.
+    client.set_sidebar_view(view(
+        SidebarOrganization::ByProject,
+        SidebarSort::LastUpdated,
+        false,
+    ));
+    let ws = client.workspace();
+    assert_eq!(ws.front.groups[0].name, "Chats");
+    assert_eq!(
+        ws.front
+            .groups
+            .iter()
+            .map(|g| g.sessions.len())
+            .sum::<usize>(),
+        ws.front.recent.len()
+    );
+
+    // By device: one group per host, named for the device.
+    client.set_sidebar_view(view(
+        SidebarOrganization::ByDevice,
+        SidebarSort::LastUpdated,
+        false,
+    ));
+    let ws = client.workspace();
+    let names: Vec<&str> = ws.front.groups.iter().map(|g| g.name.as_str()).collect();
+    assert!(names.contains(&"MacBook Pro"), "{names:?}");
+    for group in &ws.front.groups {
+        assert!(group.sessions.iter().all(|r| r.device_id == group.id));
+    }
+    assert_eq!(
+        ws.front
+            .groups
+            .iter()
+            .map(|g| g.sessions.len())
+            .sum::<usize>(),
+        ws.front.recent.len()
+    );
+    client.set_sidebar_view(SidebarView::default());
 
     let order = |client: &Client| {
         client
@@ -1034,4 +1119,23 @@ fn today_card_merges_both_macs_runs_tasks_and_tightest_usage() {
         today.open_tasks as usize,
         today.tasks.iter().filter(|t| !t.done).count()
     );
+    assert!(before.updated.is_none());
+    assert!(today.updated.as_deref().is_some_and(|u| u.starts_with("Updated ")));
+}
+
+#[test]
+fn today_add_task_is_due_today() {
+    let (client, _dir) = demo(fast());
+    let rt = zeron_client::runtime::shared();
+    assert!(rt.block_on(client.add_today_task("  ")).is_err());
+    let id = rt
+        .block_on(client.add_today_task(" Ship the Today sheet "))
+        .unwrap();
+    wait_for("the new task", Duration::from_secs(5), || {
+        client.workspace().today.tasks.iter().any(|t| t.id == id)
+    });
+    let today = client.workspace().today.clone();
+    let task = today.tasks.iter().find(|t| t.id == id).unwrap();
+    assert_eq!(task.title, "Ship the Today sheet");
+    assert_eq!(task.meta.as_deref(), Some("Today"));
 }

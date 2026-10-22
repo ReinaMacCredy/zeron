@@ -19,6 +19,7 @@ pub struct TodayPage {
     pub slots: Vec<TodaySlot>,
     pub usage: Option<TodayUsage>,
     pub runs_loaded: bool,
+    pub updated: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -186,5 +187,6 @@ pub(crate) fn derive(
             .collect(),
         usage,
         runs_loaded: !cx.today_runs.is_empty(),
+        updated: today::updated_label(cx.today_refresh.updated, cx.today_refresh.failed),
     }
 }

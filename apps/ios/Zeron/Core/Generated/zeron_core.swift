@@ -1211,8 +1211,6 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func sessionRow(chatId: String)  -> SessionRow?
     
-    func setActiveFirst(on: Bool) 
-    
     /**
      * OS network path: `false` only for a definitive "unsatisfied".
      */
@@ -1223,6 +1221,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func setSessionConfig(chatId: String, config: ChatConfig) throws 
     
     func setSessionSettled(chatId: String, settled: Bool) throws 
+    
+    func setSidebarView(organization: SidebarOrganization, sort: SidebarSort, activeFirst: Bool) 
     
     /**
      * Stop all background work (sign-out). Snapshots stay readable.
@@ -1333,9 +1333,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func watchState(chatId: String)  -> WatchState?
     
-    /**
-     * Re-fetch every online Mac's runs and accounts (card appear, pull to refresh).
-     */
+    func addTodayTask(title: String) async throws  -> String
+    
     func refreshToday() async 
     
     func todayPage()  -> TodayPage
@@ -2015,15 +2014,6 @@ open func sessionRow(chatId: String) -> SessionRow?  {
 })
 }
     
-open func setActiveFirst(on: Bool)  {try! rustCall() {
-        uniffiCallStatus in
-    uniffi_zeron_mobile_fn_method_coreclient_set_active_first(
-            self.uniffiCloneHandle(),
-        FfiConverterBool.lower(on),uniffiCallStatus
-    )
-}
-}
-    
     /**
      * OS network path: `false` only for a definitive "unsatisfied".
      */
@@ -2062,6 +2052,17 @@ open func setSessionSettled(chatId: String, settled: Bool)throws   {try rustCall
             self.uniffiCloneHandle(),
         FfiConverterString.lower(chatId),
         FfiConverterBool.lower(settled),uniffiCallStatus
+    )
+}
+}
+    
+open func setSidebarView(organization: SidebarOrganization, sort: SidebarSort, activeFirst: Bool)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_set_sidebar_view(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSidebarOrganization_lower(organization),
+        FfiConverterTypeSidebarSort_lower(sort),
+        FfiConverterBool.lower(activeFirst),uniffiCallStatus
     )
 }
 }
@@ -2662,9 +2663,22 @@ open func watchState(chatId: String) -> WatchState?  {
 })
 }
     
-    /**
-     * Re-fetch every online Mac's runs and accounts (card appear, pull to refresh).
-     */
+open func addTodayTask(title: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_add_today_task(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(title)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
 open func refreshToday()async   {
     return
         try!  await uniffiRustCallAsync(
@@ -7933,15 +7947,15 @@ public struct FrontPage: Equatable, Hashable {
      */
     public var sections: [SectionView]
     /**
-     * Everything else unsettled, in Inbox order (Active first when set).
+     * Everything else unsettled, in the view's order.
      */
     public var recent: [SessionRow]
     /**
-     * `recent` by project, the projectless Chats group first.
+     * `recent` by project or by device; empty when the view is one list.
      */
     public var groups: [FrontGroup]
     /**
-     * The Settled shelf, newest settle first.
+     * The Settled shelf (Inbox only), newest settle first.
      */
     public var settled: [SessionRow]
     /**
@@ -7959,13 +7973,13 @@ public struct FrontPage: Equatable, Hashable {
          * User sections ("folders"), each in recency order.
          */sections: [SectionView], 
         /**
-         * Everything else unsettled, in Inbox order (Active first when set).
+         * Everything else unsettled, in the view's order.
          */recent: [SessionRow], 
         /**
-         * `recent` by project, the projectless Chats group first.
+         * `recent` by project or by device; empty when the view is one list.
          */groups: [FrontGroup], 
         /**
-         * The Settled shelf, newest settle first.
+         * The Settled shelf (Inbox only), newest settle first.
          */settled: [SessionRow], 
         /**
          * Step threads and agent-opened chats, by the lead or creator they draw under.
@@ -12084,10 +12098,11 @@ public struct TodayPage: Equatable, Hashable {
     public var slots: [TodaySlot]
     public var usage: TodayUsage?
     public var runsLoaded: Bool
+    public var updated: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(greeting: String, summary: String, tasks: [TodayTask], openTasks: UInt32, prompts: UInt32, digest: [TodaySentence], slots: [TodaySlot], usage: TodayUsage?, runsLoaded: Bool) {
+    public init(greeting: String, summary: String, tasks: [TodayTask], openTasks: UInt32, prompts: UInt32, digest: [TodaySentence], slots: [TodaySlot], usage: TodayUsage?, runsLoaded: Bool, updated: String?) {
         self.greeting = greeting
         self.summary = summary
         self.tasks = tasks
@@ -12097,6 +12112,7 @@ public struct TodayPage: Equatable, Hashable {
         self.slots = slots
         self.usage = usage
         self.runsLoaded = runsLoaded
+        self.updated = updated
     }
 
     
@@ -12123,7 +12139,8 @@ public struct FfiConverterTypeTodayPage: FfiConverterRustBuffer {
                 digest: FfiConverterSequenceTypeTodaySentence.read(from: &buf), 
                 slots: FfiConverterSequenceTypeTodaySlot.read(from: &buf), 
                 usage: FfiConverterOptionTypeTodayUsage.read(from: &buf), 
-                runsLoaded: FfiConverterBool.read(from: &buf)
+                runsLoaded: FfiConverterBool.read(from: &buf), 
+                updated: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -12137,6 +12154,7 @@ public struct FfiConverterTypeTodayPage: FfiConverterRustBuffer {
         FfiConverterSequenceTypeTodaySlot.write(value.slots, into: &buf)
         FfiConverterOptionTypeTodayUsage.write(value.usage, into: &buf)
         FfiConverterBool.write(value.runsLoaded, into: &buf)
+        FfiConverterOptionString.write(value.updated, into: &buf)
     }
 }
 
@@ -17062,6 +17080,152 @@ public func FfiConverterTypeSessionTarget_lower(_ value: SessionTarget) -> RustB
 
 
 
+public enum SidebarOrganization: Equatable, Hashable {
+    
+    case byProject
+    case byDevice
+    case inOneList
+    case inbox
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SidebarOrganization: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSidebarOrganization: FfiConverterRustBuffer {
+    typealias SwiftType = SidebarOrganization
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SidebarOrganization {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .byProject
+        
+        case 2: return .byDevice
+        
+        case 3: return .inOneList
+        
+        case 4: return .inbox
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SidebarOrganization, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .byProject:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .byDevice:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .inOneList:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .inbox:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSidebarOrganization_lift(_ buf: RustBuffer) throws -> SidebarOrganization {
+    return try FfiConverterTypeSidebarOrganization.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSidebarOrganization_lower(_ value: SidebarOrganization) -> RustBuffer {
+    return FfiConverterTypeSidebarOrganization.lower(value)
+}
+
+
+
+
+public enum SidebarSort: Equatable, Hashable {
+    
+    case lastUpdated
+    case created
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SidebarSort: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSidebarSort: FfiConverterRustBuffer {
+    typealias SwiftType = SidebarSort
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SidebarSort {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .lastUpdated
+        
+        case 2: return .created
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SidebarSort, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .lastUpdated:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .created:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSidebarSort_lift(_ buf: RustBuffer) throws -> SidebarSort {
+    return try FfiConverterTypeSidebarSort.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSidebarSort_lower(_ value: SidebarSort) -> RustBuffer {
+    return FfiConverterTypeSidebarSort.lower(value)
+}
+
+
+
+
 public enum StepStatus: Equatable, Hashable {
     
     case planned
@@ -21387,6 +21551,23 @@ public func fileMentionLink(path: String, isDir: Bool) -> String  {
     )
 })
 }
+public func shelfNext(shown: UInt32) -> UInt32  {
+    return try!  FfiConverterUInt32.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_shelf_next(
+        FfiConverterUInt32.lower(shown),uniffiCallStatus
+    )
+})
+}
+public func shelfVisible(shown: UInt32, total: UInt32) -> UInt32  {
+    return try!  FfiConverterUInt32.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_shelf_visible(
+        FfiConverterUInt32.lower(shown),
+        FfiConverterUInt32.lower(total),uniffiCallStatus
+    )
+})
+}
 /**
  * Codex voice styles to offer before a host reports its own.
  */
@@ -21575,6 +21756,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_file_mention_link() != 14340) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_func_shelf_next() != 30205) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_shelf_visible() != 42657) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_func_default_voice_styles() != 30650) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -21749,9 +21936,6 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_session_row() != 10938) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_zeron_mobile_checksum_method_coreclient_set_active_first() != 4085) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_set_network_online() != 33835) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -21762,6 +21946,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_set_session_settled() != 49025) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_set_sidebar_view() != 58336) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_shutdown() != 4352) {
@@ -21887,7 +22074,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_watch_state() != 26199) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_zeron_mobile_checksum_method_coreclient_refresh_today() != 22732) {
+    if (uniffi_zeron_mobile_checksum_method_coreclient_add_today_task() != 510) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_refresh_today() != 7220) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_today_page() != 6942) {

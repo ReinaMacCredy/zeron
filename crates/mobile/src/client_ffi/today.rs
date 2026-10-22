@@ -1,6 +1,6 @@
 use zeron_client as zc;
 
-use super::{CoreClient, HostRef, on_runtime};
+use super::{CoreClient, CoreResult, HostRef, on_runtime};
 
 #[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
 pub struct TodayPage {
@@ -13,6 +13,7 @@ pub struct TodayPage {
     pub slots: Vec<TodaySlot>,
     pub usage: Option<TodayUsage>,
     pub runs_loaded: bool,
+    pub updated: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -117,6 +118,7 @@ impl From<&zc::TodayPage> for TodayPage {
                 host: (&u.host).into(),
             }),
             runs_loaded: t.runs_loaded,
+            updated: t.updated.clone(),
         }
     }
 }
@@ -125,6 +127,11 @@ impl From<&zc::TodayPage> for TodayPage {
 impl CoreClient {
     pub fn today_page(&self) -> TodayPage {
         (&self.client.workspace().today).into()
+    }
+
+    pub async fn add_today_task(&self, title: String) -> CoreResult<String> {
+        let client = self.client.clone();
+        on_runtime(async move { client.add_today_task(&title).await }).await
     }
 
     pub async fn refresh_today(&self) {

@@ -665,6 +665,7 @@ fn mutate(
                 json!({
                     "notes": params["notes"].as_str().unwrap_or_default(),
                     "spaceId": params["spaceId"],
+                    "dueOn": params["dueOn"],
                     "images": params.get("images").cloned().unwrap_or(json!([])),
                     "context": params.get("context").cloned().unwrap_or(json!([])),
                     "createdAt": now,
