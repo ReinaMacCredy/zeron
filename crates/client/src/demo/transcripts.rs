@@ -1093,6 +1093,12 @@ pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<Sess
             "Batched to one beat per 25s.",
         ),
         "chat-agents" => agents(host, now),
+        "chat-cursor" => short(
+            host,
+            now,
+            "Raise the tab bar hit targets",
+            "Raised every tab to **44pt** and kept the icons centered.",
+        ),
         "chat-seams" => seams(host, now),
         _ => Vec::new(),
     }

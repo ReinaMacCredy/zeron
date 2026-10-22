@@ -105,6 +105,7 @@ pub(crate) fn struck(mut t: PText) -> PText {
     t
 }
 
+/// `TranscriptListView` routes `zeron-chat` links to `AppRouter.openSession`.
 pub(crate) fn chat_link(chat_id: &str) -> String {
     let mut out = String::from("zeron-chat://open?id=");
     for byte in chat_id.bytes() {
