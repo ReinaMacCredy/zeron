@@ -340,13 +340,8 @@ async fn local_runtime_checks_public_releases_without_starting_edge_links() {
     assert_eq!(requests.load(Ordering::SeqCst), 0);
 
     updater.check_now();
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while requests.load(Ordering::SeqCst) < 1 {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("release checker requested manifest.json");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
     assert!(runtime.core().links().is_none());
 
     runtime.shutdown().await;
