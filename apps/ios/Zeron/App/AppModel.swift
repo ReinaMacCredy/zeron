@@ -657,7 +657,7 @@ final class AppModel {
 }
 
 extension StagedImage {
-    var outgoing: OutgoingAttachment { OutgoingAttachment(name: name, mimeType: "image/jpeg", data: data) }
+    var outgoing: OutgoingAttachment { OutgoingAttachment(name: name, mimeType: mimeType, data: data) }
 }
 
 /// Core events arrive on Rust runtime threads; hop to main.

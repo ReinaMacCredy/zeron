@@ -25,6 +25,36 @@ pub fn permission_modes() -> Vec<PermissionModeInfo> {
 }
 
 #[uniffi::export]
+pub fn pastes_as_file(pasted: String, draft: String) -> bool {
+    zeron_proto::attachment_mentions::pastes_as_file(&pasted, &draft)
+}
+
+#[uniffi::export]
+pub fn next_pasted_text_name(staged: Vec<String>) -> String {
+    zeron_proto::attachment_mentions::next_pasted_text_name(staged.iter().map(String::as_str))
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PastedTextPreview {
+    pub title: String,
+    pub subtitle: String,
+}
+
+#[uniffi::export]
+pub fn pasted_text_preview(reference: String, text: String) -> PastedTextPreview {
+    use zeron_proto::attachment_mentions::{
+        pasted_text_index_from_name, pasted_text_lines_label, pasted_text_pill_label,
+    };
+    PastedTextPreview {
+        title: pasted_text_index_from_name(&reference).map_or_else(
+            || "Pasted text".to_owned(),
+            |index| pasted_text_pill_label(index, None),
+        ),
+        subtitle: pasted_text_lines_label(text.lines().count()),
+    }
+}
+
+#[uniffi::export]
 pub fn follow_up_notice(queueing: bool, steer: bool, can_steer: bool) -> Option<String> {
     zeron_proto::steer_queues_notice(queueing, steer, can_steer).map(str::to_owned)
 }

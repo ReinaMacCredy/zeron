@@ -1,12 +1,19 @@
 import PhotosUI
 import UIKit
 
-/// An image staged in the composer before sending.
+/// An image, or a long paste as `Pasted text N.txt`, staged in the composer before sending.
 struct StagedImage: Identifiable, Equatable {
     let id: String
     let name: String
     let data: Data
     let thumbnail: UIImage
+    var mimeType = "image/jpeg"
+
+    var isImage: Bool { mimeType.hasPrefix("image/") }
+
+    static func pastedText(_ text: String, name: String) -> StagedImage {
+        StagedImage(id: UUID().uuidString, name: name, data: Data(text.utf8), thumbnail: UIImage(systemName: "doc.text") ?? UIImage(), mimeType: "text/plain")
+    }
 }
 
 /// How a message sent during a running turn is delivered.
@@ -541,7 +548,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             thumbs.addArrangedSubview(chip)
         }
         for img in images {
-            let iv = UIImageView(image: img.thumbnail)
+            let iv = img.isImage ? UIImageView(image: img.thumbnail) : pastedTextTile(img)
             iv.contentMode = .scaleAspectFill
             iv.clipsToBounds = true
             iv.layer.cornerRadius = 14
@@ -550,7 +557,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             iv.layer.borderColor = Palette.hairline.resolvedColor(with: window?.traitCollection ?? traitCollection).cgColor
             iv.isUserInteractionEnabled = true
             iv.translatesAutoresizingMaskIntoConstraints = false
-            iv.widthAnchor.constraint(equalToConstant: 56).isActive = true
+            iv.widthAnchor.constraint(equalToConstant: img.isImage ? 56 : 168).isActive = true
             iv.heightAnchor.constraint(equalToConstant: 56).isActive = true
             var x = UIButton.Configuration.filled()
             x.image = UIImage(systemName: "xmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 8, weight: .bold))
@@ -559,7 +566,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             x.cornerStyle = .capsule
             x.contentInsets = .zero
             let remove = UIButton(configuration: x)
-            remove.accessibilityLabel = "Remove image"
+            remove.accessibilityLabel = img.isImage ? "Remove image" : "Remove pasted text"
             remove.translatesAutoresizingMaskIntoConstraints = false
             remove.addAction(UIAction { [weak self] _ in
                 UIView.animate(withDuration: 0.25) { self?.images.removeAll { $0.id == img.id } }
@@ -579,7 +586,55 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         onHeightChange?()
     }
 
+    private func pastedTextTile(_ item: StagedImage) -> UIImageView {
+        let text = String(decoding: item.data, as: UTF8.self)
+        let info = pastedTextPreview(reference: item.name, text: text)
+        let tile = UIImageView()
+        tile.backgroundColor = Palette.controlFill
+        tile.accessibilityIdentifier = "composer-pasted-text"
+        tile.accessibilityLabel = info.title
+        let icon = UIImageView(image: UIImage(systemName: "doc.text", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .medium)))
+        icon.tintColor = Palette.secondary
+        let title = UILabel()
+        title.text = info.title
+        title.font = Fonts.ui(.sansMedium, 13.5)
+        title.textColor = Palette.text
+        let subtitle = UILabel()
+        subtitle.text = info.subtitle
+        subtitle.font = Fonts.ui(.sans, 12)
+        subtitle.textColor = Palette.tertiary
+        let labels = UIStackView(arrangedSubviews: [title, subtitle])
+        labels.axis = .vertical
+        labels.spacing = 1
+        let row = UIStackView(arrangedSubviews: [icon, labels])
+        row.alignment = .center
+        row.spacing = 9
+        row.isUserInteractionEnabled = false
+        row.translatesAutoresizingMaskIntoConstraints = false
+        tile.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 12),
+            row.trailingAnchor.constraint(lessThanOrEqualTo: tile.trailingAnchor, constant: -26),
+            row.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
+        ])
+        tile.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(previewPastedText(_:))))
+        tile.tag = images.firstIndex(of: item) ?? 0
+        return tile
+    }
+
+    @objc private func previewPastedText(_ tap: UITapGestureRecognizer) {
+        guard let index = tap.view?.tag, images.indices.contains(index), let vc = findViewController() else { return }
+        let item = images[index]
+        PastedTextPreviewer.present(text: String(decoding: item.data, as: UTF8.self), reference: item.name, from: vc)
+    }
+
     // MARK: Text
+
+    func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
+        guard images.count < 8, pastesAsFile(pasted: text, draft: textView.text) else { return true }
+        images.append(.pastedText(text, name: nextPastedTextName(staged: images.map(\.name))))
+        return false
+    }
 
     func textViewDidChange(_ textView: UITextView) {
         textChanged()

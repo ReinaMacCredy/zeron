@@ -63,6 +63,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         list.accessibilityIdentifier = "transcript"
         list.imageLoader = { [weak self] ref, iv in self?.source.loadImage(ref, into: iv) }
         list.imageFetcher = { [weak self] ref in await self?.source.image(ref) }
+        list.textFetcher = { [weak self] ref in await self?.source.attachmentText(ref) }
         // Hidden while following (the runway glide and tail spring travel).
         list.onDistanceFromBottom = { [weak self] d in
             guard let self else { return }

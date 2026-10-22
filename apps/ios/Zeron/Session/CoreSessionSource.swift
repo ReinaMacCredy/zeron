@@ -358,6 +358,11 @@ final class CoreSessionSource: SessionSource {
         return image
     }
 
+    func attachmentText(_ reference: String) async -> String? {
+        guard let data = try? await client.readAttachment(deviceId: hostDevice, path: reference) else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
     func loadImage(_ reference: String, into view: UIImageView) {
         // Claim the view first: a slower load for a row it used to show
         // must not land on top of this one.

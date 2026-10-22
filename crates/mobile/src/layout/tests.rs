@@ -564,6 +564,26 @@ fn synced_file_attachments_render_as_chips_and_name_pills() {
 }
 
 #[test]
+fn pasted_text_reads_as_a_tappable_pill_chipped_or_not() {
+    let mut w = worker(390.0);
+    let text = "Read [Pasted text 1.txt](zeron-attachment:1)\n\nAttached images (local files — open them to view):\n- /tmp/uploads/ab12cd34-Pasted_text_1.txt\n- pending://up-2/Pasted_text_2.txt".to_owned();
+    w.input = debug_input(vec![DebugEntry { id: "u".into(), user: true, text, streaming: false }], false);
+    let frame = w.pass();
+    let d = frame.display(0).unwrap();
+    assert!(d.text.contains("Read Pasted text 1") && d.text.contains("Pasted text 2"), "{}", d.text);
+    assert!(!d.text.contains(".txt"), "{}", d.text);
+    let mut links: Vec<&str> = d.links.iter().map(|l| l.url.as_str()).collect();
+    links.sort();
+    assert_eq!(
+        links,
+        [
+            "zeron-preview://text?ref=%2Ftmp%2Fuploads%2Fab12cd34-Pasted_text_1.txt",
+            "zeron-preview://text?ref=pending%3A%2F%2Fup-2%2FPasted_text_2.txt",
+        ]
+    );
+}
+
+#[test]
 fn folded_user_message_fades_its_last_line() {
     let mut w = worker(390.0);
     let long = (0..40).map(|i| format!("line {i} of a long pasted prompt")).collect::<Vec<_>>().join("\n");

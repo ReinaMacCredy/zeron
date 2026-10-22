@@ -76,8 +76,9 @@ pub(crate) fn next_version() -> u64 {
 pub(crate) struct UserBubble {
     pub text: PText,
     pub images: Vec<String>,
-    /// Non-image attachments (desktop-sent ZIPs, docs): icon asset + name.
-    pub files: Vec<(String, PText)>,
+    /// Non-image attachments (desktop-sent ZIPs, docs): icon asset, name and
+    /// the preview a pasted text opens.
+    pub files: Vec<(String, PText, Option<String>)>,
     pub pending: bool,
     pub expanded: bool,
     pub more: PText,
@@ -563,15 +564,14 @@ impl RowBuilder {
         let style = ctx.typo.style(Family::Sans, Weight::Regular, false, size);
         let lh = ctx.typo.px(lh);
         // Chips stand in for their attachments (as on the desktop): those
-        // leave the strip, and an image chip opens its upload on tap.
+        // leave the strip, and an image or pasted-text chip opens its upload on tap.
         let mentions = zeron_proto::attachment_mentions::attachment_mentions(&parsed.text);
         let chipped = |path: &str| mentions.iter().any(|mention| mention.names_attachment(path));
-        let previews: Vec<(u32, String)> = mentions
+        let previews: Vec<(u32, bool, String)> = mentions
             .iter()
-            .filter(|mention| mention.is_image)
             .filter_map(|mention| {
-                let image = parsed.images.iter().find(|image| mention.names_attachment(&image.path))?;
-                Some((mention.index, image.path.clone()))
+                let upload = parsed.images.iter().find(|image| mention.names_attachment(&image.path))?;
+                Some((mention.index, mention.is_image, preview_link(&upload.path)?))
             })
             .collect();
         let text = prepare_user_text(ctx, parsed.text.trim(), style, lh, &previews);
@@ -591,10 +591,17 @@ impl RowBuilder {
             .iter()
             .map(|f| {
                 let name = zeron_proto::attachment_mentions::attachment_display_name(&f.name);
-                (file_icon_asset(name), name)
+                match zeron_proto::attachment_mentions::pasted_text_index_from_name(&f.path) {
+                    Some(index) => (
+                        file_icon_asset(name),
+                        zeron_proto::attachment_mentions::pasted_text_pill_label(index, None),
+                        preview_link(&f.path),
+                    ),
+                    None => (file_icon_asset(name), name.to_owned(), None),
+                }
             })
-            .chain(quoted.iter().map(|label| ("text.quote".to_owned(), label.as_str())))
-            .map(|(icon, name)| (icon, prepare_plain(ctx, name, mstyle, ctx.typo.px(mlh), ColorRole::Text, WhiteSpace::Pre)))
+            .chain(quoted.iter().map(|label| ("text.quote".to_owned(), label.clone(), None)))
+            .map(|(icon, name, open)| (icon, prepare_plain(ctx, &name, mstyle, ctx.typo.px(mlh), ColorRole::Text, WhiteSpace::Pre), open))
             .collect();
         let expanded = self.expanded.contains(&key);
         let more = prepare_plain(
@@ -625,7 +632,7 @@ impl RowBuilder {
 }
 
 /// One chip in a sent prompt: its source range, label and icon, and for an
-/// image chip the link that opens its upload.
+/// image or pasted-text chip the link that opens its upload.
 struct UserChip {
     range: std::ops::Range<usize>,
     label: String,
@@ -633,9 +640,17 @@ struct UserChip {
     open: Option<String>,
 }
 
-/// The link an image chip opens: the host attachment ref, percent-encoded.
-fn image_preview_link(reference: &str) -> String {
-    let mut out = String::from("zeron-preview://image?ref=");
+/// The link an image or pasted text opens: the host attachment ref,
+/// percent-encoded. Other files have no preview.
+fn preview_link(reference: &str) -> Option<String> {
+    let kind = if zeron_proto::attachment_mentions::is_image_path(reference) {
+        "image"
+    } else if zeron_proto::attachment_mentions::pasted_text_index_from_name(reference).is_some() {
+        "text"
+    } else {
+        return None;
+    };
+    let mut out = format!("zeron-preview://{kind}?ref=");
     for byte in reference.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
             out.push(byte as char);
@@ -643,14 +658,14 @@ fn image_preview_link(reference: &str) -> String {
             out.push_str(&format!("%{byte:02X}"));
         }
     }
-    out
+    Some(out)
 }
 
 /// The chips a sent prompt's canonical links read as, like the desktop's:
 /// files and folders (`zeron-file:`), skills and commands (`zeron-invoke:`),
 /// and attachments (`zeron-image:` / `zeron-attachment:`), in text order.
-/// `previews` pairs image chip numbers with the uploads they open.
-fn user_chips(body: &str, previews: &[(u32, String)]) -> Vec<UserChip> {
+/// `previews` pairs chip numbers with the preview links of their uploads.
+fn user_chips(body: &str, previews: &[(u32, bool, String)]) -> Vec<UserChip> {
     let mut chips: Vec<UserChip> = zeron_proto::file_mentions::file_mention_links(body)
         .into_iter()
         .map(|link| UserChip {
@@ -671,9 +686,12 @@ fn user_chips(body: &str, previews: &[(u32, String)]) -> Vec<UserChip> {
         icon: if mention.is_image { "photo".to_owned() } else { file_icon_asset(&mention.label) },
         open: previews
             .iter()
-            .find(|(index, _)| mention.is_image && *index == mention.index)
-            .map(|(_, reference)| image_preview_link(reference)),
-        label: mention.label,
+            .find(|(index, is_image, _)| *is_image == mention.is_image && *index == mention.index)
+            .map(|(_, _, link)| link.clone()),
+        label: match zeron_proto::attachment_mentions::pasted_text_index_from_name(&mention.label) {
+            Some(index) if !mention.is_image => zeron_proto::attachment_mentions::pasted_text_pill_label(index, None),
+            _ => mention.label,
+        },
     }));
     chips.sort_by_key(|chip| chip.range.start);
     // Links never nest; drop any overlap rather than paint two chips at once.
@@ -690,7 +708,7 @@ fn user_chips(body: &str, previews: &[(u32, String)]) -> Vec<UserChip> {
 
 /// User prompt text with its canonical links shown as atomic chips: the
 /// desktop's soft pill with an icon well, the label in the body font.
-fn prepare_user_text(ctx: &mut Ctx, body: &str, style: super::style::Resolved, lh: f32, previews: &[(u32, String)]) -> PText {
+fn prepare_user_text(ctx: &mut Ctx, body: &str, style: super::style::Resolved, lh: f32, previews: &[(u32, bool, String)]) -> PText {
     let chips = user_chips(body, previews);
     if chips.is_empty() {
         return prepare_plain(ctx, body, style, lh, ColorRole::Text, WhiteSpace::PreWrap);
@@ -928,12 +946,15 @@ fn place_user(u: &UserBubble, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
     let chrome = inset + px.v(12.0);
     let name_w = (max_w - chrome).max(1.0);
     let mut fy = y + files_y;
-    for (icon, name) in &u.files {
+    for (icon, name, open) in &u.files {
         let pw = chrome + name.p.max_content_width().ceil().min(name_w);
         let fx = x + cw - pw;
         out.fill(fx, fy, pw, pill_h, px.v(12.0), ColorRole::ChipBackground);
         out.widget(WidgetKind::Icon { name: icon.clone(), color: ColorRole::TextSoft }, (fx + px.v(10.0), fy + (pill_h - is) / 2.0, is, is), None);
         place_text_lines(name, fx + inset, fy + (pill_h - name.lh) / 2.0, name_w, 1, px, out);
+        if let Some(url) = open {
+            out.links.push(super::display::LinkHit { x: fx, y: fy, w: pw, h: pill_h, url: url.clone(), scroller: out.scroller });
+        }
         fy += pill_h + gap;
     }
     if bubble_h > 0.0 {
@@ -982,7 +1003,7 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
     }
     match content {
         Content::Block(b) => block(b),
-        Content::User(u) => u.text.p.heap_bytes() + u.more.p.heap_bytes() + u.files.iter().map(|(_, n)| n.p.heap_bytes()).sum::<usize>(),
+        Content::User(u) => u.text.p.heap_bytes() + u.more.p.heap_bytes() + u.files.iter().map(|(_, n, _)| n.p.heap_bytes()).sum::<usize>(),
         Content::Tools(t) => super::tools::heap_bytes(t),
         Content::Chip(c) => c.text.p.heap_bytes(),
         Content::Image { reference } => reference.len(),

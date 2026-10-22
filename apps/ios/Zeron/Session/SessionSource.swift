@@ -83,6 +83,7 @@ protocol SessionSource: AnyObject {
     func loadImage(_ reference: String, into view: UIImageView)
     /// An attachment's picture, for opening it full size (an image chip).
     func image(_ reference: String) async -> UIImage?
+    func attachmentText(_ reference: String) async -> String?
     /// Workspace files for `@` mentions.
     func searchFiles(_ query: String) async -> [FileMatch]
     func threadMentions(_ query: String) -> [ThreadMention]
@@ -243,6 +244,7 @@ final class FixtureSessionSource: SessionSource {
     }
     func loadImage(_ reference: String, into view: UIImageView) {}
     func image(_ reference: String) async -> UIImage? { nil }
+    func attachmentText(_ reference: String) async -> String? { nil }
     func searchFiles(_ query: String) async -> [FileMatch] { [] }
     func threadMentions(_ query: String) -> [ThreadMention] { [] }
 }

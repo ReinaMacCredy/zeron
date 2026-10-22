@@ -125,6 +125,7 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     var onQuote: ((String) -> Void)?
     /// An attachment's picture, for an image chip opened full size.
     var imageFetcher: ((String) async -> UIImage?)?
+    var textFetcher: ((String) async -> String?)?
 
     // MARK: Runway (desktop transcript.rs `OwnTurnAnchor`)
     //
@@ -669,6 +670,16 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
             guard let reference = URLComponents(url: url, resolvingAgainstBaseURL: false)?
                 .queryItems?.first(where: { $0.name == "ref" })?.value
             else { return }
+            if url.host == "text" {
+                Task { @MainActor [weak self, weak vc] in
+                    guard let vc else { return }
+                    guard let text = await self?.textFetcher?(reference) else {
+                        return Toast.show("Couldn't load the pasted text", in: vc.view.window)
+                    }
+                    PastedTextPreviewer.present(text: text, reference: reference, from: vc)
+                }
+                return
+            }
             Task { @MainActor [weak self, weak view, weak vc] in
                 guard let image = await self?.imageFetcher?(reference), let view, let vc else { return }
                 vc.present(ImageViewer(image: image, source: view), animated: true)
@@ -775,11 +786,12 @@ final class SelectTextViewController: UIViewController, UITextViewDelegate {
     private let mono: Bool
     var onQuote: ((String) -> Void)?
 
-    init(text: String, title: String = "Select Text", mono: Bool = false) {
+    init(text: String, title: String = "Select Text", subtitle: String? = nil, mono: Bool = false) {
         self.text = text
         self.mono = mono
         super.init(nibName: nil, bundle: nil)
         self.title = title
+        navigationItem.subtitle = subtitle
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -812,5 +824,13 @@ final class SelectTextViewController: UIViewController, UITextViewDelegate {
             self?.dismiss(animated: true)
         }
         return UIMenu(children: [quote] + suggestedActions)
+    }
+}
+
+enum PastedTextPreviewer {
+    static func present(text: String, reference: String, from vc: UIViewController) {
+        let info = pastedTextPreview(reference: reference, text: text)
+        let sheet = SelectTextViewController(text: text, title: info.title, subtitle: info.subtitle, mono: true)
+        vc.present(UINavigationController(rootViewController: sheet), animated: true)
     }
 }
