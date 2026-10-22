@@ -2493,11 +2493,8 @@ impl SessionsEngine {
             )));
         }
         let (background_tasks, running_subagents) = self.background_work(chat_id);
-        if self.restart_ends_work(chat_id, harness.compacts_in_place()) {
-            return Err(EngineError::Other(format!(
-                "{} restarts its process to compact, which would end the background work still running. Call compact again after it finishes.",
-                harness.display_name()
-            )));
+        if !harness.compacts_in_place() && background_tasks + running_subagents as usize > 0 {
+            return Err(EngineError::Other(BACKGROUND_WORK_REFUSAL.into()));
         }
         let trimmed = |text: Option<String>| {
             text.map(|text| text.trim().to_string())
@@ -2664,7 +2661,7 @@ impl SessionsEngine {
             return Ok(None);
         }
         if self.restart_ends_work(chat_id, self.compacts_in_place(chat_id)) {
-            let reason = "Your compaction did not run: compacting this chat restarts its process, which would end the background work still running. Call compact again after it finishes.".to_string();
+            let reason = format!("Your compaction did not run. {BACKGROUND_WORK_REFUSAL}");
             return Ok(Some((
                 self.decline_agent_compact(chat_id, &request, reason),
                 request,
@@ -2867,10 +2864,7 @@ impl SessionsEngine {
             };
         }
         if self.restart_ends_work(chat_id, harness.compacts_in_place()) {
-            return Err(EngineError::Other(format!(
-                "{} restarts its process to compact, which would end the background work still running. Compact again after it finishes.",
-                harness.display_name()
-            )));
+            return Err(EngineError::Other(BACKGROUND_WORK_REFUSAL.into()));
         }
         // The same engine-owned resume the normal dispatch path injects: a
         // compaction that started a fresh session would compact nothing.
@@ -5045,6 +5039,7 @@ impl Inner {
 /// 2.1.273), but a long 1M-window chat can take several minutes; past this
 /// the chat is released and a retry is refused until its next completed turn.
 const COMPACT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+const BACKGROUND_WORK_REFUSAL: &str = "Compacting this chat restarts its agent's process, which would end the background work still running. Stop that work, or wait for it to finish, then compact again.";
 
 /// Releases the chat's one-compaction-at-a-time reservation on every exit path.
 struct CompactionReservation {
