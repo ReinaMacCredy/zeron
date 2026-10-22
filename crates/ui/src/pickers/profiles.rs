@@ -1027,7 +1027,7 @@ impl Pickers {
                 .collect(),
             EditField::Mode => {
                 std::iter::once(("Keep current".into(), draft.permission_mode.is_none()))
-                    .chain(PERMISSION_MODES.iter().map(|mode| {
+                    .chain(PermissionMode::ALL.iter().map(|mode| {
                         (
                             SharedString::from(mode_label(*mode)),
                             draft.permission_mode == Some(*mode),
@@ -1137,7 +1137,7 @@ impl Pickers {
             EditField::Mode => {
                 let mode = ix
                     .checked_sub(1)
-                    .and_then(|ix| PERMISSION_MODES.get(ix).copied());
+                    .and_then(|ix| PermissionMode::ALL.get(ix).copied());
                 self.edit_profile_draft(cx, |draft| draft.permission_mode = mode);
             }
             EditField::Effort => {

@@ -56,27 +56,11 @@ fn new_model_badge(theme: &Theme) -> AnyElement {
 /// pagination plumbing).
 const MAX_REF_ROWS: usize = 300;
 
-/// Row order of the permission dropdown (least to most permissive).
-const PERMISSION_MODES: [PermissionMode; 3] = [
-    PermissionMode::Ask,
-    PermissionMode::Auto,
-    PermissionMode::Full,
-];
-
 fn permission_icon(mode: PermissionMode) -> &'static str {
     match mode {
         PermissionMode::Ask => crate::icons::CHECKLIST,
         PermissionMode::Auto => crate::icons::BOT,
         PermissionMode::Full => crate::icons::DANGER_TRIANGLE,
-    }
-}
-
-/// One line each at the popover's width — rows must read the same height.
-fn permission_description(mode: PermissionMode) -> &'static str {
-    match mode {
-        PermissionMode::Ask => "Always ask before tools and commands",
-        PermissionMode::Auto => "Only ask for actions flagged as unsafe",
-        PermissionMode::Full => "Any file, any command, no prompts",
     }
 }
 
@@ -2524,7 +2508,7 @@ impl Pickers {
             PickerKind::HarnessModel => self.selected_model_index(cx),
             PickerKind::Space => self.selected_project_index(cx),
             PickerKind::Device => self.selected_device_index(cx),
-            PickerKind::Permission => PERMISSION_MODES
+            PickerKind::Permission => PermissionMode::ALL
                 .iter()
                 .position(|m| *m == self.effective_permission_mode(cx))
                 .unwrap_or(0),
@@ -4943,7 +4927,7 @@ impl Pickers {
                     }
                     Some(PickerKind::Space) => self.filtered_project_rows(cx).len() + 1,
                     Some(PickerKind::Device) => self.filtered_device_rows(cx).len(),
-                    Some(PickerKind::Permission) => PERMISSION_MODES.len(),
+                    Some(PickerKind::Permission) => PermissionMode::ALL.len(),
                     None => 0,
                 };
                 let current = (self.active != NO_ACTIVE_ROW).then_some(self.active);
@@ -4972,7 +4956,7 @@ impl Pickers {
                     };
                     self.pick_checkout(kind, cx);
                 } else if self.open_kind() == Some(PickerKind::Permission) {
-                    if let Some(mode) = PERMISSION_MODES.get(self.active) {
+                    if let Some(mode) = PermissionMode::ALL.get(self.active) {
                         self.pick_permission(*mode, cx);
                     }
                 } else {
@@ -6233,7 +6217,7 @@ impl Pickers {
             .flex_col()
             .gap(px(2.0))
             .child(popover::menu_heading(&theme, "Approve agent actions"))
-            .children(PERMISSION_MODES.into_iter().enumerate().map(|(ix, mode)| {
+            .children(PermissionMode::ALL.into_iter().enumerate().map(|(ix, mode)| {
                 let is_selected = current == mode;
                 let tone = if mode == PermissionMode::Full {
                     theme.warning
@@ -6276,7 +6260,7 @@ impl Pickers {
                                 .truncate()
                                 .text_size(crate::typography::ui_rems(11.0))
                                 .text_color(theme.text_muted)
-                                .child(SharedString::from(permission_description(mode))),
+                                .child(SharedString::from(mode.description())),
                         ),
                 )
                 .when(is_selected, |el| {

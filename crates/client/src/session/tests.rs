@@ -151,6 +151,34 @@ fn run_steer_and_queue_rows_carry_the_chats_computer_generation() {
 }
 
 #[test]
+fn a_run_carries_the_chats_permission_mode() {
+    let (client, _dir) = demo(false);
+    let session = client.open_session("chat-blog").unwrap();
+    let mut config = client.session_config("chat-blog").unwrap();
+    config.permission_mode = zeron_proto::PermissionMode::Ask;
+    client.set_session_config("chat-blog", &config).unwrap();
+    wait_for("the config", || {
+        client
+            .session_config("chat-blog")
+            .is_some_and(|c| c.permission_mode == zeron_proto::PermissionMode::Ask)
+    });
+    session.send(SendRequest::text("hello")).unwrap();
+    let run = session
+        .core
+        .doc()
+        .read_commands()
+        .unwrap()
+        .into_iter()
+        .find_map(|command| match command.payload {
+            SessionCommandPayload::Run { request, .. } => Some(request),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(run.permission_mode, zeron_proto::PermissionMode::Ask);
+    assert!(!run.auto_approve);
+}
+
+#[test]
 fn a_consent_answer_settles_the_card_once() {
     let (client, _dir) = demo(false);
     let session = client.open_session("chat-computer").unwrap();

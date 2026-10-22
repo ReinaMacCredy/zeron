@@ -304,6 +304,12 @@ pub enum PermissionMode {
 }
 
 impl PermissionMode {
+    pub const ALL: [PermissionMode; 3] = [
+        PermissionMode::Ask,
+        PermissionMode::Auto,
+        PermissionMode::Full,
+    ];
+
     pub fn sandbox(self) -> SandboxLevel {
         match self {
             PermissionMode::Ask | PermissionMode::Auto => SandboxLevel::WorkspaceWrite,
@@ -336,6 +342,14 @@ impl PermissionMode {
             PermissionMode::Ask => "Ask",
             PermissionMode::Auto => "Auto",
             PermissionMode::Full => "Full",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            PermissionMode::Ask => "Always ask before tools and commands",
+            PermissionMode::Auto => "Only ask for actions flagged as unsafe",
+            PermissionMode::Full => "Any file, any command, no prompts",
         }
     }
 }

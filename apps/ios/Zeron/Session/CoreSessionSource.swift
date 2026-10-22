@@ -65,6 +65,10 @@ final class CoreSessionSource: SessionSource {
         if let r = row?.reasoning, !r.isEmpty {
             chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: r), symbol: "gauge.with.dots.needle.67percent"))
         }
+        let mode = client.sessionConfig(chatId: chatId)?.permissionMode ?? .full
+        if let info = permissionModes().first(where: { $0.mode == mode }) {
+            chips.append(ComposerChip(id: "permission", title: info.shortLabel, symbol: Self.permissionSymbol(mode), tint: mode == .full ? Palette.warning : nil))
+        }
         if let pr = row?.pullRequest {
             let state: SessionRowVM.PR = switch pr.state { case .open: .open; case .merged: .merged; case .closed: .closed }
             chips.append(ComposerChip(id: "pr", title: "\(pr.number)", symbol: nil, tint: PRBadgeView.tone(state), icon: PRIcon.image(side: 12)))
@@ -247,6 +251,13 @@ final class CoreSessionSource: SessionSource {
                     })
                 }
             }])
+        case "permission":
+            let current = client.sessionConfig(chatId: chatId)?.permissionMode ?? .full
+            return UIMenu(title: "Approve agent actions", children: permissionModes().map { m in
+                UIAction(title: m.label, subtitle: m.description, image: UIImage(systemName: Self.permissionSymbol(m.mode)), state: m.mode == current ? .on : .off) { [weak self] _ in
+                    self?.setConfig { $0.permissionMode = m.mode }
+                }
+            })
         case "pr":
             guard let url = row.pullRequest.flatMap({ URL(string: $0.url) }) else { return nil }
             return UIMenu(title: row.pullRequest?.title ?? "", children: [
@@ -255,6 +266,14 @@ final class CoreSessionSource: SessionSource {
             ])
         default:
             return nil
+        }
+    }
+
+    static func permissionSymbol(_ mode: PermissionMode) -> String {
+        switch mode {
+        case .ask: "checklist"
+        case .auto: "wand.and.sparkles"
+        case .full: "exclamationmark.triangle"
         }
     }
 

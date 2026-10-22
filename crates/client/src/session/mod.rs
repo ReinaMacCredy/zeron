@@ -1109,7 +1109,7 @@ impl SessionHandle {
                     model_options: config.map(|c| c.model_options.clone()).unwrap_or_default(),
                     cwd: chat.cwd.clone().unwrap_or_else(|| "~".into()),
                     sandbox: config.map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox),
-                    auto_approve: true,
+                    auto_approve: false,
                     resume: None,
                     attachments: refs.clone(),
                     worktree: request.worktree.clone(),
@@ -1117,7 +1117,7 @@ impl SessionHandle {
                     branch: None,
                     forked_at: None,
                     computer_control: false,
-                    permission_mode: Default::default(),
+                    permission_mode: config.map(|c| c.permission_mode).unwrap_or_default(),
                     disabled_tools: config.map(|c| c.disabled_tools.clone()).unwrap_or_default(),
                 };
                 self.core.queue_command(

@@ -26,12 +26,6 @@ use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
 
-const MODES: [PermissionMode; 3] = [
-    PermissionMode::Ask,
-    PermissionMode::Auto,
-    PermissionMode::Full,
-];
-
 struct Editor {
     profile_id: Option<String>,
     draft: AgentProfileDraft,
@@ -664,14 +658,14 @@ impl AgentProfilesPage {
 
         let mode_ix = draft
             .permission_mode
-            .and_then(|mode| MODES.iter().position(|m| *m == mode))
+            .and_then(|mode| PermissionMode::ALL.iter().position(|m| *m == mode))
             .map_or(0, |ix| ix + 1);
         let mode_select = widgets::select("profile-mode", "Mode", &theme, |page: &mut Self| {
             &mut page.mode_select
         })
         .options(
             std::iter::once(widgets::SelectOption::new("Keep current")).chain(
-                MODES
+                PermissionMode::ALL
                     .iter()
                     .map(|mode| widgets::SelectOption::new(mode_label(*mode)).detail(mode.label())),
             ),
@@ -680,7 +674,7 @@ impl AgentProfilesPage {
         .width(196.0)
         .on_select(|page, ix, _, cx| {
             page.edit_draft(cx, |draft| {
-                draft.permission_mode = ix.checked_sub(1).map(|ix| MODES[ix]);
+                draft.permission_mode = ix.checked_sub(1).map(|ix| PermissionMode::ALL[ix]);
             });
         })
         .render(&self.mode_select, cx);
