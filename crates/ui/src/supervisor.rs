@@ -584,24 +584,24 @@ fn mission_title(state: &AppState, task_id: Option<&str>) -> Option<String> {
         .map(|task| task.title.clone())
 }
 
+fn plan_thread(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> Option<(String, String)> {
+    let thread = crate::tasks::mission_thread(state, chat_id, now)?;
+    let who = match thread.role {
+        crate::tasks::MissionRole::Lead => "Lead".to_owned(),
+        crate::tasks::MissionRole::Step { step_id, label } => {
+            let step = state.task_steps.iter().find(|step| step.id == step_id)?;
+            format!("{label} · {}", step.title)
+        }
+    };
+    Some((who, thread.title))
+}
+
 fn thread_name(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> String {
     if is_supervisor_chat(chat_id) {
         return "Supervisor".into();
     }
-    if let Some(task) = crate::tasks::plan_led_by(&state.tasks, chat_id) {
-        return format!("Lead · {}", task.title);
-    }
-    if let Some(step) = state
-        .task_steps
-        .iter()
-        .find(|step| step.chat_id.as_deref() == Some(chat_id) && !step.deleted)
-        && let Some(name) = step_name(state, &step.task_id, &step.id, now)
-    {
-        let mission = mission_title(state, Some(&step.task_id));
-        return match mission {
-            Some(mission) => format!("{name} · {mission}"),
-            None => name,
-        };
+    if let Some((who, mission)) = plan_thread(state, chat_id, now) {
+        return format!("{who} · {mission}");
     }
     state
         .chats
@@ -612,14 +612,15 @@ fn thread_name(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> String {
 }
 
 fn asker_name(input: &NeedsYouInput, state: &AppState, now: DateTime<Utc>) -> String {
+    if matches!(input.asker, InputAsker::Step | InputAsker::Lead)
+        && let Some((who, mission)) = plan_thread(state, &input.chat_id, now)
+    {
+        return format!("{who} · {mission}");
+    }
     let mission = mission_title(state, input.task_id.as_deref());
-    let who = match (
-        input.asker,
-        input.task_id.as_deref(),
-        input.step_id.as_deref(),
-    ) {
-        (InputAsker::Supervisor, _, _) => return "Supervisor".into(),
-        (InputAsker::Thread, _, _) => {
+    let who = match input.asker {
+        InputAsker::Supervisor => return "Supervisor".into(),
+        InputAsker::Thread => {
             let name = thread_name(state, &input.chat_id, now);
             let root = tree_root(state, &input.chat_id)
                 .filter(|root| root.id != input.chat_id)
@@ -629,11 +630,8 @@ fn asker_name(input: &NeedsYouInput, state: &AppState, now: DateTime<Utc>) -> St
                 None => name,
             }
         }
-        (InputAsker::Step, Some(task_id), Some(step_id)) => {
-            step_name(state, task_id, step_id, now).unwrap_or_else(|| "A step".into())
-        }
-        (InputAsker::Step, _, _) => "A step".into(),
-        (InputAsker::Lead, _, _) => "Lead".into(),
+        InputAsker::Step => "A step".into(),
+        InputAsker::Lead => "Lead".into(),
     };
     match mission {
         Some(mission) => format!("{who} · {mission}"),
