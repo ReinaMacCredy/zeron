@@ -802,7 +802,6 @@ impl EngineRpc {
         resources: Option<Vec<String>>,
         from_chat_id: Option<&str>,
     ) -> Result<Vec<String>, RpcError> {
-        let plans = self.plan_writes();
         let task = self.task_or_refuse(task_id)?;
         Self::check_lead(&task, from_chat_id, "writes its plan")?;
         let mode = (task.mode != TaskMode::Orchestrated).then_some(TaskMode::Orchestrated);
@@ -883,6 +882,8 @@ impl EngineRpc {
             ..Default::default()
         };
         self.withdraw_held_approval(task_id).await?;
+        let plans = self.plan_writes();
+        self.check_one_plan(&task, &patch)?;
         self.workspace
             .plan_task_steps(task_id, &steps, &patch)
             .map_err(failed)?;
