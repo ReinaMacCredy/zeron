@@ -5830,6 +5830,15 @@ public struct ChatConfig: Equatable, Hashable {
      */
     public var modelOptions: [String: String]
     public var sandbox: SandboxLevel
+    public var profileId: String?
+    /**
+     * None runs the harness's default instance.
+     */
+    public var instanceId: String?
+    /**
+     * None keeps the chat's current mode (Full for a new chat).
+     */
+    public var permissionMode: PermissionMode?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -5842,12 +5851,21 @@ public struct ChatConfig: Equatable, Hashable {
          */reasoning: String?, 
         /**
          * Model option id → choice id (`contextWindow` → `1m`).
-         */modelOptions: [String: String], sandbox: SandboxLevel) {
+         */modelOptions: [String: String], sandbox: SandboxLevel, profileId: String? = nil, 
+        /**
+         * None runs the harness's default instance.
+         */instanceId: String? = nil, 
+        /**
+         * None keeps the chat's current mode (Full for a new chat).
+         */permissionMode: PermissionMode? = nil) {
         self.harness = harness
         self.model = model
         self.reasoning = reasoning
         self.modelOptions = modelOptions
         self.sandbox = sandbox
+        self.profileId = profileId
+        self.instanceId = instanceId
+        self.permissionMode = permissionMode
     }
 
     
@@ -5870,7 +5888,10 @@ public struct FfiConverterTypeChatConfig: FfiConverterRustBuffer {
                 model: FfiConverterOptionString.read(from: &buf), 
                 reasoning: FfiConverterOptionString.read(from: &buf), 
                 modelOptions: FfiConverterDictionaryStringString.read(from: &buf), 
-                sandbox: FfiConverterTypeSandboxLevel.read(from: &buf)
+                sandbox: FfiConverterTypeSandboxLevel.read(from: &buf), 
+                profileId: FfiConverterOptionString.read(from: &buf), 
+                instanceId: FfiConverterOptionString.read(from: &buf), 
+                permissionMode: FfiConverterOptionTypePermissionMode.read(from: &buf)
         )
     }
 
@@ -5880,6 +5901,9 @@ public struct FfiConverterTypeChatConfig: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.reasoning, into: &buf)
         FfiConverterDictionaryStringString.write(value.modelOptions, into: &buf)
         FfiConverterTypeSandboxLevel.write(value.sandbox, into: &buf)
+        FfiConverterOptionString.write(value.profileId, into: &buf)
+        FfiConverterOptionString.write(value.instanceId, into: &buf)
+        FfiConverterOptionTypePermissionMode.write(value.permissionMode, into: &buf)
     }
 }
 
@@ -13068,6 +13092,79 @@ public func FfiConverterTypePendingKind_lower(_ value: PendingKind) -> RustBuffe
 
 
 
+public enum PermissionMode: Equatable, Hashable {
+    
+    case ask
+    case auto
+    case full
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PermissionMode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePermissionMode: FfiConverterRustBuffer {
+    typealias SwiftType = PermissionMode
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PermissionMode {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .ask
+        
+        case 2: return .auto
+        
+        case 3: return .full
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PermissionMode, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .ask:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .auto:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .full:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePermissionMode_lift(_ buf: RustBuffer) throws -> PermissionMode {
+    return try FfiConverterTypePermissionMode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePermissionMode_lower(_ value: PermissionMode) -> RustBuffer {
+    return FfiConverterTypePermissionMode.lower(value)
+}
+
+
+
+
 public enum PointerPhase: Equatable, Hashable {
     
     case down
@@ -15997,6 +16094,30 @@ fileprivate struct FfiConverterOptionTypeAuthCallback: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeAuthCallback.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypePermissionMode: FfiConverterRustBuffer {
+    typealias SwiftType = PermissionMode?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePermissionMode.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePermissionMode.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
