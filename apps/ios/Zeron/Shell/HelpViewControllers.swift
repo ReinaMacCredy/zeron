@@ -50,7 +50,6 @@ final class WhatsNewViewController: UIViewController {
         ])
         for entry in entries {
             stack.addArrangedSubview(label("v\(entry.version) · \(entry.date)", font: Fonts.ui(.sansMedium, 13), color: Palette.secondary))
-            if let hero = entry.hero.flatMap(picture) { stack.addArrangedSubview(hero) }
             for feature in entry.features {
                 let block = UIStackView(arrangedSubviews: [
                     label(feature.title, font: Fonts.ui(.sansMedium, 17), color: Palette.text),
