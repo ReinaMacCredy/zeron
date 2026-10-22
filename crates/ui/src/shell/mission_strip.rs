@@ -281,25 +281,6 @@ impl Shell {
         self.open_task_center(key, cx);
     }
 
-    pub(super) fn center_back_chat(&self, cx: &App) -> Option<String> {
-        let state = self.state.read(cx);
-        let id = match (self.route, self.nav.previous()) {
-            (Route::Chat, _) => state.selected_chat.as_ref()?,
-            (_, Some(NavEntry::Chat(id))) => id,
-            _ => return None,
-        };
-        let chat = state.chats.iter().find(|chat| &chat.id == id)?;
-        Some(transcript::single_line(&crate::home::chat_title(chat)))
-    }
-
-    pub(super) fn center_back(&mut self, cx: &mut Context<Self>) {
-        if self.center_back_chat(cx).is_some() {
-            self.navigate_back(cx);
-        } else {
-            self.back_to_mission_control(cx);
-        }
-    }
-
     fn strip_now(&self) -> std::time::Instant {
         self.render_time.unwrap_or_else(|| self.motion_time())
     }

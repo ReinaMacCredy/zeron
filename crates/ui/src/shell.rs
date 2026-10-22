@@ -10576,32 +10576,11 @@ impl Shell {
 
     /// The session titlebar, or on the Pull requests route the open pull
     /// request's own bar.
-    fn render_title_bar(
-        &mut self,
-        column: f32,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        if let Some(bar) = self.render_task_slide_title_bar(column, window, cx) {
-            self.drop_hidden_chat_action_menus(cx);
-            return bar;
-        }
-        if !matches!(
-            self.route,
-            Route::Tasks | Route::MissionControl | Route::TaskCenter | Route::PullRequests
-        ) {
+    fn render_title_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if !matches!(self.route, Route::PullRequests) {
             return self.render_session_title_bar(window, cx);
         }
         self.drop_hidden_chat_action_menus(cx);
-        if matches!(self.route, Route::Tasks) {
-            return self.render_tasks_title_bar(cx);
-        }
-        if matches!(self.route, Route::MissionControl) {
-            return self.render_mission_control_title_bar(cx);
-        }
-        if matches!(self.route, Route::TaskCenter) {
-            return self.render_task_center_title_bar(cx);
-        }
         let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
         let inner = div()
             .size_full()
@@ -20597,7 +20576,7 @@ impl Render for Shell {
                 } else {
                     Empty.into_any_element()
                 };
-                let title_bar = self.render_title_bar(column, window, cx);
+                let title_bar = self.render_title_bar(window, cx);
                 // Sidebar tone: a slightly lighter column behind the sidebar.
                 // Its width rides the same tween as the sidebar, so the tone
                 // melts away with the collapse instead of vanishing in a frame.

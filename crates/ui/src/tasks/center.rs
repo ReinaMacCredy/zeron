@@ -1419,18 +1419,42 @@ impl TaskCenter {
             .text_color(theme.text_muted)
             .child("This tree is gone. It was deleted, or it has not synced yet.")
             .child(
-                widgets::text_action(
-                    theme,
-                    widgets::ActionTone::Filled,
-                    "Back to Mission Control",
-                )
-                .id("task-center-missing-back")
-                .debug_selector(|| "task-center-missing-back".into())
-                .role(gpui::Role::Button)
-                .aria_label("Back to Mission Control")
-                .rounded_full()
-                .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(TaskCenterEvent::Back))),
+                widgets::text_action(theme, widgets::ActionTone::Filled, "Back to Tasks")
+                    .id("task-center-missing-back")
+                    .debug_selector(|| "task-center-missing-back".into())
+                    .role(gpui::Role::Button)
+                    .aria_label("Back to Tasks")
+                    .rounded_full()
+                    .on_click(
+                        cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(TaskCenterEvent::Back)),
+                    ),
             )
+            .into_any_element()
+    }
+
+    pub(super) fn back_crumb(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let hover = theme.text;
+        div()
+            .id("task-center-back")
+            .debug_selector(|| "task-center-back".into())
+            .role(gpui::Role::Button)
+            .aria_label("Back to Tasks")
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .w_auto()
+            .text_size(ui_rems(12.0))
+            .text_color(theme.text_muted)
+            .cursor_pointer()
+            .hover(move |s| s.text_color(hover))
+            .child("Tasks")
+            .child(
+                icon(icons::LUCIDE_CHEVRON_RIGHT)
+                    .size(px(11.0))
+                    .text_color(theme.text_faint),
+            )
+            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(TaskCenterEvent::Back)))
             .into_any_element()
     }
 

@@ -65,40 +65,4 @@ impl Shell {
             MissionIndexEvent::Tree(_) => {}
         }
     }
-
-    pub(super) fn render_mission_control_title_bar(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = Theme::of(cx).clone();
-        let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
-        let crumb = div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .text_size(crate::typography::ui_rems(12.5))
-            .text_color(theme.text)
-            .child(
-                icon(icons::MISSION_CONTROL)
-                    .size(px(13.0))
-                    .text_color(theme.text_muted),
-            )
-            .child("Mission Control");
-        let inner = div()
-            .size_full()
-            .flex()
-            .items_center()
-            .pl(px((self.sidebar_edge() + Theme::SPACE_LG)
-                .max(self.title_bar_content_start() + plus_inset)))
-            .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
-            .child(crumb);
-        let bar = div()
-            .relative()
-            .h(px(Theme::TITLEBAR_HEIGHT))
-            .flex_none()
-            .children(self.titlebar_seam_divider(cx))
-            .child(inner);
-        self.titlebar_drag_region("mission-control-titlebar", bar, cx)
-            .into_any_element()
-    }
 }

@@ -1666,6 +1666,11 @@ impl Shell {
                 .children(review_chip)
                 .child(self.render_handoff_button(&theme, cx))
         });
+        let page_controls = match self.route {
+            Route::Tasks => Some(self.tasks_view_switch(&theme, cx)),
+            Route::TaskCenter => Some(self.tree_view_switch(&theme, cx)),
+            _ => None,
+        };
         let running_subagents = {
             let state = self.state.read(cx);
             state
@@ -1838,6 +1843,7 @@ impl Shell {
             .children(session_tabs)
             .child(div().flex_1())
             .children(chat_actions)
+            .children(page_controls)
             .children(trailing);
 
         // The unified window titlebar: full-width on the glass shell, ABOVE

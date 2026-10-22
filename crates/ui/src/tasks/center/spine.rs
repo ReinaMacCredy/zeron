@@ -1611,6 +1611,7 @@ impl TaskCenter {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let crumb = self.back_crumb(theme, cx);
         let done = task.completed_at.is_some();
         let steps: Vec<&BarRow> = facts.rows.iter().filter(|row| row.id != LEAD).collect();
         let count = |kind: Status| facts.rows.iter().filter(|row| row.status == kind).count();
@@ -1960,6 +1961,7 @@ impl TaskCenter {
             .flex()
             .flex_col()
             .gap(px(6.0))
+            .child(div().flex().child(crumb))
             .child(
                 div()
                     .flex()

@@ -133,6 +133,7 @@ impl TaskCenter {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let crumb = self.back_crumb(theme, cx);
         let settled = Self::root_settled(root);
         let kids = &nodes[1..];
         let count = |status: Status| kids.iter().filter(|node| node.status == status).count();
@@ -321,6 +322,7 @@ impl TaskCenter {
             .flex()
             .flex_col()
             .gap(px(6.0))
+            .child(div().flex().child(crumb))
             .child(
                 div()
                     .flex()
