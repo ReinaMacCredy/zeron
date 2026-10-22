@@ -44,6 +44,9 @@ final class AppModel {
     private(set) var connectivity: Connectivity?
     /// Front-page sessions that are working / waiting on the user.
     private(set) var live = LiveCounts()
+    private(set) var pending: [PendingInput] = []
+    private var pendingObservers: [UUID: () -> Void] = [:]
+    private var pendingScheduled = false
     private var rows: [String: SessionRow] = [:]
     private var rawProjects: [ProjectView] = []
     private var lastHosts: [HostOption] = []
@@ -327,6 +330,12 @@ final class AppModel {
         return Token { [weak self] in self?.observers[id] = nil }
     }
 
+    func observePending(_ handler: @escaping () -> Void) -> AnyObject {
+        let id = UUID()
+        pendingObservers[id] = handler
+        return Token { [weak self] in self?.pendingObservers[id] = nil }
+    }
+
     func observeSession(_ chatId: String, _ handler: @escaping () -> Void) -> AnyObject {
         let id = UUID()
         sessionObservers[chatId, default: [:]][id] = handler
@@ -345,6 +354,9 @@ final class AppModel {
             scheduleRefresh()
         case let .sessionChanged(chatId, _), let .composerChanged(chatId, _):
             sessionObservers[chatId]?.values.forEach { $0() }
+            if rows[chatId]?.indicator == .awaitingInput || pending.contains(where: { $0.session.id == chatId }) {
+                schedulePendingRefresh()
+            }
         case let .connectivityChanged(c):
             connectivity = c
             observers.values.forEach { $0() }
@@ -408,6 +420,23 @@ final class AppModel {
         frontPage = page
         archived = archivedVMs
         if changed { observers.values.forEach { $0() } }
+        refreshPending()
+    }
+
+    private func schedulePendingRefresh() {
+        guard !pendingScheduled else { return }
+        pendingScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            self?.pendingScheduled = false
+            self?.refreshPending()
+        }
+    }
+
+    private func refreshPending() {
+        let next = client?.pendingInputs() ?? []
+        guard next != pending else { return }
+        pending = next
+        pendingObservers.values.forEach { $0() }
     }
 
     /// Like the desktop's project grouping: checkouts of one repository
@@ -538,6 +567,19 @@ final class AppModel {
             NSLog("open session failed: \(error)")
             return nil
         }
+    }
+
+    func answer(_ input: PendingInput, _ answers: [(questionId: String, labels: [String])]) -> Bool {
+        guard let handle = try? client?.openSession(chatId: input.session.id) else { return false }
+        do {
+            try handle.respondInput(requestId: input.request.requestId, answers: answers.map { UserInputAnswer(questionId: $0.questionId, labels: $0.labels) })
+        } catch {
+            NSLog("answer failed: \(error)")
+            return false
+        }
+        noteDeliveryActivity()
+        refreshPending()
+        return true
     }
 
     // MARK: New session

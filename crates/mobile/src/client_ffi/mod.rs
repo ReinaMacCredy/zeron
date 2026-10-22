@@ -52,6 +52,14 @@ where
     zc::runtime::run(fut).await.map_err(Into::into)
 }
 
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct PendingInput {
+    pub session: SessionRow,
+    pub request: InputRequest,
+    pub approval: bool,
+    pub destructive: bool,
+}
+
 /// One signed-in account (or Demo mode). Create one per sign-in; call
 /// `shutdown()` on sign-out.
 #[derive(uniffi::Object)]
@@ -354,6 +362,19 @@ impl CoreClient {
     /// Warm the most relevant sessions (capped).
     pub fn preload_sessions(&self) {
         self.client.preload_sessions();
+    }
+
+    pub fn pending_inputs(&self) -> Vec<PendingInput> {
+        self.client
+            .pending_inputs()
+            .iter()
+            .map(|p| PendingInput {
+                session: (&*p.row).into(),
+                request: (&p.request).into(),
+                approval: p.approval,
+                destructive: p.destructive,
+            })
+            .collect()
     }
 
     // ── host RPC ───────────────────────────────────────────────────────────

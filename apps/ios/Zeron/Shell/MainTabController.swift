@@ -36,6 +36,10 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
 
         bottomAccessory = accessory
         delegate = self
+        accessoryContent.onNeedsYou = { [weak self] in
+            guard let self else { return }
+            NeedsYou.present(app: self.app, from: self, excluding: nil)
+        }
         accessoryContent.update(app.live)
         liveToken = app.observe { [weak self] in
             guard let self else { return }
@@ -233,9 +237,13 @@ final class AskAnythingAccessory: UIView {
     private let cells = StatusGlyph()
     private let mark = UIImageView(image: UIImage(systemName: "plus", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)))
     private let plate = UIView()
+    private let needsChip = NeedsYouChip()
+    private var summaryEnd: NSLayoutConstraint!
+    var onNeedsYou: (() -> Void)?
     let voice = VoiceAccessoryView()
     private var voiceShown = false
     private var voiceLive = false
+    private var live = AppModel.LiveCounts()
     private var restConstraints: [NSLayoutConstraint] = []
     private var idleVoiceConstraints: [NSLayoutConstraint] = []
     private var liveVoiceConstraints: [NSLayoutConstraint] = []
@@ -265,9 +273,14 @@ final class AskAnythingAccessory: UIView {
         for v in [newSession, plate, label, mark, summary, cells, voice] as [UIView] { v.translatesAutoresizingMaskIntoConstraints = false }
         for v in [plate, label, summary, cells] as [UIView] { newSession.addSubview(v) }
         addSubview(newSession)
+        needsChip.translatesAutoresizingMaskIntoConstraints = false
+        needsChip.isHidden = true
+        needsChip.addAction(UIAction { [weak self] _ in self?.onNeedsYou?() }, for: .touchUpInside)
+        addSubview(needsChip)
         addSubview(voice)
+        summaryEnd = summary.trailingAnchor.constraint(equalTo: newSession.trailingAnchor, constant: -16)
         voice.isHidden = true
-        summary.setContentCompressionResistancePriority(.required, for: .horizontal)
+        summary.lineBreakMode = .byTruncatingTail
         NSLayoutConstraint.activate([
             newSession.leadingAnchor.constraint(equalTo: leadingAnchor),
             newSession.topAnchor.constraint(equalTo: topAnchor),
@@ -280,9 +293,12 @@ final class AskAnythingAccessory: UIView {
             mark.centerYAnchor.constraint(equalTo: plate.centerYAnchor),
             label.leadingAnchor.constraint(equalTo: plate.trailingAnchor, constant: 11),
             label.centerYAnchor.constraint(equalTo: newSession.centerYAnchor),
-            summary.trailingAnchor.constraint(equalTo: newSession.trailingAnchor, constant: -16),
+            summaryEnd,
+            needsChip.trailingAnchor.constraint(equalTo: newSession.trailingAnchor, constant: -8),
+            needsChip.centerYAnchor.constraint(equalTo: newSession.centerYAnchor),
             summary.centerYAnchor.constraint(equalTo: newSession.centerYAnchor),
             cells.trailingAnchor.constraint(equalTo: summary.leadingAnchor, constant: -7),
+            cells.leadingAnchor.constraint(greaterThanOrEqualTo: plate.trailingAnchor, constant: 11),
             cells.centerYAnchor.constraint(equalTo: newSession.centerYAnchor),
             cells.widthAnchor.constraint(equalToConstant: 12),
             cells.heightAnchor.constraint(equalToConstant: 12),
@@ -308,10 +324,8 @@ final class AskAnythingAccessory: UIView {
         ]
         NSLayoutConstraint.activate(restConstraints)
         registerForTraitChanges([UITraitTabAccessoryEnvironment.self]) { (self: AskAnythingAccessory, _) in
-            // Inline (minimized tab bar): the plus and the live summary only.
-            let inline = self.traitCollection.tabAccessoryEnvironment == .inline
-            self.label.alpha = inline || self.voiceLive ? 0 : 1
-            self.voice.setInline(inline)
+            self.voice.setInline(self.traitCollection.tabAccessoryEnvironment == .inline)
+            self.setNeedsLayout()
         }
         update(AppModel.LiveCounts())
     }
@@ -319,14 +333,47 @@ final class AskAnythingAccessory: UIView {
     required init?(coder: NSCoder) { fatalError() }
 
     func update(_ live: AppModel.LiveCounts) {
+        self.live = live
+        let parts = summaryParts(live)
+        summary.isHidden = voiceLive
+        newSession.accessibilityLabel = parts.isEmpty ? "New session" : "New session, " + parts.joined(separator: ", ")
+        setNeedsLayout()
+    }
+
+    private func summaryParts(_ live: AppModel.LiveCounts) -> [String] {
         var parts: [String] = []
         if live.working > 0 { parts.append("\(live.working) working") }
         if live.awaiting > 0 { parts.append("\(live.awaiting) need\(live.awaiting == 1 ? "s" : "") you") }
-        summary.text = parts.joined(separator: " · ")
-        cells.isHidden = parts.isEmpty || voiceLive
-        summary.isHidden = voiceLive
-        cells.kind = live.working > 0 ? .spinner : .dot(StatusTone.input)
-        newSession.accessibilityLabel = parts.isEmpty ? "New session" : "New session, " + parts.joined(separator: ", ")
+        return parts
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        fit()
+    }
+
+    /// Drops content by priority instead of overlapping: first the
+    /// "New session" title, then the working count; "N needs you" is a
+    /// chip of its own that opens the Needs you sheet.
+    private func fit() {
+        let working = live.working > 0 ? "\(live.working) working" : ""
+        let needs = live.awaiting > 0 && !voiceLive
+        if needs { needsChip.count = live.awaiting }
+        needsChip.isHidden = !needs
+        func width(_ s: String, _ f: UIFont) -> CGFloat { ceil((s as NSString).size(withAttributes: [.font: f]).width) }
+        let chip = needs ? needsChip.intrinsicContentSize.width + 8 : 0
+        let room = newSession.bounds.width - 41 - 16
+        let workingRow = working.isEmpty ? 0 : 11 + 12 + 7 + width(working, summary.font)
+        let showWorking = !working.isEmpty && workingRow + chip <= max(room, workingRow)
+        let row = (showWorking ? workingRow : 0) + chip
+        let title = 11 + width(label.text ?? "", label.font) + 10
+        let inline = traitCollection.tabAccessoryEnvironment == .inline
+        label.alpha = !inline && !voiceLive && title + row <= room ? 1 : 0
+        let text = showWorking ? working : ""
+        if summary.text != text { summary.text = text }
+        summaryEnd.constant = needs ? -(8 + chip) : -16
+        cells.isHidden = !showWorking || voiceLive
+        cells.kind = .spinner
     }
 
     /// Show voice when a host can run it, and the call strip while one runs.
@@ -340,12 +387,10 @@ final class AskAnythingAccessory: UIView {
         NSLayoutConstraint.deactivate(restConstraints + idleVoiceConstraints + liveVoiceConstraints)
         NSLayoutConstraint.activate(!shown ? restConstraints : live ? liveVoiceConstraints : idleVoiceConstraints)
         voice.isHidden = !shown
-        let inline = traitCollection.tabAccessoryEnvironment == .inline
         let apply = {
-            self.label.alpha = inline || live ? 0 : 1
             self.summary.isHidden = live
-            self.cells.isHidden = live || self.summary.text?.isEmpty != false
             self.layoutIfNeeded()
+            self.fit()
         }
         if window == nil || UIAccessibility.isReduceMotionEnabled {
             apply()

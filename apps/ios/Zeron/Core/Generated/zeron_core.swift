@@ -1141,6 +1141,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func orgId()  -> String
     
+    func pendingInputs()  -> [PendingInput]
+    
     func pinSession(chatId: String) throws 
     
     /**
@@ -1686,6 +1688,15 @@ open func orgId() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_method_coreclient_org_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func pendingInputs() -> [PendingInput]  {
+    return try!  FfiConverterSequenceTypePendingInput.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_pending_inputs(
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
@@ -3764,6 +3775,8 @@ public protocol TranscriptViewProtocol: AnyObject, Sendable {
      */
     func setDebugEntries(entries: [DebugEntry], working: Bool) 
     
+    func setHtmlHeight(id: String, height: Float) 
+    
     /**
      * Render formulas (in `face`, at `size_percent` of the text around
      * them, clamped to 75–200), or show them as their TeX source.
@@ -3904,6 +3917,16 @@ open func setDebugEntries(entries: [DebugEntry], working: Bool)  {try! rustCall(
             self.uniffiCloneHandle(),
         FfiConverterSequenceTypeDebugEntry.lower(entries),
         FfiConverterBool.lower(working),uniffiCallStatus
+    )
+}
+}
+    
+open func setHtmlHeight(id: String, height: Float)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_transcriptview_set_html_height(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(id),
+        FfiConverterFloat.lower(height),uniffiCallStatus
     )
 }
 }
@@ -8048,6 +8071,68 @@ public func FfiConverterTypeParsedUserMessage_lift(_ buf: RustBuffer) throws -> 
 #endif
 public func FfiConverterTypeParsedUserMessage_lower(_ value: ParsedUserMessage) -> RustBuffer {
     return FfiConverterTypeParsedUserMessage.lower(value)
+}
+
+
+public struct PendingInput: Equatable, Hashable {
+    public var session: SessionRow
+    public var request: InputRequest
+    public var approval: Bool
+    public var destructive: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(session: SessionRow, request: InputRequest, approval: Bool, destructive: Bool) {
+        self.session = session
+        self.request = request
+        self.approval = approval
+        self.destructive = destructive
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PendingInput: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePendingInput: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PendingInput {
+        return
+            try PendingInput(
+                session: FfiConverterTypeSessionRow.read(from: &buf), 
+                request: FfiConverterTypeInputRequest.read(from: &buf), 
+                approval: FfiConverterBool.read(from: &buf), 
+                destructive: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PendingInput, into buf: inout [UInt8]) {
+        FfiConverterTypeSessionRow.write(value.session, into: &buf)
+        FfiConverterTypeInputRequest.write(value.request, into: &buf)
+        FfiConverterBool.write(value.approval, into: &buf)
+        FfiConverterBool.write(value.destructive, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePendingInput_lift(_ buf: RustBuffer) throws -> PendingInput {
+    return try FfiConverterTypePendingInput.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePendingInput_lower(_ value: PendingInput) -> RustBuffer {
+    return FfiConverterTypePendingInput.lower(value)
 }
 
 
@@ -13591,6 +13676,7 @@ public enum RowKind: Equatable, Hashable {
     case working
     case card
     case visual
+    case html
 
 
 
@@ -13627,6 +13713,8 @@ public struct FfiConverterTypeRowKind: FfiConverterRustBuffer {
         case 7: return .card
         
         case 8: return .visual
+        
+        case 9: return .html
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -13666,6 +13754,10 @@ public struct FfiConverterTypeRowKind: FfiConverterRustBuffer {
         
         case .visual:
             writeInt(&buf, Int32(8))
+        
+        
+        case .html:
+            writeInt(&buf, Int32(9))
         
         }
     }
@@ -15215,6 +15307,8 @@ public enum WidgetKind: Equatable, Hashable {
      */
     case visual(id: String
     )
+    case htmlRender(id: String, deviceId: String, path: String, scrolls: Bool
+    )
 
 
 
@@ -15273,6 +15367,9 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
         )
         
         case 14: return .visual(id: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 15: return .htmlRender(id: try FfiConverterString.read(from: &buf), deviceId: try FfiConverterString.read(from: &buf), path: try FfiConverterString.read(from: &buf), scrolls: try FfiConverterBool.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -15357,6 +15454,14 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
         case let .visual(id):
             writeInt(&buf, Int32(14))
             FfiConverterString.write(id, into: &buf)
+            
+        
+        case let .htmlRender(id,deviceId,path,scrolls):
+            writeInt(&buf, Int32(15))
+            FfiConverterString.write(id, into: &buf)
+            FfiConverterString.write(deviceId, into: &buf)
+            FfiConverterString.write(path, into: &buf)
+            FfiConverterBool.write(scrolls, into: &buf)
             
         }
     }
@@ -16600,6 +16705,31 @@ fileprivate struct FfiConverterSequenceTypeOutgoingAttachment: FfiConverterRustB
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypePendingInput: FfiConverterRustBuffer {
+    typealias SwiftType = [PendingInput]
+
+    public static func write(_ value: [PendingInput], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePendingInput.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PendingInput] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PendingInput]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePendingInput.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypePendingSend: FfiConverterRustBuffer {
     typealias SwiftType = [PendingSend]
 
@@ -17440,6 +17570,16 @@ public func mathFontData(index: UInt8) -> Data  {
     )
 })
 }
+public func htmlRenderDocument(html: String, dark: Bool, textScale: Float) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_html_render_document(
+        FfiConverterString.lower(html),
+        FfiConverterBool.lower(dark),
+        FfiConverterFloat.lower(textScale),uniffiCallStatus
+    )
+})
+}
 /**
  * Apply `effect` to an RGBA image; `light` is the appearance it's drawn in
  * (effects print on white paper in light mode, black in dark).
@@ -17572,6 +17712,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_math_font_data() != 16862) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_func_html_render_document() != 49870) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_func_wallpaper_render() != 28318) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -17666,6 +17809,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_org_id() != 50248) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_pending_inputs() != 57817) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_pin_session() != 14361) {
@@ -17918,6 +18064,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_transcriptview_set_debug_entries() != 54762) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_transcriptview_set_html_height() != 47735) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_transcriptview_set_math() != 28799) {

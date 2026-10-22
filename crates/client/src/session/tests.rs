@@ -214,3 +214,29 @@ fn still_frames_come_from_an_online_host_only() {
         None
     );
 }
+
+#[test]
+fn pending_inputs_list_waiting_chats_until_answered_here() {
+    let (client, _dir) = demo(false);
+    wait_for("the awaiting chats", || client.pending_inputs().len() == 3);
+    let pending = client.pending_inputs();
+    let ids: Vec<&str> = pending.iter().map(|p| p.row.id.as_str()).collect();
+    assert_eq!(ids, ["chat-picker", "chat-approve-test", "chat-approve-push"]);
+    assert!(!pending[0].approval && !pending[0].destructive);
+    assert_eq!(pending[0].request.request_id, "req-1");
+    assert!(pending[1].approval && !pending[1].destructive);
+    assert!(pending[2].approval && pending[2].destructive);
+
+    let picker = client.session("chat-picker").expect("opened by pending_inputs");
+    picker
+        .respond_input(
+            "req-1",
+            vec![zeron_proto::UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec!["Local device".into()],
+            }],
+        )
+        .unwrap();
+    let ids: Vec<String> = client.pending_inputs().into_iter().map(|p| p.row.id.clone()).collect();
+    assert_eq!(ids, ["chat-approve-test", "chat-approve-push"]);
+}

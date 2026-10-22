@@ -63,6 +63,8 @@ fn front_page_mirrors_the_desktop_sidebar() {
         ids(&ws.front.recent),
         [
             "chat-visuals",
+            "chat-approve-test",
+            "chat-approve-push",
             "chat-cjk",
             "chat-side",
             "chat-home",
@@ -441,7 +443,7 @@ fn warm_sessions_are_capped_and_preload_follows_the_front_page() {
         client.close_session(id);
     }
     let open = client.open_session_ids();
-    assert!(open.len() <= zeron_client::WARM_SESSION_CAP + 2, "{open:?}");
+    assert!(open.len() <= zeron_client::WARM_SESSION_CAP + 3, "{open:?}");
     assert!(
         open.iter().any(|o| o == "chat-home"),
         "attached sessions stay"
@@ -449,6 +451,10 @@ fn warm_sessions_are_capped_and_preload_follows_the_front_page() {
     assert!(
         open.iter().any(|o| o == "chat-veil"),
         "streaming sessions stay"
+    );
+    assert!(
+        open.iter().any(|o| o == "chat-picker"),
+        "sessions awaiting input stay"
     );
 }
 

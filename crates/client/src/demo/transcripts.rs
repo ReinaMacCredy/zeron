@@ -412,6 +412,46 @@ fn picker(host: &str, now: i64) -> Vec<SessionMessageEntry> {
     ]
 }
 
+fn approval(
+    host: &str,
+    now: i64,
+    prompt: &str,
+    reply: &str,
+    question: (&str, &str, [&str; 2]),
+) -> Vec<SessionMessageEntry> {
+    let (header, ask, options) = question;
+    vec![
+        user("m1", now - 200_000, prompt),
+        assistant(
+            "m2",
+            host,
+            now - 180_000,
+            vec![
+                text("t0", reply),
+                MessagePart::Input {
+                    id: "req-approve".into(),
+                    request_id: "req-approve".into(),
+                    questions: vec![UserInputQuestion {
+                        approval: true,
+                        id: "approve".into(),
+                        header: header.into(),
+                        question: ask.into(),
+                        options: options.iter().map(|o| (*o).to_owned()).collect(),
+                        prefill: None,
+                        multiline: false,
+                        multi_select: false,
+                        kind: None,
+                    }],
+                    resolved: false,
+                    answers: None,
+                    asked_at_ms: None,
+                    answered_at_ms: None,
+                },
+            ],
+        ),
+    ]
+}
+
 fn tabs(host: &str, now: i64) -> Vec<SessionMessageEntry> {
     vec![
         user(
@@ -603,6 +643,8 @@ fn visuals(host: &str, now: i64) -> Vec<SessionMessageEntry> {
             host,
             now - 290_000,
             vec![
+                text("th", "Three treatments of the onboarding card:"),
+                super::pages::part(),
                 text("t0", "A canvas that follows your finger:"),
                 super::visuals::part(1),
                 text(
@@ -812,6 +854,28 @@ pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<Sess
         "chat-veil" => veil(host, crate::now_ms()),
         "chat-picker" => picker(host, now),
         "chat-tabs" => tabs(host, now),
+        "chat-approve-test" => approval(
+            host,
+            now,
+            "Run the mobile tests before we tag.",
+            "Running the mobile crate's tests first.",
+            (
+                "Approve command",
+                "Codex wants to run `cargo test -p zeron-mobile`. Allow it?",
+                ["Yes", "No"],
+            ),
+        ),
+        "chat-approve-push" => approval(
+            host,
+            now,
+            "Ship the release branch.",
+            "The branch is ready; publishing it needs a push.",
+            (
+                "Allow Bash?",
+                "Claude wants to use Bash: git push origin release",
+                ["Allow", "Deny"],
+            ),
+        ),
         "chat-errored" => errored(host, now),
         "chat-ios-scroll" => scroll(host, now),
         "chat-home" => home(host, now),
