@@ -85,6 +85,33 @@ pub struct ModelInfo {
     pub reasoning_levels: Vec<String>,
     #[serde(default)]
     pub options: Vec<ModelOption>,
+    #[serde(skip)]
+    pub is_new: bool,
+}
+
+pub fn decode_models(value: serde_json::Value) -> serde_json::Result<Vec<ModelInfo>> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Reply {
+        Catalog {
+            models: Vec<ModelInfo>,
+            #[serde(default, rename = "newIds")]
+            new_ids: Vec<String>,
+        },
+        List(Vec<ModelInfo>),
+    }
+    Ok(match serde_json::from_value(value)? {
+        Reply::List(models) => models,
+        Reply::Catalog {
+            mut models,
+            new_ids,
+        } => {
+            for model in &mut models {
+                model.is_new = new_ids.contains(&model.id);
+            }
+            models
+        }
+    })
 }
 
 fn model(
@@ -100,6 +127,7 @@ fn model(
         description: Some(description.into()),
         reasoning_levels: ladder.iter().map(|s| (*s).to_owned()).collect(),
         options,
+        is_new: false,
     }
 }
 
@@ -692,6 +720,19 @@ mod tests {
             model_label("cursor-test", "sonnet-9-thinking"),
             "Sonnet 9 Thinking"
         );
+    }
+
+    #[test]
+    fn list_models_reply_decodes_catalog_object_and_bare_array() {
+        let row = serde_json::json!({"id": "claude-haiku-5-5", "label": "Haiku 5.5", "reasoningLevels": ["high"]});
+        let object = serde_json::json!({"models": [row, {"id": "claude-opus-5-5", "label": "Opus 5.5"}], "newIds": ["claude-haiku-5-5"], "announceIds": []});
+        let models = decode_models(object).unwrap();
+        assert_eq!(models.len(), 2);
+        assert!(models[0].is_new);
+        assert!(!models[1].is_new);
+        let bare = decode_models(serde_json::json!([row])).unwrap();
+        assert_eq!(bare[0].id, "claude-haiku-5-5");
+        assert!(!bare[0].is_new);
     }
 
     #[test]

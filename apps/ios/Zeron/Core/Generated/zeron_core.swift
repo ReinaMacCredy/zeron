@@ -7630,6 +7630,7 @@ public struct ModelInfo: Equatable, Hashable {
      * The picker's default effort for this model.
      */
     public var defaultReasoning: String?
+    public var isNew: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -7639,13 +7640,14 @@ public struct ModelInfo: Equatable, Hashable {
          */reasoningLevels: [String], options: [ModelOption], 
         /**
          * The picker's default effort for this model.
-         */defaultReasoning: String?) {
+         */defaultReasoning: String?, isNew: Bool = false) {
         self.id = id
         self.label = label
         self.description = description
         self.reasoningLevels = reasoningLevels
         self.options = options
         self.defaultReasoning = defaultReasoning
+        self.isNew = isNew
     }
 
     
@@ -7669,7 +7671,8 @@ public struct FfiConverterTypeModelInfo: FfiConverterRustBuffer {
                 description: FfiConverterOptionString.read(from: &buf), 
                 reasoningLevels: FfiConverterSequenceString.read(from: &buf), 
                 options: FfiConverterSequenceTypeModelOption.read(from: &buf), 
-                defaultReasoning: FfiConverterOptionString.read(from: &buf)
+                defaultReasoning: FfiConverterOptionString.read(from: &buf), 
+                isNew: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -7680,6 +7683,7 @@ public struct FfiConverterTypeModelInfo: FfiConverterRustBuffer {
         FfiConverterSequenceString.write(value.reasoningLevels, into: &buf)
         FfiConverterSequenceTypeModelOption.write(value.options, into: &buf)
         FfiConverterOptionString.write(value.defaultReasoning, into: &buf)
+        FfiConverterBool.write(value.isNew, into: &buf)
     }
 }
 
