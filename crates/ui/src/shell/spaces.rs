@@ -2062,6 +2062,7 @@ mod pinned_session_tests {
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("sidebar-hover-card").is_some());
+        cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
         let shell = host.read_with(cx, |host, _| host.0.clone());
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, cx| {
@@ -2076,11 +2077,8 @@ mod pinned_session_tests {
                 cx.notify();
             });
         });
-        for _ in 0..12 {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            cx.run_until_parked();
-            cx.update(|window, cx| window.draw(cx).clear());
-        }
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
         let moved = cx.debug_bounds("chat-a").unwrap();
         assert!(
             !moved.contains(&row.center()),
