@@ -1443,6 +1443,16 @@ pub(crate) fn has_lead(chats: &[zeron_proto::Chat], task: &zeron_proto::Task) ->
     task.has_plan() && linked_chat(chats, task).is_some()
 }
 
+pub(crate) fn chat_model_label(chat: &zeron_proto::Chat, cx: &gpui::App) -> Option<String> {
+    let config = chat.config.as_ref()?;
+    let model = config.model.as_deref()?;
+    Some(crate::pickers::model_display_label(
+        config.harness,
+        model,
+        cx,
+    ))
+}
+
 pub(crate) fn chat_brand(chat: &zeron_proto::Chat) -> Brand {
     let harness = chat.config.as_ref().map(|config| config.harness);
     let model = chat

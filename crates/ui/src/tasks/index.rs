@@ -69,7 +69,15 @@ fn roots_a_tree(
             || children.contains_key(chat.id.as_str()))
 }
 
-pub(crate) fn index_rows(state: &AppState, now: DateTime<Utc>) -> IndexRows {
+fn kind_of(task: Option<&zeron_proto::Task>) -> Kind {
+    if task.is_some() {
+        Kind::Mission
+    } else {
+        Kind::Tree
+    }
+}
+
+pub(crate) fn index_rows(state: &AppState, now: DateTime<Utc>, only: Option<Kind>) -> IndexRows {
     let children = super::thread_tree::children_by_parent(state);
     let nested: HashSet<&str> = children
         .iter()
@@ -84,11 +92,14 @@ pub(crate) fn index_rows(state: &AppState, now: DateTime<Utc>) -> IndexRows {
         if !roots_a_tree(state, chat, &children, &nested) {
             continue;
         }
+        let task = plan_led_by(&state.tasks, &chat.id);
+        if only.is_some_and(|only| only != kind_of(task)) {
+            continue;
+        }
         let nodes = tree_rows(state, &chat.id, false, now);
         if nodes.is_empty() {
             continue;
         }
-        let task = plan_led_by(&state.tasks, &chat.id);
         let live = nodes.iter().any(|node| node.status.live());
         let last = nodes
             .iter()
@@ -208,11 +219,7 @@ fn index_row(
             Some(task) => task.title.clone(),
             None => crate::transcript::single_line(&crate::home::chat_title(chat)),
         },
-        kind: if task.is_some() {
-            Kind::Mission
-        } else {
-            Kind::Tree
-        },
+        kind: kind_of(task),
         status,
         line,
         asks: asker.is_some() || root_waits,
@@ -648,7 +655,7 @@ impl Render for MissionIndex {
         let theme = Theme::of(cx).clone();
         let now = Instant::now();
         let reduced = motion::reduced_motion(cx);
-        let rows = index_rows(self.state.read(cx), Utc::now());
+        let rows = index_rows(self.state.read(cx), Utc::now(), None);
         let all: Vec<&IndexRow> = rows.running.iter().chain(&rows.done_today).collect();
         let roots: HashSet<&str> = all.iter().map(|row| row.root.as_str()).collect();
         self.trees.retain(|root, _| roots.contains(root.as_str()));
@@ -888,7 +895,7 @@ mod tests {
             }))
             .unwrap(),
         ];
-        let rows = index_rows(&state, now);
+        let rows = index_rows(&state, now, None);
         let ids = |rows: &[IndexRow]| -> Vec<String> {
             rows.iter().map(|row| row.root.clone()).collect()
         };
@@ -950,7 +957,7 @@ mod tests {
             }))
             .unwrap(),
         ];
-        let rows = index_rows(&state, now);
+        let rows = index_rows(&state, now, None);
         let running: Vec<&IndexRow> = rows.running.iter().collect();
         assert_eq!(
             running.len(),

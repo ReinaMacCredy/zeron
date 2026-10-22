@@ -1066,12 +1066,11 @@ fn missions(state: &AppState, now: DateTime<Utc>) -> Vec<Mission> {
             starts_open: false,
         }
     });
-    let index = crate::tasks::index_rows(state, now);
+    let index = crate::tasks::index_rows(state, now, Some(crate::tasks::IndexKind::Tree));
     let trees = index
         .running
         .into_iter()
         .chain(index.done_today)
-        .filter(|row| row.kind == crate::tasks::IndexKind::Tree)
         .filter(|row| tree_watch(state, &row.root) == Watch::Watched)
         .map(|row| {
             let done = row
@@ -1123,16 +1122,6 @@ fn watch_params(mission: &Mission, on: bool) -> serde_json::Value {
             "op": "setMissionSupervised", "taskId": mission.key, "supervised": on,
         }),
     }
-}
-
-fn model_label(chat: &Chat, cx: &App) -> Option<String> {
-    let config = chat.config.as_ref()?;
-    let model = config.model.as_deref()?;
-    Some(crate::pickers::model_display_label(
-        config.harness,
-        model,
-        cx,
-    ))
 }
 
 fn run(from: f32, to: f32, spec: MotionSpec, reduced: bool, now: Instant) -> Tween {
@@ -1436,7 +1425,12 @@ impl SupervisorPage {
         let choices: HashMap<String, String> = self
             .replies
             .iter()
-            .filter(|(_, reply)| matches!(reply.stage, Stage::Sending | Stage::Sent(_)))
+            .filter(|(key, reply)| match reply.stage {
+                Stage::Sending | Stage::Sent(_) => true,
+                // A failed batch still answered the items that leave; the engine reverts the rest.
+                Stage::Failed(_) => key.starts_with("item:"),
+                _ => false,
+            })
             .map(|(key, reply)| (key.clone(), reply.choice.clone()))
             .collect();
         let (arrived, wake) = {
@@ -3391,6 +3385,7 @@ impl SupervisorPage {
                     crate::tasks::TreeHost::Supervisor,
                     cx,
                 )
+                .with_briefs(plan)
             });
             let id = key.clone();
             let events = cx.subscribe(
@@ -3407,7 +3402,6 @@ impl SupervisorPage {
                     crate::tasks::StripTreeEvent::OpenNative { parent_chat_id, .. } => {
                         cx.emit(SupervisorEvent::OpenChat(parent_chat_id.clone()))
                     }
-                    crate::tasks::StripTreeEvent::Brief(_) if !plan => {}
                     crate::tasks::StripTreeEvent::Brief(selection) => {
                         let step_id = match selection {
                             crate::tasks::Selection::Step(step) => Some(step.clone()),
@@ -3664,7 +3658,10 @@ impl SupervisorPage {
             None => "Brief · Lead".into(),
         };
         let mut meta = vec![task.title.clone()];
-        if let Some(model) = chat.as_ref().and_then(|chat| model_label(chat, cx)) {
+        if let Some(model) = chat
+            .as_ref()
+            .and_then(|chat| crate::tasks::chat_model_label(chat, cx))
+        {
             meta.push(model);
         }
         let started = chat.as_ref().and_then(|chat| match &chat.source_context {

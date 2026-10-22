@@ -2039,13 +2039,9 @@ impl TaskCenter {
 }
 
 pub(super) fn agent_of(chat: &zeron_proto::Chat, cx: &App) -> Option<String> {
-    let config = chat.config.as_ref()?;
-    let harness = config.harness.display_name();
-    Some(match config.model.as_deref() {
-        Some(model) => format!(
-            "{harness} · {}",
-            crate::pickers::model_display_label(config.harness, model, cx)
-        ),
+    let harness = chat.config.as_ref()?.harness.display_name();
+    Some(match super::chat_model_label(chat, cx) {
+        Some(model) => format!("{harness} · {model}"),
         None => harness.to_string(),
     })
 }
