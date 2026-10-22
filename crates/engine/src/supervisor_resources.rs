@@ -638,6 +638,13 @@ pub(crate) async fn run_check(input: CheckInput) -> CheckOutcome {
     CheckOutcome { verdicts, freed }
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReportedContention {
+    pub since: i64,
+    pub missions: BTreeSet<String>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Contention {
     pub since: i64,
@@ -735,6 +742,7 @@ impl Resources {
         &mut self,
         verdicts: Vec<(ResourceKey, Verdict)>,
         now: i64,
+        reported: &mut BTreeMap<String, ReportedContention>,
     ) -> Vec<(ResourceKey, Contention)> {
         self.last_check = Some(now);
         let mut opened = Vec::new();
@@ -742,8 +750,15 @@ impl Resources {
             if !self.candidates.iter().any(|candidate| candidate.key == key) {
                 continue;
             }
+            let name = key.to_string();
             if verdict.check.contended {
-                let earlier = self.open.get(&key).map(|open| open.since);
+                let missions: BTreeSet<String> = verdict.missions.iter().cloned().collect();
+                let earlier = self.open.get(&key).map(|open| open.since).or_else(|| {
+                    reported
+                        .get(&name)
+                        .filter(|known| known.missions == missions)
+                        .map(|known| known.since)
+                });
                 let contention = Contention {
                     since: earlier.unwrap_or(now),
                     missions: verdict.missions,
@@ -754,9 +769,17 @@ impl Resources {
                 if earlier.is_none() {
                     opened.push((key.clone(), contention.clone()));
                 }
+                reported.insert(
+                    name,
+                    ReportedContention {
+                        since: contention.since,
+                        missions,
+                    },
+                );
                 self.open.insert(key.clone(), contention);
             } else if verdict.check.error.is_none() {
                 self.open.remove(&key);
+                reported.remove(&name);
             }
             self.checks.insert(key, verdict.check);
         }

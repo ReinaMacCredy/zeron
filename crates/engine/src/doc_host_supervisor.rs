@@ -11,14 +11,15 @@ use zeron_proto::{
     StepTurnEnd, Task, TaskPatch, TaskStep, ToolCall, UserInputQuestion,
 };
 
-use super::delegation::{WAKE_QUESTION_CHARS, clip, question_lines};
+use super::delegation::{TITLE_CHARS, WAKE_QUESTION_CHARS, one_line, question_lines};
 use super::*;
 use crate::registry::HarnessRegistry;
+use crate::supervisor::fence;
 use crate::supervisor::{
-    Asked, Flush, InterventionRecord, MISSION_SILENT_MS, MissionFacts, Projections, Reply, Stall,
-    StallNode, StepSnap, StepThread, SupervisorEvent, SupervisorStore, TURN_QUIET_MS, ThreadFacts,
-    TreeStall, WakeEntry, WakeHeader, chips, escalated_item, fold_ms, lead_questions, open_inputs,
-    plan_flush, plan_stalls, stall_ms, tree_stalls, utc, wake_text,
+    Asked, Flush, InterventionRecord, MISSION_SILENT_MS, MissionFacts, PauseHold, Projections,
+    Reply, Stall, StallNode, StepSnap, StepThread, SupervisorEvent, SupervisorStore, TURN_QUIET_MS,
+    ThreadFacts, TreeStall, WakeEntry, WakeHeader, chips, escalated_item, fold_ms, lead_questions,
+    open_inputs, plan_flush, plan_stalls, stall_ms, tree_stalls, utc, wake_text,
 };
 use crate::supervisor_resources::{
     CheckOutcome, Contention, PAGE_CHECK_MS, Probe, ResourceMission, find_candidates, run_check,
@@ -27,7 +28,8 @@ use zeron_proto::supervisor::ResourceKey;
 
 const MAX_NAP: Duration = Duration::from_secs(60);
 const HOUR_MS: i64 = 60 * 60 * 1000;
-const TITLE_CHARS: usize = 80;
+const PATH_CHARS: usize = 200;
+const MERGE_RETRY_MS: i64 = 1_000;
 
 pub(crate) fn newest_supervisor<'a>(chats: &'a [Chat], device: &str) -> Option<&'a Chat> {
     chats
@@ -310,7 +312,7 @@ impl DocHost {
         }
     }
 
-    fn hosts_mission(&self, workspace: &WorkspaceHost, task_id: &str) -> bool {
+    pub(crate) fn hosts_mission(&self, workspace: &WorkspaceHost, task_id: &str) -> bool {
         workspace
             .task(task_id)
             .filter(|task| task.has_plan() && !task.deleted)
@@ -334,12 +336,11 @@ impl DocHost {
             return;
         }
         let at = now_ms();
-        store.note_failed(&step.id, at);
         let mut event = SupervisorEvent::new(
             Kind::StepFailed,
             format!("failed:{}:{at}", step.id),
             Some(&step.task_id),
-            format!("Step \"{}\" failed", clip(&step.title, TITLE_CHARS)),
+            format!("Step \"{}\" failed", one_line(&step.title, TITLE_CHARS)),
         );
         event.summary.step_id = Some(step.id.clone());
         event.summary.thread_id = Some(thread.to_string());
@@ -375,7 +376,7 @@ impl DocHost {
         let led = zeron_proto::plan_of_chat(&tasks, &asker.id).map(|task| task.id.clone());
         let (who, task_id) = match (&step, led) {
             (Some(step), _) => (
-                format!("Step \"{}\"", clip(&step.title, TITLE_CHARS)),
+                format!("Step \"{}\"", one_line(&step.title, TITLE_CHARS)),
                 Some(step.task_id.clone()),
             ),
             (None, Some(task_id)) => ("The lead".to_string(), Some(task_id)),
@@ -413,7 +414,10 @@ impl DocHost {
             Some(&task.id),
             "Plan edited by the person".to_string(),
         );
-        event.detail = changes.iter().map(|change| format!("- {change}")).collect();
+        event.detail = changes
+            .iter()
+            .map(|change| format!("- {}", one_line(change, WAKE_QUESTION_CHARS)))
+            .collect();
         event.actor = actor.map(str::to_owned);
         self.supervisor_event(event);
     }
@@ -437,18 +441,20 @@ impl DocHost {
         event.detail = vec![format!(
             "itemId {} · why: {why} · \"{}\"",
             item.id,
-            clip(&item.title, TITLE_CHARS)
+            one_line(&item.title, TITLE_CHARS)
         )];
-        if !item.detail.trim().is_empty() {
-            event
-                .detail
-                .push(clip(&item.detail, WAKE_QUESTION_CHARS).replace('\n', "\n   "));
-        }
-        if !item.options.is_empty() {
-            event
-                .detail
-                .push(format!("Options: {}", item.options.join(" | ")));
-        }
+        let options: Vec<String> = item
+            .options
+            .iter()
+            .map(|option| format!("\"{}\"", one_line(option, TITLE_CHARS)))
+            .collect();
+        let asked = [
+            item.detail.trim().to_string(),
+            format!("Options: {}", options.join(" | ")),
+        ];
+        event
+            .detail
+            .push(fence(asked.join("\n").trim(), WAKE_QUESTION_CHARS, None));
         event.actor = (item.raised_by == Raiser::Supervisor).then(|| item.raiser_chat_id.clone());
         self.supervisor_event(event);
     }
@@ -654,7 +660,7 @@ impl DocHost {
         );
         event.detail = steps
             .iter()
-            .map(|step| format!("- new step \"{}\"", clip(&step.title, TITLE_CHARS)))
+            .map(|step| format!("- new step \"{}\"", one_line(&step.title, TITLE_CHARS)))
             .collect();
         event.actor = from.map(str::to_owned);
         self.supervisor_event(event);
@@ -788,7 +794,8 @@ impl DocHost {
             }
             let mut facts = MissionFacts {
                 task_id: task.id.clone(),
-                waiting_on_person: task.plan_pending && !own.is_empty(),
+                waiting_on_person: (task.plan_pending && !own.is_empty())
+                    || store.waits_on_person(&task.id),
                 lead: thread(&lead.id),
                 steps: Vec::new(),
                 failed: Vec::new(),
@@ -802,9 +809,7 @@ impl DocHost {
                 if step_failed(step) && !step_thread.live {
                     facts.failed.push(crate::supervisor::FailedStep {
                         step_id: step.id.clone(),
-                        failed_at: store
-                            .failed_at(&step.id)
-                            .unwrap_or_else(|| ms(step.updated_at)),
+                        failed_at: ms(step.updated_at),
                     });
                 }
                 facts.steps.push(step_thread);
@@ -1023,7 +1028,7 @@ impl DocHost {
             let label = match (kind, chat.delegation.as_ref()) {
                 (Kind::NodeFinished, Some(delegation)) => format!(
                     "Delegated task \"{}\" {}",
-                    clip(chat.title.as_deref().unwrap_or("Untitled"), TITLE_CHARS),
+                    one_line(chat.title.as_deref().unwrap_or("Untitled"), TITLE_CHARS),
                     match delegation.status {
                         DelegationStatus::Completed => "completed",
                         DelegationStatus::Failed => "failed",
@@ -1075,6 +1080,14 @@ impl DocHost {
                 "Mission marked done".to_string(),
             ));
         }
+        for hold in store.holds() {
+            if hold.resumed_at.is_none()
+                && workspace.task_step(&hold.step_id).is_none()
+                && let Err(err) = store.resume_hold(&hold.row_id)
+            {
+                tracing::warn!(error = %err, "releasing the hold of a removed step failed");
+            }
+        }
         let supervisor = self.supervisor_chat();
         if store.take_refresh(now) {
             store.set_projections(self.projections(
@@ -1104,8 +1117,32 @@ impl DocHost {
                 });
             }
         };
+        let holds = store.holds();
         for stall in stalls {
-            self.supervisor_event(stall_event(stall, &round.step_titles));
+            let mut event = stall_event(stall, &round.step_titles);
+            if event.summary.kind == Kind::MissionSilent {
+                event.detail.extend(
+                    holds
+                        .iter()
+                        .filter(|hold| {
+                            hold.resumed_at.is_none()
+                                && event.summary.task_id.as_deref() == Some(hold.task_id.as_str())
+                        })
+                        .map(|hold| {
+                            let title = round
+                                .step_titles
+                                .get(&hold.step_id)
+                                .map_or("", String::as_str);
+                            format!(
+                                "Step \"{}\" (taskStepId {}) is paused for {} until you resume it.",
+                                one_line(title, TITLE_CHARS),
+                                hold.step_id,
+                                hold.resource
+                            )
+                        }),
+                );
+            }
+            self.supervisor_event(event);
         }
         let (tree_due, tree_next) = tree_stalls(now, std::mem::take(&mut round.stalls), |key| {
             store.reported(key)
@@ -1259,7 +1296,16 @@ impl DocHost {
     }
 
     fn apply_resource_check(&self, store: &SupervisorStore, outcome: CheckOutcome) {
-        let opened = store.resources(|resources| resources.apply(outcome.verdicts, now_ms()));
+        let opened = store.apply_check(outcome.verdicts, now_ms());
+        let freed: Vec<PauseHold> = store
+            .holds()
+            .into_iter()
+            .filter(|hold| {
+                hold.freed_at.is_none()
+                    && hold.resumed_at.is_none()
+                    && outcome.freed.contains(&hold.row_id)
+            })
+            .collect();
         if !outcome.freed.is_empty()
             && let Err(err) = store.mark_freed(&outcome.freed)
         {
@@ -1268,6 +1314,28 @@ impl DocHost {
         store.mark_stale();
         for (key, contention) in opened {
             self.supervisor_event(self.contention_event(&key, &contention));
+        }
+        let workspace = self.workspace();
+        for hold in freed {
+            let title = workspace
+                .and_then(|workspace| workspace.task_step(&hold.step_id))
+                .map_or_else(String::new, |step| step.title);
+            let mut event = SupervisorEvent::new(
+                Kind::Resource,
+                format!("freed:{}", hold.row_id),
+                Some(&hold.task_id),
+                format!(
+                    "{} is free; step \"{}\" is still paused",
+                    hold.resource,
+                    one_line(&title, TITLE_CHARS)
+                ),
+            );
+            event.summary.step_id = Some(hold.step_id.clone());
+            event.detail.push(format!(
+                "Resume it with the supervisor tool, action \"resume\", stepId {}, once nothing else needs {}.",
+                hold.step_id, hold.resource
+            ));
+            self.supervisor_event(event);
         }
     }
 
@@ -1278,7 +1346,7 @@ impl DocHost {
                 .and_then(|workspace| workspace.task(id))
                 .map_or_else(
                     || format!("task {id}"),
-                    |task| format!("{} (task {})", clip(&task.title, TITLE_CHARS), task.id),
+                    |task| format!("{} (task {})", one_line(&task.title, TITLE_CHARS), task.id),
                 )
         };
         let mut event = SupervisorEvent::new(
@@ -1306,10 +1374,13 @@ impl DocHost {
                         .map(|id| format!(", which belongs to {}", mission(id)))
                         .unwrap_or_default();
                     event.detail.push(format!(
-                        "Verified by lsof {at}: port {port} is open by {} (pid {}) in {}{owner}.",
-                        used.command,
+                        "Verified by lsof {at}: port {port} is open by \"{}\" (pid {}) in {}{owner}.",
+                        one_line(&used.command, TITLE_CHARS),
                         used.pid,
-                        used.cwd.as_deref().unwrap_or("an unknown folder"),
+                        used.cwd.as_deref().map_or_else(
+                            || "an unknown folder".to_string(),
+                            |cwd| format!("\"{}\"", one_line(cwd, PATH_CHARS))
+                        ),
                     ));
                 }
             }
@@ -1319,9 +1390,10 @@ impl DocHost {
                         [one] => mission(one),
                         _ => format!(
                             "a process in {}",
-                            load.cwd
-                                .as_deref()
-                                .unwrap_or("a folder these missions share")
+                            load.cwd.as_deref().map_or_else(
+                                || "a folder these missions share".to_string(),
+                                |cwd| format!("\"{}\"", one_line(cwd, PATH_CHARS))
+                            )
                         ),
                     };
                     event.detail.push(format!(
@@ -1342,7 +1414,7 @@ impl DocHost {
                         event.detail.push(format!(
                             "{}: step \"{}\" (taskStepId {}) on thread {thread}.",
                             mission(id),
-                            clip(&step.title, TITLE_CHARS),
+                            one_line(&step.title, TITLE_CHARS),
                             step.id
                         ));
                     }
@@ -1534,17 +1606,7 @@ impl DocHost {
                 .clone()
                 .filter(|target| lead.as_ref() == Some(target))
                 .map(|target| read(&target));
-            let hold = holds
-                .iter()
-                .find(|hold| hold.row_id == record.row.id)
-                .map(|hold| {
-                    let running = hold
-                        .thread_id
-                        .as_deref()
-                        .and_then(|thread| sessions.session_status(thread))
-                        .is_some_and(|session| live(session.status));
-                    (hold, running)
-                });
+            let hold = holds.iter().find(|hold| hold.row_id == record.row.id);
             projections.chips.insert(
                 record.row.id.clone(),
                 chips(record, &plan, target.as_deref(), hold),
@@ -1593,10 +1655,7 @@ impl DocHost {
             .count();
         match plan {
             Flush::Merge(row) => {
-                let Some((_, earlier)) = held else {
-                    store.requeue(keep);
-                    return Some(now);
-                };
+                let earlier = held.map(|(_, earlier)| earlier).unwrap_or_default();
                 if keep.is_empty() {
                     store.merge(&row, Vec::new(), dropped);
                     return None;
@@ -1614,7 +1673,7 @@ impl DocHost {
                     None
                 } else {
                     store.requeue(keep);
-                    Some(now)
+                    Some(now + MERGE_RETRY_MS)
                 }
             }
             _ => {
@@ -1731,6 +1790,11 @@ impl DocHost {
             Kind::Escalation => escalated_item(&summary.key)
                 .and_then(|item| self.supervisor().map(|store| store.item_open(item)))
                 .unwrap_or(false),
+            Kind::Resource if summary.key.starts_with("freed:") => summary
+                .step_id
+                .as_deref()
+                .zip(self.supervisor())
+                .is_some_and(|(step, store)| store.hold_of(step).is_some()),
             Kind::Resource => summary
                 .key
                 .strip_prefix("res:")
@@ -2045,6 +2109,7 @@ impl DocHost {
         settings: zeron_proto::supervisor::SupervisorSettings,
         permission: PermissionMode,
     ) -> String {
+        let mut quoted = HashSet::new();
         let entries: Vec<WakeEntry> = events
             .iter()
             .map(|event| {
@@ -2058,21 +2123,23 @@ impl DocHost {
                     let title = workspace.chat(root).ok().flatten()?.title;
                     Some(format!(
                         "tree \"{}\" (root thread {root})",
-                        clip(title.as_deref().unwrap_or("Untitled"), TITLE_CHARS)
+                        one_line(title.as_deref().unwrap_or("Untitled"), TITLE_CHARS)
                     ))
                 };
                 let mission = task
                     .as_ref()
-                    .map(|task| format!("{} (task {})", clip(&task.title, TITLE_CHARS), task.id))
+                    .map(|task| {
+                        format!("{} (task {})", one_line(&task.title, TITLE_CHARS), task.id)
+                    })
                     .or_else(tree);
                 let lead = task.and_then(|task| task.chat_id);
                 let source = event.summary.thread_id.clone().or(lead.clone());
-                let reply = source.map(|thread| Reply {
-                    from_lead: Some(&thread) == lead.as_ref(),
-                    text: self
-                        .last_reply(&thread)
-                        .map(|text| clip(&text, WAKE_QUESTION_CHARS)),
-                });
+                let reply = source
+                    .filter(|thread| quoted.insert(thread.clone()))
+                    .map(|thread| Reply {
+                        from_lead: Some(&thread) == lead.as_ref(),
+                        text: self.last_reply(&thread),
+                    });
                 let escalation = (event.summary.kind == Kind::Escalation)
                     .then(|| escalated_item(&event.summary.key))
                     .flatten()
@@ -2174,7 +2241,7 @@ fn node_event(kind: Kind, key: String, node: &StallNode, label: String) -> Super
 fn thread_label(chat: &Chat) -> String {
     format!(
         "Thread \"{}\"",
-        clip(chat.title.as_deref().unwrap_or("Untitled"), TITLE_CHARS)
+        one_line(chat.title.as_deref().unwrap_or("Untitled"), TITLE_CHARS)
     )
 }
 
@@ -2210,7 +2277,7 @@ fn plan_event(plan: &PendingPlan) -> SupervisorEvent {
 fn stall_event(stall: Stall, step_titles: &HashMap<String, String>) -> SupervisorEvent {
     let key = stall.key();
     match stall {
-        Stall::MissionSilent { task_id, since } => {
+        Stall::MissionSilent { task_id, since, .. } => {
             let mut event = SupervisorEvent::new(
                 Kind::MissionSilent,
                 key,
@@ -2236,7 +2303,7 @@ fn stall_event(stall: Stall, step_titles: &HashMap<String, String>) -> Superviso
                 Some(&task_id),
                 format!(
                     "Lead silent 10 min after step \"{}\" failed",
-                    clip(title, TITLE_CHARS)
+                    one_line(title, TITLE_CHARS)
                 ),
             );
             event.summary.step_id = Some(step_id);

@@ -50,6 +50,7 @@
 //! handlers stay transport-agnostic. This includes the workspace file surface,
 //! whose checkout always lives on the routed target device.
 
+mod caller;
 mod supervisor;
 mod tasks;
 mod voice_chat;
@@ -1109,6 +1110,12 @@ enum MutateParams {
     ApprovePlan { task_id: String },
     #[serde(rename_all = "camelCase")]
     TakeBackPlanApproval { task_id: String },
+    #[serde(rename_all = "camelCase")]
+    ResumeSupervisorStep {
+        step_id: String,
+        #[serde(default)]
+        from_chat_id: Option<String>,
+    },
     #[serde(rename_all = "camelCase")]
     RetryTaskStep { step_id: String },
     #[serde(rename_all = "camelCase")]
@@ -2517,18 +2524,13 @@ impl EngineRpc {
                 patch,
                 from_chat_id,
             } => {
-                if patch.title.is_some()
-                    || patch.notes.is_some()
-                    || patch.images.is_some()
-                    || patch.chat_id.is_some()
-                {
-                    let refusal = if self.registry.supervisor_settings().goal_and_spend {
-                        supervisor::GOAL_ACTION
-                    } else {
-                        supervisor::GOAL_OR_SPEND
-                    };
-                    supervisor::refuse_supervisor(from_chat_id.as_deref(), refusal)?;
-                }
+                let refusal = if self.registry.supervisor_settings().goal_and_spend {
+                    supervisor::GOAL_ACTION
+                } else {
+                    supervisor::GOAL_OR_SPEND
+                };
+                supervisor::refuse_supervisor(from_chat_id.as_deref(), refusal)?;
+                self.refuse_stranger(&task_id, from_chat_id.as_deref())?;
                 self.update_task(&task_id, &patch)
             }
             MutateParams::DeleteTask {
@@ -2536,6 +2538,7 @@ impl EngineRpc {
                 from_chat_id,
             } => {
                 supervisor::refuse_supervisor(from_chat_id.as_deref(), supervisor::GOAL_OR_SPEND)?;
+                self.refuse_stranger(&task_id, from_chat_id.as_deref())?;
                 self.workspace
                     .delete_task(&task_id)
                     .map_err(failed)
@@ -2573,6 +2576,8 @@ impl EngineRpc {
                 attach_plan,
             } => {
                 supervisor::refuse_supervisor(from_chat_id.as_deref(), supervisor::GOAL_OR_SPEND)?;
+                self.refuse_stranger(&task_id, from_chat_id.as_deref())?;
+                self.refuse_step_as_lead(&task_id, &chat_id)?;
                 let lead = orchestrate.then_some(tasks::Lead {
                     approve_plan,
                     same_agents,
@@ -2610,6 +2615,13 @@ impl EngineRpc {
             MutateParams::ApprovePlan { task_id } => self.approve_plan(&task_id).await.map(drop),
             MutateParams::TakeBackPlanApproval { task_id } => {
                 self.take_back_plan_approval(&task_id).await
+            }
+            MutateParams::ResumeSupervisorStep {
+                step_id,
+                from_chat_id,
+            } => {
+                self.resume_step_for_person(&step_id, from_chat_id.as_deref())
+                    .await
             }
             MutateParams::RetryTaskStep { step_id } => self.retry_task_step(&step_id).await,
             MutateParams::EditTaskPlan {
@@ -3278,6 +3290,10 @@ impl RpcService for AuthRpc {
 
 #[async_trait]
 impl RpcService for EngineRpc {
+    fn connection(&self) -> Option<std::sync::Arc<dyn RpcService>> {
+        Some(caller::connection(self))
+    }
+
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
@@ -3694,6 +3710,7 @@ impl RpcService for EngineRpc {
             }
             methods::SEND_THREAD_MESSAGE => {
                 let p: SendThreadMessageParams = parse_params(params)?;
+                self.refuse_held_thread(&p.chat_id)?;
                 let basis = self
                     .supervisor_gate(Some(&p.from_chat_id), |s| s.message_threads, supervisor::MESSAGE_OFF)?
                     .then(|| {
@@ -3891,6 +3908,9 @@ impl RpcService for EngineRpc {
             }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
+                if p.from_chat_id.is_some() && zeron_proto::supervisor::is_supervisor_chat(&p.chat_id) {
+                    return Err(RpcError::Failed(supervisor::PERSON_ONLY.into()));
+                }
                 let respond = match &p.command {
                     SessionCommandPayload::Interrupt { .. } => {
                         supervisor::refuse_supervisor(p.from_chat_id.as_deref(), supervisor::NO_INTERRUPT)?;

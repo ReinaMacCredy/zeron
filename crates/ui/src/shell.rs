@@ -2691,7 +2691,7 @@ pub struct Shell {
     _tasks_events: Option<gpui::Subscription>,
     task_center_task: Option<String>,
     task_center: Option<(Entity<crate::tasks::TaskCenter>, Subscription)>,
-    task_center_pane: Option<task_actions::TaskCenterPane>,
+    task_center_pane: Option<task_actions::DocPane>,
     task_center_docs: Vec<String>,
     task_slide: task_actions::TaskSlide,
     mission_tree: Option<(Entity<crate::tasks::StripTree>, Subscription)>,

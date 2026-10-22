@@ -955,7 +955,7 @@ impl WorkspaceHost {
         config: Option<ChatConfig>,
         cwd: Option<String>,
     ) -> Result<(), EngineError> {
-        self.create_chat_from(chat_id, space_id, device_id, config, cwd, None)
+        self.insert_chat(chat_id, space_id, device_id, config, cwd, None, None)
     }
 
     /// [`Self::create_chat`] stamped with the chat whose agent is opening it
@@ -970,6 +970,12 @@ impl WorkspaceHost {
         cwd: Option<String>,
         created_by_chat_id: Option<&str>,
     ) -> Result<(), EngineError> {
+        if zeron_proto::supervisor::is_supervisor_chat(chat_id) {
+            return Err(EngineError::Other(format!(
+                "chat ids starting with {} are the Supervisor's",
+                zeron_proto::supervisor::CHAT_PREFIX
+            )));
+        }
         self.insert_chat(
             chat_id,
             space_id,

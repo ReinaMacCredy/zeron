@@ -21,6 +21,7 @@ pub async fn serve_connection(
     out: mpsc::Sender<String>,
     mut inbound: mpsc::Receiver<String>,
 ) {
+    let service = service.connection().unwrap_or(service);
     let mut running: HashMap<u64, tokio::task::AbortHandle> = HashMap::new();
     while let Some(payload) = inbound.recv().await {
         // ndjson: a transport may batch several frames per message.
