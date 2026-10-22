@@ -77,6 +77,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     /// Stay in the card state even when idle (new-session canvas).
     var chipsAlwaysVisible = false { didSet { updateMode(animated: false) } }
     var images: [StagedImage] = [] { didSet { rebuildThumbs(); refreshAction(animated: true); updateMode(animated: true) } }
+    var quotes: [String] = [] { didSet { rebuildThumbs(); refreshAction(animated: true); updateMode(animated: true) } }
 
     var text: String {
         get { textView.text }
@@ -312,7 +313,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     /// The card is for composing: focused, holding photos, or pinned open
     /// (new-session canvas). An unfocused draft rests as the capsule.
     private var wantsCard: Bool {
-        chipsAlwaysVisible || textView.isFirstResponder || !images.isEmpty
+        chipsAlwaysVisible || textView.isFirstResponder || !images.isEmpty || !quotes.isEmpty
     }
 
     private func updateMode(animated: Bool) {
@@ -506,6 +507,31 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
 
     private func rebuildThumbs() {
         thumbs.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        thumbs.alignment = .center
+        if !quotes.isEmpty {
+            var q = UIButton.Configuration.filled()
+            q.title = quoteChipLabel(count: UInt32(quotes.count))
+            q.image = UIImage(systemName: "text.quote", withConfiguration: UIImage.SymbolConfiguration(pointSize: 11.5, weight: .semibold))
+            q.imagePadding = 6
+            q.baseForegroundColor = Palette.text
+            q.baseBackgroundColor = Palette.controlFill
+            q.cornerStyle = .capsule
+            q.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 11, bottom: 7, trailing: 11)
+            q.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attrs in
+                var a = attrs
+                a.font = Fonts.ui(.sansMedium, 13.5)
+                return a
+            }
+            let chip = UIButton(configuration: q)
+            chip.accessibilityIdentifier = "composer-quotes"
+            let previews = quotes.map { UIAction(title: $0, attributes: .disabled) { _ in } }
+            let remove = UIAction(title: "Remove", image: UIImage(systemName: "xmark"), attributes: .destructive) { [weak self] _ in
+                self?.quotes = []
+            }
+            chip.menu = UIMenu(children: [UIMenu(options: .displayInline, children: previews), remove])
+            chip.showsMenuAsPrimaryAction = true
+            thumbs.addArrangedSubview(chip)
+        }
         for img in images {
             let iv = UIImageView(image: img.thumbnail)
             iv.contentMode = .scaleAspectFill
@@ -539,7 +565,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             ])
             thumbs.addArrangedSubview(iv)
         }
-        thumbsHeight.constant = images.isEmpty ? 0 : 68
+        thumbsHeight.constant = !images.isEmpty ? 68 : quotes.isEmpty ? 0 : 46
         thumbs.layoutMargins = UIEdgeInsets(top: 12, left: 0, bottom: 0, right: 0)
         thumbs.isLayoutMarginsRelativeArrangement = true
         onHeightChange?()
@@ -601,7 +627,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     // MARK: Action button
 
     private var hasContent: Bool {
-        !textView.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty
+        !textView.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty || !quotes.isEmpty
     }
 
     private func refreshAction(animated: Bool) {
@@ -681,7 +707,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     private func send(_ mode: DeliveryMode) {
         guard hasContent else { return }
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        let body = mentions.encode(textView.text.trimmingCharacters(in: .whitespacesAndNewlines))
+        let body = withQuotes(text: mentions.encode(textView.text.trimmingCharacters(in: .whitespacesAndNewlines)), quotes: quotes)
         let staged = images
         let result = onSend?(body, staged, mode) ?? .sent
         guard result != .kept else { return }
@@ -691,6 +717,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         mentions.reset()
         textView.text = ""
         images = []
+        quotes = []
         textChanged()
     }
 

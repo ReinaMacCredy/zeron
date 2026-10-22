@@ -22,6 +22,7 @@ pub mod motion;
 pub mod preview;
 pub mod projectless;
 pub mod provider_instance;
+pub mod quotes;
 pub mod routing;
 pub mod sidebar_pins;
 pub mod source_control;

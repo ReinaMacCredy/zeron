@@ -29,6 +29,20 @@ pub fn follow_up_notice(queueing: bool, steer: bool, can_steer: bool) -> Option<
     zeron_proto::steer_queues_notice(queueing, steer, can_steer).map(str::to_owned)
 }
 
+#[uniffi::export]
+pub fn with_quotes(text: String, quotes: Vec<String>) -> String {
+    let quotes: Vec<_> = quotes
+        .into_iter()
+        .map(zeron_proto::quotes::Quote::new)
+        .collect();
+    zeron_proto::quotes::with_quotes(&text, &quotes)
+}
+
+#[uniffi::export]
+pub fn quote_chip_label(count: u32) -> String {
+    zeron_proto::quotes::chip_label(count as usize)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ContextCard {
     pub long_context: bool,

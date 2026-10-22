@@ -69,6 +69,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             self.setJumpVisible(d > 140 && !self.list.following)
         }
         list.onCardAction = { [weak self] action in self?.perform(action) }
+        list.onQuote = { [weak self] text in
+            guard let self else { return }
+            self.composer.quotes.append(text)
+            self.composer.becomeFirstResponder()
+        }
         view.addSubview(list)
         still.translatesAutoresizingMaskIntoConstraints = false
         still.fetch = { [weak self] in await self?.source.computerStill() }

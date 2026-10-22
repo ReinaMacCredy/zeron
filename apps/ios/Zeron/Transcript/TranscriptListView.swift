@@ -122,6 +122,7 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     var onDistanceFromBottom: ((CGFloat) -> Void)?
     var imageLoader: ((String, UIImageView) -> Void)?
     var onCardAction: ((CardAction) -> Void)?
+    var onQuote: ((String) -> Void)?
     /// An attachment's picture, for an image chip opened full size.
     var imageFetcher: ((String) async -> UIImage?)?
 
@@ -727,6 +728,11 @@ extension TranscriptListView: UIContextMenuInteractionDelegate {
                 })
             }
             let selectable = frame.messageText(index: index) ?? block
+            if !selectable.isEmpty, let onQuote = self.onQuote {
+                actions.append(UIAction(title: "Quote in reply", image: UIImage(systemName: "text.quote")) { _ in
+                    onQuote(selectable)
+                })
+            }
             if !selectable.isEmpty {
                 actions.append(UIAction(title: "Select Text", image: UIImage(systemName: "character.cursor.ibeam")) { [weak self] _ in
                     self?.presentSelection(selectable)
@@ -747,6 +753,7 @@ extension TranscriptListView: UIContextMenuInteractionDelegate {
     private func presentSelection(_ text: String) {
         guard let vc = findViewController() else { return }
         let sheet = SelectTextViewController(text: text)
+        sheet.onQuote = onQuote
         vc.present(UINavigationController(rootViewController: sheet), animated: true)
     }
 }
@@ -763,9 +770,10 @@ extension UIView {
 }
 
 /// Full-text selection for a message (the transcript itself is paint-only).
-final class SelectTextViewController: UIViewController {
+final class SelectTextViewController: UIViewController, UITextViewDelegate {
     private let text: String
     private let mono: Bool
+    var onQuote: ((String) -> Void)?
 
     init(text: String, title: String = "Select Text", mono: Bool = false) {
         self.text = text
@@ -788,10 +796,21 @@ final class SelectTextViewController: UIViewController {
         tv.textContainerInset = UIEdgeInsets(top: 16, left: 14, bottom: 32, right: 14)
         tv.frame = view.bounds
         tv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        tv.delegate = self
         view.addSubview(tv)
         navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak self] _ in
             self?.dismiss(animated: true)
         })
         if !mono { DispatchQueue.main.async { tv.selectAll(nil) } }
+    }
+
+    func textView(_ textView: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
+        guard let onQuote, range.length > 0 else { return nil }
+        let selected = (textView.text as NSString).substring(with: range)
+        let quote = UIAction(title: "Quote in reply", image: UIImage(systemName: "text.quote")) { [weak self] _ in
+            onQuote(selected)
+            self?.dismiss(animated: true)
+        }
+        return UIMenu(children: [quote] + suggestedActions)
     }
 }

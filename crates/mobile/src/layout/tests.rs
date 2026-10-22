@@ -523,6 +523,18 @@ fn user_attachments_render_as_images_not_trailer_text() {
 }
 
 #[test]
+fn quoted_selections_render_as_a_pill_not_the_block() {
+    let mut w = worker(390.0);
+    let text = zeron_proto::quotes::with_quotes("why this?", &[zeron_proto::quotes::Quote::new("the retry budget")]);
+    w.input = debug_input(vec![DebugEntry { id: "u".into(), user: true, text, streaming: false }], false);
+    let frame = w.pass();
+    let d = frame.display(0).unwrap();
+    assert!(d.text.contains("why this?") && d.text.contains("1 selection"), "{}", d.text);
+    assert!(!d.text.contains("Selected text") && !d.text.contains("retry budget"), "{}", d.text);
+    assert!(d.widgets.iter().any(|w| matches!(&w.kind, display::WidgetKind::Icon { name, .. } if name == "text.quote")));
+}
+
+#[test]
 fn synced_file_attachments_render_as_chips_and_name_pills() {
     // A desktop send mixing an image and ZIPs (one still a queued-upload ref),
     // with composer chips in the prompt. Chipped attachments show as their

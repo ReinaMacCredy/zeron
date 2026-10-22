@@ -551,7 +551,14 @@ impl RowBuilder {
     fn user_row(&mut self, ctx: &mut Ctx, id: &str, content: &str, pending: bool) -> RowCore {
         let key = row_key(&format!("{id}#u"));
         // Shared parser: strips the image trailer *and* hidden Appshot context.
-        let parsed = zeron_client::attachments::parse_user_message(content);
+        let mut parsed = zeron_client::attachments::parse_user_message(content);
+        let mut quoted = Vec::new();
+        for extract in [zeron_proto::quotes::extract_terminal, zeron_proto::quotes::extract] {
+            if let Some((rest, block)) = extract(&parsed.text) {
+                parsed.text = rest;
+                quoted.insert(0, block.label);
+            }
+        }
         let (size, lh) = TYPE.body;
         let style = ctx.typo.style(Family::Sans, Weight::Regular, false, size);
         let lh = ctx.typo.px(lh);
@@ -584,8 +591,10 @@ impl RowBuilder {
             .iter()
             .map(|f| {
                 let name = zeron_proto::attachment_mentions::attachment_display_name(&f.name);
-                (file_icon_asset(name), prepare_plain(ctx, name, mstyle, ctx.typo.px(mlh), ColorRole::Text, WhiteSpace::Pre))
+                (file_icon_asset(name), name)
             })
+            .chain(quoted.iter().map(|label| ("text.quote".to_owned(), label.as_str())))
+            .map(|(icon, name)| (icon, prepare_plain(ctx, name, mstyle, ctx.typo.px(mlh), ColorRole::Text, WhiteSpace::Pre)))
             .collect();
         let expanded = self.expanded.contains(&key);
         let more = prepare_plain(
