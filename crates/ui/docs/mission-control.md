@@ -117,7 +117,7 @@ The page keeps its place while you are away: go back to it from a chat, and the 
 
 ## Approve the plan
 
-While the lead writes the plan, its card reads **The lead is planning**. Then **Plan ready** on the lead's card shows how many steps there are, and the lead waits. Until you approve, the lead cannot start any step. Click **Approve and run** when it looks right. If you changed the plan and have not sent the changes yet, approving sends them first.
+While the lead writes the plan, its card reads **The lead is planning**. Then **Plan ready** on the lead's card shows how many steps there are, and the lead waits. Until you approve, the lead cannot start any step. Click **Approve and run** when it looks right. If you changed the plan and have not sent the changes yet, approving sends them first. Each step has a role, and [Routing](zeron://docs/routing) decides which agent and model runs it. The lead's chat shows the plan as a card with that estimate, the cost against running every step on the lead's model, and its own **Start mission** button.
 
 With **Decide for me** on, the [Supervisor](zeron://docs/supervisor) may approve the plan for you. The lead card then reads **Approved by the Supervisor · starts in 0:24** for 30 seconds before the lead hears of it, with **Take back**, which returns the plan to review and brings **Approve and run** back. **Take back** stays until the first step starts. After that the card reads **Approved by the Supervisor · steps already started**: change course by editing the plan here or messaging the lead.
 

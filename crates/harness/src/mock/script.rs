@@ -179,7 +179,7 @@ fn journal_turns(content: &str) -> (Vec<Turn>, usize) {
     (turns, skipped)
 }
 
-fn chat_id(mcp: Option<&zeron_proto::McpServer>) -> Option<&str> {
+pub(super) fn chat_id(mcp: Option<&zeron_proto::McpServer>) -> Option<&str> {
     mcp?.args
         .windows(2)
         .find(|pair| pair[0] == "--chat")

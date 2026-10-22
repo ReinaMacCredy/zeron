@@ -114,7 +114,7 @@ background and poll `zeron ui list` until the label shows up (the first build ca
 | `ZERON_DEV_DATA_DIR` | `$ZERON_DEV_ROOT/data` | the bundle's own data (settings, chats, logs) |
 | `ZERON_DEV_BUILD_ONLY=1` | unset | build and sign, do not launch |
 
-Passed through to the app when set: every `ZERON_MOCK_*`, `ZERON_HARNESS`,
+Passed through to the app when set: every `ZERON_MOCK_*`, `ZERON_HARNESS`, `ZERON_FAKE_QUOTA`,
 `ZERON_MOTION_SCALE`, `ZERON_OPEN_ROUTE`, `CODEX_EXECUTABLE`, and the `ZERON_CUA_*` probes.
 `ZERON_AUTO_UPDATE` is not passed, so an upstream release never replaces a Dev bundle.
 Arguments after the script go to the app.

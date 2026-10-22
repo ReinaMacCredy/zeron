@@ -236,7 +236,7 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
     .await;
     let header = |id: &str| {
         format!(
-            "Shop backend\n\nYou lead this task (task id {id}). Break it into steps and run each step on its own thread.\n\n1. Write the plan with the tasks tool: action \"plan\", taskId \"{id}\", steps [{{title, notes}}]. Keep each step small enough for one agent.\n"
+            "Shop backend\n\nYou lead this task (task id {id}). Break it into steps and run each step on its own thread.\n\n1. Write the plan with the tasks tool: action \"plan\", taskId \"{id}\", steps [{{title, notes, role}}]. Keep each step small enough for one agent.\n"
         )
     };
     let run = "Run each step on its own thread with create_thread: prompt set to what the step must do, taskStepId set to the step's id, title optional. Steps that do not depend on each other can run at the same time.";
@@ -245,7 +245,7 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
         prompts.lock().unwrap().as_slice(),
         [
             format!(
-                "{}2. Then stop. The person reviews the plan in Tasks and approves it; you get a message when it is approved.\n3. {run}\n4. Pick the harness and model for each step; orchestrator_capabilities lists them.\n5. {}",
+                "{}2. Then stop. The person reviews the plan in Tasks and approves it; you get a message when it is approved.\n3. {run}\n4. Give each step a role (worker, validator, research, design or general); Zeron runs it on the route set in Settings > Routing. Pass harness or model only when a step needs a specific one.\n5. {}",
                 header("t1"),
                 tail.replace("{n}", "6").replace("{m}", "7")
             ),
@@ -273,7 +273,7 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
     .await;
     let doc_brief = prompts.lock().unwrap()[2].clone();
     assert!(
-        doc_brief.contains("taskId \"t4\", overview, steps [{title, notes}]. The overview is the goal, the approach, and how you will check the result. Each step's notes are its spec: what it builds, where, and how to tell it is done."),
+        doc_brief.contains("taskId \"t4\", overview, steps [{title, notes, role}]. The overview is the goal, the approach, and how you will check the result. Each step's notes are its spec: what it builds, where, and how to tell it is done."),
         "{doc_brief}"
     );
     assert!(core.workspace.task("t4").unwrap().plan_doc);

@@ -1376,6 +1376,7 @@ mod tests {
             subagent_status: status,
             subagent_tail: None,
             html_render: None,
+            delegate_route: None,
         }
     }
 

@@ -264,6 +264,12 @@ impl MockHarness {
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
             .filter(|_| request.prompt.trim() != zeron_proto::RESUME_PROMPT)
+            .filter(|_| {
+                limit_matches(
+                    &request.prompt,
+                    std::env::var("ZERON_MOCK_LIMIT_MATCH").ok().as_deref(),
+                )
+            })
             .map(|secs| {
                 [
                     AgentEvent::Error {
@@ -457,6 +463,38 @@ impl MockHarness {
             }
             _ => Vec::new(),
         };
+        let mut delegate_events = Vec::new();
+        if let (Some(json), Some(server)) = (
+            std::env::var("ZERON_MOCK_DELEGATE").ok(),
+            request.mcp.as_ref(),
+        ) {
+            let calls = delegate_calls(&json, &request.prompt, script::chat_id(Some(server)));
+            for (ix, input) in calls.into_iter().enumerate() {
+                let id = format!("mock-delegate-{ix}");
+                let result = mock_mcp_call(server, "delegate_task", input.clone()).await;
+                if let Ok(view) = serde_json::from_str::<serde_json::Value>(&mock_mcp_text(&result))
+                    && let Some(child) = view["childThreadId"].as_str()
+                {
+                    mark_delegated(child);
+                }
+                delegate_events.extend([
+                    AgentEvent::ToolCall {
+                        id: id.clone(),
+                        call: zeron_proto::ToolCall::Mcp {
+                            server: "zeron".into(),
+                            tool: "delegate_task".into(),
+                            input: Some(input),
+                        },
+                    },
+                    AgentEvent::ToolResult {
+                        id,
+                        is_error: mock_mcp_failed(&result),
+                        output: Some(mock_mcp_text(&result)),
+                        diff: None,
+                    },
+                ]);
+            }
+        }
         // Dev/testing knob: `ZERON_MOCK_SUBAGENT=1` appends two spawn chips
         // whose nested traffic arrives as tagged `AgentEvent::Subagent`
         // events — the only data-side way to put spawn chips (running → done)
@@ -832,6 +870,7 @@ impl MockHarness {
             .chain(subagent_events)
             .chain(read_file_events)
             .chain(html_render_events)
+            .chain(delegate_events)
             .chain(reply_event)
             .chain(todo_events)
             .chain(code_event)
@@ -884,6 +923,41 @@ impl MockHarness {
             })
             .boxed())
     }
+}
+
+fn limit_matches(prompt: &str, needle: Option<&str>) -> bool {
+    needle
+        .filter(|needle| !needle.is_empty())
+        .is_none_or(|needle| prompt.contains(needle))
+}
+
+static MOCK_DELEGATED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+// Once per chat and never in its own children, or wake turns would delegate forever.
+fn delegate_calls(json: &str, prompt: &str, chat: Option<&str>) -> Vec<serde_json::Value> {
+    let calls = match serde_json::from_str(json) {
+        Ok(serde_json::Value::Array(calls)) => calls,
+        Ok(call @ serde_json::Value::Object(_)) => vec![call],
+        _ => return Vec::new(),
+    };
+    let own_child = calls.iter().any(|call| {
+        call["task"]
+            .as_str()
+            .map(str::trim)
+            .is_some_and(|task| !task.is_empty() && prompt.contains(task))
+    });
+    if calls.is_empty() || own_child || !chat.is_some_and(mark_delegated) {
+        return Vec::new();
+    }
+    calls
+}
+
+fn mark_delegated(chat: &str) -> bool {
+    MOCK_DELEGATED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(chat.to_owned())
 }
 
 fn mock_delay() -> std::time::Duration {
@@ -971,5 +1045,53 @@ fn mock_mcp_text(result: &Result<serde_json::Value, String>) -> String {
             .unwrap_or_default()
             .to_owned(),
         Err(error) => error.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mock_limit_match_narrows_the_limit_to_matching_prompts() {
+        assert!(limit_matches("anything", None));
+        assert!(limit_matches("anything", Some("")));
+        assert!(limit_matches(
+            "Act as the test sub-agent for this task.\n\nprobe",
+            Some("probe")
+        ));
+        assert!(!limit_matches("delegate the probe", Some("child-only")));
+    }
+
+    #[test]
+    fn mock_delegate_fires_once_per_chat_and_never_in_its_children() {
+        let one = r#"{"task":"say hi","role":"worker"}"#;
+        assert_eq!(
+            delegate_calls(one, "start", Some("chat-a")),
+            vec![serde_json::json!({"task": "say hi", "role": "worker"})]
+        );
+        assert!(delegate_calls(one, "Delegated task t1 finished.", Some("chat-a")).is_empty());
+        assert!(delegate_calls(one, "say hi", Some("chat-b")).is_empty());
+        assert!(
+            delegate_calls(
+                one,
+                "Act as the worker sub-agent for this task.\n\nsay hi",
+                Some("chat-c")
+            )
+            .is_empty()
+        );
+        assert!(delegate_calls(one, "start", None).is_empty());
+
+        let many =
+            r#"[{"task":"probe the cache"},{"task":"draft notes","target":{"model":"haiku"}}]"#;
+        assert_eq!(
+            delegate_calls(many, "start", Some("chat-d")),
+            vec![
+                serde_json::json!({"task": "probe the cache"}),
+                serde_json::json!({"task": "draft notes", "target": {"model": "haiku"}}),
+            ]
+        );
+        assert!(delegate_calls("not json", "start", Some("chat-e")).is_empty());
+        assert!(delegate_calls("[]", "start", Some("chat-f")).is_empty());
     }
 }

@@ -1038,6 +1038,7 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
             html_render: page,
+            delegate_route: None,
         }
     }
 
@@ -1067,6 +1068,7 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
             html_render: None,
+            delegate_route: None,
         }
     }
 

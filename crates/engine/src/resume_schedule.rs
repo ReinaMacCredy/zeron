@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, watch};
-use zeron_proto::{LimitResume, LimitResumes};
+use zeron_proto::{LimitOffer, LimitResume, LimitResumes, OfferChoice, RouteTarget};
 
 /// Windows reset on the provider's clock, not ours.
 const RESET_SLACK_MS: i64 = 15_000;
@@ -33,6 +33,30 @@ struct Limited {
     #[serde(default)]
     resets_at: Option<i64>,
     auto: bool,
+    #[serde(default)]
+    offer: Option<LimitOffer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Deferred {
+    chat_id: String,
+    at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OfferResolution {
+    Switch,
+    Wait,
+    Hold,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Due {
+    Resume(Continuation),
+    Start(String),
+    Switch(String, RouteTarget),
 }
 
 /// A limit whose reset passed with nothing left to resume it; gone once the chat runs again.
@@ -56,6 +80,8 @@ struct Stored {
     restart_recorded_at: i64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     reset: Vec<Reset>,
+    #[serde(default)]
+    deferred: Vec<Deferred>,
 }
 
 fn enabled() -> bool {
@@ -70,6 +96,7 @@ impl Default for Stored {
             after_restart: Vec::new(),
             restart_recorded_at: 0,
             reset: Vec::new(),
+            deferred: Vec::new(),
         }
     }
 }
@@ -85,16 +112,40 @@ impl Stored {
                     chat_id: entry.at.chat_id.clone(),
                     resets_at: entry.resets_at,
                     auto: entry.auto,
+                    offer: entry.offer.clone(),
                 })
                 .collect(),
         }
     }
 
-    fn take_due(&mut self, now: i64) -> (Vec<Continuation>, Option<i64>) {
+    fn take_due(&mut self, now: i64) -> (Vec<Due>, Option<i64>) {
         let mut due = Vec::new();
         let mut next: Option<i64> = None;
         let mut reset = Vec::new();
-        self.limited.retain(|entry| {
+        self.deferred.retain(|entry| {
+            if entry.at <= now {
+                due.push(Due::Start(entry.chat_id.clone()));
+                return false;
+            }
+            next = Some(next.map_or(entry.at, |next| next.min(entry.at)));
+            true
+        });
+        self.limited.retain_mut(|entry| {
+            if let Some(offer) = &entry.offer
+                && let Some(act_at) = offer.act_at
+            {
+                if act_at > now {
+                    next = Some(next.map_or(act_at, |next| next.min(act_at)));
+                } else {
+                    match (offer.preselect, offer.to.clone()) {
+                        (OfferChoice::Switch, Some(to)) => {
+                            due.push(Due::Switch(entry.at.chat_id.clone(), to));
+                            return false;
+                        }
+                        _ => entry.offer = None,
+                    }
+                }
+            }
             let Some(resets_at) = entry.resets_at else {
                 return true;
             };
@@ -108,8 +159,11 @@ impl Stored {
                 }
                 return true;
             }
+            if !entry.auto && entry.offer.is_some() {
+                return true;
+            }
             if entry.auto {
-                due.push(entry.at.clone());
+                due.push(Due::Resume(entry.at.clone()));
             }
             reset.push(Reset {
                 chat_id: entry.at.chat_id.clone(),
@@ -182,9 +236,57 @@ impl ResumeSchedule {
                 },
                 resets_at,
                 auto,
+                offer: None,
             });
             true
         });
+    }
+
+    pub fn set_offer(&self, chat_id: &str, offer: LimitOffer) {
+        self.update(|stored| {
+            let Some(entry) = stored
+                .limited
+                .iter_mut()
+                .find(|entry| entry.at.chat_id == chat_id)
+            else {
+                return false;
+            };
+            entry.offer = Some(offer);
+            true
+        });
+    }
+
+    pub fn resolve_offer(&self, chat_id: &str, choice: OfferResolution) -> Option<LimitOffer> {
+        let mut taken = None;
+        self.update(|stored| {
+            let Some(at) = stored
+                .limited
+                .iter()
+                .position(|entry| entry.at.chat_id == chat_id && entry.offer.is_some())
+            else {
+                return false;
+            };
+            match choice {
+                OfferResolution::Switch => taken = stored.limited.remove(at).offer,
+                OfferResolution::Wait => taken = stored.limited[at].offer.take(),
+                OfferResolution::Hold => {
+                    if let Some(offer) = stored.limited[at].offer.as_mut() {
+                        offer.act_at = None;
+                        taken = Some(offer.clone());
+                    }
+                }
+            }
+            true
+        });
+        taken
+    }
+
+    pub fn holds(&self, chat_id: &str, now: i64) -> bool {
+        lock(&self.inner.stored).limited.iter().any(|entry| {
+            entry.at.chat_id == chat_id
+                && (entry.offer.is_some()
+                    || (entry.auto && entry.resets_at.is_some_and(|at| at + RESET_SLACK_MS > now)))
+        })
     }
 
     pub fn set_auto(&self, chat_id: &str, auto: bool, now: i64) -> bool {
@@ -209,6 +311,25 @@ impl ResumeSchedule {
             stored.auto_resume = enabled;
             changed
         });
+    }
+
+    pub fn defer_start(&self, chat_id: &str, at: i64) {
+        self.update(|stored| {
+            stored.deferred.retain(|entry| entry.chat_id != chat_id);
+            stored.deferred.push(Deferred {
+                chat_id: chat_id.to_owned(),
+                at,
+            });
+            true
+        });
+    }
+
+    pub fn deferred_until(&self, chat_id: &str) -> Option<i64> {
+        lock(&self.inner.stored)
+            .deferred
+            .iter()
+            .find(|entry| entry.chat_id == chat_id)
+            .map(|entry| entry.at)
     }
 
     pub fn clear(&self, chat_id: &str) {
@@ -266,7 +387,7 @@ impl ResumeSchedule {
 
     pub fn spawn<F, Fut>(&self, fire: F)
     where
-        F: Fn(Continuation) -> Fut + Send + Sync + 'static,
+        F: Fn(Due) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let schedule = self.clone();
@@ -276,12 +397,12 @@ impl ResumeSchedule {
                 let mut due = Vec::new();
                 let mut next = None;
                 schedule.update(|stored| {
-                    let before = stored.limited.len();
+                    let before = (stored.limited.len(), stored.deferred.len());
                     (due, next) = stored.take_due(now);
-                    stored.limited.len() != before
+                    (stored.limited.len(), stored.deferred.len()) != before
                 });
-                for continuation in due {
-                    fire(continuation).await;
+                for due in due {
+                    fire(due).await;
                 }
                 let nap = next.map_or(MAX_NAP, |at| {
                     Duration::from_millis(u64::try_from(at - now).unwrap_or(0)).min(MAX_NAP)
@@ -359,10 +480,10 @@ mod tests {
         let (due, _) = stored.take_due(5_000 + RESET_SLACK_MS);
         assert_eq!(
             due,
-            [Continuation {
+            [Due::Resume(Continuation {
                 chat_id: "future".into(),
                 after_user: Some("u1".into())
-            }]
+            })]
         );
         let left: Vec<_> = stored
             .limited
@@ -411,5 +532,75 @@ mod tests {
                 .take_restart(1_000 + RESTART_FRESH_MS + 1)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_deferred_start_fires_at_its_time_and_survives_reopen() {
+        let (dir, schedule) = schedule();
+        schedule.defer_start("child", 9_000);
+        let reopened = ResumeSchedule::open(dir.path());
+        let mut stored = lock(&reopened.inner.stored);
+        assert_eq!(stored.take_due(8_999), (vec![], Some(9_000)));
+        assert_eq!(stored.take_due(9_000).0, [Due::Start("child".into())]);
+        assert!(stored.deferred.is_empty());
+    }
+
+    fn offer(preselect: OfferChoice, act_at: Option<i64>) -> LimitOffer {
+        LimitOffer {
+            to: Some(RouteTarget {
+                harness: zeron_proto::HarnessId::ClaudeCode,
+                model: Some("claude-opus-5-5".into()),
+                reasoning: None,
+            }),
+            preselect,
+            act_at,
+        }
+    }
+
+    #[test]
+    fn a_due_switch_offer_fires_once_and_a_wait_offer_falls_to_auto_resume() {
+        let (_dir, schedule) = schedule();
+        schedule.note_limit("switch", Some(90_000), None, 1_000);
+        schedule.set_offer("switch", offer(OfferChoice::Switch, Some(2_000)));
+        schedule.note_limit("wait", Some(90_000), None, 1_000);
+        schedule.set_offer("wait", offer(OfferChoice::Wait, Some(2_000)));
+        assert!(schedule.holds("switch", 1_500) && schedule.holds("wait", 1_500));
+        let mut stored = lock(&schedule.inner.stored);
+        assert_eq!(stored.take_due(1_500), (vec![], Some(2_000)));
+        let (due, next) = stored.take_due(2_000);
+        assert_eq!(
+            due,
+            [Due::Switch(
+                "switch".into(),
+                offer(OfferChoice::Switch, None).to.unwrap()
+            )]
+        );
+        assert_eq!(next, Some(90_000 + RESET_SLACK_MS));
+        let wait = stored
+            .limited
+            .iter()
+            .find(|e| e.at.chat_id == "wait")
+            .unwrap();
+        assert!(
+            wait.offer.is_none() && wait.auto,
+            "today's auto-resume stays armed"
+        );
+    }
+
+    #[test]
+    fn hold_clears_the_countdown_and_switch_takes_the_entry() {
+        let (_dir, schedule) = schedule();
+        schedule.note_limit("c", Some(90_000), None, 1_000);
+        schedule.set_offer("c", offer(OfferChoice::Switch, Some(2_000)));
+        let held = schedule.resolve_offer("c", OfferResolution::Hold).unwrap();
+        assert_eq!(held.act_at, None);
+        assert_eq!(schedule.snapshot().chats[0].offer, Some(held));
+        assert!(
+            schedule
+                .resolve_offer("c", OfferResolution::Switch)
+                .is_some()
+        );
+        assert!(schedule.snapshot().chats.is_empty());
+        assert!(!schedule.holds("c", 1_000));
     }
 }
