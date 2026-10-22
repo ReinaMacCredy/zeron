@@ -149,7 +149,7 @@ pub fn usage_pace(window: &AgentUsageWindow, now: DateTime<Utc>) -> Option<Usage
             let eta_ms = (100.0 - used) * duration_ms / projected;
             (eta_ms > 0.0 && eta_ms < remaining_ms)
                 .then(|| {
-                    crate::inbox::resets_in(
+                    zeron_proto::today::resets_in(
                         now + chrono::Duration::milliseconds(eta_ms as i64),
                         now,
                     )

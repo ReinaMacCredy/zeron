@@ -439,7 +439,7 @@ fn window_block(window: &AgentUsageWindow, now: DateTime<Utc>, theme: &Theme) ->
         Some(format!("{}% left", (remaining * 100.0).round() as u32)),
         window
             .resets_at
-            .and_then(|at| crate::inbox::resets_in(at, now))
+            .and_then(|at| zeron_proto::today::resets_in(at, now))
             .map(|left| format!("Resets in {left}")),
         bar,
         foot,

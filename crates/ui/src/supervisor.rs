@@ -14,15 +14,16 @@ use gpui::{
 };
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::supervisor::{
-    CheckTool, InputAsker, InterventionChip, InterventionKind, InterventionTrigger, ItemWhy,
-    LeadQuestion, NeedsYouInput, NeedsYouRow, NextCheckKind, PlanApproval, QuestionState, Raiser,
-    ResourceState, SettledBy, SharedResource, SupervisorEventKind, SupervisorIntervention,
-    SupervisorItem, SupervisorSettings, SupervisorSnapshot, SupervisorState, SupervisorWake,
-    WAKES_PER_HOUR, WakeDelivery, is_supervisor_chat,
+    BriefSender as Sender, CheckTool, InputAsker, InterventionChip, InterventionKind,
+    InterventionTrigger, LeadQuestion, NeedsYouInput, NeedsYouRow, NextCheckKind, PROFILE_ID,
+    PlanApproval, QuestionState, Raiser, ResourceState, SendDest, SettledBy, SharedResource,
+    SupervisorIntervention, SupervisorItem, SupervisorSettings, SupervisorSnapshot,
+    SupervisorState, SupervisorWake, WAKES_PER_HOUR, brief_sender as sender, is_supervisor_chat,
+    profile_config,
 };
 use zeron_proto::{
-    AgentProfile, Chat, ChatConfig, ChatIndicator, PermissionMode, PlanProgress, SandboxLevel,
-    TaskStatus, UserInputAnswer, UserInputQuestion,
+    AgentProfile, Chat, ChatConfig, ChatIndicator, PermissionMode, PlanProgress, TaskStatus,
+    UserInputAnswer, UserInputQuestion,
 };
 use zeron_rpc::methods;
 
@@ -41,7 +42,6 @@ use feed::{Entry, Feed, Filter, Kind, Memory, Row};
 use rail::{RailMode, RailMotion, mission_tone};
 
 pub(crate) const PLACEHOLDER: &str = "Talk to the Supervisor about architecture and direction…";
-const PROFILE_ID: &str = "slp-supervisor";
 const NOT_CONNECTED: &str = "Not connected to the engine";
 const WATCH_EVERYTHING: &str = "everything";
 const NO_AGENT: &str =
@@ -53,7 +53,6 @@ const TITLE_CHARS: usize = 120;
 const RECENTLY_ACTIVE: Duration = Duration::from_secs(180);
 const NO_EFFECT_AFTER_MINUTES: i64 = 10;
 const EARLIER_ROWS: usize = 50;
-const CONVERSATION_HEIGHT: f32 = 320.0;
 const PAGE_WIDTH: f32 = 760.0;
 const EASE_PAGE: CubicBezier = CubicBezier::new(0.2, 0.9, 0.3, 1.0);
 const ENTER: MotionSpec = MotionSpec::new(340, EASE_PAGE);
@@ -102,43 +101,6 @@ pub(crate) fn needs_you_route(
     }
 }
 
-pub(crate) fn row_key(row: &NeedsYouRow) -> String {
-    match row {
-        NeedsYouRow::Item(item) => format!("item:{}", item.id),
-        NeedsYouRow::Input(input) => input_key(input),
-    }
-}
-
-fn input_key(input: &NeedsYouInput) -> String {
-    format!("input:{}:{}", input.chat_id, input.request_id)
-}
-
-pub(crate) fn row_origin(row: &NeedsYouRow) -> (Option<&str>, &str) {
-    match row {
-        NeedsYouRow::Item(item) => (item.task_id.as_deref(), item.raiser_chat_id.as_str()),
-        NeedsYouRow::Input(input) => (input.task_id.as_deref(), input.chat_id.as_str()),
-    }
-}
-
-pub(crate) fn row_title(row: &NeedsYouRow) -> String {
-    match row {
-        NeedsYouRow::Item(item) => clip_to(&item.title, TITLE_CHARS),
-        NeedsYouRow::Input(input) => input_title(&input.questions),
-    }
-}
-
-fn input_title(questions: &[UserInputQuestion]) -> String {
-    let Some(first) = questions.first() else {
-        return "A question".into();
-    };
-    let text = if first.header.trim().is_empty() {
-        &first.question
-    } else {
-        &first.header
-    };
-    clip_to(&crate::transcript::single_line(text), TITLE_CHARS)
-}
-
 pub(crate) fn fresh_needs_you(
     seen: &mut Option<HashSet<String>>,
     rows: &[NeedsYouRow],
@@ -146,12 +108,12 @@ pub(crate) fn fresh_needs_you(
     let fresh = match seen.as_ref() {
         Some(seen) => rows
             .iter()
-            .filter(|row| !seen.contains(&row_key(row)))
+            .filter(|row| !seen.contains(&row.key()))
             .cloned()
             .collect(),
         None => Vec::new(),
     };
-    *seen = Some(rows.iter().map(row_key).collect());
+    *seen = Some(rows.iter().map(NeedsYouRow::key).collect());
     fresh
 }
 
@@ -173,98 +135,34 @@ pub(crate) fn no_effect_yet(row: &SupervisorIntervention, now: DateTime<Utc>) ->
     matches!(row.chips.as_slice(), [InterventionChip::Sent]) && now > no_effect_since(row.at)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ApprovalState {
-    Held { secs: i64 },
-    Sent,
-    Started,
-    TakenBack,
-}
-
-impl ApprovalState {
-    pub(crate) fn line(self) -> String {
-        match self {
-            Self::Held { secs } => format!(
-                "Approved by the Supervisor · starts in {}:{:02}",
-                secs / 60,
-                secs % 60
-            ),
-            Self::Sent => "Approved by the Supervisor · no step has started yet".into(),
-            Self::Started => "Approved by the Supervisor · steps already started. To change course, edit the plan in Mission Control or message the lead.".into(),
-            Self::TakenBack => "You took this approval back · the plan went back to review".into(),
-        }
-    }
-
-    pub(crate) fn can_take_back(self) -> bool {
-        matches!(self, Self::Held { .. } | Self::Sent)
-    }
-}
+pub(crate) use zeron_proto::mission::{ApprovalState, HELD_APPROVAL};
 
 pub(crate) fn approval_state(
     row: &SupervisorIntervention,
     state: &AppState,
     now: DateTime<Utc>,
 ) -> Option<ApprovalState> {
-    let task_id = row.task_id.as_deref()?;
-    let started = || {
-        state.task_steps.iter().any(|step| {
-            step.task_id == task_id
-                && !step.deleted
-                && (step.chat_id.is_some() || step.outcome.is_some())
-        })
-    };
-    Some(match row.approval.as_ref()? {
-        PlanApproval::TakenBack { .. } => ApprovalState::TakenBack,
-        _ if started() => ApprovalState::Started,
-        PlanApproval::Held { starts_at } => ApprovalState::Held {
-            secs: ((*starts_at - now).num_milliseconds().max(0) + 999) / 1000,
-        },
-        PlanApproval::Sent => ApprovalState::Sent,
-    })
+    zeron_proto::mission::approval_state(row, &state.task_steps, now)
 }
 
-/// The Supervisor's newest approval of the mission's plan, as the person can still act on it.
 pub(crate) fn plan_approval(
     state: &AppState,
     task_id: &str,
     now: DateTime<Utc>,
 ) -> Option<ApprovalState> {
-    let row = state
-        .supervisor
-        .as_ref()?
-        .interventions
-        .iter()
-        .find(|row| {
-            row.kind == InterventionKind::Approve && row.task_id.as_deref() == Some(task_id)
-        })?;
-    approval_state(row, state, now)
+    zeron_proto::mission::plan_approval(
+        &state.supervisor.as_ref()?.interventions,
+        &state.task_steps,
+        task_id,
+        now,
+    )
 }
-
-pub(crate) const HELD_APPROVAL: &str = "Plan approved · can take back";
 
 pub(crate) fn approval_held(state: &AppState, task_id: &str, now: DateTime<Utc>) -> bool {
     matches!(
         plan_approval(state, task_id, now),
         Some(ApprovalState::Held { .. })
     )
-}
-
-pub(crate) fn settings_patch(
-    before: Option<SupervisorSettings>,
-    after: SupervisorSettings,
-) -> serde_json::Value {
-    let after = serde_json::to_value(after).unwrap_or_default();
-    match (before.map(serde_json::to_value), after) {
-        (Some(Ok(serde_json::Value::Object(before))), serde_json::Value::Object(after)) => {
-            serde_json::Value::Object(
-                after
-                    .into_iter()
-                    .filter(|(key, value)| before.get(key) != Some(value))
-                    .collect(),
-            )
-        }
-        (_, after) => after,
-    }
 }
 
 fn take_back_key(task_id: &str) -> String {
@@ -361,63 +259,19 @@ pub(crate) fn tree_watch(state: &AppState, root: &str) -> Watch {
         .find(|chat| chat.id == root)
         .map(|chat| chat.device_id.as_str());
     let local = state.local_device_id.as_deref();
-    let snapshot = state.supervisor.as_ref();
-    if let Some(task) = zeron_proto::plan_of_chat(&state.tasks, root) {
-        let unwatched = snapshot.map_or(&[][..], |snapshot| snapshot.unwatched.as_slice());
-        return watch_of(&task.id, host, local, unwatched);
+    if let (Some(host), Some(local)) = (host, local)
+        && host != local
+    {
+        return Watch::Elsewhere(host.to_owned());
     }
-    match (host, local) {
-        (Some(host), Some(local)) if host != local => Watch::Elsewhere(host.to_owned()),
-        _ if snapshot.is_some_and(|snapshot| {
-            snapshot.watch_everything || snapshot.watched_roots.iter().any(|id| id == root)
-        }) =>
-        {
-            Watch::Watched
-        }
-        _ => Watch::Unwatched,
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Sender {
-    You,
-    Lead,
-    Supervisor,
-    Step(String),
-    Itself,
-    Thread,
-}
-
-impl Sender {
-    fn tag(&self) -> SharedString {
-        match self {
-            Self::You => "From you".into(),
-            Self::Lead => "From Lead".into(),
-            Self::Supervisor => "From Supervisor".into(),
-            Self::Step(label) => format!("From {label}").into(),
-            Self::Itself => "Auto-continue".into(),
-            Self::Thread => "From another thread".into(),
-        }
-    }
-}
-
-fn sender(
-    from: Option<&str>,
-    own: &str,
-    lead: Option<&str>,
-    step_label: &dyn Fn(&str) -> Option<String>,
-) -> Sender {
-    let Some(from) = from else {
-        return Sender::You;
-    };
-    if is_supervisor_chat(from) {
-        Sender::Supervisor
-    } else if from == own {
-        Sender::Itself
-    } else if Some(from) == lead {
-        Sender::Lead
+    let watched = state.supervisor.as_ref().map_or(
+        zeron_proto::plan_of_chat(&state.tasks, root).is_some(),
+        |snapshot| snapshot.watches(&state.tasks, root),
+    );
+    if watched {
+        Watch::Watched
     } else {
-        step_label(from).map_or(Sender::Thread, Sender::Step)
+        Watch::Unwatched
     }
 }
 
@@ -452,47 +306,6 @@ fn messages_it_got(
             at: DateTime::from_timestamp_millis(entry.created_at),
         })
         .collect()
-}
-
-fn kind_word(kind: SupervisorEventKind) -> &'static str {
-    match kind {
-        SupervisorEventKind::StepFailed => "step failed",
-        SupervisorEventKind::NeedsYou => "needs you",
-        SupervisorEventKind::MissionDone => "mission done",
-        SupervisorEventKind::MissionSilent => "mission silent",
-        SupervisorEventKind::LeadSilent => "lead silent",
-        SupervisorEventKind::Escalation => "lead escalated",
-        SupervisorEventKind::PlanEdited => "plan edited",
-        SupervisorEventKind::Resource => "resource contention",
-        SupervisorEventKind::Heartbeat => "check-in",
-        SupervisorEventKind::NodeFailed => "thread failed",
-        SupervisorEventKind::NodeFinished => "delegated task ended",
-        SupervisorEventKind::QuestionWaiting => "question waiting",
-        SupervisorEventKind::Dirty => "uncommitted files",
-        SupervisorEventKind::Unmerged => "unmerged branch",
-        SupervisorEventKind::LimitIdle => "idle after limit reset",
-        SupervisorEventKind::LostWake => "lost wake",
-        SupervisorEventKind::MergeBlocked => "merge blocked",
-    }
-}
-
-fn delivery_label(delivery: &WakeDelivery) -> String {
-    match delivery {
-        WakeDelivery::Started => "Started a turn".into(),
-        WakeDelivery::Steered => "Steered its turn".into(),
-        WakeDelivery::HeldForTurnEnd => "Held for turn end".into(),
-        WakeDelivery::HeldByStop => "Held by your Stop".into(),
-        WakeDelivery::Failed { error } => format!("Failed: {error}"),
-        WakeDelivery::Dropped => "Dropped".into(),
-    }
-}
-
-fn why_label(why: ItemWhy) -> &'static str {
-    match why {
-        ItemWhy::Goal => "Goal",
-        ItemWhy::Spend => "Spend",
-        ItemWhy::Decision => "Decision",
-    }
 }
 
 fn intervention_kind_label(kind: InterventionKind) -> &'static str {
@@ -585,75 +398,32 @@ fn step_name(state: &AppState, task_id: &str, step_id: &str, now: DateTime<Utc>)
     ))
 }
 
-fn mission_title(state: &AppState, task_id: Option<&str>) -> Option<String> {
-    let task_id = task_id?;
-    state
-        .tasks
-        .iter()
-        .find(|task| task.id == task_id)
-        .map(|task| task.title.clone())
+fn names(
+    state: &AppState,
+    now: DateTime<Utc>,
+) -> zeron_proto::mission::Names<'_, impl Fn(&zeron_proto::Task) -> Rollup + '_> {
+    zeron_proto::mission::Names {
+        chats: &state.chats,
+        tasks: &state.tasks,
+        steps: &state.task_steps,
+        plan_of: move |task: &zeron_proto::Task| rollup(state, task, now),
+    }
 }
 
-fn plan_thread(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> Option<(String, String)> {
-    let thread = crate::tasks::mission_thread(state, chat_id, now)?;
-    let who = match thread.role {
-        crate::tasks::MissionRole::Lead => "Lead".to_owned(),
-        crate::tasks::MissionRole::Step { step_id, label } => {
-            let step = state.task_steps.iter().find(|step| step.id == step_id)?;
-            format!("{label} · {}", step.title)
-        }
-    };
-    Some((who, thread.title))
+fn mission_title(state: &AppState, task_id: Option<&str>) -> Option<String> {
+    names(state, Utc::now()).mission_title(task_id)
 }
 
 fn thread_name(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> String {
-    if is_supervisor_chat(chat_id) {
-        return "Supervisor".into();
-    }
-    if let Some((who, mission)) = plan_thread(state, chat_id, now) {
-        return format!("{who} · {mission}");
-    }
-    state
-        .chats
-        .iter()
-        .find(|chat| chat.id == chat_id)
-        .map(|chat| crate::transcript::single_line(&crate::home::chat_title(chat)))
-        .unwrap_or_else(|| "a thread".into())
+    names(state, now).thread_name(chat_id)
 }
 
 fn asker_name(input: &NeedsYouInput, state: &AppState, now: DateTime<Utc>) -> String {
-    if matches!(input.asker, InputAsker::Step | InputAsker::Lead)
-        && let Some((who, mission)) = plan_thread(state, &input.chat_id, now)
-    {
-        return format!("{who} · {mission}");
-    }
-    let mission = mission_title(state, input.task_id.as_deref());
-    let who = match input.asker {
-        InputAsker::Supervisor => return "Supervisor".into(),
-        InputAsker::Thread => {
-            let name = thread_name(state, &input.chat_id, now);
-            let root = tree_root(state, &input.chat_id)
-                .filter(|root| root.id != input.chat_id)
-                .map(|root| crate::transcript::single_line(&crate::home::chat_title(root)));
-            match root {
-                Some(root) => format!("{name} · {root}"),
-                None => name,
-            }
-        }
-        InputAsker::Step => "A step".into(),
-        InputAsker::Lead => "Lead".into(),
-    };
-    match mission {
-        Some(mission) => format!("{who} · {mission}"),
-        None => who,
-    }
+    names(state, now).asker_name(input)
 }
 
 fn tree_root<'a>(state: &'a AppState, chat_id: &str) -> Option<&'a Chat> {
-    let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
-    zeron_proto::tree_path(chat, &state.chats, &state.tasks, &state.task_steps)
-        .last()
-        .copied()
+    names(state, Utc::now()).tree_root(chat_id)
 }
 
 fn root_id(state: &AppState) -> impl Fn(&str) -> Option<String> + '_ {
@@ -667,8 +437,8 @@ fn clock(at: DateTime<Utc>) -> String {
 fn wake_reason(wake: &SupervisorWake) -> String {
     match wake.events.as_slice() {
         [] => "nothing new".into(),
-        [one] => kind_word(one.kind).into(),
-        [first, rest @ ..] => format!("{} and {} more", kind_word(first.kind), rest.len()),
+        [one] => one.kind.word().into(),
+        [first, rest @ ..] => format!("{} and {} more", first.kind.word(), rest.len()),
     }
 }
 
@@ -710,13 +480,6 @@ enum Part {
 
 fn text(value: impl Into<String>) -> Part {
     Part::Text(value.into())
-}
-
-fn wakes_this_hour(wakes: &[SupervisorWake], now: DateTime<Utc>) -> usize {
-    wakes
-        .iter()
-        .filter(|wake| wake.woke() && now - wake.at < chrono::Duration::hours(1))
-        .count()
 }
 
 fn target_name(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> String {
@@ -831,24 +594,13 @@ fn woke_parts(wake: &SupervisorWake, state: &AppState) -> Vec<Part> {
     }
 }
 
-fn held_wakes(snapshot: &SupervisorSnapshot) -> Vec<&SupervisorWake> {
-    let mut held: Vec<&SupervisorWake> = snapshot
-        .wakes
-        .iter()
-        .filter(|wake| wake.delivery == WakeDelivery::HeldByStop)
-        .take(snapshot.waiting)
-        .collect();
-    held.reverse();
-    held
-}
-
 fn held_line(held: &[&SupervisorWake]) -> String {
     let Some(first) = held.first() else {
         return "Nothing held yet. New wakes wait here until you resume.".into();
     };
     let mut reasons: Vec<&str> = Vec::new();
     for event in held.iter().flat_map(|wake| &wake.events) {
-        let word = kind_word(event.kind);
+        let word = event.kind.word();
         if !reasons.contains(&word) {
             reasons.push(word);
         }
@@ -970,21 +722,6 @@ fn clip_to(text: &str, chars: usize) -> String {
     match text.char_indices().nth(chars) {
         Some((at, _)) => format!("{}…", &text[..at]),
         None => text.to_owned(),
-    }
-}
-
-fn profile_config(profile: &AgentProfile) -> ChatConfig {
-    ChatConfig {
-        harness: profile.harness,
-        model: profile.model.clone(),
-        reasoning: profile.reasoning,
-        model_options: profile.model_options.clone(),
-        sandbox: SandboxLevel::WorkspaceWrite,
-        permission_mode: profile.permission_mode.unwrap_or(PermissionMode::Full),
-        instructions: profile.instructions.clone(),
-        profile_id: Some(profile.id.clone()),
-        instance_id: None,
-        disabled_tools: profile.disabled_tools.clone(),
     }
 }
 
@@ -1247,6 +984,8 @@ pub struct SupervisorPage {
     last_sheet: Option<String>,
     focus: FocusHandle,
     width: Rc<Cell<f32>>,
+    header_bottom: Rc<Cell<f32>>,
+    region_top: Rc<Cell<f32>>,
     rail_pref: Option<bool>,
     rail: Option<RailMotion>,
     status: Option<StatusMotion>,
@@ -1324,6 +1063,8 @@ impl SupervisorPage {
             last_sheet: None,
             focus: cx.focus_handle(),
             width: Rc::default(),
+            header_bottom: Rc::default(),
+            region_top: Rc::default(),
             rail_pref: None,
             rail: None,
             status: None,
@@ -1455,8 +1196,8 @@ impl SupervisorPage {
                 .supervisor
                 .iter()
                 .flat_map(|snapshot| &snapshot.needs_you)
-                .filter(|row| arrived.contains(&row_key(row)))
-                .filter_map(|row| feed::needs_group(row, &root_id(state)))
+                .filter(|row| arrived.contains(&row.key()))
+                .filter_map(|row| row.group(&root_id(state)))
                 .collect();
             for task in tasks {
                 self.glows
@@ -1470,7 +1211,7 @@ impl SupervisorPage {
             .read(cx)
             .supervisor
             .as_ref()
-            .map(|snapshot| snapshot.needs_you.iter().map(row_key).collect())
+            .map(|snapshot| snapshot.needs_you.iter().map(NeedsYouRow::key).collect())
             .unwrap_or_default();
         let rows = &self.rows;
         self.replies
@@ -1575,13 +1316,13 @@ impl SupervisorPage {
             .read(cx)
             .supervisor
             .as_ref()
-            .is_some_and(|snapshot| snapshot.needs_you.iter().any(|row| row_key(row) == key))
+            .is_some_and(|snapshot| snapshot.needs_you.iter().any(|row| row.key() == key))
     }
 
     fn ready(&self, row: &NeedsYouRow) -> Option<(String, Option<Vec<UserInputAnswer>>)> {
         match row {
             NeedsYouRow::Item(_) => {
-                let choice = self.staged(&row_key(row), "").into_iter().next()?;
+                let choice = self.staged(&row.key(), "").into_iter().next()?;
                 Some((choice, None))
             }
             NeedsYouRow::Input(input) => {
@@ -1598,13 +1339,13 @@ impl SupervisorPage {
             .values()
             .filter(|motion| motion.row.group.as_deref().unwrap_or_default() == group)
             .filter_map(|motion| inbox::sheet_row(&motion.row.entry))
-            .filter(|row| self.still_open(&row_key(row), cx))
+            .filter(|row| self.still_open(&row.key(), cx))
             .filter(|row| {
                 self.replies
-                    .get(&row_key(row))
+                    .get(&row.key())
                     .is_none_or(|reply| reply.failed())
             })
-            .filter_map(|row| Some((row_key(row), self.ready(row)?.0)))
+            .filter_map(|row| Some((row.key(), self.ready(row)?.0)))
             .collect();
         if ready.is_empty() {
             return;
@@ -1651,14 +1392,14 @@ impl SupervisorPage {
             .filter_map(|motion| inbox::sheet_row(&motion.row.entry).cloned())
             .filter(|row| {
                 self.replies
-                    .get(&row_key(row))
+                    .get(&row.key())
                     .is_some_and(|reply| reply.stage == Stage::Held)
             })
             .collect();
         let mut items = Vec::new();
         let mut inputs = Vec::new();
         for row in &held {
-            let key = row_key(row);
+            let key = row.key();
             let ready = self.ready(row).filter(|_| self.still_open(&key, cx));
             let Some((choice, answers)) = ready else {
                 self.replies.remove(&key);
@@ -1795,7 +1536,7 @@ impl SupervisorPage {
     }
 
     fn picked_answers(&self, input: &NeedsYouInput) -> Option<Vec<UserInputAnswer>> {
-        let picks = self.picks.get(&input_key(input))?;
+        let picks = self.picks.get(&input.key())?;
         input
             .questions
             .iter()
@@ -1876,7 +1617,7 @@ impl SupervisorPage {
             return;
         };
         let previous = self.settings.ready().copied();
-        let patch = settings_patch(previous, settings);
+        let patch = zeron_proto::supervisor::settings_patch(previous, settings);
         self.settings = Loadable::Ready(settings);
         self.settings_error = None;
         self.save_task = Some(cx.spawn(async move |page, cx| {
@@ -2697,7 +2438,7 @@ impl SupervisorPage {
             let mode = mode(snapshot, &self.ensure);
             let empty = SupervisorSnapshot::default();
             let snap = snapshot.unwrap_or(&empty);
-            let held: Vec<String> = held_wakes(snap).iter().map(|w| w.id.clone()).collect();
+            let held: Vec<String> = snap.held_wakes().iter().map(|w| w.id.clone()).collect();
             let turn_since = self
                 .chat_id(cx)
                 .and_then(|id| state.session_for(&id))
@@ -2711,7 +2452,7 @@ impl SupervisorPage {
                     ),
                     Some(format!(
                         "{} of {WAKES_PER_HOUR} wakes this hour",
-                        wakes_this_hour(&snap.wakes, utc)
+                        zeron_proto::supervisor::wakes_this_hour(&snap.wakes, utc)
                     )),
                     vec![
                         ("Last", last_parts(snap, state, utc)),
@@ -2746,7 +2487,7 @@ impl SupervisorPage {
                             plural(snap.waiting, "wake", "wakes")
                         )
                     }),
-                    vec![("Held", vec![text(held_line(&held_wakes(snap)))])],
+                    vec![("Held", vec![text(held_line(&snap.held_wakes()))])],
                 ),
                 Mode::Off => (
                     ("Off", String::new()),
@@ -3444,13 +3185,98 @@ impl SupervisorPage {
         )
     }
 
-    fn render_bottom(
+    fn render_conversation(
         &self,
         now: Instant,
         theme: &Theme,
-        window: &Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Option<AnyElement> {
+        let open = self.conversation.value_at(now);
+        let pane = self.pane.as_ref().filter(|_| open > 0.0)?;
+        let top = (self.header_bottom.get() - self.region_top.get()).max(0.0);
+        let close = div()
+            .id("supervisor-conversation-close")
+            .debug_selector(|| "supervisor-conversation-close".into())
+            .role(gpui::Role::Button)
+            .aria_label("Close conversation")
+            .flex_none()
+            .cursor_pointer()
+            .p(px(4.0))
+            .rounded(px(6.0))
+            .hover(|s| s.bg(theme.glass_hover()))
+            .child(
+                icon(icons::CLOSE)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            )
+            .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.toggle_conversation(cx)));
+        let card = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(theme.bg)
+            .border_1()
+            .border_b_0()
+            .border_color(theme.border)
+            .rounded_t(px(12.0))
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px(px(14.0))
+                    .py(px(8.0))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_size(ui_rems(12.5))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child("Conversation")
+                    .child(close),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(pane.transcript.clone()),
+            );
+        Some(
+            div()
+                .id("supervisor-conversation")
+                .debug_selector(|| "supervisor-conversation".into())
+                .absolute()
+                .top(px(top))
+                .bottom_0()
+                .left_0()
+                .right_0()
+                .overflow_hidden()
+                .occlude()
+                .child(
+                    div()
+                        .absolute()
+                        .top(relative(1.0 - open))
+                        .left_0()
+                        .right_0()
+                        .h_full()
+                        .opacity(open)
+                        .child(
+                            div()
+                                .size_full()
+                                .max_w(px(PAGE_WIDTH))
+                                .mx_auto()
+                                .px(px(24.0))
+                                .child(card),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_bottom(&self, now: Instant, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let column = div()
             .flex_none()
             .w_full()
@@ -3474,8 +3300,6 @@ impl SupervisorPage {
             self.chat_id(cx)
                 .and_then(|id| last_message(state.sub_transcript(&id), wakes))
         };
-        let height =
-            (f32::from(window.viewport_size().height) * 0.4).clamp(160.0, CONVERSATION_HEIGHT);
         let tab = preview.map(|preview| {
             crate::queue::queue_panel_surface(theme, false)
                 .id("supervisor-conversation-toggle")
@@ -3521,25 +3345,6 @@ impl SupervisorPage {
                 .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.toggle_conversation(cx)))
         });
         column
-            .when(open > 0.0, |el| {
-                el.child(
-                    div()
-                        .id("supervisor-conversation")
-                        .debug_selector(|| "supervisor-conversation".into())
-                        .flex_none()
-                        .w_full()
-                        .h(px(height * open))
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .w_full()
-                                .h(px(height))
-                                .flex()
-                                .flex_col()
-                                .child(pane.transcript.clone()),
-                        ),
-                )
-            })
             .child(
                 div()
                     .relative()
@@ -4055,7 +3860,7 @@ fn render_wake_log(wakes: &[SupervisorWake], theme: &Theme) -> AnyElement {
                                     "{} {} · {}",
                                     wake.events.len(),
                                     plural(wake.events.len(), "event", "events"),
-                                    delivery_label(&wake.delivery)
+                                    wake.delivery.label()
                                 )),
                         ),
                 )
@@ -4133,10 +3938,12 @@ impl Render for SupervisorPage {
                 Mode::Stopped | Mode::Off | Mode::Failed(_) | Mode::Blocked(_)
             ))
         .then(|| self.render_status(watched, false, now, &theme, cx));
+        let header_probe = self.header_bottom.clone();
         let header = enter_block(
             self.enter_progress(0, now),
             self.render_header(feed, inline_status, now, &theme, cx),
-        );
+        )
+        .child(probe(header_probe, |bounds| f32::from(bounds.bottom())));
         let body = enter_block(
             self.enter_progress(1, now),
             self.render_inbox(feed, missions, calm, now, cx),
@@ -4153,7 +3960,8 @@ impl Render for SupervisorPage {
                 .overflow_y_scroll()
                 .child(column),
         );
-        let bottom = self.render_bottom(now, &theme, window, cx);
+        let bottom = self.render_bottom(now, &theme, cx);
+        let conversation = self.render_conversation(now, &theme, cx);
         let rail = enter_block(
             self.enter_progress(2, now),
             self.render_rail(&frame, feed, missions, watched, now, &theme, cx),
@@ -4167,7 +3975,6 @@ impl Render for SupervisorPage {
             window.request_animation_frame();
         }
         self.view = Some(view);
-        let probe = self.width.clone();
         div()
             .id("supervisor-page")
             .debug_selector(|| "supervisor-page".into())
@@ -4194,26 +4001,40 @@ impl Render for SupervisorPage {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .child(div().flex_1().min_h_0().child(scroll))
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .child(scroll)
+                            .children(conversation)
+                            .child(probe(self.region_top.clone(), |bounds| {
+                                f32::from(bounds.top())
+                            })),
+                    )
                     .child(bottom),
             )
             .child(rail)
             .children(drawer)
-            .child(
-                canvas(
-                    move |bounds, window, _| {
-                        let width = f32::from(bounds.size.width);
-                        if (probe.get() - width).abs() > 0.5 {
-                            probe.set(width);
-                            window.request_animation_frame();
-                        }
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .inset_0(),
-            )
+            .child(probe(self.width.clone(), |bounds| {
+                f32::from(bounds.size.width)
+            }))
     }
+}
+
+fn probe(cell: Rc<Cell<f32>>, read: fn(gpui::Bounds<gpui::Pixels>) -> f32) -> impl IntoElement {
+    canvas(
+        move |bounds, window, _| {
+            let value = read(bounds);
+            if (cell.get() - value).abs() > 0.5 {
+                cell.set(value);
+                window.request_animation_frame();
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .inset_0()
 }
 
 fn enter_block(progress: f32, element: impl IntoElement) -> gpui::Div {
@@ -4227,6 +4048,7 @@ fn enter_block(progress: f32, element: impl IntoElement) -> gpui::Div {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeron_proto::supervisor::ItemWhy;
 
     fn entry(id: &str, role: MessageRole, from: Option<&str>, text: &str) -> SessionMessageEntry {
         SessionMessageEntry {
@@ -4405,11 +4227,11 @@ mod tests {
             ..before
         };
         assert_eq!(
-            settings_patch(Some(before), after),
+            zeron_proto::supervisor::settings_patch(Some(before), after),
             serde_json::json!({ "decideForMe": after.decide_for_me })
         );
         assert_eq!(
-            settings_patch(None, after),
+            zeron_proto::supervisor::settings_patch(None, after),
             serde_json::to_value(after).unwrap()
         );
     }
@@ -4454,7 +4276,7 @@ mod tests {
     #[test]
     fn the_first_snapshot_seeds_silently_and_later_ones_report_new_rows() {
         let mut seen = None;
-        let keys = |rows: Vec<NeedsYouRow>| rows.iter().map(row_key).collect::<Vec<_>>();
+        let keys = |rows: Vec<NeedsYouRow>| rows.iter().map(NeedsYouRow::key).collect::<Vec<_>>();
         assert!(fresh_needs_you(&mut seen, &[item("a")]).is_empty());
         assert_eq!(
             keys(fresh_needs_you(&mut seen, &[item("a"), item("b")])),

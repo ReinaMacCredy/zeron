@@ -11,8 +11,10 @@
 
 mod fixtures;
 mod git;
+mod missions;
 mod png;
 mod transcripts;
+mod pages;
 mod visuals;
 
 use std::collections::{HashMap, HashSet};
@@ -83,6 +85,8 @@ pub(crate) struct DemoHost {
     leases: Mutex<HashMap<String, Lease>>,
     uploads: Mutex<HashMap<String, Arc<Vec<u8>>>>,
     forks: Mutex<HashMap<String, Vec<SessionMessageEntry>>>,
+    supervisor_settings: Mutex<HashMap<String, zeron_proto::supervisor::SupervisorSettings>>,
+    refused_sends: Mutex<HashSet<String>>,
     rng: Mutex<Rng>,
     cancel: Mutex<Option<CancellationToken>>,
     git: Mutex<git::GitDemo>,
@@ -105,6 +109,8 @@ impl DemoHost {
             leases: Mutex::new(HashMap::new()),
             uploads: Mutex::new(HashMap::new()),
             forks: Mutex::new(HashMap::new()),
+            supervisor_settings: Mutex::new(HashMap::new()),
+            refused_sends: Mutex::new(HashSet::new()),
             rng: Mutex::new(Rng(0x9e37_79b9_7f4a_7c15)),
             cancel: Mutex::new(None),
             git: Mutex::new(git::GitDemo::new()),
@@ -133,6 +139,14 @@ impl DemoHost {
         }
         for (device, limits) in seeded.limits {
             client.workspace.put_limits(device, limits);
+        }
+        for (device, days) in fixtures::SETTLE_DAYS {
+            client.workspace.put_settle_days(device, days);
+        }
+        if seeded.missions {
+            for (device, snapshot) in missions::supervisors(Utc::now()) {
+                client.workspace.put_supervisor(device, snapshot);
+            }
         }
         self.beat_presence(client);
         Ok(())
@@ -379,6 +393,7 @@ impl DemoHost {
                     });
                     let _ =
                         core.write(|doc| doc.resolve_input(&request_id, Some(&answers), now_ms()));
+                    missions::input_answered(&client, chat_id, &request_id);
                     let steps = if consent {
                         transcripts::consent_answered(crate::computer::consent_outcome(
                             true,
@@ -852,7 +867,6 @@ impl DemoHost {
                 return Ok(serde_json::json!({ "compaction": "native", "branching": true }));
             }
             m::FORK_CHAT => return self.fork_chat(&client, &params),
-            m::LIST_AGENT_ACCOUNTS => return Ok(demo_accounts()),
             m::FETCH_TOOL_BLOB => return Ok(demo_blob(&params)),
             m::RESOLVE_LIMIT_OFFER | m::SET_LIMIT_RESUME => {
                 return Ok(limit_rpc(&client, method == m::SET_LIMIT_RESUME, &params));
@@ -860,6 +874,19 @@ impl DemoHost {
             _ => {}
         }
         if let Some(reply) = lock(&self.git).handle(method, &params) {
+            return reply;
+        }
+        if let Some(reply) = fixtures::today_reply(device_id, method, now_ms()) {
+            return Ok(reply);
+        }
+        if let Some(reply) = missions::host_call(
+            &client,
+            &self.supervisor_settings,
+            &self.refused_sends,
+            device_id,
+            method,
+            &params,
+        ) {
             return reply;
         }
         let chat_id = params["chatId"].as_str().unwrap_or_default().to_owned();
@@ -1244,6 +1271,9 @@ impl DemoHost {
         if let Some(bytes) = visuals::read(path) {
             return Ok(Arc::new(bytes));
         }
+        if let Some(bytes) = pages::read(path) {
+            return Ok(Arc::new(bytes));
+        }
         transcripts::DEMO_IMAGES
             .iter()
             .find(|(p, ..)| *p == path)
@@ -1326,24 +1356,3 @@ fn demo_blob(params: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({ "text": text })
 }
 
-fn demo_accounts() -> serde_json::Value {
-    use zeron_proto::HarnessId::*;
-    let accounts: Vec<serde_json::Value> = [ClaudeCode, Codex, Devin, Grok, Hermes]
-        .into_iter()
-        .enumerate()
-        .map(|(i, harness)| {
-            serde_json::json!({
-                "id": format!("acct-{i}"),
-                "harness": harness,
-                "email": "dev@zeron.sh",
-                "planLabel": "Max",
-                "active": true,
-                "usageWindows": [
-                    { "label": "5-hour", "usedFraction": 0.42 + 0.1 * i as f32, "resetsAt": null },
-                    { "label": "Weekly", "usedFraction": 0.18, "resetsAt": null },
-                ],
-            })
-        })
-        .collect();
-    serde_json::json!({ "accounts": accounts, "warnings": [] })
-}

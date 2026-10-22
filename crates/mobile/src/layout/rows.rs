@@ -41,6 +41,7 @@ pub enum RowKind {
     Working,
     Card,
     Visual,
+    Html,
 }
 
 /// A user message awaiting its host echo (client-minted id = the echo's id).
@@ -120,6 +121,7 @@ pub(crate) enum Content {
     /// An agent visual: its height comes from its worker.
     Visual(Arc<crate::visual::VisualSlot>),
     Strip(Strip),
+    Html(super::html::HtmlRow),
 }
 
 /// A width-independent row: identity, top gap class and prepared content.
@@ -219,6 +221,7 @@ pub(crate) struct RowBuilder {
     pub visual_slots: HashMap<String, Arc<crate::visual::VisualSlot>>,
     pub(crate) harness: Option<HarnessId>,
     in_fold: bool,
+    pub html_slots: HashMap<String, Arc<super::html::HtmlSlot>>,
     pub(crate) blobs: HashMap<String, (Blob, u64)>,
     pub(crate) blob_clock: u64,
     pub(crate) chat_id: Option<String>,
@@ -556,7 +559,7 @@ impl RowBuilder {
                     tools.push(part);
                     flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
                 }
-                MessagePart::Tool { id, call, is_error, output, .. } => {
+                MessagePart::Tool { id, call, is_error, output, html_render, .. } => {
                     let genus = Genus::of(call);
                     let genus_flip = tools.iter().any(|p| match p {
                         MessagePart::Tool { call, .. } => Genus::of(call) != genus,
@@ -566,6 +569,15 @@ impl RowBuilder {
                         flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
                     }
                     tools.push(part);
+                    if let Some(page) = html_render
+                        && call.is_html_render()
+                    {
+                        // Outside the work fold, like the desktop: the page stays above the reply.
+                        flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
+                        let gap = gap_for(&rows, false);
+                        let core = self.html_row(ctx, entry, id, page);
+                        rows.push(Placed { core: Arc::new(core), gap });
+                    }
                     if let Some(tool) = computer::computer_tool(call)
                         && computer::is_control_denied(*is_error, output.as_deref())
                         && denied_tools.insert(tool)
@@ -678,6 +690,7 @@ impl RowBuilder {
             start
         });
         let is_work = |ix: usize, part: &MessagePart| match part {
+            MessagePart::Tool { call, html_render: Some(_), .. } if call.is_html_render() => false,
             MessagePart::Tool { .. } => true,
             MessagePart::Reasoning { text, .. } => !text.trim().is_empty(),
             MessagePart::Text { text, .. } => !text.trim().is_empty() && reply_start.is_none_or(|start| ix < start),
@@ -758,6 +771,27 @@ impl RowBuilder {
         }
         state.blocks = next.clone();
         next
+    }
+
+    fn html_row(&mut self, ctx: &mut Ctx, entry: &SessionMessageEntry, part_id: &str, page: &zeron_proto::html_render::HtmlRenderRef) -> RowCore {
+        let id = format!("{}#html-{part_id}", entry.id);
+        let key = row_key(&id);
+        let slot = match self.html_slots.get(&id) {
+            Some(slot) if slot.same_page(&entry.device_id, page) => slot.clone(),
+            _ => {
+                let slot = super::html::HtmlSlot::new(id.clone(), key, &entry.device_id, page);
+                self.html_slots.insert(id, slot.clone());
+                slot
+            }
+        };
+        RowCore {
+            key,
+            version: next_version(),
+            kind: RowKind::Html,
+            entry_id: Arc::from(entry.id.as_str()),
+            content: Content::Html(super::html::html_row(ctx, slot, &page.title)),
+            copy_text: page.title.clone(),
+        }
     }
 
     fn user_row(&mut self, ctx: &mut Ctx, id: &str, content: &str, pending: bool) -> RowCore {
@@ -1085,6 +1119,7 @@ pub(crate) fn place_row(
         }
         Content::Card(card) => place_card(card, px, x, top, cw, out),
         Content::Strip(strip) => place_strip(strip, px, x, top, cw, out),
+        Content::Html(row) => super::html::place_html(row, visual.unwrap_or_else(|| row.slot.snapshot().1), px, x, top, cw, out),
         Content::Visual(slot) => {
             // Until its worker has measured it: the loading line.
             let h = visual.unwrap_or(px.v(VISUAL_LOADING));
@@ -1296,5 +1331,6 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
         Content::Working { .. } | Content::Visual(_) => 0,
         Content::Card(card) => super::cards::heap_bytes(card),
         Content::Strip(strip) => super::strip::heap_bytes(strip),
+        Content::Html(row) => row.title.p.heap_bytes(),
     }
 }

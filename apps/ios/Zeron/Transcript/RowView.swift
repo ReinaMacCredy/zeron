@@ -39,6 +39,7 @@ protocol RowViewDelegate: AnyObject {
     func rowView(_ view: RowView, perform action: CardAction)
     /// The live view for an agent visual (kept across row reuse).
     func rowView(_ view: RowView, visualFor id: String) -> UIView?
+    func rowView(_ view: RowView, pageFor id: String, deviceId: String, path: String) -> UIView?
 }
 
 /// A reusable transcript row: canvas + horizontal scrollers + native widgets.
@@ -56,7 +57,7 @@ final class RowView: UIView {
             textElement?.accessibilityFrameInContainerSpace = bounds
             // Controls and links first: accessibility hit-testing takes the
             // first match, and the row's text element spans the whole row.
-            return widgetViews.filter { $0 is UIControl || $0 is VisualView || $0.gestureRecognizers?.isEmpty == false }
+            return widgetViews.filter { $0 is UIControl || $0 is VisualView || $0 is HtmlPageView || $0.gestureRecognizers?.isEmpty == false }
                 + positionedLinkElements()
                 + (textElement.map { [$0] } ?? [])
         }
@@ -166,6 +167,7 @@ final class RowView: UIView {
         case .working: "row-working"
         case .card: "row-card"
         case .visual: "row-visual"
+        case .html: "row-html"
         }
         element.accessibilityTraits = .staticText
         element.accessibilityFrameInContainerSpace = bounds
@@ -311,6 +313,9 @@ final class RowView: UIView {
             case let .visual(id):
                 view = delegate?.rowView(self, visualFor: id) ?? UIView()
                 (view as? VisualView)?.active = !isHidden
+            case let .htmlRender(id, deviceId, path, scrolls):
+                view = delegate?.rowView(self, pageFor: id, deviceId: deviceId, path: path) ?? UIView()
+                (view as? HtmlPageView)?.scrolls = scrolls
             }
             view.frame = rect
             host.addSubview(view)

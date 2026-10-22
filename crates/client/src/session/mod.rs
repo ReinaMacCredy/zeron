@@ -434,6 +434,17 @@ impl SessionCore {
         oldest_state(&lock(&self.state).pending)
     }
 
+    pub(crate) fn ask(&self) -> Option<crate::workspace::Ask> {
+        let request = self.composer().open_input.clone()?;
+        Some(
+            if self.snapshot().input_answers.contains_key(&request.request_id) {
+                crate::workspace::Ask::Answered(request.request_id)
+            } else {
+                crate::workspace::Ask::Open(request)
+            },
+        )
+    }
+
     pub(crate) fn has_pending_sends(&self) -> bool {
         !lock(&self.state).pending.is_empty()
             || self.room().is_some_and(|room| room.has_pending_pushes())
@@ -458,6 +469,7 @@ impl SessionCore {
                 )
             });
         let mut transcript_event = None;
+        let ask_before = self.ask();
         let send_before;
         let send_after;
         {
@@ -536,7 +548,7 @@ impl SessionCore {
             client.events.session(&self.chat_id, revision);
         }
         self.recompute_composer(&client);
-        if send_before != send_after {
+        if send_before != send_after || ask_before != self.ask() {
             client.recompute_workspace();
         }
     }

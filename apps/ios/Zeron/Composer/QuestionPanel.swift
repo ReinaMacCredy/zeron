@@ -6,6 +6,10 @@ import UIKit
 final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
     var onSubmit: (([(questionId: String, labels: [String])]) -> Void)?
     var onHeightChange: (() -> Void)?
+    var onOpenThread: (() -> Void)? {
+        didSet { other.placeholder = onOpenThread == nil ? "Other…" : "Type my own…" }
+    }
+    var quickAnswer = true { didSet { render() } }
 
     private let card = Glass.surface(radius: 26)
     private let header = UILabel()
@@ -57,7 +61,10 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
         backConfig.title = "Back"
         backConfig.baseForegroundColor = Palette.secondary
         back.configuration = backConfig
-        back.addAction(UIAction { [weak self] _ in self?.go(-1) }, for: .touchUpInside)
+        back.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            if self.page == 0, let open = self.onOpenThread { open() } else { self.go(-1) }
+        }, for: .touchUpInside)
         var nextConfig = UIButton.Configuration.prominentGlass()
         nextConfig.title = "Next"
         nextConfig.baseBackgroundColor = Palette.text
@@ -135,13 +142,20 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
             b.addAction(UIAction { [weak self] _ in self?.pick(option) }, for: .touchUpInside)
             options.addArrangedSubview(b)
         }
-        other.isHidden = q.multiline
-        editor.isHidden = !q.multiline
+        options.isHidden = !quickAnswer
+        other.isHidden = q.multiline || !quickAnswer
+        editor.isHidden = !q.multiline || !quickAnswer
+        nextButton.isHidden = !quickAnswer
         other.text = custom[q.id]
         editor.text = custom[q.id]
-        back.isHidden = page == 0
+        let opens = page == 0 && onOpenThread != nil
+        back.isHidden = page == 0 && !opens
+        var b = back.configuration
+        b?.title = opens ? "Open thread" : "Back"
+        back.configuration = b
+        back.accessibilityIdentifier = opens ? "question-open-thread" : nil
         var n = nextButton.configuration
-        n?.title = page == items.count - 1 ? "Submit" : "Next"
+        n?.title = page == items.count - 1 ? (onOpenThread == nil ? "Submit" : "Send") : "Next"
         nextButton.configuration = n
         nextButton.isEnabled = answered(q)
         onHeightChange?()

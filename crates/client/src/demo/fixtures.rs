@@ -7,7 +7,8 @@ use zeron_proto::{
     ChangeRequestState, ChangeRequestSummary, Chat, ChatConfig, CheckoutChangeRequestStatus,
     ChildRoute, ConversationSourceContext, Delegation, DelegationStatus, DelegationWake, Device,
     HarnessId, LimitOffer, LimitResume, LimitResumes, OfferChoice, ReasoningLevel, RouteTarget,
-    SandboxLevel, Session, SessionStatus, SidebarPinChange, SidebarSectionChange, Space,
+    SandboxLevel, Session, SessionStatus, SidebarPinChange, SidebarSectionChange, SidebarSettle,
+    Space,
 };
 
 use crate::client::ms;
@@ -17,6 +18,7 @@ use crate::rpc::capability;
 pub(crate) const MAC: &str = "dev-mac";
 pub(crate) const VPS: &str = "dev-vps";
 pub(crate) const STUDIO: &str = "dev-studio";
+pub(crate) const MINI: &str = "dev-mini";
 
 pub(crate) struct DemoChat {
     pub id: &'static str,
@@ -37,7 +39,13 @@ pub(crate) struct DemoChat {
     pub parent: Option<&'static str>,
     pub delegated: Option<(DelegationStatus, Option<ChildRoute>)>,
     pub compacting: bool,
+    pub side_of: Option<&'static str>,
+    /// (settled, how long ago) of a Settle / Unsettle.
+    pub settle: Option<(bool, i64)>,
 }
+
+/// Each host's `settle_after_days` (`GetSidebarSettings`); the rest keep the default.
+pub(crate) const SETTLE_DAYS: [(&str, u32); 2] = [(MAC, 3), (MINI, 7)];
 
 const MIN: i64 = 60_000;
 const HOUR: i64 = 60 * MIN;
@@ -66,6 +74,8 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         parent: None,
         delegated: None,
         compacting: false,
+        side_of: None,
+        settle: None,
     };
     vec![
         DemoChat {
@@ -96,6 +106,33 @@ pub(crate) fn chats() -> Vec<DemoChat> {
                 MAC,
                 "Model picker catalog sync",
                 "Before I wire the RPC, two decisions:",
+            )
+        },
+        DemoChat {
+            harness: Codex,
+            model: "gpt-5.6-terra",
+            reasoning: High,
+            status: Some(SessionStatus::AwaitingInput),
+            last_ago_ms: 5 * MIN,
+            seen: false,
+            ..chat(
+                "chat-approve-test",
+                Some("space-edge"),
+                VPS,
+                "Run: cargo test",
+                "Codex wants to run the test suite.",
+            )
+        },
+        DemoChat {
+            status: Some(SessionStatus::AwaitingInput),
+            last_ago_ms: 9 * MIN,
+            seen: false,
+            ..chat(
+                "chat-approve-push",
+                Some("space-zeron"),
+                MAC,
+                "Publish the release branch",
+                "Claude wants to push to origin.",
             )
         },
         DemoChat {
@@ -230,6 +267,18 @@ pub(crate) fn chats() -> Vec<DemoChat> {
                 MAC,
                 "Side chat: veil timing",
                 "α = 0.2 over inter-append gaps",
+            )
+        },
+        DemoChat {
+            side_of: Some("chat-blog"),
+            last_ago_ms: 26 * HOUR,
+            created_ago_ms: 30 * HOUR,
+            ..chat(
+                "chat-btw",
+                Some("space-zeron"),
+                MAC,
+                "btw: launch post tone",
+                "Keep it plain; no superlatives.",
             )
         },
         DemoChat {
@@ -375,6 +424,169 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             )
         },
         DemoChat {
+            model: "claude-opus-5",
+            last_ago_ms: 3 * MIN,
+            created_ago_ms: 40 * MIN,
+            ..chat(
+                "chat-lead-ios",
+                Some("space-zeron"),
+                MAC,
+                "Build iOS App Install",
+                "The plan is ready: six steps, one screen each.",
+            )
+        },
+        DemoChat {
+            last_ago_ms: 2 * MIN,
+            created_ago_ms: DAY,
+            ..chat(
+                "supervisor-dev-mac",
+                None,
+                MAC,
+                "Supervisor",
+                "Asked you about TestFlight before the widget.",
+            )
+        },
+        DemoChat {
+            last_ago_ms: 6 * MIN,
+            created_ago_ms: DAY,
+            ..chat(
+                "supervisor-dev-mini",
+                None,
+                MINI,
+                "Supervisor",
+                "Re-briefed step 3 after the swipe failure.",
+            )
+        },
+        DemoChat {
+            model: "claude-opus-5",
+            last_ago_ms: 5 * MIN,
+            created_ago_ms: 25 * MIN,
+            ..chat(
+                "chat-lead-widget",
+                Some("space-zeron"),
+                MAC,
+                "Needs you widget",
+                "The Supervisor approved the plan; step 1 starts after the hold.",
+            )
+        },
+        DemoChat {
+            model: "claude-opus-5",
+            status: Some(SessionStatus::Working),
+            last_ago_ms: 30_000,
+            created_ago_ms: 3 * HOUR,
+            ..chat(
+                "chat-lead-shelf",
+                Some("space-fork"),
+                MINI,
+                "Inbox settle shelf",
+                "Step 3 is on the swipe actions.",
+            )
+        },
+        DemoChat {
+            harness: Codex,
+            model: "gpt-5.6-terra",
+            reasoning: High,
+            last_ago_ms: 2 * HOUR,
+            parent: Some("chat-lead-shelf"),
+            ..chat(
+                "chat-shelf-1",
+                Some("space-fork"),
+                MINI,
+                "Settled fold",
+                "The Settled fold sits under Inbox.",
+            )
+        },
+        DemoChat {
+            harness: Codex,
+            model: "gpt-5.6-terra",
+            reasoning: High,
+            last_ago_ms: 90 * MIN,
+            parent: Some("chat-lead-shelf"),
+            ..chat(
+                "chat-shelf-2",
+                Some("space-fork"),
+                MINI,
+                "Slim rows",
+                "Settled rows drop the preview line.",
+            )
+        },
+        DemoChat {
+            harness: Codex,
+            model: "gpt-5.6-terra",
+            reasoning: High,
+            status: Some(SessionStatus::Working),
+            last_ago_ms: 20_000,
+            parent: Some("chat-lead-shelf"),
+            ..chat(
+                "chat-shelf-3",
+                Some("space-fork"),
+                MINI,
+                "Swipe Settle and Unsettle",
+                "Wiring the trailing swipe action.",
+            )
+        },
+        DemoChat {
+            status: Some(SessionStatus::AwaitingInput),
+            last_ago_ms: 4 * MIN,
+            seen: false,
+            parent: Some("chat-lead-shelf"),
+            ..chat(
+                "chat-shelf-4",
+                Some("space-fork"),
+                MINI,
+                "Settle after days",
+                "One question before I read the setting:",
+            )
+        },
+        DemoChat {
+            last_ago_ms: 3 * HOUR,
+            settle: Some((true, 2 * HOUR)),
+            ..chat(
+                "chat-settled",
+                Some("space-zeron"),
+                MAC,
+                "Changelog wording",
+                "Merged; nothing left here.",
+            )
+        },
+        DemoChat {
+            last_ago_ms: 4 * DAY,
+            created_ago_ms: 5 * DAY,
+            ..chat(
+                "chat-old-mac",
+                Some("space-zeron"),
+                MAC,
+                "Flaky snapshot test",
+                "Pinned the clock; it passes 200 runs in a row.",
+            )
+        },
+        DemoChat {
+            harness: Codex,
+            model: "gpt-5.6-terra",
+            reasoning: High,
+            last_ago_ms: 4 * DAY,
+            created_ago_ms: 5 * DAY,
+            ..chat(
+                "chat-old-mini",
+                Some("space-fork"),
+                MINI,
+                "Bench the sync relay",
+                "p99 is 41 ms on the Mac mini.",
+            )
+        },
+        DemoChat {
+            last_ago_ms: 9 * DAY,
+            created_ago_ms: 10 * DAY,
+            settle: Some((false, 50 * MIN)),
+            ..chat(
+                "chat-unsettled",
+                Some("space-zeron"),
+                MAC,
+                "Font fallback audit",
+                "CJK falls back to PingFang; Latin stays on Inter.",
+            )
+        },
+        DemoChat {
             harness: Acp,
             model: "default",
             last_ago_ms: 16 * HOUR,
@@ -456,6 +668,14 @@ pub(crate) fn spaces(now: i64) -> Vec<Space> {
             2 * DAY,
         ),
         space(
+            "space-fork",
+            MINI,
+            "/Users/dev/zeron-fork",
+            None,
+            true,
+            12 * HOUR,
+        ),
+        space(
             "space-agents",
             MAC,
             "/Users/dev/agents",
@@ -510,6 +730,14 @@ pub(crate) fn devices(self_id: &str, self_name: &str, now: i64) -> Vec<Device> {
             now,
         ),
         device(
+            MINI,
+            "Mac mini",
+            "macos",
+            env!("CARGO_PKG_VERSION"),
+            true,
+            now,
+        ),
+        device(
             STUDIO,
             "Mac Studio",
             "macos",
@@ -529,11 +757,12 @@ pub(crate) fn devices(self_id: &str, self_name: &str, now: i64) -> Vec<Device> {
 }
 
 /// Devices whose presence the demo keeps fresh.
-pub(crate) const ONLINE: &[&str] = &[MAC, VPS];
+pub(crate) const ONLINE: &[&str] = &[MAC, VPS, MINI];
 
 pub(crate) struct Seeded {
     pub change_requests: Vec<CheckoutChangeRequestStatus>,
     pub limits: Vec<(&'static str, LimitResumes)>,
+    pub missions: bool,
 }
 
 /// Write the whole dataset into the replica (as local writes, which the
@@ -557,6 +786,7 @@ pub(crate) fn seed(
             return Ok(Seeded {
                 change_requests,
                 limits: Vec::new(),
+                missions: false,
             });
         }
         DemoFixture::NoProjects => {
@@ -567,6 +797,7 @@ pub(crate) fn seed(
             return Ok(Seeded {
                 change_requests,
                 limits: Vec::new(),
+                missions: false,
             });
         }
         DemoFixture::Standard => {}
@@ -627,7 +858,7 @@ pub(crate) fn seed(
             space_id: demo.space.map(str::to_owned),
             last_seen_at: Some(ms(if demo.seen { last } else { last - MIN })),
             room_gen: Some(2),
-            sidechat_source_chat_id: None,
+            sidechat_source_chat_id: demo.side_of.map(str::to_owned),
             created_by_chat_id: demo.parent.map(str::to_owned),
             forked_from_chat_id: None,
             previous_harnesses: Vec::new(),
@@ -653,8 +884,14 @@ pub(crate) fn seed(
                     findings_announced: Default::default(),
                     route,
                 }),
-            settle: None,
-            unsettled_at: None,
+            settle: demo.settle.map(|(settled, ago)| SidebarSettle {
+                settled,
+                at: ms(now - ago),
+            }),
+            unsettled_at: demo
+                .settle
+                .filter(|(settled, _)| !settled)
+                .map(|(_, ago)| ms(now - ago)),
         };
         doc.upsert_chat(&chat)?;
         if let Some(status) = demo.status {
@@ -747,8 +984,108 @@ pub(crate) fn seed(
             }],
         },
     )];
+    super::missions::seed(doc, Utc::now())?;
     Ok(Seeded {
         change_requests,
         limits,
+        missions: true,
     })
 }
+
+pub(crate) fn today_reply(device_id: &str, method: &str, now_ms: i64) -> Option<serde_json::Value> {
+    use serde_json::json;
+    use zeron_rpc::methods as m;
+    let min = 60_000;
+    match method {
+        m::GET_TODAY_RUNS => {
+            let runs: &[(&str, i64, Option<i64>)] = match device_id {
+                MAC => &[
+                    ("chat-lead-shelf", 5, None),
+                    ("chat-visuals", 25, Some(9)),
+                    ("chat-lead-shelf", 40, Some(14)),
+                    ("chat-blog", 70, Some(6)),
+                    ("chat-visuals", 95, Some(18)),
+                    ("chat-deploy", 130, Some(11)),
+                    ("chat-blog", 180, Some(7)),
+                ],
+                MINI => &[
+                    ("chat-old-mini", 12, Some(8)),
+                    ("chat-old-mini", 55, Some(21)),
+                    ("chat-approve-push", 150, Some(5)),
+                ],
+                _ => &[],
+            };
+            let since = chrono::DateTime::from_timestamp_millis(now_ms).map_or(0, |now| {
+                zeron_proto::today::work_day_start(now.with_timezone(&chrono::Local))
+                    .timestamp_millis()
+            });
+            // Early in the work day the offsets shrink so every run stays today.
+            let (elapsed, span) = ((now_ms - since).max(0), 181 * min);
+            Some(json!({
+                "runs": runs
+                    .iter()
+                    .map(|(chat, ago, minutes)| json!({
+                        "chatId": chat,
+                        "startedAtMs": now_ms - ago * min * elapsed.min(span) / span,
+                        "durationMs": minutes.map(|m| m * min),
+                        "status": if minutes.is_some() { "complete" } else { "running" },
+                    }))
+                    .collect::<Vec<_>>(),
+                "waits": [],
+            }))
+        }
+        m::LIST_AGENT_ACCOUNTS => {
+            let at = |ms: i64| chrono::DateTime::from_timestamp_millis(now_ms + ms);
+            let primary = match device_id {
+                MAC => Some((
+                    "claude-code",
+                    json!([
+                        { "label": "5h", "usedFraction": 0.38, "resetsAt": at(125 * min) },
+                        { "label": "Week", "usedFraction": 0.21, "resetsAt": at(3 * 24 * 60 * min) },
+                    ]),
+                )),
+                MINI => Some((
+                    "codex",
+                    json!([
+                        { "label": "5h", "usedFraction": 0.12, "resetsAt": at(200 * min) },
+                        { "label": "Week", "usedFraction": 0.30, "resetsAt": at(5 * 24 * 60 * min) },
+                    ]),
+                )),
+                _ => None,
+            };
+            let mut accounts: Vec<serde_json::Value> = primary
+                .iter()
+                .map(|(harness, windows)| {
+                    json!({
+                        "id": format!("{device_id}-{harness}"),
+                        "harness": harness,
+                        "email": null,
+                        "planLabel": "Max",
+                        "active": true,
+                        "switchable": true,
+                        "usageWindows": windows,
+                    })
+                })
+                .collect();
+            let others = ["claude-code", "codex", "devin", "grok", "hermes"]
+                .into_iter()
+                .filter(|harness| primary.as_ref().is_none_or(|(p, _)| p != harness));
+            accounts.extend(others.enumerate().map(|(i, harness)| {
+                json!({
+                    "id": format!("{device_id}-{harness}"),
+                    "harness": harness,
+                    "email": "dev@zeron.sh",
+                    "planLabel": "Max",
+                    "active": true,
+                    "usageWindows": [
+                        { "label": "5h", "usedFraction": 0.04 + 0.02 * i as f32, "resetsAt": null },
+                        { "label": "Week", "usedFraction": 0.08, "resetsAt": null },
+                    ],
+                })
+            }));
+            Some(json!({ "accounts": accounts, "warnings": [] }))
+        }
+        _ => None,
+    }
+}
+

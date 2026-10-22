@@ -15,6 +15,8 @@ mod git;
 mod session;
 mod voice;
 pub use voice::*;
+mod tasks;
+mod today;
 mod types;
 
 use std::sync::Arc;
@@ -22,6 +24,7 @@ use std::sync::Arc;
 use zeron_client as zc;
 
 pub use session::*;
+pub use tasks::*;
 pub use types::*;
 
 /// Receives coalesced change events (at most one burst per display frame).
@@ -228,6 +231,14 @@ impl CoreClient {
         Ok(self.client.unarchive_session(&chat_id)?)
     }
 
+    pub fn set_session_settled(&self, chat_id: String, settled: bool) -> CoreResult<()> {
+        Ok(self.client.set_session_settled(&chat_id, settled)?)
+    }
+
+    pub fn set_active_first(&self, on: bool) {
+        self.client.set_active_first(on);
+    }
+
     pub fn rename_session(&self, chat_id: String, title: String) -> CoreResult<()> {
         Ok(self.client.rename_session(&chat_id, &title)?)
     }
@@ -284,6 +295,15 @@ impl CoreClient {
 
     pub fn delete_section(&self, section_id: String) -> CoreResult<()> {
         Ok(self.client.delete_section(&section_id)?)
+    }
+
+    pub fn move_section(
+        &self,
+        section_id: String,
+        after: Option<String>,
+        before: Option<String>,
+    ) -> CoreResult<()> {
+        Ok(self.client.move_section(&section_id, after, before)?)
     }
 
     pub fn set_section_collapsed(&self, section_id: String, collapsed: bool) -> CoreResult<()> {
@@ -380,6 +400,10 @@ impl CoreClient {
         self.client.preload_sessions();
     }
 
+    pub fn needs_you(&self) -> Vec<NeedsYouEntry> {
+        self.client.needs_you().iter().map(Into::into).collect()
+    }
+
     // ── host RPC ───────────────────────────────────────────────────────────
 
     /// Harness catalog of an execution device (static fallback when it's
@@ -420,7 +444,11 @@ impl CoreClient {
                 .register_push_target(
                     &token,
                     &environment,
-                    zc::PushPrefs { done: prefs.done, input: prefs.input, failed: prefs.failed },
+                    zc::PushPrefs {
+                        done: prefs.done,
+                        input: prefs.input,
+                        failed: prefs.failed,
+                    },
                 )
                 .await
         })
@@ -454,7 +482,12 @@ impl CoreClient {
         query: String,
     ) -> CoreResult<Vec<FileMatch>> {
         let client = self.client.clone();
-        let files = on_runtime(async move { client.search_files(&device_id, chat_id, space_id, &query).await }).await?;
+        let files = on_runtime(async move {
+            client
+                .search_files(&device_id, chat_id, space_id, &query)
+                .await
+        })
+        .await?;
         Ok(files
             .into_iter()
             .map(|f| FileMatch {

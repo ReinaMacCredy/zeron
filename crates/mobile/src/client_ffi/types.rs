@@ -507,6 +507,9 @@ pub struct SessionRow {
     /// Oldest unadopted send from this device (open sessions only).
     pub send_state: Option<SendState>,
     pub parent_chat_id: Option<String>,
+    /// On the Settled shelf (its host's `settle_after_days`, or a Settle).
+    pub settled: bool,
+    pub expired: bool,
     /// 2 = chat2; 1 = legacy (not dialable).
     pub room_gen: u32,
 }
@@ -547,6 +550,8 @@ impl From<&zc::SessionRow> for SessionRow {
             pull_request: r.pull_request.as_ref().map(PullRequest::from),
             send_state: r.send_state.map(Into::into),
             parent_chat_id: r.parent_chat_id.clone(),
+            settled: r.settled,
+            expired: r.expired,
             room_gen: r.room_gen,
         }
     }
@@ -572,8 +577,21 @@ pub struct FrontPage {
     pub pinned: Vec<SessionRow>,
     /// User sections ("folders"), each in recency order.
     pub sections: Vec<SectionView>,
-    /// Everything else, by recency.
+    /// Everything else unsettled, in Inbox order (Active first when set).
     pub recent: Vec<SessionRow>,
+    /// `recent` by project, the projectless Chats group first.
+    pub groups: Vec<FrontGroup>,
+    /// The Settled shelf, newest settle first.
+    pub settled: Vec<SessionRow>,
+    /// Step threads and agent-opened chats, by the lead or creator they draw under.
+    pub nested: HashMap<String, Vec<SessionRow>>,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FrontGroup {
+    pub id: String,
+    pub name: String,
+    pub sessions: Vec<SessionRow>,
 }
 
 impl From<&zc::FrontPage> for FrontPage {
@@ -591,6 +609,21 @@ impl From<&zc::FrontPage> for FrontPage {
                 })
                 .collect(),
             recent: rows(&f.recent),
+            groups: f
+                .groups
+                .iter()
+                .map(|g| FrontGroup {
+                    id: g.id.clone(),
+                    name: g.name.clone(),
+                    sessions: rows(&g.sessions),
+                })
+                .collect(),
+            settled: rows(&f.settled),
+            nested: f
+                .nested
+                .iter()
+                .map(|(lead, children)| (lead.clone(), rows(children)))
+                .collect(),
         }
     }
 }

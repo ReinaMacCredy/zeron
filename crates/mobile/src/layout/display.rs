@@ -286,6 +286,7 @@ pub enum WidgetKind {
     CardButton { action: CardAction },
     /// An agent visual; `TranscriptView::visual(id)` is its live session.
     Visual { id: String },
+    HtmlRender { id: String, device_id: String, path: String, scrolls: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]

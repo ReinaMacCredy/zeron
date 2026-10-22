@@ -711,14 +711,19 @@ impl DocHost {
             let started = now_ms();
             loop {
                 let now = now_ms();
+                // A held watch guard deadlocks against SessionsEngine, which publishes under its statuses lock.
+                let sessions_now = statuses.borrow_and_update().clone();
+                let chats_now = chats.borrow_and_update().clone();
+                let tasks_now = tasks.borrow_and_update().clone();
+                let steps_now = steps.borrow_and_update().clone();
                 let round = host.observe(
                     &store,
                     &mut observed,
                     now,
-                    &statuses.borrow_and_update(),
-                    &chats.borrow_and_update(),
-                    &tasks.borrow_and_update(),
-                    &steps.borrow_and_update(),
+                    &sessions_now,
+                    &chats_now,
+                    &tasks_now,
+                    &steps_now,
                 );
                 let next = host
                     .supervise(

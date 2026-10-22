@@ -220,6 +220,28 @@ pub struct InputRequest {
     pub questions: Vec<UserInputQuestion>,
 }
 
+impl From<&zc::InputRequest> for InputRequest {
+    fn from(i: &zc::InputRequest) -> Self {
+        Self {
+            entry_id: i.entry_id.clone(),
+            request_id: i.request_id.clone(),
+            questions: i
+                .questions
+                .iter()
+                .map(|q| UserInputQuestion {
+                    id: q.id.clone(),
+                    header: q.header.clone(),
+                    question: q.question.clone(),
+                    options: q.options.clone(),
+                    multi_select: q.multi_select,
+                    prefill: q.prefill.clone(),
+                    multiline: q.multiline,
+                })
+                .collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct RoomState {
     pub connected: bool,
@@ -334,23 +356,7 @@ impl From<&zc::ComposerState> for ComposerState {
                 degraded: c.room.degraded,
             },
             transfer_progress: c.transfer_progress,
-            open_input: c.open_input.as_ref().map(|i| InputRequest {
-                entry_id: i.entry_id.clone(),
-                request_id: i.request_id.clone(),
-                questions: i
-                    .questions
-                    .iter()
-                    .map(|q| UserInputQuestion {
-                        id: q.id.clone(),
-                        header: q.header.clone(),
-                        question: q.question.clone(),
-                        options: q.options.clone(),
-                        multi_select: q.multi_select,
-                        prefill: q.prefill.clone(),
-                        multiline: q.multiline,
-                    })
-                    .collect(),
-            }),
+            open_input: c.open_input.as_ref().map(Into::into),
             queue_error: c.queue_error.clone(),
             last_submitted_message_id: c.last_submitted_message_id.clone(),
             context_usage: c.context_usage.map(|u| ContextUsage {
