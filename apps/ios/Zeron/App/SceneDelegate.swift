@@ -68,6 +68,10 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                 if route == "new" { router.presentNewSession(prompt: nil) }
                 if route == "more" { router.showSettings() }
                 if route == "search" { router.showSearch() }
+                if route == "prs" { router.showPullRequests(git: false, history: false) }
+                if route == "git" { router.showPullRequests(git: true, history: false) }
+                if route == "git-history" { router.showPullRequests(git: true, history: true) }
+                if route.hasPrefix("pr:") { router.openPullRequest(url: String(route.dropFirst(3)), deviceId: nil) }
             }
         }
     }

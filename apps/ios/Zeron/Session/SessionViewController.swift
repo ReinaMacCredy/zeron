@@ -73,6 +73,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         list.onBranch = { [weak self] offer in self?.confirmBranch(offer) }
         list.onSkill = { [weak self] name, path in self?.openSkill(name, path: path) }
         list.onLimit = { [weak self] id in self?.openLimitCard(id) }
+        list.onPullRequest = { [weak self] url in
+            guard let self else { return }
+            (self.view.window?.rootViewController as? AppRouter)?.openPullRequest(url: url, deviceId: self.app.row(self.chatId)?.deviceId)
+        }
         view.addSubview(list)
         still.translatesAutoresizingMaskIntoConstraints = false
         still.fetch = { [weak self] in await self?.source.computerStill() }

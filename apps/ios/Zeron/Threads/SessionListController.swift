@@ -473,7 +473,12 @@ class SessionsViewController: SessionListController {
         collectionView.backgroundView = backdrop
         title = "Sessions"
         navigationItem.largeTitleDisplayMode = .always
-        navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: optionsMenu())
+        let pulls = UIBarButtonItem(image: UIImage(systemName: "arrow.triangle.pull"), primaryAction: UIAction { [weak self] _ in
+            (self?.view.window?.rootViewController as? AppRouter)?.showPullRequests(git: false, history: false)
+        })
+        pulls.accessibilityIdentifier = "sessions-pull-requests"
+        pulls.accessibilityLabel = "Pull requests"
+        navigationItem.rightBarButtonItems = [UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: optionsMenu()), pulls]
     }
 
     override func buildSections() -> [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] {

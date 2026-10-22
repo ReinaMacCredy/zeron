@@ -253,8 +253,15 @@ final class CoreSessionSource: SessionSource {
             }])
         case "pr":
             guard let url = row.pullRequest.flatMap({ URL(string: $0.url) }) else { return nil }
+            let device = hostDevice
             return UIMenu(title: row.pullRequest?.title ?? "", children: [
-                UIAction(title: "Open Pull Request", image: UIImage(systemName: "safari")) { _ in UIApplication.shared.open(url) },
+                UIAction(title: "Open Pull Request", image: UIImage(systemName: "arrow.triangle.pull")) { _ in
+                    let window = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
+                    guard pullRequestLink(url: url.absoluteString) != nil,
+                          let router = window?.rootViewController as? AppRouter
+                    else { return UIApplication.shared.open(url) }
+                    router.openPullRequest(url: url.absoluteString, deviceId: device)
+                },
                 UIAction(title: "Copy Link", image: UIImage(systemName: "link")) { _ in UIPasteboard.general.url = url },
             ])
         default:

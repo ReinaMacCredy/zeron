@@ -126,6 +126,7 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     var onBranch: ((BranchOffer) -> Void)?
     var onSkill: ((_ name: String, _ path: String?) -> Void)?
     var onLimit: ((_ chatId: String) -> Void)?
+    var onPullRequest: ((_ url: String) -> Void)?
     /// An attachment's picture, for an image chip opened full size.
     var imageFetcher: ((String) async -> UIImage?)?
 
@@ -713,6 +714,10 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
                 .queryItems?.first(where: { $0.name == "id" })?.value
             else { return }
             (window?.rootViewController as? AppRouter)?.openSession(id)
+            return
+        }
+        if let link = pullRequestLink(url: url.absoluteString), let onPullRequest {
+            onPullRequest(link.url)
             return
         }
         if url.scheme == "http" || url.scheme == "https" {

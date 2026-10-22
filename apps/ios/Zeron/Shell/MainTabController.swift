@@ -155,6 +155,33 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
         selectedTab = tabs.first { $0 is UISearchTab }
     }
 
+    func showPullRequests(git: Bool, history: Bool) {
+        guard let nav = sessionsNav() else { return }
+        let board = PullRequestsViewController(app: app, segment: git ? .git : .pulls)
+        nav.popToRootViewController(animated: false)
+        nav.pushViewController(board, animated: true)
+        if history { board.showGit(history: true) }
+    }
+
+    func openPullRequest(url: String, deviceId: String?) {
+        guard let device = app.pullRequestDevice(deviceId) else { return Toast.show("No Mac serves pull requests.", in: view.window) }
+        guard let nav = sessionsNav() else { return }
+        let page = PullRequestViewController(app: app, deviceId: device, url: url)
+        if nav.topViewController is PullRequestsViewController || nav.topViewController is PullRequestViewController {
+            nav.pushViewController(page, animated: true)
+        } else {
+            nav.setViewControllers([nav.viewControllers[0], PullRequestsViewController(app: app), page], animated: true)
+        }
+    }
+
+    private func sessionsNav() -> UINavigationController? {
+        if presentedViewController != nil { dismiss(animated: true) }
+        guard let tab = tabs.first(where: { $0.identifier == "sessions" }) else { return nil }
+        selectedTab = tab
+        syncAccessory()
+        return tab.viewController as? UINavigationController
+    }
+
     /// From the new-session sheet: the chat goes in under the sheet at once,
     /// the sheet leaves without its slide, and the handoff animation carries
     /// the draft (page, composer, message) into the chat.
