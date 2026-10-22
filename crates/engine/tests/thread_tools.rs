@@ -2490,6 +2490,51 @@ async fn a_child_that_finishes_mid_turn_steers_its_wake_into_the_owners_turn() {
 }
 
 #[tokio::test]
+async fn the_delegate_chip_binds_when_the_wake_steers_in_before_the_tool_result() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let steers: Arc<Mutex<Vec<String>>> = Arc::default();
+    let rig = rig_on(Arc::new(DelegatingHarness {
+        release: release.clone(),
+        steerable: true,
+        steers: steers.clone(),
+    }));
+    let core = &rig.core;
+    queue_human_run(core, "lead", "cmd-1", "msg-1");
+    wait_for(|| working(core, "lead"), "the owner's turn").await;
+    let child = core
+        .doc_host
+        .delegate_task(delegate("probe the cache"), Default::default())
+        .await
+        .unwrap()
+        .task_id;
+    wait_for(
+        || {
+            steers
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|steer| steer.contains(&child))
+        },
+        "the wake steered into the live turn",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    release.notify_one();
+    wait_for(|| idle(core, "lead"), "the owner to finish").await;
+    let bound = entries(core, "lead")
+        .iter()
+        .flat_map(|entry| &entry.parts)
+        .find_map(|part| match part {
+            zeron_doc::MessagePart::Tool {
+                id, subagent_ref, ..
+            } if id == "tc-1" => subagent_ref.clone(),
+            _ => None,
+        });
+    assert_eq!(bound.as_deref(), Some(child.as_str()));
+    core.shutdown().await;
+}
+
+#[tokio::test]
 async fn children_finishing_while_the_wake_waits_share_one_wake() {
     let release = Arc::new(tokio::sync::Notify::new());
     let rig = rig_on(Arc::new(DelegatingHarness {

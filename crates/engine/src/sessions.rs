@@ -856,6 +856,12 @@ impl Inner {
         });
     }
 
+    /// Also run before a segment reset, so a bind registered after the call's fold still lands.
+    fn bind_tool_parts(&self, chat_id: &str, run_id: &str, parts: &mut [MessagePart]) {
+        self.bind_delegates(chat_id, run_id, parts);
+        self.bind_html_renders(chat_id, run_id, parts);
+    }
+
     fn bind_html_renders(&self, chat_id: &str, run_id: &str, parts: &mut [MessagePart]) {
         let Some(binds) = lock(&self.runs)
             .get(chat_id)
@@ -6340,6 +6346,7 @@ async fn drive_run(
                         && !inner.continues_with_sent_message(&chat_id))
                         .then(|| entry_id.clone());
                     if !folded.is_empty() || writer.is_some() {
+                        inner.bind_tool_parts(&chat_id, &run_id, &mut folded);
                         if let Err(err) = finish_segment(
                             doc_ref,
                             writer.take(),
@@ -6638,6 +6645,7 @@ async fn drive_run(
             inner.set_compacting(&chat_id, false);
             inner.publish(&chat_id, &event);
             if !folded.is_empty() || writer.is_some() {
+                inner.bind_tool_parts(&chat_id, &run_id, &mut folded);
                 if let Err(err) = finish_segment(
                     doc_ref,
                     writer.take(),
@@ -6922,6 +6930,7 @@ async fn drive_run(
             // A steer boundary means a real prompt owns the turn again — its
             // Done will come; the short self-continued window stands down.
             self_continued_turn = false;
+            inner.bind_tool_parts(&chat_id, &run_id, &mut folded);
             if let Err(err) = finish_segment(
                 doc_ref,
                 writer.take(),
@@ -7062,8 +7071,7 @@ async fn drive_run(
                 event,
                 AgentEvent::ToolCall { .. } | AgentEvent::ToolResult { .. }
             ) {
-                inner.bind_delegates(&chat_id, &run_id, &mut folded);
-                inner.bind_html_renders(&chat_id, &run_id, &mut folded);
+                inner.bind_tool_parts(&chat_id, &run_id, &mut folded);
             }
             // R2 sidecar PARKED (2026-08-10, product call): the fold's
             // summary/stats ARE the doc's whole record — no refs stamped, no
