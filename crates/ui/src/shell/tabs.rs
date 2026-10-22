@@ -35,6 +35,8 @@ const TAB_GAP: f32 = 4.0;
 /// Width of the overflow edge fades. Wide enough that per-glyph fade steps
 /// (title text fades glyph-by-glyph on glass) stay gentle.
 const FADE_WIDTH: f32 = 36.0;
+const FOLDER_FLARE: f32 = 8.0;
+const FOLDER_DROP: f32 = (Theme::TITLEBAR_HEIGHT - TAB_HEIGHT) / 2.0;
 
 /// Drag-reorder state; `epoch` keys the 150ms slide animation restarts.
 pub(super) struct TabDragState {
@@ -219,17 +221,53 @@ fn tab_spinner(id: &str, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
         .into_any_element()
 }
 
-fn selected_shadows(tones: Option<InsetTones>) -> Vec<gpui::BoxShadow> {
-    let Some(tones) = tones else {
-        return crate::theme::glass_selected_shadows();
-    };
-    vec![gpui::BoxShadow {
-        color: tones.edge,
-        offset: gpui::point(px(0.0), px(0.0)),
-        blur_radius: px(0.0),
-        spread_radius: px(0.5),
-        inset: true,
-    }]
+fn folder_tab_backdrop(tones: InsetTones) -> AnyElement {
+    div()
+        .absolute()
+        .top_0()
+        .left(px(-FOLDER_FLARE))
+        .right(px(-FOLDER_FLARE))
+        .h(px(TAB_HEIGHT + FOLDER_DROP + 1.0))
+        .child(
+            gpui::canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    let at = |x: f32, y: f32| {
+                        gpui::point(bounds.origin.x + px(x), bounds.origin.y + px(y))
+                    };
+                    let w = f32::from(bounds.size.width);
+                    let b = f32::from(bounds.size.height);
+                    let j = b - 1.0;
+                    let (f, r) = (FOLDER_FLARE, 8.0);
+                    let outline = |path: &mut gpui::PathBuilder| {
+                        path.move_to(at(0.0, j));
+                        path.curve_to(at(f, j - f), at(f, j));
+                        path.line_to(at(f, r));
+                        path.curve_to(at(f + r, 0.0), at(f, 0.0));
+                        path.line_to(at(w - f - r, 0.0));
+                        path.curve_to(at(w - f, r), at(w - f, 0.0));
+                        path.line_to(at(w - f, j - f));
+                        path.curve_to(at(w, j), at(w - f, j));
+                    };
+                    let mut fill = gpui::PathBuilder::fill();
+                    fill.move_to(at(0.0, b));
+                    fill.line_to(at(0.0, j));
+                    outline(&mut fill);
+                    fill.line_to(at(w, b));
+                    fill.close();
+                    if let Ok(path) = fill.build() {
+                        window.paint_path(path, tones.body);
+                    }
+                    let mut edge = gpui::PathBuilder::stroke(px(0.5));
+                    outline(&mut edge);
+                    if let Ok(path) = edge.build() {
+                        window.paint_path(path, tones.edge);
+                    }
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
 }
 
 fn tab_grip(theme: &Theme) -> AnyElement {
@@ -266,9 +304,11 @@ fn split_tab_chip(
         .items_center()
         .rounded(px(8.0))
         .text_size(px(12.0))
-        .when(active, |el| {
-            el.bg(tones.map_or_else(crate::theme::glass_selected_bg, |tones| tones.body))
-                .shadow(selected_shadows(tones))
+        .when(active, |el| match tones {
+            Some(tones) => el.relative().child(folder_tab_backdrop(tones)),
+            None => el
+                .bg(crate::theme::glass_selected_bg())
+                .shadow(crate::theme::glass_selected_shadows()),
         })
         .when(!active, |el| {
             let wash = tones.map_or_else(|| theme.glass_hover(), |tones| tones.wash);
@@ -1273,7 +1313,11 @@ impl Shell {
         }
         let hovered = self.tab_hover.clone();
         let count = tabs.len();
-        let width = tab_width(f32::from(self.tabs_scroll.bounds().size.width), count);
+        let strip_pad = if tones.is_some() { FOLDER_FLARE } else { 0.0 };
+        let width = tab_width(
+            f32::from(self.tabs_scroll.bounds().size.width) - strip_pad * 2.0,
+            count,
+        );
         let drag = self
             .tab_drag
             .as_ref()
@@ -1321,7 +1365,7 @@ impl Shell {
                     // `on_hover` per element, and the state listener wins.
                     let terminal = terminals.get(&id).map(|row| row.launch.brand());
                     let (text_color, bg) = match (is_selected, is_hovered, tones) {
-                        (true, _, Some(tones)) => (theme.text, tones.body),
+                        (true, _, Some(_)) => (theme.text, crate::theme::wash(0.0)),
                         (true, _, None) => (theme.text, crate::theme::glass_selected_bg()),
                         (false, true, Some(tones)) => (theme.text, tones.wash),
                         (false, true, None) => (theme.text, theme.glass_hover()),
@@ -1356,7 +1400,10 @@ impl Shell {
                         .text_size(px(12.0))
                         .text_color(text_color)
                         .bg(bg)
-                        .when(is_selected, |el| el.shadow(selected_shadows(tones)))
+                        .when(is_selected, |el| match tones {
+                            Some(tones) => el.relative().child(folder_tab_backdrop(tones)),
+                            None => el.shadow(crate::theme::glass_selected_shadows()),
+                        })
                         .cursor_pointer()
                         // Tabs sit inside the titlebar drag strip — carve them out.
                         // NOT `.occlude()`: a BlockMouse hitbox ends the hit test,
@@ -1486,9 +1533,13 @@ impl Shell {
         let fade_left = scrolled > 1.0;
         let fade_right = scrolled < max_scroll - 1.0;
         let scroll_for_drag = self.tabs_scroll.clone();
+        let folder = tones.is_some();
         let tab_region = div()
             .relative()
             .min_w_0()
+            .when(folder, |el| {
+                el.self_start().h(px(Theme::TITLEBAR_HEIGHT + 1.0))
+            })
             .child(
                 div()
                     .id("session-tabs-scroll")
@@ -1499,6 +1550,12 @@ impl Shell {
                     .items_center()
                     .gap(px(TAB_GAP))
                     .min_w_0()
+                    .when(folder, |el| {
+                        el.h_full()
+                            .items_start()
+                            .pt(px(FOLDER_DROP))
+                            .px(px(FOLDER_FLARE))
+                    })
                     .overflow_x_scroll()
                     .track_scroll(&self.tabs_scroll)
                     .on_scroll_wheel(crate::swipe::claim_scrollable(&self.tabs_scroll))
@@ -1514,6 +1571,7 @@ impl Shell {
                             // relative x plus the scrolled-off width.
                             let rel_x = f32::from(event.event.position.x)
                                 - f32::from(event.bounds.left())
+                                - strip_pad
                                 - f32::from(scroll_for_drag.offset().x);
                             let over = drop_index(rel_x, width + TAB_GAP, count);
                             this.update_tab_drag_over(from, over, cx);
