@@ -101,9 +101,6 @@ impl TaskCenter {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if target.task.is_some_and(|task| task.completed_at.is_some()) {
-            return None;
-        }
         let (watch, elsewhere) = {
             let state = self.state.read(cx);
             state.supervisor.as_ref()?;

@@ -328,12 +328,7 @@ pub(crate) enum Watch {
     Elsewhere(String),
 }
 
-fn watch_of(
-    task_id: &str,
-    host: Option<&str>,
-    local: Option<&str>,
-    unwatched: &[String],
-) -> Watch {
+fn watch_of(task_id: &str, host: Option<&str>, local: Option<&str>, unwatched: &[String]) -> Watch {
     match (host, local) {
         (Some(host), Some(local)) if host != local => Watch::Elsewhere(host.to_owned()),
         _ if unwatched.iter().any(|id| id == task_id) => Watch::Unwatched,
@@ -349,7 +344,7 @@ pub(crate) fn tree_watch(state: &AppState, root: &str) -> Watch {
         .map(|chat| chat.device_id.as_str());
     let local = state.local_device_id.as_deref();
     let snapshot = state.supervisor.as_ref();
-    if let Some(task) = crate::tasks::plan_led_by(&state.tasks, root) {
+    if let Some(task) = zeron_proto::plan_of_chat(&state.tasks, root) {
         let unwatched = snapshot.map_or(&[][..], |snapshot| snapshot.unwatched.as_slice());
         return watch_of(&task.id, host, local, unwatched);
     }
@@ -4279,12 +4274,18 @@ mod tests {
             chat("picked", "mac"),
             chat("other", "mac"),
             chat("lead", "mac"),
+            chat("finished", "mac"),
         ];
         state.chats.push(chat("remote", "pc"));
         state.tasks = vec![
             serde_json::from_value(serde_json::json!({
                 "id": "t", "title": "t", "mode": "orchestrated", "chatId": "lead",
                 "createdAt": Utc::now(), "updatedAt": Utc::now(),
+            }))
+            .unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "id": "done", "title": "done", "mode": "orchestrated", "chatId": "finished",
+                "createdAt": Utc::now(), "updatedAt": Utc::now(), "completedAt": Utc::now(),
             }))
             .unwrap(),
         ];
@@ -4302,7 +4303,13 @@ mod tests {
         assert_eq!(tree_watch(&state, "other"), Watch::Unwatched);
         assert_eq!(tree_watch(&state, "remote"), Watch::Elsewhere("pc".into()));
         assert_eq!(tree_watch(&state, "lead"), Watch::Unwatched);
+        assert_eq!(
+            tree_watch(&state, "finished"),
+            Watch::Unwatched,
+            "a lead whose plan finished is a plain tree until picked"
+        );
         state.supervisor.as_mut().unwrap().watch_everything = true;
+        assert_eq!(tree_watch(&state, "finished"), Watch::Watched);
         assert_eq!(tree_watch(&state, "other"), Watch::Watched);
         assert_eq!(
             tree_watch(&state, "lead"),

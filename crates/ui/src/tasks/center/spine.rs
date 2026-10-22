@@ -1770,7 +1770,7 @@ impl TaskCenter {
             self.render_watch_button(
                 super::watch_sheet::WatchTarget {
                     root,
-                    task: Some(task),
+                    task: Some(task).filter(|task| task.completed_at.is_none()),
                     title: &task.title,
                 },
                 theme,

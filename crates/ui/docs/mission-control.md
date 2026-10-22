@@ -51,7 +51,7 @@ While the lead writes, its line reads **Planning**. The planned steps rise in ab
 
 ## Watched by the Supervisor
 
-Every mission is watched by the [Supervisor](zeron://docs/supervisor) unless you turn it off. A tree without a plan is watched only when you pick it: click **Watch** in its header, read what the Supervisor will do, set its two **Authority** switches if you want, and click **Start watching**. The button turns into **Watched** with a green dot. Click it again for **Stop watching**. With **Watch everything** on, every tree is watched.
+Every mission is watched by the [Supervisor](zeron://docs/supervisor) unless you turn it off. A tree without a plan, or whose plan has finished, is watched only when you pick it: click **Watch** in its header, read what the Supervisor will do, set its two **Authority** switches if you want, and click **Start watching**. The button turns into **Watched** with a green dot. Click it again for **Stop watching**. With **Watch everything** on, every tree is watched.
 
 ## Start a mission from a task
 
