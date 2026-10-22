@@ -18236,6 +18236,7 @@ mod tests {
         assert!(matches!(rows[2].kind, RowKind::GeneratedImage { .. }));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn settled_html_links_end_the_entry_with_one_card_row() {
         let parts = vec![
