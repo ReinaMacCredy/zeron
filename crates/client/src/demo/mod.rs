@@ -10,6 +10,7 @@
 //! rows, draining the queue, and answering relay RPCs.
 
 mod fixtures;
+mod missions;
 mod png;
 mod transcripts;
 mod visuals;
@@ -78,6 +79,7 @@ pub(crate) struct DemoHost {
     processed: Mutex<HashSet<String>>,
     leases: Mutex<HashMap<String, Lease>>,
     uploads: Mutex<HashMap<String, Arc<Vec<u8>>>>,
+    supervisor_settings: Mutex<HashMap<String, zeron_proto::supervisor::SupervisorSettings>>,
     rng: Mutex<Rng>,
     cancel: Mutex<Option<CancellationToken>>,
 }
@@ -98,6 +100,7 @@ impl DemoHost {
             processed: Mutex::new(HashSet::new()),
             leases: Mutex::new(HashMap::new()),
             uploads: Mutex::new(HashMap::new()),
+            supervisor_settings: Mutex::new(HashMap::new()),
             rng: Mutex::new(Rng(0x9e37_79b9_7f4a_7c15)),
             cancel: Mutex::new(None),
         })
@@ -122,6 +125,11 @@ impl DemoHost {
             .map_err(doc_err)?;
         for status in seeded.change_requests {
             client.workspace.put_change_request(status);
+        }
+        if seeded.missions {
+            for (device, snapshot) in missions::supervisors(Utc::now()) {
+                client.workspace.put_supervisor(device, snapshot);
+            }
         }
         self.beat_presence(client);
         Ok(())
@@ -366,6 +374,7 @@ impl DemoHost {
                     });
                     let _ =
                         core.write(|doc| doc.resolve_input(&request_id, Some(&answers), now_ms()));
+                    missions::input_answered(&client, chat_id, &request_id);
                     let steps = if consent {
                         transcripts::consent_answered(crate::computer::consent_outcome(
                             true,
@@ -791,6 +800,15 @@ impl DemoHost {
             return Err(ClientError::HostUnavailable(device_id.to_owned()));
         }
         tokio::time::sleep(Duration::from_millis(80)).await;
+        if let Some(reply) = missions::host_call(
+            &client,
+            &self.supervisor_settings,
+            device_id,
+            method,
+            &params,
+        ) {
+            return reply;
+        }
         let chat_id = params["chatId"].as_str().unwrap_or_default().to_owned();
         let id = params["id"].as_str().unwrap_or_default().to_owned();
         let core = client

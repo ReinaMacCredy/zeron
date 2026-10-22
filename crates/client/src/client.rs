@@ -8,6 +8,7 @@ use std::time::Duration;
 use chrono::{TimeZone, Utc};
 use tokio_util::sync::CancellationToken;
 use zeron_doc::RegistryDoc;
+use zeron_proto::supervisor::SupervisorSettings;
 use zeron_proto::{Chat, ChatConfig, SidebarPinChange, SidebarSectionChange};
 
 use crate::attachments::{self, AttachmentCache};
@@ -23,7 +24,7 @@ use crate::events::{ClientEvent, ClientListener, EventPump};
 use crate::live::LiveBackend;
 use crate::rpc::{FolderListing, ProgressFn, QUEUED_ATTACHMENTS_MIN, RepoRef, capability};
 use crate::session::{HostCapabilities, OutgoingAttachment, RoomState, SessionCore, SessionHandle};
-use crate::workspace::{SearchHit, WorkspaceSnapshot, WorkspaceStore};
+use crate::workspace::{SearchHit, TaskDetail, WorkspaceSnapshot, WorkspaceStore};
 use crate::{lock, now_ms, read, write};
 
 /// Attachment read cache budget.
@@ -178,7 +179,7 @@ impl ClientInner {
         }
         self.recompute_connectivity();
         self.recompute_workspace();
-        self.reconcile_change_request_watches();
+        self.reconcile_watches();
         // New rows may flip a chat's roomGen / host: attach rooms.
         for core in self.cores() {
             core.ensure_room(self);
@@ -209,8 +210,9 @@ impl ClientInner {
     }
 
     /// PR-status streams for every active chat with a branch (per
-    /// `(device, repo root, branch)`), only while foregrounded.
-    pub(crate) fn reconcile_change_request_watches(self: &Arc<Self>) {
+    /// `(device, repo root, branch)`) and every host's Supervisor, only while
+    /// foregrounded.
+    pub(crate) fn reconcile_watches(self: &Arc<Self>) {
         let Some(live) = self.live() else { return };
         if !self.foreground.load(Ordering::Acquire) {
             live.relay.stop_watches();
@@ -234,6 +236,15 @@ impl ClientInner {
             })
             .collect();
         live.relay.reconcile_watches(self, targets);
+        let hosts = self
+            .workspace
+            .snapshot()
+            .devices
+            .iter()
+            .filter(|d| d.is_execution_host && !d.is_self)
+            .map(|d| d.id.clone())
+            .collect();
+        live.relay.reconcile_supervisors(self, hosts);
     }
 
     /// Durable wake: retry until the edge accepts it, including after relaunch.
@@ -700,6 +711,168 @@ impl Client {
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
         self.workspace().search(query, limit)
+    }
+
+
+    pub fn task_detail(&self, task_id: &str) -> Option<TaskDetail> {
+        let (state, _) = self.inner.workspace.state();
+        crate::workspace::task_detail(
+            &state,
+            &self.inner.workspace.steps(),
+            &self.workspace(),
+            &self.inner.workspace.supervisors(),
+            task_id,
+        )
+    }
+
+    fn task_host(&self, task_id: &str) -> Result<String> {
+        let workspace = self.workspace();
+        let page = &workspace.tasks;
+        let row = [
+            &page.missions,
+            &page.needs_you,
+            &page.working,
+            &page.to_do,
+            &page.done,
+        ]
+        .into_iter()
+        .flatten()
+        .find(|row| row.id == task_id)
+        .ok_or_else(|| ClientError::NotFound(task_id.to_owned()))?;
+        row.host
+            .as_ref()
+            .map(|host| host.device_id.clone())
+            .or_else(|| {
+                workspace
+                    .devices
+                    .iter()
+                    .find(|d| d.is_execution_host && d.online && !d.is_self)
+                    .map(|d| d.id.clone())
+            })
+            .ok_or_else(|| ClientError::HostUnavailable("no host is online".into()))
+    }
+
+    fn step_host(&self, step_id: &str) -> Result<String> {
+        let steps = self.inner.workspace.steps();
+        let step = steps
+            .iter()
+            .find(|step| step.id == step_id)
+            .ok_or_else(|| ClientError::NotFound(step_id.to_owned()))?;
+        self.task_host(&step.task_id)
+    }
+
+    async fn mutate(&self, device_id: &str, params: serde_json::Value) -> Result<()> {
+        self.inner
+            .host_rpc(device_id, zeron_rpc::methods::MUTATE, params)
+            .await
+            .map(drop)
+    }
+
+    pub async fn approve_plan(&self, task_id: &str) -> Result<()> {
+        let host = self.task_host(task_id)?;
+        self.mutate(
+            &host,
+            serde_json::json!({ "op": "approvePlan", "taskId": task_id }),
+        )
+        .await
+    }
+
+    pub async fn take_back_plan_approval(&self, task_id: &str) -> Result<()> {
+        let host = self.task_host(task_id)?;
+        self.mutate(
+            &host,
+            serde_json::json!({ "op": "takeBackPlanApproval", "taskId": task_id }),
+        )
+        .await
+    }
+
+    pub async fn retry_step(&self, step_id: &str) -> Result<()> {
+        let host = self.step_host(step_id)?;
+        self.mutate(
+            &host,
+            serde_json::json!({ "op": "retryTaskStep", "stepId": step_id }),
+        )
+        .await
+    }
+
+    pub async fn set_step_skipped(&self, step_id: &str, skipped: bool) -> Result<()> {
+        let host = self.step_host(step_id)?;
+        let patch = zeron_proto::TaskStepPatch {
+            outcome: Some(skipped.then_some(zeron_proto::StepOutcome::Skipped)),
+            ..Default::default()
+        };
+        self.mutate(
+            &host,
+            serde_json::json!({ "op": "updateTaskStep", "stepId": step_id, "patch": patch }),
+        )
+        .await
+    }
+
+    pub async fn set_task_completed(&self, task_id: &str, completed: bool) -> Result<()> {
+        let host = self.task_host(task_id)?;
+        let patch = zeron_proto::TaskPatch {
+            completed: Some(completed),
+            ..Default::default()
+        };
+        self.mutate(
+            &host,
+            serde_json::json!({ "op": "updateTask", "taskId": task_id, "patch": patch }),
+        )
+        .await
+    }
+
+    pub async fn delete_task(&self, task_id: &str) -> Result<()> {
+        let host = self.task_host(task_id)?;
+        self.mutate(
+            &host,
+            serde_json::json!({ "op": "deleteTask", "taskId": task_id }),
+        )
+        .await
+    }
+
+    pub async fn resolve_supervisor_item(
+        &self,
+        device_id: &str,
+        item_id: &str,
+        choice: &str,
+    ) -> Result<()> {
+        self.mutate(
+            device_id,
+            serde_json::json!({
+                "op": "resolveSupervisorItems",
+                "answers": [{ "itemId": item_id, "choice": choice }],
+            }),
+        )
+        .await
+    }
+
+    pub async fn supervisor_settings(&self, device_id: &str) -> Result<SupervisorSettings> {
+        let reply = self
+            .inner
+            .host_rpc(
+                device_id,
+                zeron_rpc::methods::GET_SUPERVISOR_SETTINGS,
+                serde_json::json!({}),
+            )
+            .await?;
+        serde_json::from_value(reply).map_err(|e| ClientError::HostError(e.to_string()))
+    }
+
+    pub async fn set_supervisor_settings(
+        &self,
+        device_id: &str,
+        before: SupervisorSettings,
+        after: SupervisorSettings,
+    ) -> Result<SupervisorSettings> {
+        let reply = self
+            .inner
+            .host_rpc(
+                device_id,
+                zeron_rpc::methods::SET_SUPERVISOR_SETTINGS,
+                zeron_proto::supervisor::settings_patch(Some(before), after),
+            )
+            .await?;
+        serde_json::from_value(reply).map_err(|e| ClientError::HostError(e.to_string()))
     }
 
     // ── workspace writes ───────────────────────────────────────────────────
@@ -1497,7 +1670,7 @@ impl Client {
             live.probe_health();
             self.kick_rooms();
             live.relay.clear_unsupported();
-            self.inner.reconcile_change_request_watches();
+            self.inner.reconcile_watches();
         }
         self.inner.tick();
     }

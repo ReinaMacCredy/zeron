@@ -62,10 +62,24 @@ fn front_page_mirrors_the_desktop_sidebar() {
     assert_eq!(
         ids(&ws.front.recent),
         [
+            "chat-shelf-3",
+            "chat-lead-shelf",
             "chat-visuals",
+            "chat-lead-ios",
+            "chat-shelf-4",
             "chat-cjk",
             "chat-side",
+            "chat-shelf-2",
+            "chat-agents",
             "chat-home",
+            "chat-shelf-1",
+            "chat-cursor",
+            "chat-devin",
+            "chat-grok",
+            "chat-hermes",
+            "chat-pi",
+            "chat-antigravity",
+            "chat-acp",
             "chat-deploy",
             "chat-computer",
             "chat-blog"
@@ -600,4 +614,57 @@ fn sends_to_an_offline_host_park_as_queued_not_working() {
     let row = client.workspace().session("chat-blog").unwrap().clone();
     assert_eq!(row.send_state, Some(zeron_client::SendState::Queued));
     assert_eq!(row.host_indicator, ChatIndicator::Idle);
+}
+
+#[test]
+fn tasks_and_supervisors_merge_across_macs() {
+    let (client, _dir) = demo(fast());
+    let ws = client.workspace();
+    let missions: Vec<&str> = ws.tasks.missions.iter().map(|t| t.id.as_str()).collect();
+    assert!(missions.contains(&"task-ios-install"));
+    let hosts: Vec<&str> = ws
+        .supervisor
+        .hosts
+        .iter()
+        .map(|h| h.host.name.as_str())
+        .collect();
+    assert_eq!(hosts.len(), 2);
+    assert!(hosts.contains(&"MacBook Pro") && hosts.contains(&"Mac mini"));
+    let tagged: std::collections::BTreeSet<&str> = ws
+        .supervisor
+        .needs_you
+        .iter()
+        .map(|n| n.host.name.as_str())
+        .collect();
+    assert_eq!(tagged.len(), 2);
+
+    assert!(
+        client
+            .task_detail("task-ios-install")
+            .unwrap()
+            .row
+            .plan_ready
+    );
+    zeron_client::runtime::shared()
+        .block_on(client.approve_plan("task-ios-install"))
+        .unwrap();
+    wait_for("plan approved", Duration::from_secs(5), || {
+        !client
+            .task_detail("task-ios-install")
+            .unwrap()
+            .row
+            .plan_ready
+    });
+
+    let before = client.workspace().supervisor.needs_you.len();
+    zeron_client::runtime::shared()
+        .block_on(client.resolve_supervisor_item(
+            "dev-mac",
+            "item-testflight",
+            "Wait for the widget",
+        ))
+        .unwrap();
+    wait_for("item resolved", Duration::from_secs(5), || {
+        client.workspace().supervisor.needs_you.len() == before - 1
+    });
 }

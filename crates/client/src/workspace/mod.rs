@@ -6,15 +6,22 @@
 //! the rows once per registry *generation* (cached), so the 1 Hz time-driven
 //! re-derivation (staleness, presence expiry, send grace) never re-decodes.
 
+mod tasks;
 mod view;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use zeron_doc::{RegistryDoc, WorkspaceState};
-use zeron_proto::{CheckoutChangeRequestStatus, SidebarPreferences};
+use zeron_proto::supervisor::SupervisorSnapshot;
+use zeron_proto::{CheckoutChangeRequestStatus, SidebarPreferences, TaskStep};
 
+pub(crate) use tasks::detail as task_detail;
+pub use tasks::{
+    ApprovalView, HostRef, NeedsYouEntry, NeedsYouKind, StepView, SupervisorHost, SupervisorPage,
+    TaskDetail, TaskRow, TasksPage, WakeEntry,
+};
 pub(crate) use view::{DeriveContext, device_online};
 pub use view::{
     DeviceView, FrontPage, PROJECT_COLOR_COUNT, ProjectRef, ProjectView, PullRequestGroups,
@@ -27,6 +34,7 @@ use crate::{lock, read, write};
 struct StateCache {
     generation: u64,
     state: Arc<WorkspaceState>,
+    steps: Arc<Vec<TaskStep>>,
     prefs: Option<SidebarPreferences>,
 }
 
@@ -34,6 +42,7 @@ pub(crate) struct WorkspaceStore {
     doc: Arc<Mutex<RegistryDoc>>,
     presence: Mutex<HashMap<String, i64>>,
     change_requests: Mutex<Vec<CheckoutChangeRequestStatus>>,
+    supervisors: Mutex<BTreeMap<String, SupervisorSnapshot>>,
     cache: Mutex<Option<StateCache>>,
     snapshot: RwLock<Arc<WorkspaceSnapshot>>,
     recompute: Mutex<()>,
@@ -46,6 +55,7 @@ impl WorkspaceStore {
             doc: Arc::new(Mutex::new(doc)),
             presence: Mutex::new(HashMap::new()),
             change_requests: Mutex::new(Vec::new()),
+            supervisors: Mutex::new(BTreeMap::new()),
             cache: Mutex::new(None),
             snapshot: RwLock::new(Arc::new(WorkspaceSnapshot::default())),
             recompute: Mutex::new(()),
@@ -66,13 +76,32 @@ impl WorkspaceStore {
     /// Materialized rows + sidebar prefs, re-read only when the replica's
     /// generation moved.
     pub(crate) fn state(&self) -> (Arc<WorkspaceState>, Option<SidebarPreferences>) {
+        let (state, _, prefs) = self.state_and_steps();
+        (state, prefs)
+    }
+
+    pub(crate) fn steps(&self) -> Arc<Vec<TaskStep>> {
+        self.state_and_steps().1
+    }
+
+    fn state_and_steps(
+        &self,
+    ) -> (
+        Arc<WorkspaceState>,
+        Arc<Vec<TaskStep>>,
+        Option<SidebarPreferences>,
+    ) {
         let doc = lock(&self.doc);
         let generation = doc.generation();
         let mut cache = lock(&self.cache);
         if let Some(cached) = cache.as_ref()
             && cached.generation == generation
         {
-            return (cached.state.clone(), cached.prefs.clone());
+            return (
+                cached.state.clone(),
+                cached.steps.clone(),
+                cached.prefs.clone(),
+            );
         }
         let state = Arc::new(doc.read_all().unwrap_or_else(|err| {
             tracing::warn!(error = %err, "registry read failed");
@@ -84,13 +113,18 @@ impl WorkspaceStore {
                 tasks: vec![],
             }
         }));
+        let steps = Arc::new(doc.read_task_steps().unwrap_or_else(|err| {
+            tracing::warn!(error = %err, "task steps read failed");
+            Vec::new()
+        }));
         let prefs = doc.sidebar_preferences();
         *cache = Some(StateCache {
             generation,
             state: state.clone(),
+            steps: steps.clone(),
             prefs: prefs.clone(),
         });
-        (state, prefs)
+        (state, steps, prefs)
     }
 
     pub(crate) fn chat(&self, chat_id: &str) -> Option<zeron_proto::Chat> {
@@ -127,6 +161,26 @@ impl WorkspaceStore {
         all.push(status);
     }
 
+    pub(crate) fn put_supervisor(&self, device_id: &str, snapshot: SupervisorSnapshot) {
+        lock(&self.supervisors).insert(device_id.to_owned(), snapshot);
+    }
+
+    pub(crate) fn drop_supervisor(&self, device_id: &str) -> bool {
+        lock(&self.supervisors).remove(device_id).is_some()
+    }
+
+    pub(crate) fn supervisors(&self) -> BTreeMap<String, SupervisorSnapshot> {
+        lock(&self.supervisors).clone()
+    }
+
+    pub(crate) fn update_supervisor(
+        &self,
+        device_id: &str,
+        f: impl FnOnce(&mut SupervisorSnapshot),
+    ) -> bool {
+        lock(&self.supervisors).get_mut(device_id).map(f).is_some()
+    }
+
     pub(crate) fn snapshot(&self) -> Arc<WorkspaceSnapshot> {
         read(&self.snapshot).clone()
     }
@@ -139,9 +193,10 @@ impl WorkspaceStore {
         synced: bool,
     ) -> Option<u64> {
         let _serial = lock(&self.recompute);
-        let (state, prefs) = self.state();
+        let (state, steps, prefs) = self.state_and_steps();
         let presence = self.presence();
         let change_requests = lock(&self.change_requests).clone();
+        let supervisors = self.supervisors();
         let previous = self.snapshot();
         let mut next = view::derive(
             &state,
@@ -151,6 +206,8 @@ impl WorkspaceStore {
                 now: chrono::Utc::now(),
                 presence: &presence,
                 change_requests: &change_requests,
+                steps: &steps,
+                supervisors: &supervisors,
                 send_states,
                 synced,
                 previous: Some(&previous),

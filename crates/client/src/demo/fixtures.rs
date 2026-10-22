@@ -16,6 +16,7 @@ use crate::rpc::capability;
 pub(crate) const MAC: &str = "dev-mac";
 pub(crate) const VPS: &str = "dev-vps";
 pub(crate) const STUDIO: &str = "dev-studio";
+pub(crate) const MINI: &str = "dev-mini";
 
 pub(crate) struct DemoChat {
     pub id: &'static str,
@@ -339,6 +340,87 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             )
         },
         DemoChat {
+            model: "claude-opus-5",
+            last_ago_ms: 3 * MIN,
+            created_ago_ms: 40 * MIN,
+            ..chat(
+                "chat-lead-ios",
+                Some("space-zeron"),
+                MAC,
+                "Build iOS App Install",
+                "The plan is ready: six steps, one screen each.",
+            )
+        },
+        DemoChat {
+            model: "claude-opus-5",
+            status: Some(SessionStatus::Working),
+            last_ago_ms: 30_000,
+            created_ago_ms: 3 * HOUR,
+            ..chat(
+                "chat-lead-shelf",
+                Some("space-fork"),
+                MINI,
+                "Inbox settle shelf",
+                "Step 3 is on the swipe actions.",
+            )
+        },
+        DemoChat {
+            harness: Codex,
+            model: "gpt-5.6-terra",
+            reasoning: High,
+            last_ago_ms: 2 * HOUR,
+            parent: Some("chat-lead-shelf"),
+            ..chat(
+                "chat-shelf-1",
+                Some("space-fork"),
+                MINI,
+                "Settled fold",
+                "The Settled fold sits under Inbox.",
+            )
+        },
+        DemoChat {
+            harness: Codex,
+            model: "gpt-5.6-terra",
+            reasoning: High,
+            last_ago_ms: 90 * MIN,
+            parent: Some("chat-lead-shelf"),
+            ..chat(
+                "chat-shelf-2",
+                Some("space-fork"),
+                MINI,
+                "Slim rows",
+                "Settled rows drop the preview line.",
+            )
+        },
+        DemoChat {
+            harness: Codex,
+            model: "gpt-5.6-terra",
+            reasoning: High,
+            status: Some(SessionStatus::Working),
+            last_ago_ms: 20_000,
+            parent: Some("chat-lead-shelf"),
+            ..chat(
+                "chat-shelf-3",
+                Some("space-fork"),
+                MINI,
+                "Swipe Settle and Unsettle",
+                "Wiring the trailing swipe action.",
+            )
+        },
+        DemoChat {
+            status: Some(SessionStatus::AwaitingInput),
+            last_ago_ms: 4 * MIN,
+            seen: false,
+            parent: Some("chat-lead-shelf"),
+            ..chat(
+                "chat-shelf-4",
+                Some("space-fork"),
+                MINI,
+                "Settle after days",
+                "One question before I read the setting:",
+            )
+        },
+        DemoChat {
             harness: Acp,
             model: "default",
             last_ago_ms: 16 * HOUR,
@@ -406,6 +488,14 @@ pub(crate) fn spaces(now: i64) -> Vec<Space> {
             2 * DAY,
         ),
         space(
+            "space-fork",
+            MINI,
+            "/Users/dev/zeron-fork",
+            None,
+            true,
+            12 * HOUR,
+        ),
+        space(
             "space-agents",
             MAC,
             "/Users/dev/agents",
@@ -453,6 +543,14 @@ pub(crate) fn devices(self_id: &str, self_name: &str, now: i64) -> Vec<Device> {
             now,
         ),
         device(
+            MINI,
+            "Mac mini",
+            "macos",
+            env!("CARGO_PKG_VERSION"),
+            true,
+            now,
+        ),
+        device(
             STUDIO,
             "Mac Studio",
             "macos",
@@ -472,10 +570,11 @@ pub(crate) fn devices(self_id: &str, self_name: &str, now: i64) -> Vec<Device> {
 }
 
 /// Devices whose presence the demo keeps fresh.
-pub(crate) const ONLINE: &[&str] = &[MAC, VPS];
+pub(crate) const ONLINE: &[&str] = &[MAC, VPS, MINI];
 
 pub(crate) struct Seeded {
     pub change_requests: Vec<CheckoutChangeRequestStatus>,
+    pub missions: bool,
 }
 
 /// Write the whole dataset into the replica (as local writes, which the
@@ -496,14 +595,20 @@ pub(crate) fn seed(
                 doc.upsert_device(phone)?;
             }
             doc.reconcile_sidebar_pins(true)?;
-            return Ok(Seeded { change_requests });
+            return Ok(Seeded {
+                change_requests,
+                missions: false,
+            });
         }
         DemoFixture::NoProjects => {
             for device in &all_devices {
                 doc.upsert_device(device)?;
             }
             doc.reconcile_sidebar_pins(true)?;
-            return Ok(Seeded { change_requests });
+            return Ok(Seeded {
+                change_requests,
+                missions: false,
+            });
         }
         DemoFixture::Standard => {}
     }
@@ -642,5 +747,9 @@ pub(crate) fn seed(
             })?;
         }
     }
-    Ok(Seeded { change_requests })
+    super::missions::seed(doc, Utc::now())?;
+    Ok(Seeded {
+        change_requests,
+        missions: true,
+    })
 }

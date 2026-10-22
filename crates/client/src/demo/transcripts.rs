@@ -370,42 +370,75 @@ fn picker(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                 MessagePart::Input {
                     id: "req-1".into(),
                     request_id: "req-1".into(),
-                    questions: vec![
-                        UserInputQuestion {
-                            approval: false,
-                            id: "q1".into(),
-                            header: "Catalog source".into(),
-                            question:
-                                "Which device should serve harness/model catalogs for the picker?"
-                                    .into(),
-                            options: vec![
-                                "Space's device (Recommended)".into(),
-                                "Local device".into(),
-                                "Union of both".into(),
-                            ],
-                            prefill: None,
-                            multiline: false,
-                            multi_select: false,
-                            kind: None,
-                        },
-                        UserInputQuestion {
-                            approval: false,
-                            id: "q2".into(),
-                            header: "Harnesses".into(),
-                            question: "Which harnesses should the picker offer on phones?".into(),
-                            options: vec![
-                                "Claude Code".into(),
-                                "Codex".into(),
-                                "OpenCode".into(),
-                                "Grok".into(),
-                            ],
-                            prefill: None,
-                            multiline: false,
-                            multi_select: true,
-                            kind: None,
-                        },
-                    ],
-                    resolved: false, answers: None, 
+                    questions: picker_questions(),
+                    resolved: false,
+                    answers: None,
+                    asked_at_ms: None,
+                    answered_at_ms: None,
+                },
+            ],
+        ),
+    ]
+}
+
+pub(crate) fn picker_questions() -> Vec<UserInputQuestion> {
+    vec![
+        UserInputQuestion {
+            approval: false,
+            id: "q1".into(),
+            header: "Catalog source".into(),
+            question: "Which device should serve harness/model catalogs for the picker?".into(),
+            options: vec![
+                "Space's device (Recommended)".into(),
+                "Local device".into(),
+                "Union of both".into(),
+            ],
+            prefill: None,
+            multiline: false,
+            multi_select: false,
+            kind: None,
+        },
+        UserInputQuestion {
+            approval: false,
+            id: "q2".into(),
+            header: "Harnesses".into(),
+            question: "Which harnesses should the picker offer on phones?".into(),
+            options: vec![
+                "Claude Code".into(),
+                "Codex".into(),
+                "OpenCode".into(),
+                "Grok".into(),
+            ],
+            prefill: None,
+            multiline: false,
+            multi_select: true,
+            kind: None,
+        },
+    ]
+}
+
+fn shelf(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    vec![
+        user(
+            "m1",
+            now - 300_000,
+            "Step 4 of Inbox settle shelf: read settle_after_days from the host.",
+        ),
+        assistant(
+            "m2",
+            host,
+            now - 240_000,
+            vec![
+                text(
+                    "t0",
+                    "The phone has no settings row for it yet. One question before I read the setting:",
+                ),
+                MessagePart::Input {
+                    id: super::missions::SHELF_QUESTION.into(),
+                    request_id: super::missions::SHELF_QUESTION.into(),
+                    questions: super::missions::shelf_questions(),
+                    resolved: false,
+                    answers: None,
                     asked_at_ms: None,
                     answered_at_ms: None,
                 },
@@ -846,9 +879,24 @@ fn agents(host: &str, now: i64) -> Vec<SessionMessageEntry> {
             now - 280_000,
             vec![
                 text("t0", "Spawning one agent per surface:"),
-                spawn("s1", "Audit the layout cache", Some("claude-haiku-5-5"), SubagentStatus::Done),
-                spawn("s2", "Port the veil to Android", Some("openai/gpt-5.6-sol"), SubagentStatus::Done),
-                spawn("s3", "Review the edge worker", Some("xai/grok-4.5"), SubagentStatus::Running),
+                spawn(
+                    "s1",
+                    "Audit the layout cache",
+                    Some("claude-haiku-5-5"),
+                    SubagentStatus::Done,
+                ),
+                spawn(
+                    "s2",
+                    "Port the veil to Android",
+                    Some("openai/gpt-5.6-sol"),
+                    SubagentStatus::Done,
+                ),
+                spawn(
+                    "s3",
+                    "Review the edge worker",
+                    Some("xai/grok-4.5"),
+                    SubagentStatus::Running,
+                ),
                 spawn("s4", "Summarize the CRDT notes", None, SubagentStatus::Done),
                 text("t1", "Four agents reported back."),
             ],
@@ -906,6 +954,7 @@ pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<Sess
             "Batched to one beat per 25s.",
         ),
         "chat-agents" => agents(host, now),
+        "chat-shelf-4" => shelf(host, now),
         _ => Vec::new(),
     }
 }
