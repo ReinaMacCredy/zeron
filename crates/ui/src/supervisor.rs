@@ -2134,7 +2134,9 @@ impl SupervisorPage {
     fn sync_motion(&mut self, feed: &Feed, missions: &[Mission], now: Instant, reduced: bool) {
         let fresh = std::mem::take(&mut self.fresh);
         let mut snap = reduced;
-        if self.filter != self.list_filter {
+        if self.filter == self.list_filter {
+            self.list_switch = None;
+        } else {
             let out = LIST_OUT.total().mul_f32(motion::speed_scale());
             if reduced || self.list_switch.is_none_or(|at| now >= at + out) {
                 self.list_filter = self.filter;
@@ -4375,6 +4377,85 @@ mod tests {
             assert!(page.replies.get("item:b").is_none());
             assert_eq!(page.staged("item:b", ""), vec!["Yes".to_owned()]);
         });
+    }
+
+    #[gpui::test]
+    fn a_filter_picked_and_unpicked_inside_the_fade_leaves_the_list_shown(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::pull_request_test_support as fixture;
+
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let _settings = fixture::settings(cx, crate::settings::UiSettings::default());
+        let page = cx.update(|cx| {
+            let state = fixture::state(cx, None);
+            cx.new(|cx| SupervisorPage::new(state, cx))
+        });
+        page.update(cx, |page, cx| {
+            page.pick_filter(Some(Kind::Needs), cx);
+            page.pick_filter(Some(Kind::Needs), cx);
+            let later = Instant::now() + Duration::from_secs(1);
+            page.sync_motion(&Feed::default(), &[], later, false);
+            assert!(page.list_switch.is_none());
+            assert!(!page.animating(later));
+        });
+    }
+
+    #[test]
+    fn take_back_is_offered_only_before_a_step_starts() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        let approval = |approval: PlanApproval| SupervisorIntervention {
+            id: "a".into(),
+            at: now,
+            kind: InterventionKind::Approve,
+            task_id: Some("t".into()),
+            step_ids: Vec::new(),
+            target: Some("lead".into()),
+            message_id: None,
+            request_id: None,
+            item: None,
+            text: String::new(),
+            trigger: None,
+            chips: Vec::new(),
+            approval: Some(approval),
+        };
+        let held = approval(PlanApproval::Held {
+            starts_at: now + chrono::Duration::seconds(25),
+        });
+        let sent = approval(PlanApproval::Sent);
+        let taken = approval(PlanApproval::TakenBack { at: now });
+        assert_eq!(
+            approval_state(&held, &state, now),
+            Some(ApprovalState::Held { secs: 25 })
+        );
+        assert_eq!(
+            approval_state(&sent, &state, now),
+            Some(ApprovalState::Sent)
+        );
+        assert_eq!(
+            approval_state(&taken, &state, now),
+            Some(ApprovalState::TakenBack)
+        );
+        state.task_steps = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "s", "taskId": "t", "title": "s", "orderKey": "a",
+                "chatId": "step-chat", "createdAt": now, "updatedAt": now,
+            }))
+            .unwrap(),
+        ];
+        for row in [&held, &sent] {
+            let started = approval_state(row, &state, now);
+            assert_eq!(started, Some(ApprovalState::Started));
+            assert!(!started.unwrap().can_take_back());
+        }
+        assert_eq!(
+            approval_state(&taken, &state, now),
+            Some(ApprovalState::TakenBack)
+        );
+        assert!(ApprovalState::Held { secs: 1 }.can_take_back());
+        assert!(ApprovalState::Sent.can_take_back());
     }
 
     #[gpui::test]
