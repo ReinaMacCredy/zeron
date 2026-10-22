@@ -7521,6 +7521,7 @@ public struct LiveStatus: Equatable, Hashable {
      * Stop is meaningful.
      */
     public var canInterrupt: Bool
+    public var resumable: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -7536,12 +7537,13 @@ public struct LiveStatus: Equatable, Hashable {
          */streaming: Bool, 
         /**
          * Stop is meaningful.
-         */canInterrupt: Bool) {
+         */canInterrupt: Bool, resumable: Bool) {
         self.indicator = indicator
         self.turnRunning = turnRunning
         self.workingSinceMs = workingSinceMs
         self.streaming = streaming
         self.canInterrupt = canInterrupt
+        self.resumable = resumable
     }
 
     
@@ -7564,7 +7566,8 @@ public struct FfiConverterTypeLiveStatus: FfiConverterRustBuffer {
                 turnRunning: FfiConverterBool.read(from: &buf), 
                 workingSinceMs: FfiConverterOptionInt64.read(from: &buf), 
                 streaming: FfiConverterBool.read(from: &buf), 
-                canInterrupt: FfiConverterBool.read(from: &buf)
+                canInterrupt: FfiConverterBool.read(from: &buf), 
+                resumable: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -7574,6 +7577,7 @@ public struct FfiConverterTypeLiveStatus: FfiConverterRustBuffer {
         FfiConverterOptionInt64.write(value.workingSinceMs, into: &buf)
         FfiConverterBool.write(value.streaming, into: &buf)
         FfiConverterBool.write(value.canInterrupt, into: &buf)
+        FfiConverterBool.write(value.resumable, into: &buf)
     }
 }
 
@@ -15196,7 +15200,7 @@ public enum WidgetKind: Equatable, Hashable {
      * Working indicator at the tail of a live turn. The painter ticks the
      * elapsed label itself so time never forces a relayout.
      */
-    case working(sinceMs: Int64?, streaming: Bool
+    case working(sinceMs: Int64?, word: String
     )
     /**
      * A small activity spinner (running tools).
@@ -15279,7 +15283,7 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
         case 4: return .image(reference: try FfiConverterString.read(from: &buf)
         )
         
-        case 5: return .working(sinceMs: try FfiConverterOptionInt64.read(from: &buf), streaming: try FfiConverterBool.read(from: &buf)
+        case 5: return .working(sinceMs: try FfiConverterOptionInt64.read(from: &buf), word: try FfiConverterString.read(from: &buf)
         )
         
         case 6: return .spinner
@@ -15335,10 +15339,10 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
             FfiConverterString.write(reference, into: &buf)
             
         
-        case let .working(sinceMs,streaming):
+        case let .working(sinceMs,word):
             writeInt(&buf, Int32(5))
             FfiConverterOptionInt64.write(sinceMs, into: &buf)
-            FfiConverterBool.write(streaming, into: &buf)
+            FfiConverterString.write(word, into: &buf)
             
         
         case .spinner:
@@ -17388,6 +17392,13 @@ public func relativeTimeLabel(atMs: Int64, nowMs: Int64) -> String  {
     )
 })
 }
+public func resumePrompt() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_resume_prompt(uniffiCallStatus
+    )
+})
+}
 /**
  * WorkOS AuthKit authorize URL (start of the web-auth session).
  */
@@ -17581,6 +17592,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_relative_time_label() != 32740) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_resume_prompt() != 29392) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_workos_authorize_url() != 35994) {
