@@ -568,6 +568,7 @@ mod tests {
                 subagent_status: None,
                 subagent_tail: None,
                 html_render: Some(page.clone()),
+                delegate_route: None,
             }],
             created_at: 0,
             device_id: "dev".into(),

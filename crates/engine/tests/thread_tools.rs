@@ -22,6 +22,7 @@ use zeron_proto::{
 /// Answers every prompt after `step_delay`, recording what it was asked and,
 /// when steerable, what reached its mid-turn mailbox.
 struct RecordingHarness {
+    id: HarnessId,
     prompts: Arc<Mutex<Vec<String>>>,
     attachments: Arc<Mutex<Vec<(String, Vec<String>)>>>,
     steers: Arc<Mutex<Vec<String>>>,
@@ -33,7 +34,7 @@ struct RecordingHarness {
 #[async_trait]
 impl Harness for RecordingHarness {
     fn id(&self) -> HarnessId {
-        HarnessId::Mock
+        self.id
     }
     fn display_name(&self) -> &str {
         "Recording"
@@ -82,6 +83,7 @@ impl Harness for RecordingHarness {
             }
         });
         let delay = self.step_delay;
+        let limited = self.id == HarnessId::Codex && request.prompt.contains("LIMIT ME");
         let reply = if request.prompt.contains("FOLLOW-UP") {
             "Because the handle outlives the request."
         } else {
@@ -105,6 +107,26 @@ impl Harness for RecordingHarness {
                     session_id: Some("hs-rec".into()),
                 },
             ];
+            let script = if limited {
+                let resets_at = chrono::Utc::now().timestamp_millis() + 3_600_000;
+                vec![
+                    script[0].clone(),
+                    AgentEvent::Error {
+                        message: "Codex usage limit reached".into(),
+                    },
+                    AgentEvent::UsageLimit {
+                        resets_at: Some(resets_at),
+                    },
+                    AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        result: None,
+                        error: Some("Codex usage limit reached".into()),
+                        session_id: Some("hs-rec".into()),
+                    },
+                ]
+            } else {
+                script
+            };
             for event in script {
                 tokio::select! {
                     () = tokio::time::sleep(delay) => {}
@@ -149,6 +171,7 @@ fn rig_with(step_delay: Duration, steerable: bool) -> Rig {
     let steers = Arc::new(Mutex::new(Vec::new()));
     let attachments = Arc::new(Mutex::new(Vec::new()));
     let rig = rig_on(Arc::new(RecordingHarness {
+        id: HarnessId::Mock,
         prompts: prompts.clone(),
         attachments: attachments.clone(),
         steers: steers.clone(),
@@ -1068,6 +1091,503 @@ fn queue_interrupt(core: &EngineCore, chat_id: &str) {
         .expect("queue interrupt");
 }
 
+fn routed_rig() -> Rig {
+    let rig = rig(Duration::from_millis(5));
+    rig.core.registry.register(Arc::new(RecordingHarness {
+        id: HarnessId::ClaudeCode,
+        prompts: rig.prompts.clone(),
+        attachments: rig.attachments.clone(),
+        steers: rig.steers.clone(),
+        steerable: false,
+        step_delay: Duration::from_millis(5),
+        reply: "noted",
+    }));
+    let mut routing = zeron_engine::routing::RoutingSettings::default();
+    routing.roles.insert(
+        zeron_engine::routing::Role::Worker,
+        zeron_engine::routing::RoleRoute::Target(haiku_route()),
+    );
+    routing.roles.insert(
+        zeron_engine::routing::Role::Validator,
+        zeron_engine::routing::RoleRoute::Target(haiku_route()),
+    );
+    rig.core.registry.set_routing_settings(routing).unwrap();
+    rig
+}
+
+fn haiku_route() -> zeron_proto::RouteTarget {
+    zeron_proto::RouteTarget {
+        harness: HarnessId::ClaudeCode,
+        model: Some("claude-haiku-5-5".into()),
+        reasoning: Some(ReasoningLevel::Low),
+    }
+}
+
+async fn delegate_rpc(rig: &Rig, params: serde_json::Value) -> zeron_proto::Chat {
+    let client = zeron_rpc::memory_client(rig.core.rpc_service());
+    let view = client
+        .call(zeron_rpc::methods::DELEGATE_TASK, params)
+        .await
+        .expect("delegate");
+    let child = view["taskId"].as_str().expect("task id").to_string();
+    rig.core.workspace.chat(&child).unwrap().expect("child row")
+}
+
+#[tokio::test]
+async fn a_routed_role_runs_its_child_on_the_route_and_an_agent_choice_wins() {
+    let rig = routed_rig();
+    let routed = delegate_rpc(
+        &rig,
+        serde_json::json!({ "ownerChatId": "lead", "task": "write the parser", "role": "implementation" }),
+    )
+    .await;
+    let config = routed.config.clone().expect("routed config");
+    assert_eq!(config.harness, HarnessId::ClaudeCode);
+    assert_eq!(config.model.as_deref(), Some("claude-haiku-5-5"));
+    assert_eq!(config.reasoning, Some(ReasoningLevel::Low));
+    let route = routed.delegation.clone().unwrap().route.expect("route");
+    assert_eq!(route.source, "routed");
+    assert_eq!(route.role.as_deref(), Some("worker"));
+    assert_eq!(route.table, Some(haiku_route()));
+
+    let chosen = delegate_rpc(
+        &rig,
+        serde_json::json!({
+            "ownerChatId": "lead", "task": "write the lexer", "role": "worker",
+            "harness": "claude-code", "model": "claude-sonnet-5-5", "chosen": ["harness", "model"],
+        }),
+    )
+    .await;
+    assert_eq!(
+        chosen.config.as_ref().unwrap().model.as_deref(),
+        Some("claude-sonnet-5-5")
+    );
+    let route = chosen.delegation.unwrap().route.expect("route");
+    assert_eq!(route.source, "chosen_by_agent");
+    assert_eq!(route.table, Some(haiku_route()));
+    assert_eq!(
+        route.reason.as_deref(),
+        Some("The lead passed harness and model")
+    );
+
+    let profiled = delegate_rpc(
+        &rig,
+        serde_json::json!({
+            "ownerChatId": "lead", "task": "check the lexer", "role": "validator",
+            "harness": "mock", "profileId": "careful", "chosen": ["profile"],
+        }),
+    )
+    .await;
+    assert_eq!(profiled.config.as_ref().unwrap().harness, HarnessId::Mock);
+    assert_eq!(
+        profiled.config.as_ref().unwrap().profile_id.as_deref(),
+        Some("careful")
+    );
+    let route = profiled.delegation.unwrap().route.expect("route");
+    assert_eq!(route.source, "chosen_by_agent");
+    assert_eq!(route.table, Some(haiku_route()));
+
+    let mut changed = rig.core.registry.routing_settings();
+    changed.roles.insert(
+        zeron_engine::routing::Role::Worker,
+        zeron_engine::routing::RoleRoute::SameAsParent,
+    );
+    rig.core.registry.set_routing_settings(changed).unwrap();
+    let after = rig.core.workspace.chat(&routed.id).unwrap().unwrap();
+    assert_eq!(
+        after.config, routed.config,
+        "routing never rewrites a live chat"
+    );
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_exhausted_route_follows_the_out_of_quota_policy() {
+    use zeron_engine::routing::{OutOfQuota, Role, RoleRoute};
+    let rig = routed_rig();
+    rig.core.registry.register(Arc::new(RecordingHarness {
+        id: HarnessId::Codex,
+        prompts: rig.prompts.clone(),
+        attachments: rig.attachments.clone(),
+        steers: rig.steers.clone(),
+        steerable: false,
+        step_delay: Duration::from_millis(5),
+        reply: "noted",
+    }));
+    let config = zeron_proto::ChatConfig {
+        harness: HarnessId::ClaudeCode,
+        model: Some("claude-opus-5-5".into()),
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: SandboxLevel::WorkspaceWrite,
+        permission_mode: zeron_proto::PermissionMode::Ask,
+        instructions: String::new(),
+        profile_id: None,
+        instance_id: None,
+        disabled_tools: Vec::new(),
+    };
+    rig.core.workspace.set_chat_config("lead", &config).unwrap();
+    let set = |policy| {
+        let mut routing = rig.core.registry.routing_settings();
+        routing.roles.insert(
+            Role::Worker,
+            RoleRoute::Target(zeron_proto::RouteTarget {
+                harness: HarnessId::Codex,
+                model: Some("gpt-6-luna".into()),
+                reasoning: None,
+            }),
+        );
+        routing.out_of_quota = policy;
+        rig.core.registry.set_routing_settings(routing).unwrap();
+    };
+    let now = chrono::Utc::now().timestamp_millis();
+    let reset = now + 3_600_000;
+    rig.core
+        .sessions
+        .quota()
+        .note_limit(HarnessId::Codex, Some(reset), now);
+    let client = zeron_rpc::memory_client(rig.core.rpc_service());
+    let call = |task: &str, extra: serde_json::Value| {
+        let mut params =
+            serde_json::json!({ "ownerChatId": "lead", "task": task, "role": "worker" });
+        for (key, value) in extra.as_object().unwrap() {
+            params[key] = value.clone();
+        }
+        client.call(zeron_rpc::methods::DELEGATE_TASK, params)
+    };
+
+    set(OutOfQuota::Native);
+    let native = call("native job", serde_json::json!({})).await.unwrap();
+    assert_eq!(native["status"], "use_native");
+    assert_eq!(native["route"]["source"], "fell_back");
+    assert_eq!(native["route"]["resetsAt"], reset);
+    assert!(native.get("taskId").is_none(), "no child is created");
+
+    set(OutOfQuota::Ask);
+    let asked = call("ask job", serde_json::json!({})).await.unwrap_err();
+    assert!(asked.to_string().contains("quota_exhausted"), "{asked}");
+
+    let waited = call("wait job", serde_json::json!({ "quotaChoice": "wait" }))
+        .await
+        .unwrap();
+    assert_eq!(waited["status"], "queued");
+    let child = rig
+        .core
+        .workspace
+        .chat(waited["taskId"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(child.config.unwrap().harness, HarnessId::Codex);
+    let route = child.delegation.unwrap().route.unwrap();
+    assert_eq!(route.wait_until, Some(reset + 15_000));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        prompts_with(&rig, "wait job").is_empty(),
+        "a waiting child does not start before the reset"
+    );
+    assert!(
+        rig.core
+            .resume_schedule
+            .snapshot()
+            .chats
+            .iter()
+            .all(|chat| chat.chat_id != child.id)
+    );
+
+    set(OutOfQuota::NextInList);
+    let mut routing = rig.core.registry.routing_settings();
+    routing.native = zeron_engine::routing::NativePolicy::Off;
+    routing.fallback = vec![zeron_proto::RouteTarget {
+        harness: HarnessId::ClaudeCode,
+        model: Some("claude-sonnet-5-5".into()),
+        reasoning: None,
+    }];
+    rig.core.registry.set_routing_settings(routing).unwrap();
+    let next = call("next job", serde_json::json!({})).await.unwrap();
+    let child = rig
+        .core
+        .workspace
+        .chat(next["taskId"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        child.config.unwrap().model.as_deref(),
+        Some("claude-sonnet-5-5")
+    );
+    assert_eq!(child.delegation.unwrap().route.unwrap().source, "fell_back");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_child_that_hits_its_limit_mid_run_switches_to_its_owner() {
+    use zeron_engine::routing::{Role, RoleRoute};
+    let rig = routed_rig();
+    rig.core.registry.register(Arc::new(RecordingHarness {
+        id: HarnessId::Codex,
+        prompts: rig.prompts.clone(),
+        attachments: rig.attachments.clone(),
+        steers: rig.steers.clone(),
+        steerable: false,
+        step_delay: Duration::from_millis(5),
+        reply: "noted",
+    }));
+    rig.core
+        .workspace
+        .set_chat_config(
+            "lead",
+            &zeron_proto::ChatConfig {
+                harness: HarnessId::ClaudeCode,
+                model: Some("claude-opus-5-5".into()),
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: SandboxLevel::WorkspaceWrite,
+                permission_mode: zeron_proto::PermissionMode::Ask,
+                instructions: String::new(),
+                profile_id: None,
+                instance_id: None,
+                disabled_tools: Vec::new(),
+            },
+        )
+        .unwrap();
+    let mut routing = rig.core.registry.routing_settings();
+    routing.roles.insert(
+        Role::Worker,
+        RoleRoute::Target(zeron_proto::RouteTarget {
+            harness: HarnessId::Codex,
+            model: Some("gpt-6-luna".into()),
+            reasoning: None,
+        }),
+    );
+    rig.core.registry.set_routing_settings(routing).unwrap();
+    let client = zeron_rpc::memory_client(rig.core.rpc_service());
+    let view = client
+        .call(
+            zeron_rpc::methods::DELEGATE_TASK,
+            serde_json::json!({ "ownerChatId": "lead", "task": "LIMIT ME please", "role": "worker" }),
+        )
+        .await
+        .unwrap();
+    let child = view["taskId"].as_str().unwrap().to_string();
+    let offer = || {
+        rig.core
+            .resume_schedule
+            .snapshot()
+            .chats
+            .into_iter()
+            .find(|chat| chat.chat_id == child)
+            .and_then(|chat| chat.offer)
+    };
+    wait_for(|| offer().is_some(), "the mid-run offer").await;
+    let offer = offer().unwrap();
+    assert_eq!(offer.preselect, zeron_proto::OfferChoice::Switch);
+    assert_eq!(
+        offer.to.as_ref().map(|to| to.harness),
+        Some(HarnessId::ClaudeCode)
+    );
+    assert!(offer.act_at.is_some());
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(
+        delegation(&rig.core, &child).is_running(),
+        "the owner is not woken while the offer is pending"
+    );
+
+    client
+        .call(
+            zeron_rpc::methods::RESOLVE_LIMIT_OFFER,
+            serde_json::json!({ "chatId": child, "choice": "switch" }),
+        )
+        .await
+        .unwrap();
+    let row = rig.core.workspace.chat(&child).unwrap().unwrap();
+    let config = row.config.unwrap();
+    assert_eq!(config.harness, HarnessId::ClaudeCode);
+    assert_eq!(config.model.as_deref(), Some("claude-opus-5-5"));
+    let route = row.delegation.unwrap().route.unwrap();
+    assert_eq!(route.source, "fell_back");
+    assert_eq!(
+        route.reason.as_deref(),
+        Some("Codex hit its usage limit mid-run")
+    );
+    let entries = rig
+        .core
+        .doc_host
+        .open(&child)
+        .unwrap()
+        .doc()
+        .read_entries()
+        .unwrap();
+    assert!(entries.iter().any(|entry| {
+        entry
+            .parts
+            .iter()
+            .any(|part| matches!(part, zeron_doc::MessagePart::Handoff { .. }))
+    }));
+    wait_for(
+        || !prompts_with(&rig, zeron_proto::RESUME_PROMPT).is_empty(),
+        "the resumed turn",
+    )
+    .await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_unrouted_role_inherits_the_owner_as_today() {
+    let rig = routed_rig();
+    let lead = rig.core.workspace.chat("lead").unwrap().unwrap();
+    for role in [serde_json::Value::Null, serde_json::json!("research")] {
+        let child = delegate_rpc(
+            &rig,
+            serde_json::json!({ "ownerChatId": "lead", "task": format!("look around {role}"), "role": role }),
+        )
+        .await;
+        assert_eq!(child.config, lead.config);
+        assert_eq!(child.delegation.unwrap().route, None);
+    }
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_review_child_skips_routing() {
+    let rig = routed_rig();
+    let mut params = delegate("review the diff");
+    params.role = Some("validator".into());
+    params.harness = Some(HarnessId::Mock);
+    params.client_request_id = Some("zeron-review:branch:x".into());
+    let view = rig
+        .core
+        .doc_host
+        .delegate_task(params, Default::default())
+        .await
+        .expect("delegate");
+    let row = rig.core.workspace.chat(&view.task_id).unwrap().unwrap();
+    assert_eq!(row.config.unwrap().harness, HarnessId::Mock);
+    assert_eq!(row.delegation.unwrap().route, None);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_planned_step_role_routes_its_thread_and_survives_a_replan() {
+    let rig = routed_rig();
+    let rpc = rig.core.rpc_service();
+    let call = |method: &'static str, params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move {
+            match zeron_rpc::RpcService::handle(&*rpc, method, params).await {
+                Ok(zeron_rpc::RpcReply::Value(value)) => value,
+                Ok(_) => panic!("a value"),
+                Err(err) => panic!("{method}: {err}"),
+            }
+        }
+    };
+    let mutate = |params| call(zeron_rpc::methods::MUTATE, params);
+    let step_titled = |task: &str, title: &str| {
+        rig.core
+            .workspace
+            .task_steps_of(task)
+            .into_iter()
+            .find(|step| step.title == title)
+            .unwrap_or_else(|| panic!("step {title}"))
+    };
+    for (task, lead, same_agents) in [("t1", "lead-1", false), ("t2", "lead-2", true)] {
+        mutate(serde_json::json!({ "op": "createTask", "taskId": task, "title": "Ship it" })).await;
+        mutate(serde_json::json!({
+            "op": "startTask", "taskId": task, "chatId": lead, "spaceId": "space-tt",
+            "orchestrate": true, "sameAgents": same_agents,
+        }))
+        .await;
+        mutate(serde_json::json!({
+            "op": "planSteps", "taskId": task, "fromChatId": lead,
+            "steps": [
+                { "title": "Check the API", "role": "test" },
+                { "title": "Write the docs", "role": "worker" },
+            ],
+        }))
+        .await;
+    }
+    let bad = zeron_rpc::RpcService::handle(
+        &*rpc,
+        zeron_rpc::methods::MUTATE,
+        serde_json::json!({
+            "op": "planSteps", "taskId": "t1", "fromChatId": "lead-1",
+            "steps": [{ "title": "Plan", "role": "planner" }],
+        }),
+    )
+    .await;
+    assert!(bad.is_err(), "an unknown step role is refused");
+    let check = step_titled("t1", "Check the API");
+    assert_eq!(check.role.as_deref(), Some("validator"));
+    let docs = step_titled("t1", "Write the docs");
+    mutate(serde_json::json!({
+        "op": "editTaskPlan", "taskId": "t1",
+        "steps": [
+            { "stepId": check.id, "title": "Check the whole API" },
+            { "title": "Write the docs", "notes": "README" },
+        ],
+        "removeStepIds": [docs.id],
+    }))
+    .await;
+    let check = step_titled("t1", "Check the whole API");
+    assert_eq!(
+        check.role.as_deref(),
+        Some("validator"),
+        "an edit keeps the role"
+    );
+    let docs = step_titled("t1", "Write the docs");
+    assert_eq!(
+        docs.role.as_deref(),
+        Some("worker"),
+        "a re-added namesake keeps the role"
+    );
+
+    for task in ["t1", "t2"] {
+        mutate(serde_json::json!({ "op": "approvePlan", "taskId": task })).await;
+    }
+    let run = |lead: &str, step: &zeron_proto::TaskStep| {
+        call(
+            zeron_rpc::methods::CREATE_THREAD,
+            serde_json::json!({ "fromChatId": lead, "prompt": format!("do: {}", step.title), "taskStepId": step.id }),
+        )
+    };
+    let thread = run("lead-1", &check).await["chatId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let config = rig
+        .core
+        .workspace
+        .chat(&thread)
+        .unwrap()
+        .unwrap()
+        .config
+        .unwrap();
+    assert_eq!(config.harness, HarnessId::ClaudeCode);
+    assert_eq!(config.model.as_deref(), Some("claude-haiku-5-5"));
+    let route = rig
+        .core
+        .workspace
+        .task_step(&check.id)
+        .unwrap()
+        .route
+        .expect("step route");
+    assert_eq!(route.source, "routed");
+    assert_eq!(route.role.as_deref(), Some("validator"));
+
+    let same = step_titled("t2", "Check the API");
+    let thread = run("lead-2", &same).await["chatId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let lead = rig.core.workspace.chat("lead-2").unwrap().unwrap();
+    let child = rig.core.workspace.chat(&thread).unwrap().unwrap();
+    assert_eq!(
+        child.config.map(|c| (c.harness, c.model)),
+        lead.config.map(|c| (c.harness, c.model)),
+        "a same-agents mission skips routing"
+    );
+    assert_eq!(rig.core.workspace.task_step(&same.id).unwrap().route, None);
+    rig.core.shutdown().await;
+}
+
 #[tokio::test]
 async fn a_delegated_child_is_owned_hidden_and_starts_from_the_task_alone() {
     let rig = rig(Duration::from_millis(5));
@@ -1092,7 +1612,7 @@ async fn a_delegated_child_is_owned_hidden_and_starts_from_the_task_alone() {
     .await;
     assert_eq!(
         rig.prompts.lock().unwrap()[0],
-        "Act as the review sub-agent for this task.\n\naudit the login flow",
+        "Act as the validator sub-agent for this task.\n\naudit the login flow",
         "no owner history and no peer framing"
     );
     rig.core.shutdown().await;
@@ -1421,6 +1941,7 @@ const REVIEW_REPLY: &str = "Looked it over.\n\n```zeron-review\n[{\"path\":\"src
 fn review_rig() -> Rig {
     let prompts = Arc::new(Mutex::new(Vec::new()));
     let rig = rig_on(Arc::new(RecordingHarness {
+        id: HarnessId::Mock,
         prompts: prompts.clone(),
         attachments: Arc::default(),
         steers: Arc::default(),
@@ -2227,6 +2748,7 @@ fn a_child_revived_after_a_crash_settles_from_its_revived_run() {
         let prompts = Arc::new(Mutex::new(Vec::new()));
         let registry = HarnessRegistry::new();
         registry.register(Arc::new(RecordingHarness {
+            id: HarnessId::Mock,
             prompts: prompts.clone(),
             attachments: Arc::default(),
             steers: Arc::new(Mutex::new(Vec::new())),

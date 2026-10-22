@@ -210,6 +210,7 @@ mod tests {
         assert!(!allowed_navigation("javascript:alert(1)"));
         assert!(!allowed_navigation("https://user@example.com/"));
     }
+    #[cfg(unix)]
     #[test]
     fn file_navigation_stays_inside_the_workspace_root() {
         let dir = tempfile::tempdir().unwrap();

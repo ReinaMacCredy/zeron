@@ -456,6 +456,7 @@ pub mod install;
 pub(crate) mod jsonrpc;
 mod launch;
 pub use launch::LaunchOverrides;
+mod limit_text;
 pub mod mock;
 mod model_context;
 pub mod opencode;

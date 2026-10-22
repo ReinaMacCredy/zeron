@@ -74,6 +74,7 @@ fn lead_patch(
         mode: lead.map(|_| TaskMode::Orchestrated),
         plan_pending: lead.map(|lead| lead.approve_plan),
         plan_doc: lead.map(|lead| lead.plan_doc),
+        same_agents: lead.map(|lead| lead.same_agents),
         ..Default::default()
     }
 }
@@ -96,6 +97,8 @@ pub(super) struct PlanEdit {
     pub notes: String,
     #[serde(default)]
     pub images: Option<Vec<String>>,
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 const REORDER_REFUSED: &str =
@@ -126,6 +129,22 @@ fn count_images(n: usize) -> String {
     match n {
         1 => "1 image".into(),
         n => format!("{n} images"),
+    }
+}
+
+fn canonical_role(name: &str) -> Option<String> {
+    crate::routing::Role::parse(name).map(|role| role.name().to_string())
+}
+
+fn carry_roles(before: &[TaskStep], steps: &mut [TaskStep]) {
+    for step in steps.iter_mut().filter(|step| step.role.is_none()) {
+        let title = step.title.trim();
+        let mut namesakes = before
+            .iter()
+            .filter(|old| old.title.trim() == title && old.role.is_some());
+        if let (Some(old), None) = (namesakes.next(), namesakes.next()) {
+            step.role = old.role.clone();
+        }
     }
 }
 
@@ -239,11 +258,11 @@ pub(super) struct Rebrief<'a> {
 fn lead_brief(task_id: &str, lead: Lead, reads: bool) -> String {
     let plan = if lead.plan_doc {
         format!(
-            "Write the plan with the tasks tool: action \"plan\", taskId \"{task_id}\", overview, steps [{{title, notes}}]. The overview is the goal, the approach, and how you will check the result. Each step's notes are its spec: what it builds, where, and how to tell it is done. Keep each step small enough for one agent."
+            "Write the plan with the tasks tool: action \"plan\", taskId \"{task_id}\", overview, steps [{{title, notes, role}}]. The overview is the goal, the approach, and how you will check the result. Each step's notes are its spec: what it builds, where, and how to tell it is done. Keep each step small enough for one agent."
         )
     } else {
         format!(
-            "Write the plan with the tasks tool: action \"plan\", taskId \"{task_id}\", steps [{{title, notes}}]. Keep each step small enough for one agent."
+            "Write the plan with the tasks tool: action \"plan\", taskId \"{task_id}\", steps [{{title, notes, role}}]. Keep each step small enough for one agent."
         )
     };
     let mut lines = vec![plan.as_str()];
@@ -265,7 +284,7 @@ fn lead_brief(task_id: &str, lead: Lead, reads: bool) -> String {
     lines.push(if lead.same_agents {
         "Run every step on your own harness and model: do not pass harness or model to create_thread."
     } else {
-        "Pick the harness and model for each step; orchestrator_capabilities lists them."
+        "Give each step a role (worker, validator, research, design or general); Zeron runs it on the route set in Settings > Routing. Pass harness or model only when a step needs a specific one."
     });
     lines.push(
         "Zeron messages you when a step's thread finishes a turn or fails. Read the thread with read_thread, then mark the step done or skipped with the tasks tool, action \"step\", send the thread a fix with send_message_to_thread, or start the step over with create_thread and the same taskStepId.",
@@ -343,6 +362,7 @@ impl EngineRpc {
                 send_error: None,
                 plan: String::new(),
                 plan_doc: false,
+                same_agents: false,
                 resources: Vec::new(),
                 images,
                 context,
@@ -733,7 +753,7 @@ impl EngineRpc {
     pub(super) fn plan_steps(
         &self,
         task_id: &str,
-        steps: Vec<(String, String, Option<String>)>,
+        steps: Vec<(String, String, Option<String>, Option<String>)>,
         overview: Option<String>,
         resources: Option<Vec<String>>,
         from_chat_id: Option<&str>,
@@ -748,7 +768,16 @@ impl EngineRpc {
                 ..Default::default()
             },
         )?;
-        let threads: Vec<Option<String>> = steps.iter().map(|(_, _, id)| id.clone()).collect();
+        if steps.iter().any(|(_, _, _, role)| {
+            role.as_deref()
+                .is_some_and(|role| canonical_role(role).is_none())
+        }) {
+            return Err(refused(&format!(
+                "A step's role must be one of {}",
+                crate::routing::Role::names()
+            )));
+        }
+        let threads: Vec<Option<String>> = steps.iter().map(|(_, _, id, _)| id.clone()).collect();
         self.check_step_threads(&task, &threads)?;
         let resources = resources
             .map(|keys| crate::supervisor_resources::checked_keys(&keys))
@@ -759,7 +788,7 @@ impl EngineRpc {
         let now = chrono::Utc::now();
         let mut steps: Vec<TaskStep> = steps
             .into_iter()
-            .map(|(title, notes, thread)| TaskStep {
+            .map(|(title, notes, thread, role)| TaskStep {
                 id: crate::new_id(),
                 task_id: task_id.to_string(),
                 title,
@@ -772,8 +801,11 @@ impl EngineRpc {
                 updated_at: now,
                 deleted: false,
                 images: Vec::new(),
+                role: role.as_deref().and_then(canonical_role),
+                route: None,
             })
             .collect();
+        carry_roles(&before, &mut steps);
         let (mut moved, orphans) = carry_images(&before, &mut steps);
         let mut images = task.images.clone();
         let mut left_out = Vec::new();
@@ -1091,6 +1123,15 @@ impl EngineRpc {
                     1 => " with 1 image".to_string(),
                     n => format!(" with {n} images"),
                 };
+                let role = edit.role.as_deref().and_then(canonical_role).or_else(|| {
+                    let mut namesakes = removed
+                        .iter()
+                        .filter(|old| old.title.trim() == title && old.role.is_some());
+                    match (namesakes.next(), namesakes.next()) {
+                        (Some(old), None) => old.role.clone(),
+                        _ => None,
+                    }
+                });
                 let now = chrono::Utc::now();
                 creates.push(TaskStep {
                     id: id.clone(),
@@ -1105,6 +1146,8 @@ impl EngineRpc {
                     deleted: false,
                     turn: None,
                     images,
+                    role,
+                    route: None,
                 });
                 changes.push(format!("New step \"{title}\" (taskStepId {id}){with}."));
                 continue;
@@ -1127,6 +1170,12 @@ impl EngineRpc {
                 title: (title != step.title).then(|| title.clone()),
                 notes: (edit.notes != step.notes).then_some(edit.notes),
                 images,
+                role: edit
+                    .role
+                    .as_deref()
+                    .and_then(canonical_role)
+                    .filter(|role| step.role.as_deref() != Some(role.as_str()))
+                    .map(Some),
                 ..Default::default()
             };
             let text = match (patch.title.is_some(), patch.notes.is_some()) {
@@ -1136,13 +1185,16 @@ impl EngineRpc {
                 (false, false) => None,
             };
             let what = match (text, image_note) {
-                (Some(text), Some(note)) => format!("{text}, and has {note}"),
-                (Some(text), None) => text,
-                (None, Some(note)) => format!("has {note}"),
+                (Some(text), Some(note)) => Some(format!("{text}, and has {note}")),
+                (Some(text), None) => Some(text),
+                (None, Some(note)) => Some(format!("has {note}")),
+                (None, None) if patch.role.is_some() => None,
                 (None, None) => continue,
             };
             updates.push((id.clone(), patch));
-            changes.push(format!("Step \"{}\" (taskStepId {id}) {what}.", step.title));
+            if let Some(what) = what {
+                changes.push(format!("Step \"{}\" (taskStepId {id}) {what}.", step.title));
+            }
         }
         let deletes: Vec<String> = removed.iter().map(|step| step.id.clone()).collect();
         self.workspace
@@ -1224,6 +1276,8 @@ mod tests {
             deleted: false,
             turn: None,
             images: Vec::new(),
+            role: None,
+            route: None,
         }
     }
 

@@ -309,6 +309,8 @@ pub enum MessagePart {
         /// the engine — the HTML itself never enters the doc).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         html_render: Option<zeron_proto::html_render::HtmlRenderRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delegate_route: Option<zeron_proto::ChildRoute>,
     },
     #[serde(rename_all = "camelCase")]
     Input {
@@ -521,6 +523,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     subagent_status: None,
                     subagent_tail: None,
                     html_render: None,
+                    delegate_route: None,
                 });
             }
         }
@@ -754,7 +757,7 @@ pub fn sidecar_payload(event: &AgentEvent) -> Option<SidecarPayload> {
 /// and a subagent spawn's model/type (see [`spawn_badge`] — a couple of short
 /// identifiers the chip names the child by).
 /// Drops: WriteFile content, EditFile old/new strings, WebFetch prompt, Mcp/Unknown input
-/// (but a `respond_to_input` call keeps the thread and request it answered, never the answer).
+/// (but `respond_to_input`, a `tasks` plan call and `delegate_task` keep the short ids [`zeron_badge`] lists).
 /// Full inputs remain only in the host's local run journal. Idempotent.
 pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
     match call {
@@ -776,32 +779,40 @@ pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
             tool: tool.clone(),
             input: spawn_badge(call)
                 .or_else(|| computer_badge(call))
-                .or_else(|| respond_badge(call)),
+                .or_else(|| zeron_badge(call)),
         },
         ToolCall::Unknown { name, .. } => ToolCall::Unknown {
             name: name.clone(),
             input: spawn_badge(call)
                 .or_else(|| skill_badge(call))
-                .or_else(|| respond_badge(call)),
+                .or_else(|| zeron_badge(call)),
         },
         other => other.clone(),
     }
 }
 
-/// The Supervisor's projection tells a lead's ruling on a step's question by these two ids.
-fn respond_badge(call: &ToolCall) -> Option<serde_json::Value> {
-    let input = match call {
+fn zeron_badge(call: &ToolCall) -> Option<serde_json::Value> {
+    let (tool, input) = match call {
         ToolCall::Mcp {
             server,
             tool,
             input,
-        } if server == "zeron" && tool == "respond_to_input" => input.as_ref()?,
-        ToolCall::Unknown { name, input } if name.ends_with("respond_to_input") => {
-            input.as_ref()?
-        }
+        } if server == "zeron" => (tool.as_str(), input.as_ref()?),
+        ToolCall::Unknown { name, input } => (
+            name.rsplit("zeron__").next().unwrap_or(name),
+            input.as_ref()?,
+        ),
         _ => return None,
     };
-    let kept: serde_json::Map<String, serde_json::Value> = ["threadId", "requestId"]
+    let keys: &[&str] = match tool {
+        "respond_to_input" => &["threadId", "requestId"],
+        "tasks" if input.get("action").and_then(|a| a.as_str()) == Some("plan") => {
+            &["action", "taskId"]
+        }
+        "delegate_task" => &["title"],
+        _ => return None,
+    };
+    let kept: serde_json::Map<String, serde_json::Value> = keys
         .iter()
         .filter_map(|key| {
             let value = input.get(key)?.as_str()?.trim();
@@ -1217,6 +1228,43 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_keeps_a_plan_calls_task_and_a_delegate_title_only() {
+        let plan = ToolCall::Unknown {
+            name: "mcp__zeron__tasks".into(),
+            input: Some(serde_json::json!({
+                "action": "plan", "taskId": "t1", "steps": [{ "title": "secret" }],
+            })),
+        };
+        let kept = sanitize_tool_call(&plan);
+        assert_eq!(
+            kept,
+            ToolCall::Unknown {
+                name: "mcp__zeron__tasks".into(),
+                input: Some(serde_json::json!({ "action": "plan", "taskId": "t1" })),
+            }
+        );
+        assert_eq!(sanitize_tool_call(&kept), kept);
+        let update = ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "tasks".into(),
+            input: Some(serde_json::json!({ "action": "update", "taskId": "t1" })),
+        };
+        assert!(matches!(
+            sanitize_tool_call(&update),
+            ToolCall::Mcp { input: None, .. }
+        ));
+        let delegate = ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "delegate_task".into(),
+            input: Some(serde_json::json!({ "task": "the whole prompt", "title": "Audit" })),
+        };
+        assert!(matches!(
+            sanitize_tool_call(&delegate),
+            ToolCall::Mcp { input: Some(input), .. } if input == serde_json::json!({ "title": "Audit" })
+        ));
+    }
+
+    #[test]
     fn sanitize_keeps_which_question_a_respond_to_input_answered_but_not_the_answer() {
         let call = ToolCall::Mcp {
             server: "zeron".into(),
@@ -1325,6 +1373,7 @@ mod tests {
                 subagent_status: None,
                 subagent_tail: None,
                 html_render: None,
+                delegate_route: None,
             },
         ];
         let chunks = split_parts(&parts);

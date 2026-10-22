@@ -6532,6 +6532,7 @@ mod tests {
             finding_outcomes: Default::default(),
             findings_handed: Default::default(),
             findings_announced: Default::default(),
+            route: None,
         });
         state.apply_chats(vec![child, chat("b", 1, None)]);
         let visible: Vec<&str> = state.visible_chats().map(|c| c.id.as_str()).collect();

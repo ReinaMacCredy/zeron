@@ -295,6 +295,53 @@ impl Default for SidebarSettings {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteTarget {
+    pub harness: HarnessId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningLevel>,
+}
+
+/// `source` stays a plain string so a device that does not know a newer value still reads the row.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildRoute {
+    #[serde(default)]
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_option"
+    )]
+    pub table: Option<RouteTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_until: Option<i64>,
+}
+
+fn lenient_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
+}
+
+impl ChildRoute {
+    pub const ROUTED: &str = "routed";
+    pub const CHOSEN_BY_AGENT: &str = "chosen_by_agent";
+    pub const FELL_BACK: &str = "fell_back";
+}
+
 /// Holds until the chat's next message after `at`, as T3's `settledOverride` resets on activity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -336,6 +383,12 @@ pub struct Delegation {
     pub findings_handed: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub findings_announced: BTreeSet<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_option"
+    )]
+    pub route: Option<ChildRoute>,
 }
 
 impl Delegation {
@@ -521,6 +574,8 @@ pub struct Task {
     pub plan: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub plan_doc: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub same_agents: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resources: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -670,6 +725,14 @@ pub struct TaskStep {
     pub turn: Option<StepTurn>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_option"
+    )]
+    pub route: Option<ChildRoute>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -724,6 +787,18 @@ pub struct TaskStepPatch {
     pub turn: Option<Option<StepTurn>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<String>>,
+    #[serde(
+        default,
+        deserialize_with = "present_nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub role: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "present_nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub route: Option<Option<ChildRoute>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -827,6 +902,8 @@ pub struct TaskPatch {
     pub plan: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_doc: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same_agents: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2444,6 +2521,7 @@ mod tests {
             finding_outcomes: Default::default(),
             findings_handed: Default::default(),
             findings_announced: Default::default(),
+            route: None,
         });
         chat
     }

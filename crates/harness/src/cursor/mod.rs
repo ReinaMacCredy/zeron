@@ -1107,12 +1107,7 @@ fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
             } else {
                 DoneStatus::Completed
             };
-            vec![AgentEvent::Done {
-                status,
-                result: None,
-                error,
-                session_id: None,
-            }]
+            crate::limit_text::done_events(status, error, None)
         }
         "fatal" => vec![AgentEvent::Done {
             status: if interrupted {
@@ -1188,6 +1183,33 @@ mod tests {
         )
         .unwrap();
         assert_eq!(map_shim_frame(&nested, false).len(), 1);
+    }
+
+    #[test]
+    fn limit_text_turn_error_reports_the_limit_before_done() {
+        let frame = json!({"ev": "turn", "status": "error", "error": "Rate limit exceeded [code=resource_exhausted]"});
+        assert!(matches!(
+            &map_shim_frame(&frame, false)[..],
+            [
+                AgentEvent::UsageLimit { resets_at: None },
+                AgentEvent::Done {
+                    status: DoneStatus::Errored,
+                    ..
+                },
+            ]
+        ));
+        assert!(matches!(
+            &map_shim_frame(&frame, true)[..],
+            [AgentEvent::Done {
+                status: DoneStatus::Interrupted,
+                ..
+            }]
+        ));
+        let auth = json!({"ev": "turn", "status": "error", "error": "Unauthorized — connect Cursor in Settings → Accounts"});
+        assert!(matches!(
+            &map_shim_frame(&auth, false)[..],
+            [AgentEvent::Done { .. }]
+        ));
     }
 
     #[test]

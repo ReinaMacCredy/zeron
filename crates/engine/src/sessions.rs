@@ -279,6 +279,7 @@ struct RunHandle {
     stop_tx: mpsc::UnboundedSender<String>,
     /// The MCP call never carries the harness tool id, so the part is matched by task text.
     delegate_binds: Arc<Mutex<Vec<(String, String)>>>,
+    native_binds: Arc<Mutex<Vec<(String, zeron_proto::ChildRoute)>>>,
     /// Published pages awaiting their tool part, keyed by the agent's html.
     html_binds: Arc<Mutex<Vec<(String, zeron_proto::html_render::HtmlRenderRef)>>>,
     /// The user stopped this runtime: it is being torn down and takes no
@@ -545,6 +546,7 @@ impl RunSetup {
                 computer: RunComputer::new(),
                 stop_tx,
                 delegate_binds: Arc::new(Mutex::new(Vec::new())),
+                native_binds: Arc::new(Mutex::new(Vec::new())),
                 html_binds: Arc::new(Mutex::new(Vec::new())),
                 retiring: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 compaction: Arc::new(Mutex::new(None)),
@@ -651,6 +653,7 @@ struct Inner {
     computer: Mutex<Option<Arc<ComputerRuntime>>>,
     device_hub: Mutex<Option<Arc<crate::device_hub::DeviceHub>>>,
     resume_schedule: OnceLock<crate::resume_schedule::ResumeSchedule>,
+    quota: Arc<crate::routing::quota::QuotaBook>,
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
@@ -714,12 +717,18 @@ impl Inner {
         #[cfg(not(target_os = "macos"))]
         let computer_guidance =
             computer_control.then(crate::computer::tools::guidance::computer_tool_instructions);
+        let delegation_guidance = Some(crate::routing::guidance::guidance(
+            &self.registry.routing_settings(),
+            crate::routing::guidance::own_model(config.as_ref()),
+        ));
         let blocks: Vec<&str> = [
             Some(instructions).filter(|text| !text.is_empty()),
             computer_guidance
                 .as_deref()
                 .filter(|_| live(ToolGroup::Computer)),
-            live(ToolGroup::Delegation).then_some(crate::doc_host::DELEGATION_GUIDANCE),
+            delegation_guidance
+                .as_deref()
+                .filter(|_| live(ToolGroup::Delegation)),
             live(ToolGroup::Pages).then_some(zeron_proto::html_render::GUIDANCE),
             live(ToolGroup::Devices).then_some(crate::device_hub::DEVICE_TOOL_INSTRUCTIONS),
         ]
@@ -741,6 +750,44 @@ impl Inner {
         })
     }
 
+    /// Only a delegated child gets a mid-run offer; top-level chats keep the limit pill.
+    fn limit_offer(&self, chat_id: &str, harness: HarnessId) -> Option<zeron_proto::LimitOffer> {
+        let owner = self.doc_host()?.child_owner(chat_id)?;
+        let offered: Vec<HarnessId> = self.registry.offered().iter().map(|d| d.id).collect();
+        let now = now_ms();
+        Some(crate::routing::quota::offer(
+            &self.registry.routing_settings(),
+            harness,
+            owner.config.as_ref().map(crate::routing::target_of),
+            &offered,
+            &|id| self.quota.state(id, now),
+            now,
+        ))
+    }
+
+    /// Claude Code under native policy Off loses its sub-agent tool while Delegation is live, so it still has a way to delegate.
+    fn apply_native_policy(&self, chat_id: &str, harness: HarnessId, disabled: &mut Vec<String>) {
+        if !crate::routing::guidance::native_tools_off(&self.registry.routing_settings(), harness) {
+            return;
+        }
+        let config = self
+            .workspace()
+            .and_then(|workspace| workspace.chat_config(chat_id));
+        let state = self.registry.tool_settings_state(
+            false,
+            config.as_ref().map_or(&[][..], |c| &c.disabled_tools),
+        );
+        let off = state.disabled.iter().map(String::as_str).collect();
+        if !zeron_proto::tools::group_live(ToolGroup::Delegation, &off) {
+            return;
+        }
+        for tool in crate::routing::guidance::NATIVE_TOOLS {
+            if !disabled.iter().any(|name| name == tool) {
+                disabled.push(tool.to_string());
+            }
+        }
+    }
+
     /// The host system prompt, then the chat's own instructions: what a run launches with.
     fn instructions_for(&self, chat_id: &str) -> String {
         let chat = self
@@ -760,13 +807,36 @@ impl Inner {
     }
 
     fn bind_delegates(&self, chat_id: &str, run_id: &str, parts: &mut [MessagePart]) {
-        let Some(binds) = lock(&self.runs)
+        let Some((binds, natives)) = lock(&self.runs)
             .get(chat_id)
             .filter(|run| run.run_id == run_id)
-            .map(|run| run.delegate_binds.clone())
+            .map(|run| (run.delegate_binds.clone(), run.native_binds.clone()))
         else {
             return;
         };
+        lock(&natives).retain(|(task, route)| {
+            let slot = parts.iter_mut().find_map(|part| match part {
+                MessagePart::Tool {
+                    call,
+                    subagent_ref: None,
+                    delegate_route,
+                    ..
+                } if delegate_route.is_none()
+                    && call.is_delegate_task()
+                    && spawned_text(call) == Some(task.as_str()) =>
+                {
+                    Some(delegate_route)
+                }
+                _ => None,
+            });
+            match slot {
+                Some(slot) => {
+                    *slot = Some(route.clone());
+                    false
+                }
+                None => true,
+            }
+        });
         lock(&binds).retain(|(task, child)| {
             let slot = parts.iter_mut().find_map(|part| match part {
                 MessagePart::Tool {
@@ -875,6 +945,7 @@ impl SessionsEngine {
                 computer: Mutex::new(None),
                 device_hub: Mutex::new(None),
                 resume_schedule: OnceLock::new(),
+                quota: crate::routing::quota::QuotaBook::new(),
             }),
         }
     }
@@ -963,6 +1034,43 @@ impl SessionsEngine {
     }
 
     /// Wire the turn-start listener (called once at engine assembly).
+    pub fn defer_start(&self, chat_id: &str, at: i64) -> bool {
+        self.inner
+            .resume_schedule
+            .get()
+            .map(|schedule| schedule.defer_start(chat_id, at))
+            .is_some()
+    }
+
+    pub fn limit_holds(&self, chat_id: &str) -> bool {
+        self.inner
+            .resume_schedule
+            .get()
+            .is_some_and(|schedule| schedule.holds(chat_id, now_ms()))
+    }
+
+    pub fn resolve_limit_offer(
+        &self,
+        chat_id: &str,
+        choice: crate::resume_schedule::OfferResolution,
+    ) -> Option<zeron_proto::LimitOffer> {
+        self.inner
+            .resume_schedule
+            .get()
+            .and_then(|schedule| schedule.resolve_offer(chat_id, choice))
+    }
+
+    pub fn deferred_until(&self, chat_id: &str) -> Option<i64> {
+        self.inner
+            .resume_schedule
+            .get()
+            .and_then(|schedule| schedule.deferred_until(chat_id))
+    }
+
+    pub fn quota(&self) -> &Arc<crate::routing::quota::QuotaBook> {
+        &self.inner.quota
+    }
+
     pub fn set_resume_schedule(&self, schedule: crate::resume_schedule::ResumeSchedule) {
         let _ = self.inner.resume_schedule.set(schedule);
     }
@@ -1016,6 +1124,12 @@ impl SessionsEngine {
     ) {
         if let Some(run) = lock(&self.inner.runs).get(chat_id) {
             lock(&run.html_binds).push((crate::html_render::html_key(html), page));
+        }
+    }
+
+    pub fn bind_native_fallback(&self, chat_id: &str, task: &str, route: zeron_proto::ChildRoute) {
+        if let Some(run) = lock(&self.inner.runs).get(chat_id) {
+            lock(&run.native_binds).push((task.trim().to_string(), route));
         }
     }
 
@@ -1378,6 +1492,8 @@ impl SessionsEngine {
         // run spawns, creating a new chat's scratch folder.
         request.cwd = crate::repos::resolve_chat_cwd(&request.cwd, &self.inner.scratch_root())
             .map_err(EngineError::Other)?;
+        self.inner
+            .apply_native_policy(chat_id, harness_id, &mut request.disabled_tools);
         // Native-only catalog entries have no portable file fallback. Reject
         // cross-harness delivery before recording or routing the user turn.
         zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
@@ -3186,6 +3302,8 @@ impl SessionsEngine {
             }
         };
         let harness_id = host.harness_for_request(chat_id, &request);
+        self.inner
+            .apply_native_policy(chat_id, harness_id, &mut request.disabled_tools);
         request.attachments.clear();
         // The checkout the chat runs in already exists; cwd points at it.
         request.worktree = None;
@@ -5450,6 +5568,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_status,
                 subagent_tail,
                 html_render,
+                delegate_route,
             } => MessagePart::Tool {
                 id: id.clone(),
                 call: sanitize_tool_call(call),
@@ -5469,6 +5588,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_status: *subagent_status,
                 subagent_tail: subagent_tail.clone(),
                 html_render: html_render.clone(),
+                delegate_route: delegate_route.clone(),
             },
             other => other.clone(),
         })
@@ -6946,6 +7066,7 @@ async fn drive_run(
 
         if let AgentEvent::UsageLimit { resets_at } = &event {
             turn_limit = Some(resets_at.or(turn_limit.flatten()));
+            inner.quota.note_limit(harness_id, *resets_at, now_ms());
         }
         if let AgentEvent::Done {
             status,
@@ -6976,6 +7097,9 @@ async fn drive_run(
                 && let Some(schedule) = inner.resume_schedule.get()
             {
                 schedule.note_limit(&chat_id, resets_at, last_user_entry(doc_ref), now_ms());
+                if let Some(offer) = inner.limit_offer(&chat_id, harness_id) {
+                    schedule.set_offer(&chat_id, offer);
+                }
             }
             record_session_stats(
                 doc_ref,
@@ -7585,9 +7709,41 @@ mod tests {
                 text.ends_with(crate::device_hub::DEVICE_TOOL_INSTRUCTIONS),
                 "{text}"
             );
-            assert!(text.contains(crate::doc_host::DELEGATION_GUIDANCE));
+            assert!(text.contains(crate::routing::guidance::BASE));
             assert!(text.contains(zeron_proto::html_render::GUIDANCE));
         }
+    }
+
+    #[test]
+    fn native_policy_off_drops_claudes_sub_agent_tool_only() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(RunJournal::open(dir.path().join("journals")).unwrap());
+        let registry = Arc::new(HarnessRegistry::new());
+        let sessions = SessionsEngine::new("host".into(), journal, registry.clone());
+        let tools = |harness| {
+            let mut disabled = vec!["WebFetch".to_string()];
+            sessions
+                .inner
+                .apply_native_policy("chat", harness, &mut disabled);
+            sessions
+                .inner
+                .apply_native_policy("chat", harness, &mut disabled);
+            disabled
+        };
+        assert_eq!(tools(HarnessId::ClaudeCode), ["WebFetch"]);
+        registry
+            .set_routing_settings(crate::routing::RoutingSettings {
+                native: crate::routing::NativePolicy::Off,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(tools(HarnessId::ClaudeCode), ["WebFetch", "Agent", "Task"]);
+        assert_eq!(tools(HarnessId::Codex), ["WebFetch"]);
+        let mut settings = zeron_proto::tools::ToolSettings::default();
+        settings.set_group(ToolGroup::Delegation, false);
+        registry.set_tool_settings(settings);
+        assert_eq!(tools(HarnessId::ClaudeCode), ["WebFetch"]);
     }
 
     #[test]
@@ -7611,7 +7767,7 @@ mod tests {
             guidance(false),
             Some(format!(
                 "{}\n\n{}",
-                crate::doc_host::DELEGATION_GUIDANCE,
+                crate::routing::guidance::BASE,
                 zeron_proto::html_render::GUIDANCE
             ))
         );
@@ -7620,14 +7776,14 @@ mod tests {
         registry.set_tool_settings(settings.clone());
         assert_eq!(
             guidance(false).as_deref(),
-            Some(crate::doc_host::DELEGATION_GUIDANCE)
+            Some(crate::routing::guidance::BASE)
         );
         settings.set_group(ToolGroup::Delegation, false);
         registry.set_tool_settings(settings.clone());
         assert_eq!(guidance(false), None);
         let computer = guidance(true).unwrap();
         assert!(computer.starts_with("## Zeron computer use\n"));
-        assert!(!computer.contains(crate::doc_host::DELEGATION_GUIDANCE));
+        assert!(!computer.contains(crate::routing::guidance::BASE));
         for name in zeron_proto::computer::ZERON_COMPUTER_TOOL_NAMES {
             settings.set_tool(name, false);
         }

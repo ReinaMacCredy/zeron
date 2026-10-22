@@ -1112,6 +1112,8 @@ impl TaskCenter {
                 deleted: false,
                 turn: None,
                 images: text.images.clone(),
+                role: None,
+                route: None,
             };
             shown.push((
                 StepRow {

@@ -41,6 +41,8 @@ struct RawTask {
     #[serde(default)]
     plan_doc: bool,
     #[serde(default)]
+    same_agents: bool,
+    #[serde(default)]
     resources: Vec<String>,
     #[serde(default)]
     images: Vec<String>,
@@ -71,6 +73,7 @@ impl From<RawTask> for Task {
             send_error: raw.send_error,
             plan: raw.plan,
             plan_doc: raw.plan_doc,
+            same_agents: raw.same_agents,
             resources: raw.resources,
             images: raw.images,
             context: raw.context,
@@ -172,6 +175,7 @@ fn task_fields(task: &Task, title: String, order_key: String) -> BTreeMap<String
         ("sendError", opt_str(task.send_error.as_deref())),
         ("plan", json!(task.plan)),
         ("planDoc", json!(task.plan_doc)),
+        ("sameAgents", json!(task.same_agents)),
         ("resources", json!(task.resources)),
         ("images", json!(task.images)),
         ("context", json!(task.context)),
@@ -356,6 +360,9 @@ impl RegistryDoc {
         }
         if let Some(plan_doc) = patch.plan_doc {
             set.insert("planDoc".into(), json!(plan_doc));
+        }
+        if let Some(same_agents) = patch.same_agents {
+            set.insert("sameAgents".into(), json!(same_agents));
         }
         if let Some(resources) = &patch.resources {
             set.insert("resources".into(), json!(resources));
