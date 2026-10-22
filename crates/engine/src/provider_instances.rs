@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -428,15 +429,30 @@ pub(crate) fn keeps_sessions(
     after: &ProviderInstance,
     data_dir: &Path,
 ) -> bool {
-    let home = |instance: &ProviderInstance, home: &Option<HomeDir>| {
-        home.as_ref()
-            .map(|home| home_path(&instance.id, home, data_dir).ok())
-    };
+    // The harness falls back to its home variable in `env` when no home field is set.
+    let home =
+        |instance: &ProviderInstance, home: &Option<HomeDir>, env: &BTreeMap<String, String>| {
+            match home {
+                Some(home) => home_path(&instance.id, home, data_dir).ok(),
+                None => home_variable(instance.driver)
+                    .and_then(|variable| env.get(variable))
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from),
+            }
+        };
     match (&before.config, &after.config) {
         (
-            InstanceConfig::Native { home_dir: was, .. },
-            InstanceConfig::Native { home_dir: now, .. },
-        ) => home(before, was) == home(after, now),
+            InstanceConfig::Native {
+                home_dir: was,
+                env: was_env,
+                ..
+            },
+            InstanceConfig::Native {
+                home_dir: now,
+                env: now_env,
+                ..
+            },
+        ) => home(before, was, was_env) == home(after, now, now_env),
         (InstanceConfig::Acp { source: was, .. }, InstanceConfig::Acp { source: now, .. }) => {
             match (was, now) {
                 (
@@ -450,6 +466,16 @@ pub(crate) fn keeps_sessions(
             }
         }
         _ => false,
+    }
+}
+
+fn home_variable(driver: HarnessId) -> Option<&'static str> {
+    match driver {
+        HarnessId::Codex => Some("CODEX_HOME"),
+        HarnessId::ClaudeCode => Some("CLAUDE_CONFIG_DIR"),
+        HarnessId::Pi => Some("PI_CODING_AGENT_DIR"),
+        HarnessId::Antigravity => Some("GEMINI_HOME"),
+        _ => None,
     }
 }
 
@@ -510,6 +536,29 @@ mod tests {
                 env: Default::default(),
             },
         }
+    }
+
+    #[test]
+    fn a_home_given_through_env_decides_whether_sessions_are_kept() {
+        let data_dir = Path::new("/data");
+        let with_env = |key: &str, value: &str| {
+            let mut instance = instance("codex_work", HarnessId::Codex);
+            instance.config = InstanceConfig::Native {
+                executable: None,
+                home_dir: None,
+                launch_args: Vec::new(),
+                env: BTreeMap::from([(key.into(), value.into())]),
+            };
+            instance
+        };
+        let a = with_env("CODEX_HOME", "/a");
+        assert!(!keeps_sessions(&a, &with_env("CODEX_HOME", "/b"), data_dir));
+        assert!(keeps_sessions(&a, &with_env("CODEX_HOME", "/a"), data_dir));
+        assert!(keeps_sessions(
+            &with_env("OPENAI_BASE_URL", "http://a"),
+            &with_env("OPENAI_BASE_URL", "http://b"),
+            data_dir
+        ));
     }
 
     fn ids(snapshot: &ProviderInstancesSnapshot) -> Vec<&str> {

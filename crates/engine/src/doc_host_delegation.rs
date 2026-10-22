@@ -993,6 +993,7 @@ impl DocHost {
         owner: &str,
         task_id: &str,
         ids: Vec<String>,
+        withdraw: bool,
     ) -> Result<Vec<String>, EngineError> {
         let (_, findings) = self.finished_review(owner, task_id)?;
         if let Some(id) = ids
@@ -1008,7 +1009,11 @@ impl DocHost {
             .workspace_or_fail()?
             .update_chat_delegation(task_id, |d| {
                 let before = d.findings_handed.len();
-                d.findings_handed.extend(ids);
+                if withdraw {
+                    d.findings_handed.retain(|id| !ids.contains(id));
+                } else {
+                    d.findings_handed.extend(ids);
+                }
                 d.findings_handed.len() != before
             })?
             .ok_or_else(|| failure("task_not_found", task_id))?;

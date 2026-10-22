@@ -2495,11 +2495,8 @@ impl SessionsEngine {
             )));
         }
         let (background_tasks, running_subagents) = self.background_work(chat_id);
-        if self.restart_ends_work(chat_id, harness.compacts_in_place()) {
-            return Err(EngineError::Other(format!(
-                "{} restarts its process to compact, which would end the background work still running. Call compact again after it finishes.",
-                harness.display_name()
-            )));
+        if !harness.compacts_in_place() && background_tasks + running_subagents as usize > 0 {
+            return Err(EngineError::Other(BACKGROUND_WORK_REFUSAL.into()));
         }
         let trimmed = |text: Option<String>| {
             text.map(|text| text.trim().to_string())
@@ -2666,7 +2663,7 @@ impl SessionsEngine {
             return Ok(None);
         }
         if self.restart_ends_work(chat_id, self.compacts_in_place(chat_id)) {
-            let reason = "Your compaction did not run: compacting this chat restarts its process, which would end the background work still running. Call compact again after it finishes.".to_string();
+            let reason = format!("Your compaction did not run. {BACKGROUND_WORK_REFUSAL}");
             return Ok(Some((
                 self.decline_agent_compact(chat_id, &request, reason),
                 request,
@@ -2869,10 +2866,7 @@ impl SessionsEngine {
             };
         }
         if self.restart_ends_work(chat_id, harness.compacts_in_place()) {
-            return Err(EngineError::Other(format!(
-                "{} restarts its process to compact, which would end the background work still running. Compact again after it finishes.",
-                harness.display_name()
-            )));
+            return Err(EngineError::Other(BACKGROUND_WORK_REFUSAL.into()));
         }
         // The same engine-owned resume the normal dispatch path injects: a
         // compaction that started a fresh session would compact nothing.
@@ -3952,6 +3946,7 @@ struct HarnessPrompt {
 struct Owed {
     carry: Option<String>,
     note: Option<String>,
+    agent_compacted: bool,
 }
 
 #[derive(Default)]
@@ -3980,8 +3975,10 @@ impl Inner {
         let owed = Owed {
             carry: self.take_carry(chat_id, typed),
             note: self.take_compact_note(chat_id, typed),
+            agent_compacted: zeron_proto::invocation::leading_command(typed).is_none()
+                && lock(&self.agent_compacted).remove(chat_id),
         };
-        let nudge = self.context_nudge(chat_id, harness_id, typed, owed.note.as_deref());
+        let nudge = self.context_nudge(chat_id, harness_id, typed, &owed);
         if nudge.is_none() && owed.carry.is_none() {
             return (wrapped, owed);
         }
@@ -4008,6 +4005,9 @@ impl Inner {
             lock(&self.compact_owed)
                 .entry(chat_id.to_string())
                 .or_insert(note);
+        }
+        if owed.agent_compacted {
+            lock(&self.agent_compacted).insert(chat_id.to_string());
         }
     }
 
@@ -4134,12 +4134,12 @@ impl Inner {
         chat_id: &str,
         harness_id: HarnessId,
         typed: &str,
-        owed: Option<&str>,
+        owed: &Owed,
     ) -> Option<String> {
         if zeron_proto::invocation::leading_command(typed).is_some() {
             return None;
         }
-        let reminder = if lock(&self.agent_compacted).remove(chat_id)
+        let reminder = if owed.agent_compacted
             || self.registry.compaction_settings().mode != CompactionMode::Threshold
         {
             None
@@ -4153,10 +4153,14 @@ impl Inner {
             })
         };
         let findings = self.findings_reminder(chat_id);
-        let lines: Vec<&str> = [owed, findings.as_deref(), reminder.as_deref()]
-            .into_iter()
-            .flatten()
-            .collect();
+        let lines: Vec<&str> = [
+            owed.note.as_deref(),
+            findings.as_deref(),
+            reminder.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         (!lines.is_empty()).then(|| {
             format!(
                 "<system-reminder>\n{}\n</system-reminder>",
@@ -5047,6 +5051,7 @@ impl Inner {
 /// 2.1.273), but a long 1M-window chat can take several minutes; past this
 /// the chat is released and a retry is refused until its next completed turn.
 const COMPACT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+const BACKGROUND_WORK_REFUSAL: &str = "Compacting this chat restarts its agent's process, which would end the background work still running. Stop that work, or wait for it to finish, then compact again.";
 
 /// Releases the chat's one-compaction-at-a-time reservation on every exit path.
 struct CompactionReservation {

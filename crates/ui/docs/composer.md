@@ -16,7 +16,7 @@ A sent message that uses Markdown, such as a list, a heading, or a code block, s
 - Drag files onto the conversation (**Drop to attach**).
 - Paste an image or a copied file.
 
-Each attachment appears as a chip in your text: images are named **Image 1**, **Image 2**, and so on. Click an image chip to see it full size; press Left and Right to step through the images, and Escape to close. To remove an attachment, delete its chip. Files can be up to 24 MB each.
+Each attachment appears as a chip in your text: images are named **Image 1**, **Image 2**, and so on. Click an image chip to see it full size, and press Escape to close it. To remove an attachment, delete its chip. Files can be up to 24 MB each.
 
 An attachment that has no chip in your text shows as a small tile above it instead. Hover the tile and click its **×** to remove it.
 

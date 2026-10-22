@@ -82,7 +82,6 @@ Wide tables scroll sideways. Math is covered in [Appearance](zeron://docs/appear
 Click an image in the transcript (an attachment, an image the agent made, or a picture in a tool result) to open it full size:
 
 - Pinch, or Ctrl+scroll, to zoom. Scroll or drag to pan.
-- With several images, use Left and Right, or the **Previous image** and **Next image** buttons.
 - Press Escape or click to close.
 
 Right-click an image for **Copy path** and **Copy image**.

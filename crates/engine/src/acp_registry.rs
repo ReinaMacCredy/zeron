@@ -465,7 +465,6 @@ enum RecordLaunch {
         program: PathBuf,
         archive: String,
         sha256: Option<String>,
-        verified: bool,
     },
 }
 
@@ -658,13 +657,11 @@ async fn install(
             )
             .await
             .map_err(failed)?;
-            let verified = target.sha256.is_some();
             Ok(record(
                 RecordLaunch::Binary {
                     program,
                     archive: target.archive,
                     sha256: target.sha256,
-                    verified,
                 },
                 target.args,
                 target.env,
@@ -702,6 +699,12 @@ async fn install(
                 agent.distribution.uvx.clone().ok_or_else(|| {
                     EngineError::Other(format!("{} has no uvx package", agent.name))
                 })?;
+            if !uvx_spec_ok(&package.package) {
+                return Err(EngineError::Other(format!(
+                    "{}'s uvx package {} is not a pinned Python package",
+                    agent.name, package.package
+                )));
+            }
             if zeron_harness::acp::find_uvx().is_none() {
                 return Err(EngineError::Other(format!(
                     "{} runs through uv, which is not installed. Install uv (https://docs.astral.sh/uv/) and try again.",
@@ -742,6 +745,22 @@ fn npm_spec_ok(spec: &str) -> bool {
         && version
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+}
+
+fn uvx_spec_ok(spec: &str) -> bool {
+    let Some((name, version)) = spec.split_once("==").or_else(|| spec.split_once('@')) else {
+        return false;
+    };
+    name.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'))
+        && version.chars().next().is_some_and(|c| c.is_ascii_digit())
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '!'))
 }
 
 fn npm_bin_name(package: &str) -> &str {
@@ -954,6 +973,28 @@ mod tests {
             "Demo@1.0.0",
         ] {
             assert!(!npm_spec_ok(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn only_pinned_uvx_packages_run() {
+        for good in [
+            "fast-agent-acp==0.10.1",
+            "minion-code@0.1.44",
+            "Demo_x.y==1!2.0+local",
+        ] {
+            assert!(uvx_spec_ok(good), "{good}");
+        }
+        for bad in [
+            "demo",
+            "--index-url=http://127.0.0.1:1",
+            "--from@1.0.0",
+            "demo==latest",
+            "git+https://x/y.git@1.0.0",
+            "demo @ file:///x",
+            "demo==1.0 --with x",
+        ] {
+            assert!(!uvx_spec_ok(bad), "{bad}");
         }
     }
 

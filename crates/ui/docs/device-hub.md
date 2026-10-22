@@ -7,7 +7,7 @@ Open [Settings > Device hub](zeron://settings/device-hub) and switch on **Device
 - **Platform support** shows whether iOS (Xcode and iOS Simulator) and Android (Android SDK and Emulator) are ready, and what to install if not. Either platform works without the other. Click **Refresh** after installing.
 - **Check versions** shows the running, required, and installed device tools. When they are out of date, an **Update to** button appears.
 - **Agent device access** lets new agent sessions start and control devices. It needs **Device hub** on, and turning **Device hub** off turns it off too.
-- **Auto-show floating preview** (on by default) shows a floating preview when an agent opens a device, unless the agent says otherwise. With it off, the device opens as a tab in the right pane.
+- **Auto-show floating preview** (on by default) shows a floating preview when an agent opens a device. With it off, the device opens as a tab in the right pane.
 
 Until the hub is set up, a device tab walks you through the same steps. You can leave agent control off and still use devices yourself.
 

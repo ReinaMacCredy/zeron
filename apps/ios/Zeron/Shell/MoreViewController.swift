@@ -284,7 +284,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         case "archived":
             navigationController?.pushViewController(FolderViewController(app: app, folder: FolderRowVM(id: "archived", name: "Archived", count: 0, symbol: "archivebox")), animated: true)
         case "signout":
-            let alert = UIAlertController(title: "Sign out?", message: "Local drafts stay on this device.", preferredStyle: .actionSheet)
+            let alert = UIAlertController(title: "Sign out?", message: "Messages still waiting to send and the New session draft are deleted. Text left in a session's composer stays on this device.", preferredStyle: .actionSheet)
             alert.addAction(UIAlertAction(title: "Sign Out", style: .destructive) { [weak self] _ in self?.app.signOut() })
             alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
             alert.popoverPresentationController?.sourceView = collectionView.cellForItem(at: path)

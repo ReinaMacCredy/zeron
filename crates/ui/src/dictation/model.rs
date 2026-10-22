@@ -399,7 +399,7 @@ impl Render for VoiceCard {
                                 if self.call_live {
                                     "End the call to change devices"
                                 } else {
-                                    "Runs Codex; audio stays on this device"
+                                    "Runs Codex; this device streams the audio to Codex's voice service"
                                 }
                                 .into_any_element(),
                             ],
