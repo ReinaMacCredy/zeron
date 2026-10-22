@@ -457,6 +457,16 @@ async fn mcp_cli(chat: String, ipc_port: u16) -> anyhow::Result<()> {
     let client = zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
         .await
         .map_err(|e| anyhow::anyhow!("no engine listening on 127.0.0.1:{ipc_port} ({e})"))?;
+    if let Ok(secret) = std::env::var(zeron_rpc::COMPUTER_RUN_SECRET_ENV)
+        && let Err(error) = client
+            .call(
+                zeron_rpc::methods::BIND_RUN,
+                serde_json::json!({ "chatId": chat, "runSecret": secret }),
+            )
+            .await
+    {
+        tracing::warn!(%error, chat = %chat, "the engine did not bind this server to its run");
+    }
     let tools = zeron_mcp::ThreadTools::new(client, chat).with_ipc_port(ipc_port);
     zeron_mcp::serve(
         tokio::io::BufReader::new(tokio::io::stdin()),

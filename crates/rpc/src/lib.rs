@@ -118,6 +118,10 @@ pub mod methods {
     pub const CONTINUE_IN_NEW_THREAD: &str = "ContinueInNewThread";
     // Thread tools (peer chats, d25). IPC-only; the caller identity comes from
     // the engine-spawned `zeron mcp --chat` process, never from the agent.
+    /// Bind this connection to a chat's live run: `{chatId, runSecret}` → `{}`.
+    /// Every later `fromChatId` and `ownerChatId` on the connection must name that
+    /// chat; an unbound connection may not send `fromChatId` at all.
+    pub const BIND_RUN: &str = "BindRun";
     /// Open a peer chat in `fromChatId`'s project, stamped `createdByChatId`,
     /// and hand it `prompt` as its first turn. Omitted run settings copy the
     /// creator's. `{fromChatId, prompt, title?, harness?, model?, reasoning?}`
@@ -571,6 +575,11 @@ impl RpcReply {
 #[async_trait]
 pub trait RpcService: Send + Sync + 'static {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError>;
+
+    /// A service that binds state to one connection (the caller a `BindRun` proved) serves it here.
+    fn connection(&self) -> Option<Arc<dyn RpcService>> {
+        None
+    }
 }
 
 /// Deserialize typed params out of the envelope's `params` value.

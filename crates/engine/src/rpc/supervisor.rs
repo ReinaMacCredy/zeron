@@ -8,11 +8,13 @@ use zeron_proto::supervisor::{
 
 pub(super) const MESSAGE_OFF: &str = "Messaging leads and step threads is off in the Supervisor's Authority; the person can turn it on on the Supervisor page.";
 pub(super) const START_OFF: &str = "Starting missions is off in the Supervisor's Authority, and create_thread and delegate_task go with it; the person can turn it on on the Supervisor page.";
+pub(super) const PERSON_ONLY: &str =
+    "Only the person stops the Supervisor or answers its questions; send it a message instead.";
 pub(super) const NO_INTERRUPT: &str = "The Supervisor does not interrupt threads: a step that blocks a shared resource is stopped with supervisor pause, which needs a verified contention. Otherwise message the step's lead.";
 const PAUSE_OFF: &str = "Pausing steps is off in the Supervisor's Authority; the person can turn it on on the Supervisor page.";
 const UNIX_ONLY: &str = "Shared resources are checked against the machine on macOS and Linux only";
-pub(super) const GOAL_OR_SPEND: &str = "A task's title, notes and thread are the person's: the Supervisor cannot change them, delete the task or reassign it. Raise it with the supervisor tool, action \"ask\".";
-pub(super) const GOAL_ACTION: &str = "The Supervisor changes a mission's title and notes with the supervisor tool, action \"goal\", which tells its lead. It cannot delete or reassign a task.";
+pub(super) const GOAL_OR_SPEND: &str = "A task is the person's: the Supervisor cannot change it, mark it done, delete it or reassign it. Raise it with the supervisor tool, action \"ask\".";
+pub(super) const GOAL_ACTION: &str = "The Supervisor changes a mission's title and notes with the supervisor tool, action \"goal\", which tells its lead. It cannot otherwise change a task, mark it done, delete it or reassign it.";
 const DECIDE_OFF: &str = "Decide for me is off in the Supervisor's Authority: the person decides the leads' Needs you items and approves plans. Raise it with the supervisor tool, action \"ask\", if it needs them.";
 const GOAL_OFF: &str = "Changing a mission's goal or spend is off in the Supervisor's Authority: it is the person's decision. Raise it with the supervisor tool, action \"ask\".";
 const TAKEN_BACK: &str =
@@ -23,6 +25,8 @@ const TREE_UNWATCHED: &str =
     "The Supervisor does not watch this thread's tree, so its questions are the person's.";
 const TREE_DECIDE_OFF: &str = "Decide for me is off in the Supervisor's Authority: in a tree without a plan the person answers the questions. Raise it with the supervisor tool, action \"ask\", if it needs them.";
 const MAX_OPTIONS: usize = 3;
+const OPTION_CHARS: usize = 200;
+const REASON_CHARS: usize = 2_000;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -117,6 +121,9 @@ fn refused(message: &str) -> RpcError {
 fn given<'a>(reason: &'a str, who_reads: &str) -> Result<&'a str, RpcError> {
     match reason.trim() {
         "" => Err(refused(&format!("reason is required: {who_reads}"))),
+        reason if reason.chars().count() > REASON_CHARS => {
+            Err(refused("reason is limited to 2,000 characters"))
+        }
         reason => Ok(reason),
     }
 }
@@ -145,6 +152,29 @@ impl EngineRpc {
             }
             _ => Ok(false),
         }
+    }
+
+    pub(super) fn refuse_held_thread(&self, chat_id: &str) -> Result<(), RpcError> {
+        let Some(hold) = self.doc_host.supervisor().and_then(|store| {
+            store.holds().into_iter().find(|hold| {
+                hold.resumed_at.is_none() && hold.thread_id.as_deref() == Some(chat_id)
+            })
+        }) else {
+            return Ok(());
+        };
+        Err(refused(&format!(
+            "Thread {chat_id} runs step {}, which the Supervisor paused for {}: it takes no messages until the step is resumed.",
+            hold.step_id, hold.resource
+        )))
+    }
+
+    fn refuse_elsewhere(&self, task_id: &str) -> Result<(), RpcError> {
+        if self.doc_host.hosts_mission(&self.workspace, task_id) {
+            return Ok(());
+        }
+        Err(refused(
+            "This mission's lead is archived or runs on another Mac: the Supervisor reaches only threads on its own Mac",
+        ))
     }
 
     pub(super) fn supervisor_store(&self) -> Result<&SupervisorStore, RpcError> {
@@ -285,13 +315,10 @@ impl EngineRpc {
                         "Re-briefing steps is off in the Supervisor's Authority; the person can turn it on on the Supervisor page.",
                     ));
                 }
-                if reason.trim().is_empty() {
-                    return Err(refused(
-                        "reason is required: the lead reads why the step changed",
-                    ));
-                }
+                given(&reason, "the lead reads why the step changed")?;
                 let step = self.step_or_refuse(&step_id)?;
                 let task = self.task_or_refuse(&step.task_id)?;
+                self.refuse_elsewhere(&task.id)?;
                 let lead = self.lead_of(&task)?;
                 let basis = self.doc_host.intervention_basis(
                     InterventionKind::Rebrief,
@@ -392,7 +419,7 @@ impl EngineRpc {
                 resource,
                 reason,
             } => {
-                self.resume_step(from, &step_id, resource.as_deref(), &reason)
+                self.resume_step(Some(from), &step_id, resource.as_deref(), &reason)
                     .await
             }
             SupervisorAction::Check { task_id } => self.check_resources(task_id.as_deref()).await,
@@ -474,6 +501,7 @@ impl EngineRpc {
         if self.supervisor_store()?.is_unwatched(&task.id) {
             return Err(refused(UNWATCHED));
         }
+        self.refuse_elsewhere(&task.id)?;
         let lead = self.lead_of(&task)?;
         Ok((task, lead))
     }
@@ -621,21 +649,6 @@ impl EngineRpc {
         Ok(serde_json::json!({ "taskId": task.id, "leadThreadId": lead, "messageId": message_id }))
     }
 
-    fn pause_ready(&self, reason: &str, does: &str) -> Result<(), RpcError> {
-        if !cfg!(unix) {
-            return Err(refused(UNIX_ONLY));
-        }
-        if !self.registry.supervisor_settings().pause_steps {
-            return Err(refused(PAUSE_OFF));
-        }
-        if reason.trim().is_empty() {
-            return Err(refused(&format!(
-                "reason is required: the lead reads why its step {does}"
-            )));
-        }
-        Ok(())
-    }
-
     async fn pause_step(
         &self,
         from: &str,
@@ -643,7 +656,13 @@ impl EngineRpc {
         resource: &str,
         reason: &str,
     ) -> Result<serde_json::Value, RpcError> {
-        self.pause_ready(reason, "stopped")?;
+        if !self.registry.supervisor_settings().pause_steps {
+            return Err(refused(PAUSE_OFF));
+        }
+        if !cfg!(unix) {
+            return Err(refused(UNIX_ONLY));
+        }
+        given(reason, "the lead reads why its step stopped")?;
         let key = ResourceKey::parse(resource).ok_or_else(|| {
             refused("resource is port:<n>, slot:<name> or path:<path>, as the mission declared it")
         })?;
@@ -652,6 +671,7 @@ impl EngineRpc {
             return Err(refused("This step is already marked done or skipped"));
         }
         let task = self.task_or_refuse(&step.task_id)?;
+        self.refuse_elsewhere(&task.id)?;
         let lead = self.lead_of(&task)?;
         let store = self.supervisor_store()?;
         if store.hold_of(step_id).is_some() {
@@ -710,7 +730,7 @@ impl EngineRpc {
             (None, _) => "It has not started.".to_string(),
         };
         let text = format!(
-            "The Supervisor paused step \"{}\" (taskStepId {}) because {key} is contended with another mission.\n\nWhy: {reason}\n\n{thread} Do not run it again until the Supervisor resumes it: create_thread with this taskStepId is refused until then. Keep working on steps that do not need {key}.",
+            "The Supervisor paused step \"{}\" (taskStepId {}) because {key} is contended with another mission.\n\nWhy: {reason}\n\n{thread} Do not run it again until the Supervisor resumes it: create_thread with this taskStepId and send_message_to_thread to its thread are refused until then. Keep working on steps that do not need {key}.",
             step.title, step.id
         );
         let message_id = match self
@@ -737,14 +757,29 @@ impl EngineRpc {
         }))
     }
 
+    pub(super) async fn resume_step_for_person(
+        &self,
+        step_id: &str,
+        from: Option<&str>,
+    ) -> Result<(), RpcError> {
+        if from.is_some() {
+            return Err(refused(
+                "Only the person resumes a step from the Supervisor page",
+            ));
+        }
+        self.resume_step(None, step_id, None, "").await.map(drop)
+    }
+
     async fn resume_step(
         &self,
-        from: &str,
+        from: Option<&str>,
         step_id: &str,
         resource: Option<&str>,
         reason: &str,
     ) -> Result<serde_json::Value, RpcError> {
-        self.pause_ready(reason, "resumes")?;
+        if from.is_some() {
+            given(reason, "the lead reads why its step resumes")?;
+        }
         let store = self.supervisor_store()?;
         let hold = store
             .hold_of(step_id)
@@ -758,26 +793,43 @@ impl EngineRpc {
                 hold.resource
             )));
         }
-        let step = self.step_or_refuse(step_id)?;
+        let Some(step) = self.workspace.task_step(step_id) else {
+            store.resume_hold(&hold.row_id).map_err(failed)?;
+            return Ok(serde_json::json!({ "stepId": step_id, "removed": true }));
+        };
         let task = self.task_or_refuse(&step.task_id)?;
         let lead = self.lead_of(&task)?;
-        let basis = self.doc_host.intervention_basis(
-            InterventionKind::Resume,
-            from,
-            Some(&lead),
-            Some(step_id),
-        );
+        let basis = from.map(|from| {
+            self.doc_host.intervention_basis(
+                InterventionKind::Resume,
+                from,
+                Some(&lead),
+                Some(step_id),
+            )
+        });
         store.resume_hold(&hold.row_id).map_err(failed)?;
         let reason = reason.trim();
+        let who = if from.is_some() {
+            "The Supervisor"
+        } else {
+            "The person"
+        };
+        let why = if reason.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nWhy: {reason}")
+        };
         let text = format!(
-            "The Supervisor resumed step \"{}\" (taskStepId {}), paused for {}.\n\nWhy: {reason}\n\nStart it again with create_thread and taskStepId {} when it is next to run.",
+            "{who} resumed step \"{}\" (taskStepId {}), paused for {}.{why}\n\nStart it again with create_thread and taskStepId {} when it is next to run.",
             step.title, step.id, hold.resource, step.id
         );
         let message_id = self
-            .send_to_task_thread(&task, &lead, Some(from), &text, Vec::new())
+            .send_to_task_thread(&task, &lead, from, &text, Vec::new())
             .await?;
-        self.doc_host
-            .record_intervention(basis, Some(message_id.clone()), None, reason);
+        if let Some(basis) = basis {
+            self.doc_host
+                .record_intervention(basis, Some(message_id.clone()), None, reason);
+        }
         Ok(serde_json::json!({ "stepId": step.id, "leadThreadId": lead, "messageId": message_id }))
     }
 
@@ -840,6 +892,12 @@ impl EngineRpc {
             .collect();
         if options.is_empty() || options.len() > MAX_OPTIONS {
             return Err(refused("An item offers one to three options"));
+        }
+        if options
+            .iter()
+            .any(|option| option.chars().count() > OPTION_CHARS)
+        {
+            return Err(refused("An option is limited to 200 characters"));
         }
         let item = SupervisorItem {
             id: crate::new_id(),

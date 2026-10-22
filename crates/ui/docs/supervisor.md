@@ -8,7 +8,7 @@ The Supervisor's chat never shows in the sidebar or under **Archived**, and it n
 
 ## What wakes it and what it can do
 
-Zeron wakes the Supervisor when something happens in a watched mission: a step fails, a step or the lead waits on you, the mission finishes, the mission goes quiet for 30 minutes, the lead stays quiet for 10 minutes after a step failed, the plan is edited after the mission started, the lead escalates, or two missions contend for a shared resource. With **Decide for me** on, a plan that waits for review wakes it too.
+Zeron wakes the Supervisor when something happens in a watched mission: a step fails, a step or the lead waits on you, the mission finishes, the mission goes quiet for 30 minutes, the lead stays quiet for 10 minutes after a step failed, the plan is edited after the mission started, the lead escalates, or two missions contend for a shared resource. With **Decide for me** on, a plan that waits for review wakes it too. Events still waiting for their wake when Zeron quits are not carried over; a quiet mission or an open contention is noticed again after a restart without waking the Supervisor twice for it.
 
 In a watched tree, at any depth, it wakes when a thread asks you something, fails, or a delegated thread finishes. It also wakes when work stalls:
 
@@ -25,8 +25,8 @@ In a mission it acts through the lead, within the switches under **Authority**:
 
 - It messages a lead or a step's thread, and answers their questions and tool approvals.
 - It re-briefs a step: it rewrites that step's title and spec, and the lead gets one message saying what changed and why. It never changes the plan's overview and never adds or removes a step.
-- It pauses a step that blocks a shared resource, and resumes it later. A pause needs a contention Zeron verified on this Mac (see **Resources** below): it stops the step's thread, the lead cannot run that step again until it is resumed, and the lead gets one message each time.
-- It starts a new mission. The new lead writes a plan that you review before any step runs, or that the Supervisor approves when **Decide for me** is on.
+- It pauses a step that blocks a shared resource, and resumes it later. A pause needs a contention Zeron verified on this Mac (see **Resources** below): it stops the step's thread, no thread can run that step again or message its thread until it is resumed, and the lead gets one message each time. You can resume it yourself from the Pause row.
+- It starts a new mission. The new lead runs with the Supervisor's agent, model and permission, and writes a plan that you review before any step runs, or that the Supervisor approves when **Decide for me** is on.
 - It decides for you, when you turn on **Decide for me** under **Authority**: it answers the leads' decisions and approves plans that wait for review. With **Change a mission's goal or spend** on too, it also decides goal and spend decisions and can change a mission's title and notes.
 - It asks you. A change to a mission's goal or spend, or a decision it should not make alone, becomes a decision in the inbox.
 
@@ -108,12 +108,12 @@ The colored words on the right show only what has happened since, and change as 
 
 - **Sent**: the Supervisor's message went to the thread.
 - **Lead ran a turn**: the lead answered after it.
-- **Step paused**: the step is still paused and its thread is not running.
+- **Step paused**: the step is still paused. **Resume** on the row lifts the pause yourself, and the lead is told.
 - **No effect yet**: **Sent** is still all that happened ten minutes later.
 
 They never judge whether the action helped; the Supervisor's own words are its judgment.
 
-An intervention moves to **Earlier** once the work changed after it, or after 24 hours: **Plan edited on steps 2, 3** (those steps' titles or specs changed since), **Step 2 thread completed a turn**, **Resource freed** (a check after a pause found the process gone or the port closed), or the paused step was resumed. An intervention that shows **No effect yet** stays in the inbox.
+An intervention moves to **Earlier** once the work changed after it, or after 24 hours: **Plan edited on steps 2, 3** (those steps' titles or specs changed since), **Step 2 thread completed a turn**, or **Resource freed** (a check after a pause found the process gone or the port closed). A pause stays in the inbox while its step is paused, even after the resource is freed, which also wakes the Supervisor; it moves to **Earlier** once the step is resumed or removed. An intervention that shows **No effect yet** stays in the inbox.
 
 ### Resources
 

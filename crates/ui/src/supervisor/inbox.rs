@@ -1479,13 +1479,64 @@ impl SupervisorPage {
             .then(|| approval_state(row, self.state.read(cx), utc))
             .flatten()
             .map(|approval| self.approval_line(row, approval, theme, cx));
+        let resume = row
+            .step_ids
+            .first()
+            .filter(|_| !done && row.chips.contains(&InterventionChip::StepPaused))
+            .map(|step_id| self.resume_line(row, step_id.clone(), theme, cx));
         div()
             .flex()
             .flex_col()
             .child(shell)
             .children(approval)
+            .children(resume)
             .children(failed.map(|error| self.failure_line(error, theme)))
             .into_any_element()
+    }
+
+    fn resume_line(
+        &self,
+        row: &SupervisorIntervention,
+        step_id: String,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let key = format!("resume:{}", row.id);
+        let sent = self.sends.get(&key);
+        let sending = matches!(sent, Some(None));
+        let error = sent.cloned().flatten();
+        let selector = format!("supervisor-resume-{}", row.id);
+        let resume = widgets::text_action(
+            theme,
+            widgets::ActionTone::Outlined,
+            if sending { "Resuming…" } else { "Resume" },
+        )
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .role(gpui::Role::Button)
+        .aria_label("Resume the paused step")
+        .flex_none()
+        .min_h(px(22.0))
+        .rounded_full()
+        .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
+            cx.stop_propagation();
+            let params = serde_json::json!({ "op": "resumeSupervisorStep", "stepId": step_id });
+            page.send_mutation(key.clone(), params, cx)
+        }));
+        div()
+            .pl(px(HAIRLINE_LEFT))
+            .pr(px(10.0))
+            .pb(px(8.0))
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .text_size(ui_rems(11.5))
+            .child(div().flex().child(resume))
+            .children(error.map(|error| {
+                div()
+                    .text_color(theme.danger)
+                    .child(format!("Could not resume the step: {error}"))
+            }))
     }
 
     fn approval_line(
