@@ -229,6 +229,14 @@ impl CoreClient {
         Ok(self.client.unarchive_session(&chat_id)?)
     }
 
+    pub fn set_session_settled(&self, chat_id: String, settled: bool) -> CoreResult<()> {
+        Ok(self.client.set_session_settled(&chat_id, settled)?)
+    }
+
+    pub fn set_active_first(&self, on: bool) {
+        self.client.set_active_first(on);
+    }
+
     pub fn rename_session(&self, chat_id: String, title: String) -> CoreResult<()> {
         Ok(self.client.rename_session(&chat_id, &title)?)
     }
@@ -285,6 +293,15 @@ impl CoreClient {
 
     pub fn delete_section(&self, section_id: String) -> CoreResult<()> {
         Ok(self.client.delete_section(&section_id)?)
+    }
+
+    pub fn move_section(
+        &self,
+        section_id: String,
+        after: Option<String>,
+        before: Option<String>,
+    ) -> CoreResult<()> {
+        Ok(self.client.move_section(&section_id, after, before)?)
     }
 
     pub fn set_section_collapsed(&self, section_id: String, collapsed: bool) -> CoreResult<()> {

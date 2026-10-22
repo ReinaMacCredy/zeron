@@ -9,7 +9,7 @@ use chrono::{TimeZone, Utc};
 use tokio_util::sync::CancellationToken;
 use zeron_doc::RegistryDoc;
 use zeron_proto::supervisor::{SupervisorSettings, SupervisorSnapshot};
-use zeron_proto::{Chat, ChatConfig, SidebarPinChange, SidebarSectionChange};
+use zeron_proto::{Chat, ChatConfig, SidebarPinChange, SidebarSectionChange, SidebarSettle};
 
 use crate::attachments::{self, AttachmentCache};
 use crate::auth::TokenProvider;
@@ -1343,6 +1343,21 @@ impl Client {
         self.chat_write(chat_id, |doc| doc.set_chat_archived(chat_id, false))
     }
 
+    /// Settle / Unsettle, as the desktop's `setChatSettled`; holds until the chat's next message.
+    pub fn set_session_settled(&self, chat_id: &str, settled: bool) -> Result<()> {
+        let settle = SidebarSettle {
+            settled,
+            at: Utc::now(),
+        };
+        self.chat_write(chat_id, |doc| doc.set_chat_settle(chat_id, settle))
+    }
+
+    /// The front page's "Active first" sort (a local preference, as on the desktop).
+    pub fn set_active_first(&self, on: bool) {
+        self.inner.workspace.set_active_first(on);
+        self.inner.recompute_workspace();
+    }
+
     pub fn rename_session(&self, chat_id: &str, title: &str) -> Result<()> {
         self.chat_write(chat_id, |doc| doc.rename_chat(chat_id, title.trim()))
     }
@@ -1482,6 +1497,20 @@ impl Client {
     pub fn delete_section(&self, section_id: &str) -> Result<()> {
         self.section_change(SidebarSectionChange::Delete {
             id: section_id.to_owned(),
+        })
+    }
+
+    /// Reorder a section between neighbours (either may be `None` at the ends).
+    pub fn move_section(
+        &self,
+        section_id: &str,
+        after: Option<String>,
+        before: Option<String>,
+    ) -> Result<()> {
+        self.section_change(SidebarSectionChange::Move {
+            id: section_id.to_owned(),
+            after,
+            before,
         })
     }
 

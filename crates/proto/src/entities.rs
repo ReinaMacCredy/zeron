@@ -516,6 +516,22 @@ impl Chat {
         }
     }
 
+    /// [`Chat::settled_at`] for a row showing `status`: a live turn keeps it in the Inbox.
+    pub fn inbox_settled_at(
+        &self,
+        status: ChatIndicator,
+        after_days: u32,
+        now: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        if matches!(
+            status,
+            ChatIndicator::Working | ChatIndicator::AwaitingInput
+        ) {
+            return None;
+        }
+        self.settled_at(after_days, now)
+    }
+
     /// True when the chat has activity the user hasn't seen on any device.
     pub fn unseen(&self) -> bool {
         match (self.last_message_at, self.last_seen_at) {

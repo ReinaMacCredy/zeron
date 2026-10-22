@@ -129,6 +129,9 @@ impl DemoHost {
         for status in seeded.change_requests {
             client.workspace.put_change_request(status);
         }
+        for (device, days) in fixtures::SETTLE_DAYS {
+            client.workspace.put_settle_days(device, days);
+        }
         if seeded.missions {
             for (device, snapshot) in missions::supervisors(Utc::now()) {
                 client.workspace.put_supervisor(device, snapshot);

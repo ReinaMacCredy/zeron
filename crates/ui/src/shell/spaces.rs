@@ -2492,28 +2492,13 @@ impl InboxShelf {
     }
 }
 
-pub(super) fn inbox_settled_at(
-    status: ChatIndicator,
-    chat: &zeron_proto::Chat,
-    after_days: u32,
-    now: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
-    if matches!(
-        status,
-        ChatIndicator::Working | ChatIndicator::AwaitingInput
-    ) {
-        return None;
-    }
-    chat.settled_at(after_days, now)
-}
-
 pub(super) fn sidebar_settled_at(
     state: &AppState,
     status: ChatIndicator,
     chat: &zeron_proto::Chat,
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
-    inbox_settled_at(status, chat, state.sidebar_settings.settle_after_days, now)
+    chat.inbox_settled_at(status, state.sidebar_settings.settle_after_days, now)
 }
 
 pub(super) fn inbox_rank(
@@ -9231,7 +9216,7 @@ mod tests {
 
     use super::{
         CHATS_GROUP_KEY, ChatIndicator, InboxMark, compare_sidebar_chats, compare_sidebar_rows,
-        grouped_visible_order, inbox_rank, inbox_settled_at, lead_rollup, promote_group,
+        grouped_visible_order, inbox_rank, lead_rollup, promote_group,
     };
     use crate::settings::{SidebarOrganization, SidebarSort};
 
@@ -9423,7 +9408,7 @@ mod tests {
     fn inbox_ids(rows: &mut [InboxRow], working_shelf: bool) -> Vec<String> {
         let now = inbox_at(1_000);
         rows.sort_by_key(|(status, chat, started, mark)| {
-            let settled = inbox_settled_at(*status, chat, 3, now);
+            let settled = chat.inbox_settled_at(*status, 3, now);
             inbox_rank(*status, chat, *started, *mark, settled, working_shelf)
         });
         rows.iter().map(|row| row.1.id.clone()).collect()

@@ -10,7 +10,7 @@ mod tasks;
 mod view;
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use zeron_doc::{RegistryDoc, WorkspaceState};
@@ -26,7 +26,7 @@ pub(crate) use tasks::{
 };
 pub(crate) use view::{DeriveContext, device_online};
 pub use view::{
-    DeviceView, FrontPage, PROJECT_COLOR_COUNT, ProjectRef, ProjectView, PullRequestGroups,
+    DeviceView, FrontGroup, FrontPage, PROJECT_COLOR_COUNT, ProjectRef, ProjectView, PullRequestGroups,
     SearchField, SearchHit, SectionView, SessionRow, WorkspaceSnapshot, project_color_index,
     relative_time_label,
 };
@@ -46,6 +46,8 @@ pub(crate) struct WorkspaceStore {
     change_requests: Mutex<Vec<CheckoutChangeRequestStatus>>,
     supervisors: Mutex<BTreeMap<String, SupervisorSnapshot>>,
     item_sends: Mutex<HashMap<String, ItemSend>>,
+    settle_days: Mutex<HashMap<String, u32>>,
+    active_first: AtomicBool,
     cache: Mutex<Option<StateCache>>,
     snapshot: RwLock<Arc<WorkspaceSnapshot>>,
     recompute: Mutex<()>,
@@ -60,6 +62,8 @@ impl WorkspaceStore {
             change_requests: Mutex::new(Vec::new()),
             supervisors: Mutex::new(BTreeMap::new()),
             item_sends: Mutex::new(HashMap::new()),
+            settle_days: Mutex::new(HashMap::new()),
+            active_first: AtomicBool::new(false),
             cache: Mutex::new(None),
             snapshot: RwLock::new(Arc::new(WorkspaceSnapshot::default())),
             recompute: Mutex::new(()),
@@ -184,6 +188,14 @@ impl WorkspaceStore {
         };
     }
 
+    pub(crate) fn put_settle_days(&self, device_id: &str, days: u32) {
+        lock(&self.settle_days).insert(device_id.to_owned(), days);
+    }
+
+    pub(crate) fn set_active_first(&self, on: bool) {
+        self.active_first.store(on, Ordering::Release);
+    }
+
     pub(crate) fn drop_supervisor(&self, device_id: &str) -> bool {
         lock(&self.supervisors).remove(device_id).is_some()
     }
@@ -218,6 +230,7 @@ impl WorkspaceStore {
         let change_requests = lock(&self.change_requests).clone();
         let supervisors = self.supervisors();
         let item_sends = lock(&self.item_sends).clone();
+        let settle_days = lock(&self.settle_days).clone();
         let previous = self.snapshot();
         let mut next = view::derive(
             &state,
@@ -233,6 +246,8 @@ impl WorkspaceStore {
                 send_states,
                 asks,
                 synced,
+                settle_days: &settle_days,
+                active_first: self.active_first.load(Ordering::Acquire),
                 previous: Some(&previous),
             },
         );

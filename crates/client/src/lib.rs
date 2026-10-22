@@ -56,7 +56,7 @@ pub use session::{
     SendRequest, SessionHandle, SessionSnapshot, SnapshotDelta, SnapshotWatch,
 };
 pub use workspace::{
-    ApprovalView, Brief, BriefMessage, ContextChat, DeviceView, FrontPage, HostRef, ItemSend, MissionOptions,
+    ApprovalView, Brief, BriefMessage, ContextChat, DeviceView, FrontGroup, FrontPage, HostRef, ItemSend, MissionOptions,
     MissionStrip, NeedsYouEntry,
     NeedsYouKind, ProjectRef, ProjectView, PullRequestGroups, SearchField, SearchHit, SectionView,
     SessionRow, StepView, SupervisorHost, SupervisorPage, TaskDetail, TaskDraft, TaskRow, TasksPage,

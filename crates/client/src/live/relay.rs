@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
-use zeron_proto::CheckoutChangeRequestStatus;
 use zeron_proto::supervisor::SupervisorSnapshot;
+use zeron_proto::{CheckoutChangeRequestStatus, SidebarSettings};
 use zeron_rpc::{LinkCache, LinkCacheConfig, PeerLiveness, RpcError, methods};
 
 use super::{Bearer, b64};
@@ -354,6 +354,14 @@ fn spawn_supervisor_watch(weak: Weak<ClientInner>, device_id: String, cancel: Ca
             drop(inner);
             let result = async {
                 let client = links.client(&device_id).await?;
+                if let Ok(value) = client.call(methods::GET_SIDEBAR_SETTINGS, json!({})).await
+                    && let Ok(settings) = serde_json::from_value::<SidebarSettings>(value)
+                    && let Some(inner) = weak.upgrade()
+                {
+                    inner
+                        .workspace
+                        .put_settle_days(&device_id, settings.settle_after_days);
+                }
                 client
                     .subscribe_checked(methods::WATCH_SUPERVISOR, json!({}))
                     .await

@@ -58,24 +58,21 @@ fn front_page_mirrors_the_desktop_sidebar() {
             ("Mobile", vec!["chat-ios-scroll", "chat-ios-keyboard"]),
         ]
     );
-    // Recency order; archived chats never appear, child chats stay listed.
+    // Inbox order; archived and settled chats leave it, step threads and
+    // agent-opened chats nest under their lead.
     assert_eq!(
         ids(&ws.front.recent),
         [
-            "chat-shelf-3",
             "chat-lead-shelf",
             "chat-visuals",
             "chat-lead-ios",
-            "chat-shelf-4",
             "chat-approve-test",
             "chat-lead-widget",
             "chat-approve-push",
             "chat-cjk",
-            "chat-side",
-            "chat-shelf-2",
+            "chat-unsettled",
             "chat-agents",
             "chat-home",
-            "chat-shelf-1",
             "chat-cursor",
             "chat-devin",
             "chat-grok",
@@ -85,7 +82,7 @@ fn front_page_mirrors_the_desktop_sidebar() {
             "chat-acp",
             "chat-deploy",
             "chat-computer",
-            "chat-blog"
+            "chat-old-mini"
         ]
     );
     assert_eq!(ids(&ws.archived), ["chat-oklch", "chat-presence"]);
@@ -136,6 +133,90 @@ fn front_page_mirrors_the_desktop_sidebar() {
 
     let hits = client.search("scroll", 5);
     assert_eq!(hits[0].session.id, "chat-ios-scroll");
+}
+
+#[test]
+fn settled_shelf_uses_each_hosts_days_and_settle_writes() {
+    let (client, _dir) = demo(fast());
+    let ws = client.workspace();
+    // MacBook Pro settles after 3 days, the Mac mini after 7; the studio keeps the default 3.
+    assert_eq!(
+        ids(&ws.front.settled),
+        ["chat-settled", "chat-old-mac", "chat-blog"]
+    );
+    assert!(ws.session("chat-old-mac").unwrap().settled);
+    assert!(!ws.session("chat-old-mini").unwrap().settled);
+    assert!(ids(&ws.front.recent).contains(&"chat-old-mini"));
+    // An Unsettle anchors a 9-day-old chat in the Inbox as fresh activity.
+    let recent = ids(&ws.front.recent);
+    let at = |id: &str| recent.iter().position(|r| *r == id).unwrap();
+    assert!(at("chat-unsettled") < at("chat-old-mini"));
+    // The projectless Chats group leads; groups partition the Inbox.
+    assert_eq!(ws.front.groups[0].name, "Chats");
+    assert_eq!(
+        ws.front.groups.iter().map(|g| g.sessions.len()).sum::<usize>(),
+        ws.front.recent.len()
+    );
+
+    client.set_session_settled("chat-deploy", true).unwrap();
+    let ws = client.workspace();
+    assert_eq!(ws.front.settled[0].id, "chat-deploy");
+    assert!(!ids(&ws.front.recent).contains(&"chat-deploy"));
+    client.set_session_settled("chat-old-mac", false).unwrap();
+    let ws = client.workspace();
+    assert!(!ws.session("chat-old-mac").unwrap().settled);
+    assert_eq!(ws.front.recent[0].id, "chat-old-mac");
+    // A live turn never settles.
+    client.set_session_settled("chat-veil", true).unwrap();
+    assert!(!client.workspace().session("chat-veil").unwrap().settled);
+}
+
+#[test]
+fn step_threads_and_opened_chats_nest_under_their_lead() {
+    let (client, _dir) = demo(fast());
+    let ws = client.workspace();
+    let nested = |lead: &str| ids(ws.front.nested.get(lead).map_or(&[][..], Vec::as_slice));
+    assert_eq!(
+        nested("chat-lead-shelf"),
+        ["chat-shelf-3", "chat-shelf-4", "chat-shelf-2", "chat-shelf-1"]
+    );
+    assert_eq!(nested("chat-veil"), ["chat-side"]);
+    for lists in [&ws.front.recent, &ws.front.settled, &ws.front.pinned] {
+        assert!(!ids(lists).iter().any(|id| id.starts_with("chat-shelf-") || *id == "chat-side"));
+    }
+}
+
+#[test]
+fn active_first_and_section_moves_reorder_the_front_page() {
+    let (client, _dir) = demo(fast());
+    client.set_active_first(true);
+    let ws = client.workspace();
+    let live = ws
+        .front
+        .recent
+        .iter()
+        .take_while(|r| r.indicator != ChatIndicator::Idle)
+        .count();
+    assert!(live > 0);
+    assert!(ws.front.recent[live..]
+        .iter()
+        .all(|r| r.indicator == ChatIndicator::Idle));
+    client.set_active_first(false);
+
+    let order = |client: &Client| {
+        client
+            .workspace()
+            .front
+            .sections
+            .iter()
+            .map(|s| s.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(&client), ["P0", "Mobile"]);
+    client
+        .move_section("section-mobile", None, Some("section-p0".into()))
+        .unwrap();
+    assert_eq!(order(&client), ["Mobile", "P0"]);
 }
 
 #[test]

@@ -6,7 +6,7 @@ use zeron_doc::RegistryDoc;
 use zeron_proto::{
     ChangeRequestState, ChangeRequestSummary, Chat, ChatConfig, CheckoutChangeRequestStatus,
     ConversationSourceContext, Device, HarnessId, ReasoningLevel, SandboxLevel, Session,
-    SessionStatus, SidebarPinChange, SidebarSectionChange, Space,
+    SessionStatus, SidebarPinChange, SidebarSectionChange, SidebarSettle, Space,
 };
 
 use crate::client::ms;
@@ -35,7 +35,12 @@ pub(crate) struct DemoChat {
     pub seen: bool,
     pub archived: bool,
     pub parent: Option<&'static str>,
+    /// (settled, how long ago) of a Settle / Unsettle.
+    pub settle: Option<(bool, i64)>,
 }
+
+/// Each host's `settle_after_days` (`GetSidebarSettings`); the rest keep the default.
+pub(crate) const SETTLE_DAYS: [(&str, u32); 2] = [(MAC, 3), (MINI, 7)];
 
 const MIN: i64 = 60_000;
 const HOUR: i64 = 60 * MIN;
@@ -62,6 +67,7 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         seen: true,
         archived: false,
         parent: None,
+        settle: None,
     };
     vec![
         DemoChat {
@@ -482,6 +488,54 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             )
         },
         DemoChat {
+            last_ago_ms: 3 * HOUR,
+            settle: Some((true, 2 * HOUR)),
+            ..chat(
+                "chat-settled",
+                Some("space-zeron"),
+                MAC,
+                "Changelog wording",
+                "Merged; nothing left here.",
+            )
+        },
+        DemoChat {
+            last_ago_ms: 4 * DAY,
+            created_ago_ms: 5 * DAY,
+            ..chat(
+                "chat-old-mac",
+                Some("space-zeron"),
+                MAC,
+                "Flaky snapshot test",
+                "Pinned the clock; it passes 200 runs in a row.",
+            )
+        },
+        DemoChat {
+            harness: Codex,
+            model: "gpt-5.6-terra",
+            reasoning: High,
+            last_ago_ms: 4 * DAY,
+            created_ago_ms: 5 * DAY,
+            ..chat(
+                "chat-old-mini",
+                Some("space-fork"),
+                MINI,
+                "Bench the sync relay",
+                "p99 is 41 ms on the Mac mini.",
+            )
+        },
+        DemoChat {
+            last_ago_ms: 9 * DAY,
+            created_ago_ms: 10 * DAY,
+            settle: Some((false, 50 * MIN)),
+            ..chat(
+                "chat-unsettled",
+                Some("space-zeron"),
+                MAC,
+                "Font fallback audit",
+                "CJK falls back to PingFang; Latin stays on Inter.",
+            )
+        },
+        DemoChat {
             harness: Acp,
             model: "default",
             last_ago_ms: 16 * HOUR,
@@ -734,8 +788,14 @@ pub(crate) fn seed(
             forked_from_chat_id: None,
             previous_harnesses: Vec::new(),
             delegation: None,
-            settle: None,
-            unsettled_at: None,
+            settle: demo.settle.map(|(settled, ago)| SidebarSettle {
+                settled,
+                at: ms(now - ago),
+            }),
+            unsettled_at: demo
+                .settle
+                .filter(|(settled, _)| !settled)
+                .map(|(_, ago)| ms(now - ago)),
         };
         doc.upsert_chat(&chat)?;
         if let Some(status) = demo.status {
