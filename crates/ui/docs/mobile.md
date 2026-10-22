@@ -86,7 +86,7 @@ The **Settings** tab has:
 | **Math** | **Render Math** (off shows LaTeX source), **Math Font**, and **Math Size**. |
 | **Sessions** | **Group by Project** and **Archived Sessions**. |
 
-**Sign Out** at the bottom signs the phone out. Drafts you have not sent stay on the phone.
+**Sign Out** at the bottom signs the phone out and removes the account's data from it, including messages still waiting to send and the **New session** draft. Text left in a session's composer stays on the phone.
 
 ## iPad keyboard shortcuts
 
