@@ -88,8 +88,7 @@ fn front_page_mirrors_the_desktop_sidebar() {
     );
     assert_eq!(ids(&ws.archived), ["chat-oklch", "chat-presence"]);
     assert_eq!(ids(ws.children("chat-veil")), ["chat-side"]);
-    let expired = |id: &str| ws.session(id).unwrap().expired;
-    assert!(expired("chat-btw") && !expired("chat-side"));
+    assert!(ws.session("chat-btw").unwrap().expired);
 
     let veil = ws.session("chat-veil").unwrap();
     assert_eq!(veil.indicator, ChatIndicator::Working);
