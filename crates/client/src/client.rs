@@ -1,5 +1,7 @@
 //! [`Client`] — the account-scoped root object.
 
+mod host_git;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};

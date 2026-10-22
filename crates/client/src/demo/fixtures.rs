@@ -477,8 +477,15 @@ pub(crate) fn devices(self_id: &str, self_name: &str, now: i64) -> Vec<Device> {
             version: Some(version.into()),
             cursor_sdk_version: None,
             capabilities: if caps {
+                use zeron_proto::capabilities as host;
                 capability::ALL_QUEUE
                     .iter()
+                    .chain(&[
+                        host::PULL_REQUESTS_PAGE_V1,
+                        host::SOURCE_CONTROL_V1,
+                        host::SOURCE_CONTROL_SYNC_V1,
+                        host::SOURCE_CONTROL_COMMITS_V1,
+                    ])
                     .map(|c| (*c).to_owned())
                     .collect()
             } else {

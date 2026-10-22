@@ -1270,6 +1270,18 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func workspaceRevision()  -> UInt64
     
+    func gitCheckout(projectId: String, checkoutPath: String?) throws  -> GitCheckout
+    
+    func gitCheckouts(projectId: String)  -> [GitCheckoutOption]
+    
+    func pullRequestBoard(deviceId: String, repository: String, stars: [String])  -> PullRequestBoard
+    
+    func pullRequestDevices()  -> [PrDevice]
+    
+    func pullRequestPage(deviceId: String, url: String)  -> PullRequestPage
+    
+    func pullRequestRepositories(deviceId: String) async  -> [PrRepository]
+    
     /**
      * Returns immediately. Callbacks are dispatched on the core runtime; the
      * platform must hop to its media/UI executor and call complete_media.
@@ -2165,6 +2177,76 @@ open func workspaceRevision() -> UInt64  {
 })
 }
     
+open func gitCheckout(projectId: String, checkoutPath: String?)throws  -> GitCheckout  {
+    return try  FfiConverterTypeGitCheckout_lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_git_checkout(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(projectId),
+        FfiConverterOptionString.lower(checkoutPath),uniffiCallStatus
+    )
+})
+}
+    
+open func gitCheckouts(projectId: String) -> [GitCheckoutOption]  {
+    return try!  FfiConverterSequenceTypeGitCheckoutOption.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_git_checkouts(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(projectId),uniffiCallStatus
+    )
+})
+}
+    
+open func pullRequestBoard(deviceId: String, repository: String, stars: [String]) -> PullRequestBoard  {
+    return try!  FfiConverterTypePullRequestBoard_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_pull_request_board(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(deviceId),
+        FfiConverterString.lower(repository),
+        FfiConverterSequenceString.lower(stars),uniffiCallStatus
+    )
+})
+}
+    
+open func pullRequestDevices() -> [PrDevice]  {
+    return try!  FfiConverterSequenceTypePrDevice.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_pull_request_devices(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func pullRequestPage(deviceId: String, url: String) -> PullRequestPage  {
+    return try!  FfiConverterTypePullRequestPage_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_pull_request_page(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(deviceId),
+        FfiConverterString.lower(url),uniffiCallStatus
+    )
+})
+}
+    
+open func pullRequestRepositories(deviceId: String)async  -> [PrRepository]  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_pull_request_repositories(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypePrRepository.lift,
+            errorHandler: nil
+            
+        )
+}
+    
     /**
      * Returns immediately. Callbacks are dispatched on the core runtime; the
      * platform must hop to its media/UI executor and call complete_media.
@@ -2225,6 +2307,356 @@ public func FfiConverterTypeCoreClient_lift(_ handle: UInt64) throws -> CoreClie
 #endif
 public func FfiConverterTypeCoreClient_lower(_ value: CoreClient) -> UInt64 {
     return FfiConverterTypeCoreClient.lower(value)
+}
+
+
+
+
+
+
+public protocol GitCheckoutProtocol: AnyObject, Sendable {
+    
+    func commit(message: String, amend: Bool, all: Bool) async throws  -> GitTreeView
+    
+    func commitDetail(sha: String) async throws  -> GitCommitView
+    
+    func dismissNotice()  -> GitTreeView
+    
+    func fileDiff(path: String, staged: Bool) async throws  -> [DiffFileView]
+    
+    func generateMessage() async throws  -> String
+    
+    func history(more: Bool) async throws  -> GitHistoryView
+    
+    func path()  -> String
+    
+    func pull() async throws  -> GitTreeView
+    
+    /**
+     * Run only after the reader confirmed `push_prompt`.
+     */
+    func push() async throws  -> GitTreeView
+    
+    func refresh() async throws  -> GitTreeView
+    
+    func stage(paths: [String]) async throws  -> GitTreeView
+    
+    func stageAll() async throws  -> GitTreeView
+    
+    func unstage(paths: [String]) async throws  -> GitTreeView
+    
+    func unstageAll() async throws  -> GitTreeView
+    
+}
+open class GitCheckout: GitCheckoutProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_zeron_mobile_fn_clone_gitcheckout(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_zeron_mobile_fn_free_gitcheckout(handle, $0) }
+    }
+
+    
+
+    
+open func commit(message: String, amend: Bool, all: Bool)async throws  -> GitTreeView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_gitcheckout_commit(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(message),FfiConverterBool.lower(amend),FfiConverterBool.lower(all)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeGitTreeView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func commitDetail(sha: String)async throws  -> GitCommitView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_gitcheckout_commit_detail(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(sha)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeGitCommitView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func dismissNotice() -> GitTreeView  {
+    return try!  FfiConverterTypeGitTreeView_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_gitcheckout_dismiss_notice(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func fileDiff(path: String, staged: Bool)async throws  -> [DiffFileView]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_gitcheckout_file_diff(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(path),FfiConverterBool.lower(staged)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeDiffFileView.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func generateMessage()async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_gitcheckout_generate_message(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func history(more: Bool)async throws  -> GitHistoryView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_gitcheckout_history(
+                        self.uniffiCloneHandle(),FfiConverterBool.lower(more)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeGitHistoryView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func path() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_gitcheckout_path(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func pull()async throws  -> GitTreeView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_gitcheckout_pull(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeGitTreeView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Run only after the reader confirmed `push_prompt`.
+     */
+open func push()async throws  -> GitTreeView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_gitcheckout_push(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeGitTreeView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func refresh()async throws  -> GitTreeView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_gitcheckout_refresh(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeGitTreeView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func stage(paths: [String])async throws  -> GitTreeView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_gitcheckout_stage(
+                        self.uniffiCloneHandle(),FfiConverterSequenceString.lower(paths)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeGitTreeView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func stageAll()async throws  -> GitTreeView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_gitcheckout_stage_all(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeGitTreeView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func unstage(paths: [String])async throws  -> GitTreeView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_gitcheckout_unstage(
+                        self.uniffiCloneHandle(),FfiConverterSequenceString.lower(paths)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeGitTreeView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func unstageAll()async throws  -> GitTreeView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_gitcheckout_unstage_all(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeGitTreeView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGitCheckout: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = GitCheckout
+
+    public static func lift(_ handle: UInt64) throws -> GitCheckout {
+        return GitCheckout(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: GitCheckout) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GitCheckout {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: GitCheckout, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitCheckout_lift(_ handle: UInt64) throws -> GitCheckout {
+    return try FfiConverterTypeGitCheckout.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitCheckout_lower(_ value: GitCheckout) -> UInt64 {
+    return FfiConverterTypeGitCheckout.lower(value)
 }
 
 
@@ -3231,6 +3663,599 @@ public func FfiConverterTypePlatformMeasurer_lift(_ handle: UInt64) throws -> Pl
 #endif
 public func FfiConverterTypePlatformMeasurer_lower(_ value: PlatformMeasurer) -> UInt64 {
     return FfiConverterTypePlatformMeasurer.lower(value)
+}
+
+
+
+
+
+
+public protocol PullRequestBoardProtocol: AnyObject, Sendable {
+    
+    func load(refresh: Bool) async  -> PrBoardView
+    
+    func loadMore() async  -> PrBoardView
+    
+    func setFilter(filter: PrFilter) async  -> PrBoardView
+    
+    func setQuery(query: String)  -> PrBoardView
+    
+    func setRepository(repository: String) async  -> PrBoardView
+    
+    func setSort(field: PrSortField, ascending: Bool)  -> PrBoardView
+    
+    func setStars(stars: [String])  -> PrBoardView
+    
+    func setView(view: PrPersonalView)  -> PrBoardView
+    
+    func view()  -> PrBoardView
+    
+}
+open class PullRequestBoard: PullRequestBoardProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_zeron_mobile_fn_clone_pullrequestboard(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_zeron_mobile_fn_free_pullrequestboard(handle, $0) }
+    }
+
+    
+
+    
+open func load(refresh: Bool)async  -> PrBoardView  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_pullrequestboard_load(
+                        self.uniffiCloneHandle(),FfiConverterBool.lower(refresh)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePrBoardView_lift,
+            errorHandler: nil
+            
+        )
+}
+    
+open func loadMore()async  -> PrBoardView  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_pullrequestboard_load_more(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePrBoardView_lift,
+            errorHandler: nil
+            
+        )
+}
+    
+open func setFilter(filter: PrFilter)async  -> PrBoardView  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_pullrequestboard_set_filter(
+                        self.uniffiCloneHandle(),FfiConverterTypePrFilter_lower(filter)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePrBoardView_lift,
+            errorHandler: nil
+            
+        )
+}
+    
+open func setQuery(query: String) -> PrBoardView  {
+    return try!  FfiConverterTypePrBoardView_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_pullrequestboard_set_query(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(query),uniffiCallStatus
+    )
+})
+}
+    
+open func setRepository(repository: String)async  -> PrBoardView  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_pullrequestboard_set_repository(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(repository)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePrBoardView_lift,
+            errorHandler: nil
+            
+        )
+}
+    
+open func setSort(field: PrSortField, ascending: Bool) -> PrBoardView  {
+    return try!  FfiConverterTypePrBoardView_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_pullrequestboard_set_sort(
+            self.uniffiCloneHandle(),
+        FfiConverterTypePrSortField_lower(field),
+        FfiConverterBool.lower(ascending),uniffiCallStatus
+    )
+})
+}
+    
+open func setStars(stars: [String]) -> PrBoardView  {
+    return try!  FfiConverterTypePrBoardView_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_pullrequestboard_set_stars(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(stars),uniffiCallStatus
+    )
+})
+}
+    
+open func setView(view: PrPersonalView) -> PrBoardView  {
+    return try!  FfiConverterTypePrBoardView_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_pullrequestboard_set_view(
+            self.uniffiCloneHandle(),
+        FfiConverterTypePrPersonalView_lower(view),uniffiCallStatus
+    )
+})
+}
+    
+open func view() -> PrBoardView  {
+    return try!  FfiConverterTypePrBoardView_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_pullrequestboard_view(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePullRequestBoard: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = PullRequestBoard
+
+    public static func lift(_ handle: UInt64) throws -> PullRequestBoard {
+        return PullRequestBoard(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: PullRequestBoard) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PullRequestBoard {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: PullRequestBoard, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePullRequestBoard_lift(_ handle: UInt64) throws -> PullRequestBoard {
+    return try FfiConverterTypePullRequestBoard.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePullRequestBoard_lower(_ value: PullRequestBoard) -> UInt64 {
+    return FfiConverterTypePullRequestBoard.lower(value)
+}
+
+
+
+
+
+
+public protocol PullRequestPageProtocol: AnyObject, Sendable {
+    
+    func askContext() throws  -> PrAskContext
+    
+    func code(refresh: Bool) async throws  -> PrCodeView
+    
+    func comment(body: String) async throws  -> PrDetailView
+    
+    func controls() async throws  -> PrControlsView
+    
+    func handoffProject() async  -> String?
+    
+    func handoffPrompt(kind: PrHandoffKind) throws  -> String
+    
+    func load(refresh: Bool) async throws  -> PrDetailView
+    
+    func merge(method: PrMergeMethod) async throws  -> PrDetailView
+    
+    func mergeConfirm(method: PrMergeMethod)  -> PrConfirm
+    
+    func reply(threadId: String, body: String) async throws  -> PrDetailView
+    
+    func resolve(threadId: String, resolved: Bool) async throws  -> PrDetailView
+    
+    func review(event: PrReviewEvent, body: String) async throws  -> PrDetailView
+    
+    func setLabel(name: String, add: Bool) async throws  -> PrControlsView
+    
+    func setReviewer(login: String, team: Bool, add: Bool) async throws  -> PrControlsView
+    
+    func url()  -> String
+    
+}
+open class PullRequestPage: PullRequestPageProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_zeron_mobile_fn_clone_pullrequestpage(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_zeron_mobile_fn_free_pullrequestpage(handle, $0) }
+    }
+
+    
+
+    
+open func askContext()throws  -> PrAskContext  {
+    return try  FfiConverterTypePrAskContext_lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_pullrequestpage_ask_context(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func code(refresh: Bool)async throws  -> PrCodeView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_pullrequestpage_code(
+                        self.uniffiCloneHandle(),FfiConverterBool.lower(refresh)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePrCodeView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func comment(body: String)async throws  -> PrDetailView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_pullrequestpage_comment(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(body)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePrDetailView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func controls()async throws  -> PrControlsView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_pullrequestpage_controls(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePrControlsView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func handoffProject()async  -> String?  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_pullrequestpage_handoff_project(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionString.lift,
+            errorHandler: nil
+            
+        )
+}
+    
+open func handoffPrompt(kind: PrHandoffKind)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_pullrequestpage_handoff_prompt(
+            self.uniffiCloneHandle(),
+        FfiConverterTypePrHandoffKind_lower(kind),uniffiCallStatus
+    )
+})
+}
+    
+open func load(refresh: Bool)async throws  -> PrDetailView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_pullrequestpage_load(
+                        self.uniffiCloneHandle(),FfiConverterBool.lower(refresh)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePrDetailView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func merge(method: PrMergeMethod)async throws  -> PrDetailView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_pullrequestpage_merge(
+                        self.uniffiCloneHandle(),FfiConverterTypePrMergeMethod_lower(method)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePrDetailView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func mergeConfirm(method: PrMergeMethod) -> PrConfirm  {
+    return try!  FfiConverterTypePrConfirm_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_pullrequestpage_merge_confirm(
+            self.uniffiCloneHandle(),
+        FfiConverterTypePrMergeMethod_lower(method),uniffiCallStatus
+    )
+})
+}
+    
+open func reply(threadId: String, body: String)async throws  -> PrDetailView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_pullrequestpage_reply(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(body)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePrDetailView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func resolve(threadId: String, resolved: Bool)async throws  -> PrDetailView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_pullrequestpage_resolve(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterBool.lower(resolved)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePrDetailView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func review(event: PrReviewEvent, body: String)async throws  -> PrDetailView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_pullrequestpage_review(
+                        self.uniffiCloneHandle(),FfiConverterTypePrReviewEvent_lower(event),FfiConverterString.lower(body)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePrDetailView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func setLabel(name: String, add: Bool)async throws  -> PrControlsView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_pullrequestpage_set_label(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(name),FfiConverterBool.lower(add)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePrControlsView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func setReviewer(login: String, team: Bool, add: Bool)async throws  -> PrControlsView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_pullrequestpage_set_reviewer(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(login),FfiConverterBool.lower(team),FfiConverterBool.lower(add)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePrControlsView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func url() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_pullrequestpage_url(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePullRequestPage: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = PullRequestPage
+
+    public static func lift(_ handle: UInt64) throws -> PullRequestPage {
+        return PullRequestPage(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: PullRequestPage) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PullRequestPage {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: PullRequestPage, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePullRequestPage_lift(_ handle: UInt64) throws -> PullRequestPage {
+    return try FfiConverterTypePullRequestPage.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePullRequestPage_lower(_ value: PullRequestPage) -> UInt64 {
+    return FfiConverterTypePullRequestPage.lower(value)
 }
 
 
@@ -6956,6 +7981,204 @@ public func FfiConverterTypeDeviceView_lower(_ value: DeviceView) -> RustBuffer 
 }
 
 
+public struct DiffFileView: Equatable, Hashable {
+    public var path: String
+    public var oldPath: String?
+    public var status: String
+    public var additions: UInt32
+    public var deletions: UInt32
+    public var binary: Bool
+    public var notices: [String]
+    public var hunks: [DiffHunkView]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(path: String, oldPath: String?, status: String, additions: UInt32, deletions: UInt32, binary: Bool, notices: [String], hunks: [DiffHunkView]) {
+        self.path = path
+        self.oldPath = oldPath
+        self.status = status
+        self.additions = additions
+        self.deletions = deletions
+        self.binary = binary
+        self.notices = notices
+        self.hunks = hunks
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DiffFileView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDiffFileView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DiffFileView {
+        return
+            try DiffFileView(
+                path: FfiConverterString.read(from: &buf), 
+                oldPath: FfiConverterOptionString.read(from: &buf), 
+                status: FfiConverterString.read(from: &buf), 
+                additions: FfiConverterUInt32.read(from: &buf), 
+                deletions: FfiConverterUInt32.read(from: &buf), 
+                binary: FfiConverterBool.read(from: &buf), 
+                notices: FfiConverterSequenceString.read(from: &buf), 
+                hunks: FfiConverterSequenceTypeDiffHunkView.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DiffFileView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterOptionString.write(value.oldPath, into: &buf)
+        FfiConverterString.write(value.status, into: &buf)
+        FfiConverterUInt32.write(value.additions, into: &buf)
+        FfiConverterUInt32.write(value.deletions, into: &buf)
+        FfiConverterBool.write(value.binary, into: &buf)
+        FfiConverterSequenceString.write(value.notices, into: &buf)
+        FfiConverterSequenceTypeDiffHunkView.write(value.hunks, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDiffFileView_lift(_ buf: RustBuffer) throws -> DiffFileView {
+    return try FfiConverterTypeDiffFileView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDiffFileView_lower(_ value: DiffFileView) -> RustBuffer {
+    return FfiConverterTypeDiffFileView.lower(value)
+}
+
+
+public struct DiffHunkView: Equatable, Hashable {
+    public var header: String
+    public var lines: [DiffLineView]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(header: String, lines: [DiffLineView]) {
+        self.header = header
+        self.lines = lines
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DiffHunkView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDiffHunkView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DiffHunkView {
+        return
+            try DiffHunkView(
+                header: FfiConverterString.read(from: &buf), 
+                lines: FfiConverterSequenceTypeDiffLineView.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DiffHunkView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.header, into: &buf)
+        FfiConverterSequenceTypeDiffLineView.write(value.lines, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDiffHunkView_lift(_ buf: RustBuffer) throws -> DiffHunkView {
+    return try FfiConverterTypeDiffHunkView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDiffHunkView_lower(_ value: DiffHunkView) -> RustBuffer {
+    return FfiConverterTypeDiffHunkView.lower(value)
+}
+
+
+public struct DiffLineView: Equatable, Hashable {
+    public var kind: DiffLineKind
+    public var oldNo: UInt32?
+    public var newNo: UInt32?
+    public var text: String
+    public var threads: [PrThread]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: DiffLineKind, oldNo: UInt32?, newNo: UInt32?, text: String, threads: [PrThread]) {
+        self.kind = kind
+        self.oldNo = oldNo
+        self.newNo = newNo
+        self.text = text
+        self.threads = threads
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DiffLineView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDiffLineView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DiffLineView {
+        return
+            try DiffLineView(
+                kind: FfiConverterTypeDiffLineKind.read(from: &buf), 
+                oldNo: FfiConverterOptionUInt32.read(from: &buf), 
+                newNo: FfiConverterOptionUInt32.read(from: &buf), 
+                text: FfiConverterString.read(from: &buf), 
+                threads: FfiConverterSequenceTypePrThread.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DiffLineView, into buf: inout [UInt8]) {
+        FfiConverterTypeDiffLineKind.write(value.kind, into: &buf)
+        FfiConverterOptionUInt32.write(value.oldNo, into: &buf)
+        FfiConverterOptionUInt32.write(value.newNo, into: &buf)
+        FfiConverterString.write(value.text, into: &buf)
+        FfiConverterSequenceTypePrThread.write(value.threads, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDiffLineView_lift(_ buf: RustBuffer) throws -> DiffLineView {
+    return try FfiConverterTypeDiffLineView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDiffLineView_lower(_ value: DiffLineView) -> RustBuffer {
+    return FfiConverterTypeDiffLineView.lower(value)
+}
+
+
 public struct FaceData: Equatable, Hashable {
     public var role: FaceRole
     public var bytes: Data
@@ -7396,6 +8619,638 @@ public func FfiConverterTypeFrontPage_lift(_ buf: RustBuffer) throws -> FrontPag
 #endif
 public func FfiConverterTypeFrontPage_lower(_ value: FrontPage) -> RustBuffer {
     return FfiConverterTypeFrontPage.lower(value)
+}
+
+
+public struct GitCheckoutOption: Equatable, Hashable {
+    /**
+     * `None` is the project's main checkout.
+     */
+    public var path: String?
+    public var label: String
+    public var detail: String
+    public var live: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `None` is the project's main checkout.
+         */path: String?, label: String, detail: String, live: Bool) {
+        self.path = path
+        self.label = label
+        self.detail = detail
+        self.live = live
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GitCheckoutOption: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGitCheckoutOption: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GitCheckoutOption {
+        return
+            try GitCheckoutOption(
+                path: FfiConverterOptionString.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                detail: FfiConverterString.read(from: &buf), 
+                live: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GitCheckoutOption, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.path, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterString.write(value.detail, into: &buf)
+        FfiConverterBool.write(value.live, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitCheckoutOption_lift(_ buf: RustBuffer) throws -> GitCheckoutOption {
+    return try FfiConverterTypeGitCheckoutOption.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitCheckoutOption_lower(_ value: GitCheckoutOption) -> RustBuffer {
+    return FfiConverterTypeGitCheckoutOption.lower(value)
+}
+
+
+public struct GitCommitView: Equatable, Hashable {
+    public var sha: String
+    public var shortSha: String
+    public var subject: String
+    public var author: String
+    public var when: String
+    public var files: [DiffFileView]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(sha: String, shortSha: String, subject: String, author: String, when: String, files: [DiffFileView]) {
+        self.sha = sha
+        self.shortSha = shortSha
+        self.subject = subject
+        self.author = author
+        self.when = when
+        self.files = files
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GitCommitView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGitCommitView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GitCommitView {
+        return
+            try GitCommitView(
+                sha: FfiConverterString.read(from: &buf), 
+                shortSha: FfiConverterString.read(from: &buf), 
+                subject: FfiConverterString.read(from: &buf), 
+                author: FfiConverterString.read(from: &buf), 
+                when: FfiConverterString.read(from: &buf), 
+                files: FfiConverterSequenceTypeDiffFileView.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GitCommitView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.sha, into: &buf)
+        FfiConverterString.write(value.shortSha, into: &buf)
+        FfiConverterString.write(value.subject, into: &buf)
+        FfiConverterString.write(value.author, into: &buf)
+        FfiConverterString.write(value.when, into: &buf)
+        FfiConverterSequenceTypeDiffFileView.write(value.files, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitCommitView_lift(_ buf: RustBuffer) throws -> GitCommitView {
+    return try FfiConverterTypeGitCommitView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitCommitView_lower(_ value: GitCommitView) -> RustBuffer {
+    return FfiConverterTypeGitCommitView.lower(value)
+}
+
+
+public struct GitFileRow: Equatable, Hashable {
+    public var path: String
+    public var letter: String
+    public var additions: UInt32
+    public var deletions: UInt32
+    public var staged: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(path: String, letter: String, additions: UInt32, deletions: UInt32, staged: Bool) {
+        self.path = path
+        self.letter = letter
+        self.additions = additions
+        self.deletions = deletions
+        self.staged = staged
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GitFileRow: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGitFileRow: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GitFileRow {
+        return
+            try GitFileRow(
+                path: FfiConverterString.read(from: &buf), 
+                letter: FfiConverterString.read(from: &buf), 
+                additions: FfiConverterUInt32.read(from: &buf), 
+                deletions: FfiConverterUInt32.read(from: &buf), 
+                staged: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GitFileRow, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterString.write(value.letter, into: &buf)
+        FfiConverterUInt32.write(value.additions, into: &buf)
+        FfiConverterUInt32.write(value.deletions, into: &buf)
+        FfiConverterBool.write(value.staged, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitFileRow_lift(_ buf: RustBuffer) throws -> GitFileRow {
+    return try FfiConverterTypeGitFileRow.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitFileRow_lower(_ value: GitFileRow) -> RustBuffer {
+    return FfiConverterTypeGitFileRow.lower(value)
+}
+
+
+public struct GitHistoryRow: Equatable, Hashable {
+    public var sha: String
+    public var shortSha: String
+    public var subject: String
+    public var author: String
+    public var when: String
+    public var refs: [GitRefChip]
+    public var isHead: Bool
+    public var lane: UInt32
+    public var color: UInt32
+    public var segments: [GitSegment]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(sha: String, shortSha: String, subject: String, author: String, when: String, refs: [GitRefChip], isHead: Bool, lane: UInt32, color: UInt32, segments: [GitSegment]) {
+        self.sha = sha
+        self.shortSha = shortSha
+        self.subject = subject
+        self.author = author
+        self.when = when
+        self.refs = refs
+        self.isHead = isHead
+        self.lane = lane
+        self.color = color
+        self.segments = segments
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GitHistoryRow: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGitHistoryRow: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GitHistoryRow {
+        return
+            try GitHistoryRow(
+                sha: FfiConverterString.read(from: &buf), 
+                shortSha: FfiConverterString.read(from: &buf), 
+                subject: FfiConverterString.read(from: &buf), 
+                author: FfiConverterString.read(from: &buf), 
+                when: FfiConverterString.read(from: &buf), 
+                refs: FfiConverterSequenceTypeGitRefChip.read(from: &buf), 
+                isHead: FfiConverterBool.read(from: &buf), 
+                lane: FfiConverterUInt32.read(from: &buf), 
+                color: FfiConverterUInt32.read(from: &buf), 
+                segments: FfiConverterSequenceTypeGitSegment.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GitHistoryRow, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.sha, into: &buf)
+        FfiConverterString.write(value.shortSha, into: &buf)
+        FfiConverterString.write(value.subject, into: &buf)
+        FfiConverterString.write(value.author, into: &buf)
+        FfiConverterString.write(value.when, into: &buf)
+        FfiConverterSequenceTypeGitRefChip.write(value.refs, into: &buf)
+        FfiConverterBool.write(value.isHead, into: &buf)
+        FfiConverterUInt32.write(value.lane, into: &buf)
+        FfiConverterUInt32.write(value.color, into: &buf)
+        FfiConverterSequenceTypeGitSegment.write(value.segments, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitHistoryRow_lift(_ buf: RustBuffer) throws -> GitHistoryRow {
+    return try FfiConverterTypeGitHistoryRow.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitHistoryRow_lower(_ value: GitHistoryRow) -> RustBuffer {
+    return FfiConverterTypeGitHistoryRow.lower(value)
+}
+
+
+public struct GitHistoryView: Equatable, Hashable {
+    public var rows: [GitHistoryRow]
+    public var laneCount: UInt32
+    public var canLoadMore: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(rows: [GitHistoryRow], laneCount: UInt32, canLoadMore: Bool) {
+        self.rows = rows
+        self.laneCount = laneCount
+        self.canLoadMore = canLoadMore
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GitHistoryView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGitHistoryView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GitHistoryView {
+        return
+            try GitHistoryView(
+                rows: FfiConverterSequenceTypeGitHistoryRow.read(from: &buf), 
+                laneCount: FfiConverterUInt32.read(from: &buf), 
+                canLoadMore: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GitHistoryView, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeGitHistoryRow.write(value.rows, into: &buf)
+        FfiConverterUInt32.write(value.laneCount, into: &buf)
+        FfiConverterBool.write(value.canLoadMore, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitHistoryView_lift(_ buf: RustBuffer) throws -> GitHistoryView {
+    return try FfiConverterTypeGitHistoryView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitHistoryView_lower(_ value: GitHistoryView) -> RustBuffer {
+    return FfiConverterTypeGitHistoryView.lower(value)
+}
+
+
+public struct GitNotice: Equatable, Hashable {
+    public var text: String
+    public var error: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(text: String, error: Bool) {
+        self.text = text
+        self.error = error
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GitNotice: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGitNotice: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GitNotice {
+        return
+            try GitNotice(
+                text: FfiConverterString.read(from: &buf), 
+                error: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GitNotice, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.text, into: &buf)
+        FfiConverterBool.write(value.error, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitNotice_lift(_ buf: RustBuffer) throws -> GitNotice {
+    return try FfiConverterTypeGitNotice.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitNotice_lower(_ value: GitNotice) -> RustBuffer {
+    return FfiConverterTypeGitNotice.lower(value)
+}
+
+
+public struct GitRefChip: Equatable, Hashable {
+    public var label: String
+    public var kind: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(label: String, kind: String) {
+        self.label = label
+        self.kind = kind
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GitRefChip: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGitRefChip: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GitRefChip {
+        return
+            try GitRefChip(
+                label: FfiConverterString.read(from: &buf), 
+                kind: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GitRefChip, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterString.write(value.kind, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitRefChip_lift(_ buf: RustBuffer) throws -> GitRefChip {
+    return try FfiConverterTypeGitRefChip.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitRefChip_lower(_ value: GitRefChip) -> RustBuffer {
+    return FfiConverterTypeGitRefChip.lower(value)
+}
+
+
+public struct GitSegment: Equatable, Hashable {
+    public var fromLane: UInt32
+    public var toLane: UInt32
+    public var color: UInt32
+    public var shape: GitSegmentShape
+    public var dashed: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(fromLane: UInt32, toLane: UInt32, color: UInt32, shape: GitSegmentShape, dashed: Bool) {
+        self.fromLane = fromLane
+        self.toLane = toLane
+        self.color = color
+        self.shape = shape
+        self.dashed = dashed
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GitSegment: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGitSegment: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GitSegment {
+        return
+            try GitSegment(
+                fromLane: FfiConverterUInt32.read(from: &buf), 
+                toLane: FfiConverterUInt32.read(from: &buf), 
+                color: FfiConverterUInt32.read(from: &buf), 
+                shape: FfiConverterTypeGitSegmentShape.read(from: &buf), 
+                dashed: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GitSegment, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.fromLane, into: &buf)
+        FfiConverterUInt32.write(value.toLane, into: &buf)
+        FfiConverterUInt32.write(value.color, into: &buf)
+        FfiConverterTypeGitSegmentShape.write(value.shape, into: &buf)
+        FfiConverterBool.write(value.dashed, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitSegment_lift(_ buf: RustBuffer) throws -> GitSegment {
+    return try FfiConverterTypeGitSegment.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitSegment_lower(_ value: GitSegment) -> RustBuffer {
+    return FfiConverterTypeGitSegment.lower(value)
+}
+
+
+public struct GitTreeView: Equatable, Hashable {
+    public var branch: String
+    public var upstream: String?
+    public var ahead: UInt32
+    public var behind: UInt32
+    public var clean: String?
+    public var staged: [GitFileRow]
+    public var changes: [GitFileRow]
+    public var stashes: [String]
+    public var agentBanner: String?
+    public var pullRefusal: String?
+    public var pushRefusal: String?
+    public var pushPrompt: String?
+    public var commitRefusal: String?
+    public var canAmend: Bool
+    public var subjectLimit: UInt32
+    public var notice: GitNotice?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(branch: String, upstream: String?, ahead: UInt32, behind: UInt32, clean: String?, staged: [GitFileRow], changes: [GitFileRow], stashes: [String], agentBanner: String?, pullRefusal: String?, pushRefusal: String?, pushPrompt: String?, commitRefusal: String?, canAmend: Bool, subjectLimit: UInt32, notice: GitNotice?) {
+        self.branch = branch
+        self.upstream = upstream
+        self.ahead = ahead
+        self.behind = behind
+        self.clean = clean
+        self.staged = staged
+        self.changes = changes
+        self.stashes = stashes
+        self.agentBanner = agentBanner
+        self.pullRefusal = pullRefusal
+        self.pushRefusal = pushRefusal
+        self.pushPrompt = pushPrompt
+        self.commitRefusal = commitRefusal
+        self.canAmend = canAmend
+        self.subjectLimit = subjectLimit
+        self.notice = notice
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GitTreeView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGitTreeView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GitTreeView {
+        return
+            try GitTreeView(
+                branch: FfiConverterString.read(from: &buf), 
+                upstream: FfiConverterOptionString.read(from: &buf), 
+                ahead: FfiConverterUInt32.read(from: &buf), 
+                behind: FfiConverterUInt32.read(from: &buf), 
+                clean: FfiConverterOptionString.read(from: &buf), 
+                staged: FfiConverterSequenceTypeGitFileRow.read(from: &buf), 
+                changes: FfiConverterSequenceTypeGitFileRow.read(from: &buf), 
+                stashes: FfiConverterSequenceString.read(from: &buf), 
+                agentBanner: FfiConverterOptionString.read(from: &buf), 
+                pullRefusal: FfiConverterOptionString.read(from: &buf), 
+                pushRefusal: FfiConverterOptionString.read(from: &buf), 
+                pushPrompt: FfiConverterOptionString.read(from: &buf), 
+                commitRefusal: FfiConverterOptionString.read(from: &buf), 
+                canAmend: FfiConverterBool.read(from: &buf), 
+                subjectLimit: FfiConverterUInt32.read(from: &buf), 
+                notice: FfiConverterOptionTypeGitNotice.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GitTreeView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.branch, into: &buf)
+        FfiConverterOptionString.write(value.upstream, into: &buf)
+        FfiConverterUInt32.write(value.ahead, into: &buf)
+        FfiConverterUInt32.write(value.behind, into: &buf)
+        FfiConverterOptionString.write(value.clean, into: &buf)
+        FfiConverterSequenceTypeGitFileRow.write(value.staged, into: &buf)
+        FfiConverterSequenceTypeGitFileRow.write(value.changes, into: &buf)
+        FfiConverterSequenceString.write(value.stashes, into: &buf)
+        FfiConverterOptionString.write(value.agentBanner, into: &buf)
+        FfiConverterOptionString.write(value.pullRefusal, into: &buf)
+        FfiConverterOptionString.write(value.pushRefusal, into: &buf)
+        FfiConverterOptionString.write(value.pushPrompt, into: &buf)
+        FfiConverterOptionString.write(value.commitRefusal, into: &buf)
+        FfiConverterBool.write(value.canAmend, into: &buf)
+        FfiConverterUInt32.write(value.subjectLimit, into: &buf)
+        FfiConverterOptionTypeGitNotice.write(value.notice, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitTreeView_lift(_ buf: RustBuffer) throws -> GitTreeView {
+    return try FfiConverterTypeGitTreeView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitTreeView_lower(_ value: GitTreeView) -> RustBuffer {
+    return FfiConverterTypeGitTreeView.lower(value)
 }
 
 
@@ -8762,6 +10617,1400 @@ public func FfiConverterTypePendingSend_lift(_ buf: RustBuffer) throws -> Pendin
 #endif
 public func FfiConverterTypePendingSend_lower(_ value: PendingSend) -> RustBuffer {
     return FfiConverterTypePendingSend.lower(value)
+}
+
+
+public struct PrActivity: Equatable, Hashable {
+    public var id: String
+    public var kind: PrActivityKind
+    public var comment: PrComment
+    public var state: PrChip?
+    public var thread: PrThread?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, kind: PrActivityKind, comment: PrComment, state: PrChip?, thread: PrThread?) {
+        self.id = id
+        self.kind = kind
+        self.comment = comment
+        self.state = state
+        self.thread = thread
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrActivity: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrActivity: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrActivity {
+        return
+            try PrActivity(
+                id: FfiConverterString.read(from: &buf), 
+                kind: FfiConverterTypePrActivityKind.read(from: &buf), 
+                comment: FfiConverterTypePrComment.read(from: &buf), 
+                state: FfiConverterOptionTypePrChip.read(from: &buf), 
+                thread: FfiConverterOptionTypePrThread.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrActivity, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterTypePrActivityKind.write(value.kind, into: &buf)
+        FfiConverterTypePrComment.write(value.comment, into: &buf)
+        FfiConverterOptionTypePrChip.write(value.state, into: &buf)
+        FfiConverterOptionTypePrThread.write(value.thread, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrActivity_lift(_ buf: RustBuffer) throws -> PrActivity {
+    return try FfiConverterTypePrActivity.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrActivity_lower(_ value: PrActivity) -> RustBuffer {
+    return FfiConverterTypePrActivity.lower(value)
+}
+
+
+public struct PrAskContext: Equatable, Hashable {
+    public var title: String
+    public var placeholder: String
+    public var chips: [String]
+    public var block: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(title: String, placeholder: String, chips: [String], block: String) {
+        self.title = title
+        self.placeholder = placeholder
+        self.chips = chips
+        self.block = block
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrAskContext: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrAskContext: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrAskContext {
+        return
+            try PrAskContext(
+                title: FfiConverterString.read(from: &buf), 
+                placeholder: FfiConverterString.read(from: &buf), 
+                chips: FfiConverterSequenceString.read(from: &buf), 
+                block: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrAskContext, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.placeholder, into: &buf)
+        FfiConverterSequenceString.write(value.chips, into: &buf)
+        FfiConverterString.write(value.block, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrAskContext_lift(_ buf: RustBuffer) throws -> PrAskContext {
+    return try FfiConverterTypePrAskContext.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrAskContext_lower(_ value: PrAskContext) -> RustBuffer {
+    return FfiConverterTypePrAskContext.lower(value)
+}
+
+
+public struct PrBoardView: Equatable, Hashable {
+    public var deviceId: String
+    public var repository: String
+    public var filter: PrFilter
+    public var view: PrPersonalView
+    public var sortField: PrSortField
+    public var ascending: Bool
+    public var query: String
+    public var groups: [PrGroup]
+    public var empty: String?
+    public var error: PrNotice?
+    public var canLoadMore: Bool
+    public var summary: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(deviceId: String, repository: String, filter: PrFilter, view: PrPersonalView, sortField: PrSortField, ascending: Bool, query: String, groups: [PrGroup], empty: String?, error: PrNotice?, canLoadMore: Bool, summary: String) {
+        self.deviceId = deviceId
+        self.repository = repository
+        self.filter = filter
+        self.view = view
+        self.sortField = sortField
+        self.ascending = ascending
+        self.query = query
+        self.groups = groups
+        self.empty = empty
+        self.error = error
+        self.canLoadMore = canLoadMore
+        self.summary = summary
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrBoardView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrBoardView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrBoardView {
+        return
+            try PrBoardView(
+                deviceId: FfiConverterString.read(from: &buf), 
+                repository: FfiConverterString.read(from: &buf), 
+                filter: FfiConverterTypePrFilter.read(from: &buf), 
+                view: FfiConverterTypePrPersonalView.read(from: &buf), 
+                sortField: FfiConverterTypePrSortField.read(from: &buf), 
+                ascending: FfiConverterBool.read(from: &buf), 
+                query: FfiConverterString.read(from: &buf), 
+                groups: FfiConverterSequenceTypePrGroup.read(from: &buf), 
+                empty: FfiConverterOptionString.read(from: &buf), 
+                error: FfiConverterOptionTypePrNotice.read(from: &buf), 
+                canLoadMore: FfiConverterBool.read(from: &buf), 
+                summary: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrBoardView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.deviceId, into: &buf)
+        FfiConverterString.write(value.repository, into: &buf)
+        FfiConverterTypePrFilter.write(value.filter, into: &buf)
+        FfiConverterTypePrPersonalView.write(value.view, into: &buf)
+        FfiConverterTypePrSortField.write(value.sortField, into: &buf)
+        FfiConverterBool.write(value.ascending, into: &buf)
+        FfiConverterString.write(value.query, into: &buf)
+        FfiConverterSequenceTypePrGroup.write(value.groups, into: &buf)
+        FfiConverterOptionString.write(value.empty, into: &buf)
+        FfiConverterOptionTypePrNotice.write(value.error, into: &buf)
+        FfiConverterBool.write(value.canLoadMore, into: &buf)
+        FfiConverterString.write(value.summary, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrBoardView_lift(_ buf: RustBuffer) throws -> PrBoardView {
+    return try FfiConverterTypePrBoardView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrBoardView_lower(_ value: PrBoardView) -> RustBuffer {
+    return FfiConverterTypePrBoardView.lower(value)
+}
+
+
+public struct PrCheckRow: Equatable, Hashable {
+    public var name: String
+    public var chip: PrChip
+    public var url: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, chip: PrChip, url: String?) {
+        self.name = name
+        self.chip = chip
+        self.url = url
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrCheckRow: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrCheckRow: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrCheckRow {
+        return
+            try PrCheckRow(
+                name: FfiConverterString.read(from: &buf), 
+                chip: FfiConverterTypePrChip.read(from: &buf), 
+                url: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrCheckRow, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterTypePrChip.write(value.chip, into: &buf)
+        FfiConverterOptionString.write(value.url, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrCheckRow_lift(_ buf: RustBuffer) throws -> PrCheckRow {
+    return try FfiConverterTypePrCheckRow.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrCheckRow_lower(_ value: PrCheckRow) -> RustBuffer {
+    return FfiConverterTypePrCheckRow.lower(value)
+}
+
+
+public struct PrChip: Equatable, Hashable {
+    public var label: String
+    public var glyph: PrGlyph
+    public var tone: PrTone
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(label: String, glyph: PrGlyph, tone: PrTone) {
+        self.label = label
+        self.glyph = glyph
+        self.tone = tone
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrChip: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrChip: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrChip {
+        return
+            try PrChip(
+                label: FfiConverterString.read(from: &buf), 
+                glyph: FfiConverterTypePrGlyph.read(from: &buf), 
+                tone: FfiConverterTypePrTone.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrChip, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterTypePrGlyph.write(value.glyph, into: &buf)
+        FfiConverterTypePrTone.write(value.tone, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrChip_lift(_ buf: RustBuffer) throws -> PrChip {
+    return try FfiConverterTypePrChip.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrChip_lower(_ value: PrChip) -> RustBuffer {
+    return FfiConverterTypePrChip.lower(value)
+}
+
+
+public struct PrCodeView: Equatable, Hashable {
+    public var files: [DiffFileView]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(files: [DiffFileView]) {
+        self.files = files
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrCodeView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrCodeView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrCodeView {
+        return
+            try PrCodeView(
+                files: FfiConverterSequenceTypeDiffFileView.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrCodeView, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeDiffFileView.write(value.files, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrCodeView_lift(_ buf: RustBuffer) throws -> PrCodeView {
+    return try FfiConverterTypePrCodeView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrCodeView_lower(_ value: PrCodeView) -> RustBuffer {
+    return FfiConverterTypePrCodeView.lower(value)
+}
+
+
+public struct PrComment: Equatable, Hashable {
+    public var id: String
+    public var author: String
+    public var body: String
+    public var when: String
+    public var mine: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, author: String, body: String, when: String, mine: Bool) {
+        self.id = id
+        self.author = author
+        self.body = body
+        self.when = when
+        self.mine = mine
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrComment: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrComment: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrComment {
+        return
+            try PrComment(
+                id: FfiConverterString.read(from: &buf), 
+                author: FfiConverterString.read(from: &buf), 
+                body: FfiConverterString.read(from: &buf), 
+                when: FfiConverterString.read(from: &buf), 
+                mine: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrComment, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.author, into: &buf)
+        FfiConverterString.write(value.body, into: &buf)
+        FfiConverterString.write(value.when, into: &buf)
+        FfiConverterBool.write(value.mine, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrComment_lift(_ buf: RustBuffer) throws -> PrComment {
+    return try FfiConverterTypePrComment.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrComment_lower(_ value: PrComment) -> RustBuffer {
+    return FfiConverterTypePrComment.lower(value)
+}
+
+
+public struct PrConfirm: Equatable, Hashable {
+    public var title: String
+    public var message: String
+    public var action: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(title: String, message: String, action: String) {
+        self.title = title
+        self.message = message
+        self.action = action
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrConfirm: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrConfirm: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrConfirm {
+        return
+            try PrConfirm(
+                title: FfiConverterString.read(from: &buf), 
+                message: FfiConverterString.read(from: &buf), 
+                action: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrConfirm, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.message, into: &buf)
+        FfiConverterString.write(value.action, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrConfirm_lift(_ buf: RustBuffer) throws -> PrConfirm {
+    return try FfiConverterTypePrConfirm.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrConfirm_lower(_ value: PrConfirm) -> RustBuffer {
+    return FfiConverterTypePrConfirm.lower(value)
+}
+
+
+public struct PrControlsView: Equatable, Hashable {
+    public var mergeMethods: [PrMergeOption]
+    public var canWrite: Bool
+    public var canTriage: Bool
+    public var labels: [PrLabel]
+    public var reviewers: [PrReviewer]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(mergeMethods: [PrMergeOption], canWrite: Bool, canTriage: Bool, labels: [PrLabel], reviewers: [PrReviewer]) {
+        self.mergeMethods = mergeMethods
+        self.canWrite = canWrite
+        self.canTriage = canTriage
+        self.labels = labels
+        self.reviewers = reviewers
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrControlsView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrControlsView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrControlsView {
+        return
+            try PrControlsView(
+                mergeMethods: FfiConverterSequenceTypePrMergeOption.read(from: &buf), 
+                canWrite: FfiConverterBool.read(from: &buf), 
+                canTriage: FfiConverterBool.read(from: &buf), 
+                labels: FfiConverterSequenceTypePrLabel.read(from: &buf), 
+                reviewers: FfiConverterSequenceTypePrReviewer.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrControlsView, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypePrMergeOption.write(value.mergeMethods, into: &buf)
+        FfiConverterBool.write(value.canWrite, into: &buf)
+        FfiConverterBool.write(value.canTriage, into: &buf)
+        FfiConverterSequenceTypePrLabel.write(value.labels, into: &buf)
+        FfiConverterSequenceTypePrReviewer.write(value.reviewers, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrControlsView_lift(_ buf: RustBuffer) throws -> PrControlsView {
+    return try FfiConverterTypePrControlsView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrControlsView_lower(_ value: PrControlsView) -> RustBuffer {
+    return FfiConverterTypePrControlsView.lower(value)
+}
+
+
+public struct PrDetailView: Equatable, Hashable {
+    public var url: String
+    public var repository: String
+    public var number: UInt64
+    public var title: String
+    public var body: String
+    public var author: String
+    public var state: PrChip
+    public var review: PrChip?
+    public var ci: PrChip
+    public var branch: String
+    public var changes: String
+    public var fileCount: UInt32
+    public var blockers: [String]
+    public var attention: [String]
+    public var missing: [String]
+    public var checks: [PrCheckRow]
+    public var checksEmpty: String?
+    public var activity: [PrActivity]
+    public var openThreads: UInt32
+    public var handoffs: [PrHandoff]
+    public var canJudge: Bool
+    public var isOpen: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(url: String, repository: String, number: UInt64, title: String, body: String, author: String, state: PrChip, review: PrChip?, ci: PrChip, branch: String, changes: String, fileCount: UInt32, blockers: [String], attention: [String], missing: [String], checks: [PrCheckRow], checksEmpty: String?, activity: [PrActivity], openThreads: UInt32, handoffs: [PrHandoff], canJudge: Bool, isOpen: Bool) {
+        self.url = url
+        self.repository = repository
+        self.number = number
+        self.title = title
+        self.body = body
+        self.author = author
+        self.state = state
+        self.review = review
+        self.ci = ci
+        self.branch = branch
+        self.changes = changes
+        self.fileCount = fileCount
+        self.blockers = blockers
+        self.attention = attention
+        self.missing = missing
+        self.checks = checks
+        self.checksEmpty = checksEmpty
+        self.activity = activity
+        self.openThreads = openThreads
+        self.handoffs = handoffs
+        self.canJudge = canJudge
+        self.isOpen = isOpen
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrDetailView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrDetailView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrDetailView {
+        return
+            try PrDetailView(
+                url: FfiConverterString.read(from: &buf), 
+                repository: FfiConverterString.read(from: &buf), 
+                number: FfiConverterUInt64.read(from: &buf), 
+                title: FfiConverterString.read(from: &buf), 
+                body: FfiConverterString.read(from: &buf), 
+                author: FfiConverterString.read(from: &buf), 
+                state: FfiConverterTypePrChip.read(from: &buf), 
+                review: FfiConverterOptionTypePrChip.read(from: &buf), 
+                ci: FfiConverterTypePrChip.read(from: &buf), 
+                branch: FfiConverterString.read(from: &buf), 
+                changes: FfiConverterString.read(from: &buf), 
+                fileCount: FfiConverterUInt32.read(from: &buf), 
+                blockers: FfiConverterSequenceString.read(from: &buf), 
+                attention: FfiConverterSequenceString.read(from: &buf), 
+                missing: FfiConverterSequenceString.read(from: &buf), 
+                checks: FfiConverterSequenceTypePrCheckRow.read(from: &buf), 
+                checksEmpty: FfiConverterOptionString.read(from: &buf), 
+                activity: FfiConverterSequenceTypePrActivity.read(from: &buf), 
+                openThreads: FfiConverterUInt32.read(from: &buf), 
+                handoffs: FfiConverterSequenceTypePrHandoff.read(from: &buf), 
+                canJudge: FfiConverterBool.read(from: &buf), 
+                isOpen: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrDetailView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.url, into: &buf)
+        FfiConverterString.write(value.repository, into: &buf)
+        FfiConverterUInt64.write(value.number, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.body, into: &buf)
+        FfiConverterString.write(value.author, into: &buf)
+        FfiConverterTypePrChip.write(value.state, into: &buf)
+        FfiConverterOptionTypePrChip.write(value.review, into: &buf)
+        FfiConverterTypePrChip.write(value.ci, into: &buf)
+        FfiConverterString.write(value.branch, into: &buf)
+        FfiConverterString.write(value.changes, into: &buf)
+        FfiConverterUInt32.write(value.fileCount, into: &buf)
+        FfiConverterSequenceString.write(value.blockers, into: &buf)
+        FfiConverterSequenceString.write(value.attention, into: &buf)
+        FfiConverterSequenceString.write(value.missing, into: &buf)
+        FfiConverterSequenceTypePrCheckRow.write(value.checks, into: &buf)
+        FfiConverterOptionString.write(value.checksEmpty, into: &buf)
+        FfiConverterSequenceTypePrActivity.write(value.activity, into: &buf)
+        FfiConverterUInt32.write(value.openThreads, into: &buf)
+        FfiConverterSequenceTypePrHandoff.write(value.handoffs, into: &buf)
+        FfiConverterBool.write(value.canJudge, into: &buf)
+        FfiConverterBool.write(value.isOpen, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrDetailView_lift(_ buf: RustBuffer) throws -> PrDetailView {
+    return try FfiConverterTypePrDetailView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrDetailView_lower(_ value: PrDetailView) -> RustBuffer {
+    return FfiConverterTypePrDetailView.lower(value)
+}
+
+
+public struct PrDevice: Equatable, Hashable {
+    public var id: String
+    public var name: String
+    public var online: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String, online: Bool) {
+        self.id = id
+        self.name = name
+        self.online = online
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrDevice: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrDevice: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrDevice {
+        return
+            try PrDevice(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                online: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrDevice, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterBool.write(value.online, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrDevice_lift(_ buf: RustBuffer) throws -> PrDevice {
+    return try FfiConverterTypePrDevice.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrDevice_lower(_ value: PrDevice) -> RustBuffer {
+    return FfiConverterTypePrDevice.lower(value)
+}
+
+
+public struct PrGroup: Equatable, Hashable {
+    public var key: String
+    public var label: String
+    public var rows: [PrRow]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(key: String, label: String, rows: [PrRow]) {
+        self.key = key
+        self.label = label
+        self.rows = rows
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrGroup: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrGroup: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrGroup {
+        return
+            try PrGroup(
+                key: FfiConverterString.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                rows: FfiConverterSequenceTypePrRow.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrGroup, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.key, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterSequenceTypePrRow.write(value.rows, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrGroup_lift(_ buf: RustBuffer) throws -> PrGroup {
+    return try FfiConverterTypePrGroup.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrGroup_lower(_ value: PrGroup) -> RustBuffer {
+    return FfiConverterTypePrGroup.lower(value)
+}
+
+
+public struct PrHandoff: Equatable, Hashable {
+    public var kind: PrHandoffKind
+    public var label: String
+    public var summary: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: PrHandoffKind, label: String, summary: String) {
+        self.kind = kind
+        self.label = label
+        self.summary = summary
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrHandoff: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrHandoff: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrHandoff {
+        return
+            try PrHandoff(
+                kind: FfiConverterTypePrHandoffKind.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                summary: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrHandoff, into buf: inout [UInt8]) {
+        FfiConverterTypePrHandoffKind.write(value.kind, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterString.write(value.summary, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrHandoff_lift(_ buf: RustBuffer) throws -> PrHandoff {
+    return try FfiConverterTypePrHandoff.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrHandoff_lower(_ value: PrHandoff) -> RustBuffer {
+    return FfiConverterTypePrHandoff.lower(value)
+}
+
+
+public struct PrLabel: Equatable, Hashable {
+    public var name: String
+    public var color: String?
+    public var applied: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, color: String?, applied: Bool) {
+        self.name = name
+        self.color = color
+        self.applied = applied
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrLabel: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrLabel: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrLabel {
+        return
+            try PrLabel(
+                name: FfiConverterString.read(from: &buf), 
+                color: FfiConverterOptionString.read(from: &buf), 
+                applied: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrLabel, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.color, into: &buf)
+        FfiConverterBool.write(value.applied, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrLabel_lift(_ buf: RustBuffer) throws -> PrLabel {
+    return try FfiConverterTypePrLabel.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrLabel_lower(_ value: PrLabel) -> RustBuffer {
+    return FfiConverterTypePrLabel.lower(value)
+}
+
+
+public struct PrLink: Equatable, Hashable {
+    public var url: String
+    public var repository: String
+    public var number: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(url: String, repository: String, number: UInt64) {
+        self.url = url
+        self.repository = repository
+        self.number = number
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrLink: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrLink: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrLink {
+        return
+            try PrLink(
+                url: FfiConverterString.read(from: &buf), 
+                repository: FfiConverterString.read(from: &buf), 
+                number: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrLink, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.url, into: &buf)
+        FfiConverterString.write(value.repository, into: &buf)
+        FfiConverterUInt64.write(value.number, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrLink_lift(_ buf: RustBuffer) throws -> PrLink {
+    return try FfiConverterTypePrLink.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrLink_lower(_ value: PrLink) -> RustBuffer {
+    return FfiConverterTypePrLink.lower(value)
+}
+
+
+public struct PrMergeOption: Equatable, Hashable {
+    public var method: PrMergeMethod
+    public var label: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(method: PrMergeMethod, label: String) {
+        self.method = method
+        self.label = label
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrMergeOption: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrMergeOption: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrMergeOption {
+        return
+            try PrMergeOption(
+                method: FfiConverterTypePrMergeMethod.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrMergeOption, into buf: inout [UInt8]) {
+        FfiConverterTypePrMergeMethod.write(value.method, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrMergeOption_lift(_ buf: RustBuffer) throws -> PrMergeOption {
+    return try FfiConverterTypePrMergeOption.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrMergeOption_lower(_ value: PrMergeOption) -> RustBuffer {
+    return FfiConverterTypePrMergeOption.lower(value)
+}
+
+
+public struct PrNotice: Equatable, Hashable {
+    public var title: String
+    public var body: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(title: String, body: String) {
+        self.title = title
+        self.body = body
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrNotice: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrNotice: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrNotice {
+        return
+            try PrNotice(
+                title: FfiConverterString.read(from: &buf), 
+                body: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrNotice, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.body, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrNotice_lift(_ buf: RustBuffer) throws -> PrNotice {
+    return try FfiConverterTypePrNotice.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrNotice_lower(_ value: PrNotice) -> RustBuffer {
+    return FfiConverterTypePrNotice.lower(value)
+}
+
+
+public struct PrRepository: Equatable, Hashable {
+    public var repository: String
+    public var projectId: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(repository: String, projectId: String) {
+        self.repository = repository
+        self.projectId = projectId
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrRepository: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrRepository: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrRepository {
+        return
+            try PrRepository(
+                repository: FfiConverterString.read(from: &buf), 
+                projectId: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrRepository, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.repository, into: &buf)
+        FfiConverterString.write(value.projectId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrRepository_lift(_ buf: RustBuffer) throws -> PrRepository {
+    return try FfiConverterTypePrRepository.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrRepository_lower(_ value: PrRepository) -> RustBuffer {
+    return FfiConverterTypePrRepository.lower(value)
+}
+
+
+public struct PrReviewer: Equatable, Hashable {
+    public var login: String
+    public var team: Bool
+    public var requested: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(login: String, team: Bool, requested: Bool) {
+        self.login = login
+        self.team = team
+        self.requested = requested
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrReviewer: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrReviewer: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrReviewer {
+        return
+            try PrReviewer(
+                login: FfiConverterString.read(from: &buf), 
+                team: FfiConverterBool.read(from: &buf), 
+                requested: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrReviewer, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.login, into: &buf)
+        FfiConverterBool.write(value.team, into: &buf)
+        FfiConverterBool.write(value.requested, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrReviewer_lift(_ buf: RustBuffer) throws -> PrReviewer {
+    return try FfiConverterTypePrReviewer.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrReviewer_lower(_ value: PrReviewer) -> RustBuffer {
+    return FfiConverterTypePrReviewer.lower(value)
+}
+
+
+public struct PrRow: Equatable, Hashable {
+    public var url: String
+    public var starKey: String
+    public var starred: Bool
+    public var number: UInt64
+    public var title: String
+    public var author: String
+    public var status: String
+    public var statusTone: PrTone
+    public var glyphTone: PrTone
+    public var ciLabel: String
+    public var ciTone: PrTone
+    public var changes: String
+    public var updated: String
+    public var accessibility: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(url: String, starKey: String, starred: Bool, number: UInt64, title: String, author: String, status: String, statusTone: PrTone, glyphTone: PrTone, ciLabel: String, ciTone: PrTone, changes: String, updated: String, accessibility: String) {
+        self.url = url
+        self.starKey = starKey
+        self.starred = starred
+        self.number = number
+        self.title = title
+        self.author = author
+        self.status = status
+        self.statusTone = statusTone
+        self.glyphTone = glyphTone
+        self.ciLabel = ciLabel
+        self.ciTone = ciTone
+        self.changes = changes
+        self.updated = updated
+        self.accessibility = accessibility
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrRow: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrRow: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrRow {
+        return
+            try PrRow(
+                url: FfiConverterString.read(from: &buf), 
+                starKey: FfiConverterString.read(from: &buf), 
+                starred: FfiConverterBool.read(from: &buf), 
+                number: FfiConverterUInt64.read(from: &buf), 
+                title: FfiConverterString.read(from: &buf), 
+                author: FfiConverterString.read(from: &buf), 
+                status: FfiConverterString.read(from: &buf), 
+                statusTone: FfiConverterTypePrTone.read(from: &buf), 
+                glyphTone: FfiConverterTypePrTone.read(from: &buf), 
+                ciLabel: FfiConverterString.read(from: &buf), 
+                ciTone: FfiConverterTypePrTone.read(from: &buf), 
+                changes: FfiConverterString.read(from: &buf), 
+                updated: FfiConverterString.read(from: &buf), 
+                accessibility: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrRow, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.url, into: &buf)
+        FfiConverterString.write(value.starKey, into: &buf)
+        FfiConverterBool.write(value.starred, into: &buf)
+        FfiConverterUInt64.write(value.number, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.author, into: &buf)
+        FfiConverterString.write(value.status, into: &buf)
+        FfiConverterTypePrTone.write(value.statusTone, into: &buf)
+        FfiConverterTypePrTone.write(value.glyphTone, into: &buf)
+        FfiConverterString.write(value.ciLabel, into: &buf)
+        FfiConverterTypePrTone.write(value.ciTone, into: &buf)
+        FfiConverterString.write(value.changes, into: &buf)
+        FfiConverterString.write(value.updated, into: &buf)
+        FfiConverterString.write(value.accessibility, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrRow_lift(_ buf: RustBuffer) throws -> PrRow {
+    return try FfiConverterTypePrRow.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrRow_lower(_ value: PrRow) -> RustBuffer {
+    return FfiConverterTypePrRow.lower(value)
+}
+
+
+public struct PrThread: Equatable, Hashable {
+    public var id: String
+    public var path: String
+    public var line: UInt64?
+    public var resolved: Bool
+    public var outdated: Bool
+    public var comments: [PrComment]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, path: String, line: UInt64?, resolved: Bool, outdated: Bool, comments: [PrComment]) {
+        self.id = id
+        self.path = path
+        self.line = line
+        self.resolved = resolved
+        self.outdated = outdated
+        self.comments = comments
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PrThread: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrThread: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrThread {
+        return
+            try PrThread(
+                id: FfiConverterString.read(from: &buf), 
+                path: FfiConverterString.read(from: &buf), 
+                line: FfiConverterOptionUInt64.read(from: &buf), 
+                resolved: FfiConverterBool.read(from: &buf), 
+                outdated: FfiConverterBool.read(from: &buf), 
+                comments: FfiConverterSequenceTypePrComment.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrThread, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterOptionUInt64.write(value.line, into: &buf)
+        FfiConverterBool.write(value.resolved, into: &buf)
+        FfiConverterBool.write(value.outdated, into: &buf)
+        FfiConverterSequenceTypePrComment.write(value.comments, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrThread_lift(_ buf: RustBuffer) throws -> PrThread {
+    return try FfiConverterTypePrThread.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrThread_lower(_ value: PrThread) -> RustBuffer {
+    return FfiConverterTypePrThread.lower(value)
 }
 
 
@@ -13361,6 +16610,86 @@ public func FfiConverterTypeDemoFixture_lower(_ value: DemoFixture) -> RustBuffe
 
 
 
+
+public enum DiffLineKind: Equatable, Hashable {
+    
+    case context
+    case add
+    case del
+    case meta
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension DiffLineKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDiffLineKind: FfiConverterRustBuffer {
+    typealias SwiftType = DiffLineKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DiffLineKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .context
+        
+        case 2: return .add
+        
+        case 3: return .del
+        
+        case 4: return .meta
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: DiffLineKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .context:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .add:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .del:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .meta:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDiffLineKind_lift(_ buf: RustBuffer) throws -> DiffLineKind {
+    return try FfiConverterTypeDiffLineKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDiffLineKind_lower(_ value: DiffLineKind) -> RustBuffer {
+    return FfiConverterTypeDiffLineKind.lower(value)
+}
+
+
+
 /**
  * Faces the platform registers (same bytes it hands CoreText/Skia).
  */
@@ -13573,6 +16902,79 @@ public func FfiConverterTypeFadeEdge_lift(_ buf: RustBuffer) throws -> FadeEdge 
 #endif
 public func FfiConverterTypeFadeEdge_lower(_ value: FadeEdge) -> RustBuffer {
     return FfiConverterTypeFadeEdge.lower(value)
+}
+
+
+
+
+public enum GitSegmentShape: Equatable, Hashable {
+    
+    case through
+    case incoming
+    case outgoing
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension GitSegmentShape: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGitSegmentShape: FfiConverterRustBuffer {
+    typealias SwiftType = GitSegmentShape
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GitSegmentShape {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .through
+        
+        case 2: return .incoming
+        
+        case 3: return .outgoing
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: GitSegmentShape, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .through:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .incoming:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .outgoing:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitSegmentShape_lift(_ buf: RustBuffer) throws -> GitSegmentShape {
+    return try FfiConverterTypeGitSegmentShape.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitSegmentShape_lower(_ value: GitSegmentShape) -> RustBuffer {
+    return FfiConverterTypeGitSegmentShape.lower(value)
 }
 
 
@@ -13919,6 +17321,705 @@ public func FfiConverterTypePointerPhase_lift(_ buf: RustBuffer) throws -> Point
 #endif
 public func FfiConverterTypePointerPhase_lower(_ value: PointerPhase) -> RustBuffer {
     return FfiConverterTypePointerPhase.lower(value)
+}
+
+
+
+
+public enum PrActivityKind: Equatable, Hashable {
+    
+    case comment
+    case review
+    case thread
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PrActivityKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrActivityKind: FfiConverterRustBuffer {
+    typealias SwiftType = PrActivityKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrActivityKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .comment
+        
+        case 2: return .review
+        
+        case 3: return .thread
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PrActivityKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .comment:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .review:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .thread:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrActivityKind_lift(_ buf: RustBuffer) throws -> PrActivityKind {
+    return try FfiConverterTypePrActivityKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrActivityKind_lower(_ value: PrActivityKind) -> RustBuffer {
+    return FfiConverterTypePrActivityKind.lower(value)
+}
+
+
+
+
+public enum PrFilter: Equatable, Hashable {
+    
+    case authored
+    case reviewing
+    case all
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PrFilter: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrFilter: FfiConverterRustBuffer {
+    typealias SwiftType = PrFilter
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrFilter {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .authored
+        
+        case 2: return .reviewing
+        
+        case 3: return .all
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PrFilter, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .authored:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .reviewing:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .all:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrFilter_lift(_ buf: RustBuffer) throws -> PrFilter {
+    return try FfiConverterTypePrFilter.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrFilter_lower(_ value: PrFilter) -> RustBuffer {
+    return FfiConverterTypePrFilter.lower(value)
+}
+
+
+
+
+public enum PrGlyph: Equatable, Hashable {
+    
+    case pullRequest
+    case closeCircle
+    case document
+    case check
+    case dangerTriangle
+    case clockCircle
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PrGlyph: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrGlyph: FfiConverterRustBuffer {
+    typealias SwiftType = PrGlyph
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrGlyph {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .pullRequest
+        
+        case 2: return .closeCircle
+        
+        case 3: return .document
+        
+        case 4: return .check
+        
+        case 5: return .dangerTriangle
+        
+        case 6: return .clockCircle
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PrGlyph, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .pullRequest:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .closeCircle:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .document:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .check:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .dangerTriangle:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .clockCircle:
+            writeInt(&buf, Int32(6))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrGlyph_lift(_ buf: RustBuffer) throws -> PrGlyph {
+    return try FfiConverterTypePrGlyph.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrGlyph_lower(_ value: PrGlyph) -> RustBuffer {
+    return FfiConverterTypePrGlyph.lower(value)
+}
+
+
+
+
+public enum PrHandoffKind: Equatable, Hashable {
+    
+    case review
+    case addressFeedback
+    case fixChecks
+    case resolveConflicts
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PrHandoffKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrHandoffKind: FfiConverterRustBuffer {
+    typealias SwiftType = PrHandoffKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrHandoffKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .review
+        
+        case 2: return .addressFeedback
+        
+        case 3: return .fixChecks
+        
+        case 4: return .resolveConflicts
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PrHandoffKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .review:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .addressFeedback:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .fixChecks:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .resolveConflicts:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrHandoffKind_lift(_ buf: RustBuffer) throws -> PrHandoffKind {
+    return try FfiConverterTypePrHandoffKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrHandoffKind_lower(_ value: PrHandoffKind) -> RustBuffer {
+    return FfiConverterTypePrHandoffKind.lower(value)
+}
+
+
+
+
+public enum PrMergeMethod: Equatable, Hashable {
+    
+    case merge
+    case squash
+    case rebase
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PrMergeMethod: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrMergeMethod: FfiConverterRustBuffer {
+    typealias SwiftType = PrMergeMethod
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrMergeMethod {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .merge
+        
+        case 2: return .squash
+        
+        case 3: return .rebase
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PrMergeMethod, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .merge:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .squash:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .rebase:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrMergeMethod_lift(_ buf: RustBuffer) throws -> PrMergeMethod {
+    return try FfiConverterTypePrMergeMethod.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrMergeMethod_lower(_ value: PrMergeMethod) -> RustBuffer {
+    return FfiConverterTypePrMergeMethod.lower(value)
+}
+
+
+
+
+public enum PrPersonalView: Equatable, Hashable {
+    
+    case everything
+    case needsYou
+    case starred
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PrPersonalView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrPersonalView: FfiConverterRustBuffer {
+    typealias SwiftType = PrPersonalView
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrPersonalView {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .everything
+        
+        case 2: return .needsYou
+        
+        case 3: return .starred
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PrPersonalView, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .everything:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .needsYou:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .starred:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrPersonalView_lift(_ buf: RustBuffer) throws -> PrPersonalView {
+    return try FfiConverterTypePrPersonalView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrPersonalView_lower(_ value: PrPersonalView) -> RustBuffer {
+    return FfiConverterTypePrPersonalView.lower(value)
+}
+
+
+
+
+public enum PrReviewEvent: Equatable, Hashable {
+    
+    case comment
+    case approve
+    case requestChanges
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PrReviewEvent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrReviewEvent: FfiConverterRustBuffer {
+    typealias SwiftType = PrReviewEvent
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrReviewEvent {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .comment
+        
+        case 2: return .approve
+        
+        case 3: return .requestChanges
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PrReviewEvent, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .comment:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .approve:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .requestChanges:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrReviewEvent_lift(_ buf: RustBuffer) throws -> PrReviewEvent {
+    return try FfiConverterTypePrReviewEvent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrReviewEvent_lower(_ value: PrReviewEvent) -> RustBuffer {
+    return FfiConverterTypePrReviewEvent.lower(value)
+}
+
+
+
+
+public enum PrSortField: Equatable, Hashable {
+    
+    case updated
+    case opened
+    case changes
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PrSortField: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrSortField: FfiConverterRustBuffer {
+    typealias SwiftType = PrSortField
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrSortField {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .updated
+        
+        case 2: return .opened
+        
+        case 3: return .changes
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PrSortField, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .updated:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .opened:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .changes:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrSortField_lift(_ buf: RustBuffer) throws -> PrSortField {
+    return try FfiConverterTypePrSortField.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrSortField_lower(_ value: PrSortField) -> RustBuffer {
+    return FfiConverterTypePrSortField.lower(value)
+}
+
+
+
+
+public enum PrTone: Equatable, Hashable {
+    
+    case muted
+    case positive
+    case warning
+    case danger
+    case merged
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PrTone: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrTone: FfiConverterRustBuffer {
+    typealias SwiftType = PrTone
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrTone {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .muted
+        
+        case 2: return .positive
+        
+        case 3: return .warning
+        
+        case 4: return .danger
+        
+        case 5: return .merged
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PrTone, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .muted:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .positive:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .warning:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .danger:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .merged:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrTone_lift(_ buf: RustBuffer) throws -> PrTone {
+    return try FfiConverterTypePrTone.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrTone_lower(_ value: PrTone) -> RustBuffer {
+    return FfiConverterTypePrTone.lower(value)
 }
 
 
@@ -16663,6 +20764,30 @@ fileprivate struct FfiConverterOptionTypeFrameImage: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeGitNotice: FfiConverterRustBuffer {
+    typealias SwiftType = GitNotice?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeGitNotice.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeGitNotice.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeInputRequest: FfiConverterRustBuffer {
     typealias SwiftType = InputRequest?
 
@@ -16751,6 +20876,102 @@ fileprivate struct FfiConverterOptionTypeLimitPill: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeLimitPill.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypePrChip: FfiConverterRustBuffer {
+    typealias SwiftType = PrChip?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePrChip.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePrChip.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypePrLink: FfiConverterRustBuffer {
+    typealias SwiftType = PrLink?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePrLink.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePrLink.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypePrNotice: FfiConverterRustBuffer {
+    typealias SwiftType = PrNotice?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePrNotice.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePrNotice.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypePrThread: FfiConverterRustBuffer {
+    typealias SwiftType = PrThread?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePrThread.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePrThread.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -17344,6 +21565,81 @@ fileprivate struct FfiConverterSequenceTypeDeviceView: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeDiffFileView: FfiConverterRustBuffer {
+    typealias SwiftType = [DiffFileView]
+
+    public static func write(_ value: [DiffFileView], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeDiffFileView.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [DiffFileView] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [DiffFileView]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeDiffFileView.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeDiffHunkView: FfiConverterRustBuffer {
+    typealias SwiftType = [DiffHunkView]
+
+    public static func write(_ value: [DiffHunkView], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeDiffHunkView.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [DiffHunkView] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [DiffHunkView]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeDiffHunkView.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeDiffLineView: FfiConverterRustBuffer {
+    typealias SwiftType = [DiffLineView]
+
+    public static func write(_ value: [DiffLineView], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeDiffLineView.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [DiffLineView] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [DiffLineView]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeDiffLineView.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFaceData: FfiConverterRustBuffer {
     typealias SwiftType = [FaceData]
 
@@ -17436,6 +21732,131 @@ fileprivate struct FfiConverterSequenceTypeFolderEntry: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeFolderEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeGitCheckoutOption: FfiConverterRustBuffer {
+    typealias SwiftType = [GitCheckoutOption]
+
+    public static func write(_ value: [GitCheckoutOption], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeGitCheckoutOption.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [GitCheckoutOption] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [GitCheckoutOption]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeGitCheckoutOption.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeGitFileRow: FfiConverterRustBuffer {
+    typealias SwiftType = [GitFileRow]
+
+    public static func write(_ value: [GitFileRow], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeGitFileRow.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [GitFileRow] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [GitFileRow]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeGitFileRow.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeGitHistoryRow: FfiConverterRustBuffer {
+    typealias SwiftType = [GitHistoryRow]
+
+    public static func write(_ value: [GitHistoryRow], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeGitHistoryRow.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [GitHistoryRow] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [GitHistoryRow]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeGitHistoryRow.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeGitRefChip: FfiConverterRustBuffer {
+    typealias SwiftType = [GitRefChip]
+
+    public static func write(_ value: [GitRefChip], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeGitRefChip.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [GitRefChip] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [GitRefChip]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeGitRefChip.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeGitSegment: FfiConverterRustBuffer {
+    typealias SwiftType = [GitSegment]
+
+    public static func write(_ value: [GitSegment], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeGitSegment.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [GitSegment] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [GitSegment]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeGitSegment.read(from: &buf))
         }
         return seq
     }
@@ -17661,6 +22082,306 @@ fileprivate struct FfiConverterSequenceTypePendingSend: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypePendingSend.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePrActivity: FfiConverterRustBuffer {
+    typealias SwiftType = [PrActivity]
+
+    public static func write(_ value: [PrActivity], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePrActivity.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PrActivity] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PrActivity]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePrActivity.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePrCheckRow: FfiConverterRustBuffer {
+    typealias SwiftType = [PrCheckRow]
+
+    public static func write(_ value: [PrCheckRow], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePrCheckRow.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PrCheckRow] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PrCheckRow]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePrCheckRow.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePrComment: FfiConverterRustBuffer {
+    typealias SwiftType = [PrComment]
+
+    public static func write(_ value: [PrComment], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePrComment.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PrComment] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PrComment]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePrComment.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePrDevice: FfiConverterRustBuffer {
+    typealias SwiftType = [PrDevice]
+
+    public static func write(_ value: [PrDevice], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePrDevice.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PrDevice] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PrDevice]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePrDevice.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePrGroup: FfiConverterRustBuffer {
+    typealias SwiftType = [PrGroup]
+
+    public static func write(_ value: [PrGroup], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePrGroup.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PrGroup] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PrGroup]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePrGroup.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePrHandoff: FfiConverterRustBuffer {
+    typealias SwiftType = [PrHandoff]
+
+    public static func write(_ value: [PrHandoff], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePrHandoff.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PrHandoff] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PrHandoff]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePrHandoff.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePrLabel: FfiConverterRustBuffer {
+    typealias SwiftType = [PrLabel]
+
+    public static func write(_ value: [PrLabel], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePrLabel.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PrLabel] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PrLabel]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePrLabel.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePrMergeOption: FfiConverterRustBuffer {
+    typealias SwiftType = [PrMergeOption]
+
+    public static func write(_ value: [PrMergeOption], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePrMergeOption.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PrMergeOption] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PrMergeOption]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePrMergeOption.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePrRepository: FfiConverterRustBuffer {
+    typealias SwiftType = [PrRepository]
+
+    public static func write(_ value: [PrRepository], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePrRepository.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PrRepository] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PrRepository]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePrRepository.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePrReviewer: FfiConverterRustBuffer {
+    typealias SwiftType = [PrReviewer]
+
+    public static func write(_ value: [PrReviewer], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePrReviewer.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PrReviewer] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PrReviewer]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePrReviewer.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePrRow: FfiConverterRustBuffer {
+    typealias SwiftType = [PrRow]
+
+    public static func write(_ value: [PrRow], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePrRow.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PrRow] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PrRow]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePrRow.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePrThread: FfiConverterRustBuffer {
+    typealias SwiftType = [PrThread]
+
+    public static func write(_ value: [PrThread], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePrThread.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PrThread] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PrThread]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePrThread.read(from: &buf))
         }
         return seq
     }
@@ -18418,6 +23139,14 @@ public func workosAuthorizeUrl(state: String) -> String  {
     )
 })
 }
+public func pullRequestLink(url: String) -> PrLink?  {
+    return try!  FfiConverterOptionTypePrLink.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_pull_request_link(
+        FfiConverterString.lower(url),uniffiCallStatus
+    )
+})
+}
 /**
  * The canonical mention link the host understands (`[name](zeron-file:path)`).
  */
@@ -18606,6 +23335,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_workos_authorize_url() != 35994) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_pull_request_link() != 45740) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_file_mention_link() != 14340) {
@@ -18830,10 +23562,142 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_workspace_revision() != 48105) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_git_checkout() != 58565) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_git_checkouts() != 38147) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_pull_request_board() != 32259) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_pull_request_devices() != 63706) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_pull_request_page() != 58598) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_pull_request_repositories() != 2770) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_start_voice() != 62086) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_uploadprogress_on_progress() != 40458) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_gitcheckout_commit() != 30144) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_gitcheckout_commit_detail() != 9760) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_gitcheckout_dismiss_notice() != 36056) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_gitcheckout_file_diff() != 9277) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_gitcheckout_generate_message() != 11487) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_gitcheckout_history() != 31202) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_gitcheckout_path() != 10874) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_gitcheckout_pull() != 63237) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_gitcheckout_push() != 58830) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_gitcheckout_refresh() != 52707) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_gitcheckout_stage() != 32943) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_gitcheckout_stage_all() != 9678) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_gitcheckout_unstage() != 6360) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_gitcheckout_unstage_all() != 20359) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestboard_load() != 35964) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestboard_load_more() != 58276) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestboard_set_filter() != 17130) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestboard_set_query() != 32878) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestboard_set_repository() != 11128) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestboard_set_sort() != 21723) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestboard_set_stars() != 27207) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestboard_set_view() != 55578) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestboard_view() != 52039) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestpage_ask_context() != 27439) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestpage_code() != 61907) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestpage_comment() != 11926) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestpage_controls() != 30128) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestpage_handoff_project() != 15652) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestpage_handoff_prompt() != 61564) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestpage_load() != 25919) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestpage_merge() != 35366) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestpage_merge_confirm() != 6572) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestpage_reply() != 64470) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestpage_resolve() != 42355) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestpage_review() != 58608) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestpage_set_label() != 43386) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestpage_set_reviewer() != 37162) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_pullrequestpage_url() != 13514) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_answer_consent() != 18593) {

@@ -10,6 +10,7 @@
 //! rows, draining the queue, and answering relay RPCs.
 
 mod fixtures;
+mod git;
 mod png;
 mod transcripts;
 mod visuals;
@@ -84,6 +85,7 @@ pub(crate) struct DemoHost {
     forks: Mutex<HashMap<String, Vec<SessionMessageEntry>>>,
     rng: Mutex<Rng>,
     cancel: Mutex<Option<CancellationToken>>,
+    git: Mutex<git::GitDemo>,
 }
 
 fn doc_err(err: zeron_doc::DocError) -> ClientError {
@@ -105,6 +107,7 @@ impl DemoHost {
             forks: Mutex::new(HashMap::new()),
             rng: Mutex::new(Rng(0x9e37_79b9_7f4a_7c15)),
             cancel: Mutex::new(None),
+            git: Mutex::new(git::GitDemo::new()),
         })
     }
 
@@ -855,6 +858,9 @@ impl DemoHost {
                 return Ok(limit_rpc(&client, method == m::SET_LIMIT_RESUME, &params));
             }
             _ => {}
+        }
+        if let Some(reply) = lock(&self.git).handle(method, &params) {
+            return reply;
         }
         let chat_id = params["chatId"].as_str().unwrap_or_default().to_owned();
         let id = params["id"].as_str().unwrap_or_default().to_owned();
