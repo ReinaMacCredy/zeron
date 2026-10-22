@@ -1658,6 +1658,10 @@ mod tests {
         }
     }
 
+    #[cfg_attr(
+        windows,
+        ignore = "`:(glob)*` is not a legal Windows file name, so the pathspec bait cannot be created"
+    )]
     #[tokio::test]
     async fn staging_treats_every_name_as_a_literal_path() {
         let dir = committed_repo();
@@ -2221,6 +2225,10 @@ mod tests {
             .collect()
     }
 
+    #[cfg_attr(
+        windows,
+        ignore = "`:(glob)*` is not a legal Windows file name, so the pathspec bait cannot be created"
+    )]
     #[tokio::test]
     async fn discard_restores_the_unstaged_side_and_removes_exact_untracked_files() {
         let dir = committed_repo();
