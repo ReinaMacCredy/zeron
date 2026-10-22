@@ -12,6 +12,7 @@
 //! (`snapshot()` / `subscribe()`), never over FFI.
 
 mod session;
+mod settings;
 mod voice;
 pub use voice::*;
 mod types;

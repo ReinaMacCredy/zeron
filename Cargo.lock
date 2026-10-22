@@ -13847,6 +13847,7 @@ dependencies = [
  "zatex",
  "zeron-client",
  "zeron-doc",
+ "zeron-docs",
  "zeron-markdown",
  "zeron-orb",
  "zeron-proto",

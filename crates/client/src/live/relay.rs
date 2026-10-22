@@ -158,6 +158,25 @@ impl Relay {
         unreachable!("the second attempt always returns")
     }
 
+    pub(crate) async fn first(
+        &self,
+        device_id: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<Value> {
+        let first = async {
+            let client = self.links.client(device_id).await?;
+            let mut stream = client.subscribe_checked(method, params).await?;
+            stream.recv().await.ok_or(RpcError::Closed)
+        };
+        match tokio::time::timeout(deadline(method), first).await {
+            Ok(result) => result.map_err(|e| map_rpc(device_id, method, e)),
+            Err(_) => Err(ClientError::HostUnavailable(format!(
+                "{method} on {device_id} timed out"
+            ))),
+        }
+    }
+
     /// Chunked upload (`UploadChunk` ×N with `seq`, then `UploadCommit`).
     /// Returns the durable host path. Idempotent per `upload_id`.
     pub(crate) async fn upload(

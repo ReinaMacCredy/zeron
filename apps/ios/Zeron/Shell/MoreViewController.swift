@@ -231,6 +231,11 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             Row(id: "groupByProject", title: "Group by Project", subtitle: "Sessions outside your sections, under their project", symbol: "square.stack.3d.up", accessory: .toggle(app.groupByProject)),
             Row(id: "archived", title: "Archived Sessions", symbol: "archivebox"),
         ])
+        s.appendSections(["Help"])
+        s.appendItems([
+            Row(id: "whatsnew", title: "What's New", subtitle: whatsNew().map { "v\($0.version) · \($0.date)" }, symbol: "sparkles"),
+            Row(id: "docs", title: "Docs", subtitle: "How Zeron works, by topic", symbol: "book"),
+        ])
         s.appendSections([" "])
         s.appendItems([Row(id: "signout", title: "Sign Out", symbol: "rectangle.portrait.and.arrow.right", accessory: .none, destructive: true)])
         dataSource.apply(s, animatingDifferences: false)
@@ -241,6 +246,8 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         guard let row = dataSource.itemIdentifier(for: path) else { return }
         switch row.id {
         case "voice": navigationController?.pushViewController(VoiceViewController(app: app), animated: true)
+        case let id where id.hasPrefix("device:"):
+            navigationController?.pushViewController(HostPageViewController(app: app, deviceId: String(id.dropFirst(7)), page: "mac", title: row.title), animated: true)
         case let id where id.hasPrefix("appearance:"):
             let style = Int(id.dropFirst(11)) ?? 0
             UserDefaults.standard.set(style, forKey: "appearance")
@@ -286,6 +293,10 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             present(sheet, animated: true)
         case "wallpaper:remove":
             WallpaperStore.remove()
+        case "whatsnew":
+            WhatsNewViewController.present(from: self)
+        case "docs":
+            navigationController?.pushViewController(DocsViewController(), animated: true)
         case "archived":
             navigationController?.pushViewController(FolderViewController(app: app, folder: FolderRowVM(id: "archived", name: "Archived", count: 0, symbol: "archivebox")), animated: true)
         case "signout":

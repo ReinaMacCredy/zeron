@@ -11,6 +11,7 @@
 
 mod fixtures;
 mod png;
+mod settings;
 mod transcripts;
 mod visuals;
 
@@ -80,6 +81,7 @@ pub(crate) struct DemoHost {
     uploads: Mutex<HashMap<String, Arc<Vec<u8>>>>,
     rng: Mutex<Rng>,
     cancel: Mutex<Option<CancellationToken>>,
+    settings: Mutex<settings::HostSettings>,
 }
 
 fn doc_err(err: zeron_doc::DocError) -> ClientError {
@@ -100,6 +102,7 @@ impl DemoHost {
             uploads: Mutex::new(HashMap::new()),
             rng: Mutex::new(Rng(0x9e37_79b9_7f4a_7c15)),
             cancel: Mutex::new(None),
+            settings: Mutex::new(settings::HostSettings::new()),
         })
     }
 
@@ -791,6 +794,9 @@ impl DemoHost {
             return Err(ClientError::HostUnavailable(device_id.to_owned()));
         }
         tokio::time::sleep(Duration::from_millis(80)).await;
+        if settings::HostSettings::handles(method) {
+            return lock(&self.settings).call(method, &params);
+        }
         let chat_id = params["chatId"].as_str().unwrap_or_default().to_owned();
         let id = params["id"].as_str().unwrap_or_default().to_owned();
         let core = client
@@ -945,6 +951,7 @@ impl DemoHost {
             harness.steering_mode = Some("step-boundary".into());
             harness.enabled = Some(true);
         }
+        let disabled = lock(&self.settings).disabled_harnesses.clone();
         list.push(HarnessInfo {
             id: "opencode".into(),
             label: "OpenCode".into(),
@@ -954,12 +961,21 @@ impl DemoHost {
             installed: true,
             enabled: Some(true),
         });
+        for harness in &mut list {
+            if disabled.contains(&harness.id) {
+                harness.enabled = Some(false);
+            }
+        }
         list
     }
 
     pub(crate) async fn list_models(&self, harness: &str) -> Vec<ModelInfo> {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        catalog::fallback_models(harness)
+        let mut models = catalog::fallback_models(harness);
+        for model in &mut models {
+            model.is_new = model.id == "claude-sonnet-5-5";
+        }
+        models
     }
 
     fn seeded_refs(path: &str) -> Vec<RepoRef> {

@@ -34,6 +34,7 @@ pub mod connectivity;
 mod demo;
 pub mod error;
 pub mod events;
+pub mod host_settings;
 mod live;
 pub mod rpc;
 pub mod runtime;
