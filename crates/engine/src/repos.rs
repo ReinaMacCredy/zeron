@@ -3403,6 +3403,13 @@ tmpfs /run tmpfs rw 0 0
         std::fs::write(root.path().join("beta.rs"), "").unwrap();
         let repos =
             Repos::with_worktrees_root(data.path(), "device", data.path().join("worktrees"));
+        let canonical = super::canonical_search_root(root.path()).unwrap();
+        repos.workspace_search().warm(&canonical).unwrap();
+        assert!(
+            repos
+                .workspace_search()
+                .wait_until_indexed(&canonical, Duration::from_secs(30))
+        );
 
         let alpha = repos.search_files(root.path().into(), "alpha".into(), Vec::new());
         let beta = repos.search_files(root.path().into(), "beta".into(), Vec::new());
