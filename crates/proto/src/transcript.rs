@@ -35,6 +35,14 @@ pub fn compact_count(n: u64) -> String {
     }
 }
 
+pub fn format_kb(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else {
+        format!("{} KB", bytes.div_ceil(1024))
+    }
+}
+
 pub fn token_count(n: u64) -> String {
     let trim = |s: String| {
         if s.contains('.') {
@@ -285,5 +293,167 @@ pub fn handoff_footnote(pointer: bool) -> &'static str {
         "Sent ahead of your next message so the new model reads the source thread itself."
     } else {
         "Sent ahead of your next message so the new model can continue this thread."
+    }
+}
+
+pub struct BranchCopy {
+    pub title: &'static str,
+    pub context: String,
+    pub option: &'static str,
+    pub detail: &'static str,
+}
+
+pub fn branch_copy(rewind: bool, excerpt: &str) -> BranchCopy {
+    let excerpt = if excerpt.is_empty() {
+        String::new()
+    } else {
+        let mut text: String = excerpt.chars().take(72).collect();
+        if excerpt.chars().count() > 72 {
+            text.push('\u{2026}');
+        }
+        format!("\u{201C}{text}\u{201D}")
+    };
+    if rewind {
+        BranchCopy {
+            title: "Rewind to here",
+            context: format!("Before {excerpt}"),
+            option: "Restore conversation",
+            detail: "Removes this prompt and everything after it and puts the prompt back in the composer. Files on disk stay as they are.",
+        }
+    } else {
+        BranchCopy {
+            title: "Fork chat from here",
+            context: format!("After {excerpt}"),
+            option: "Fork in this workspace",
+            detail: "New chat with the conversation through this reply. This chat stays as is.",
+        }
+    }
+}
+
+pub struct LimitCardCopy {
+    pub title: String,
+    pub resets: String,
+    pub switch: Option<(String, String)>,
+    pub wait: (String, String),
+}
+
+pub fn limit_duration(ms: i64) -> String {
+    let mins = (ms / 60_000).max(0);
+    match (mins / 60, mins % 60) {
+        (0, m) => format!("{m}m"),
+        (h, 0) => format!("{h}h"),
+        (h, m) => format!("{h}h {m}m"),
+    }
+}
+
+pub fn limit_card_copy(
+    name: &str,
+    reset_clock: Option<&str>,
+    resets_in_ms: Option<i64>,
+    target: Option<&str>,
+    auto: bool,
+) -> LimitCardCopy {
+    let resets = match (reset_clock, resets_in_ms) {
+        (Some(at), Some(ms)) if ms > 0 => format!("resets {at}, in {}", limit_duration(ms)),
+        (Some(at), _) => format!("resets {at}"),
+        _ => "reset time unknown".to_owned(),
+    };
+    LimitCardCopy {
+        title: format!("{name} hit its usage limit"),
+        resets,
+        switch: target.map(|to| {
+            (
+                format!("{to} (keeps transcript)"),
+                format!(
+                    "Same thread, provider switched. Back to {name} only if you switch it again."
+                ),
+            )
+        }),
+        wait: (
+            reset_clock.map_or_else(
+                || "Wait for reset".to_owned(),
+                |at| format!("Wait for reset {at}"),
+            ),
+            if auto {
+                format!("Auto-resumes on {name} at reset, as today.")
+            } else {
+                "Auto-resume is not armed: the thread stops here and its parent is told.".to_owned()
+            },
+        ),
+    }
+}
+
+pub fn limit_pill_label(
+    reset_clock: Option<&str>,
+    upcoming: bool,
+    auto: bool,
+) -> (String, Option<&'static str>) {
+    match (reset_clock, upcoming) {
+        (Some(when), true) if auto => (format!("Usage limit · resumes {when}"), Some("Cancel")),
+        (Some(when), true) => (
+            format!("Usage limit · resets {when}"),
+            Some("Resume at reset"),
+        ),
+        _ => ("Usage limit · reset time unknown".into(), None),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactionWait {
+    Queued,
+    Classifying {
+        harness: crate::HarnessId,
+        model: Option<String>,
+        agent_note: bool,
+    },
+    Compacting(Option<(u64, bool)>),
+}
+
+impl CompactionWait {
+    pub fn words(&self) -> (String, Option<&'static str>) {
+        match self {
+            Self::Queued => (
+                "Compaction queued · starts when the turn settles".to_string(),
+                None,
+            ),
+            Self::Classifying { agent_note, .. } => (
+                "Classifier".to_string(),
+                Some(if *agent_note {
+                    "· checking the agent's note"
+                } else {
+                    "· checking if this is a new task"
+                }),
+            ),
+            Self::Compacting(Some((tokens, carry))) => (
+                format!(
+                    "Compacting {}{}",
+                    compact_count(*tokens),
+                    if *carry {
+                        ", carrying the last turns over"
+                    } else {
+                        " before the new task"
+                    }
+                ),
+                None,
+            ),
+            Self::Compacting(None) => ("Compacting context".to_string(), None),
+        }
+    }
+
+    pub fn timed(&self) -> bool {
+        !matches!(self, Self::Queued)
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::limit_duration;
+
+    #[test]
+    fn reset_durations_read_in_hours_and_minutes() {
+        assert_eq!(limit_duration(72 * 60_000), "1h 12m");
+        assert_eq!(limit_duration(120 * 60_000), "2h");
+        assert_eq!(limit_duration(5 * 60_000 + 59_000), "5m");
+        assert_eq!(limit_duration(-1), "0m");
     }
 }

@@ -1478,6 +1478,25 @@ pub fn turn_stopped(last: &SessionMessageEntry) -> bool {
             && matches!(last.parts.last(), Some(MessagePart::Error { .. })))
 }
 
+pub fn boundary_compaction<'a, I>(transcript: I) -> Option<(u64, bool)>
+where
+    I: IntoIterator<Item = &'a SessionMessageEntry>,
+    I::IntoIter: DoubleEndedIterator,
+{
+    let entry = transcript
+        .into_iter()
+        .rev()
+        .find(|entry| entry.role != MessageRole::User)?;
+    entry.parts.iter().find_map(|part| match part {
+        MessagePart::Classifier { record, .. } => match record.verdict {
+            crate::parts::ClassifierVerdict::New => Some((record.context_tokens, false)),
+            crate::parts::ClassifierVerdict::Carry => Some((record.context_tokens, true)),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
 /// The streaming reply's advisor call is still out: the one tool that takes
 /// minutes with nothing streaming, so the working trailer names that wait.
 pub fn consulting_advisor(last: &SessionMessageEntry) -> bool {

@@ -2977,6 +2977,7 @@ struct ChipAffordance {
 
 #[cfg(test)]
 use zeron_proto::transcript::{handoff_message_count, handoff_size_label};
+use zeron_proto::transcript::{CompactionWait, format_kb};
 
 struct HandoffSide {
     icon: (&'static str, Option<gpui::Hsla>),
@@ -3021,32 +3022,6 @@ impl HandoffSide {
     }
 }
 
-#[derive(Clone, PartialEq)]
-enum CompactionWait {
-    Queued,
-    Classifying {
-        harness: zeron_proto::HarnessId,
-        model: Option<String>,
-        agent_note: bool,
-    },
-    Compacting(Option<(u64, bool)>),
-}
-
-fn boundary_compaction(transcript: &[SessionMessageEntry]) -> Option<(u64, bool)> {
-    let entry = transcript
-        .iter()
-        .rev()
-        .find(|entry| entry.role != MessageRole::User)?;
-    entry.parts.iter().find_map(|part| match part {
-        MessagePart::Classifier { record, .. } => match record.verdict {
-            zeron_doc::ClassifierVerdict::New => Some((record.context_tokens, false)),
-            zeron_doc::ClassifierVerdict::Carry => Some((record.context_tokens, true)),
-            _ => None,
-        },
-        _ => None,
-    })
-}
-
 /// Capture knob (`ZERON_OPEN_HANDOFF=1`): synthetic clicks never reach a Dev bundle.
 fn handoff_open_knob() -> bool {
     static OPEN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -3080,14 +3055,6 @@ fn blob_detail(text: &str, is_diff: bool) -> Option<ToolDetail> {
     })
 }
 
-/// Compact byte size for the fetch affordance label ("812 B", "12 KB").
-fn format_kb(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else {
-        format!("{} KB", bytes.div_ceil(1024))
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Working indicator flavour (pure; rendered by the shell strip)
@@ -9950,9 +9917,9 @@ impl Transcript {
         }
         let state = self.state.read(cx);
         if state.chat_compacting(chat_id) {
-            return Some(CompactionWait::Compacting(boundary_compaction(
-                &state.transcript,
-            )));
+            return Some(CompactionWait::Compacting(
+                zeron_doc::schema::boundary_compaction(&state.transcript),
+            ));
         }
         let session = state.session_for(chat_id)?;
         let agent = session.compact_plan == Some(zeron_proto::CompactPlan::Agent);
@@ -10006,44 +9973,13 @@ impl Transcript {
                 None => text.into_any_element(),
             }
         };
-        let (lead, chip, tail, timed) = match &wait {
-            CompactionWait::Queued => (
-                "Compaction queued · starts when the turn settles".to_string(),
-                None,
-                None,
-                false,
-            ),
-            CompactionWait::Classifying {
-                harness,
-                model,
-                agent_note,
-            } => (
-                "Classifier".to_string(),
-                Some(HandoffSide::new(*harness, model.as_deref(), cx).chip(&theme)),
-                Some(if *agent_note {
-                    "· checking the agent's note"
-                } else {
-                    "· checking if this is a new task"
-                }),
-                true,
-            ),
-            CompactionWait::Compacting(boundary) => (
-                match boundary {
-                    Some((tokens, carry)) => format!(
-                        "Compacting {}{}",
-                        crate::composer::background::compact_count(*tokens),
-                        if *carry {
-                            ", carrying the last turns over"
-                        } else {
-                            " before the new task"
-                        }
-                    ),
-                    None => "Compacting context".to_string(),
-                },
-                None,
-                None,
-                true,
-            ),
+        let (lead, tail) = wait.words();
+        let timed = wait.timed();
+        let chip = match &wait {
+            CompactionWait::Classifying { harness, model, .. } => {
+                Some(HandoffSide::new(*harness, model.as_deref(), cx).chip(&theme))
+            }
+            _ => None,
         };
         let elapsed = format!(
             "· {}",
