@@ -33,6 +33,7 @@ struct SessionChrome: Equatable {
         let text: String
         let thumbnail: UIImage?
         let gate: String?
+        var from: String? = nil
     }
 
     var title = ""

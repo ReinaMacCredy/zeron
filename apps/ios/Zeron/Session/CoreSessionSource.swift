@@ -109,7 +109,7 @@ final class CoreSessionSource: SessionSource {
             case .reviewRequired?: "Needs review"
             case nil: q.actionPending ? "Updating" : nil
             }
-            return SessionChrome.QueuedItem(id: q.id, text: q.visibleText, thumbnail: nil, gate: gate)
+            return SessionChrome.QueuedItem(id: q.id, text: q.visibleText, thumbnail: nil, gate: gate, from: q.fromLabel)
         }
         next.error = c.queueError
         if next != chrome {

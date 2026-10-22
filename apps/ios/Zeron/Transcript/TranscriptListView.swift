@@ -674,6 +674,13 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
             }
             return
         }
+        if url.scheme == "zeron-chat" {
+            guard let id = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "id" })?.value
+            else { return }
+            (window?.rootViewController as? AppRouter)?.openSession(id)
+            return
+        }
         if url.scheme == "http" || url.scheme == "https" {
             let safari = SFSafariViewController(url: url)
             safari.preferredControlTintColor = Palette.accent

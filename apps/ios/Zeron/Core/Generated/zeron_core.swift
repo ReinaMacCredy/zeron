@@ -8613,6 +8613,7 @@ public struct QueueItem: Equatable, Hashable {
      * A Send-now / Remove is awaiting the host's acknowledgement.
      */
     public var actionPending: Bool
+    public var fromLabel: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -8625,7 +8626,7 @@ public struct QueueItem: Equatable, Hashable {
          */visibleText: String, attachments: [String], holdForTurnEnd: Bool, issuedBy: String, fromThisDevice: Bool, issuedAtMs: Int64, editedAtMs: Int64?, gate: QueueGate?, 
         /**
          * A Send-now / Remove is awaiting the host's acknowledgement.
-         */actionPending: Bool) {
+         */actionPending: Bool, fromLabel: String?) {
         self.id = id
         self.text = text
         self.visibleText = visibleText
@@ -8637,6 +8638,7 @@ public struct QueueItem: Equatable, Hashable {
         self.editedAtMs = editedAtMs
         self.gate = gate
         self.actionPending = actionPending
+        self.fromLabel = fromLabel
     }
 
     
@@ -8665,7 +8667,8 @@ public struct FfiConverterTypeQueueItem: FfiConverterRustBuffer {
                 issuedAtMs: FfiConverterInt64.read(from: &buf), 
                 editedAtMs: FfiConverterOptionInt64.read(from: &buf), 
                 gate: FfiConverterOptionTypeQueueGate.read(from: &buf), 
-                actionPending: FfiConverterBool.read(from: &buf)
+                actionPending: FfiConverterBool.read(from: &buf), 
+                fromLabel: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -8681,6 +8684,7 @@ public struct FfiConverterTypeQueueItem: FfiConverterRustBuffer {
         FfiConverterOptionInt64.write(value.editedAtMs, into: &buf)
         FfiConverterOptionTypeQueueGate.write(value.gate, into: &buf)
         FfiConverterBool.write(value.actionPending, into: &buf)
+        FfiConverterOptionString.write(value.fromLabel, into: &buf)
     }
 }
 
@@ -11569,6 +11573,10 @@ public enum ColorRole: Equatable, Hashable {
     case warningTile
     case buttonBorder
     case onSolid
+    case cyan
+    case accentWash
+    case warningWash
+    case cyanWash
 
 
 
@@ -11695,6 +11703,14 @@ public struct FfiConverterTypeColorRole: FfiConverterRustBuffer {
         case 52: return .buttonBorder
         
         case 53: return .onSolid
+        
+        case 54: return .cyan
+        
+        case 55: return .accentWash
+        
+        case 56: return .warningWash
+        
+        case 57: return .cyanWash
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -11914,6 +11930,22 @@ public struct FfiConverterTypeColorRole: FfiConverterRustBuffer {
         
         case .onSolid:
             writeInt(&buf, Int32(53))
+        
+        
+        case .cyan:
+            writeInt(&buf, Int32(54))
+        
+        
+        case .accentWash:
+            writeInt(&buf, Int32(55))
+        
+        
+        case .warningWash:
+            writeInt(&buf, Int32(56))
+        
+        
+        case .cyanWash:
+            writeInt(&buf, Int32(57))
         
         }
     }

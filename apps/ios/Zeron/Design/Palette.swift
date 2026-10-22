@@ -99,6 +99,10 @@ enum Palette {
         case .warningTile: warning.withAlphaComponent(0.12)
         case .buttonBorder: dual(UIColor(white: 0, alpha: 0.135), UIColor(white: 1, alpha: 0.1))
         case .onSolid: background
+        case .cyan: dynamic(0x0E7490, 0x22D3EE)
+        case .accentWash: dynamic(0x5B43E8, 0x8B7CF6, alpha: 0.14)
+        case .warningWash: dynamic(0xA16207, 0xFACC15, alpha: 0.14)
+        case .cyanWash: dynamic(0x0E7490, 0x22D3EE, alpha: 0.14)
         }
     }
 }

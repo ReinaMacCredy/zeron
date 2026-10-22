@@ -69,6 +69,10 @@ pub enum ColorRole {
     WarningTile,
     ButtonBorder,
     OnSolid,
+    Cyan,
+    AccentWash,
+    WarningWash,
+    CyanWash,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]

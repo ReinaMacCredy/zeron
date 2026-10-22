@@ -149,6 +149,7 @@ pub struct QueueItem {
     pub gate: Option<QueueGate>,
     /// A Send-now / Remove is awaiting the host's acknowledgement.
     pub action_pending: bool,
+    pub from_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -318,6 +319,7 @@ impl From<&zc::ComposerState> for ComposerState {
                         }
                     }),
                     action_pending: q.action_pending,
+                    from_label: q.from_label.clone(),
                 })
                 .collect(),
             pending_sends: c.pending_sends.iter().map(Into::into).collect(),

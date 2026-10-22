@@ -267,7 +267,7 @@ final class QueuePanel: UIView {
 
     private func row(_ item: SessionChrome.QueuedItem, index: Int, count: Int) -> UIView {
         let v = UIView()
-        v.heightAnchor.constraint(equalToConstant: 40).isActive = true
+        v.heightAnchor.constraint(equalToConstant: item.from == nil ? 40 : 52).isActive = true
         let icon = UIImageView(image: UIImage(systemName: "clock", withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .medium)))
         icon.tintColor = Palette.tertiary
         let thumb = UIImageView(image: item.thumbnail)
@@ -279,6 +279,14 @@ final class QueuePanel: UIView {
         label.text = item.gate.map { "\($0) · \(item.text)" } ?? item.text
         label.font = Fonts.ui(.sans, 15)
         label.textColor = Palette.text
+        let from = UILabel()
+        from.text = item.from
+        from.font = Fonts.ui(.sans, 12)
+        from.textColor = Palette.tertiary
+        from.isHidden = item.from == nil
+        let text = UIStackView(arrangedSubviews: [label, from])
+        text.axis = .vertical
+        text.spacing = 1
         var sendConfig = UIButton.Configuration.plain()
         sendConfig.image = UIImage(systemName: "arrow.up.circle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .regular))
         sendConfig.baseForegroundColor = Palette.text
@@ -296,15 +304,17 @@ final class QueuePanel: UIView {
             UIAction(title: "Move Down", image: UIImage(systemName: "arrow.down"), attributes: index == count - 1 ? .disabled : []) { [weak self] _ in self?.onAction?(item.id, .moveDown) },
             UIAction(title: "Remove", image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in self?.onAction?(item.id, .remove) },
         ])
-        for s in [icon, thumb, label, send, more] {
+        for s in [icon, thumb, text, send, more] {
             s.translatesAutoresizingMaskIntoConstraints = false
             v.addSubview(s)
         }
         // A long message fades inside the row; it must never outweigh the
         // row's width (it used to stretch the row past the card and push the
         // send / more buttons off the edge).
-        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        for l in [text, label, from] {
+            l.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            l.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        }
         for b in [send, more] {
             b.setContentCompressionResistancePriority(.required, for: .horizontal)
             b.setContentHuggingPriority(.required, for: .horizontal)
@@ -316,9 +326,9 @@ final class QueuePanel: UIView {
             thumb.centerYAnchor.constraint(equalTo: v.centerYAnchor),
             thumb.widthAnchor.constraint(equalToConstant: item.thumbnail == nil ? 0 : 26),
             thumb.heightAnchor.constraint(equalToConstant: 26),
-            label.leadingAnchor.constraint(equalTo: thumb.trailingAnchor, constant: item.thumbnail == nil ? 0 : 8),
-            label.centerYAnchor.constraint(equalTo: v.centerYAnchor),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: send.leadingAnchor, constant: -4),
+            text.leadingAnchor.constraint(equalTo: thumb.trailingAnchor, constant: item.thumbnail == nil ? 0 : 8),
+            text.centerYAnchor.constraint(equalTo: v.centerYAnchor),
+            text.trailingAnchor.constraint(lessThanOrEqualTo: send.leadingAnchor, constant: -4),
             send.trailingAnchor.constraint(equalTo: more.leadingAnchor),
             send.centerYAnchor.constraint(equalTo: v.centerYAnchor),
             more.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -4),

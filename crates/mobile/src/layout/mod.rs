@@ -13,6 +13,8 @@ pub mod display;
 mod markdown;
 mod file_icons;
 mod rows;
+mod seams;
+mod strip;
 pub(crate) mod style;
 mod tools;
 
@@ -431,12 +433,22 @@ impl TranscriptView {
         let tx = Mutex::new(self.tx.lock().unwrap().clone());
         let weak = Arc::downgrade(&client);
         let guard = handle.watch(move |snap| {
-            let harness = weak.upgrade().and_then(|client| {
+            let client = weak.upgrade();
+            let harness = client.as_ref().and_then(|client| {
                 let wire = client.client.workspace().session(&chat_id)?.harness.clone()?;
                 serde_json::from_value(serde_json::Value::String(wire)).ok()
             });
+            let entries = snap.transcript_messages();
+            let chats: seams::Chats = client
+                .map(|client| {
+                    std::iter::once(chat_id.clone())
+                        .chain(entries.iter().flat_map(|e| seams::entry_refs(e)))
+                        .filter_map(|id| Some((id.clone(), seams::ChatRef::of(&client.client.chat(&id)?))))
+                        .collect()
+                })
+                .unwrap_or_default();
             let input = TranscriptInput {
-                entries: snap.transcript_messages(),
+                entries,
                 pending: snap
                     .pending
                     .iter()
@@ -450,6 +462,8 @@ impl TranscriptView {
                 streaming: snap.streaming,
                 input_answers: snap.input_answers.clone(),
                 harness,
+                chat_id: Some(chat_id.clone()),
+                chats: Arc::new(chats),
             };
             let _ = tx.lock().unwrap().send(Msg::Input(input));
         });
@@ -545,6 +559,8 @@ pub(crate) fn debug_input(entries: Vec<DebugEntry>, working: bool) -> Transcript
         streaming: working,
         input_answers: Default::default(),
         harness: None,
+        chat_id: None,
+        chats: Default::default(),
     }
 }
 
@@ -686,6 +702,7 @@ impl Worker {
             .is_some_and(|r| match &r.core.content {
                 rows::Content::Tools(t) => t.expanded,
                 rows::Content::User(u) => u.expanded,
+                rows::Content::Strip(s) => s.open == Some(true),
                 _ => false,
             })
     }

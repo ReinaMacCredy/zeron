@@ -9,13 +9,15 @@ use std::sync::Arc;
 
 use zeron_doc::parts::{MessagePart, SubagentStatus};
 use zeron_markdown::parser::{Block, BlockTree, IncrementalParser, InlineRun, InlineStyle};
-use zeron_proto::{HarnessId, ToolCall};
+use zeron_proto::{ChildRoute, DelegationStatus, HarnessId, ToolCall};
 use zeron_text::WhiteSpace;
 
 use super::display::{ColorRole, Decoration, DisplayBuilder, FadeEdge, WidgetKind};
 use super::file_icons::{basename, file_icon_asset};
 use super::markdown::{Ctx, PText, Px, SpanPaint, place_text, prepare_plain};
 use super::rows::{Content, RowBuilder, RowCore, RowKind, next_version, place_text_lines, quick_hash, row_key};
+use super::seams::{ChatRef, Chats, brand_icon, model_label, route_badge, route_detail, single_line};
+use super::strip::chat_link;
 use super::style::{Family, Weight, baseline};
 
 /// Desktop → phone scale (12pt tool text → 13.5pt).
@@ -38,6 +40,7 @@ const DIFF_MAX_LINES: usize = 600;
 const CALL_WRAP_COLS: usize = 80;
 const AGENT_ROW: f32 = 38.0;
 const AGENT_CARD: f32 = 30.0;
+const AGENT_SUB: f32 = 16.0;
 
 fn d(px: Px, v: f32) -> f32 {
     px.v(v * T)
@@ -54,6 +57,21 @@ pub(crate) struct ToolLine {
     pub key: u64,
     pub open: bool,
     pub body: Vec<DetailBlock>,
+    pub agent: Option<AgentExtra>,
+}
+
+pub(crate) struct AgentExtra {
+    pub trailing: Option<PText>,
+    pub meta: Option<PText>,
+    pub route: Option<RouteBadge>,
+    pub open: Option<String>,
+}
+
+pub(crate) struct RouteBadge {
+    pub label: PText,
+    pub wash: ColorRole,
+    pub title: String,
+    pub detail: String,
 }
 
 pub(crate) struct ToolGroup {
@@ -137,11 +155,20 @@ fn tool_icon(call: &ToolCall) -> &'static str {
     }
 }
 
-fn agent_icon(harness: Option<HarnessId>, call: &ToolCall) -> String {
-    HarnessId::brand_of(harness, call.subagent_model())
-        .and_then(|h| serde_json::to_value(h).ok())
-        .and_then(|v| v.as_str().map(|id| format!("mark-{id}")))
-        .unwrap_or_else(|| "tool-bot".to_owned())
+fn spawn_tag(harness: Option<HarnessId>, call: &ToolCall) -> Option<String> {
+    if let Some(model) = call.subagent_model() {
+        return Some(model_label(harness, model));
+    }
+    let (ToolCall::Unknown { input, .. } | ToolCall::Mcp { input, .. }) = call else {
+        return None;
+    };
+    input
+        .as_ref()?
+        .get("subagent_type")?
+        .as_str()
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty())
+        .map(str::to_owned)
 }
 
 fn file_path(call: &ToolCall) -> Option<&str> {
@@ -766,7 +793,18 @@ impl RowBuilder {
     }
 
     /// One group of consecutive tool / thought parts (`{msg}#g{n}`).
-    pub(crate) fn tool_row(&mut self, ctx: &mut Ctx, entry_id: &str, id: &str, parts: &[&MessagePart], live: bool, agents: bool) -> RowCore {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tool_row(
+        &mut self,
+        ctx: &mut Ctx,
+        entry_id: &str,
+        id: &str,
+        parts: &[&MessagePart],
+        live: bool,
+        agents: bool,
+        chats: &Chats,
+        own: Option<&ChatRef>,
+    ) -> RowCore {
         let key = row_key(id);
         let calls: Vec<(ToolCall, bool)> = parts
             .iter()
@@ -794,6 +832,8 @@ impl RowBuilder {
             out_lh: ctx.typo.px(OUT_LH * T),
         };
         let medium = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
+        let small = ctx.typo.style(Family::Sans, Weight::Regular, false, 11.0 * T);
+        let small_lh = ctx.typo.px(AGENT_SUB * T);
         let summary = prepare_plain(ctx, &group_summary(thoughts, &calls), st.label, st.lh, ColorRole::TextSecondary, WhiteSpace::Pre);
         let mut lines = Vec::new();
         if expanded {
@@ -801,6 +841,11 @@ impl RowBuilder {
             for (i, part) in parts.iter().enumerate() {
                 let dkey = row_key(&format!("{id}/{}", part.id()));
                 match part {
+                    MessagePart::Tool { call, subagent_ref, delegate_route, .. }
+                        if agents && call.is_delegate_task() && (subagent_ref.is_some() || delegate_route.is_some()) =>
+                    {
+                        lines.push(delegate_line(ctx, &st, medium, call, subagent_ref.as_deref(), delegate_route.as_ref(), dkey, chats, own));
+                    }
                     MessagePart::Tool { call, is_error, resolved, subagent_ref, subagent_status, .. } => {
                         // Computer calls show their title only: arguments can hold typed text.
                         let computer = zeron_client::computer::computer_tool(call);
@@ -834,10 +879,16 @@ impl RowBuilder {
                             body.extend(lines_block(ctx, &st, &call_text(call), Some(CALL_WRAP_COLS)));
                             body.extend(result_block(ctx, &st, part));
                         }
+                        let agent = (agents && call.is_subagent_spawn()).then(|| AgentExtra {
+                            trailing: spawn_tag(self.harness, call).map(|tag| prepare_plain(ctx, &tag, small, small_lh, ColorRole::TextFaint, WhiteSpace::Pre)),
+                            meta: None,
+                            route: None,
+                            open: None,
+                        });
                         lines.push(ToolLine {
                             icon: match (computer, agents) {
                                 (Some(_), _) => "cursorarrow".to_owned(),
-                                (None, true) if subagent_ref.is_some() => agent_icon(self.harness, call),
+                                (None, true) if subagent_ref.is_some() => brand_icon(self.harness, call.subagent_model()),
                                 (None, _) => tool_icon(call).to_owned(),
                             },
                             label: prepare_plain(ctx, label, if agents { medium } else { st.label }, st.lh, color, WhiteSpace::Pre),
@@ -848,6 +899,7 @@ impl RowBuilder {
                             key: dkey,
                             open,
                             body,
+                            agent,
                         });
                     }
                     MessagePart::Reasoning { text, .. } => {
@@ -875,6 +927,7 @@ impl RowBuilder {
                             key: dkey,
                             open,
                             body,
+                            agent: None,
                         });
                     }
                     _ => {}
@@ -889,6 +942,89 @@ impl RowBuilder {
             content: Content::Tools(ToolGroup { summary, lines, expanded, live, agents }),
             copy_text: String::new(),
         }
+    }
+}
+
+/// Unbound with a route, the delegate ran as this chat's native sub-agent.
+#[allow(clippy::too_many_arguments)]
+fn delegate_line(
+    ctx: &mut Ctx,
+    st: &Styles,
+    medium: super::style::Resolved,
+    call: &ToolCall,
+    child: Option<&str>,
+    native_route: Option<&ChildRoute>,
+    key: u64,
+    chats: &Chats,
+    own: Option<&ChatRef>,
+) -> ToolLine {
+    let chat = child.and_then(|id| chats.get(id));
+    let native = child.is_none();
+    let runs_on = if native { own } else { chat };
+    let harness = runs_on.and_then(|c| c.harness);
+    let model = runs_on.and_then(|c| c.model.as_deref());
+    let status = chat.and_then(|c| c.status);
+    let failed = status == Some(DelegationStatus::Failed);
+    let route = if native { native_route.cloned() } else { chat.and_then(|c| c.route.clone()) };
+    let name = harness.map_or("Agent", |h| h.display_name());
+    let label = if native { format!("{name} native") } else { name.to_owned() };
+    let title = if native {
+        let input = match call {
+            ToolCall::Mcp { input, .. } | ToolCall::Unknown { input, .. } => input.as_ref(),
+            _ => None,
+        };
+        input.and_then(|i| i.get("title")?.as_str()).or(call.delegate_task_text()).map(single_line)
+    } else {
+        chat.and_then(|c| c.title.as_deref()).map(single_line)
+    }
+    .filter(|t| !t.is_empty())
+    .unwrap_or_else(|| "Delegated task".into());
+    let small = ctx.typo.style(Family::Sans, Weight::Regular, false, 11.0 * T);
+    let small_lh = ctx.typo.px(AGENT_SUB * T);
+    let role = route.as_ref().and_then(|r| r.role.clone());
+    let model_text = model.map(|m| model_label(harness, m));
+    let meta = match (role, model_text) {
+        (Some(role), Some(model)) => Some(format!("{role} · {model}")),
+        (Some(role), None) => Some(role),
+        (None, model) => model,
+    };
+    let route_badge = route.as_ref().and_then(|r| {
+        let (text, tint) = route_badge(r)?;
+        let wash = match tint {
+            ColorRole::Accent => ColorRole::AccentWash,
+            ColorRole::Warning => ColorRole::WarningWash,
+            _ => ColorRole::CyanWash,
+        };
+        let ran = harness.map(|h| (h, model));
+        let parent = own.and_then(|o| Some((o.harness?, o.model.as_deref())));
+        let (title, detail) = route_detail(r, ran, parent, native);
+        Some(RouteBadge {
+            label: prepare_plain(ctx, &text, small, small_lh, tint, WhiteSpace::Pre),
+            wash,
+            title,
+            detail,
+        })
+    });
+    let trailing = (!native).then(|| {
+        let state = zeron_proto::transcript::delegate_state_text(status, chat.and_then(|c| c.elapsed_secs), false);
+        prepare_plain(ctx, &state, small, small_lh, if failed { ColorRole::Danger } else { ColorRole::TextFaint }, WhiteSpace::Pre)
+    });
+    ToolLine {
+        icon: brand_icon(harness, model),
+        label: prepare_plain(ctx, &label, medium, st.lh, if failed { ColorRole::Danger } else { ColorRole::TextSecondary }, WhiteSpace::Pre),
+        detail: Some(prepare_plain(ctx, &title, st.label, st.lh, if failed { ColorRole::Danger } else { ColorRole::TextSoft }, WhiteSpace::Pre)),
+        badge: None,
+        failed,
+        running: status == Some(DelegationStatus::Running),
+        key,
+        open: false,
+        body: Vec::new(),
+        agent: Some(AgentExtra {
+            trailing,
+            meta: meta.map(|m| prepare_plain(ctx, &m, small, small_lh, ColorRole::TextFaint, WhiteSpace::Pre)),
+            route: route_badge,
+            open: child.map(chat_link),
+        }),
     }
 }
 
@@ -1101,38 +1237,102 @@ fn place_block(block: &DetailBlock, px: Px, bx: f32, by: f32, bw: f32, out: Opti
     }
 }
 
-/// Subagent spawns: 38pt rows holding a bordered 30pt card — icon tile,
-/// "Agent", the description, a mini spinner while it runs.
+/// Subagent spawns and delegates: a bordered 30pt card per call, plus a meta
+/// line with the route badge for delegates.
+fn agent_card_h(line: &ToolLine, px: Px) -> f32 {
+    let sub = line.agent.as_ref().is_some_and(|a| a.meta.is_some() || a.route.is_some());
+    d(px, AGENT_CARD) + if sub { d(px, AGENT_SUB + 6.0) } else { 0.0 }
+}
+
 fn place_agents(t: &ToolGroup, px: Px, x: f32, y: f32, cw: f32, mut out: Option<&mut DisplayBuilder>) -> f32 {
-    let row = d(px, AGENT_ROW);
-    let h = row * t.lines.len() as f32;
+    let margin = d(px, AGENT_ROW - AGENT_CARD);
+    let h = t.lines.iter().map(|l| agent_card_h(l, px) + margin).sum();
     let Some(o) = out.as_deref_mut() else { return h };
-    for (i, line) in t.lines.iter().enumerate() {
-        let ry = y + i as f32 * row;
-        let card_y = ry + (row - d(px, AGENT_CARD)) / 2.0;
-        let card_h = d(px, AGENT_CARD);
+    let mut ry = y;
+    for line in &t.lines {
+        let card_h = agent_card_h(line, px);
+        let head = d(px, AGENT_CARD);
+        let card_y = ry + margin / 2.0;
+        ry += card_h + margin;
         o.fill(x, card_y, cw, card_h, d(px, 9.0), ColorRole::AgentCard);
         o.hairline(x, card_y, cw, card_h, d(px, 9.0), ColorRole::AgentCardBorder);
         let tile = d(px, 18.0);
         let tx = x + d(px, 8.0);
-        let ty = card_y + (card_h - tile) / 2.0;
+        let ty = card_y + (head - tile) / 2.0;
         o.fill(tx, ty, tile, tile, d(px, 5.0), ColorRole::AgentTile);
         let is = d(px, 12.0);
-        o.widget(WidgetKind::Icon { name: line.icon.clone(), color: ColorRole::TextSecondary }, (tx + (tile - is) / 2.0, ty + (tile - is) / 2.0, is, is), None);
+        let icon_color = if line.failed { ColorRole::Danger } else { ColorRole::TextSecondary };
+        o.widget(WidgetKind::Icon { name: line.icon.clone(), color: icon_color }, (tx + (tile - is) / 2.0, ty + (tile - is) / 2.0, is, is), None);
         let lx = tx + tile + d(px, 8.0);
         let lw = line.label.p.max_content_width();
-        place_text(&line.label, lx, card_y + (card_h - line.label.lh) / 2.0, lw + 1.0, Some(o));
-        let spin = if line.running { d(px, 14.0) + d(px, 8.0) } else { 0.0 };
-        if let Some(detail) = &line.detail {
-            let dx = lx + lw + d(px, 8.0);
-            let avail = x + cw - d(px, 8.0) - spin - dx;
-            if avail > 1.0 {
-                place_text_lines(detail, dx, card_y + (card_h - detail.lh) / 2.0, avail, 1, px, o);
-            }
+        place_text(&line.label, lx, card_y + (head - line.label.lh) / 2.0, lw + 1.0, Some(o));
+        let extra = line.agent.as_ref();
+        let mut right = x + cw - d(px, 8.0);
+        if let Some(url) = extra.and_then(|a| a.open.as_ref()) {
+            right -= tile;
+            o.fill(right, ty, tile, tile, d(px, 5.0), ColorRole::ToolBadge);
+            let s = d(px, 10.0);
+            o.widget(
+                WidgetKind::Icon {
+                    name: "arrow.up.right".into(),
+                    color: ColorRole::TextSecondary,
+                },
+                (right + (tile - s) / 2.0, ty + (tile - s) / 2.0, s, s),
+                None,
+            );
+            o.links.push(super::display::LinkHit {
+                x,
+                y: card_y,
+                w: cw,
+                h: head,
+                url: url.clone(),
+                scroller: o.scroller,
+            });
+            right -= d(px, 8.0);
         }
         if line.running {
             let s = d(px, 14.0);
-            o.widget(WidgetKind::Spinner, (x + cw - d(px, 8.0) - s, card_y + (card_h - s) / 2.0, s, s), None);
+            right -= s;
+            o.widget(WidgetKind::Spinner, (right, card_y + (head - s) / 2.0, s, s), None);
+            right -= d(px, 8.0);
+        }
+        if let Some(trailing) = extra.and_then(|a| a.trailing.as_ref()) {
+            let w = trailing.p.max_content_width().min((right - lx - lw - d(px, 40.0)).max(0.0));
+            if w > 1.0 {
+                right -= w;
+                place_text_lines(trailing, right, card_y + (head - trailing.lh) / 2.0, w, 1, px, o);
+                right -= d(px, 8.0);
+            }
+        }
+        if let Some(detail) = &line.detail {
+            let dx = lx + lw + d(px, 8.0);
+            let avail = right - dx;
+            if avail > 1.0 {
+                place_text_lines(detail, dx, card_y + (head - detail.lh) / 2.0, avail, 1, px, o);
+            }
+        }
+        let Some(extra) = extra.filter(|a| a.meta.is_some() || a.route.is_some()) else { continue };
+        let sy = card_y + head - d(px, 3.0);
+        let sub_h = d(px, AGENT_SUB);
+        let limit = x + cw - d(px, 8.0);
+        let mut sx = lx;
+        if let Some(meta) = &extra.meta {
+            let w = meta.p.max_content_width().min(limit - sx);
+            place_text_lines(meta, sx, sy + (sub_h - meta.lh) / 2.0, w.max(1.0), 1, px, o);
+            sx += w + d(px, 6.0);
+        }
+        if let Some(badge) = &extra.route {
+            let pad = d(px, 6.0);
+            let w = (badge.label.p.max_content_width() + pad * 2.0).min(limit - sx);
+            if w > pad * 3.0 {
+                o.fill(sx, sy, w, sub_h, d(px, 4.0), badge.wash);
+                place_text_lines(&badge.label, sx + pad, sy + (sub_h - badge.label.lh) / 2.0, w - pad * 2.0, 1, px, o);
+                o.widget(
+                    WidgetKind::Detail { title: badge.title.clone() },
+                    (sx, sy - d(px, 4.0), w, sub_h + d(px, 8.0)),
+                    Some(badge.detail.clone()),
+                );
+            }
         }
     }
     h
@@ -1146,6 +1346,11 @@ pub(crate) fn heap_bytes(t: &ToolGroup) -> usize {
                 l.label.p.heap_bytes()
                     + l.detail.as_ref().map_or(0, |d| d.p.heap_bytes())
                     + l.badge.as_ref().map_or(0, |b| b.1.p.heap_bytes())
+                    + l.agent.as_ref().map_or(0, |a| {
+                        a.trailing.as_ref().map_or(0, |t| t.p.heap_bytes())
+                            + a.meta.as_ref().map_or(0, |t| t.p.heap_bytes())
+                            + a.route.as_ref().map_or(0, |r| r.label.p.heap_bytes() + r.detail.len())
+                    })
                     + l.body
                         .iter()
                         .map(|b| match b {

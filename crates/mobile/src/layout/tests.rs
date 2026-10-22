@@ -730,7 +730,7 @@ fn actions(frame: &LayoutFrame, row: u32) -> Vec<display::CardAction> {
 }
 
 #[test]
-fn computer_notes_become_cards_and_other_system_text_stays_markdown() {
+fn computer_notes_become_cards_and_other_system_text_is_a_divider() {
     use zeron_client::computer::{CONTROL_ON_DISCLOSURE, ESCAPE_STOP_NOTICE, SETUP_NOTE, UNAVAILABLE_NOTE};
     use zeron_doc::schema::MessageRole::System;
     for (note, hint) in [
@@ -751,7 +751,38 @@ fn computer_notes_become_cards_and_other_system_text_stays_markdown() {
         assert!(actions(&frame, 0).is_empty());
     }
     let other = frame_of(vec![message("n", System, vec![text_part("t0", "Context compacted")])], 390.0);
-    assert_eq!(kinds(&other), [RowKind::Markdown]);
+    assert_eq!(kinds(&other), [RowKind::Chip]);
+    assert_eq!(other.display(0).unwrap().text, "Context compacted");
+}
+
+#[test]
+fn thread_sent_rows_route_by_sender() {
+    use zeron_doc::schema::MessageRole::User;
+    let from = |id: &str, chat: &str, text: &str| {
+        let mut entry = (*message(id, User, vec![text_part("t0", text)])).clone();
+        entry.from_chat_id = Some(chat.into());
+        Arc::new(entry)
+    };
+    let child = seams::ChatRef { title: Some("Fix it".into()), delegated_by: Some("own".into()), ..Default::default() };
+    let peer = seams::ChatRef { title: Some("Peer".into()), ..Default::default() };
+    let mut w = worker(390.0);
+    w.input = TranscriptInput {
+        entries: vec![
+            from("a", "child", "Delegated task child (\"Fix it\") completed."),
+            from("b", "peer", "hello"),
+            from("c", "own", "keep going"),
+            message("d", User, vec![text_part("t0", zeron_proto::RESUME_PROMPT)]),
+        ],
+        chat_id: Some("own".into()),
+        chats: Arc::new([("child".into(), child), ("peer".into(), peer)].into_iter().collect()),
+        ..Default::default()
+    };
+    let frame = w.pass();
+    assert_eq!(kinds(&frame), [RowKind::Chip, RowKind::Chip, RowKind::Markdown, RowKind::Chip, RowKind::User, RowKind::Chip]);
+    let text = |i| frame.display(i).unwrap().text;
+    assert!(text(0).contains("Fix it"), "{}", text(0));
+    assert!(text(1).contains("Peer"), "{}", text(1));
+    assert_eq!(text(5), "Resumed");
 }
 
 #[test]
