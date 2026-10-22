@@ -361,13 +361,6 @@ pub(crate) fn tree_watch(state: &AppState, root: &str) -> Watch {
     }
 }
 
-pub(crate) fn watched_count(watches: &[Watch]) -> usize {
-    watches
-        .iter()
-        .filter(|watch| **watch == Watch::Watched)
-        .count()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Sender {
     You,
@@ -987,6 +980,13 @@ struct Mission {
 }
 
 const RAIL_OPEN_TREES: usize = 4;
+const VIEW_FRESH: Duration = Duration::from_secs(1);
+
+struct View {
+    built: Instant,
+    missions: Vec<Mission>,
+    feed: Feed,
+}
 
 impl Mission {
     fn fraction(&self) -> f32 {
@@ -1125,7 +1125,7 @@ struct Arrival {
 
 struct RowMotion {
     fold: Fold,
-    row: Row,
+    row: Rc<Row>,
     arrival: Option<Arrival>,
 }
 
@@ -1203,6 +1203,7 @@ pub struct SupervisorPage {
     tabs: Rc<RefCell<TabProbe>>,
     underline: Option<(usize, Tween, Tween)>,
     memory: Memory,
+    view: Option<View>,
     rows: HashMap<String, RowMotion>,
     groups: HashMap<String, GroupMotion>,
     arrivals: HashSet<String>,
@@ -1279,6 +1280,7 @@ impl SupervisorPage {
             tabs: Rc::default(),
             underline: None,
             memory: Memory::default(),
+            view: None,
             rows: HashMap::new(),
             groups: HashMap::new(),
             arrivals: HashSet::new(),
@@ -1330,6 +1332,7 @@ impl SupervisorPage {
         }
         self.entered_at = (!motion::reduced_motion(cx)).then(Instant::now);
         self.fresh = true;
+        self.view = None;
         self.rows.clear();
         self.groups.clear();
         self.arrivals.clear();
@@ -1391,6 +1394,7 @@ impl SupervisorPage {
     }
 
     fn on_state(&mut self, cx: &mut Context<Self>) {
+        self.view = None;
         if matches!(self.settings, Loadable::Idle) {
             self.load_settings(cx);
         }
@@ -1500,6 +1504,7 @@ impl SupervisorPage {
             cx.spawn(async move |page, cx| {
                 cx.background_executor().timer(wait).await;
                 page.update(cx, |page, cx| {
+                    page.view = None;
                     page.schedule_effect_check(cx);
                     cx.notify();
                 })
@@ -2225,7 +2230,9 @@ impl SupervisorPage {
             any_shown |= shown;
             seen.insert(row.key.clone());
             if let Some(motion) = self.rows.get_mut(&row.key) {
-                motion.row = row.clone();
+                if !Rc::ptr_eq(&motion.row, row) {
+                    motion.row = Rc::clone(row);
+                }
                 motion.fold.set(shown, ROW_FOLD, snap, now);
                 if motion
                     .arrival
@@ -2243,7 +2250,7 @@ impl SupervisorPage {
                 row.key.clone(),
                 RowMotion {
                     fold,
-                    row: row.clone(),
+                    row: Rc::clone(row),
                     arrival: arriving.then(|| Arrival {
                         slide: run(0.0, 1.0, ARRIVE, reduced, now),
                     }),
@@ -3571,17 +3578,27 @@ impl SupervisorPage {
             .as_deref()
             .and_then(|id| plan.steps.iter().find(|row| row.step.id == id));
         let thread = self.owner_thread(owner, cx);
-        let (chat, entries) = {
+        let (chat, received) = {
             let state = self.state.read(cx);
             let chat = thread
                 .as_deref()
                 .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
                 .cloned();
-            let entries = thread
-                .as_deref()
-                .map(|id| state.sub_transcript(id).to_vec())
-                .unwrap_or_default();
-            (chat, entries)
+            let received = thread.as_deref().map(|own| {
+                let labels = step_labels(&plan);
+                messages_it_got(
+                    state.sub_transcript(own),
+                    own,
+                    task.chat_id.as_deref(),
+                    &|chat_id| {
+                        labels
+                            .iter()
+                            .find(|(id, _)| id == chat_id)
+                            .map(|(_, label)| label.clone())
+                    },
+                )
+            });
+            (chat, received)
         };
         let removed = owner.step_id.is_some() && step.is_none();
         let title = match step {
@@ -3679,15 +3696,6 @@ impl SupervisorPage {
                 ))
             };
         }
-        let received = thread.as_deref().map(|own| {
-            let labels = step_labels(&plan);
-            messages_it_got(&entries, own, task.chat_id.as_deref(), &|chat_id| {
-                labels
-                    .iter()
-                    .find(|(id, _)| id == chat_id)
-                    .map(|(_, label)| label.clone())
-            })
-        });
         let mut messages =
             block("MESSAGES IT GOT").debug_selector(|| "supervisor-brief-messages".into());
         messages = match received {
@@ -4017,25 +4025,33 @@ impl Render for SupervisorPage {
         let theme = Theme::of(cx).clone();
         let (now, utc) = (Instant::now(), Utc::now());
         let reduced = motion::reduced_motion(cx);
-        let missions = missions(self.state.read(cx), utc);
-        let watches: Vec<Watch> = missions
-            .iter()
-            .filter(|m| m.done_at.is_none())
-            .map(|m| m.watch.clone())
-            .collect();
-        let watched = watched_count(&watches);
-        let (feed, calm) = {
-            let snapshot = self.state.read(cx).supervisor.as_ref();
-            let feed = snapshot
-                .map(|snapshot| {
-                    feed::feed(snapshot, &self.memory, utc, &root_id(self.state.read(cx)))
-                })
-                .unwrap_or_default();
-            let calm = calm_line(snapshot, &feed, self.list_filter, watched, watches.len());
-            (feed, calm)
+        let view = match self.view.take() {
+            Some(view) if now < view.built + VIEW_FRESH => view,
+            _ => {
+                let state = self.state.read(cx);
+                View {
+                    built: now,
+                    missions: missions(state, utc),
+                    feed: state
+                        .supervisor
+                        .as_ref()
+                        .map(|snapshot| feed::feed(snapshot, &self.memory, utc, &root_id(state)))
+                        .unwrap_or_default(),
+                }
+            }
         };
-        self.sync_motion(&feed, &missions, now, reduced);
-        self.sync_trees(&missions, now, cx);
+        let (missions, feed) = (&view.missions, &view.feed);
+        let active = missions.iter().filter(|m| m.done_at.is_none());
+        let watched = active.clone().filter(|m| m.watch == Watch::Watched).count();
+        let calm = calm_line(
+            self.state.read(cx).supervisor.as_ref(),
+            feed,
+            self.list_filter,
+            watched,
+            active.count(),
+        );
+        self.sync_motion(feed, missions, now, reduced);
+        self.sync_trees(missions, now, cx);
         self.sync_underline(now, reduced);
         let frame = self.sync_rail(now, reduced);
         let mode = mode(self.state.read(cx).supervisor.as_ref(), &self.ensure);
@@ -4063,11 +4079,11 @@ impl Render for SupervisorPage {
         .then(|| self.render_status(watched, false, now, &theme, cx));
         let header = enter_block(
             self.enter_progress(0, now),
-            self.render_header(&feed, inline_status, now, &theme, cx),
+            self.render_header(feed, inline_status, now, &theme, cx),
         );
         let body = enter_block(
             self.enter_progress(1, now),
-            self.render_inbox(&feed, &missions, calm, now, cx),
+            self.render_inbox(feed, missions, calm, now, cx),
         );
         let column = widgets::page_column()
             .max_w(px(PAGE_WIDTH))
@@ -4084,7 +4100,7 @@ impl Render for SupervisorPage {
         let bottom = self.render_bottom(now, &theme, window, cx);
         let rail = enter_block(
             self.enter_progress(2, now),
-            self.render_rail(&frame, &feed, &missions, watched, now, &theme, cx),
+            self.render_rail(&frame, feed, missions, watched, now, &theme, cx),
         )
         .h_full();
         let drawer = self
@@ -4094,6 +4110,7 @@ impl Render for SupervisorPage {
         if self.animating(now) {
             window.request_animation_frame();
         }
+        self.view = Some(view);
         let probe = self.width.clone();
         div()
             .id("supervisor-page")
@@ -4243,7 +4260,6 @@ mod tests {
                 Watch::Watched,
             ]
         );
-        assert_eq!(watched_count(&watches), 3);
     }
 
     #[test]

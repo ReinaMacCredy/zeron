@@ -385,7 +385,7 @@ impl SupervisorPage {
             .values()
             .filter(|motion| !motion.fold.gone(now))
             .collect();
-        let groups = feed::grouped(motions.iter().map(|motion| &motion.row));
+        let groups = feed::grouped(motions.iter().map(|motion| &*motion.row));
         let narrow = self
             .rail
             .as_ref()
@@ -1753,7 +1753,7 @@ impl SupervisorPage {
 
     fn render_earlier(
         &self,
-        rows: &[Row],
+        rows: &[Rc<Row>],
         now: Instant,
         theme: &Theme,
         cx: &mut Context<Self>,

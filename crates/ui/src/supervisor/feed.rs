@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use chrono::{DateTime, Duration, Utc};
 use zeron_proto::supervisor::{
@@ -85,9 +86,9 @@ pub(crate) struct Row {
 
 #[derive(Debug, Default)]
 pub(crate) struct Feed {
-    pub open: Vec<Row>,
-    pub declared: Vec<Row>,
-    pub earlier: Vec<Row>,
+    pub open: Vec<Rc<Row>>,
+    pub declared: Vec<Rc<Row>>,
+    pub earlier: Vec<Rc<Row>>,
 }
 
 impl Feed {
@@ -95,7 +96,7 @@ impl Feed {
         self.open.iter().filter(|row| row.kind == kind).count()
     }
 
-    pub(crate) fn rows(&self, filter: Filter) -> impl Iterator<Item = (u8, &Row, bool)> {
+    pub(crate) fn rows(&self, filter: Filter) -> impl Iterator<Item = (u8, &Rc<Row>, bool)> {
         let declared = filter == Filter::Only(Kind::Resource);
         self.open
             .iter()
@@ -334,13 +335,18 @@ pub(crate) fn feed(
     newest_first(&mut rest);
     newest_first(&mut earlier);
     open.extend(rest);
-    for row in open.iter_mut().chain(&mut declared).chain(&mut earlier) {
-        row.group = group_of(&row.entry, root_of);
-    }
+    let shared = |rows: Vec<Row>| {
+        rows.into_iter()
+            .map(|mut row| {
+                row.group = group_of(&row.entry, root_of);
+                Rc::new(row)
+            })
+            .collect()
+    };
     Feed {
-        open,
-        declared,
-        earlier,
+        open: shared(open),
+        declared: shared(declared),
+        earlier: shared(earlier),
     }
 }
 
@@ -513,7 +519,7 @@ mod tests {
         }
     }
 
-    fn keys(rows: &[Row]) -> Vec<&str> {
+    fn keys(rows: &[Rc<Row>]) -> Vec<&str> {
         rows.iter().map(|row| row.key.as_str()).collect()
     }
 
@@ -775,7 +781,7 @@ mod tests {
             ..Default::default()
         };
         let first = feed(&snapshot, &Memory::default(), now, &|_| None);
-        let groups: Vec<(Option<&str>, Vec<&str>)> = grouped(&first.open)
+        let groups: Vec<(Option<&str>, Vec<&str>)> = grouped(first.open.iter().map(|row| &**row))
             .into_iter()
             .map(|group| (group.task, keys_of(&group.rows)))
             .collect();
@@ -792,7 +798,7 @@ mod tests {
         let mut snapshot = snapshot;
         snapshot.interventions[0].task_id = Some("a".into());
         let second = feed(&snapshot, &Memory::default(), now, &|_| None);
-        let a = grouped(&second.open)
+        let a = grouped(second.open.iter().map(|row| &**row))
             .into_iter()
             .find(|group| group.task == Some("a"))
             .map(|group| keys_of(&group.rows));
