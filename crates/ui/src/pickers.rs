@@ -29,8 +29,11 @@ use gpui::{
 
 use zeron_doc::MessageRole;
 use zeron_engine::registry::{HarnessDescriptor, TitleSettings};
+use zeron_proto::model_options::{
+    self, AUTO_COMPACT, CONTEXT_WINDOW, compact_applies, compact_tokens,
+};
 use zeron_proto::{
-    ChatConfig, FolderListing, HarnessId, Model, ModelCatalog, ModelOption, ModelOptionChoice,
+    ChatConfig, FolderListing, HarnessId, Model, ModelCatalog,
     PermissionMode, ProviderInstance, ReasoningLevel, RepoRef, SandboxLevel, Space,
 };
 use zeron_rpc::methods;
@@ -891,29 +894,6 @@ struct SettingGroup {
     choices: Vec<SettingChoice>,
 }
 
-/// The speed selects the effort card's bolt can stand in for, as (option id,
-/// the choice that means "fast"): Claude's `fastMode` off/on and Codex's
-/// `serviceTier` Standard/Fast. The bolt owns one only while the model also
-/// has a ladder AND the select is exactly that pair; a richer tier list
-/// (Flex, Ultra Fast) has no bolt shape and stays a row.
-const SPEED_TOGGLES: [(&str, &str); 2] = [("fastMode", "on"), ("serviceTier", "fast")];
-
-/// The model's speed select as the bolt sees it: `(option, off choice, on
-/// choice)`.
-fn speed_toggle_option(
-    model: &Model,
-) -> Option<(&ModelOption, &ModelOptionChoice, &ModelOptionChoice)> {
-    SPEED_TOGGLES.into_iter().find_map(|(id, on_id)| {
-        let option = model.options.iter().find(|o| o.id == id)?;
-        if option.choices.len() != 2 {
-            return None;
-        }
-        let on = option.choices.iter().find(|c| c.id == on_id)?;
-        let off = option.choices.iter().find(|c| c.id != on_id)?;
-        Some((option, off, on))
-    })
-}
-
 /// The bolt's state for the selected model.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SpeedToggle {
@@ -976,8 +956,6 @@ impl EffortTween {
     }
 }
 
-const CONTEXT_WINDOW: &str = "contextWindow";
-const AUTO_COMPACT: &str = "autoCompact";
 const CONTEXT_CARD_HEIGHT: f32 = 104.0;
 const CONTEXT_WARNING_HEIGHT: f32 = 32.0;
 const CONTEXT_STOP_LABEL_WIDTH: f32 = 36.0;
@@ -1010,15 +988,8 @@ fn selected_value(group: &SettingGroup) -> &str {
         .unwrap_or_default()
 }
 
-// Auto is the model's tuned 1M window, so it closes the track after the explicit sizes.
 fn context_long_stops(compact: &SettingGroup) -> Vec<&SettingChoice> {
-    let (auto, sized): (Vec<_>, Vec<_>) = compact.choices.iter().partition(|c| c.value == "auto");
-    sized.into_iter().chain(auto).collect()
-}
-
-fn compact_applies(window_choice: &str) -> bool {
-    zeron_harness::claude::catalog::context_window_tokens(window_choice)
-        .is_some_and(|tokens| tokens > 200_000)
+    model_options::context_long_stops(&compact.choices, |c| &c.value)
 }
 
 /// A mid-chat model pick awaiting the switch-model dialog's answer. With
@@ -3438,10 +3409,10 @@ impl Pickers {
     }
 
     /// The bolt's speed toggle when the selected model exposes one
-    /// ([`speed_toggle_option`]).
+    /// ([`model_options::speed_toggle_option`]).
     fn speed_toggle(&self, cx: &App) -> Option<SpeedToggle> {
         let model = self.selected_model(cx)?;
-        let (option, off, on) = speed_toggle_option(model)?;
+        let (option, off, on) = model_options::speed_toggle_option(&model.options)?;
         let selections = self.explicit_options(cx);
         let choice = selections
             .get(&option.id)
@@ -7249,7 +7220,7 @@ impl Pickers {
         // With a ladder the Reasoning group renders as the effort card, whose
         // bolt owns the speed select; ladderless models keep it as a row.
         let bolt_owns = (!levels.is_empty())
-            .then(|| self.selected_model(cx).and_then(speed_toggle_option))
+            .then(|| self.selected_model(cx).and_then(|m| model_options::speed_toggle_option(&m.options)))
             .flatten()
             .map(|(option, _, _)| ModelSetting::Option(option.id.clone()));
         let mut groups = self.live_groups(cx);
@@ -7971,7 +7942,7 @@ impl Pickers {
         let (window_cursor, compact_cursor) = (cursor(CONTEXT_WINDOW), cursor(AUTO_COMPACT));
         let window_choice = selected_value(&window);
         let on = compact_applies(window_choice);
-        let threshold = zeron_harness::claude::catalog::compact_threshold(
+        let threshold = model_options::compact_threshold(
             window_choice,
             selected_value(&compact),
         )
@@ -8692,38 +8663,6 @@ fn stepped_track(
         )
 }
 
-fn context_window_warning(
-    option_id: &str,
-    choice_id: &str,
-    selected: bool,
-    usage: Option<zeron_proto::ContextUsage>,
-) -> Option<String> {
-    if option_id != "contextWindow" {
-        return None;
-    }
-    let capacity = zeron_harness::claude::catalog::context_window_tokens(choice_id)?;
-    let tokens = usage?.tokens?;
-    let in_use = compact_tokens(tokens);
-    (tokens > capacity).then(|| {
-        if selected {
-            format!("~{in_use} in use; the next message compacts it")
-        } else {
-            format!(
-                "Switching to {} compacts this chat (~{in_use} in use)",
-                compact_tokens(capacity)
-            )
-        }
-    })
-}
-
-pub(crate) fn compact_tokens(tokens: u64) -> String {
-    if tokens >= 999_500 {
-        format!("{:.1}M", tokens as f64 / 1_000_000.0)
-    } else {
-        format!("{}K", (tokens + 500) / 1_000)
-    }
-}
-
 /// The "Default" marker beside a section's default choice: a ghost badge —
 /// bare muted text, no border or fill (user request; t3code draws an outline
 /// pill here).
@@ -8774,12 +8713,15 @@ fn build_setting_groups(
                     reasoning: None,
                     selected: selected == choice.id,
                     default: option.default_choice == choice.id,
-                    warning: context_window_warning(
-                        &option.id,
-                        &choice.id,
-                        selected == choice.id,
-                        usage,
-                    ),
+                    warning: (option.id == CONTEXT_WINDOW)
+                        .then(|| {
+                            model_options::context_window_warning(
+                                &choice.id,
+                                selected == choice.id,
+                                usage.and_then(|u| u.tokens),
+                            )
+                        })
+                        .flatten(),
                 })
                 .collect(),
         });
@@ -9304,34 +9246,6 @@ fn resizing_chip_text(
     .into_any_element()
 }
 
-/// Fast mode's `(on, off)` choices, whatever form a harness gives it: a
-/// `fastMode`/`fast_mode` on/off toggle (Claude), Cursor's `fast` true/false,
-/// or a tier/speed option offering `fast` (Codex, Devin). Off is the default
-/// when fast isn't, else the other choice — Cursor runs some models fast by
-/// default. Every model then gets the same fast-mode UI.
-fn fast_mode_values(option: &zeron_proto::ModelOption) -> Option<(&str, &str)> {
-    let has = |id: &str| option.choices.iter().any(|choice| choice.id == id);
-    let on = if matches!(option.id.as_str(), "fastMode" | "fast_mode") && has("on") {
-        "on"
-    } else if option.id == "fast" && has("true") {
-        "true"
-    } else if has("fast") {
-        "fast"
-    } else {
-        return None;
-    };
-    let off = if option.default_choice != on && has(&option.default_choice) {
-        option.default_choice.as_str()
-    } else {
-        option
-            .choices
-            .iter()
-            .map(|choice| choice.id.as_str())
-            .find(|id| *id != on)?
-    };
-    Some((on, off))
-}
-
 /// Attach the (single) open popover above a selector trigger.
 fn attach_overlay(
     chip: gpui::Stateful<gpui::Div>,
@@ -9605,16 +9519,7 @@ impl Render for Pickers {
                     .map(|label| (label, None))
             });
         let fast = self.selected_model(cx).is_some_and(|model| {
-            model.options.iter().any(|option| {
-                fast_mode_values(option).is_some_and(|(on, _)| {
-                    self.resolved(cx)
-                        .model_options
-                        .get(&option.id)
-                        .and_then(|value| value.as_str())
-                        .unwrap_or(&option.default_choice)
-                        == on
-                })
-            })
+            model_options::fast_mode_on(&model.options, &self.resolved(cx).model_options)
         });
         let chip_profile = self
             .title
@@ -10583,66 +10488,6 @@ mod tests {
                 })
                 .unwrap();
         }
-    }
-
-    #[test]
-    fn every_fast_mode_encoding_gets_the_same_controls() {
-        let option = |id: &str, choices: &[&str], default: &str| ModelOption {
-            id: id.into(),
-            label: id.into(),
-            choices: choices
-                .iter()
-                .map(|c| ModelOptionChoice {
-                    id: (*c).into(),
-                    label: (*c).into(),
-                })
-                .collect(),
-            default_choice: default.into(),
-        };
-        // Codex tier, Claude toggle, ACP speed and the snake_case toggle.
-        assert_eq!(
-            fast_mode_values(&option("serviceTier", &["default", "fast"], "default")),
-            Some(("fast", "default"))
-        );
-        assert_eq!(
-            fast_mode_values(&option("fastMode", &["off", "on"], "off")),
-            Some(("on", "off"))
-        );
-        assert_eq!(
-            fast_mode_values(&option("speed", &["standard", "fast"], "standard")),
-            Some(("fast", "standard"))
-        );
-        assert_eq!(
-            fast_mode_values(&option("fast_mode", &["off", "on"], "off")),
-            Some(("on", "off"))
-        );
-        // Cursor's true/false switch, off by default (Opus) and on by
-        // default (Grok, Composer): both still toggle between the two.
-        assert_eq!(
-            fast_mode_values(&option("fast", &["false", "true"], "false")),
-            Some(("true", "false"))
-        );
-        assert_eq!(
-            fast_mode_values(&option("fast", &["false", "true"], "true")),
-            Some(("true", "false"))
-        );
-        assert_eq!(
-            fast_mode_values(&option("serviceTier", &["default", "fast"], "fast")),
-            Some(("fast", "default"))
-        );
-        // Not fast mode: other toggles, including Cursor's true/false ones.
-        assert_eq!(
-            fast_mode_values(&option("thinking", &["off", "on"], "off")),
-            None
-        );
-        assert_eq!(
-            fast_mode_values(&option("thinking", &["false", "true"], "true")),
-            None
-        );
-        assert_eq!(
-            fast_mode_values(&option("contextWindow", &["200k", "1m"], "200k")),
-            None
-        );
     }
 
     #[gpui::test]
@@ -13426,46 +13271,6 @@ mod tests {
         })
     }
 
-    #[test]
-    fn context_window_warning_needs_usage_above_the_choice() {
-        let usage = |tokens| {
-            Some(zeron_proto::ContextUsage {
-                tokens,
-                window: Some(1_000_000),
-            })
-        };
-        assert_eq!(
-            context_window_warning("contextWindow", "200k", true, usage(Some(230_412))).as_deref(),
-            Some("~230K in use; the next message compacts it")
-        );
-        assert_eq!(
-            context_window_warning("contextWindow", "200k", false, usage(Some(230_412))).as_deref(),
-            Some("Switching to 200K compacts this chat (~230K in use)")
-        );
-        assert_eq!(
-            context_window_warning("contextWindow", "200k", false, usage(Some(200_000))),
-            None
-        );
-        assert_eq!(
-            context_window_warning("contextWindow", "1m", true, usage(Some(230_412))),
-            None
-        );
-        assert_eq!(
-            context_window_warning("contextWindow", "200k", false, usage(None)),
-            None
-        );
-        assert_eq!(
-            context_window_warning("contextWindow", "200k", false, None),
-            None
-        );
-        assert_eq!(
-            context_window_warning("serviceTier", "200k", false, usage(Some(230_412))),
-            None
-        );
-        assert_eq!(compact_tokens(200_001), "200K");
-        assert_eq!(compact_tokens(1_240_000), "1.2M");
-    }
-
     #[gpui::test]
     fn the_context_window_menu_warns_from_the_selected_chat_usage(cx: &mut gpui::TestAppContext) {
         let handle = existing_claude_chat(cx);
@@ -13658,19 +13463,6 @@ mod tests {
             ));
         }
         model
-    }
-
-    #[test]
-    fn compact_threshold_sits_33k_under_the_effective_window() {
-        let at = |window, compact| {
-            zeron_harness::claude::catalog::compact_threshold(window, compact).map(compact_tokens)
-        };
-        assert_eq!(at("1m", "auto").as_deref(), Some("967K"));
-        assert_eq!(at("1m", "300k").as_deref(), Some("267K"));
-        assert_eq!(at("1m", "400k").as_deref(), Some("367K"));
-        assert_eq!(at("200k", "auto").as_deref(), Some("167K"));
-        assert_eq!(at("200k", "800k").as_deref(), Some("167K"));
-        assert_eq!(at("standard", "auto"), None);
     }
 
     #[test]

@@ -390,7 +390,7 @@ pub struct Model {
     pub options: Vec<ModelOption>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelOption {
     pub id: String,
@@ -399,7 +399,7 @@ pub struct ModelOption {
     pub default_choice: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelOptionChoice {
     pub id: String,

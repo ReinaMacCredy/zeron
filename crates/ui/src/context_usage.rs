@@ -311,7 +311,7 @@ pub(crate) fn with_chat_budget(
 ) -> ContextUsage {
     ContextUsage {
         window: config
-            .and_then(zeron_harness::claude::catalog::chat_budget)
+            .and_then(zeron_proto::model_options::chat_budget)
             .or(usage.window),
         ..usage
     }

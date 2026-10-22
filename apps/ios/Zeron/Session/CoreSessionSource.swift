@@ -15,6 +15,9 @@ final class CoreSessionSource: SessionSource {
         didSet { if hostDevice != oldValue { connectVisuals() } }
     }
     private weak var engine: TranscriptView?
+    private var models: [ModelInfo] = []
+    private var modelsKey = ""
+    private weak var contextSheet: ContextSheetViewController?
 
     init(app: AppModel, client: CoreClient, handle: SessionHandle, chatId: String) {
         self.app = app
@@ -62,10 +65,14 @@ final class CoreSessionSource: SessionSource {
         if let model = row?.modelLabel ?? row?.harnessLabel {
             chips.append(ComposerChip(id: "model", title: model, symbol: nil, icon: BrandMarks.image(for: row?.harness ?? "claude-code", side: 13)))
         }
+        loadModels(harness: row?.harness ?? "claude-code")
+        let config = client.sessionConfig(chatId: chatId)
+        let model = currentModel
         if let r = row?.reasoning, !r.isEmpty {
-            chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: r), symbol: "gauge.with.dots.needle.67percent"))
+            let fast = model.flatMap { m in config.map { fastModeOn(model: m, config: $0) } } ?? false
+            chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: r), symbol: fast ? "bolt.fill" : "gauge.with.dots.needle.67percent"))
         }
-        let mode = client.sessionConfig(chatId: chatId)?.permissionMode ?? .full
+        let mode = config?.permissionMode ?? .full
         if let info = permissionModes().first(where: { $0.mode == mode }) {
             chips.append(ComposerChip(id: "permission", title: info.shortLabel, symbol: Self.permissionSymbol(mode), tint: mode == .full ? Palette.warning : nil))
         }
@@ -77,14 +84,14 @@ final class CoreSessionSource: SessionSource {
         }
         if let usage = c.contextUsage, let tokens = usage.tokens, let window = usage.window, window > 0 {
             let fraction = Double(tokens) / Double(window)
-            if fraction >= 0.5 {
-                chips.append(ComposerChip(
-                    id: "context",
-                    title: "\(Int((fraction * 100).rounded()))% context",
-                    symbol: fraction >= 0.85 ? "exclamationmark.circle" : "circle.lefthalf.filled",
-                    tint: fraction >= 0.85 ? Palette.warning : nil
-                ))
-            }
+            chips.append(ComposerChip(
+                id: "context",
+                title: "\(Int((fraction * 100).rounded()))% context",
+                symbol: fraction >= 0.85 ? "exclamationmark.circle" : "circle.lefthalf.filled",
+                tint: fraction >= 0.85 ? Palette.warning : nil
+            ))
+        } else if contextContent().card != nil {
+            chips.append(ComposerChip(id: "context", title: "Context", symbol: "circle.lefthalf.filled"))
         }
         next.chips = chips
         if let sendFailure {
@@ -120,6 +127,47 @@ final class CoreSessionSource: SessionSource {
             chrome = next
             onChange?()
         }
+        contextSheet?.reload()
+    }
+
+    private func loadModels(harness: String) {
+        let key = "\(hostDevice)|\(harness)"
+        guard key != modelsKey, !hostDevice.isEmpty else { return }
+        modelsKey = key
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let models = await self.client.listModels(deviceId: self.hostDevice, harness: harness)
+            guard self.modelsKey == key else { return }
+            self.models = models
+            self.refresh()
+        }
+    }
+
+    private var currentModel: ModelInfo? {
+        let id = app?.row(chatId)?.model
+        return models.first { $0.id == id } ?? models.first
+    }
+
+    private func contextContent() -> ContextSheetViewController.Content {
+        guard let model = currentModel, let config = client.sessionConfig(chatId: chatId) else { return .init() }
+        return .init(card: contextCard(model: model, config: config, tokens: handle.composer().contextUsage?.tokens))
+    }
+
+    func chipSheet(_ id: String) -> UIViewController? {
+        guard id == "context" else { return nil }
+        let sheet = ContextSheetViewController(
+            content: { [weak self] in self?.contextContent() ?? .init() },
+            toggleLong: { [weak self] in
+                guard let self, let model = self.currentModel else { return }
+                self.setConfig { $0 = toggleLongContext(model: model, config: $0) }
+            },
+            pick: { [weak self] position in
+                guard let self, let model = self.currentModel else { return }
+                self.setConfig { $0 = pickContext(model: model, config: $0, position: position) }
+            }
+        )
+        contextSheet = sheet
+        return sheet.wrapped
     }
 
     /// False when the core refused the message (it stays in the composer).
@@ -239,16 +287,24 @@ final class CoreSessionSource: SessionSource {
                 }
             }])
         case "effort":
-            return UIMenu(title: "Reasoning effort", children: [UIDeferredMenuElement { [weak self] done in
+            return UIMenu(title: "Effort", children: [UIDeferredMenuElement { [weak self] done in
                 guard let self else { return done([]) }
                 Task { @MainActor in
                     let models = (try? await self.client.listModels(deviceId: self.hostDevice, harness: harness)) ?? fallbackModels(harness: harness)
-                    let levels = models.first { $0.id == row.model }?.reasoningLevels ?? models.first?.reasoningLevels ?? []
-                    done(levels.map { l in
+                    let model = models.first { $0.id == row.model } ?? models.first
+                    var items: [UIMenuElement] = (model?.reasoningLevels ?? []).map { l in
                         UIAction(title: reasoningLabel(level: l), state: l == row.reasoning ? .on : .off) { [weak self] _ in
                             self?.setConfig { $0.reasoning = l }
                         }
-                    })
+                    }
+                    if let model, let config = self.client.sessionConfig(chatId: self.chatId), let fast = speedToggle(model: model, config: config) {
+                        items.append(UIMenu(options: .displayInline, children: [
+                            UIAction(title: "Fast", image: UIImage(systemName: fast ? "bolt.fill" : "bolt"), state: fast ? .on : .off) { [weak self] _ in
+                                self?.setConfig { $0 = toggleSpeed(model: model, config: $0) }
+                            },
+                        ]))
+                    }
+                    done(items)
                 }
             }])
         case "permission":

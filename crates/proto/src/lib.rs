@@ -17,6 +17,7 @@ pub mod home;
 pub mod html_render;
 pub mod invocation;
 pub mod model_catalog;
+pub mod model_options;
 pub mod motion;
 pub mod preview;
 pub mod projectless;

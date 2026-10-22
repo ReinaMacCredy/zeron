@@ -35,6 +35,7 @@ mod demo;
 pub mod error;
 pub mod events;
 mod live;
+pub mod model_picks;
 pub mod rpc;
 pub mod runtime;
 pub mod session;

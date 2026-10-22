@@ -107,6 +107,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         composer.mentionSearch = { [weak self] q in await self?.source.searchFiles(q) ?? [] }
         composer.onHeightChange = { [weak self] in self?.view.setNeedsLayout() }
         composer.onActionChange = { [weak self] in self?.render(animated: true) }
+        composer.onChipTap = { [weak self] id, _ in
+            guard let self, let sheet = self.source.chipSheet(id) else { return }
+            self.present(sheet, animated: true)
+        }
         questions.onSubmit = { [weak self] answers in
             guard let self, let id = self.shown.questions?.requestId else { return }
             self.source.answer(requestId: id, answers: answers)

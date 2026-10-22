@@ -79,11 +79,16 @@ protocol SessionSource: AnyObject {
     func finishEdit(text: String?) async
     /// Menu for a composer chip (model, effort, branch…), or nil.
     func chipMenu(_ id: String) -> UIMenu?
+    func chipSheet(_ id: String) -> UIViewController?
     func loadImage(_ reference: String, into view: UIImageView)
     /// An attachment's picture, for opening it full size (an image chip).
     func image(_ reference: String) async -> UIImage?
     /// Workspace files for `@` mentions.
     func searchFiles(_ query: String) async -> [FileMatch]
+}
+
+extension SessionSource {
+    func chipSheet(_ id: String) -> UIViewController? { nil }
 }
 
 enum QueueAction {

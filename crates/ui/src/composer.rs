@@ -14646,7 +14646,7 @@ impl Render for Composer {
                             vec![
                                 format!(
                                     "{} tokens from {} ago \u{b7} cache expired",
-                                    crate::pickers::compact_tokens(offer.tokens),
+                                    zeron_proto::model_options::compact_tokens(offer.tokens),
                                     offer.idle_label()
                                 )
                                 .into(),
