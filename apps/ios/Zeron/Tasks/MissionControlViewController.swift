@@ -11,6 +11,8 @@ final class MissionControlViewController: UIViewController, UICollectionViewDele
     private let plan = PlanMarkdownView()
     private var editingPlan = false
     private var draft = Draft()
+    private var estimate: PlanEstimate?
+    private var estimateKey: String?
 
     struct Row: Hashable {
         let id: String
@@ -224,6 +226,7 @@ final class MissionControlViewController: UIViewController, UICollectionViewDele
                 plan.show(detail.plan)
                 rows.append(Row(id: "plan-text", title: ""))
             }
+            rows += estimateRows(detail)
             if ready {
                 rows.append(Row(id: "approve", title: draft.count > 0 ? "Approve and run with \(changes)" : "Approve and run", glyph: .symbol("play.fill"), tint: Palette.accent, action: true))
             }
@@ -276,6 +279,38 @@ final class MissionControlViewController: UIViewController, UICollectionViewDele
             countdown?.invalidate()
             countdown = nil
         }
+    }
+
+    private func estimateRows(_ detail: TaskDetail) -> [Row] {
+        let key = detail.steps.map { "\($0.id)=\($0.status)" }.joined(separator: ",")
+        if key != estimateKey, let client = app.client {
+            estimateKey = key
+            let id = taskId
+            Task { @MainActor [weak self] in
+                let estimate = try? await client.planEstimate(taskId: id)
+                guard let self, self.estimateKey == key else { return }
+                self.estimate = estimate ?? nil
+                self.reload()
+            }
+        }
+        guard let estimate, !estimate.lines.isEmpty else { return [] }
+        var rows = estimate.lines.enumerated().map { ix, line in
+            Row(
+                id: "est:\(ix)",
+                title: line.title,
+                subtitle: ([line.role, line.runsOn, line.multiplier].compactMap { $0 } + [line.fallback].compactMap { $0 }).joined(separator: " · "),
+                glyph: .symbol(line.fallback == nil ? "cpu" : "exclamationmark.triangle"),
+                tint: line.fallback == nil ? Palette.text : Palette.warning
+            )
+        }
+        rows.append(Row(
+            id: "est-cost",
+            title: "\(estimate.cost) \(estimate.baseline)",
+            subtitle: ([estimate.mix.joined(separator: ", ")] + [estimate.raised].compactMap { $0 }).joined(separator: "\n"),
+            glyph: .symbol("gauge.with.dots.needle.33percent"),
+            tint: estimate.raised == nil ? Palette.text : Palette.warning
+        ))
+        return rows
     }
 
     private var changes: String { draft.count == 1 ? "1 change" : "\(draft.count) changes" }

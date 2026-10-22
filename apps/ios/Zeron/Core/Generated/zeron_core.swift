@@ -1280,6 +1280,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func missionStrip(chatId: String)  -> MissionStrip?
     
+    func planEstimate(taskId: String) async throws  -> PlanEstimate?
+    
     func resolveSupervisorItems(deviceId: String, answers: [ItemAnswer]) async throws 
     
     func resumeSupervisor(deviceId: String) async throws 
@@ -2291,6 +2293,22 @@ open func missionStrip(chatId: String) -> MissionStrip?  {
         FfiConverterString.lower(chatId),uniffiCallStatus
     )
 })
+}
+    
+open func planEstimate(taskId: String)async throws  -> PlanEstimate?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_plan_estimate(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(taskId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypePlanEstimate.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
 open func resolveSupervisorItems(deviceId: String, answers: [ItemAnswer])async throws   {
@@ -7315,6 +7333,72 @@ public func FfiConverterTypeDeviceView_lower(_ value: DeviceView) -> RustBuffer 
 }
 
 
+public struct EstimateLine: Equatable, Hashable {
+    public var title: String
+    public var role: String?
+    public var runsOn: String
+    public var multiplier: String?
+    public var fallback: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(title: String, role: String?, runsOn: String, multiplier: String?, fallback: String?) {
+        self.title = title
+        self.role = role
+        self.runsOn = runsOn
+        self.multiplier = multiplier
+        self.fallback = fallback
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension EstimateLine: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEstimateLine: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EstimateLine {
+        return
+            try EstimateLine(
+                title: FfiConverterString.read(from: &buf), 
+                role: FfiConverterOptionString.read(from: &buf), 
+                runsOn: FfiConverterString.read(from: &buf), 
+                multiplier: FfiConverterOptionString.read(from: &buf), 
+                fallback: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EstimateLine, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterOptionString.write(value.role, into: &buf)
+        FfiConverterString.write(value.runsOn, into: &buf)
+        FfiConverterOptionString.write(value.multiplier, into: &buf)
+        FfiConverterOptionString.write(value.fallback, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEstimateLine_lift(_ buf: RustBuffer) throws -> EstimateLine {
+    return try FfiConverterTypeEstimateLine.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEstimateLine_lower(_ value: EstimateLine) -> RustBuffer {
+    return FfiConverterTypeEstimateLine.lower(value)
+}
+
+
 public struct FaceData: Equatable, Hashable {
     public var role: FaceRole
     public var bytes: Data
@@ -9261,6 +9345,72 @@ public func FfiConverterTypePlanEdit_lift(_ buf: RustBuffer) throws -> PlanEdit 
 #endif
 public func FfiConverterTypePlanEdit_lower(_ value: PlanEdit) -> RustBuffer {
     return FfiConverterTypePlanEdit.lower(value)
+}
+
+
+public struct PlanEstimate: Equatable, Hashable {
+    public var lines: [EstimateLine]
+    public var mix: [String]
+    public var cost: String
+    public var baseline: String
+    public var raised: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(lines: [EstimateLine], mix: [String], cost: String, baseline: String, raised: String?) {
+        self.lines = lines
+        self.mix = mix
+        self.cost = cost
+        self.baseline = baseline
+        self.raised = raised
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PlanEstimate: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePlanEstimate: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PlanEstimate {
+        return
+            try PlanEstimate(
+                lines: FfiConverterSequenceTypeEstimateLine.read(from: &buf), 
+                mix: FfiConverterSequenceString.read(from: &buf), 
+                cost: FfiConverterString.read(from: &buf), 
+                baseline: FfiConverterString.read(from: &buf), 
+                raised: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PlanEstimate, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeEstimateLine.write(value.lines, into: &buf)
+        FfiConverterSequenceString.write(value.mix, into: &buf)
+        FfiConverterString.write(value.cost, into: &buf)
+        FfiConverterString.write(value.baseline, into: &buf)
+        FfiConverterOptionString.write(value.raised, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlanEstimate_lift(_ buf: RustBuffer) throws -> PlanEstimate {
+    return try FfiConverterTypePlanEstimate.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlanEstimate_lower(_ value: PlanEstimate) -> RustBuffer {
+    return FfiConverterTypePlanEstimate.lower(value)
 }
 
 
@@ -18404,6 +18554,30 @@ fileprivate struct FfiConverterOptionTypePlanEdit: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypePlanEstimate: FfiConverterRustBuffer {
+    typealias SwiftType = PlanEstimate?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePlanEstimate.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePlanEstimate.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeProjectRef: FfiConverterRustBuffer {
     typealias SwiftType = ProjectRef?
 
@@ -19054,6 +19228,31 @@ fileprivate struct FfiConverterSequenceTypeDeviceView: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeDeviceView.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeEstimateLine: FfiConverterRustBuffer {
+    typealias SwiftType = [EstimateLine]
+
+    public static func write(_ value: [EstimateLine], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeEstimateLine.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [EstimateLine] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [EstimateLine]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeEstimateLine.read(from: &buf))
         }
         return seq
     }
@@ -20701,6 +20900,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_mission_strip() != 55154) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_plan_estimate() != 37071) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_resolve_supervisor_items() != 57178) {
