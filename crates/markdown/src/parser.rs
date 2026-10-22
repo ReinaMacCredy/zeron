@@ -156,11 +156,7 @@ pub fn parse_full_line_breaks(source: &str) -> BlockTree {
     parse_guarded(source, 0, options(), true)
 }
 
-/// A sent message as markdown, only when it is structured (a list, table,
-/// quote, math, fenced code, or a code/math/link run); plain prose stays a
-/// plain bubble. An agent's "Message from X" attribution becomes a header
-/// with the name in bold. `__init__`, `# comment` lines and indented code
-/// are plain developer text, so they stay text.
+/// `__init__`, `# comment` lines and indented code are plain developer text, so they stay text.
 pub fn user_markdown(text: &str) -> Option<BlockTree> {
     let attribution = text
         .strip_prefix("Message from ")
