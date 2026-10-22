@@ -10,38 +10,6 @@ const WIDE_ROW: f32 = 124.0;
 const WIDE_INTERVENTION: f32 = 330.0;
 const WIDE_FOOTER: f32 = 440.0;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Dest {
-    Lead,
-    Step,
-    Supervisor,
-    Thread,
-}
-
-impl Dest {
-    fn word(self) -> &'static str {
-        match self {
-            Dest::Lead => "the Lead",
-            Dest::Step => "the step",
-            Dest::Thread => "the thread",
-            Dest::Supervisor => "the Supervisor",
-        }
-    }
-}
-
-pub(super) fn dest(row: &NeedsYouRow) -> Dest {
-    match row {
-        NeedsYouRow::Item(item) if item.task_id.is_some() => Dest::Lead,
-        NeedsYouRow::Item(_) => Dest::Supervisor,
-        NeedsYouRow::Input(input) => match input.asker {
-            InputAsker::Lead => Dest::Lead,
-            InputAsker::Step => Dest::Step,
-            InputAsker::Thread => Dest::Thread,
-            InputAsker::Supervisor => Dest::Supervisor,
-        },
-    }
-}
-
 pub(super) fn sheet_row(entry: &Entry) -> Option<&NeedsYouRow> {
     match entry {
         Entry::Needs(row @ NeedsYouRow::Item(_)) => Some(row),
@@ -1083,7 +1051,7 @@ impl SupervisorPage {
         let key = row.key.clone();
         let sel = format!("supervisor-answered-{}", sel_of(&key));
         let title = strip_mission(&needs.title(), mission);
-        let to = dest(needs).word();
+        let to = needs.dest().word();
         let fade = {
             let total = CONFIRM.total().mul_f32(motion::speed_scale()).as_secs_f32();
             let raw = now.saturating_duration_since(reply.flipped).as_secs_f32() / total.max(0.001);
@@ -1188,10 +1156,10 @@ impl SupervisorPage {
             .iter()
             .filter(|row| self.ready(row).is_some())
             .collect();
-        let dests: Vec<Dest> = if ready.is_empty() {
-            sheet.iter().map(|row| dest(row)).collect()
+        let dests: Vec<SendDest> = if ready.is_empty() {
+            sheet.iter().map(|row| row.dest()).collect()
         } else {
-            ready.iter().map(|row| dest(row)).collect()
+            ready.iter().map(|row| row.dest()).collect()
         };
         let to = dests
             .first()
