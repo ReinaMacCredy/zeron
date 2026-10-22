@@ -118,6 +118,7 @@ pub(crate) struct StripTree {
     host: TreeHost,
     fold_hover: Option<String>,
     menu: Popup<RowMenu>,
+    briefs: bool,
     compact: bool,
     lit: bool,
     picked: Option<String>,
@@ -155,11 +156,17 @@ impl StripTree {
             host,
             fold_hover: None,
             menu: Popup::default(),
+            briefs: false,
             compact: false,
             lit: false,
             picked: None,
             rects: RowRects::default(),
         }
+    }
+
+    pub fn with_briefs(mut self, briefs: bool) -> Self {
+        self.briefs = briefs;
+        self
     }
 
     pub fn sample(state: Entity<AppState>, rows: Vec<SampleRow>, cx: &mut Context<Self>) -> Self {
@@ -422,14 +429,16 @@ impl StripTree {
                     tree.open(selection.clone(), chat_id.clone(), cx)
                 })),
             )
-            .child(
-                item("strip-tree-menu-brief", "Brief", icons::DOCUMENT).on_click(cx.listener(
-                    move |tree, _: &ClickEvent, _, cx| {
-                        tree.close_menu(cx);
-                        cx.emit(StripTreeEvent::Brief(brief.clone()));
-                    },
-                )),
-            );
+            .when(self.briefs, |card| {
+                card.child(
+                    item("strip-tree-menu-brief", "Brief", icons::DOCUMENT).on_click(cx.listener(
+                        move |tree, _: &ClickEvent, _, cx| {
+                            tree.close_menu(cx);
+                            cx.emit(StripTreeEvent::Brief(brief.clone()));
+                        },
+                    )),
+                )
+            });
         Some(popover::menu_at(
             "strip-tree-menu",
             menu.position,

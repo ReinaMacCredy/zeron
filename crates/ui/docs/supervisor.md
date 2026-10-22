@@ -151,7 +151,7 @@ Hover a row in the inbox and its mission lights up in the rail: an amber border,
 
 ## Read a brief
 
-Right-click the lead or a step and choose **Brief** to see what that agent was told, in a drawer that slides in from the right. Its header names the thread, the mission and the model, and the branch and commit the thread started on. Then:
+On a mission, right-click the lead or a step and choose **Brief** to see what that agent was told (a tree without a plan has no brief), in a drawer that slides in from the right. Its header names the thread, the mission and the model, and the branch and commit the thread started on. Then:
 
 - **Task**: the mission's title and notes.
 - **Spec**: the plan's overview, and for a step, what the lead wrote for that step.

@@ -3391,6 +3391,7 @@ impl SupervisorPage {
                     crate::tasks::TreeHost::Supervisor,
                     cx,
                 )
+                .with_briefs(plan)
             });
             let id = key.clone();
             let events = cx.subscribe(
@@ -3407,7 +3408,6 @@ impl SupervisorPage {
                     crate::tasks::StripTreeEvent::OpenNative { parent_chat_id, .. } => {
                         cx.emit(SupervisorEvent::OpenChat(parent_chat_id.clone()))
                     }
-                    crate::tasks::StripTreeEvent::Brief(_) if !plan => {}
                     crate::tasks::StripTreeEvent::Brief(selection) => {
                         let step_id = match selection {
                             crate::tasks::Selection::Step(step) => Some(step.clone()),
