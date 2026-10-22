@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use zeron_proto::HarnessId;
 use zeron_proto::compaction::{ResumeCompaction, compact_outcome_notice, resume_compaction_due};
+use zeron_proto::stats_view::CompactSection;
 
-use super::SessionHandle;
+use super::{SessionHandle, lock};
 use crate::error::Result;
 use crate::workspace::SessionRow;
 
@@ -63,6 +64,19 @@ impl SessionHandle {
             Ok(Err(err)) => Some(format!("Compaction failed: {err}")),
             Err(_) => Some("Compaction failed: timed out".into()),
         })
+    }
+
+    pub fn compact_section(&self, now_ms: i64) -> Option<CompactSection> {
+        let plan = lock(&self.core.state)
+            .session
+            .as_ref()
+            .and_then(|session| session.compact_plan);
+        CompactSection::of(
+            plan,
+            self.composer().compacting,
+            self.session_stats().as_ref(),
+            now_ms,
+        )
     }
 
     pub fn keep_full_history(&self) {

@@ -159,9 +159,11 @@ final class CoreSessionSource: SessionSource {
     }
 
     private func contextContent() -> ContextSheetViewController.Content {
-        let stats = handle.statsView(nowMs: Int64(Date().timeIntervalSince1970 * 1000))
-        guard let model = currentModel, let config = client.sessionConfig(chatId: chatId) else { return .init(stats: stats) }
-        return .init(card: contextCard(model: model, config: config, tokens: handle.composer().contextUsage?.tokens), stats: stats)
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let stats = handle.statsView(nowMs: now)
+        let compact = handle.compactSection(nowMs: now)
+        guard let model = currentModel, let config = client.sessionConfig(chatId: chatId) else { return .init(stats: stats, compact: compact) }
+        return .init(card: contextCard(model: model, config: config, tokens: handle.composer().contextUsage?.tokens), stats: stats, compact: compact)
     }
 
     func chipSheet(_ id: String) -> UIViewController? {

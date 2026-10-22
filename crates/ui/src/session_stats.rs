@@ -2,7 +2,7 @@ use crate::theme::Theme;
 use gpui::{Context, IntoElement, SharedString, Task, Window, div, prelude::*, px};
 use zeron_proto::SessionStats;
 use zeron_proto::stats_view::{
-    Cache, chip_label, cost_headline, cost_note, stats_rows, token_split,
+    Cache, CompactSection, chip_label, cost_headline, cost_note, stats_rows, token_split,
 };
 
 fn now_ms() -> i64 {
@@ -306,47 +306,14 @@ impl CompactView {
     }
 }
 
-fn clock(ms: i64) -> String {
-    chrono::DateTime::from_timestamp_millis(ms)
-        .map(|utc| {
-            utc.with_timezone(&chrono::Local)
-                .format("%-I:%M %p")
-                .to_string()
-        })
-        .unwrap_or_default()
-}
-
-fn compact_rows(view: &CompactView, now_ms: i64) -> Vec<(&'static str, String)> {
-    let mut rows = Vec::new();
-    if let Some(cache) = view
-        .stats
-        .and_then(|stats| Cache::of(&stats, false, now_ms))
-    {
-        rows.push(("Prompt cache", cache.long()));
-    }
-    match view.plan {
-        Some(zeron_proto::CompactPlan::Idle { at }) => {
-            rows.push(("Compacts at", clock(at)));
-        }
-        Some(zeron_proto::CompactPlan::Agent) => {
-            rows.push(("Compacts", "when this turn ends".into()));
-        }
-        None => {}
-    }
-    rows
-}
-
 pub fn compact_section(view: &CompactView, theme: &Theme) -> gpui::Div {
-    let (heading, note) = match view.plan {
-        _ if view.compacting => ("Compacting", None),
-        Some(zeron_proto::CompactPlan::Agent) => (
-            "Agent compaction",
-            Some("The agent asked to compact. It runs as soon as the turn ends."),
-        ),
-        _ => (
-            "Idle compaction",
-            Some("Sending a message first cancels it."),
-        ),
+    let Some(CompactSection {
+        heading,
+        note,
+        rows,
+    }) = CompactSection::of(view.plan, view.compacting, view.stats.as_ref(), now_ms())
+    else {
+        return div();
     };
     div()
         .w(px(280.0))
@@ -354,7 +321,7 @@ pub fn compact_section(view: &CompactView, theme: &Theme) -> gpui::Div {
         .flex_col()
         .child(crate::popover::menu_heading(theme, heading))
         .children(
-            compact_rows(view, now_ms())
+            rows
                 .into_iter()
                 .map(|(label, value)| {
                     div()

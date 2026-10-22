@@ -6,7 +6,7 @@ use zeron_doc::{DocError, MessagePart, MessageRole, SessionDoc, SubagentStatus};
 use zeron_proto::invocation::Skill;
 use zeron_proto::prediction::ComposerPrediction;
 use zeron_proto::{
-    BackgroundTask, BackgroundTaskKind, Chat, HarnessId, Session, SessionStats, SessionStatus,
+    BackgroundTask, BackgroundTaskKind, Chat, CompactPlan, HarnessId, Session, SessionStats, SessionStatus,
     SlashCommand, SlashCommandKind, ToolCall,
 };
 
@@ -285,7 +285,9 @@ pub(super) fn background_session(chat_id: &str) -> Option<Session> {
         started_at: None,
         updated_at: Utc::now(),
         running_subagents: 2,
-        compact_plan: None,
+        compact_plan: Some(CompactPlan::Idle {
+            at: (Utc::now() + Duration::minutes(38)).timestamp_millis(),
+        }),
     })
 }
 

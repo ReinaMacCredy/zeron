@@ -4,6 +4,7 @@ final class ContextSheetViewController: UITableViewController {
     struct Content: Equatable {
         var card: ContextCard?
         var stats: SessionStatsView?
+        var compact: CompactSectionView?
     }
 
     private let content: () -> Content
@@ -62,12 +63,13 @@ final class ContextSheetViewController: UITableViewController {
         tableView.reloadData()
     }
 
-    private enum Section { case context, cost, stats }
+    private enum Section { case context, compact, cost, stats }
     private enum Row { case long, track, readout, cost, stat(StatsRow) }
 
     private var sections: [Section] {
         var out: [Section] = []
         if shown.card != nil { out.append(.context) }
+        if shown.compact != nil { out.append(.compact) }
         if shown.stats?.cost != nil { out.append(.cost) }
         if shown.stats != nil { out.append(.stats) }
         return out
@@ -76,6 +78,7 @@ final class ContextSheetViewController: UITableViewController {
     private func rows(_ section: Section) -> [Row] {
         switch section {
         case .context: return [.long, .track, .readout]
+        case .compact: return (shown.compact?.rows ?? []).map(Row.stat)
         case .cost: return [.cost] + (shown.stats?.split ?? []).map(Row.stat)
         case .stats: return (shown.stats?.rows ?? []).map(Row.stat)
         }
@@ -90,6 +93,7 @@ final class ContextSheetViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
         switch sections[section] {
         case .context: return "Context"
+        case .compact: return shown.compact?.heading
         case .cost: return "Session cost"
         case .stats: return "Session statistics"
         }
@@ -98,6 +102,7 @@ final class ContextSheetViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
         switch sections[section] {
         case .context: return shown.card?.warning
+        case .compact: return shown.compact?.note
         case .cost: return shown.stats?.costNote
         case .stats: return nil
         }

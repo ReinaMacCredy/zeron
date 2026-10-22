@@ -333,6 +333,32 @@ impl SessionHandle {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CompactSectionView {
+    pub heading: String,
+    pub note: Option<String>,
+    pub rows: Vec<StatsRow>,
+}
+
+#[uniffi::export]
+impl SessionHandle {
+    pub fn compact_section(&self, now_ms: i64) -> Option<CompactSectionView> {
+        let section = self.inner.compact_section(now_ms)?;
+        Some(CompactSectionView {
+            heading: section.heading.into(),
+            note: section.note.map(Into::into),
+            rows: section
+                .rows
+                .into_iter()
+                .map(|(label, value)| StatsRow {
+                    label: label.into(),
+                    value,
+                })
+                .collect(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct CompactCommand {
     pub focus: Option<String>,
 }

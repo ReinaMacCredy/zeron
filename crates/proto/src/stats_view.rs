@@ -1,4 +1,4 @@
-use crate::SessionStats;
+use crate::{CompactPlan, SessionStats};
 use crate::usage::format_usd as usd;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,10 +164,86 @@ pub fn token_split(stats: &SessionStats) -> Vec<(&'static str, u64)> {
     split
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompactSection {
+    pub heading: &'static str,
+    pub note: Option<&'static str>,
+    pub rows: Vec<(&'static str, String)>,
+}
+
+impl CompactSection {
+    pub fn of(
+        plan: Option<CompactPlan>,
+        compacting: bool,
+        stats: Option<&SessionStats>,
+        now_ms: i64,
+    ) -> Option<Self> {
+        if !compacting && plan.is_none() {
+            return None;
+        }
+        let (heading, note) = match plan {
+            _ if compacting => ("Compacting", None),
+            Some(CompactPlan::Agent) => (
+                "Agent compaction",
+                Some("The agent asked to compact. It runs as soon as the turn ends."),
+            ),
+            _ => ("Idle compaction", Some("Sending a message first cancels it.")),
+        };
+        let mut rows = Vec::new();
+        if let Some(cache) = stats.and_then(|stats| Cache::of(stats, false, now_ms)) {
+            rows.push(("Prompt cache", cache.long()));
+        }
+        match plan {
+            Some(CompactPlan::Idle { at }) => rows.push(("Compacts at", clock(at))),
+            Some(CompactPlan::Agent) => rows.push(("Compacts", "when this turn ends".into())),
+            None => {}
+        }
+        Some(Self {
+            heading,
+            note,
+            rows,
+        })
+    }
+}
+
+fn clock(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|utc| {
+            utc.with_timezone(&chrono::Local)
+                .format("%-I:%M %p")
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::usage::format_tokens as tokens;
+
+    #[test]
+    fn the_compact_section_names_the_plan() {
+        assert_eq!(CompactSection::of(None, false, None, 0), None);
+        let running = CompactSection::of(Some(CompactPlan::Agent), true, None, 0).unwrap();
+        assert_eq!((running.heading, running.note), ("Compacting", None));
+        let agent = CompactSection::of(Some(CompactPlan::Agent), false, None, 0).unwrap();
+        assert_eq!(agent.heading, "Agent compaction");
+        assert_eq!(agent.rows, [("Compacts", "when this turn ends".to_string())]);
+        let at = 1_700_000_000_000;
+        let idle = CompactSection::of(Some(CompactPlan::Idle { at }), false, None, 0).unwrap();
+        assert_eq!(idle.heading, "Idle compaction");
+        assert_eq!(idle.note, Some("Sending a message first cancels it."));
+        assert_eq!(idle.rows, [("Compacts at", clock(at))]);
+        let stats = SessionStats {
+            cache_ttl_secs: Some(3600),
+            cache_touched_at: Some(0),
+            ..Default::default()
+        };
+        let cached =
+            CompactSection::of(Some(CompactPlan::Idle { at }), false, Some(&stats), 60_000)
+                .unwrap();
+        assert_eq!(cached.rows[0].0, "Prompt cache");
+    }
 
     #[test]
     fn chip_reads_like_the_reference_and_hides_on_a_fresh_chat() {
