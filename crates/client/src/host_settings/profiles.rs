@@ -107,6 +107,9 @@ pub(super) async fn page(client: &Client, device_id: &str, page: &str) -> Result
         Some("model") => model_page(profile, &models),
         Some("mode") => mode_page(profile),
         Some("effort") => effort_page(profile, &models),
+        Some(tools) if tools == "tools" || tools.starts_with("tools:") => {
+            super::profile_tools::page(client, device_id, profile, tools).await?
+        }
         Some(other) => return Err(ClientError::NotFound(other.to_owned())),
     })
 }
@@ -138,7 +141,42 @@ pub(super) async fn act(
         upsert(client, device_id, None, &draft).await?;
         return Ok(false);
     }
-    let (id, _) = split(page).ok_or_else(|| ClientError::InvalidArgument(page.to_owned()))?;
+    let moved = action
+        .strip_prefix("up:")
+        .map(|id| (id, true))
+        .or_else(|| action.strip_prefix("down:").map(|id| (id, false)));
+    if page == "profiles"
+        && let Some((id, up)) = moved
+    {
+        let mut ids: Vec<String> = snapshot(client, device_id)
+            .await?
+            .profiles
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        let from = ids
+            .iter()
+            .position(|p| p == id)
+            .ok_or_else(|| ClientError::NotFound(id.to_owned()))?;
+        let to = if up {
+            from.checked_sub(1)
+        } else {
+            (from + 1 < ids.len()).then_some(from + 1)
+        };
+        if let Some(to) = to {
+            ids.swap(from, to);
+            client
+                .inner
+                .host_rpc(
+                    device_id,
+                    methods::REORDER_AGENT_PROFILES,
+                    serde_json::json!({ "profileIds": ids }),
+                )
+                .await?;
+        }
+        return Ok(false);
+    }
+    let (id, field) = split(page).ok_or_else(|| ClientError::InvalidArgument(page.to_owned()))?;
     if action == "remove" {
         client
             .inner
@@ -157,6 +195,20 @@ pub(super) async fn act(
         .find(|p| p.id == id)
         .ok_or_else(|| ClientError::NotFound(id.to_owned()))?;
     let mut draft = draft_of(profile);
+    if let Some(field) = field.filter(|f| f.starts_with("tools")) {
+        let on = value.as_deref() == Some("true");
+        super::profile_tools::act(
+            client,
+            device_id,
+            &mut draft.disabled_tools,
+            field,
+            action,
+            on,
+        )
+        .await?;
+        upsert(client, device_id, Some(id), &draft).await?;
+        return Ok(false);
+    }
     let models = match action.strip_prefix("agent:") {
         Some(harness) => client.list_models(device_id, harness).await,
         None => client.list_models(device_id, &wire(profile.harness)).await,
@@ -276,12 +328,14 @@ fn edit(
 }
 
 fn list_page(snapshot: &AgentProfilesSnapshot, labels: &[Option<String>], prompt: &str) -> Page {
+    let last = snapshot.profiles.len().saturating_sub(1);
     let mut rows: Vec<Row> = snapshot
         .profiles
         .iter()
         .zip(labels)
-        .map(|(profile, label)| {
-            Row::new(
+        .enumerate()
+        .map(|(ix, (profile, label))| {
+            let mut row = Row::new(
                 format!("profile:{}", profile.id),
                 profile.name.clone(),
                 RowKind::Link {
@@ -295,7 +349,19 @@ fn list_page(snapshot: &AgentProfilesSnapshot, labels: &[Option<String>], prompt
                 profile.permission_mode,
                 profile.reasoning,
                 profile.disabled_tools.len(),
-            )))
+            )));
+            for (dir, title, show) in [("up", "Move up", ix > 0), ("down", "Move down", ix < last)]
+            {
+                if show {
+                    row.actions.push(RowAction {
+                        id: format!("{dir}:{}", profile.id),
+                        title: title.into(),
+                        destructive: false,
+                        confirm: None,
+                    });
+                }
+            }
+            row
         })
         .collect();
     rows.push(Row::new(
@@ -434,14 +500,17 @@ fn editor_page(profile: &AgentProfile, models: &[ModelInfo]) -> Page {
             },
             Section {
                 title: None,
-                footer: Some("Edit a profile's tools on the Mac.".into()),
-                rows: vec![Row::new("tools", "Tools", RowKind::Info).value(Some(
-                    if tools_off == 0 {
+                footer: None,
+                rows: vec![link(
+                    profile,
+                    "tools",
+                    "Tools",
+                    Some(if tools_off == 0 {
                         "All on".to_owned()
                     } else {
                         format!("{tools_off} tools off")
-                    },
-                ))],
+                    }),
+                )],
             },
             Section {
                 title: None,

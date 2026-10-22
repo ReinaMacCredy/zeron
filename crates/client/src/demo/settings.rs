@@ -70,7 +70,8 @@ impl HostSettings {
             { "id": "ui-work", "name": "UI work", "harness": "claude-code", "model": "claude-opus-5-5",
               "permissionMode": "auto", "reasoning": "high",
               "instructions": "Match the kit; prove UI with a screenshot.",
-              "disabledTools": ["mcp__zeron__computer", "mcp__zeron__device_open"] },
+              "disabledTools": ["mcp__zeron__computer", "mcp__zeron__device_open", "WebSearch",
+                                "mcp__figma", "mcp__retired_server"] },
             { "id": "reviewer", "name": "reviewer", "harness": "codex", "model": "gpt-5.5",
               "permissionMode": "ask", "reasoning": "high", "byAgent": true,
               "notes": "Review a finished diff before it lands." },
@@ -132,6 +133,8 @@ impl HostSettings {
                 | m::LIST_AGENT_PROFILES
                 | m::UPSERT_AGENT_PROFILE
                 | m::DELETE_AGENT_PROFILE
+                | m::REORDER_AGENT_PROFILES
+                | m::LIST_HARNESS_TOOLS
                 | m::GET_SYSTEM_PROMPT
                 | m::SET_SYSTEM_PROMPT
                 | m::WATCH_HARNESS_UPDATES
@@ -223,6 +226,37 @@ impl HostSettings {
                 self.profiles.profiles.retain(|p| p.id != id);
                 to_json(&self.profiles)
             }
+            m::REORDER_AGENT_PROFILES => {
+                let order: Vec<&str> = params["profileIds"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                self.profiles.profiles.sort_by_key(|p| {
+                    order
+                        .iter()
+                        .position(|id| *id == p.id)
+                        .unwrap_or(usize::MAX)
+                });
+                to_json(&self.profiles)
+            }
+            m::LIST_HARNESS_TOOLS => Ok(json!({
+                "builtin": [
+                    { "id": "shell", "title": "Shell", "summary": "Run commands and background shells.",
+                      "tools": ["Bash", "BashOutput", "KillShell"] },
+                    { "id": "web", "title": "Web", "summary": "Fetch pages and search the web.",
+                      "tools": ["WebFetch", "WebSearch"] },
+                    { "id": "agents", "title": "Subagents", "summary": "Spawn and message subagents.",
+                      "tools": ["Agent", "SendMessage"] },
+                    { "id": "skills", "title": "Skills", "summary": "Load skills on demand.",
+                      "tools": ["Skill"] }
+                ],
+                "mcpServers": [
+                    { "name": "linear", "rule": "mcp__linear", "status": "connected", "source": "user" },
+                    { "name": "figma", "rule": "mcp__figma", "status": "needs auth", "source": "project" }
+                ]
+            })),
             m::WATCH_HARNESS_UPDATES | m::CHECK_HARNESS_UPDATES => Ok(self.updates.clone()),
             m::APPLY_HARNESS_UPDATE => {
                 let harness = params["harness"].clone();
