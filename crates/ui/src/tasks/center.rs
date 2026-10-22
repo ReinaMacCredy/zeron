@@ -577,7 +577,7 @@ impl TaskCenter {
                     .iter()
                     .find(|chat| chat.id == self.key)
                     .map(|chat| chat.id.as_str()),
-                super::plan_led_by(&state.tasks, &self.key),
+                super::task_led_by(&state.tasks, &self.key),
             ),
         }
     }
@@ -1492,7 +1492,9 @@ impl TaskCenter {
             "Done".into()
         } else if plan.lead.is_none() {
             "Not started".into()
-        } else if working && plan.steps.is_empty() {
+        } else if let Some(lead) = plan.lead.filter(|_| !super::is_mission(task, plan)) {
+            super::TasksPage::linked_label(lead).into()
+        } else if plan.phase(task) == super::PlanPhase::Planning {
             "Planning".into()
         } else if plan.lead == Some(ChatIndicator::Errored) {
             "Failed".into()
@@ -2230,7 +2232,8 @@ impl Render for TaskCenter {
             };
         };
         self.draft.retain_live(&plan);
-        let editable = task.completed_at.is_none() && plan.lead.is_some();
+        let editable =
+            task.completed_at.is_none() && plan.lead.is_some() && super::is_mission(&task, &plan);
         let shown = self.shown(&task, &plan, cx);
         let reduced = motion::reduced_motion(cx);
         let now = Instant::now();

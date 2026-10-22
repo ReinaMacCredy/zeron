@@ -108,6 +108,16 @@ pub(crate) fn lead_status(
     if task.completed_at.is_some() {
         return (Status::Done, "Done");
     }
+    if let Some(indicator) = plan.lead.filter(|_| !super::is_mission(task, plan)) {
+        let status = match indicator {
+            ChatIndicator::Working => Status::Running,
+            ChatIndicator::Errored => Status::Failed,
+            ChatIndicator::AwaitingInput | ChatIndicator::Completed | ChatIndicator::Idle => {
+                Status::Waiting
+            }
+        };
+        return (status, super::TasksPage::linked_label(indicator));
+    }
     match plan.lead {
         None => (Status::Queued, "Not started"),
         _ if plan.phase(task) == super::PlanPhase::Planning => (Status::Running, "Planning"),

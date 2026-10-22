@@ -1613,6 +1613,7 @@ impl TaskCenter {
     ) -> AnyElement {
         let crumb = self.back_crumb(theme, cx);
         let done = task.completed_at.is_some();
+        let mission = crate::tasks::is_mission(task, plan);
         let steps: Vec<&BarRow> = facts.rows.iter().filter(|row| row.id != LEAD).collect();
         let count = |kind: Status| facts.rows.iter().filter(|row| row.status == kind).count();
         let (waiting, failed) = (count(Status::Waiting), count(Status::Failed));
@@ -1705,6 +1706,9 @@ impl TaskCenter {
                 ));
             }
         }
+        if !mission {
+            pills.clear();
+        }
         let button = |label: SharedString, selector: &'static str, tone: widgets::ActionTone| {
             widgets::text_action(theme, tone, label.clone())
                 .id(selector)
@@ -1715,7 +1719,7 @@ impl TaskCenter {
                 .min_h(px(28.0))
                 .rounded_full()
         };
-        let primary = if done {
+        let primary = if done || (!mission && plan.lead != Some(ChatIndicator::AwaitingInput)) {
             None
         } else if let Some(row) = facts.rows.iter().find(|row| row.status == Status::Waiting) {
             if row.id == LEAD && row.text.is_some() {
@@ -1767,17 +1771,43 @@ impl TaskCenter {
                     }))
                 })
         };
-        let watch = facts.lead_chat.as_deref().and_then(|root| {
-            self.render_watch_button(
-                super::watch_sheet::WatchTarget {
-                    root,
-                    task: Some(task).filter(|task| task.completed_at.is_none()),
-                    title: &task.title,
-                },
-                theme,
-                cx,
-            )
-        });
+        let watch = facts
+            .lead_chat
+            .as_deref()
+            .filter(|_| mission)
+            .and_then(|root| {
+                self.render_watch_button(
+                    super::watch_sheet::WatchTarget {
+                        root,
+                        task: Some(task).filter(|task| task.completed_at.is_none()),
+                        title: &task.title,
+                    },
+                    theme,
+                    cx,
+                )
+            });
+        let add_plan = facts
+            .lead_chat
+            .clone()
+            .filter(|lead| {
+                let state = self.state.read(cx);
+                !mission
+                    && state
+                        .chats
+                        .iter()
+                        .any(|chat| &chat.id == lead && crate::tasks::can_add_plan(state, chat))
+            })
+            .map(|lead| {
+                button(
+                    "Add plan".into(),
+                    "task-center-add-plan",
+                    widgets::ActionTone::Filled,
+                )
+                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    cx.emit(TaskCenterEvent::AddPlan(lead.clone()))
+                }))
+            });
         let task_id = task.id.clone();
         let toggle_label = if done { "Reopen" } else { "Mark as done" };
         let toggle = button(
@@ -1831,11 +1861,22 @@ impl TaskCenter {
                 at.format("%b %-d %H:%M").to_string()
             }
         };
-        let mut sub = vec!["Lead".to_string()];
+        let mut sub: Vec<String> = mission.then(|| "Lead".to_string()).into_iter().collect();
         sub.extend(facts.lead_agent.clone());
-        sub.push(match task.completed_at {
-            Some(at) => format!("finished {}", local(at)),
-            None => format!("started {}", local(task.created_at)),
+        if mission {
+            sub.push(match task.completed_at {
+                Some(at) => format!("finished {}", local(at)),
+                None => format!("started {}", local(task.created_at)),
+            });
+        }
+        let status_word = (!mission).then(|| {
+            let (status, word) = tree::lead_status(task, plan);
+            let tone = status.tone(theme);
+            div()
+                .debug_selector(|| "task-center-status".into())
+                .flex_none()
+                .text_color(tone)
+                .child(word)
         });
         let elapsed = tree::fmt_time(
             (task.completed_at.unwrap_or_else(Utc::now) - task.created_at)
@@ -1967,22 +2008,24 @@ impl TaskCenter {
                     .flex()
                     .items_center()
                     .gap(px(10.0))
-                    .child(
-                        div()
-                            .flex_none()
-                            .size(px(28.0))
-                            .rounded(px(8.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                icon(icons::MISSION_CONTROL)
-                                    .size(px(14.0))
-                                    .text_color(theme.text_muted),
-                            ),
-                    )
+                    .when(mission, |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .size(px(28.0))
+                                .rounded(px(8.0))
+                                .border_1()
+                                .border_color(theme.border)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    icon(icons::MISSION_CONTROL)
+                                        .size(px(14.0))
+                                        .text_color(theme.text_muted),
+                                ),
+                        )
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -2004,38 +2047,45 @@ impl TaskCenter {
                                             .text_color(theme.text)
                                             .child(SharedString::from(task.title.clone())),
                                     )
-                                    .child(self.kind_badge(theme, now)),
+                                    .when(mission, |el| el.child(self.kind_badge(theme, now))),
                             )
                             .child(
                                 div()
-                                    .truncate()
+                                    .flex()
+                                    .min_w_0()
+                                    .gap(px(4.0))
                                     .text_size(ui_rems(12.0))
                                     .text_color(theme.text_muted)
-                                    .child(sub.join(" · ")),
+                                    .children(status_word)
+                                    .when(!mission && !sub.is_empty(), |el| el.child("·"))
+                                    .child(div().min_w_0().truncate().child(sub.join(" · "))),
                             ),
                     )
                     .children(watch)
                     .children(pills)
                     .children(primary)
+                    .children(add_plan)
                     .child(toggle)
                     .child(more),
             )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .child(
-                        div()
-                            .debug_selector(|| "task-center-progress".into())
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .gap(px(3.0))
-                            .children(segments),
-                    )
-                    .child(totals),
-            )
+            .when(mission, |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .debug_selector(|| "task-center-progress".into())
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .gap(px(3.0))
+                                .children(segments),
+                        )
+                        .child(totals),
+                )
+            })
             .into_any_element()
     }
 
@@ -2864,11 +2914,9 @@ impl TaskCenter {
                         div()
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child("Agents"),
+                            .child("Outside the plan"),
                     )
-                    .child(format!(
-                        "{count} \u{b7} started by the Lead, not in the plan"
-                    )),
+                    .child(format!("{count} \u{b7} started by the Lead")),
             )
             .into_any_element()
     }

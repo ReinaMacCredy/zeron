@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Local, Utc};
 use zeron_proto::Chat;
 
-use super::plan_led_by;
+use super::task_led_by;
 use super::thread_tree::{NodeKind, TreeNode, tree_rows};
 use super::tree::Status;
 use crate::state::AppState;
@@ -41,7 +41,7 @@ fn roots_a_tree(
     }
     !nested.contains(chat.id.as_str())
         && children.contains_key(chat.id.as_str())
-        && plan_led_by(&state.tasks, &chat.id).is_none()
+        && task_led_by(&state.tasks, &chat.id).is_none()
 }
 
 pub(crate) fn tree_index(state: &AppState, now: DateTime<Utc>) -> IndexRows {

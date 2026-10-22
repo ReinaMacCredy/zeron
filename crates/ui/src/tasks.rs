@@ -148,7 +148,14 @@ impl Rollup {
             && !lead_working
         {
             PlanPhase::PlanReady
-        } else if task.completed_at.is_none() && lead_working && self.steps.is_empty() {
+        } else if task.completed_at.is_none()
+            && self.steps.is_empty()
+            && is_mission(task, self)
+            && matches!(
+                self.lead,
+                Some(ChatIndicator::Working | ChatIndicator::Idle | ChatIndicator::Completed)
+            )
+        {
             PlanPhase::Planning
         } else {
             PlanPhase::Status(self.status)
@@ -429,11 +436,11 @@ impl TasksPage {
     fn open_row(
         &mut self,
         task_id: &str,
-        orchestrated: bool,
+        paged: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if orchestrated {
+        if paged {
             cx.emit(TasksEvent::OpenCenter(task_id.to_string()));
             return;
         }
@@ -663,7 +670,7 @@ impl TasksPage {
             .into_any_element()
     }
 
-    fn linked_label(indicator: ChatIndicator) -> &'static str {
+    pub(crate) fn linked_label(indicator: ChatIndicator) -> &'static str {
         match indicator {
             ChatIndicator::Working => "Working",
             ChatIndicator::AwaitingInput => "Asked you a question",
@@ -854,7 +861,7 @@ impl TasksPage {
         let accent = theme.accent;
         let open_id = task_id.clone();
         let menu_id = task_id.clone();
-        let orchestrated = row.orchestrated();
+        let paged = row.linked.is_some();
         let drop_before = task_id.clone();
         let drag = TaskDrag {
             task_id: task_id.clone(),
@@ -877,7 +884,7 @@ impl TasksPage {
                 ROW_BORDER,
             ))
             .on_click(cx.listener(move |page, _: &ClickEvent, window, cx| {
-                page.open_row(&open_id, orchestrated, window, cx)
+                page.open_row(&open_id, paged, window, cx)
             }))
             .on_mouse_down(MouseButton::Right, Self::row_menu_listener(menu_id, cx))
             .when(!done, |el| {
@@ -1372,7 +1379,7 @@ impl TasksPage {
         };
         let open_id = task_id.clone();
         let menu_id = task_id.clone();
-        let orchestrated = row.orchestrated();
+        let paged = row.linked.is_some();
         let thumbs = self.row_images("task-kanban", row, theme, cx);
         Self::card_visual(row, selected, theme)
             .children(thumbs)
@@ -1387,7 +1394,7 @@ impl TasksPage {
                 Edges::all(1.0),
             ))
             .on_click(cx.listener(move |page, _: &ClickEvent, window, cx| {
-                page.open_row(&open_id, orchestrated, window, cx)
+                page.open_row(&open_id, paged, window, cx)
             }))
             .on_mouse_down(MouseButton::Right, Self::row_menu_listener(menu_id, cx))
             .on_drag(drag, |drag, _, _, cx| {
@@ -1859,6 +1866,19 @@ pub(crate) fn plan_led_by<'a>(
                 !task.deleted && task.has_plan() && task.chat_id.as_deref() == Some(chat_id)
             })
             .max_by_key(|task| task.completed_at)
+    })
+}
+
+/// A plan first, else the task handed to this chat, open before done.
+pub(crate) fn task_led_by<'a>(
+    tasks: &'a [zeron_proto::Task],
+    chat_id: &str,
+) -> Option<&'a zeron_proto::Task> {
+    plan_led_by(tasks, chat_id).or_else(|| {
+        tasks
+            .iter()
+            .filter(|task| !task.deleted && task.chat_id.as_deref() == Some(chat_id))
+            .max_by_key(|task| (task.completed_at.is_none(), task.completed_at))
     })
 }
 

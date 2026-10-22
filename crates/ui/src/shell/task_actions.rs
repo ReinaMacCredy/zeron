@@ -81,7 +81,7 @@ enum TaskOrigin {
         create: serde_json::Value,
     },
     Plan {
-        create: serde_json::Value,
+        create: Option<serde_json::Value>,
     },
 }
 
@@ -91,7 +91,8 @@ impl TaskOrigin {
             Self::Card { patch, .. } => patch.as_ref().map(
                 |patch| serde_json::json!({ "op": "updateTask", "taskId": task_id, "patch": patch }),
             ),
-            Self::Mission { create, .. } | Self::Plan { create } => Some(create.clone()),
+            Self::Mission { create, .. } => Some(create.clone()),
+            Self::Plan { create } => create.clone(),
         }
     }
 }
@@ -254,9 +255,18 @@ impl Shell {
         else {
             return;
         };
-        let task_id = uuid::Uuid::new_v4().to_string();
-        let title = crate::home::chat_title(chat);
-        let create = Self::create_task_params(&task_id, &title, "", chat.space_id.clone(), None);
+        let (task_id, create) = match crate::tasks::task_led_by(&state.tasks, chat_id)
+            .filter(|task| task.completed_at.is_none())
+        {
+            Some(task) => (task.id.clone(), None),
+            None => {
+                let task_id = uuid::Uuid::new_v4().to_string();
+                let title = crate::home::chat_title(chat);
+                let create =
+                    Self::create_task_params(&task_id, &title, "", chat.space_id.clone(), None);
+                (task_id, Some(create))
+            }
+        };
         let lead = crate::tasks::Orchestrate::default();
         self.assign_task(
             TaskOrigin::Plan { create },
@@ -292,8 +302,8 @@ impl Shell {
                 self.composer
                     .update(cx, |composer, cx| composer.mission_failed(start, cx));
             }
-            TaskOrigin::Plan { .. } => {
-                if !save_failed {
+            TaskOrigin::Plan { create } => {
+                if create.is_some() && !save_failed {
                     self.delete_task(task_id, cx);
                 }
             }

@@ -239,7 +239,7 @@ impl StripTree {
             if let Some(group) = node.group {
                 let label = match group {
                     Group::Steps(n) => format!("Steps \u{a0}{n}"),
-                    Group::Agents(n) => format!("Agents \u{a0}{n} \u{b7} not in the plan"),
+                    Group::Agents(n) => format!("Outside the plan \u{a0}{n}"),
                 };
                 rows.push(Row {
                     id: format!("label-{}", node.id),
