@@ -2638,6 +2638,8 @@ pub struct Shell {
     right_tab_scroll: gpui::ScrollHandle,
     /// Session tab currently hovered (close button appears on hover).
     tab_hover: Option<String>,
+    tab_group_hover: Option<String>,
+    tab_group_menu_hover: Option<String>,
     /// Session-tab context menu: (chat id, window position).
     tab_menu: popover::Popup<(String, Point<Pixels>)>,
     /// Session-tab drag-reorder in flight (see `tabs::TabDragState`).
@@ -3393,6 +3395,8 @@ impl Shell {
             right_tab_drag: None,
             right_tab_scroll: gpui::ScrollHandle::new(),
             tab_hover: None,
+            tab_group_hover: None,
+            tab_group_menu_hover: None,
             tab_menu: popover::Popup::default(),
             tab_drag: None,
             split_drop_hot: None,

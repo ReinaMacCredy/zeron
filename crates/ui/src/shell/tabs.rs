@@ -99,6 +99,33 @@ pub(super) fn next_after_close(order: &[String], closed: &str) -> Option<String>
     })
 }
 
+pub(super) fn group_tab_order(
+    order: &[String],
+    members: &std::collections::HashMap<String, crate::tasks::TabMember>,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(order.len());
+    for id in order {
+        if out.contains(id) {
+            continue;
+        }
+        let Some(member) = members.get(id) else {
+            out.push(id.clone());
+            continue;
+        };
+        let mut group: Vec<&String> = order
+            .iter()
+            .filter(|other| {
+                members
+                    .get(*other)
+                    .is_some_and(|other| other.task_id == member.task_id)
+            })
+            .collect();
+        group.sort_by_key(|other| members[*other].step.map_or(0, |step| step + 1));
+        out.extend(group.into_iter().cloned());
+    }
+    out
+}
+
 /// The strip hugs its tabs until they shrink, then fills the row.
 fn tab_width(strip_width: f32, slots: usize) -> f32 {
     let slots = slots.max(1) as f32;
@@ -848,6 +875,7 @@ impl Shell {
             return Vec::new();
         }
         let now = Utc::now();
+        let members = crate::tasks::tab_members(state);
         let mut opened = Vec::new();
         let mut next = std::collections::HashMap::new();
         for (status, chat) in state.overview_chats(now) {
@@ -880,7 +908,7 @@ impl Shell {
                 && !matches!(prev, ChatIndicator::Working | ChatIndicator::AwaitingInput);
             let asks = status == ChatIndicator::AwaitingInput
                 && prev != ChatIndicator::AwaitingInput
-                && chat.delegated_by().is_none();
+                && (chat.delegated_by().is_none() || members.contains_key(&chat.id));
             if (new_run && person_chat) || asks {
                 opened.push(chat.id.clone());
             }
@@ -1217,6 +1245,11 @@ impl Shell {
             self.tab_drag = None;
         }
         let mut order: Vec<String> = self.open_tab_ids(cx);
+        let mut members = crate::tasks::tab_members(self.state.read(cx));
+        if let Some(pair) = &self.split_pair {
+            members.retain(|id, _| !pair.contains(id));
+        }
+        order = group_tab_order(&order, &members);
         // A split's two sessions share ONE double chip (Atlas): the secondary
         // moves next to the selected one, on the side it is shown on, and
         // the pair spends exactly two slots so the drop-index math holds.
@@ -1275,11 +1308,16 @@ impl Shell {
                         ));
                     }
                     let chat = chats.get(id.as_str())?;
+                    let lead = members.get(id).is_some_and(|member| member.step.is_none());
                     Some((
                         chat.id.clone(),
-                        SharedString::from(transcript::single_line(
-                            &chat.title.clone().unwrap_or_else(|| "New session".into()),
-                        )),
+                        if lead {
+                            SharedString::from("Lead")
+                        } else {
+                            SharedString::from(transcript::single_line(
+                                &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                            ))
+                        },
                         crate::pickers::chat_marks(chat, cx),
                         if state.send_pending(&chat.id, now) {
                             ChatIndicator::Working
@@ -1330,122 +1368,124 @@ impl Shell {
             .iter()
             .map(|(id, title, harness, status, _)| (id.clone(), (title.clone(), harness.clone(), *status)))
             .collect();
-        let tab_elements: Vec<AnyElement> =
-            tabs.into_iter()
-                .enumerate()
-                .filter_map(|(ix, (id, title, harness, status, is_draft))| {
-                    if let Some((left, right)) = &group {
-                        if id == *right {
-                            // Drawn as the second half of the chip below.
-                            return None;
-                        }
-                        if id == *left {
-                            let chip = split_tab_chip(
-                                ix,
-                                [left, right].map(|id| {
-                                    let (title, harness, status) = tabs_by_id[id].clone();
-                                    (id.clone(), title, harness, status)
-                                }),
-                                selected.as_deref(),
-                                hovered.as_deref(),
-                                tones,
-                                &theme,
-                                cx,
-                            );
-                            return Some(slide_tab(chip, ix, id.clone(), 2, width, drag));
-                        }
+        let tab_elements: Vec<(String, AnyElement)> = tabs
+            .into_iter()
+            .enumerate()
+            .filter_map(|(ix, (id, title, harness, status, is_draft))| {
+                if let Some((left, right)) = &group {
+                    if id == *right {
+                        // Drawn as the second half of the chip below.
+                        return None;
                     }
-                    // The split's secondary wears the selected look too: it
-                    // is on screen beside the selected session.
-                    let is_selected = selected.as_deref() == Some(id.as_str())
-                        || split.as_deref() == Some(id.as_str());
-                    let is_hovered = hovered.as_deref() == Some(id.as_str());
-                    // Hover state lives in Shell (the trailing slot swaps dot ↔
-                    // close), so the wash snaps off it too — gpui allows only one
-                    // `on_hover` per element, and the state listener wins.
-                    let terminal = terminals.get(&id).map(|row| row.launch.brand());
-                    let (text_color, bg) = match (is_selected, is_hovered, tones) {
-                        (true, _, Some(_)) => (theme.text, crate::theme::wash(0.0)),
-                        (true, _, None) => (theme.text, crate::theme::glass_selected_bg()),
-                        (false, true, Some(tones)) => (theme.text, tones.wash),
-                        (false, true, None) => (theme.text, theme.glass_hover()),
-                        (false, false, _) => (theme.text_muted, crate::theme::wash(0.0)),
-                    };
-                    let glyph_alpha = 0.9;
-                    let brand = terminal
-                        .map(|(path, tint)| InstanceIcon::Brand(path, tint))
-                        .or_else(|| harness.last().cloned());
-                    let select_id = id.clone();
-                    let middle_id = id.clone();
-                    let menu_id = id.clone();
-                    let hover_id = id.clone();
-                    let trailing =
-                        tab_trailing(&id, &title, status, is_selected || is_hovered, &theme, cx);
-                    let tab_el = div()
-                        .id(SharedString::from(format!("session-tab-{id}")))
-                        .debug_selector(|| format!("session-tab-{id}"))
-                        .role(gpui::Role::Tab)
-                        .aria_label(title.clone())
-                        .aria_selected(is_selected)
-                        .w(px(TAB_MAX_WIDTH))
-                        .min_w(px(TAB_MIN_WIDTH))
-                        .h(px(TAB_HEIGHT))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .pl(px(10.0))
-                        .pr(px(4.0))
-                        .rounded(px(8.0))
-                        .text_size(px(12.0))
-                        .text_color(text_color)
-                        .bg(bg)
-                        .when(is_selected, |el| match tones {
-                            Some(tones) => el.relative().child(folder_tab_backdrop(tones)),
-                            None => el.shadow(crate::theme::glass_selected_shadows()),
-                        })
-                        .cursor_pointer()
-                        // Tabs sit inside the titlebar drag strip — carve them out.
-                        // NOT `.occlude()`: a BlockMouse hitbox ends the hit test,
-                        // so the scroll container behind the tabs never saw wheel
-                        // events and an overflowing strip could not be scrolled
-                        // (tabs tile the whole region). ExceptScroll keeps the
-                        // drag-region carve-out and lets the strip scroll.
-                        .block_mouse_except_scroll()
-                        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                        // Track hover in Shell state: the trailing slot flips
-                        // between dot and close button (hover_blend only fades
-                        // colors; child swaps need real state).
-                        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                            if *hovered {
-                                this.tab_hover = Some(hover_id.clone());
-                            } else if this.tab_hover.as_deref() == Some(hover_id.as_str()) {
-                                this.tab_hover = None;
-                            }
-                            cx.notify();
-                        }))
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                    if id == *left {
+                        let chip = split_tab_chip(
+                            ix,
+                            [left, right].map(|id| {
+                                let (title, harness, status) = tabs_by_id[id].clone();
+                                (id.clone(), title, harness, status)
+                            }),
+                            selected.as_deref(),
+                            hovered.as_deref(),
+                            tones,
+                            &theme,
+                            cx,
+                        );
+                        return Some((id.clone(), slide_tab(chip, ix, id.clone(), 2, width, drag)));
+                    }
+                }
+                // The split's secondary wears the selected look too: it
+                // is on screen beside the selected session.
+                let is_selected = selected.as_deref() == Some(id.as_str())
+                    || split.as_deref() == Some(id.as_str());
+                let is_hovered = hovered.as_deref() == Some(id.as_str());
+                // Hover state lives in Shell (the trailing slot swaps dot ↔
+                // close), so the wash snaps off it too — gpui allows only one
+                // `on_hover` per element, and the state listener wins.
+                let terminal = terminals.get(&id).map(|row| row.launch.brand());
+                let (text_color, bg) = match (is_selected, is_hovered, tones) {
+                    (true, _, Some(_)) => (theme.text, crate::theme::wash(0.0)),
+                    (true, _, None) => (theme.text, crate::theme::glass_selected_bg()),
+                    (false, true, Some(tones)) => (theme.text, tones.wash),
+                    (false, true, None) => (theme.text, theme.glass_hover()),
+                    (false, false, _) => (theme.text_muted, crate::theme::wash(0.0)),
+                };
+                let glyph_alpha = 0.9;
+                let brand = terminal
+                    .map(|(path, tint)| InstanceIcon::Brand(path, tint))
+                    .or_else(|| harness.last().cloned());
+                let select_id = id.clone();
+                let middle_id = id.clone();
+                let menu_id = id.clone();
+                let hover_id = id.clone();
+                let trailing =
+                    tab_trailing(&id, &title, status, is_selected || is_hovered, &theme, cx);
+                let grouped = members.contains_key(&id);
+                let tab_el = div()
+                    .id(SharedString::from(format!("session-tab-{id}")))
+                    .debug_selector(|| format!("session-tab-{id}"))
+                    .role(gpui::Role::Tab)
+                    .aria_label(title.clone())
+                    .aria_selected(is_selected)
+                    .w(px(TAB_MAX_WIDTH))
+                    .min_w(px(TAB_MIN_WIDTH))
+                    .h(px(TAB_HEIGHT))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .pl(px(10.0))
+                    .pr(px(4.0))
+                    .rounded(px(8.0))
+                    .text_size(px(12.0))
+                    .text_color(text_color)
+                    .bg(bg)
+                    .when(is_selected, |el| match tones {
+                        Some(tones) => el.relative().child(folder_tab_backdrop(tones)),
+                        None => el.shadow(crate::theme::glass_selected_shadows()),
+                    })
+                    .cursor_pointer()
+                    // Tabs sit inside the titlebar drag strip — carve them out.
+                    // NOT `.occlude()`: a BlockMouse hitbox ends the hit test,
+                    // so the scroll container behind the tabs never saw wheel
+                    // events and an overflowing strip could not be scrolled
+                    // (tabs tile the whole region). ExceptScroll keeps the
+                    // drag-region carve-out and lets the strip scroll.
+                    .block_mouse_except_scroll()
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                    // Track hover in Shell state: the trailing slot flips
+                    // between dot and close button (hover_blend only fades
+                    // colors; child swaps need real state).
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if *hovered {
+                            this.tab_hover = Some(hover_id.clone());
+                        } else if this.tab_hover.as_deref() == Some(hover_id.as_str()) {
+                            this.tab_hover = None;
+                        }
+                        cx.notify();
+                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.navigate_to(Some(select_id.clone()), true, cx);
+                    }))
+                    // Middle-click closes (terminal-tab parity).
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
-                            this.navigate_to(Some(select_id.clone()), true, cx);
-                        }))
-                        // Middle-click closes (terminal-tab parity).
-                        .on_mouse_down(
-                            MouseButton::Middle,
-                            cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.close_session_tab(middle_id.clone(), cx);
-                            }),
-                        )
-                        // Right-click: close / close others / close to a side.
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                cx.stop_propagation();
-                                this.tab_menu.open((menu_id.clone(), event.position));
-                                cx.notify();
-                            }),
-                        )
-                        .on_drag(
+                            this.close_session_tab(middle_id.clone(), cx);
+                        }),
+                    )
+                    // Right-click: close / close others / close to a side.
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.tab_menu.open((menu_id.clone(), event.position));
+                            cx.notify();
+                        }),
+                    )
+                    .when(!grouped, |el| {
+                        el.on_drag(
                             TabDragPayload {
                                 from: ix,
                                 chat_id: id.clone(),
@@ -1459,69 +1499,82 @@ impl Shell {
                                 cx.new(|_| TabGhost { title, brand })
                             },
                         )
-                        .when_some(terminal.filter(|_| !is_hovered), |el, (path, tint)| {
-                            el.child(
-                                icon(path).size(px(14.0)).flex_none().text_color(
-                                    tint.unwrap_or(theme.text_muted).opacity(glyph_alpha),
-                                ),
-                            )
-                        })
-                        .when(terminal.is_some() && is_hovered, |el| {
-                            el.child(tab_grip(&theme))
-                        })
-                        .when(terminal.is_none(), |el| {
-                            el.map(|el| {
-                                match crate::computer::presence::chat_glyph(
-                                    "session-tab",
-                                    &id,
-                                    14.0,
-                                    glyph_alpha,
-                                    &theme,
-                                    cx,
-                                ) {
-                                    Some(glyph) => el.child(glyph),
-                                    None if status == ChatIndicator::Working => {
-                                        el.child(tab_spinner(&id, &theme, cx))
-                                    }
-                                    None if is_hovered && !harness.is_empty() => {
-                                        el.child(tab_grip(&theme))
-                                    }
-                                    None => el.when(!harness.is_empty(), |el| {
-                                        let selector = format!("session-tab-harness-{id}");
-                                        el.child(
-                                            crate::pickers::harness_mark_stack(
-                                                &harness,
-                                                14.0,
-                                                theme.text_muted,
-                                                glyph_alpha,
-                                            )
-                                            .debug_selector(move || selector),
-                                        )
-                                    }),
-                                }
-                            })
-                        })
-                        // A draft wears the amber pen where a session wears
-                        // its harness brand (d18); a session with unsent
-                        // composer text wears both, like its sidebar row.
-                        .when(
-                            terminal.is_none()
-                                && (is_draft || crate::draft_store::has_content(&id, cx)),
-                            |el| {
-                                el.child(
-                                    icon(icons::PEN)
-                                        .size(px(13.0))
-                                        .flex_none()
-                                        .text_color(theme.warning.opacity(glyph_alpha)),
-                                )
-                            },
+                    })
+                    .when_some(terminal.filter(|_| !is_hovered), |el, (path, tint)| {
+                        el.child(
+                            icon(path)
+                                .size(px(14.0))
+                                .flex_none()
+                                .text_color(tint.unwrap_or(theme.text_muted).opacity(glyph_alpha)),
                         )
-                        .child(div().flex_1().min_w_0().truncate().child(title))
-                        .child(trailing);
+                    })
+                    .when(terminal.is_some() && is_hovered, |el| {
+                        el.child(tab_grip(&theme))
+                    })
+                    .when(terminal.is_none(), |el| {
+                        el.map(|el| {
+                            match crate::computer::presence::chat_glyph(
+                                "session-tab",
+                                &id,
+                                14.0,
+                                glyph_alpha,
+                                &theme,
+                                cx,
+                            ) {
+                                Some(glyph) => el.child(glyph),
+                                None if status == ChatIndicator::Working => {
+                                    el.child(tab_spinner(&id, &theme, cx))
+                                }
+                                None if is_hovered && !harness.is_empty() => {
+                                    el.child(tab_grip(&theme))
+                                }
+                                None => el.when(!harness.is_empty(), |el| {
+                                    let selector = format!("session-tab-harness-{id}");
+                                    el.child(
+                                        crate::pickers::harness_mark_stack(
+                                            &harness,
+                                            14.0,
+                                            theme.text_muted,
+                                            glyph_alpha,
+                                        )
+                                        .debug_selector(move || selector),
+                                    )
+                                }),
+                            }
+                        })
+                    })
+                    // A draft wears the amber pen where a session wears
+                    // its harness brand (d18); a session with unsent
+                    // composer text wears both, like its sidebar row.
+                    .when(
+                        terminal.is_none()
+                            && (is_draft || crate::draft_store::has_content(&id, cx)),
+                        |el| {
+                            el.child(
+                                icon(icons::PEN)
+                                    .size(px(13.0))
+                                    .flex_none()
+                                    .text_color(theme.warning.opacity(glyph_alpha)),
+                            )
+                        },
+                    )
+                    .child(div().flex_1().min_w_0().truncate().child(title))
+                    .child(trailing);
 
-                    Some(slide_tab(tab_el, ix, id, 1, width, drag))
-                })
-                .collect();
+                if grouped {
+                    return Some((id, tab_el.into_any_element()));
+                }
+                Some((id.clone(), slide_tab(tab_el, ix, id, 1, width, drag)))
+            })
+            .collect();
+        let tab_elements = self.assemble_tab_groups(
+            tab_elements,
+            &members,
+            &tabs_by_id,
+            selected.as_deref(),
+            width,
+            cx,
+        );
 
         // Overflow: the tab region scrolls horizontally; edge fades appear on
         // whichever side has hidden tabs (offset from the LAST frame — a
@@ -1593,6 +1646,267 @@ impl Shell {
             .fade_left(fade_left)
             .fade_right(fade_right)
             .into_any_element()
+    }
+
+    fn toggle_tab_group(&mut self, task_id: &str, cx: &mut Context<Self>) {
+        let tasks = &self.state.read(cx).tasks;
+        let groups = &mut self.settings.collapsed_tab_groups;
+        groups.retain(|id| tasks.iter().any(|task| &task.id == id && !task.deleted));
+        match groups.iter().position(|id| id == task_id) {
+            Some(ix) => {
+                groups.remove(ix);
+            }
+            None => groups.push(task_id.to_owned()),
+        }
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    fn close_tab_group_menu(&mut self, cx: &mut Context<Self>) {
+        self.tab_group_hover = None;
+        self.tab_group_menu_hover = None;
+        cx.notify();
+    }
+
+    fn assemble_tab_groups(
+        &mut self,
+        elements: Vec<(String, AnyElement)>,
+        members: &std::collections::HashMap<String, crate::tasks::TabMember>,
+        tabs: &std::collections::HashMap<String, (SharedString, Vec<InstanceIcon>, ChatIndicator)>,
+        selected: Option<&str>,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut out = Vec::new();
+        let mut elements = elements.into_iter().peekable();
+        while let Some((id, element)) = elements.next() {
+            let Some(member) = members.get(&id) else {
+                out.push(element);
+                continue;
+            };
+            let mut group = vec![(id, element)];
+            while let Some(next) = elements.next_if(|(next, _)| {
+                members
+                    .get(next)
+                    .is_some_and(|next| next.task_id == member.task_id)
+            }) {
+                group.push(next);
+            }
+            out.push(self.render_tab_group(member, group, tabs, selected, width, cx));
+        }
+        out
+    }
+
+    fn render_tab_group(
+        &mut self,
+        member: &crate::tasks::TabMember,
+        group: Vec<(String, AnyElement)>,
+        tabs: &std::collections::HashMap<String, (SharedString, Vec<InstanceIcon>, ChatIndicator)>,
+        selected: Option<&str>,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let tones = self.settings.inset_shell.then(|| theme.inset_tones());
+        let task_id = member.task_id.clone();
+        let title = SharedString::from(
+            self.state
+                .read(cx)
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .map(|task| transcript::single_line(&task.title))
+                .unwrap_or_default(),
+        );
+        let collapsed = self.settings.collapsed_tab_groups.contains(&task_id);
+        let on_page = matches!(self.route, Route::TaskCenter)
+            && self.task_center_task.as_deref() == Some(member.lead.as_str());
+        let shown = |id: &str| !collapsed || id == member.lead || selected == Some(id);
+        let status_of = |id: &str| tabs.get(id).map(|(_, _, status)| *status);
+        let hidden_asks = group
+            .iter()
+            .any(|(id, _)| !shown(id) && status_of(id) == Some(ChatIndicator::AwaitingInput));
+        let menu_open = collapsed
+            && [&self.tab_group_hover, &self.tab_group_menu_hover]
+                .iter()
+                .any(|hover| hover.as_deref() == Some(task_id.as_str()));
+        let ids: Vec<String> = group.iter().map(|(id, _)| id.clone()).collect();
+        let menu =
+            menu_open.then(|| self.render_tab_group_menu(&task_id, &ids, tabs, selected, cx));
+        let reduced = self.reduced_motion;
+        let members: Vec<AnyElement> = group
+            .into_iter()
+            .filter_map(|(id, element)| {
+                let t = motion::state_t(
+                    &format!("tab-group-member-{id}"),
+                    shown(&id),
+                    motion::TAB_GROUP,
+                    reduced,
+                );
+                if t >= 1.0 {
+                    return Some(element);
+                }
+                (t > 0.0).then(|| {
+                    div()
+                        .flex_none()
+                        .w(px(width * t))
+                        .opacity(t)
+                        .overflow_hidden()
+                        .child(div().w(px(width)).flex().child(element))
+                        .into_any_element()
+                })
+            })
+            .collect();
+        let tone = motion::mix(theme.accent, theme.text, 0.2);
+        let toggle_id = task_id.clone();
+        let hover_id = task_id.clone();
+        let title_el = div()
+            .id(SharedString::from(format!("tab-group-{task_id}")))
+            .debug_selector(|| format!("tab-group-{task_id}"))
+            .role(gpui::Role::Button)
+            .aria_label(title.clone())
+            .aria_expanded(!collapsed)
+            .relative()
+            .flex_none()
+            .max_w(px(TAB_MAX_WIDTH))
+            .h(px(TAB_HEIGHT))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(10.0))
+            .rounded(px(8.0))
+            .text_size(px(12.0))
+            .text_color(if on_page { theme.text } else { tone })
+            .cursor_pointer()
+            .when(on_page, |el| match tones {
+                Some(tones) => el.child(folder_tab_backdrop(tones)),
+                None => el
+                    .bg(crate::theme::glass_selected_bg())
+                    .shadow(crate::theme::glass_selected_shadows()),
+            })
+            .when(!on_page, |el| {
+                let wash = tones.map_or_else(|| theme.glass_hover(), |tones| tones.wash);
+                el.hover(move |s| s.bg(wash))
+            })
+            .block_mouse_except_scroll()
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.tab_group_hover = Some(hover_id.clone());
+                } else if this.tab_group_hover.as_deref() == Some(hover_id.as_str()) {
+                    this.tab_group_hover = None;
+                }
+                cx.notify();
+            }))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.toggle_tab_group(&toggle_id, cx);
+            }))
+            .child(
+                icon(icons::MISSION_CONTROL)
+                    .size(px(14.0))
+                    .flex_none()
+                    .text_color(tone),
+            )
+            .child(div().min_w_0().truncate().child(title))
+            .when(hidden_asks, |el| {
+                el.child(div().size(px(6.0)).flex_none().rounded_full().bg(
+                    spaces::status_dot_color(ChatIndicator::AwaitingInput, &theme),
+                ))
+            })
+            .children(menu);
+        div()
+            .id(SharedString::from(format!("tab-group-box-{task_id}")))
+            .min_w_0()
+            .h(px(TAB_HEIGHT))
+            .flex()
+            .flex_row()
+            .items_center()
+            .rounded(px(10.0))
+            .bg(crate::theme::wash(0.05))
+            .child(title_el)
+            .children(members)
+            .into_any_element()
+    }
+
+    fn render_tab_group_menu(
+        &mut self,
+        task_id: &str,
+        ids: &[String],
+        tabs: &std::collections::HashMap<String, (SharedString, Vec<InstanceIcon>, ChatIndicator)>,
+        selected: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let tone = motion::mix(theme.accent, theme.text, 0.2);
+        let hover_id = task_id.to_owned();
+        let page_id = task_id.to_owned();
+        let mut card = popover::popover_card(&theme)
+            .w(px(270.0))
+            .flex()
+            .flex_col()
+            .id(SharedString::from(format!("tab-group-menu-{task_id}")))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.tab_group_menu_hover = Some(hover_id.clone());
+                } else if this.tab_group_menu_hover.as_deref() == Some(hover_id.as_str()) {
+                    this.tab_group_menu_hover = None;
+                }
+                cx.notify();
+            }))
+            .child(
+                popover::menu_row(&theme, false, format!("tab-group-page-{task_id}"))
+                    .id(SharedString::from(format!("tab-group-page-{task_id}")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.close_tab_group_menu(cx);
+                        this.open_task_center(page_id.clone(), cx);
+                    }))
+                    .child(
+                        icon(icons::MISSION_CONTROL)
+                            .size(px(14.0))
+                            .flex_none()
+                            .text_color(tone),
+                    )
+                    .child(div().text_color(theme.text_muted).child("Mission page")),
+            );
+        for id in ids {
+            let Some((label, harness, status)) = tabs.get(id).cloned() else {
+                continue;
+            };
+            let open_id = id.clone();
+            card = card.child(
+                popover::menu_row(
+                    &theme,
+                    selected == Some(id.as_str()),
+                    format!("tab-group-row-{id}"),
+                )
+                .id(SharedString::from(format!("tab-group-row-{id}")))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.close_tab_group_menu(cx);
+                    this.navigate_to(Some(open_id.clone()), true, cx);
+                }))
+                .children(
+                    harness
+                        .last()
+                        .map(|brand| brand.svg(theme.text_muted).size(px(14.0)).flex_none()),
+                )
+                .child(div().flex_1().min_w_0().truncate().child(label))
+                .when(
+                    !matches!(status, ChatIndicator::Idle | ChatIndicator::Working),
+                    |el| {
+                        el.child(
+                            div()
+                                .size(px(6.0))
+                                .flex_none()
+                                .rounded_full()
+                                .bg(spaces::status_dot_color(status, &theme)),
+                        )
+                    },
+                ),
+            );
+        }
+        popover::hover_menu_below(format!("tab-group-menu-{task_id}"), card.into_any_element())
     }
 
     /// The trailing titlebar strip follows the columns beneath it.
@@ -3120,5 +3434,34 @@ mod close_tests {
         assert_eq!(next_after_close(&ids(&["solo"]), "solo"), None);
         // Unknown id: no opinion.
         assert_eq!(next_after_close(&order, "zz"), None);
+    }
+}
+
+#[cfg(test)]
+mod tab_group_tests {
+    use super::group_tab_order;
+    use crate::tasks::TabMember;
+
+    #[test]
+    fn mission_tabs_gather_at_the_first_member_lead_first() {
+        let member = |step| TabMember {
+            task_id: "t".into(),
+            lead: "lead".into(),
+            step,
+        };
+        let members = std::collections::HashMap::from([
+            ("lead".to_string(), member(None)),
+            ("s1".to_string(), member(Some(0))),
+            ("s2".to_string(), member(Some(1))),
+        ]);
+        let order: Vec<String> = ["a", "s2", "b", "lead", "c", "s1"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            group_tab_order(&order, &members),
+            ["a", "lead", "s1", "s2", "b", "c"]
+                .map(String::from)
+                .to_vec()
+        );
     }
 }

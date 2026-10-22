@@ -1577,6 +1577,44 @@ pub(crate) fn mission_thread(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TabMember {
+    pub task_id: String,
+    pub lead: String,
+    pub step: Option<usize>,
+}
+
+pub(crate) fn tab_members(state: &AppState) -> std::collections::HashMap<String, TabMember> {
+    let mut tasks: Vec<&zeron_proto::Task> = state
+        .tasks
+        .iter()
+        .filter(|task| !task.deleted && task.has_plan())
+        .collect();
+    tasks.sort_by_key(|task| task.completed_at.is_none());
+    let mut members = std::collections::HashMap::new();
+    for task in tasks {
+        let Some(lead) = task.chat_id.clone() else {
+            continue;
+        };
+        let member = |step| TabMember {
+            task_id: task.id.clone(),
+            lead: lead.clone(),
+            step,
+        };
+        members.insert(lead.clone(), member(None));
+        let steps = state
+            .task_steps
+            .iter()
+            .filter(|step| step.task_id == task.id && !step.deleted);
+        for (ix, step) in steps.enumerate() {
+            if let Some(chat_id) = &step.chat_id {
+                members.insert(chat_id.clone(), member(Some(ix)));
+            }
+        }
+    }
+    members
+}
+
 pub(crate) fn can_add_plan(state: &AppState, chat: &zeron_proto::Chat) -> bool {
     state.local_device_id.as_deref() == Some(chat.device_id.as_str())
         && !chat.archived

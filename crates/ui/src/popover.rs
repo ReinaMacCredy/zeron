@@ -713,6 +713,32 @@ pub fn anchored_menu_below_layer(
         .into_any_element()
 }
 
+/// No outside-press guard: the hovered trigger beside it must keep taking clicks.
+pub fn hover_menu_below(id: impl Into<SharedString>, content: AnyElement) -> AnyElement {
+    let content = crate::frost::frosted(CARD_RADIUS, crate::frost::MENU_BLUR, content);
+    div()
+        .absolute()
+        .bottom_0()
+        .left_0()
+        .size_0()
+        .child(
+            gpui::deferred(
+                gpui::anchored()
+                    .anchor(Anchor::TopLeft)
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(menu_motion_from(
+                        id.into(),
+                        None,
+                        div().occlude().child(content),
+                        -MENU_TRAVEL,
+                    )),
+            )
+            .priority(1)
+            .into_any_element(),
+        )
+        .into_any_element()
+}
+
 /// [`anchored_menu`] opening UPWARD from the trigger (composer pickers, the
 /// user menu — anything anchored near the window bottom; Radix flips these
 /// automatically, gpui's `anchored` needs the side picked).
