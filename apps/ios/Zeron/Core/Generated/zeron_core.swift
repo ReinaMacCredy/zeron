@@ -5851,13 +5851,15 @@ public func FfiConverterTypeCaptionSpan_lower(_ value: CaptionSpan) -> RustBuffe
 public struct ChangelogEntry: Equatable, Hashable {
     public var version: String
     public var date: String
+    public var hero: String?
     public var features: [ChangelogFeature]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(version: String, date: String, features: [ChangelogFeature]) {
+    public init(version: String, date: String, hero: String?, features: [ChangelogFeature]) {
         self.version = version
         self.date = date
+        self.hero = hero
         self.features = features
     }
 
@@ -5879,6 +5881,7 @@ public struct FfiConverterTypeChangelogEntry: FfiConverterRustBuffer {
             try ChangelogEntry(
                 version: FfiConverterString.read(from: &buf), 
                 date: FfiConverterString.read(from: &buf), 
+                hero: FfiConverterOptionString.read(from: &buf), 
                 features: FfiConverterSequenceTypeChangelogFeature.read(from: &buf)
         )
     }
@@ -5886,6 +5889,7 @@ public struct FfiConverterTypeChangelogEntry: FfiConverterRustBuffer {
     public static func write(_ value: ChangelogEntry, into buf: inout [UInt8]) {
         FfiConverterString.write(value.version, into: &buf)
         FfiConverterString.write(value.date, into: &buf)
+        FfiConverterOptionString.write(value.hero, into: &buf)
         FfiConverterSequenceTypeChangelogFeature.write(value.features, into: &buf)
     }
 }
@@ -5909,13 +5913,15 @@ public func FfiConverterTypeChangelogEntry_lower(_ value: ChangelogEntry) -> Rus
 public struct ChangelogFeature: Equatable, Hashable {
     public var title: String
     public var description: String
+    public var image: String?
     public var details: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(title: String, description: String, details: String?) {
+    public init(title: String, description: String, image: String?, details: String?) {
         self.title = title
         self.description = description
+        self.image = image
         self.details = details
     }
 
@@ -5937,6 +5943,7 @@ public struct FfiConverterTypeChangelogFeature: FfiConverterRustBuffer {
             try ChangelogFeature(
                 title: FfiConverterString.read(from: &buf), 
                 description: FfiConverterString.read(from: &buf), 
+                image: FfiConverterOptionString.read(from: &buf), 
                 details: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -5944,6 +5951,7 @@ public struct FfiConverterTypeChangelogFeature: FfiConverterRustBuffer {
     public static func write(_ value: ChangelogFeature, into buf: inout [UInt8]) {
         FfiConverterString.write(value.title, into: &buf)
         FfiConverterString.write(value.description, into: &buf)
+        FfiConverterOptionString.write(value.image, into: &buf)
         FfiConverterOptionString.write(value.details, into: &buf)
     }
 }
@@ -11390,6 +11398,68 @@ public func FfiConverterTypeVoiceMediaRequest_lower(_ value: VoiceMediaRequest) 
 }
 
 
+/**
+ * The post-update card: `entry` to show, or `advance` to record `version`
+ * as seen without one (a fresh install, or an update with no entry).
+ */
+public struct WhatsNewCard: Equatable, Hashable {
+    public var entry: ChangelogEntry?
+    public var advance: Bool
+    public var version: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(entry: ChangelogEntry?, advance: Bool, version: String) {
+        self.entry = entry
+        self.advance = advance
+        self.version = version
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension WhatsNewCard: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWhatsNewCard: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WhatsNewCard {
+        return
+            try WhatsNewCard(
+                entry: FfiConverterOptionTypeChangelogEntry.read(from: &buf), 
+                advance: FfiConverterBool.read(from: &buf), 
+                version: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WhatsNewCard, into buf: inout [UInt8]) {
+        FfiConverterOptionTypeChangelogEntry.write(value.entry, into: &buf)
+        FfiConverterBool.write(value.advance, into: &buf)
+        FfiConverterString.write(value.version, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWhatsNewCard_lift(_ buf: RustBuffer) throws -> WhatsNewCard {
+    return try FfiConverterTypeWhatsNewCard.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWhatsNewCard_lower(_ value: WhatsNewCard) -> RustBuffer {
+    return FfiConverterTypeWhatsNewCard.lower(value)
+}
+
+
 public struct Widget: Equatable, Hashable {
     public var id: UInt32
     public var kind: WidgetKind
@@ -16487,6 +16557,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
+    typealias SwiftType = Data?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterData.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterData.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypePlatformMeasurer: FfiConverterRustBuffer {
     typealias SwiftType = PlatformMeasurer?
 
@@ -18591,15 +18685,19 @@ public func changelog() -> [ChangelogEntry]  {
     )
 })
 }
-/**
- * An article's markdown without its screenshots, which ship only with the
- * desktop app.
- */
 public func docsBody(id: String) -> String?  {
     return try!  FfiConverterOptionString.lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_func_docs_body(
         FfiConverterString.lower(id),uniffiCallStatus
+    )
+})
+}
+public func docsImage(name: String) -> Data?  {
+    return try!  FfiConverterOptionData.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_docs_image(
+        FfiConverterString.lower(name),uniffiCallStatus
     )
 })
 }
@@ -18622,6 +18720,14 @@ public func whatsNew() -> ChangelogEntry?  {
     return try!  FfiConverterOptionTypeChangelogEntry.lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_func_whats_new(uniffiCallStatus
+    )
+})
+}
+public func whatsNewCard(lastSeen: String?) -> WhatsNewCard  {
+    return try!  FfiConverterTypeWhatsNewCard_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_whats_new_card(
+        FfiConverterOptionString.lower(lastSeen),uniffiCallStatus
     )
 })
 }
@@ -18792,7 +18898,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_changelog() != 56732) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_zeron_mobile_checksum_func_docs_body() != 25573) {
+    if (uniffi_zeron_mobile_checksum_func_docs_body() != 35187) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_docs_image() != 25704) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_docs_link() != 25879) {
@@ -18802,6 +18911,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_whats_new() != 4991) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_whats_new_card() != 39558) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_debug_line_starts() != 43822) {

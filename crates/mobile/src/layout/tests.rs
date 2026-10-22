@@ -523,6 +523,25 @@ fn user_attachments_render_as_images_not_trailer_text() {
 }
 
 #[test]
+fn bundled_doc_images_lay_out_as_sized_blocks_and_others_stay_links() {
+    let mut w = worker(390.0);
+    let text = "Pick a model.\n\n![Compact picker](models-compact-picker.jpg)\n\n![Elsewhere](not-bundled.png)".to_owned();
+    w.input = debug_input(vec![DebugEntry { id: "a".into(), user: false, text, streaming: false }], false);
+    let frame = w.pass();
+    let rows: Vec<_> = (0..frame.row_count()).filter_map(|i| frame.display(i)).collect();
+    let images: Vec<_> = rows
+        .iter()
+        .flat_map(|d| &d.widgets)
+        .filter(|w| matches!(&w.kind, display::WidgetKind::Image { .. }))
+        .collect();
+    assert_eq!(images.len(), 1);
+    assert!(matches!(&images[0].kind, display::WidgetKind::Image { reference } if reference == "docs:models-compact-picker.jpg"));
+    let (iw, ih) = (images[0].w, images[0].h);
+    assert!(iw <= 380.0 && (ih - iw * 256.0 / 760.0).abs() < 0.5, "{iw}x{ih}");
+    assert!(rows.iter().any(|d| d.text.contains("Elsewhere")));
+}
+
+#[test]
 fn synced_file_attachments_render_as_chips_and_name_pills() {
     // A desktop send mixing an image and ZIPs (one still a queued-upload ref),
     // with composer chips in the prompt. Chipped attachments show as their

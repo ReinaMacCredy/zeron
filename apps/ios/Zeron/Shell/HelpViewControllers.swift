@@ -4,8 +4,8 @@ final class WhatsNewViewController: UIViewController {
     private let entries: [ChangelogEntry]
     private let full: Bool
 
-    static func present(from host: UIViewController) {
-        guard let entry = whatsNew() else { return }
+    static func present(from host: UIViewController, entry: ChangelogEntry? = nil) {
+        guard let entry = entry ?? whatsNew() else { return }
         let nav = UINavigationController(rootViewController: WhatsNewViewController(entries: [entry], full: false))
         nav.sheetPresentationController?.detents = [.medium(), .large()]
         nav.sheetPresentationController?.prefersGrabberVisible = true
@@ -50,13 +50,15 @@ final class WhatsNewViewController: UIViewController {
         ])
         for entry in entries {
             stack.addArrangedSubview(label("v\(entry.version) · \(entry.date)", font: Fonts.ui(.sansMedium, 13), color: Palette.secondary))
+            if let hero = entry.hero.flatMap(picture) { stack.addArrangedSubview(hero) }
             for feature in entry.features {
                 let block = UIStackView(arrangedSubviews: [
                     label(feature.title, font: Fonts.ui(.sansMedium, 17), color: Palette.text),
                     label(feature.description, font: Fonts.ui(.sans, 15), color: Palette.secondary),
-                ])
+                ] + (feature.image.flatMap(picture).map { [$0] } ?? []))
                 block.axis = .vertical
                 block.spacing = 4
+                block.setCustomSpacing(10, after: block.arrangedSubviews[1])
                 stack.addArrangedSubview(block)
             }
         }
@@ -81,6 +83,121 @@ final class WhatsNewViewController: UIViewController {
         label.textColor = color
         label.numberOfLines = 0
         return label
+    }
+
+    private func picture(_ name: String) -> UIView? {
+        guard let image = bundledImage(name) else { return nil }
+        let view = UIImageView(image: image)
+        view.contentMode = .scaleAspectFit
+        view.clipsToBounds = true
+        view.layer.cornerRadius = 12
+        view.layer.cornerCurve = .continuous
+        view.accessibilityIdentifier = "whatsnew-image-\(name)"
+        view.heightAnchor.constraint(equalTo: view.widthAnchor, multiplier: image.size.height / image.size.width).isActive = true
+        return view
+    }
+}
+
+func bundledImage(_ name: String) -> UIImage? {
+    docsImage(name: name).flatMap { UIImage(data: Data($0)) }
+}
+
+/// The post-update card the desktop shows once after an update, floating
+/// over the sessions list until opened or dismissed.
+final class WhatsNewCardView: UIView {
+    private static let seenKey = "whatsNewLastSeen"
+    private let version: String
+    private weak var host: UIViewController?
+
+    static func install(on host: UIViewController) {
+        let check = whatsNewCard(lastSeen: UserDefaults.standard.string(forKey: seenKey))
+        if check.advance { UserDefaults.standard.set(check.version, forKey: seenKey) }
+        guard let entry = check.entry else { return }
+        let card = WhatsNewCardView(entry: entry, version: check.version, host: host)
+        host.view.addSubview(card)
+        let guide = host.view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            card.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 16),
+            card.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -16),
+            card.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -12),
+        ])
+    }
+
+    private init(entry: ChangelogEntry, version: String, host: UIViewController) {
+        self.version = version
+        self.host = host
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        accessibilityIdentifier = "whatsnew-card"
+        backgroundColor = Palette.elevated
+        layer.cornerRadius = 16
+        layer.cornerCurve = .continuous
+        layer.shadowColor = UIColor.black.cgColor
+        layer.shadowOpacity = 0.18
+        layer.shadowRadius = 16
+        layer.shadowOffset = CGSize(width: 0, height: 6)
+
+        let stack = UIStackView()
+        stack.axis = .vertical
+        stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        if let image = entry.hero.flatMap(bundledImage) {
+            let hero = UIImageView(image: image)
+            hero.contentMode = .scaleAspectFill
+            hero.clipsToBounds = true
+            hero.layer.cornerRadius = 10
+            hero.layer.cornerCurve = .continuous
+            hero.heightAnchor.constraint(equalToConstant: 120).isActive = true
+            stack.addArrangedSubview(hero)
+            stack.setCustomSpacing(12, after: hero)
+        }
+        let badge = UILabel()
+        badge.text = "New · v\(entry.version)"
+        badge.font = Fonts.ui(.sansMedium, 12)
+        badge.textColor = Palette.accent
+        let title = UILabel()
+        title.text = entry.features.first?.title ?? "What's new in v\(entry.version)"
+        title.font = Fonts.ui(.sansMedium, 16)
+        title.textColor = Palette.text
+        title.numberOfLines = 2
+        var config = UIButton.Configuration.plain()
+        config.title = "See what’s new →"
+        config.contentInsets = .zero
+        let open = UIButton(configuration: config, primaryAction: UIAction { [weak self] _ in
+            guard let self, let host = self.host else { return }
+            self.close()
+            WhatsNewViewController.present(from: host, entry: entry)
+        })
+        open.tintColor = Palette.accent
+        open.contentHorizontalAlignment = .leading
+        open.accessibilityIdentifier = "whatsnew-card-open"
+        [badge, title, open].forEach(stack.addArrangedSubview)
+
+        let dismiss = UIButton(type: .system, primaryAction: UIAction(image: UIImage(systemName: "xmark")) { [weak self] _ in self?.close() })
+        dismiss.tintColor = Palette.secondary
+        dismiss.accessibilityLabel = "Dismiss"
+        dismiss.accessibilityIdentifier = "whatsnew-card-dismiss"
+        dismiss.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(dismiss)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            dismiss.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            dismiss.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            dismiss.widthAnchor.constraint(equalToConstant: 36),
+            dismiss.heightAnchor.constraint(equalToConstant: 36),
+        ])
+        bringSubviewToFront(dismiss)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func close() {
+        UserDefaults.standard.set(version, forKey: Self.seenKey)
+        UIView.animate(withDuration: 0.2, animations: { self.alpha = 0 }, completion: { _ in self.removeFromSuperview() })
     }
 }
 
@@ -176,6 +293,7 @@ final class DocArticleViewController: UIViewController {
         list.onLink = { [weak self] url in self?.open(url) ?? false }
         view.addSubview(list)
         setContentScrollView(list, for: .top)
+        list.imageLoader = { name, view in view.image = bundledImage(name) }
         MathSettings.apply(to: engine)
         engine.setDebugEntries(entries: [DebugEntry(id: id, user: false, text: docsBody(id: id) ?? "", streaming: false)], working: false)
     }
