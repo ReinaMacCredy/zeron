@@ -22,7 +22,7 @@ Each role has a row with **Harness**, **Model** and **Reasoning**:
 - **Same as parent** runs the child on the delegating chat's agent, model and reasoning level.
 - An agent picks that agent, with the model and reasoning level beside it. If the agent is not installed or is turned off, the child runs on the parent's model instead and its chip says why.
 
-Beside each model, a multiplier such as **0.04x** compares its price with the model named in the column header, from [models.dev](https://models.dev) prices, three input tokens to each output token. The **Quota** column shows how much of each agent's plan limit is used and when it resets, from [Usage](zeron://docs/usage). An agent that reports no usage shows **no quota data**: Zeron learns that it is out of quota from its first limit error, and then treats it as out for an hour, or until the reset time it gave.
+Beside each model, a multiplier such as **0.04x** compares its price with the model named in the column header, from [models.dev](https://models.dev) prices, three input tokens to each output token. The **Quota** column shows how much of each agent's plan limit is used and when it resets, from [Usage](zeron://docs/usage). An agent that reports no usage shows **no quota data**: Zeron learns that it is out of quota from its first limit error, and then treats it as out for an hour, or until the reset time it gave. A newer usage reading, or a turn that finishes on that agent, ends this early.
 
 Routes apply only when a child is created. Changing the table never moves a chat that is already running.
 

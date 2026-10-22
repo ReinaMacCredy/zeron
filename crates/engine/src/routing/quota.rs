@@ -42,16 +42,27 @@ impl CachedQuota {
     }
 }
 
-pub fn merge(cache: Option<CachedQuota>, limited_until: Option<i64>, now: i64) -> QuotaState {
-    if let Some(until) = limited_until.filter(|until| *until > now) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Memo {
+    pub until: i64,
+    pub noted_at: i64,
+}
+
+pub fn merge(cache: Option<CachedQuota>, memo: Option<Memo>, now: i64) -> QuotaState {
+    let cache = cache.filter(|cache| now - cache.fetched_at <= STALE_MS);
+    if let Some(memo) = memo.filter(|memo| memo.until > now)
+        && cache
+            .as_ref()
+            .is_none_or(|cache| cache.fetched_at <= memo.noted_at)
+    {
         return QuotaState {
             known: true,
             used_fraction: Some(1.0),
-            resets_at: Some(until),
+            resets_at: Some(memo.until),
             exhausted: true,
         };
     }
-    match cache.filter(|cache| now - cache.fetched_at <= STALE_MS) {
+    match cache {
         Some(cache) => {
             let exhausted = cache.used_fraction >= 1.0 && cache.resets_at.is_none_or(|at| at > now);
             QuotaState {
@@ -87,7 +98,7 @@ fn fake(harness: HarnessId, now: i64) -> Option<CachedQuota> {
 #[derive(Default)]
 pub struct QuotaBook {
     accounts: OnceLock<AgentAccounts>,
-    limited: Mutex<HashMap<HarnessId, i64>>,
+    limited: Mutex<HashMap<HarnessId, Memo>>,
 }
 
 impl QuotaBook {
@@ -106,7 +117,20 @@ impl QuotaBook {
         self.limited
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(harness, until);
+            .insert(
+                harness,
+                Memo {
+                    until,
+                    noted_at: now,
+                },
+            );
+    }
+
+    pub fn clear(&self, harness: HarnessId) {
+        self.limited
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&harness);
     }
 
     pub fn state(&self, harness: HarnessId, now: i64) -> QuotaState {
@@ -535,10 +559,25 @@ mod tests {
             fetched_at: NOW - 1_000,
             ..full
         };
-        assert!(merge(Some(fresh), None, NOW).exhausted);
-        let memo = merge(None, Some(NOW + 5_000), NOW);
+        assert!(merge(Some(fresh.clone()), None, NOW).exhausted);
+        let noted = |until, noted_at| Some(Memo { until, noted_at });
+        let memo = merge(None, noted(NOW + 5_000, NOW - 2_000), NOW);
         assert!(memo.exhausted && memo.resets_at == Some(NOW + 5_000));
-        assert!(!merge(None, Some(NOW - 1), NOW).known);
+        assert!(!merge(None, noted(NOW - 1, NOW - 2_000), NOW).known);
+        let probed_after = CachedQuota {
+            used_fraction: 0.1,
+            ..fresh
+        };
+        assert!(
+            !merge(
+                Some(probed_after.clone()),
+                noted(NOW + 5_000, NOW - 2_000),
+                NOW
+            )
+            .exhausted,
+            "a usage probe fetched after the limit wins"
+        );
+        assert!(merge(Some(probed_after), noted(NOW + 5_000, NOW), NOW).exhausted);
     }
 
     #[test]
@@ -553,6 +592,8 @@ mod tests {
         let grok = book.state(HarnessId::Grok, NOW);
         assert!(grok.exhausted);
         assert_eq!(grok.resets_at, Some(NOW + UNKNOWN_RESET_MS));
+        book.clear(HarnessId::Grok);
+        assert!(!book.state(HarnessId::Grok, NOW).known);
     }
 
     #[test]
