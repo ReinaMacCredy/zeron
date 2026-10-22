@@ -242,6 +242,7 @@ fn the_steps_window_button_closes_its_own_window(cx: &mut TestAppContext) {
     let _guard = runtime.enter();
     let (_lab, state) = lab(cx);
     mission(&state, cx);
+    state.update(cx, |state, _| state.tasks[0].plan_pending = true);
     let (_center, cx) = cx.add_window_view(|_, cx| TaskCenter::new(state, "orch".into(), cx));
     cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
     cx.run_until_parked();
