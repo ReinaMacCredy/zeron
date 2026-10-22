@@ -127,14 +127,18 @@ pub(crate) fn tree_rows(
         .copied()
         .filter(|chat| !bound.contains(chat.id.as_str()))
         .collect();
-    let labelled = rollup.is_some();
-    let count = agents.len();
-    for (n, chat) in agents.into_iter().enumerate() {
-        if let Some(ix) = walk.agent(chat, 0, 1) {
-            walk.out[ix].group = (labelled && n == 0).then_some(Group::Agents(count));
-        }
+    let first = walk.out.len();
+    for chat in agents {
+        walk.agent(chat, 0, 1);
     }
     walk.natives(root, 0, 1);
+    let count = walk.out[first..]
+        .iter()
+        .filter(|node| node.parent == Some(0))
+        .count();
+    if rollup.is_some() && count > 0 {
+        walk.out[first].group = Some(Group::Agents(count));
+    }
     if rollup.is_none() {
         walk.out[0].title = root_line(&walk.out);
     }

@@ -53,7 +53,6 @@ const TITLE_CHARS: usize = 120;
 const RECENTLY_ACTIVE: Duration = Duration::from_secs(180);
 const NO_EFFECT_AFTER_MINUTES: i64 = 10;
 const EARLIER_ROWS: usize = 50;
-const CONVERSATION_HEIGHT: f32 = 320.0;
 const PAGE_WIDTH: f32 = 760.0;
 const EASE_PAGE: CubicBezier = CubicBezier::new(0.2, 0.9, 0.3, 1.0);
 const ENTER: MotionSpec = MotionSpec::new(340, EASE_PAGE);
@@ -1247,6 +1246,8 @@ pub struct SupervisorPage {
     last_sheet: Option<String>,
     focus: FocusHandle,
     width: Rc<Cell<f32>>,
+    header_bottom: Rc<Cell<f32>>,
+    region_top: Rc<Cell<f32>>,
     rail_pref: Option<bool>,
     rail: Option<RailMotion>,
     status: Option<StatusMotion>,
@@ -1324,6 +1325,8 @@ impl SupervisorPage {
             last_sheet: None,
             focus: cx.focus_handle(),
             width: Rc::default(),
+            header_bottom: Rc::default(),
+            region_top: Rc::default(),
             rail_pref: None,
             rail: None,
             status: None,
@@ -3444,13 +3447,98 @@ impl SupervisorPage {
         )
     }
 
-    fn render_bottom(
+    fn render_conversation(
         &self,
         now: Instant,
         theme: &Theme,
-        window: &Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Option<AnyElement> {
+        let open = self.conversation.value_at(now);
+        let pane = self.pane.as_ref().filter(|_| open > 0.0)?;
+        let top = (self.header_bottom.get() - self.region_top.get()).max(0.0);
+        let close = div()
+            .id("supervisor-conversation-close")
+            .debug_selector(|| "supervisor-conversation-close".into())
+            .role(gpui::Role::Button)
+            .aria_label("Close conversation")
+            .flex_none()
+            .cursor_pointer()
+            .p(px(4.0))
+            .rounded(px(6.0))
+            .hover(|s| s.bg(theme.glass_hover()))
+            .child(
+                icon(icons::CLOSE)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            )
+            .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.toggle_conversation(cx)));
+        let card = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(theme.bg)
+            .border_1()
+            .border_b_0()
+            .border_color(theme.border)
+            .rounded_t(px(12.0))
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px(px(14.0))
+                    .py(px(8.0))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_size(ui_rems(12.5))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child("Conversation")
+                    .child(close),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(pane.transcript.clone()),
+            );
+        Some(
+            div()
+                .id("supervisor-conversation")
+                .debug_selector(|| "supervisor-conversation".into())
+                .absolute()
+                .top(px(top))
+                .bottom_0()
+                .left_0()
+                .right_0()
+                .overflow_hidden()
+                .occlude()
+                .child(
+                    div()
+                        .absolute()
+                        .top(relative(1.0 - open))
+                        .left_0()
+                        .right_0()
+                        .h_full()
+                        .opacity(open)
+                        .child(
+                            div()
+                                .size_full()
+                                .max_w(px(PAGE_WIDTH))
+                                .mx_auto()
+                                .px(px(24.0))
+                                .child(card),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_bottom(&self, now: Instant, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let column = div()
             .flex_none()
             .w_full()
@@ -3474,8 +3562,6 @@ impl SupervisorPage {
             self.chat_id(cx)
                 .and_then(|id| last_message(state.sub_transcript(&id), wakes))
         };
-        let height =
-            (f32::from(window.viewport_size().height) * 0.4).clamp(160.0, CONVERSATION_HEIGHT);
         let tab = preview.map(|preview| {
             crate::queue::queue_panel_surface(theme, false)
                 .id("supervisor-conversation-toggle")
@@ -3521,25 +3607,6 @@ impl SupervisorPage {
                 .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.toggle_conversation(cx)))
         });
         column
-            .when(open > 0.0, |el| {
-                el.child(
-                    div()
-                        .id("supervisor-conversation")
-                        .debug_selector(|| "supervisor-conversation".into())
-                        .flex_none()
-                        .w_full()
-                        .h(px(height * open))
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .w_full()
-                                .h(px(height))
-                                .flex()
-                                .flex_col()
-                                .child(pane.transcript.clone()),
-                        ),
-                )
-            })
             .child(
                 div()
                     .relative()
@@ -4133,10 +4200,12 @@ impl Render for SupervisorPage {
                 Mode::Stopped | Mode::Off | Mode::Failed(_) | Mode::Blocked(_)
             ))
         .then(|| self.render_status(watched, false, now, &theme, cx));
+        let header_probe = self.header_bottom.clone();
         let header = enter_block(
             self.enter_progress(0, now),
             self.render_header(feed, inline_status, now, &theme, cx),
-        );
+        )
+        .child(probe(header_probe, |bounds| f32::from(bounds.bottom())));
         let body = enter_block(
             self.enter_progress(1, now),
             self.render_inbox(feed, missions, calm, now, cx),
@@ -4153,7 +4222,8 @@ impl Render for SupervisorPage {
                 .overflow_y_scroll()
                 .child(column),
         );
-        let bottom = self.render_bottom(now, &theme, window, cx);
+        let bottom = self.render_bottom(now, &theme, cx);
+        let conversation = self.render_conversation(now, &theme, cx);
         let rail = enter_block(
             self.enter_progress(2, now),
             self.render_rail(&frame, feed, missions, watched, now, &theme, cx),
@@ -4167,7 +4237,6 @@ impl Render for SupervisorPage {
             window.request_animation_frame();
         }
         self.view = Some(view);
-        let probe = self.width.clone();
         div()
             .id("supervisor-page")
             .debug_selector(|| "supervisor-page".into())
@@ -4194,26 +4263,40 @@ impl Render for SupervisorPage {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .child(div().flex_1().min_h_0().child(scroll))
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .child(scroll)
+                            .children(conversation)
+                            .child(probe(self.region_top.clone(), |bounds| {
+                                f32::from(bounds.top())
+                            })),
+                    )
                     .child(bottom),
             )
             .child(rail)
             .children(drawer)
-            .child(
-                canvas(
-                    move |bounds, window, _| {
-                        let width = f32::from(bounds.size.width);
-                        if (probe.get() - width).abs() > 0.5 {
-                            probe.set(width);
-                            window.request_animation_frame();
-                        }
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .inset_0(),
-            )
+            .child(probe(self.width.clone(), |bounds| {
+                f32::from(bounds.size.width)
+            }))
     }
+}
+
+fn probe(cell: Rc<Cell<f32>>, read: fn(gpui::Bounds<gpui::Pixels>) -> f32) -> impl IntoElement {
+    canvas(
+        move |bounds, window, _| {
+            let value = read(bounds);
+            if (cell.get() - value).abs() > 0.5 {
+                cell.set(value);
+                window.request_animation_frame();
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .inset_0()
 }
 
 fn enter_block(progress: f32, element: impl IntoElement) -> gpui::Div {

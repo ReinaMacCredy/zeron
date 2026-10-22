@@ -1101,6 +1101,17 @@ impl EngineRpc {
             .map_err(failed)
     }
 
+    pub(super) fn watch_mentioned_trees(&self, chat_id: &str, text: &str) {
+        if !zeron_proto::supervisor::is_supervisor_chat(chat_id) {
+            return;
+        }
+        for mentioned in zeron_proto::chat_mentions::mentioned_chat_ids(text) {
+            if let Err(error) = self.set_tree_watched(&mentioned, true) {
+                tracing::warn!(chat = %mentioned, %error, "could not watch a mentioned thread's tree");
+            }
+        }
+    }
+
     pub(super) fn set_watch_everything(&self, on: bool) -> Result<(), RpcError> {
         self.supervisor_store()?
             .set_watch_everything(on)
