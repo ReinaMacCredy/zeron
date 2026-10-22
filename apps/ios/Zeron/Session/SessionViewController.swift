@@ -392,7 +392,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     }
 
     private func openLimitCard(_ id: String) {
-        let open = { [weak self] in (self?.view.window?.rootViewController as? AppRouter)?.openSession(id) }
+        let open: () -> Void = { [weak self] in (self?.view.window?.rootViewController as? AppRouter)?.openSession(id) }
         guard let card = source.limitCard(chatId: id) else {
             open()
             return
@@ -431,10 +431,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     }
 
     private func limitActions() {
-        guard let pill = shown.limitPill else { return }
-        let sheet = UIAlertController(title: pill.text, message: nil, preferredStyle: .actionSheet)
+        guard let limit = shown.limitPill else { return }
+        let sheet = UIAlertController(title: limit.text, message: nil, preferredStyle: .actionSheet)
         let run = { [weak self] (work: @escaping (SessionSource) async throws -> Void) in
-            Task { @MainActor in
+            _ = Task { @MainActor in
                 guard let self else { return }
                 do { try await work(self.source) } catch {
                     Toast.show(Self.hostFailure(error, fallback: "Couldn't reach the host. Try again."), in: self.view.window)
@@ -442,14 +442,14 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             }
         }
         let id = chatId
-        if let model = pill.switchTo {
+        if let model = limit.switchTo {
             sheet.addAction(UIAlertAction(title: "Switch to \(model)", style: .default) { _ in
                 run { try await $0.resolveLimit(chatId: id, choice: "switch") }
             })
         }
-        if let action = pill.action {
+        if let action = limit.action {
             sheet.addAction(UIAlertAction(title: action, style: .default) { _ in
-                run { try await $0.setLimitResume(chatId: id, auto: !pill.auto) }
+                run { try await $0.setLimitResume(chatId: id, auto: !limit.auto) }
             })
         }
         sheet.addAction(UIAlertAction(title: "Close", style: .cancel))

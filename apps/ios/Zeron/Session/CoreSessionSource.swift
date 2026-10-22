@@ -301,7 +301,7 @@ final class CoreSessionSource: SessionSource {
     }
 
     func setLimitResume(chatId: String, auto: Bool) async throws {
-        _ = try await client.setLimitResume(chatId: chatId, auto: auto)
+        _ = try await client.setLimitResume(chatId: chatId, autoResume: auto)
     }
 
     private static let images = NSCache<NSString, UIImage>()

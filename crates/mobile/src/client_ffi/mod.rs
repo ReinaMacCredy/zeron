@@ -346,9 +346,9 @@ impl CoreClient {
         on_runtime(async move { client.resolve_limit_offer(&chat_id, &choice).await }).await
     }
 
-    pub async fn set_limit_resume(&self, chat_id: String, auto: bool) -> CoreResult<bool> {
+    pub async fn set_limit_resume(&self, chat_id: String, auto_resume: bool) -> CoreResult<bool> {
         let client = self.client.clone();
-        on_runtime(async move { client.set_limit_resume(&chat_id, auto).await }).await
+        on_runtime(async move { client.set_limit_resume(&chat_id, auto_resume).await }).await
     }
 
     /// Mid-session ref switch (worktree retarget or `git checkout`).
