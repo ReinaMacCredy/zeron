@@ -802,7 +802,7 @@ fn next_parts(snapshot: &SupervisorSnapshot, state: &AppState) -> Vec<Part> {
         NextCheckKind::Heartbeat => vec![text(format!("check-in at {at}"))],
         NextCheckKind::HeldWake => vec![text(format!("held events wake it at {at}"))],
         NextCheckKind::Resource => vec![text(format!("resource check at {at}"))],
-        NextCheckKind::Tree => vec![text(format!("stall check on a watched tree at {at}"))],
+        NextCheckKind::Tree => vec![text(format!("stall check at {at}"))],
     }
 }
 
