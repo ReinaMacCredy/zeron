@@ -218,3 +218,82 @@ pub fn sync_note(
         SyncKind::Pull => format!("Pulled {} into {branch}.", commit_count(reply.commits)),
     }
 }
+
+pub struct CheckoutChat<'a> {
+    pub cwd: &'a str,
+    pub branch: Option<&'a str>,
+    pub title: Option<&'a str>,
+    pub live: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckoutOption {
+    /// `None` is the project's main checkout.
+    pub path: Option<String>,
+    pub label: String,
+    pub detail: String,
+    pub live: bool,
+}
+
+pub fn same_path(left: &str, right: &str) -> bool {
+    left.trim_end_matches('/') == right.trim_end_matches('/')
+}
+
+pub fn checkout_options<'a>(
+    space_path: &str,
+    chats: impl IntoIterator<Item = CheckoutChat<'a>>,
+) -> Vec<CheckoutOption> {
+    let mut options = vec![CheckoutOption {
+        path: None,
+        label: "Main checkout".into(),
+        detail: space_path.to_owned(),
+        live: false,
+    }];
+    let mut worktrees: Vec<(String, Option<String>, Option<String>, bool)> = Vec::new();
+    for chat in chats {
+        if same_path(chat.cwd, space_path) {
+            continue;
+        }
+        match worktrees
+            .iter_mut()
+            .find(|known| same_path(&known.0, chat.cwd))
+        {
+            Some(known) => {
+                known.3 |= chat.live;
+                if known.2.is_none() {
+                    known.2 = chat.title.map(str::to_owned);
+                }
+            }
+            None => worktrees.push((
+                chat.cwd.to_owned(),
+                chat.branch.map(str::to_owned),
+                chat.title.map(str::to_owned),
+                chat.live,
+            )),
+        }
+    }
+    worktrees.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
+    options.extend(worktrees.into_iter().map(|(path, branch, title, live)| {
+        let label = branch.unwrap_or_else(|| {
+            std::path::Path::new(&path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone())
+        });
+        let thread = title
+            .map(|title| format!("Thread \"{title}\""))
+            .unwrap_or_else(|| "Agent thread".into());
+        let detail = if live {
+            format!("{thread} · running")
+        } else {
+            thread
+        };
+        CheckoutOption {
+            path: Some(path),
+            label,
+            detail,
+            live,
+        }
+    }));
+    options
+}

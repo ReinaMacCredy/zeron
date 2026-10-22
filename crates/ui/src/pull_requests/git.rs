@@ -18,9 +18,9 @@ use zeron_rpc::{RpcError, methods};
 
 use zeron_proto::git_tab::{
     self, SUBJECT_LIMIT, agent_banner, clean_status, publish_destination, push_direction,
-    short_sha, status_letter, subject_chars, sync_note,
+    same_path, short_sha, status_letter, subject_chars, sync_note,
 };
-pub(super) use zeron_proto::git_tab::{SyncKind, changed_files, staged_files};
+pub(super) use zeron_proto::git_tab::{CheckoutOption, SyncKind, changed_files, staged_files};
 
 use crate::changes::{self, FileDiff};
 use crate::composer::{ComposerInput, ComposerInputEvent};
@@ -50,14 +50,6 @@ pub(super) struct GitSpace {
     pub space_id: String,
     pub path: String,
     pub device: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct CheckoutOption {
-    pub path: Option<String>,
-    pub label: SharedString,
-    pub detail: SharedString,
-    pub live: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,10 +350,6 @@ fn checkout_target(commit: &GitHistoryCommit, tree: &WorkingTree) -> Option<(Str
     }
 }
 
-fn same_path(left: &str, right: &str) -> bool {
-    left.trim_end_matches('/') == right.trim_end_matches('/')
-}
-
 fn state_color(state: GitFileState, theme: &Theme) -> gpui::Hsla {
     match state {
         GitFileState::Added | GitFileState::Untracked => theme.success,
@@ -377,71 +365,26 @@ pub(super) fn checkout_options(state: &AppState, space: &GitSpace) -> Vec<Checko
         .iter()
         .find(|candidate| candidate.id == space.space_id)
         .map(|candidate| candidate.device_id.clone());
-    let mut options = vec![CheckoutOption {
-        path: None,
-        label: "Main checkout".into(),
-        detail: space.path.clone().into(),
-        live: false,
-    }];
-    let mut worktrees: Vec<(String, Option<String>, Option<String>, bool)> = Vec::new();
-    for chat in &state.chats {
+    let chats = state.chats.iter().filter_map(|chat| {
         if chat.archived
             || chat.space_id.as_deref() != Some(space.space_id.as_str())
             || Some(&chat.device_id) != space_device.as_ref()
         {
-            continue;
+            return None;
         }
-        let Some(cwd) = chat.cwd.as_deref() else {
-            continue;
-        };
-        if same_path(cwd, &space.path) {
-            continue;
-        }
-        let live = state.session_for(&chat.id).is_some_and(|session| {
-            matches!(
-                session.status,
-                SessionStatus::Working | SessionStatus::AwaitingInput
-            )
-        });
-        match worktrees.iter_mut().find(|known| same_path(&known.0, cwd)) {
-            Some(known) => {
-                known.3 |= live;
-                if known.2.is_none() {
-                    known.2 = chat.title.clone();
-                }
-            }
-            None => worktrees.push((
-                cwd.to_owned(),
-                chat.branch.clone(),
-                chat.title.clone(),
-                live,
-            )),
-        }
-    }
-    worktrees.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
-    options.extend(worktrees.into_iter().map(|(path, branch, title, live)| {
-        let label = branch.unwrap_or_else(|| {
-            std::path::Path::new(&path)
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.clone())
-        });
-        let thread = title
-            .map(|title| format!("Thread \"{title}\""))
-            .unwrap_or_else(|| "Agent thread".into());
-        let detail = if live {
-            format!("{thread} · running")
-        } else {
-            thread
-        };
-        CheckoutOption {
-            path: Some(path),
-            label: label.into(),
-            detail: detail.into(),
-            live,
-        }
-    }));
-    options
+        Some(git_tab::CheckoutChat {
+            cwd: chat.cwd.as_deref()?,
+            branch: chat.branch.as_deref(),
+            title: chat.title.as_deref(),
+            live: state.session_for(&chat.id).is_some_and(|session| {
+                matches!(
+                    session.status,
+                    SessionStatus::Working | SessionStatus::AwaitingInput
+                )
+            }),
+        })
+    });
+    git_tab::checkout_options(&space.path, chats)
 }
 
 impl GitTab {
@@ -1767,7 +1710,7 @@ impl GitTab {
                 head_sha: Some(head),
                 ..
             }) => format!("detached at {}", short_sha(head)).into(),
-            _ => option.label.clone(),
+            _ => option.label.clone().into(),
         };
         let ahead = tree.map(|tree| (tree.ahead, tree.behind));
         let agent = option.path.is_some();
@@ -1862,8 +1805,8 @@ impl GitTab {
                 let path = option.path.clone();
                 menu_option(
                     format!("pull-requests-git-checkout-{index}"),
-                    option.label,
-                    option.detail,
+                    option.label.into(),
+                    option.detail.into(),
                     selected,
                     option.live,
                     &popup,
