@@ -32,7 +32,7 @@ const LIVENESS_WARMUP_MS: i64 = 60_000;
 pub(crate) fn deadline(method: &str) -> Duration {
     match method {
         methods::CREATE_WORKTREE => Duration::from_secs(120),
-        methods::LIST_MODELS => Duration::from_secs(100),
+        methods::LIST_MODELS | methods::LIST_HARNESS_TOOLS => Duration::from_secs(100),
         methods::UPLOAD_COMMIT => Duration::from_secs(150),
         methods::CHECK_HARNESS_UPDATES => Duration::from_secs(4 * 60),
         methods::PREPARE_ACP_AGENT => Duration::from_secs(15 * 60),
