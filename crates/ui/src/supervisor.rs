@@ -105,8 +105,12 @@ pub(crate) fn needs_you_route(
 pub(crate) fn row_key(row: &NeedsYouRow) -> String {
     match row {
         NeedsYouRow::Item(item) => format!("item:{}", item.id),
-        NeedsYouRow::Input(input) => format!("input:{}:{}", input.chat_id, input.request_id),
+        NeedsYouRow::Input(input) => input_key(input),
     }
+}
+
+fn input_key(input: &NeedsYouInput) -> String {
+    format!("input:{}:{}", input.chat_id, input.request_id)
 }
 
 pub(crate) fn row_origin(row: &NeedsYouRow) -> (Option<&str>, &str) {
@@ -1763,9 +1767,7 @@ impl SupervisorPage {
     }
 
     fn picked_answers(&self, input: &NeedsYouInput) -> Option<Vec<UserInputAnswer>> {
-        let picks = self
-            .picks
-            .get(&row_key(&NeedsYouRow::Input(input.clone())))?;
+        let picks = self.picks.get(&input_key(input))?;
         input
             .questions
             .iter()
@@ -2327,9 +2329,9 @@ impl SupervisorPage {
         }
         let mut counts = vec![(None, feed.open.len())];
         counts.extend(
-            Kind::chips()
-                .into_iter()
-                .map(|kind| (Some(kind), feed.count(kind))),
+            Kind::CHIPS
+                .iter()
+                .map(|&kind| (Some(kind), feed.count(kind))),
         );
         for (kind, count) in counts {
             match self.ticks.get_mut(&kind) {
@@ -2467,7 +2469,7 @@ impl SupervisorPage {
         let ix = match self.filter {
             Filter::All => 0,
             Filter::Only(kind) => {
-                1 + Kind::chips()
+                1 + Kind::CHIPS
                     .iter()
                     .position(|chip| *chip == kind)
                     .unwrap_or_default()
@@ -3056,13 +3058,15 @@ impl SupervisorPage {
 
     fn render_gear_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let popup = theme.for_popup();
-        let wakes: Vec<SupervisorWake> = self
-            .state
-            .read(cx)
-            .supervisor
-            .as_ref()
-            .map(|snapshot| snapshot.wakes.clone())
-            .unwrap_or_default();
+        let (count, log) = {
+            let wakes = self
+                .state
+                .read(cx)
+                .supervisor
+                .as_ref()
+                .map_or(&[][..], |snapshot| snapshot.wakes.as_slice());
+            (wakes.len(), render_wake_log(wakes, &popup))
+        };
         popover::popover_card(&popup)
             .id("supervisor-gear-card")
             .debug_selector(|| "supervisor-gear-menu".into())
@@ -3084,9 +3088,9 @@ impl SupervisorPage {
             .child(popover::menu_separator())
             .child(popover::menu_heading(
                 &popup,
-                &format!("Wake log · {}", wakes.len()),
+                &format!("Wake log · {count}"),
             ))
-            .child(render_wake_log(&wakes, &popup))
+            .child(log)
             .into_any_element()
     }
 

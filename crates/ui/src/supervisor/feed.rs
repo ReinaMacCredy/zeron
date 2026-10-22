@@ -21,13 +21,15 @@ pub(crate) enum Kind {
 }
 
 impl Kind {
-    pub(crate) fn chips() -> Vec<Kind> {
-        let mut kinds = vec![Kind::Needs, Kind::Question, Kind::Intervention];
-        if !cfg!(windows) {
-            kinds.push(Kind::Resource);
-        }
-        kinds
-    }
+    #[cfg(not(windows))]
+    pub(crate) const CHIPS: &[Kind] = &[
+        Kind::Needs,
+        Kind::Question,
+        Kind::Intervention,
+        Kind::Resource,
+    ];
+    #[cfg(windows)]
+    pub(crate) const CHIPS: &[Kind] = &[Kind::Needs, Kind::Question, Kind::Intervention];
 
     pub(crate) fn chip(self) -> &'static str {
         match self {
@@ -855,6 +857,6 @@ mod tests {
         assert_eq!(filter.pick(Some(Kind::Question)), Filter::All);
         assert_eq!(filter.pick(None), Filter::All);
         assert_eq!(Filter::All.pick(None), Filter::All);
-        assert!(Kind::chips().iter().all(|kind| Filter::All.shows(*kind)));
+        assert!(Kind::CHIPS.iter().all(|kind| Filter::All.shows(*kind)));
     }
 }

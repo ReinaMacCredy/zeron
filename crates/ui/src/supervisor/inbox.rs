@@ -96,9 +96,8 @@ fn item_quote(item: &SupervisorItem, mission: Option<&str>) -> String {
 }
 
 fn input_quote(input: &NeedsYouInput, who: &str) -> String {
-    let row = NeedsYouRow::Input(input.clone());
     let mut quote = vec![
-        format!("Needs you: {}", row_title(&row)),
+        format!("Needs you: {}", input_title(&input.questions)),
         format!("Asked by {who}"),
     ];
     for question in &input.questions {
@@ -234,9 +233,9 @@ impl SupervisorPage {
         let total = feed.open.len();
         let mut tabs = vec![(None, total)];
         tabs.extend(
-            Kind::chips()
-                .into_iter()
-                .map(|kind| (Some(kind), feed.count(kind))),
+            Kind::CHIPS
+                .iter()
+                .map(|&kind| (Some(kind), feed.count(kind))),
         );
         let origin = self.tabs.clone();
         let underline = self.underline_rect(now);
@@ -912,13 +911,12 @@ impl SupervisorPage {
             "supervisor-needs-input-{}",
             input.request_id.replace(':', "-")
         );
-        let row = NeedsYouRow::Input(input.clone());
         let who = asker_name(input, self.state.read(cx), Utc::now());
         let quote = input_quote(input, &who);
         let thread = (input.asker != InputAsker::Supervisor).then(|| input.chat_id.clone());
-        let title = strip_mission(&row_title(&row), mission);
+        let title = strip_mission(&input_title(&input.questions), mission);
         let approval = input.questions.iter().any(|question| question.approval);
-        if sheet_row(&Entry::Needs(row.clone())).is_none() {
+        if sheet_row(&shown.entry).is_none() {
             let chat_id = input.chat_id.clone();
             let supervisor = input.asker == InputAsker::Supervisor;
             let reply_quote = quote.clone();
