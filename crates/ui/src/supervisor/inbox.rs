@@ -1701,11 +1701,24 @@ impl SupervisorPage {
     ) -> AnyElement {
         let key = row_key(&answered.row);
         let (task_id, _) = row_origin(&answered.row);
-        let mission = mission_title(self.state.read(cx), task_id);
+        let state = self.state.read(cx);
+        let mission = mission_title(state, task_id);
         let title = strip_mission(&row_title(&answered.row), mission.as_deref());
-        let choice = match &answered.choice {
-            Some(choice) => format!("→ {choice}"),
-            None => "Answered".to_owned(),
+        let decided = |id: &str| {
+            state
+                .supervisor
+                .as_ref()?
+                .interventions
+                .iter()
+                .filter_map(|row| row.item.as_ref())
+                .find(|item| item.id == id)
+                .and_then(|item| Some(item.answer.as_ref()?.choice.clone()))
+        };
+        let choice = match (&answered.choice, &answered.row) {
+            (Some(choice), _) => format!("→ {choice}"),
+            (None, NeedsYouRow::Item(item)) => decided(&item.id)
+                .map_or_else(|| "Answered".to_owned(), |choice| format!("→ {choice}")),
+            (None, NeedsYouRow::Input(_)) => "Closed".to_owned(),
         };
         self.other_shell(
             &key,
