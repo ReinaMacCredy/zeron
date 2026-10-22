@@ -9833,7 +9833,9 @@ impl Transcript {
             }
             let (sending, queued, elapsed, turn) = {
                 let state = self.state.read(cx);
-                if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
+                if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working
+                    || !state.turn_in_flight(&chat_id, now)
+                {
                     return None;
                 }
                 // During the send→turn window the session row's `started_at`
