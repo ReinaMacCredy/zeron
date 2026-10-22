@@ -26,7 +26,7 @@ A card row carries more than the title:
 
 Hover a row to get its quick buttons: **Pin chat** and **Archive session**, plus **Settle** in Inbox mode. Hover longer and a card shows the session's project, device, branch, agent and model, which chat opened it, how many subagents are running, and any pull request. **Compact** rows have neither the **Pin chat** button nor the card: hovering shows only the archive button in place of the time.
 
-Right-click a row for the full menu: **Rename**, **Pin** or **Unpin**, **Archive**, **Copy**, and **Delete…**, which removes the session for good after you confirm. A mission lead's row also has **Collapse step threads** or **Expand step threads**. A chat that another chat opened, such as a side chat, gets only **Rename** and **Delete…**.
+Right-click a row for the full menu: **Rename**, **Add plan** (on a chat of this computer that has no plan yet), **Pin** or **Unpin**, **Settle** or **Unsettle** (in Inbox mode, on a row that is not pinned, not in a section, and not working or waiting on you), **Archive**, **Copy**, and **Delete…**, which removes the session for good after you confirm. A mission lead's row also has **Collapse step threads** or **Expand step threads**. A chat that another chat opened gets only **Rename** and **Delete…**, plus **Add plan** when it is not a side chat.
 
 **Copy** has:
 
