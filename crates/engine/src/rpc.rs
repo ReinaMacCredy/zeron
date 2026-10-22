@@ -1471,11 +1471,7 @@ impl EngineRpc {
         };
         let base = match (p.base, owner) {
             (Some(base), _) => base,
-            (None, Some(config)) => zeron_proto::RouteTarget {
-                harness: config.harness,
-                model: config.model,
-                reasoning: config.reasoning,
-            },
+            (None, Some(config)) => crate::routing::target_of(&config),
             (None, None) => self.default_route_base().await,
         };
         let offered: Vec<HarnessId> = self.registry.offered().iter().map(|d| d.id).collect();

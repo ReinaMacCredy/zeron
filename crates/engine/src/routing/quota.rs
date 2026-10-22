@@ -6,10 +6,10 @@ use zeron_proto::{AgentUsageWindow, ChildRoute, HarnessId, RouteTarget};
 
 use super::{NativePolicy, OutOfQuota, QuotaState, Resolved, RoutingSettings};
 use crate::agent_accounts::AgentAccounts;
+use crate::resume_schedule::RESET_SLACK_MS;
 
 const STALE_MS: i64 = 15 * 60 * 1000;
 const UNKNOWN_RESET_MS: i64 = 60 * 60 * 1000;
-pub const START_SLACK_MS: i64 = 15_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CachedQuota {
@@ -216,7 +216,7 @@ pub fn gate(resolved: Resolved, gate: &Gate) -> Gated {
     let wait = || {
         Gated::Run(Resolved {
             route: Some(ChildRoute {
-                wait_until: Some(resets_at.unwrap_or(gate.now + UNKNOWN_RESET_MS) + START_SLACK_MS),
+                wait_until: Some(resets_at.unwrap_or(gate.now + UNKNOWN_RESET_MS) + RESET_SLACK_MS),
                 resets_at,
                 reason: Some(out.clone()),
                 ..route.clone()
@@ -515,7 +515,7 @@ mod tests {
         assert_eq!(waiting.harness, Some(HarnessId::Codex));
         assert_eq!(
             waiting.route.unwrap().wait_until,
-            Some(NOW + 3_600_000 + START_SLACK_MS)
+            Some(NOW + 3_600_000 + RESET_SLACK_MS)
         );
     }
 

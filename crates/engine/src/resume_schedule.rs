@@ -10,7 +10,7 @@ use tokio::sync::{Notify, watch};
 use zeron_proto::{LimitOffer, LimitResume, LimitResumes, OfferChoice, RouteTarget};
 
 /// Windows reset on the provider's clock, not ours.
-const RESET_SLACK_MS: i64 = 15_000;
+pub(crate) const RESET_SLACK_MS: i64 = 15_000;
 /// Monotonic sleeps stop while the Mac sleeps; re-read the wall clock often.
 const MAX_NAP: Duration = Duration::from_secs(60);
 /// A restart that never came (a failed install) must not continue old turns
