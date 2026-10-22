@@ -293,6 +293,20 @@ fn owned_by<'a>(chat: &'a Chat, owner: &str) -> Option<&'a Delegation> {
         .filter(|d| d.delegated_by_chat_id == owner)
 }
 
+fn request_key(params: &DelegateTaskParams) -> Option<&str> {
+    params
+        .client_request_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+}
+
+fn requested_child<'a>(chats: &'a [Chat], owner: &str, key: &str) -> Option<&'a Chat> {
+    chats.iter().find(|chat| {
+        owned_by(chat, owner).is_some_and(|d| d.client_request_id.as_deref() == Some(key))
+    })
+}
+
 /// A session reads Idle before a fresh turn starts, so only an answer to the
 /// latest user entry (`reply`) ends a task.
 pub(super) fn child_outcome(
@@ -462,6 +476,16 @@ impl DocHost {
         Ok(config)
     }
 
+    /// A retried request names its first child, so it must not be routed again.
+    pub fn delegated_before(&self, params: &DelegateTaskParams) -> bool {
+        let (Some(workspace), Some(key)) = (self.workspace(), request_key(params)) else {
+            return false;
+        };
+        workspace
+            .read_chats()
+            .is_ok_and(|chats| requested_child(&chats, &params.owner_chat_id, key).is_some())
+    }
+
     pub(crate) fn child_owner(&self, chat_id: &str) -> Option<Chat> {
         let workspace = self.workspace()?;
         let owner = match workspace.chat(chat_id).ok()??.delegation {
@@ -483,6 +507,13 @@ impl DocHost {
         let chat = workspace
             .chat(chat_id)?
             .ok_or_else(|| failure("thread_not_found", chat_id))?;
+        let open = match &chat.delegation {
+            Some(delegation) => delegation.is_running() && !delegation.cancel_requested,
+            None => self.step_lead_of(chat_id).is_some(),
+        };
+        if chat.archived || !open {
+            return Ok(());
+        }
         let Some(mut config) = chat.config.clone() else {
             return Ok(());
         };
@@ -596,17 +627,8 @@ impl DocHost {
         }
         let admitting = self.inner.delegation_lock.lock().await;
         let chats = workspace.read_chats()?;
-        let key = params
-            .client_request_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|key| !key.is_empty());
-        if let Some(key) = key
-            && let Some(existing) = chats.iter().find(|chat| {
-                owned_by(chat, &owner.id)
-                    .is_some_and(|d| d.client_request_id.as_deref() == Some(key))
-            })
-        {
+        let key = request_key(&params);
+        if let Some(existing) = key.and_then(|key| requested_child(&chats, &owner.id, key)) {
             return Ok(self.task_view(existing, &chats));
         }
         let depth = owner.delegation.as_ref().map_or(0, |d| d.depth) + 1;
@@ -971,6 +993,7 @@ impl DocHost {
         owner: &str,
         task_id: &str,
         ids: Vec<String>,
+        withdraw: bool,
     ) -> Result<Vec<String>, EngineError> {
         let (_, findings) = self.finished_review(owner, task_id)?;
         if let Some(id) = ids
@@ -986,7 +1009,11 @@ impl DocHost {
             .workspace_or_fail()?
             .update_chat_delegation(task_id, |d| {
                 let before = d.findings_handed.len();
-                d.findings_handed.extend(ids);
+                if withdraw {
+                    d.findings_handed.retain(|id| !ids.contains(id));
+                } else {
+                    d.findings_handed.extend(ids);
+                }
                 d.findings_handed.len() != before
             })?
             .ok_or_else(|| failure("task_not_found", task_id))?;
@@ -1538,7 +1565,22 @@ impl DocHost {
     ) {
         let host = self.clone();
         self.spawn_worker(async move {
-            while statuses.changed().await.is_ok() {
+            let mut limits = None;
+            loop {
+                if limits.is_none() {
+                    limits = host
+                        .sessions()
+                        .and_then(|sessions| sessions.resume_schedule().map(|s| s.watch()));
+                }
+                tokio::select! {
+                    changed = statuses.changed() => if changed.is_err() { return },
+                    changed = async {
+                        match limits.as_mut() {
+                            Some(limits) => limits.changed().await,
+                            None => std::future::pending().await,
+                        }
+                    } => if changed.is_err() { return },
+                }
                 host.settle_delegations(None).await;
                 host.settle_task_steps().await;
             }
@@ -1678,6 +1720,9 @@ impl DocHost {
         if let Err(err) = updated {
             tracing::warn!(task = %child.id, error = %err, "finishing a delegated task failed");
             return;
+        }
+        if let Some(schedule) = sessions.resume_schedule() {
+            schedule.clear(&child.id);
         }
         if offer && let Err(err) = self.offer_wake(&owner_id, &child.id).await {
             tracing::warn!(task = %child.id, error = %err, "waking the owner failed");

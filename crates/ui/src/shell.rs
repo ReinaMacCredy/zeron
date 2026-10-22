@@ -3689,13 +3689,7 @@ impl Shell {
         // the composer only merges on its next key change.
         let key = target
             .unwrap_or_else(|| self.state.read(cx).focused_id().unwrap_or_default());
-        let (composer, stage_key) = match self.active_btw_tab(cx) {
-            Some((source, tab)) if source == key => (
-                tab.composer.clone(),
-                self.btw[&source].active.clone().unwrap_or_default(),
-            ),
-            _ => (self.composer.clone(), key.clone()),
-        };
+        let (composer, stage_key) = self.capture_composer(&key, cx);
         composer.update(cx, |composer, cx| {
             composer.stage_appshot_for(stage_key, appshot, cx)
         });
@@ -4873,15 +4867,19 @@ impl Shell {
             return LinkOutcome::Rejected;
         }
         if activation.target.navigation.is_err() {
-            return if matches!(
+            let opens = matches!(
                 activation.action,
                 LinkAction::Primary | LinkAction::Internal
-            ) && self.open_workspace_file_link(
-                &source,
-                &activation.target.original,
-                window,
-                cx,
-            ) {
+            );
+            if opens
+                && let Some(action) = crate::docs::Action::from_link(&activation.target.original)
+            {
+                self.run_docs_action(action, cx);
+                return LinkOutcome::Internal;
+            }
+            return if opens
+                && self.open_workspace_file_link(&source, &activation.target.original, window, cx)
+            {
                 LinkOutcome::Internal
             } else {
                 LinkOutcome::Rejected
@@ -4993,11 +4991,12 @@ impl Shell {
                 }
                 crate::browser::BrowserEvent::Annotation(capture) => {
                     let capture = capture.clone();
-                    this.composer.update(cx, |composer, cx| {
-                        composer.stage_annotation(owner.clone(), capture, cx)
+                    let (composer, stage_key) = this.capture_composer(&owner, cx);
+                    composer.update(cx, |composer, cx| {
+                        composer.stage_annotation(stage_key, capture, cx)
                     });
                     if this.panel_key(cx) == owner {
-                        window.focus(&this.composer.focus_handle(cx), cx);
+                        window.focus(&composer.focus_handle(cx), cx);
                     }
                 }
             }
@@ -6037,6 +6036,16 @@ impl Shell {
                 .any(|chat| chat.id == active);
         live.then(|| self.btw_tabs.get(active).map(|tab| (source, tab)))
             .flatten()
+    }
+
+    fn capture_composer(&self, key: &str, cx: &App) -> (Entity<Composer>, String) {
+        match self.active_btw_tab(cx) {
+            Some((source, tab)) if source == key => (
+                tab.composer.clone(),
+                self.btw[&source].active.clone().unwrap_or_default(),
+            ),
+            _ => (self.composer.clone(), key.to_owned()),
+        }
     }
 
     fn active_btw_composer(&self, cx: &App) -> Option<Entity<Composer>> {

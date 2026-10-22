@@ -21,7 +21,7 @@ When the review ends, the chip shows the number of findings, **No issues**, or *
 
 - **Fix N remaining** adds every open finding to your next message as comments. Send it, and your chat's agent works through them.
 - **Open Changes** shows the right pane's **Working tree** diff tab, or the first Diffs tab you have open, or opens a new **Working tree** tab. Each finding sits as a card on its line with **Fix** and **Dismiss**, but only in a Diffs tab whose scope matches the review: **Working tree** for **Uncommitted**, **Branch changes** for **Branch vs**, **Latest turn** for **Latest turn**, and that commit's own tab (opened from **History**) for a **Commit** review. A finding whose code has changed since the review gets no card. See [Right pane](zeron://docs/right-pane).
-- **Fix** adds one finding to your next message as a comment. A finding already handed to the agent is not added again. **Dismiss** removes it from the review.
+- **Fix** adds one finding to your next message as a comment. A finding already handed to the agent is not added again, but removing its comment before you send hands it back, so **Fix** can add it again. **Dismiss** removes it from the review.
 
 ![A review finding on its line](review-diff-card.jpg)
 

@@ -23,7 +23,7 @@ use futures::stream::BoxStream;
 use zeron_doc::{
     MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionDoc, SessionMessageEntry,
 };
-use zeron_engine::{EngineCore, HarnessRegistry, RunJournal};
+use zeron_engine::{EngineCore, EngineProfile, HarnessRegistry, InstanceLock, RunJournal};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
@@ -144,6 +144,22 @@ fn assemble(dir: &std::path::Path, harness: RecordingHarness) -> EngineCore {
     registry.register(Arc::new(harness));
     EngineCore::assemble(dir, Arc::new(registry), HarnessId::Mock, None)
         .expect("engine core assembles")
+}
+
+fn assemble_with_tools(dir: &std::path::Path, harness: RecordingHarness) -> EngineCore {
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(harness));
+    let profile = EngineProfile::development(dir, "dev-org", "dev-user");
+    let lock = InstanceLock::acquire(dir).expect("instance lock");
+    EngineCore::assemble_with_profile_locked(
+        profile,
+        Arc::new(registry),
+        HarnessId::Mock,
+        None,
+        lock,
+        Some(1),
+    )
+    .expect("engine core assembles")
 }
 
 fn queue_run(core: &EngineCore, prompt: &str, cwd: &str, message_id: &str) {
@@ -656,7 +672,7 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
     }
 
     let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
-    let core = assemble(
+    let core = assemble_with_tools(
         &dir,
         RecordingHarness {
             requests: requests.clone(),
@@ -706,6 +722,10 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
         revived.resume.as_deref(),
         Some("hs-crash"),
         "auto-resume must reattach the crashed harness session"
+    );
+    assert!(
+        revived.mcp.is_some(),
+        "a run revived at boot launches with the zeron tool server"
     );
     core.shutdown().await;
 }

@@ -39,7 +39,7 @@ Tabs belong to each chat: switching chats shows that chat's own tabs. They last 
 - Drag tabs to reorder them, and middle-click to close one. Drag a file tab onto the composer to attach that file.
 - After you close a tab, the tab you used most recently before it becomes active. Closing the last tab closes the pane; a docked Files panel stays open on its own.
 
-Right-click a tab for **Close tab**, **Close other tabs**, **Close tabs to the left**, and **Close tabs to the right**. On a side chat or delegated child tab, the menu also has that chat's own rows, such as **Rename**, **Pin**, **Archive**, and **Delete…**. On a device tab it adds **Rename**.
+Right-click a tab for **Close tab**, **Close other tabs**, **Close tabs to the left**, and **Close tabs to the right**. On a side chat or delegated child tab, the menu also has **Rename** and **Delete…** for that chat, plus **Add plan** on a delegated child that can take one. On a device tab it adds **Rename**.
 
 Cmd+W closes the active pane tab first. When the pane has focus, Ctrl+Tab and Ctrl+Shift+Tab move between its tabs.
 

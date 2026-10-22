@@ -2,7 +2,7 @@ Providers are the agents Zeron can run: Claude Code, Codex, Cursor, Devin, Grok,
 
 ## Turn agents on and off
 
-Each row shows the agent, its version, and a switch that decides whether the composer offers it. Turning an agent on needs its CLI installed; a missing CLI dims the row and its hint says what to install, for example **Install the claude CLI to enable**. **Install** sets it up when Zeron can; the row reads **Installing** and the agent's name while it runs, and **Cancel** stops it. You cannot turn off the last enabled agent while it is installed (an agent whose CLI is missing can always be turned off).
+Each row shows the agent, its version, and a switch that decides whether the composer offers it. Turning an agent on needs its CLI installed; a missing CLI dims the row and its hint says what to install, for example **Install the claude CLI to enable**. **Install** sets it up when Zeron can; the row reads **Installing** and the agent's name while it runs, and **Cancel** stops it. You cannot turn off the last enabled agent while it is installed (an agent whose CLI is missing can always be turned off). Turning off the agent the [Supervisor](zeron://docs/supervisor) runs on stops its wakes until you turn it back on.
 
 **Update** appears when a new version is out, and **Check now** in the header looks right away. While an update waits for the agent to be idle, prepares, or downloads, the version line says so (**Waiting for agent to be idle**, **Preparing update…**, **Downloading…**) and **Cancel** replaces **Update**.
 
@@ -45,6 +45,7 @@ The account in use is marked **In use**. Click another account to switch to it, 
 Below the tiles, **Or choose from ACP Registry** searches the registry of agents that speak the Agent Client Protocol. Each result shows its version and how it installs, and **Installed** when it is already set up. Click **Add** to download or prepare it, give it a label, then choose **Continue to sign-in**. The **Sign in** step lists the sign-in methods the agent offers, or links to its docs with **Open docs** when it has none in the app. **Skip for now** finishes without signing in.
 
 - **Enter manually** takes an agent ID from the official ACP Registry, for example `devin`.
+- An agent marked **unverified** downloads a program the registry publishes no checksum for, so Zeron cannot check it. Its **Add** turns into **Add anyway** on the first click, and under **Enter manually** **Next** does the same; click again to install it unchecked.
 - **Local ACP command** runs an ACP agent that is already installed: set its **Executable** (an absolute path or a command on PATH), **Arguments**, and **Environment**, click **Next**, give it a **Label** on the **Identity** step, then **Add instance**.
 
 ## Instances on the Providers page

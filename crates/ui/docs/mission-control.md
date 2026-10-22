@@ -6,7 +6,7 @@ Mission Control introduces itself once, in a four-page sheet that appears after 
 
 Click **Mission Control** in the rail, between **Tasks** and **Supervisor**. The page lists, newest activity first:
 
-- **Running**: every mission that is not done, and every tree whose root is still working or whose threads were active today.
+- **Running**: every mission that is not done, and every tree with a thread still working or waiting on you.
 - **Done today**: missions finished today, and trees you marked done today or whose threads all went idle today.
 
 A chat gets a row when it leads a plan or started another thread: a delegated task, a thread it created with `create_thread`, or a step. A sidechat, a fork, or Claude Code's own built-in sub-agents never make a row by themselves. A thread that belongs to a tree shows inside that tree's row, not as its own.
@@ -190,6 +190,6 @@ In the list, a Mission Control task has a progress ring in place of its circle, 
 
 The [Supervisor](zeron://docs/supervisor) is one agent above the leads of all your missions. Open its page once, from **Supervisor** in the rail, to start it. From then on, every mission whose lead runs on this Mac is watched: Zeron wakes the Supervisor when a step fails, a thread waits on you, a mission finishes or goes quiet, the plan is edited after the mission started, or the lead escalates.
 
-The Supervisor acts through the leads, within the switches you set under **Authority**: it messages a lead or a step's thread, answers their questions, re-briefs a step through its lead, pauses a step that blocks a shared resource, or starts a new mission, whose plan you review before any step runs. It never adds or removes a step and never changes the overview. A change to a mission's goal or spend comes to you as a **Needs you** card on the Supervisor page, and so does a decision a lead escalates. When you turn on **Decide for me** under **Authority**, the Supervisor decides the leads' decisions and approves plans itself, and **Change a mission's goal or spend** lets it decide those too; each decision shows on the Supervisor page, where you can change it.
+The Supervisor acts through the leads, within the switches you set under **Authority**: it messages a lead or a step's thread, answers their questions, re-briefs a step through its lead, pauses a step that blocks a shared resource, or starts a new mission, whose plan you review before any step runs. It never adds or removes a step and never changes the overview. A change to a mission's goal or spend comes to you as a **Needs you** card on the Supervisor page, and so does a decision a lead escalates. When you turn on **Decide for me** under **Authority**, the Supervisor decides the leads' decisions and approves plans itself. **Change a mission's goal or spend** is a separate switch: on its own it lets the Supervisor decide goal and spend decisions and change a mission's title and notes. Each decision shows on the Supervisor page, where you can change it.
 
 The Supervisor's rail shows every mission that is not done and every tree it watches, who works on it, and **Open Mission Control** for its page. Turn off **Watched by the Supervisor** there to keep a mission or tree from waking it. A mission whose lead runs on another device is not watched.

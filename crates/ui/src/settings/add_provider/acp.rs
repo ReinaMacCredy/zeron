@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use gpui::{AnyElement, Context, SharedString, Task, div, prelude::*, px};
+use gpui::{AnyElement, App, Context, SharedString, Task, div, prelude::*, px};
 use zeron_proto::{
     AcpAuthMethod, AcpDistribution, AcpPreparedAgent, AcpRegistryAgent, AcpSource, AgentLoginStart,
     HarnessId, InstanceConfig, ProviderInstance,
@@ -339,6 +339,12 @@ impl AddProviderDialog {
         }
     }
 
+    pub(super) fn manual_unverified_armed(&self, cx: &App) -> bool {
+        self.acp == Some(AcpFlow::Manual)
+            && self.registry.unverified_armed.as_deref()
+                == Some(self.manual_input.read(cx).text().trim())
+    }
+
     pub(super) fn acp_next(&mut self, cx: &mut Context<Self>) {
         match self.acp {
             Some(AcpFlow::Manual) => {
@@ -367,7 +373,18 @@ impl AddProviderDialog {
                         installed: false,
                         unverified: false,
                     });
-                self.prepare(agent, false, cx);
+                if agent.unverified && !self.manual_unverified_armed(cx) {
+                    self.registry.prepare_error = Some(format!(
+                        "The ACP Registry publishes no checksum for {}'s download, so Zeron \
+                         cannot check it. Choose Add anyway to install it unchecked.",
+                        agent.name
+                    ));
+                    self.registry.unverified_armed = Some(agent.id);
+                    cx.notify();
+                    return;
+                }
+                let unverified = agent.unverified;
+                self.prepare(agent, unverified, cx);
             }
             Some(AcpFlow::Local) if !self.acp_selection_ok(cx) => {
                 self.acp_error = Some("Executable is required.".into());

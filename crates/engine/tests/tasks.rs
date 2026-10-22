@@ -1224,7 +1224,7 @@ async fn the_person_takes_back_a_supervisor_plan_approval_until_a_step_starts() 
                 .and_then(|row| row.approval)
         }
     };
-    for task in ["t1", "t2", "t3"] {
+    for task in ["t1", "t2", "t3", "t4"] {
         let lead = format!("lead-{task}");
         mutate(json!({ "op": "createTask", "taskId": task, "title": format!("Mission {task}") }))
             .await
@@ -1314,5 +1314,28 @@ async fn the_person_takes_back_a_supervisor_plan_approval_until_a_step_starts() 
     assert!(late.contains("A step already started"), "{late}");
     assert!(!core.workspace.task("t3").unwrap().plan_pending);
     assert_eq!(approval_of("t3").await, Some(PlanApproval::Sent));
+
+    approve("t4").await.unwrap();
+    assert!(matches!(
+        approval_of("t4").await,
+        Some(PlanApproval::Held { .. })
+    ));
+    mutate(json!({ "op": "editTaskPlan", "taskId": "t4", "overview": "Build it, then test it" }))
+        .await
+        .unwrap();
+    assert!(
+        core.workspace.task("t4").unwrap().plan_pending,
+        "an edit during the hold sends the plan back to review"
+    );
+    assert!(!matches!(
+        approval_of("t4").await,
+        Some(PlanApproval::Held { .. })
+    ));
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    assert_eq!(
+        count(approved),
+        2,
+        "the withdrawn approval never reaches the lead"
+    );
     core.shutdown().await;
 }

@@ -230,6 +230,8 @@ struct HandFindingsParams {
     owner_chat_id: String,
     task_id: String,
     ids: Vec<String>,
+    #[serde(default)]
+    withdraw: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1480,11 +1482,7 @@ impl EngineRpc {
         };
         let base = match (p.base, owner) {
             (Some(base), _) => base,
-            (None, Some(config)) => zeron_proto::RouteTarget {
-                harness: config.harness,
-                model: config.model,
-                reasoning: config.reasoning,
-            },
+            (None, Some(config)) => crate::routing::target_of(&config),
             (None, None) => self.default_route_base().await,
         };
         let offered: Vec<HarnessId> = self.registry.offered().iter().map(|d| d.id).collect();
@@ -2607,6 +2605,7 @@ impl EngineRpc {
                     resources,
                     from_chat_id.as_deref(),
                 )
+                .await
                 .map(drop)
             }
             MutateParams::UpdateTaskStep {
@@ -2648,7 +2647,7 @@ impl EngineRpc {
             MutateParams::SetMissionSupervised {
                 task_id,
                 supervised,
-            } => self.set_mission_supervised(&task_id, supervised),
+            } => self.set_mission_supervised(&task_id, supervised).await,
             MutateParams::SetTreeWatched {
                 root_chat_id,
                 watched,
@@ -3382,10 +3381,11 @@ impl RpcService for EngineRpc {
                 if p.choice == crate::resume_schedule::OfferResolution::Switch
                     && let Some(to) = offer.as_ref().and_then(|offer| offer.to.as_ref())
                 {
-                    self.doc_host
-                        .act_on_offer(&p.chat_id, to)
-                        .await
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    let switched = self.doc_host.act_on_offer(&p.chat_id, to).await;
+                    if let Some(schedule) = self.sessions.resume_schedule() {
+                        schedule.acted(&p.chat_id, switched.is_err());
+                    }
+                    switched.map_err(|e| RpcError::Failed(e.to_string()))?;
                 }
                 RpcReply::value(&serde_json::json!({ "changed": offer.is_some() }))
             }
@@ -3414,6 +3414,7 @@ impl RpcService for EngineRpc {
             }
             methods::START_REVIEW => {
                 let p: StartReviewParams = parse_params(params)?;
+                self.supervisor_gate(Some(&p.owner_chat_id), |s| s.start_missions, supervisor::START_OFF)?;
                 RpcReply::value(&Box::pin(self.start_review(p)).await?)
             }
             methods::SET_DELEGATION_SETTINGS => {
@@ -3449,6 +3450,7 @@ impl RpcService for EngineRpc {
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;
                 update_harness_enabled(&self.registry, p.harness, p.enabled).await?;
+                self.doc_host.supervisor_stale();
                 if let Some(coordinator) = &self.harness_updates {
                     coordinator.refresh_enabled();
                 }
@@ -3755,9 +3757,13 @@ impl RpcService for EngineRpc {
                     )));
                 }
                 self.supervisor_gate(Some(&p.owner_chat_id), |s| s.start_missions, supervisor::START_OFF)?;
-                let p = match self.route_delegation(p)? {
-                    Ok(p) => p,
-                    Err(native) => return Ok(RpcReply::Value(native)),
+                let p = if self.doc_host.delegated_before(&p) {
+                    p
+                } else {
+                    match self.route_delegation(p)? {
+                        Ok(p) => p,
+                        Err(native) => return Ok(RpcReply::Value(native)),
+                    }
                 };
                 let view = self
                     .doc_host
@@ -3796,7 +3802,7 @@ impl RpcService for EngineRpc {
                 let p: HandFindingsParams = parse_params(params)?;
                 let handed = self
                     .doc_host
-                    .hand_review_findings(&p.owner_chat_id, &p.task_id, p.ids)
+                    .hand_review_findings(&p.owner_chat_id, &p.task_id, p.ids, p.withdraw)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "handed": handed }))
             }
@@ -4640,13 +4646,15 @@ impl RpcService for EngineRpc {
                         .into_iter()
                         .map(|step| (step.title, step.notes, step.thread_id, step.role))
                         .collect();
-                    let images_moved = self.plan_steps(
-                        &task_id,
-                        steps,
-                        overview,
-                        resources,
-                        from_chat_id.as_deref(),
-                    )?;
+                    let images_moved = self
+                        .plan_steps(
+                            &task_id,
+                            steps,
+                            overview,
+                            resources,
+                            from_chat_id.as_deref(),
+                        )
+                        .await?;
                     return RpcReply::value(&serde_json::json!({
                         "ok": true,
                         "task": self.workspace.task(&task_id),

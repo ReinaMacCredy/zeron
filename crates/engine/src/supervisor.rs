@@ -40,25 +40,40 @@ pub(crate) const TURN_QUIET_MS: i64 = 2 * 60 * 1000;
 pub(crate) const LIMIT_IDLE_MS: i64 = 5 * 60 * 1000;
 pub(crate) const LOST_WAKE_MS: i64 = 5 * 60 * 1000;
 
-pub(crate) fn stall_ms(default: i64) -> i64 {
-    std::env::var("ZERON_SUPERVISOR_STALL_MS")
+/// Unit tests keep the defaults, so a knob exported for a proof cannot fail them.
+fn env_ms(name: &str, default: i64) -> i64 {
+    if cfg!(test) {
+        return default;
+    }
+    std::env::var(name)
         .ok()
         .and_then(|ms| ms.parse().ok())
         .unwrap_or(default)
 }
 
+pub(crate) fn stall_ms(default: i64) -> i64 {
+    env_ms("ZERON_SUPERVISOR_STALL_MS", default)
+}
+
 pub(crate) fn fold_ms() -> i64 {
-    std::env::var("ZERON_SUPERVISOR_FOLD_MS")
-        .ok()
-        .and_then(|ms| ms.parse().ok())
-        .unwrap_or(60_000)
+    env_ms("ZERON_SUPERVISOR_FOLD_MS", 60_000)
 }
 
 pub(crate) fn approval_hold_ms() -> i64 {
-    std::env::var("ZERON_SUPERVISOR_APPROVAL_HOLD_MS")
-        .ok()
-        .and_then(|ms| ms.parse().ok())
-        .unwrap_or(30_000)
+    env_ms("ZERON_SUPERVISOR_APPROVAL_HOLD_MS", 30_000)
+}
+
+/// A dropped event of a passing kind can come true again under the same key, so dropping it must not report it.
+fn burns(event: &SupervisorEventSummary) -> bool {
+    !matches!(
+        event.kind,
+        SupervisorEventKind::Dirty
+            | SupervisorEventKind::Unmerged
+            | SupervisorEventKind::MergeBlocked
+            | SupervisorEventKind::LostWake
+            | SupervisorEventKind::LimitIdle
+            | SupervisorEventKind::MissionSilent
+    )
 }
 
 pub(crate) fn escalated_item(key: &str) -> Option<&str> {
@@ -204,6 +219,7 @@ struct Router {
     resources: Resources,
     next_check: Option<NextCheck>,
     asked: Vec<Asked>,
+    blocked: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,11 +253,13 @@ impl State {
             .map(NeedsYouRow::Item)
             .collect();
         needs_you.extend(projections.inputs.iter().cloned().map(NeedsYouRow::Input));
+        let blocked = chat_id.as_ref().and(self.router.blocked.clone());
         SupervisorSnapshot {
             chat_id,
             state,
             waiting,
             next_check: self.router.next_check.clone(),
+            blocked,
             wakes: self
                 .file
                 .wakes
@@ -281,7 +299,11 @@ impl State {
     fn reported_keys(wakes: &[SupervisorWake]) -> HashSet<String> {
         wakes
             .iter()
-            .flat_map(|wake| wake.events.iter().chain(&wake.dropped))
+            .flat_map(|wake| {
+                wake.events
+                    .iter()
+                    .chain(wake.dropped.iter().filter(|e| burns(e)))
+            })
             .map(|event| event.key.clone())
             .collect()
     }
@@ -325,6 +347,15 @@ impl SupervisorStore {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => empty_file(),
             Err(err) => return Err(err.into()),
         };
+        let mut file = file;
+        let now = Utc::now();
+        for record in &mut file.interventions {
+            if let Some(PlanApproval::Held { starts_at }) = &mut record.row.approval
+                && *starts_at < now
+            {
+                *starts_at = now + chrono::Duration::milliseconds(approval_hold_ms());
+            }
+        }
         let state = State {
             router: Router {
                 reported: State::reported_keys(&file.wakes),
@@ -476,9 +507,18 @@ impl SupervisorStore {
         {
             let mut state = lock(&self.inner.state);
             let key = &event.summary.key;
+            let failed_again = |e: &SupervisorEvent| {
+                event.summary.kind == SupervisorEventKind::NodeFailed
+                    && e.summary.kind == SupervisorEventKind::NodeFailed
+                    && e.summary.thread_id == event.summary.thread_id
+            };
             if !state.file.keeps(&event)
                 || state.router.reported.contains(key)
-                || state.router.pending.iter().any(|e| &e.summary.key == key)
+                || state
+                    .router
+                    .pending
+                    .iter()
+                    .any(|e| &e.summary.key == key || failed_again(e))
             {
                 return;
             }
@@ -590,7 +630,10 @@ impl SupervisorStore {
 
     pub(crate) fn record(&self, wake: SupervisorWake, delivered: Vec<SupervisorEvent>) {
         let mut state = lock(&self.inner.state);
-        let keys = wake.events.iter().chain(&wake.dropped);
+        let keys = wake
+            .events
+            .iter()
+            .chain(wake.dropped.iter().filter(|e| burns(e)));
         let keys: Vec<String> = keys.map(|event| event.key.clone()).collect();
         if wake.woke() {
             state.router.held = Some((wake.id.clone(), delivered));
@@ -617,10 +660,12 @@ impl SupervisorStore {
             .iter()
             .map(|event| event.summary.clone())
             .collect();
-        state
-            .router
-            .reported
-            .extend(added.iter().chain(&dropped).map(|event| event.key.clone()));
+        state.router.reported.extend(
+            added
+                .iter()
+                .chain(dropped.iter().filter(|e| burns(e)))
+                .map(|event| event.key.clone()),
+        );
         if let Some(wake) = state.file.wakes.iter_mut().find(|wake| wake.id == wake_id) {
             wake.events.extend(added);
             wake.dropped.extend(dropped);
@@ -733,13 +778,26 @@ impl SupervisorStore {
             .any(|item| item.answer.is_none() && item.task_id.as_deref() == Some(task_id))
     }
 
-    pub(crate) fn reopen_item(&self, item_id: &str) -> Result<(), EngineError> {
+    /// Puts back the answer before `choice`, unless a later answer already replaced it.
+    pub(crate) fn revert_answer(
+        &self,
+        item_id: &str,
+        choice: &str,
+        previous: Option<ItemAnswer>,
+    ) -> Result<(), EngineError> {
         {
             let mut state = lock(&self.inner.state);
             let mut file = state.file.clone();
-            if let Some(item) = file.items.iter_mut().find(|item| item.id == item_id) {
-                item.answer = None;
-            }
+            let Some(item) = file.items.iter_mut().find(|item| {
+                item.id == item_id
+                    && item
+                        .answer
+                        .as_ref()
+                        .is_some_and(|answer| answer.choice == choice)
+            }) else {
+                return Ok(());
+            };
+            item.answer = previous;
             persist_json(&self.inner.path, &file)?;
             state.file = file;
         }
@@ -761,12 +819,20 @@ impl SupervisorStore {
         {
             let mut state = lock(&self.inner.state);
             state.file.interventions.push(record);
-            let excess = state
+            let mut excess = state
                 .file
                 .interventions
                 .len()
                 .saturating_sub(KEPT_INTERVENTIONS);
-            state.file.interventions.drain(..excess);
+            state.file.interventions.retain(|record| {
+                let drop = excess > 0
+                    && !matches!(
+                        record.row.approval,
+                        Some(PlanApproval::Held { .. } | PlanApproval::TakenBack { .. })
+                    );
+                excess -= usize::from(drop);
+                !drop
+            });
             self.persist(&state);
         }
         self.mark_stale();
@@ -880,6 +946,14 @@ impl SupervisorStore {
 
     pub(crate) fn set_projections(&self, projections: Projections) {
         lock(&self.inner.state).router.projections = projections;
+    }
+
+    pub(crate) fn set_blocked(&self, blocked: Option<String>) {
+        lock(&self.inner.state).router.blocked = blocked;
+    }
+
+    pub(crate) fn blocked(&self) -> bool {
+        lock(&self.inner.state).router.blocked.is_some()
     }
 
     pub(crate) fn set_next_check(&self, check: Option<NextCheck>) {
@@ -1149,7 +1223,7 @@ impl TreeStall {
     }
 }
 
-/// A busy node (background work or live sub-agents) is never stalled, and wakes no timer.
+/// A busy node (background work or live sub-agents) is never stalled, and wakes no timer; a question waits on the person whatever runs.
 pub(crate) fn tree_stalls(
     now: i64,
     stalls: Vec<TreeStall>,
@@ -1157,7 +1231,10 @@ pub(crate) fn tree_stalls(
 ) -> (Vec<TreeStall>, Option<i64>) {
     let mut due = Vec::new();
     let mut next: Option<i64> = None;
-    for stall in stalls.into_iter().filter(|stall| !stall.node().busy) {
+    let stalled = |stall: &TreeStall| {
+        matches!(stall, TreeStall::QuestionWaiting { .. }) || !stall.node().busy
+    };
+    for stall in stalls.into_iter().filter(stalled) {
         let at = stall.due_at();
         if at > now {
             next = Some(next.map_or(at, |next| next.min(at)));
@@ -1289,6 +1366,9 @@ fn authority_footer(settings: SupervisorSettings, permission: PermissionMode) ->
     let mut decides = String::new();
     if settings.decide_for_me {
         decides.push_str("\n- decide each lead's Needs you item whose why is decision yourself, in the person's place, with the supervisor tool, action \"decide\" (itemId, choice, reason), and approve a plan that waits for review with action \"approve\" (taskId, reason) when it fits the mission: on");
+        if !settings.goal_and_spend {
+            decides.push_str(" (the lead picks an item's why itself: one marked decision that changes the mission's goal or spends money is still the person's, so raise it with action \"ask\")");
+        }
     }
     let goal = if settings.goal_and_spend {
         decides.push_str("\n- decide each lead's goal and spend items yourself too with action \"decide\", and change a mission's goal, its title and notes, with action \"goal\" (taskId, title, notes, reason): on");
@@ -1300,7 +1380,7 @@ fn authority_footer(settings: SupervisorSettings, permission: PermissionMode) ->
         decides.push_str("\nThe person sees each of these decisions with your reason and may change it, so give a reason they can check.");
     }
     format!(
-        "Read more with read_thread, list_threads, or the tasks tool (action \"list\", taskId). What you may do now:\n- message leads and step threads with send_message_to_thread: {}\n- answer their questions and tool approvals with respond_to_input: {}{approvals}\n- answer the questions of a watched tree without a plan with respond_to_input (Decide for me): {}; decide, approve, goal, re-brief and pause apply once a tree has a plan\n- re-brief a step's title and spec through its lead with the supervisor tool, action \"rebrief\": {}{resources}\n- start a mission whose plan the person reviews with the supervisor tool, action \"start\" (create_thread and delegate_task go with it): {}{decides}\n{goal}\nIf nothing needs doing, reply in one line.",
+        "Read more with read_thread, list_threads, or the tasks tool (action \"list\", taskId). What you may do now:\n- message leads and step threads with send_message_to_thread: {}\n- answer their questions and tool approvals with respond_to_input: {}{approvals}\n- answer the questions of a watched tree without a plan with respond_to_input (Decide for me): {}; decide, approve, goal, re-brief and pause apply once a tree has a plan\n- re-brief a step's title and spec through its lead with the supervisor tool, action \"rebrief\": {}{resources}\n- start a mission whose plan the person reviews with the supervisor tool, action \"start\" (create_thread, delegate_task and review_changes go with it): {}{decides}\n{goal}\nIf nothing needs doing, reply in one line.",
         on(settings.message_threads),
         on(settings.message_threads),
         on(settings.message_threads && settings.decide_for_me),
@@ -1598,7 +1678,7 @@ mod tests {
         let off = SupervisorSettings::default();
         assert_eq!(
             footer(off),
-            "- start a mission whose plan the person reviews with the supervisor tool, action \"start\" (create_thread and delegate_task go with it): off\nA change to a mission's goal or spend is the person's decision: raise it with the supervisor tool, action \"ask\".\nIf nothing needs doing, reply in one line."
+            "- start a mission whose plan the person reviews with the supervisor tool, action \"start\" (create_thread, delegate_task and review_changes go with it): off\nA change to a mission's goal or spend is the person's decision: raise it with the supervisor tool, action \"ask\".\nIf nothing needs doing, reply in one line."
         );
         let decide = footer(SupervisorSettings {
             decide_for_me: true,
@@ -1923,7 +2003,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tree_stall_waits_its_threshold_fires_once_and_never_on_a_busy_node() {
+    fn a_tree_stall_waits_its_threshold_fires_once_and_never_on_a_busy_node_but_a_question() {
         let now = 10 * HOUR_MS;
         let node = |busy| StallNode {
             chat_id: "child".into(),
@@ -1968,7 +2048,13 @@ mod tests {
                 false,
                 Some(now + 15 * MIN),
             ),
-            ("busy", question(now - 21 * MIN, true), false, false, None),
+            (
+                "asked 21 min ago while a shell runs",
+                question(now - 21 * MIN, true),
+                false,
+                true,
+                None,
+            ),
             (
                 "reset 6 min ago",
                 limit(now - 6 * MIN, false),

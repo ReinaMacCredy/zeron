@@ -4665,6 +4665,7 @@ impl Transcript {
         let offer = limit.offer.clone()?;
         let device = device.to_string();
         let resets_at = limit.resets_at;
+        let auto = limit.auto;
         let engine = state.engine().cloned()?;
         let harness = state
             .chats
@@ -4736,6 +4737,7 @@ impl Transcript {
                 harness,
                 offer: &offer,
                 resets_at,
+                auto,
                 selected,
                 countdown,
                 on_select,

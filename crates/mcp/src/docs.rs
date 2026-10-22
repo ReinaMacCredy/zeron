@@ -6,6 +6,7 @@ use zeron_docs::changelog;
 pub const TOOL: &str = "docs";
 
 const RECENT_RELEASES: usize = 3;
+const MAX_QUERY_CHARS: usize = 200;
 
 pub fn tool() -> Value {
     json!({
@@ -16,7 +17,7 @@ pub fn tool() -> Value {
             "properties": {
                 "action": { "type": "string", "enum": ["list", "read", "search", "whatsNew"] },
                 "id": { "type": "string", "description": "Article id, for read." },
-                "query": { "type": "string", "maxLength": 200, "description": "Words to look for, for search. An article matches when it contains every word." },
+                "query": { "type": "string", "maxLength": MAX_QUERY_CHARS, "description": "Words to look for, for search. An article matches when it contains every word." },
                 "version": { "type": "string", "description": "Release version such as 0.2.114, for whatsNew. Defaults to the newest releases." }
             },
             "required": ["action"],
@@ -51,6 +52,11 @@ fn run(args: &Value) -> Result<String, String> {
             let query = args["query"].as_str().unwrap_or_default();
             if query.trim().is_empty() {
                 return Err("search needs a `query`".into());
+            }
+            if query.chars().count() > MAX_QUERY_CHARS {
+                return Err(format!(
+                    "`query` must be at most {MAX_QUERY_CHARS} characters"
+                ));
             }
             Ok(search(docs, query))
         }
@@ -184,6 +190,11 @@ mod tests {
         assert_eq!(none["isError"], false);
         assert!(text(&none).starts_with("No article"));
         assert_eq!(mcp_result(&json!({ "action": "search" }))["isError"], true);
+        let long = "word ".repeat(MAX_QUERY_CHARS);
+        assert_eq!(
+            mcp_result(&json!({ "action": "search", "query": long }))["isError"],
+            true
+        );
     }
 
     #[test]

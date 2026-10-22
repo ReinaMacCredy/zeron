@@ -201,11 +201,16 @@ struct Round {
     quiet_until: Option<i64>,
 }
 
-/// A watched node whose turn ended quietly; its checkout is read off the router loop.
+/// A checkout where watched turns ended quietly, read once off the router loop.
 struct Checkout {
     node: StallNode,
+    also: Vec<String>,
     cwd: std::path::PathBuf,
     checkout_id: String,
+}
+
+fn checkout_of(chat: &Chat) -> Option<String> {
+    chat.checkout_id.clone().or_else(|| chat.cwd.clone())
 }
 
 /// What an intervention row needs from before the action: a re-brief's snapshot predates its own edit.
@@ -592,16 +597,23 @@ impl DocHost {
         sent
     }
 
+    /// Held across a take-back's check and write, so no step thread starts between them.
+    pub(crate) async fn step_start_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.inner.delegation_lock.lock().await
+    }
+
     /// Sends each held Supervisor approval whose hold ran out; returns when the next one does.
     async fn release_approvals(
         &self,
         store: &SupervisorStore,
         workspace: &WorkspaceHost,
+        decide_for_me: bool,
         now: i64,
     ) -> Option<i64> {
         let mut next = None;
         for (id, task_id, due, reason) in store.held_approvals() {
-            if due > now {
+            let withdrawn = !decide_for_me || store.is_unwatched(&task_id);
+            if due > now && !withdrawn {
                 next = Some(next.map_or(due, |next: i64| next.min(due)));
                 continue;
             }
@@ -622,20 +634,34 @@ impl DocHost {
                 store.set_approval(&id, None, None);
                 continue;
             };
+            let to_review = || {
+                let patch = TaskPatch {
+                    plan_pending: Some(true),
+                    ..Default::default()
+                };
+                if let Err(err) = workspace.update_task(&task_id, &patch) {
+                    tracing::warn!(error = %err, task = %task_id, "returning a plan to review failed");
+                }
+                store.set_approval(&id, None, None);
+            };
+            if withdrawn {
+                to_review();
+                continue;
+            }
             let text = format!(
                 "The Supervisor approved the plan; the person gave it this decision. Run it.\n\nWhy: {}",
                 reason.trim()
             );
-            match self
+            let sent = self
                 .send_to_task_thread(workspace, &task, &lead, None, &text, Vec::new())
-                .await
-            {
+                .await;
+            match sent {
                 Ok(message_id) => {
                     store.set_approval(&id, Some(PlanApproval::Sent), Some(message_id))
                 }
                 Err(err) => {
                     tracing::warn!(error = %err, task = %task_id, "sending a held plan approval failed");
-                    store.set_approval(&id, Some(PlanApproval::Sent), None);
+                    to_review();
                 }
             }
         }
@@ -826,10 +852,8 @@ impl DocHost {
             let mut cwds: Vec<String> = threads.iter().filter_map(|t| t.cwd.clone()).collect();
             cwds.sort();
             cwds.dedup();
-            let mut checkouts: Vec<String> = threads
-                .iter()
-                .filter_map(|t| t.checkout_id.clone().or_else(|| t.cwd.clone()))
-                .collect();
+            let mut checkouts: Vec<String> =
+                threads.iter().filter_map(|t| checkout_of(t)).collect();
             checkouts.sort();
             checkouts.dedup();
             let held = |facts: &ThreadFacts| {
@@ -960,7 +984,12 @@ impl DocHost {
             }
         }
         let quiet_ms = stall_ms(TURN_QUIET_MS);
-        let mut checks = Vec::new();
+        let working: HashSet<String> = chats
+            .iter()
+            .filter(|chat| is_live(&chat.id))
+            .filter_map(checkout_of)
+            .collect();
+        let mut checks: Vec<Checkout> = Vec::new();
         let mut quiet_until: Option<i64> = None;
         observed.quiet.retain(|thread, ended| {
             let Some(chat) = chat(thread) else {
@@ -970,22 +999,27 @@ impl DocHost {
             let (Some(node), Some(cwd)) = (node(chat), cwd.filter(|cwd| cwd.is_absolute())) else {
                 return false;
             };
-            let due = *ended + quiet_ms;
+            let checkout_id = checkout_of(chat).unwrap_or_default();
+            let due = match node.busy || working.contains(&checkout_id) {
+                true => now + quiet_ms,
+                false => *ended + quiet_ms,
+            };
             if due > now {
                 quiet_until = Some(quiet_until.map_or(due, |at| at.min(due)));
                 return true;
             }
-            if node.busy {
-                return true;
+            match checks
+                .iter_mut()
+                .find(|check| check.checkout_id == checkout_id)
+            {
+                Some(check) => check.also.push(node.chat_id),
+                None => checks.push(Checkout {
+                    checkout_id,
+                    cwd: cwd.to_path_buf(),
+                    node,
+                    also: Vec::new(),
+                }),
             }
-            checks.push(Checkout {
-                checkout_id: chat
-                    .checkout_id
-                    .clone()
-                    .unwrap_or_else(|| cwd.to_string_lossy().into_owned()),
-                cwd: cwd.to_path_buf(),
-                node,
-            });
             false
         });
         (stalls, checks, quiet_until)
@@ -1018,18 +1052,23 @@ impl DocHost {
             let Some(chat) = chats.iter().find(|chat| &chat.id == thread) else {
                 continue;
             };
+            let delegated = chat.delegation.as_ref().map(|delegation| delegation.status);
+            let stopped = match kind {
+                Kind::NodeFinished => delegated == Some(DelegationStatus::Interrupted),
+                _ => true,
+            };
             if chat.is_system()
                 || open_step_of(steps, thread).is_some()
-                || busy(sessions, engine.as_ref(), thread)
+                || (stopped && busy(sessions, engine.as_ref(), thread))
             {
                 continue;
             }
             let tree = tree_of(chat, chats, tasks, steps, self.device_id());
-            let label = match (kind, chat.delegation.as_ref()) {
-                (Kind::NodeFinished, Some(delegation)) => format!(
+            let label = match (kind, delegated) {
+                (Kind::NodeFinished, Some(status)) => format!(
                     "Delegated task \"{}\" {}",
                     one_line(chat.title.as_deref().unwrap_or("Untitled"), TITLE_CHARS),
-                    match delegation.status {
+                    match status {
                         DelegationStatus::Completed => "completed",
                         DelegationStatus::Failed => "failed",
                         DelegationStatus::Cancelled => "was cancelled",
@@ -1037,7 +1076,6 @@ impl DocHost {
                         DelegationStatus::Running => "ended",
                     }
                 ),
-                (Kind::NodeFinished, None) => continue,
                 _ => format!("{} failed", thread_label(chat)),
             };
             let at = chat
@@ -1096,8 +1134,17 @@ impl DocHost {
                 sessions,
                 supervisor.as_ref().map(|chat| chat.id.as_str()),
             ));
+            store.set_blocked(
+                supervisor
+                    .as_ref()
+                    .and_then(|chat| chat.config.as_ref())
+                    .and_then(|config| registry.cannot_run(config)),
+            );
         }
-        let released = self.release_approvals(store, workspace, now).await;
+        let settings = registry.supervisor_settings();
+        let released = self
+            .release_approvals(store, workspace, settings.decide_for_me, now)
+            .await;
         let refresh = [store.refresh_at(), released].into_iter().flatten().min();
         let Some(supervisor) = supervisor else {
             store.take_pending();
@@ -1153,7 +1200,6 @@ impl DocHost {
         for check in std::mem::take(&mut round.checks) {
             self.spawn_checkout_check(check);
         }
-        let settings = registry.supervisor_settings();
         if settings.decide_for_me {
             for plan in &round.plans {
                 let taken_back = matches!(
@@ -1626,7 +1672,7 @@ impl DocHost {
         settings: zeron_proto::supervisor::SupervisorSettings,
         now: i64,
     ) -> Option<i64> {
-        if !store.has_pending() {
+        if !store.has_pending() || store.blocked() {
             return None;
         }
         let held = store.held();
@@ -1830,50 +1876,55 @@ impl DocHost {
     fn spawn_checkout_check(&self, check: Checkout) {
         let host = self.clone();
         self.spawn_worker(async move {
-            for event in host.checkout_stalls(check).await {
+            let checked = tokio::time::timeout(
+                crate::working_tree::READ_TIMEOUT,
+                host.checkout_stalls(check),
+            )
+            .await;
+            for event in checked.unwrap_or_default() {
                 host.supervisor_event(event);
             }
         });
     }
 
-    /// Keyed by head sha: the same uncommitted or unmerged state is reported once.
+    /// Keyed by checkout and head sha: the same uncommitted or unmerged state is reported once, whichever thread ended there.
     async fn checkout_stalls(&self, check: Checkout) -> Vec<SupervisorEvent> {
         let Checkout {
             node,
+            also,
             cwd,
             checkout_id,
         } = check;
-        let read = tokio::time::timeout(
-            crate::working_tree::READ_TIMEOUT,
-            crate::working_tree::read(&cwd, &checkout_id),
-        )
-        .await;
-        let tree = match read {
-            Ok(Ok(tree)) => tree,
-            Ok(Err(err)) => {
+        let tree = match crate::working_tree::changes(&cwd).await {
+            Ok(tree) => tree,
+            Err(err) => {
                 tracing::debug!(chat = %node.chat_id, error = %err, "stall check read no checkout");
                 return Vec::new();
             }
-            Err(_) => return Vec::new(),
         };
         let who = self.who(&node.chat_id);
+        let ended = std::iter::once(who.clone())
+            .chain(also.iter().map(|id| self.who(id)))
+            .collect::<Vec<_>>()
+            .join(", ");
         let head = tree.head_sha.clone().unwrap_or_else(|| "unborn".into());
         let mut events = Vec::new();
         if !tree.files.is_empty() {
             let n = tree.files.len();
             let mut event = node_event(
                 Kind::Dirty,
-                format!("dirty:{}:{head}", node.chat_id),
+                format!("dirty:{checkout_id}:{head}"),
                 &node,
-                format!("{who} left {}", plural(n, "uncommitted file")),
+                format!(
+                    "{who} ended its turn with {} in its checkout",
+                    plural(n, "uncommitted file")
+                ),
             );
-            let mut paths: Vec<&str> = tree.files.iter().map(|f| f.path.as_str()).collect();
-            paths.truncate(MAX_PATHS);
+            let paths: Vec<&str> = tree.files.iter().map(|f| f.path.as_str()).collect();
             event.detail = vec![format!(
-                "In {} after its turn ended: {}{}",
-                tree.root,
-                paths.join(", "),
-                if n > MAX_PATHS { ", ..." } else { "" }
+                "In {} after a turn ended there ({ended}): {}",
+                cwd.display(),
+                listed(&paths)
             )];
             events.push(event);
         }
@@ -1892,18 +1943,18 @@ impl DocHost {
         if let Some(ahead) = ahead {
             let mut event = node_event(
                 Kind::Unmerged,
-                format!("unmerged:{}:{head}", node.chat_id),
+                format!("unmerged:{checkout_id}:{head}"),
                 &node,
                 format!("{who} left branch {branch} unmerged into {main}"),
             );
             event.detail = vec![format!(
                 "{} on {branch} that {main} does not have, in {}.",
                 plural(ahead as usize, "commit"),
-                tree.root
+                cwd.display()
             )];
             events.push(event);
             let blocked = self
-                .merge_blocked(&node, &who, &cwd, &branch, &main, &head)
+                .merge_blocked(&node, &who, &cwd, &checkout_id, &branch, &main, &head)
                 .await;
             events.extend(blocked);
         }
@@ -1911,31 +1962,33 @@ impl DocHost {
     }
 
     /// The branch's changes overlap paths left uncommitted in the main checkout, which a merge there would refuse.
+    #[allow(clippy::too_many_arguments)]
     async fn merge_blocked(
         &self,
         node: &StallNode,
         who: &str,
         cwd: &std::path::Path,
+        checkout_id: &str,
         branch: &str,
         main: &str,
         head: &str,
     ) -> Option<SupervisorEvent> {
-        use crate::working_tree::{READ_TIMEOUT, branch_paths, main_checkout, read, toplevel};
+        use crate::working_tree::{branch_paths, changes, main_checkout, toplevel};
         let (main_root, own) = (main_checkout(cwd).await?, toplevel(cwd).await?);
         if canonical(&main_root) == canonical(&own) {
             return None;
         }
-        let root_id = main_root.to_string_lossy().into_owned();
-        let main_tree = tokio::time::timeout(READ_TIMEOUT, read(&main_root, &root_id))
-            .await
-            .ok()?
-            .ok()?;
+        let main_tree = changes(&main_root).await.ok()?;
+        if main_tree.branch.as_deref() != Some(main) {
+            return None;
+        }
         let changed = branch_paths(cwd, main).await;
         let mut overlap: Vec<String> = main_tree
             .files
             .iter()
-            .map(|file| file.path.clone())
+            .flat_map(|file| std::iter::once(&file.path).chain(&file.old_path))
             .filter(|path| changed.contains(path))
+            .cloned()
             .collect();
         if overlap.is_empty() {
             return None;
@@ -1946,24 +1999,18 @@ impl DocHost {
         let digest: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
         let mut event = node_event(
             Kind::MergeBlocked,
-            format!("merge-blocked:{}:{head}:{digest}", node.chat_id),
+            format!("merge-blocked:{checkout_id}:{head}:{digest}"),
             node,
             format!(
                 "{who} cannot merge {branch} into {main}: the main checkout holds uncommitted changes to {}",
                 plural(overlap.len(), "file it also changed")
             ),
         );
-        let mut shown = overlap.clone();
-        shown.truncate(MAX_PATHS);
+        let shown: Vec<&str> = overlap.iter().map(String::as_str).collect();
         event.detail = vec![format!(
-            "Uncommitted in {}: {}{}",
+            "Uncommitted in {}: {}",
             main_root.display(),
-            shown.join(", "),
-            if overlap.len() > MAX_PATHS {
-                ", ..."
-            } else {
-                ""
-            }
+            listed(&shown)
         )];
         event.detail.push(
             match self.last_writer(&main_root, &overlap, &node.chat_id) {
@@ -1972,7 +2019,7 @@ impl DocHost {
                     thread_label(&chat),
                     chat.id
                 ),
-                None => "No chat on this device wrote them in that checkout.".to_string(),
+                None => "No chat on this device edited them there with a file tool in the last day; a shell command or an editor may have.".to_string(),
             },
         );
         Some(event)
@@ -1982,6 +2029,7 @@ impl DocHost {
     fn last_writer(&self, root: &std::path::Path, paths: &[String], exclude: &str) -> Option<Chat> {
         let root = canonical(root);
         let chats = self.workspace()?.watch_chats().borrow().clone();
+        let since = chrono::Utc::now() - chrono::Duration::days(1);
         chats
             .into_iter()
             .filter(|chat| {
@@ -1989,6 +2037,7 @@ impl DocHost {
                     && !chat.is_system()
                     && !chat.archived
                     && chat.device_id == self.device_id()
+                    && chat.last_message_at.unwrap_or(chat.created_at) > since
             })
             .filter_map(|chat| {
                 let cwd = canonical(std::path::Path::new(chat.cwd.as_deref()?));
@@ -2222,6 +2271,19 @@ fn written_path(call: &ToolCall) -> Option<&str> {
         ToolCall::ApplyPatch { path } => path.as_deref(),
         _ => None,
     }
+}
+
+/// Repository path names are written by anyone, so each is escaped to one line before it reaches the wake.
+fn listed(paths: &[&str]) -> String {
+    let mut shown: Vec<String> = paths
+        .iter()
+        .take(MAX_PATHS)
+        .map(|path| path.escape_debug().to_string())
+        .collect();
+    if paths.len() > MAX_PATHS {
+        shown.push("...".to_string());
+    }
+    shown.join(", ")
 }
 
 fn plural(n: usize, what: &str) -> String {

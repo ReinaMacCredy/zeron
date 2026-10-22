@@ -540,6 +540,29 @@ impl HarnessRegistry {
         self.prefs().disabled.contains(&id)
     }
 
+    /// Why a chat with `config` cannot run here; a provider instance is checked at its own launch.
+    pub(crate) fn cannot_run(&self, config: &zeron_proto::ChatConfig) -> Option<String> {
+        if config.instance_id.is_some() {
+            return None;
+        }
+        let name = config.harness.display_name();
+        let other = match &config.profile_id {
+            Some(profile) => format!("give the {profile} profile another agent"),
+            None => "pick another agent".to_string(),
+        };
+        if !self.installed_for(config.harness) {
+            Some(format!(
+                "{name} is not installed on this Mac. Install it, or {other}."
+            ))
+        } else if self.turned_off(config.harness) {
+            Some(format!(
+                "{name} is turned off in Settings > Providers. Turn it on, or {other}."
+            ))
+        } else {
+            None
+        }
+    }
+
     /// Whether this device's CLI probe passes for `id` (no spawn, no resolve).
     pub(crate) fn installed_for(&self, id: HarnessId) -> bool {
         match self.slots().get(&id) {
