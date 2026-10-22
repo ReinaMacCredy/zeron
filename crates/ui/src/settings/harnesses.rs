@@ -29,7 +29,7 @@ use zeron_engine::registry::{HarnessDescriptor, descriptor_enabled};
 
 use zeron_proto::{
     HarnessId, HarnessUpdatePhase, HarnessUpdatePolicy, HarnessUpdateStatus, InstanceConfig,
-    ProviderInstance,
+    ProviderInstance, cli_name,
 };
 
 use zeron_rpc::methods;
@@ -108,22 +108,6 @@ fn install_params(harness: HarnessId, target: &Option<String>) -> serde_json::Va
 }
 
 /// The CLI named in the not-installed hint.
-pub fn cli_name(harness: HarnessId) -> &'static str {
-    match harness {
-        HarnessId::ClaudeCode => "claude",
-        HarnessId::Codex => "codex",
-        HarnessId::Cursor => "cursor-agent",
-        HarnessId::Devin => "devin",
-        HarnessId::Grok => "grok",
-        HarnessId::Hermes => "hermes",
-        HarnessId::Pi => "pi",
-        HarnessId::Opencode => "opencode",
-        HarnessId::Antigravity => "Antigravity",
-        HarnessId::Acp => "acp",
-        HarnessId::Mock => "mock",
-    }
-}
-
 fn harness_update_label(status: &HarnessUpdateStatus, theme: &Theme) -> (SharedString, gpui::Hsla) {
     let label = status.version_line();
     let color = match status.phase {
@@ -306,7 +290,7 @@ impl HarnessesPage {
             .ready()
             .into_iter()
             .flatten()
-            .filter(|instance| provider_instances::has_own_login(instance))
+            .filter(|instance| zeron_proto::has_own_login(instance))
             .cloned()
             .collect();
         self.instance_accounts
@@ -486,15 +470,13 @@ impl HarnessesPage {
                                 .child(SharedString::from(id.clone()))
                                 .into_any_element(),
                         )
-                        .chain(
-                            provider_instances::acp_source_summary(instance).map(|summary| {
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .child(SharedString::from(summary))
-                                    .into_any_element()
-                            }),
-                        )
+                        .chain(zeron_proto::acp_source_summary(instance).map(|summary| {
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .child(SharedString::from(summary))
+                                .into_any_element()
+                        }))
                         .collect(),
                     )),
             )

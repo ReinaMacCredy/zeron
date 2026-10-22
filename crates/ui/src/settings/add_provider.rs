@@ -5,7 +5,10 @@ use gpui::{
     px,
 };
 use zeron_engine::registry::HarnessDescriptor;
-use zeron_proto::{AcpSource, HarnessId, HomeDir, InstanceConfig, ProviderInstance};
+use zeron_proto::{
+    AcpSource, HarnessId, HomeDir, InstanceConfig, ProviderInstance, binary_placeholder, home_field,
+};
+pub use zeron_proto::{DRIVERS, driver_name};
 
 mod acp;
 
@@ -19,57 +22,12 @@ use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::{Theme, ink};
 
-pub const DRIVERS: [HarnessId; 9] = [
-    HarnessId::ClaudeCode,
-    HarnessId::Codex,
-    HarnessId::Cursor,
-    HarnessId::Devin,
-    HarnessId::Grok,
-    HarnessId::Hermes,
-    HarnessId::Opencode,
-    HarnessId::Pi,
-    HarnessId::Antigravity,
-];
-
-pub fn driver_name(driver: HarnessId) -> &'static str {
-    match driver {
-        HarnessId::ClaudeCode => "Claude",
-        HarnessId::Codex => "Codex",
-        HarnessId::Cursor => "Cursor",
-        HarnessId::Devin => "Devin",
-        HarnessId::Grok => "Grok",
-        HarnessId::Hermes => "Hermes",
-        HarnessId::Opencode => "OpenCode",
-        HarnessId::Pi => "Pi",
-        HarnessId::Antigravity => "Antigravity",
-        HarnessId::Acp => "ACP",
-        HarnessId::Mock => "Mock",
-    }
-}
-
-fn binary_placeholder(driver: HarnessId) -> &'static str {
-    match driver {
-        HarnessId::Antigravity => "antigravity-acp",
-        _ => crate::settings::harnesses::cli_name(driver),
-    }
-}
-
-fn home_field(driver: HarnessId) -> Option<(&'static str, &'static str)> {
-    match driver {
-        HarnessId::ClaudeCode => Some(("CLAUDE_CONFIG_DIR path", "~/.claude")),
-        HarnessId::Codex => Some(("CODEX_HOME path", "~/.codex")),
-        HarnessId::Pi => Some(("PI_CODING_AGENT_DIR path", "~/.pi/agent")),
-        _ => None,
-    }
-}
-
 fn sign_in_action(driver: HarnessId) -> Option<(&'static str, &'static str)> {
-    match driver {
-        HarnessId::Codex => Some(("Continue with ChatGPT", icons::OPENAI_MARK)),
-        HarnessId::ClaudeCode => Some(("Sign in with Claude", icons::CLAUDE_MARK)),
-        HarnessId::Pi => Some(("Continue with ChatGPT", icons::OPENAI_MARK)),
-        _ => None,
-    }
+    let mark = match driver {
+        HarnessId::ClaudeCode => icons::CLAUDE_MARK,
+        _ => icons::OPENAI_MARK,
+    };
+    zeron_proto::sign_in_label(driver).map(|label| (label, mark))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -447,12 +405,7 @@ impl AddProviderDialog {
             return zeron_proto::derive_instance_id(HarnessId::Acp, "custom", self.taken())
                 .unwrap_or_default();
         }
-        provider_instances::default_instance_id(
-            self.driver,
-            driver_name(self.driver),
-            label,
-            self.taken(),
-        )
+        zeron_proto::default_instance_id(self.driver, driver_name(self.driver), label, self.taken())
     }
 
     fn instance_id(&self) -> String {
@@ -469,7 +422,7 @@ impl AddProviderDialog {
         if self.editing.is_some() {
             return None;
         }
-        provider_instances::instance_id_error(&self.instance_id(), self.taken())
+        zeron_proto::instance_id_error(&self.instance_id(), self.taken())
     }
 
     fn sync_id_input(&mut self, cx: &mut Context<Self>) {
@@ -668,7 +621,7 @@ impl AddProviderDialog {
         }
         let identity = self.identity();
         let (label, id) = if identity.untouched(self.driver) {
-            provider_instances::next_numbered(self.driver, driver_name(self.driver), self.taken())
+            zeron_proto::next_numbered(self.driver, driver_name(self.driver), self.taken())
         } else {
             if self.id_error().is_some() {
                 self.go(Step::Identity, cx);
@@ -965,26 +918,28 @@ impl AddProviderDialog {
                 .justify_center()
                 .cursor_pointer()
         };
-        let swatches =
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(2.0))
-                .child(
-                    swatch(("add-provider-accent-none", 0), identity.accent.is_none())
-                        .on_click(cx.listener(|this, _, _, cx| this.set_accent(None, cx)))
-                        .child(
-                            div()
-                                .size(px(16.0))
-                                .rounded_full()
-                                .border_1()
-                                .border_dashed()
-                                .border_color(theme.border_strong),
-                        ),
-                )
-                .children(provider_instances::ACCENTS.into_iter().enumerate().map(
-                    |(ix, accent)| {
+        let swatches = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(2.0))
+            .child(
+                swatch(("add-provider-accent-none", 0), identity.accent.is_none())
+                    .on_click(cx.listener(|this, _, _, cx| this.set_accent(None, cx)))
+                    .child(
+                        div()
+                            .size(px(16.0))
+                            .rounded_full()
+                            .border_1()
+                            .border_dashed()
+                            .border_color(theme.border_strong),
+                    ),
+            )
+            .children(
+                zeron_proto::ACCENTS
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, (accent, _))| {
                         let on = identity.accent.as_deref() == Some(accent);
                         swatch(("add-provider-accent", ix), on)
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -997,8 +952,8 @@ impl AddProviderDialog {
                                     .bg(provider_instances::accent_color(accent)
                                         .unwrap_or(theme.text_muted)),
                             )
-                    },
-                ));
+                    }),
+            );
         div()
             .flex()
             .flex_col()
