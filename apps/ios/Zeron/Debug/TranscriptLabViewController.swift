@@ -30,10 +30,6 @@ final class TranscriptLabViewController: UIViewController {
             ComposerChip(id: "effort", title: "High", symbol: "gauge.with.dots.needle.67percent"),
             ComposerChip(id: "branch", title: "ios-rewrite", symbol: nil, icon: BranchIcon.sized()),
         ]
-        composer.attachMenu = { [weak self] in
-            guard let self else { return UIMenu() }
-            return AttachmentPicker.menu(host: self, limit: 8) { [weak self] in self?.composer.addImages($0) }
-        }
         composer.onSend = { [weak self] text, _, _ in
             self?.send(text)
             return .sent

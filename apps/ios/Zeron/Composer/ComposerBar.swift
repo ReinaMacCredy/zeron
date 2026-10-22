@@ -59,7 +59,6 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
 
     var onSend: ((String, [StagedImage], DeliveryMode) -> SendResult)?
     var onStop: (() -> Void)?
-    var attachMenu: (() -> UIMenu)?
     var onChipTap: ((String, UIView) -> Void)?
     var onHeightChange: (() -> Void)?
     var onFocusChange: ((Bool) -> Void)?
@@ -108,6 +107,8 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     private let suggestions = MentionSuggestions()
     private var mentionQuery: (range: NSRange, query: String)?
     private var mentionTask: Task<Void, Never>?
+    private var attachCard: AttachCard?
+    private var keyboardHeight: CGFloat = 336
 
     private let font = Fonts.ui(.sans, UIFontMetrics(forTextStyle: .body).scaledValue(for: 16.5))
     private var maxLines: Int {
@@ -153,11 +154,8 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         attachButton.accessibilityLabel = "Attach"
         attachButton.accessibilityIdentifier = "composer-attach"
         attachButton.translatesAutoresizingMaskIntoConstraints = false
-        // Built on open so "Paste Image" reflects the pasteboard right now.
-        attachButton.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
-            done(self?.attachMenu?().children ?? [])
-        }])
-        attachButton.showsMenuAsPrimaryAction = true
+        attachButton.addAction(UIAction { [weak self] _ in self?.toggleAttachCard() }, for: .touchUpInside)
+        NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillShow), name: UIResponder.keyboardWillShowNotification, object: nil)
         content.addSubview(attachButton)
 
         textView.font = font
@@ -284,7 +282,13 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         return true
     }
 
+    /// The text view's own taps must not starve the one that swaps the attach card back to the keyboard.
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        true
+    }
+
     @objc private func focusFromTap() {
+        if let attachCard { return attachCard.close() }
         if !textView.isFirstResponder { textView.becomeFirstResponder() }
     }
 
@@ -413,6 +417,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     }
 
     func textViewDidEndEditing(_ textView: UITextView) {
+        attachCard?.close()
         setSuggestionsVisible(false)
         updateMode(animated: true)
         textView.setContentOffset(.zero, animated: false)
@@ -468,6 +473,28 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     }
 
     // MARK: Attachments
+
+    private func toggleAttachCard() {
+        if let attachCard { return attachCard.close() }
+        guard let host = findViewController() else { return }
+        let picker = AttachmentPicker(host: host, limit: 8 - images.count) { [weak self] in self?.addImages($0) }
+        attachCard = AttachCard.present(in: textView, from: attachButton, picker: picker, height: keyboardHeight) { [weak self] in
+            self?.attachCard = nil
+            self?.rotateAttach(open: false)
+        }
+        rotateAttach(open: true)
+    }
+
+    @objc private func keyboardWillShow(_ note: Notification) {
+        guard attachCard == nil, let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect, frame.height >= 200 else { return }
+        keyboardHeight = frame.height
+    }
+
+    private func rotateAttach(open: Bool) {
+        let apply = { self.attachButton.transform = open ? CGAffineTransform(rotationAngle: .pi / 4) : .identity }
+        guard !UIAccessibility.isReduceMotionEnabled else { return apply() }
+        UIView.animate(withDuration: 0.42, delay: 0, usingSpringWithDamping: 0.72, initialSpringVelocity: 0, options: [.allowUserInteraction, .beginFromCurrentState], animations: apply)
+    }
 
     func addImages(_ new: [StagedImage]) {
         images.append(contentsOf: new.prefix(max(0, 8 - images.count)))
