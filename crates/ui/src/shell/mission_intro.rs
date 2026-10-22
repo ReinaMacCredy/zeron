@@ -25,7 +25,7 @@ const PAGES: [Page; 4] = [
     },
     Page {
         title: "Watch every step",
-        body: "Each step runs on its own thread, side by side when steps don\u{2019}t depend on each other. The tree on the lead\u{2019}s thread follows them live, and the Mission Control page adds each step\u{2019}s token count.",
+        body: "Each step runs on its own thread, side by side when steps don\u{2019}t depend on each other. The tree on the lead\u{2019}s thread follows them live, and the mission page adds each step\u{2019}s token count.",
     },
     Page {
         title: "A lead and a Supervisor watch",

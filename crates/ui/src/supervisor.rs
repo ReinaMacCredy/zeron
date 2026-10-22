@@ -189,7 +189,7 @@ impl ApprovalState {
                 secs % 60
             ),
             Self::Sent => "Approved by the Supervisor · no step has started yet".into(),
-            Self::Started => "Approved by the Supervisor · steps already started. To change course, edit the plan in Mission Control or message the lead.".into(),
+            Self::Started => "Approved by the Supervisor · steps already started. To change course, edit the plan on the mission page or message the lead.".into(),
             Self::TakenBack => "You took this approval back · the plan went back to review".into(),
         }
     }
@@ -1065,7 +1065,7 @@ fn missions(state: &AppState, now: DateTime<Utc>) -> Vec<Mission> {
             starts_open: false,
         }
     });
-    let index = crate::tasks::index_rows(state, now, Some(crate::tasks::IndexKind::Tree));
+    let index = crate::tasks::tree_index(state, now);
     let trees = index
         .running
         .into_iter()
@@ -4017,10 +4017,7 @@ fn calm_line(
         );
     }
     let line = match (missions, watched) {
-        (0, _) => {
-            "Nothing watched is running. Start a mission, or Watch a tree in Mission Control."
-                .into()
-        }
+        (0, _) => "Nothing watched is running. Start a mission, or Watch a tree.".into(),
         (_, 0) => "No tree is watched. Turn Watched on for one below.".into(),
         (_, n) => format!(
             "Watching {n} {}. A mission's open decisions arrive here as one sheet.",

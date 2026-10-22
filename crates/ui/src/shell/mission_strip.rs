@@ -61,7 +61,7 @@ impl Shell {
                 .id("mission-strip-open")
                 .debug_selector(|| "mission-strip-open".into())
                 .role(gpui::Role::Button)
-                .aria_label(format!("Open Mission Control: {}", mission.title))
+                .aria_label(format!("Open mission page: {}", mission.title))
                 .flex_none()
                 .flex()
                 .items_center()
@@ -69,7 +69,7 @@ impl Shell {
                 .whitespace_nowrap()
                 .text_color(theme.text)
                 .cursor_pointer()
-                .child("Mission Control")
+                .child("Mission page")
                 .child(
                     icon(icons::LUCIDE_CHEVRON_RIGHT)
                         .size(px(12.0))
@@ -88,7 +88,7 @@ impl Shell {
             .aria_label(match open {
                 Some(true) => format!("Fold the steps of {}", mission.title),
                 Some(false) => format!("Show the steps of {}", mission.title),
-                None => format!("Open Mission Control: {}", mission.title),
+                None => format!("Open mission page: {}", mission.title),
             })
             .when_some(open, |el, open| el.aria_expanded(open))
             .flex_none()

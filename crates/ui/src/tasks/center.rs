@@ -582,19 +582,6 @@ impl TaskCenter {
         }
     }
 
-    pub fn title(&self, cx: &App) -> Option<String> {
-        let state = self.state.read(cx);
-        match self.resolve(state) {
-            (_, Some(task)) => Some(task.title.clone()),
-            (Some(root), None) => state
-                .chats
-                .iter()
-                .find(|chat| chat.id == root)
-                .map(|chat| crate::transcript::single_line(&crate::home::chat_title(chat))),
-            (None, None) => None,
-        }
-    }
-
     pub(super) fn plan_id(&self, cx: &App) -> Option<String> {
         self.resolve(self.state.read(cx))
             .1

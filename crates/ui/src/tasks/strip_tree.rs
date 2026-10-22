@@ -54,7 +54,6 @@ pub(crate) enum TreeHost {
     Strip,
     Supervisor,
     Intro,
-    Index,
     Center,
 }
 
@@ -180,10 +179,6 @@ impl StripTree {
             Source::Tree { root_chat_id, .. } => root_chat_id,
             Source::Sample(..) => "",
         }
-    }
-
-    pub fn openness(&self) -> f32 {
-        self.open.value_at(Instant::now())
     }
 
     pub fn is_open(&self) -> bool {
@@ -421,7 +416,7 @@ impl StripTree {
                 } else {
                     item(
                         "strip-tree-menu-open",
-                        "Open in Mission Control",
+                        "Open mission page",
                         icons::LUCIDE_CHEVRON_RIGHT,
                     )
                 }
@@ -468,7 +463,7 @@ impl Render for StripTree {
         let reduced = motion::reduced_motion(cx);
         let theme = match self.host {
             TreeHost::Strip | TreeHost::Intro => Theme::of(cx).for_popup(),
-            TreeHost::Supervisor | TreeHost::Index | TreeHost::Center => Theme::of(cx).clone(),
+            TreeHost::Supervisor | TreeHost::Center => Theme::of(cx).clone(),
         };
         let Some(rows) = self.rows(cx) else {
             return div().into_any_element();

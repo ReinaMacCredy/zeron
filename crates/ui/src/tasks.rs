@@ -41,7 +41,7 @@ mod tree;
 
 pub use card::{CardFocus, Orchestrate, TaskCard, TaskCardEvent};
 pub use center::{LiveThread, PlanEdit, Selection, TaskCenter, TaskCenterEvent};
-pub(crate) use index::{Kind as IndexKind, MissionIndex, MissionIndexEvent, index_rows};
+pub(crate) use index::tree_index;
 use logic::COLUMNS;
 use morph::{Key, Morph, Painted, Rects};
 pub(crate) use strip_tree::{SampleRow, StripTree, StripTreeEvent, TreeHost};
@@ -308,7 +308,11 @@ impl TasksPage {
             gallery,
             card,
             done_open: true,
-            filter: TasksFilter::All,
+            filter: if std::env::var("ZERON_OPEN_ROUTE").as_deref() == Ok("mission-control") {
+                TasksFilter::Missions
+            } else {
+                TasksFilter::All
+            },
             open_first_card: std::env::var("ZERON_OPEN_DIALOG").as_deref() == Ok("task-card"),
             focus: cx.focus_handle(),
             view_now: None,
@@ -2199,7 +2203,7 @@ impl Render for TasksPage {
         let now = Instant::now();
         let reduced = motion::reduced_motion(cx);
         let mut trees = match view {
-            TasksView::List => index_rows(self.state.read(cx), Utc::now(), Some(IndexKind::Tree)),
+            TasksView::List => tree_index(self.state.read(cx), Utc::now()),
             TasksView::Kanban => index::IndexRows::default(),
         };
         if view == TasksView::Kanban && self.filter == TasksFilter::Trees {

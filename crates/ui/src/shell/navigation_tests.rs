@@ -613,7 +613,7 @@ fn the_task_center_terminal_opens_the_panes_chat_not_the_selection(cx: &mut Test
 }
 
 #[gpui::test]
-fn going_back_to_mission_control_finds_the_page_it_left(cx: &mut TestAppContext) {
+fn going_back_to_a_mission_page_finds_the_page_it_left(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
     shell.update(cx, |shell, cx| {
         shell.reduced_motion = false;
