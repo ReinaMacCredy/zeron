@@ -3449,6 +3449,7 @@ impl RpcService for EngineRpc {
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;
                 update_harness_enabled(&self.registry, p.harness, p.enabled).await?;
+                self.doc_host.supervisor_stale();
                 if let Some(coordinator) = &self.harness_updates {
                     coordinator.refresh_enabled();
                 }

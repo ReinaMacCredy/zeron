@@ -2,7 +2,7 @@ Providers are the agents Zeron can run: Claude Code, Codex, Cursor, Devin, Grok,
 
 ## Turn agents on and off
 
-Each row shows the agent, its version, and a switch that decides whether the composer offers it. Turning an agent on needs its CLI installed; a missing CLI dims the row and its hint says what to install, for example **Install the claude CLI to enable**. **Install** sets it up when Zeron can; the row reads **Installing** and the agent's name while it runs, and **Cancel** stops it. You cannot turn off the last enabled agent while it is installed (an agent whose CLI is missing can always be turned off).
+Each row shows the agent, its version, and a switch that decides whether the composer offers it. Turning an agent on needs its CLI installed; a missing CLI dims the row and its hint says what to install, for example **Install the claude CLI to enable**. **Install** sets it up when Zeron can; the row reads **Installing** and the agent's name while it runs, and **Cancel** stops it. You cannot turn off the last enabled agent while it is installed (an agent whose CLI is missing can always be turned off). Turning off the agent the [Supervisor](zeron://docs/supervisor) runs on stops its wakes until you turn it back on.
 
 **Update** appears when a new version is out, and **Check now** in the header looks right away. While an update waits for the agent to be idle, prepares, or downloads, the version line says so (**Waiting for agent to be idle**, **Preparing update…**, **Downloading…**) and **Cancel** replaces **Update**.
 

@@ -2,7 +2,7 @@ The Supervisor is one agent for this Mac's workspace that sits above the leads o
 
 ## Open the Supervisor
 
-Click **Supervisor**, the shield in the rail under **Tasks**. The first time you open the page, Zeron starts the Supervisor's chat. It uses your **SLP Supervisor** agent profile when you have one. Otherwise it uses the agent and model you last used on New chat, with permission at **Full**. When it cannot start, the status card reads **Couldn't start the Supervisor** with the reason: the agent the profile names is turned off in [Settings > Providers](zeron://settings/providers) or not installed on this Mac, or no agent is installed and turned on. Turn the agent on or give the profile another agent, then click **Try again**; it reads the profile again first.
+Click **Supervisor**, the shield in the rail under **Tasks**. The first time you open the page, Zeron starts the Supervisor's chat. It uses your **SLP Supervisor** agent profile when you have one. Otherwise it uses the agent and model you last used on New chat, with permission at **Full**. When it cannot start, the status card reads **Couldn't start the Supervisor** with the reason: the agent the profile names is turned off in [Settings > Providers](zeron://settings/providers) or not installed on this Mac, or no agent is installed and turned on. Turn the agent on or give the profile another agent, then click **Try again**; it reads the profile again first. When the agent of a Supervisor that already runs is later turned off or uninstalled, it stops waking: its wakes wait until the agent can run again, and the status card says why.
 
 The Supervisor's chat never shows in the sidebar or under **Archived**, and it never plays the run-finished sound. You reach it only from this page.
 

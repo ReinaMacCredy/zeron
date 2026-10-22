@@ -219,6 +219,7 @@ struct Router {
     resources: Resources,
     next_check: Option<NextCheck>,
     asked: Vec<Asked>,
+    blocked: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,11 +253,13 @@ impl State {
             .map(NeedsYouRow::Item)
             .collect();
         needs_you.extend(projections.inputs.iter().cloned().map(NeedsYouRow::Input));
+        let blocked = chat_id.as_ref().and(self.router.blocked.clone());
         SupervisorSnapshot {
             chat_id,
             state,
             waiting,
             next_check: self.router.next_check.clone(),
+            blocked,
             wakes: self
                 .file
                 .wakes
@@ -943,6 +946,14 @@ impl SupervisorStore {
 
     pub(crate) fn set_projections(&self, projections: Projections) {
         lock(&self.inner.state).router.projections = projections;
+    }
+
+    pub(crate) fn set_blocked(&self, blocked: Option<String>) {
+        lock(&self.inner.state).router.blocked = blocked;
+    }
+
+    pub(crate) fn blocked(&self) -> bool {
+        lock(&self.inner.state).router.blocked.is_some()
     }
 
     pub(crate) fn set_next_check(&self, check: Option<NextCheck>) {

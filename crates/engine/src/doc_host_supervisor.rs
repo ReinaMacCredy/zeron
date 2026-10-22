@@ -1134,6 +1134,12 @@ impl DocHost {
                 sessions,
                 supervisor.as_ref().map(|chat| chat.id.as_str()),
             ));
+            store.set_blocked(
+                supervisor
+                    .as_ref()
+                    .and_then(|chat| chat.config.as_ref())
+                    .and_then(|config| registry.cannot_run(config)),
+            );
         }
         let settings = registry.supervisor_settings();
         let released = self
@@ -1666,7 +1672,7 @@ impl DocHost {
         settings: zeron_proto::supervisor::SupervisorSettings,
         now: i64,
     ) -> Option<i64> {
-        if !store.has_pending() {
+        if !store.has_pending() || store.blocked() {
             return None;
         }
         let held = store.held();
