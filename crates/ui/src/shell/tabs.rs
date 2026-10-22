@@ -1798,6 +1798,7 @@ impl Shell {
             .aria_label(title.clone())
             .aria_expanded(!collapsed)
             .relative()
+            .flex_shrink(100.0)
             .min_w(px(TAB_GROUP_TITLE_MIN_WIDTH))
             .max_w(px(TAB_MAX_WIDTH))
             .h(px(TAB_HEIGHT))

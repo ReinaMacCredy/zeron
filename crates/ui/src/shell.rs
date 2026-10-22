@@ -391,10 +391,16 @@ fn composer_target_width(panel_width: f32, content_width: f32, docked: bool) -> 
 }
 
 fn titlebar_new_session_alpha(route: &Route, has_selected_chat: bool) -> f32 {
-    if matches!(route, Route::PullRequests) || (matches!(route, Route::Chat) && has_selected_chat) {
-        1.0
-    } else {
-        0.0
+    match route {
+        Route::Chat => {
+            if has_selected_chat {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        Route::Settings(_) => 0.0,
+        _ => 1.0,
     }
 }
 
@@ -21383,6 +21389,8 @@ mod tests {
         assert_eq!(titlebar_new_session_alpha(&Route::Chat, false), 0.0);
         assert_eq!(titlebar_new_session_alpha(&Route::PullRequests, false), 1.0);
         assert_eq!(titlebar_new_session_alpha(&Route::PullRequests, true), 1.0);
+        assert_eq!(titlebar_new_session_alpha(&Route::Tasks, false), 1.0);
+        assert_eq!(titlebar_new_session_alpha(&Route::TaskCenter, false), 1.0);
         assert_eq!(
             titlebar_new_session_alpha(&Route::Settings(SettingsSection::Devices), true),
             0.0
