@@ -358,25 +358,7 @@ fn is_overdue(task: &zeron_proto::Task, chats: &[zeron_proto::Chat], today: &str
         && task.due_on.as_deref().is_some_and(|due| due < today)
 }
 
-pub(crate) fn resets_in(resets_at: DateTime<Utc>, now: DateTime<Utc>) -> Option<String> {
-    let seconds = (resets_at - now).num_seconds();
-    if seconds <= 0 {
-        return None;
-    }
-    let minutes = (seconds + 59) / 60;
-    let (hours, days) = (minutes / 60, minutes / (60 * 24));
-    Some(match () {
-        _ if minutes < 60 => format!("{minutes}m"),
-        _ if hours < 24 => match minutes % 60 {
-            0 => format!("{hours}h"),
-            m => format!("{hours}h {m}m"),
-        },
-        _ => match hours % 24 {
-            0 => format!("{days}d"),
-            h => format!("{days}d {h}h"),
-        },
-    })
-}
+pub(crate) use zeron_proto::account_usage::resets_in;
 
 pub(crate) fn awaiting_chats(state: &AppState, now: DateTime<Utc>) -> Vec<&Chat> {
     state
@@ -1452,26 +1434,6 @@ mod tests {
                 Part::Text(", mostly in the morning".into()),
                 Part::Text(".".into()),
             ]
-        );
-    }
-
-    #[test]
-    fn resets_in_reads_minutes_hours_then_days() {
-        let now = Utc.with_ymd_and_hms(2026, 10, 17, 12, 0, 0).unwrap();
-        let later = |secs: i64| now + chrono::Duration::seconds(secs);
-        assert_eq!(resets_in(now, now), None);
-        assert_eq!(resets_in(later(-60), now), None);
-        assert_eq!(resets_in(later(30), now).as_deref(), Some("1m"));
-        assert_eq!(resets_in(later(59 * 60), now).as_deref(), Some("59m"));
-        assert_eq!(resets_in(later(3600), now).as_deref(), Some("1h"));
-        assert_eq!(
-            resets_in(later(2 * 3600 + 14 * 60), now).as_deref(),
-            Some("2h 14m")
-        );
-        assert_eq!(resets_in(later(24 * 3600), now).as_deref(), Some("1d"));
-        assert_eq!(
-            resets_in(later(3 * 86_400 + 4 * 3600), now).as_deref(),
-            Some("3d 4h")
         );
     }
 

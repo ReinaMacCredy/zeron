@@ -7,11 +7,13 @@ use gpui::{
     Render, SharedString, Task, Window, canvas, div, point, prelude::*, px, relative,
 };
 use zeron_proto::HarnessId;
-use zeron_proto::usage::{UsageSummary, UsageTokens};
+use zeron_proto::usage::{
+    ModelTotal, PeriodTotal, USAGE_WINDOWS as WINDOWS, UsageSummary, UsageView as View,
+    format_tokens, format_usd, percent, plural,
+};
 use zeron_rpc::methods;
 
 use crate::icons::{self, icon};
-use crate::session_stats::{tokens as format_tokens, usd as format_usd};
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -28,13 +30,6 @@ enum Breakdown {
     Period,
 }
 
-const PROVIDERS: [HarnessId; 3] = [HarnessId::Codex, HarnessId::ClaudeCode, HarnessId::Grok];
-const WINDOWS: [(u32, &str); 4] = [
-    (1, "Past 24h"),
-    (7, "7 days"),
-    (30, "30 days"),
-    (90, "90 days"),
-];
 const CHART_HEIGHT: f32 = 224.0;
 const PLOT_TOP: f32 = 8.0;
 const AXIS_WIDTH: f32 = 56.0;
@@ -127,123 +122,6 @@ impl UsagePage {
     }
 }
 
-struct ProviderTotal {
-    harness: HarnessId,
-    tokens: u64,
-    cost: f64,
-    sessions: u64,
-}
-
-struct ModelTotal {
-    harness: HarnessId,
-    model: String,
-    tokens: u64,
-    cost: f64,
-}
-
-struct PeriodTotal {
-    start: i64,
-    by_provider: Vec<(f64, u64)>,
-    cost: f64,
-    tokens: u64,
-}
-
-struct View {
-    tokens: UsageTokens,
-    cost: f64,
-    savings: f64,
-    sessions: u64,
-    unpriced: u64,
-    providers: Vec<ProviderTotal>,
-    models: Vec<ModelTotal>,
-    periods: Vec<PeriodTotal>,
-}
-
-impl View {
-    fn new(summary: &UsageSummary) -> Self {
-        let slot = |harness: HarnessId| PROVIDERS.iter().position(|&h| h == harness);
-        let mut providers: Vec<ProviderTotal> = PROVIDERS
-            .iter()
-            .map(|&harness| ProviderTotal {
-                harness,
-                tokens: 0,
-                cost: 0.0,
-                sessions: summary
-                    .sessions
-                    .iter()
-                    .find(|entry| entry.harness == harness)
-                    .map_or(0, |entry| entry.sessions),
-            })
-            .collect();
-        let mut periods: Vec<PeriodTotal> = summary
-            .periods
-            .iter()
-            .map(|&start| PeriodTotal {
-                start,
-                by_provider: vec![(0.0, 0); PROVIDERS.len()],
-                cost: 0.0,
-                tokens: 0,
-            })
-            .collect();
-        let mut models: Vec<ModelTotal> = Vec::new();
-        let mut view_tokens = UsageTokens::default();
-        let (mut cost, mut savings, mut unpriced) = (0.0, 0.0, 0);
-        for bucket in &summary.buckets {
-            let tokens = bucket.tokens.total();
-            view_tokens.add(&bucket.tokens);
-            cost += bucket.cost_usd;
-            savings += bucket.cache_savings_usd;
-            unpriced += bucket.unpriced_records;
-            let index = slot(bucket.harness);
-            if let Some(provider) = index.map(|i| &mut providers[i]) {
-                provider.tokens += tokens;
-                provider.cost += bucket.cost_usd;
-            }
-            if let Some(period) = periods.get_mut(bucket.period) {
-                period.cost += bucket.cost_usd;
-                period.tokens += tokens;
-                if let Some(i) = index {
-                    period.by_provider[i].0 += bucket.cost_usd;
-                    period.by_provider[i].1 += tokens;
-                }
-            }
-            match models
-                .iter_mut()
-                .find(|m| m.harness == bucket.harness && m.model == bucket.model)
-            {
-                Some(model) => {
-                    model.tokens += tokens;
-                    model.cost += bucket.cost_usd;
-                }
-                None => models.push(ModelTotal {
-                    harness: bucket.harness,
-                    model: bucket.model.clone(),
-                    tokens,
-                    cost: bucket.cost_usd,
-                }),
-            }
-        }
-        models.sort_by(|a, b| b.cost.total_cmp(&a.cost).then(b.tokens.cmp(&a.tokens)));
-        let sessions = providers.iter().map(|p| p.sessions).sum();
-        Self {
-            tokens: view_tokens,
-            cost,
-            savings,
-            sessions,
-            unpriced,
-            providers,
-            models,
-            periods,
-        }
-    }
-
-    fn active(&self) -> Vec<usize> {
-        (0..self.providers.len())
-            .filter(|&i| self.providers[i].tokens > 0 || self.providers[i].cost > 0.0)
-            .collect()
-    }
-}
-
 fn value(metric: Metric, cost: f64, tokens: u64) -> f64 {
     match metric {
         Metric::Cost => cost,
@@ -256,34 +134,6 @@ fn format_value(metric: Metric, value: f64) -> String {
         Metric::Cost => format_usd(value),
         Metric::Tokens => format_tokens(value.round() as u64),
     }
-}
-
-fn percent(part: f64, whole: f64) -> String {
-    if whole > 0.0 {
-        format!("{:.1}%", part / whole * 100.0)
-    } else {
-        "0.0%".into()
-    }
-}
-
-fn plural(n: u64, one: &str) -> String {
-    if n == 1 {
-        format!("1 {one}")
-    } else {
-        format!("{} {one}s", group_thousands(n))
-    }
-}
-
-fn group_thousands(n: u64) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
 }
 
 fn nice_scale(peak: f64, target_ticks: usize) -> (f64, Vec<f64>) {

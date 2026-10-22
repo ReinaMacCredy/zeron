@@ -27,7 +27,7 @@ pub fn brand_badge(harness: HarnessId, size: f32, fallback: Hsla) -> impl IntoEl
 }
 
 pub fn summary(profile: &AgentProfile, harness_name: &str, model_label: Option<&str>) -> String {
-    summary_line(
+    zeron_proto::profile_line(
         harness_name,
         model_label.or(profile.model.as_deref()),
         profile.permission_mode,
@@ -41,7 +41,7 @@ pub fn draft_summary(
     harness_name: &str,
     model_label: Option<&str>,
 ) -> String {
-    let line = summary_line(
+    let line = zeron_proto::profile_line(
         harness_name,
         model_label.or(draft.model.as_deref()),
         draft.permission_mode,
@@ -54,29 +54,6 @@ pub fn draft_summary(
     } else {
         format!("{name} · {line}")
     }
-}
-
-fn summary_line(
-    harness_name: &str,
-    model: Option<&str>,
-    mode: Option<zeron_proto::PermissionMode>,
-    reasoning: Option<zeron_proto::ReasoningLevel>,
-    tools_off: usize,
-) -> String {
-    let mut parts = vec![harness_name.to_string()];
-    if let Some(model) = model {
-        parts.push(model.to_string());
-    }
-    if let Some(mode) = mode {
-        parts.push(mode_label(mode).to_string());
-    }
-    if let Some(level) = reasoning {
-        parts.push(crate::pickers::reasoning_label(level).to_string());
-    }
-    if tools_off > 0 {
-        parts.push(format!("{tools_off} tools off"));
-    }
-    parts.join(" · ")
 }
 
 pub fn options_for_model(
@@ -221,11 +198,7 @@ pub fn folded_row(id: &'static str, text: impl Into<SharedString>, muted: Hsla) 
 }
 
 pub fn mode_label(mode: zeron_proto::PermissionMode) -> &'static str {
-    match mode {
-        zeron_proto::PermissionMode::Ask => "Ask",
-        zeron_proto::PermissionMode::Auto => "Auto",
-        zeron_proto::PermissionMode::Full => "Full",
-    }
+    mode.short_label()
 }
 
 pub fn draft_of(profile: &AgentProfile) -> AgentProfileDraft {

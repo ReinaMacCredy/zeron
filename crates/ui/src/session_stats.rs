@@ -255,47 +255,7 @@ fn rows(stats: &SessionStats, cache: Option<Cache>) -> Vec<(&'static str, String
     rows
 }
 
-pub(crate) fn tokens(n: u64) -> String {
-    let trim = |s: String| {
-        if s.contains('.') {
-            s.trim_end_matches('0').trim_end_matches('.').to_string()
-        } else {
-            s
-        }
-    };
-    let n = n as f64;
-    if n >= 1e10 {
-        format!("{}B", trim(format!("{:.1}", n / 1e9)))
-    } else if n >= 999_500_000.0 {
-        format!("{}B", trim(format!("{:.2}", n / 1e9)))
-    } else if n >= 1e7 {
-        format!("{}M", trim(format!("{:.1}", n / 1e6)))
-    } else if n >= 999_500.0 {
-        format!("{}M", trim(format!("{:.2}", n / 1e6)))
-    } else if n >= 1e5 {
-        format!("{:.0}K", n / 1e3)
-    } else if n >= 1e3 {
-        format!("{}K", trim(format!("{:.1}", n / 1e3)))
-    } else {
-        format!("{n}")
-    }
-}
-
-pub(crate) fn usd(x: f64) -> String {
-    if x < 1.0 {
-        return format!("${x:.3}");
-    }
-    let fixed = format!("{x:.2}");
-    let (whole, cents) = fixed.split_once('.').unwrap_or((&fixed, "00"));
-    let mut grouped = String::new();
-    for (i, ch) in whole.chars().enumerate() {
-        if i > 0 && (whole.len() - i) % 3 == 0 {
-            grouped.push(',');
-        }
-        grouped.push(ch);
-    }
-    format!("${grouped}.{cents}")
-}
+pub(crate) use zeron_proto::usage::{format_tokens as tokens, format_usd as usd};
 
 fn cost_headline(stats: &SessionStats) -> Option<String> {
     match stats.cost_usd() {
