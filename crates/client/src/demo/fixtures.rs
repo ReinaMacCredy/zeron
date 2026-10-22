@@ -5,8 +5,9 @@ use chrono::Utc;
 use zeron_doc::RegistryDoc;
 use zeron_proto::{
     ChangeRequestState, ChangeRequestSummary, Chat, ChatConfig, CheckoutChangeRequestStatus,
-    ConversationSourceContext, Device, HarnessId, ReasoningLevel, SandboxLevel, Session,
-    SessionStatus, SidebarPinChange, SidebarSectionChange, Space,
+    ChildRoute, ConversationSourceContext, Delegation, DelegationStatus, DelegationWake, Device,
+    HarnessId, ReasoningLevel, RouteTarget, SandboxLevel, Session, SessionStatus, SidebarPinChange,
+    SidebarSectionChange, Space,
 };
 
 use crate::client::ms;
@@ -34,6 +35,7 @@ pub(crate) struct DemoChat {
     pub seen: bool,
     pub archived: bool,
     pub parent: Option<&'static str>,
+    pub delegated: Option<(DelegationStatus, Option<ChildRoute>)>,
 }
 
 const MIN: i64 = 60_000;
@@ -61,6 +63,7 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         seen: true,
         archived: false,
         parent: None,
+        delegated: None,
     };
     vec![
         DemoChat {
@@ -270,6 +273,20 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             harness: Cursor,
             model: "default",
             last_ago_ms: 4 * HOUR,
+            parent: Some("chat-agents"),
+            delegated: Some((
+                DelegationStatus::Completed,
+                Some(ChildRoute {
+                    source: ChildRoute::ROUTED.into(),
+                    role: Some("reviewer".into()),
+                    table: Some(RouteTarget {
+                        harness: Cursor,
+                        model: Some("default".into()),
+                        reasoning: None,
+                    }),
+                    ..Default::default()
+                }),
+            )),
             ..chat(
                 "chat-cursor",
                 Some("space-agents"),
@@ -282,6 +299,21 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             harness: Devin,
             model: "swe-1-7-medium",
             last_ago_ms: 6 * HOUR,
+            parent: Some("chat-agents"),
+            delegated: Some((
+                DelegationStatus::Running,
+                Some(ChildRoute {
+                    source: ChildRoute::FELL_BACK.into(),
+                    role: Some("debugger".into()),
+                    table: Some(RouteTarget {
+                        harness: Codex,
+                        model: Some("gpt-5.6-sol".into()),
+                        reasoning: None,
+                    }),
+                    reason: Some("Codex out of quota".into()),
+                    ..Default::default()
+                }),
+            )),
             ..chat(
                 "chat-devin",
                 Some("space-agents"),
@@ -294,6 +326,8 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             harness: Grok,
             model: "grok-4.5",
             last_ago_ms: 8 * HOUR,
+            parent: Some("chat-agents"),
+            delegated: Some((DelegationStatus::Failed, None)),
             ..chat(
                 "chat-grok",
                 Some("space-agents"),
@@ -348,6 +382,18 @@ pub(crate) fn chats() -> Vec<DemoChat> {
                 MAC,
                 "Registry agent smoke test",
                 "Handshake ok.",
+            )
+        },
+        DemoChat {
+            harness: ClaudeCode,
+            model: "claude-opus-5-5",
+            last_ago_ms: 18 * HOUR,
+            ..chat(
+                "chat-seams",
+                Some("space-agents"),
+                MAC,
+                "Pick up the layout bench",
+                "Resumed after the restart.",
             )
         },
     ]
@@ -567,7 +613,28 @@ pub(crate) fn seed(
             created_by_chat_id: demo.parent.map(str::to_owned),
             forked_from_chat_id: None,
             previous_harnesses: Vec::new(),
-            delegation: None,
+            delegation: demo
+                .parent
+                .zip(demo.delegated.clone())
+                .map(|(parent, (status, route))| Delegation {
+                    delegated_by_chat_id: parent.into(),
+                    depth: 1,
+                    anchor: "m1".into(),
+                    client_request_id: None,
+                    owner_turn_started_at: None,
+                    wake: DelegationWake::Always,
+                    status,
+                    cancel_requested: false,
+                    delivery: None,
+                    summary: None,
+                    started_at: ms(last - 4 * MIN),
+                    completed_at: (status != DelegationStatus::Running)
+                        .then(|| ms(last - 2 * MIN + 14_000)),
+                    finding_outcomes: Default::default(),
+                    findings_handed: Default::default(),
+                    findings_announced: Default::default(),
+                    route,
+                }),
             settle: None,
             unsettled_at: None,
         };

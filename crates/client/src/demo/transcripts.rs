@@ -850,8 +850,195 @@ fn agents(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                 spawn("s2", "Port the veil to Android", Some("openai/gpt-5.6-sol"), SubagentStatus::Done),
                 spawn("s3", "Review the edge worker", Some("xai/grok-4.5"), SubagentStatus::Running),
                 spawn("s4", "Summarize the CRDT notes", None, SubagentStatus::Done),
-                text("t1", "Four agents reported back."),
+                text("t1", "Four agents reported back. Delegating the rest:"),
+                delegate(
+                    "d1",
+                    "Raise the tab bar hit targets",
+                    Some("chat-cursor"),
+                    None,
+                ),
+                delegate("d2", "Find the flaky e2e on CI", Some("chat-devin"), None),
+                delegate("d3", "Tune the edge cache headers", Some("chat-grok"), None),
+                delegate(
+                    "d4",
+                    "Map the Android bindings",
+                    None,
+                    Some(zeron_proto::ChildRoute {
+                        source: zeron_proto::ChildRoute::CHOSEN_BY_AGENT.into(),
+                        role: Some("explorer".into()),
+                        ..Default::default()
+                    }),
+                ),
+                started_thread("c1", "Changelog draft", "chat-hermes"),
             ],
+        ),
+        from_thread(
+            "m3",
+            now - 200_000,
+            "chat-cursor",
+            "Delegated task chat-cursor (\"Raise the tab bar hit targets\") completed.\n<agent-response>\nRaised every tab to **44pt** and kept the icons centered.\n</agent-response>",
+        ),
+        assistant(
+            "m4",
+            host,
+            now - 190_000,
+            vec![text("t0", "Cursor finished the hit targets.")],
+        ),
+        from_thread(
+            "m5",
+            now - 150_000,
+            "chat-pi",
+            "The layout pass p95 is 3.1ms on the A17. Want the trace?",
+        ),
+        from_thread(
+            "m6",
+            now - 120_000,
+            "chat-hermes",
+            "Step \"Draft the changelog\" reported back on its thread chat-hermes.\n<agent-response>\nGrouped the changelog by surface: iOS, desktop, engine.\n</agent-response>",
+        ),
+        from_thread(
+            "m7",
+            now - 90_000,
+            "chat-agents",
+            "Continue with the Android bindings once the explorer reports.",
+        ),
+        assistant(
+            "m8",
+            host,
+            now - 80_000,
+            vec![text("t0", "Waiting on the explorer.")],
+        ),
+    ]
+}
+
+fn delegate(
+    id: &str,
+    task: &str,
+    child: Option<&str>,
+    route: Option<zeron_proto::ChildRoute>,
+) -> MessagePart {
+    let mut part = tool(
+        id,
+        ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "delegate_task".into(),
+            input: Some(serde_json::json!({ "task": task })),
+        },
+        false,
+        None,
+    );
+    if let MessagePart::Tool {
+        subagent_ref,
+        delegate_route,
+        ..
+    } = &mut part
+    {
+        *subagent_ref = child.map(str::to_owned);
+        *delegate_route = route;
+    }
+    part
+}
+
+fn started_thread(id: &str, title: &str, chat_id: &str) -> MessagePart {
+    let mut part = tool(
+        id,
+        ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "create_thread".into(),
+            input: Some(serde_json::json!({ "title": title })),
+        },
+        false,
+        None,
+    );
+    if let MessagePart::Tool { subagent_ref, .. } = &mut part {
+        *subagent_ref = Some(chat_id.into());
+    }
+    part
+}
+
+fn from_thread(id: &str, at: i64, from: &str, body: &str) -> SessionMessageEntry {
+    let mut entry = user(id, at, body);
+    entry.from_chat_id = Some(from.into());
+    entry
+}
+
+fn system(id: &str, host: &str, at: i64, parts: Vec<MessagePart>) -> SessionMessageEntry {
+    entry(id, MessageRole::System, host, at, parts)
+}
+
+fn seams(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    let packet = "User: Bench the layout pass on the A17.\nAssistant: p95 is 3.1ms; the markdown prepare dominates.\nUser: Can the prepare move off the main thread?\nAssistant: It already runs on the layout worker.";
+    vec![
+        user("m1", now - 600_000, "Bench the layout pass on the A17."),
+        assistant(
+            "m2",
+            host,
+            now - 590_000,
+            vec![text("t0", "p95 is **3.1ms**; the markdown prepare dominates.")],
+        ),
+        system(
+            "m3",
+            host,
+            now - 500_000,
+            vec![MessagePart::Handoff {
+                id: "h0".into(),
+                harness: zeron_proto::HarnessId::ClaudeCode,
+                text: packet.into(),
+                route: zeron_doc::parts::HandoffRoute {
+                    from_harness: Some(zeron_proto::HarnessId::Codex),
+                    from_model: Some("gpt-5.6-sol".into()),
+                    to_model: Some("claude-opus-5-5".into()),
+                    source_chat_id: Some("chat-pi".into()),
+                    source_title: Some("Bench the layout pass".into()),
+                    kind: Default::default(),
+                },
+            }],
+        ),
+        user("m4", now - 400_000, "Now profile the scroll path."),
+        system(
+            "m5",
+            host,
+            now - 399_000,
+            vec![MessagePart::Classifier {
+                id: "k0".into(),
+                record: zeron_doc::parts::ClassifierRecord {
+                    harness: Some(zeron_proto::HarnessId::ClaudeCode),
+                    model: Some("claude-haiku-5-5".into()),
+                    verdict: zeron_doc::parts::ClassifierVerdict::Carry,
+                    classifier_verdict: None,
+                    decided_by: zeron_doc::parts::DecidedBy::Stage1,
+                    duration_ms: 820,
+                    context_tokens: 48_200,
+                    input: "Now profile the scroll path.".into(),
+                    reply: "CARRY: same benchmark thread, new surface.".into(),
+                    stage2_reply: None,
+                    input_tokens: Some(1_240),
+                    output_tokens: Some(12),
+                },
+            }],
+        ),
+        assistant(
+            "m6",
+            host,
+            now - 380_000,
+            vec![text("t0", "Scroll stays under 2ms per frame.")],
+        ),
+        system(
+            "m7",
+            host,
+            now - 300_000,
+            vec![
+                text("t0", "Context compacted"),
+                text("t1", "Older turns were summarized to free the context window."),
+            ],
+        ),
+        system("m8", host, now - 200_000, vec![text("t0", "Host restarted")]),
+        user("m9", now - 120_000, zeron_proto::RESUME_PROMPT),
+        assistant(
+            "m10",
+            host,
+            now - 100_000,
+            vec![text("t0", "Back on the scroll profile.")],
         ),
     ]
 }
@@ -906,6 +1093,7 @@ pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<Sess
             "Batched to one beat per 25s.",
         ),
         "chat-agents" => agents(host, now),
+        "chat-seams" => seams(host, now),
         _ => Vec::new(),
     }
 }

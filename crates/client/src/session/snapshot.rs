@@ -199,6 +199,7 @@ pub struct QueueItem {
     pub gate: Option<QueueGate>,
     /// A Send-now / Remove is awaiting the host's acknowledgement.
     pub action_pending: bool,
+    pub from_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -693,6 +693,10 @@ impl Client {
         self.inner.connectivity()
     }
 
+    pub fn chat(&self, chat_id: &str) -> Option<zeron_proto::Chat> {
+        self.inner.workspace.chat(chat_id)
+    }
+
     /// The chat's run configuration (harness/model/effort/options/sandbox).
     pub fn session_config(&self, chat_id: &str) -> Option<ChatConfig> {
         self.inner.workspace.chat(chat_id).and_then(|c| c.config)

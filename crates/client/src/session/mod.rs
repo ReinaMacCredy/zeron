@@ -549,7 +549,17 @@ impl SessionCore {
             queue: st
                 .queue
                 .iter()
-                .map(|item| queue_item(item, &client.config.device_id, &st.queue_actions_pending))
+                .map(|item| {
+                    let mut queued =
+                        queue_item(item, &client.config.device_id, &st.queue_actions_pending);
+                    queued.from_label = zeron_proto::transcript::queue_from_label(
+                        &self.chat_id,
+                        item.from_chat_id.as_deref(),
+                        &item.text,
+                        |id| client.workspace.chat(id).and_then(|chat| chat.title),
+                    );
+                    queued
+                })
                 .collect(),
             pending_sends: st.pending.clone(),
             send_state: oldest_state(&st.pending),
@@ -701,6 +711,7 @@ fn queue_item(item: &QueuedMessage, device_id: &str, pending: &HashSet<String>) 
             },
         }),
         action_pending: pending.contains(&item.id),
+        from_label: None,
     }
 }
 

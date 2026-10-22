@@ -65,7 +65,13 @@ fn front_page_mirrors_the_desktop_sidebar() {
             "chat-visuals",
             "chat-cjk",
             "chat-side",
+            "chat-agents",
             "chat-home",
+            "chat-hermes",
+            "chat-pi",
+            "chat-antigravity",
+            "chat-acp",
+            "chat-seams",
             "chat-deploy",
             "chat-computer",
             "chat-blog"
