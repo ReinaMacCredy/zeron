@@ -69,9 +69,12 @@ impl Harness for RecordingHarness {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(8);
         let steers = self.steers.clone();
         let confirm = tx.clone();
+        let ended = Arc::new(tokio::sync::Mutex::new(false));
+        let steer_ended = ended.clone();
         tokio::spawn(async move {
             while let Some(message) = controls.steering.recv().await {
                 steers.lock().unwrap().push(message.prompt);
+                let ended = steer_ended.lock().await;
                 // A real harness confirms the fold; without it the engine
                 // treats the steer as lost and re-runs it at turn end.
                 let _ = confirm
@@ -80,6 +83,17 @@ impl Harness for RecordingHarness {
                         next_assistant_message_id: Some("a-rec-2".into()),
                     }))
                     .await;
+                // A steer that lands after Done opens a new turn, which a real harness ends with its own Done.
+                if *ended {
+                    let _ = confirm
+                        .send(Ok(AgentEvent::Done {
+                            status: DoneStatus::Completed,
+                            result: None,
+                            error: None,
+                            session_id: Some("hs-rec".into()),
+                        }))
+                        .await;
+                }
             }
         });
         let delay = self.step_delay;
@@ -142,9 +156,12 @@ impl Harness for RecordingHarness {
                         return;
                     }
                 }
+                let mut ended = ended.lock().await;
+                let done = matches!(event, AgentEvent::Done { .. });
                 if tx.send(Ok(event)).await.is_err() {
                     return;
                 }
+                *ended = done;
             }
         });
         Ok(futures::stream::unfold(rx, |mut rx| async move {
