@@ -52,6 +52,18 @@ pub fn header_line(now: DateTime<Local>, needs: usize, open_tasks: usize) -> Str
     format!("{}. {date}.{rest}", greeting(now))
 }
 
+pub fn updated_label(updated: Option<DateTime<Local>>, failed: bool) -> Option<String> {
+    match (updated, failed) {
+        (Some(at), false) => Some(format!("Updated {}", at.format("%-I:%M %p"))),
+        (Some(at), true) => Some(format!(
+            "Updated {}, refresh failed",
+            at.format("%-I:%M %p")
+        )),
+        (None, true) => Some("Runs did not load".to_owned()),
+        (None, false) => None,
+    }
+}
+
 pub fn is_overdue(task: &Task, chats: &[Chat], today: &str) -> bool {
     task.completed_at.is_none()
         && crate::mission::linked_chat(chats, task).is_none()
@@ -272,6 +284,23 @@ mod tests {
 
     fn local(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Local> {
         Local.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
+    }
+
+    #[test]
+    fn updated_label_reads_like_the_mockup() {
+        assert_eq!(
+            updated_label(Some(local(2026, 10, 16, 9, 40)), false).as_deref(),
+            Some("Updated 9:40 AM")
+        );
+        assert_eq!(
+            updated_label(Some(local(2026, 10, 16, 21, 5)), true).as_deref(),
+            Some("Updated 9:05 PM, refresh failed")
+        );
+        assert_eq!(
+            updated_label(None, true).as_deref(),
+            Some("Runs did not load")
+        );
+        assert_eq!(updated_label(None, false), None);
     }
 
     #[test]

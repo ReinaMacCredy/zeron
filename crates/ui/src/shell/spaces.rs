@@ -15,6 +15,10 @@ use crate::pickers::{
 };
 use gpui::{FocusHandle, Window};
 use std::collections::HashSet;
+use zeron_proto::sidebar_view::{
+    SHELF_INITIAL_ROWS, SHELF_PAGE_ROWS, compare_sidebar_chats, compare_sidebar_rows, shelf_next,
+    shelf_visible,
+};
 use zeron_proto::{
     ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, HomeFolderMatch,
     HomeFolderSearchResult, SearchHomeFoldersRequest, Space,
@@ -2432,33 +2436,6 @@ impl ActiveChatRow {
     }
 }
 
-pub(super) fn compare_sidebar_chats(
-    sort: SidebarSort,
-    left: &zeron_proto::Chat,
-    right: &zeron_proto::Chat,
-) -> std::cmp::Ordering {
-    let primary = match sort {
-        SidebarSort::Created => right.created_at.cmp(&left.created_at),
-        SidebarSort::LastUpdated => right
-            .last_message_at
-            .unwrap_or(right.created_at)
-            .cmp(&left.last_message_at.unwrap_or(left.created_at)),
-    };
-    primary.then_with(|| left.id.cmp(&right.id))
-}
-
-pub(super) fn compare_sidebar_rows(
-    sort: SidebarSort,
-    active_first: bool,
-    left: (ChatIndicator, &zeron_proto::Chat),
-    right: (ChatIndicator, &zeron_proto::Chat),
-) -> std::cmp::Ordering {
-    let active = |status: ChatIndicator| active_first && status != ChatIndicator::Idle;
-    active(right.0)
-        .cmp(&active(left.0))
-        .then_with(|| compare_sidebar_chats(sort, left.1, right.1))
-}
-
 #[derive(Clone, Copy)]
 pub(super) struct InboxMark {
     working: bool,
@@ -2653,10 +2630,6 @@ pub(super) const SIDEBAR_DISCLOSURE_HEADER_HEIGHT: f32 = 32.0;
 pub(super) const SIDEBAR_DISCLOSURE_BODY_INSET: f32 = 4.0;
 const SIDEBAR_DISCLOSURE_SECTION_HEIGHT: f32 =
     SIDEBAR_SECTION_GAP + SIDEBAR_DISCLOSURE_HEADER_HEIGHT;
-/// The Archived and Settled shelves show this many rows, then "Show more"
-/// pages by [`SHELF_PAGE_ROWS`].
-const SHELF_INITIAL_ROWS: usize = 10;
-const SHELF_PAGE_ROWS: usize = 25;
 
 fn sidebar_show_more_row(
     id: &'static str,
@@ -2688,25 +2661,10 @@ fn sidebar_show_more_row(
 const CHATS_GROUP_KEY: &str = "chats";
 const NEW_CHAT_DIMMED_OPACITY: f32 = 0.45;
 
-/// Put one group first (this machine's device, or the projectless Chats)
-/// without disturbing the recency-based order of the others. A targeted
-/// promotion is more truthful than a full name sort: that context leads, then
-/// the user's chosen chat sort wins.
 fn promote_group<T>(groups: &mut Vec<(Option<(String, String)>, Vec<T>)>, key: Option<&str>) {
-    let Some(key) = key else {
-        return;
-    };
-    let Some(index) = groups.iter().position(|(group, _)| {
-        group
-            .as_ref()
-            .is_some_and(|(group_key, _)| group_key == key)
-    }) else {
-        return;
-    };
-    if index > 0 {
-        let local = groups.remove(index);
-        groups.insert(0, local);
-    }
+    zeron_proto::sidebar_view::promote_group(groups, key, |(group, _)| {
+        group.as_ref().map(|(group_key, _)| group_key.as_str())
+    });
 }
 
 /// The chat ids in the order the sidebar draws them: the sorted input
@@ -6957,8 +6915,7 @@ impl Shell {
             let row_count = rendered_rows.len();
             let more_height = sidebar_row_height(self.settings.sidebar_compact, true, true);
             let hidden = if slim {
-                let shown = self.sidebar_settled_shown.max(SHELF_INITIAL_ROWS);
-                let cut = shown.min(row_count);
+                let cut = shelf_visible(self.sidebar_settled_shown, row_count);
                 let mut tail = rendered_rows.split_off(cut);
                 let pulled = [
                     selected.as_deref(),
@@ -7011,9 +6968,7 @@ impl Shell {
                             theme,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.sidebar_settled_shown =
-                                this.sidebar_settled_shown.max(SHELF_INITIAL_ROWS)
-                                    + SHELF_PAGE_ROWS;
+                            this.sidebar_settled_shown = shelf_next(this.sidebar_settled_shown);
                             cx.notify();
                         })),
                     )

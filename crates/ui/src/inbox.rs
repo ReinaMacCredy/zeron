@@ -748,15 +748,8 @@ impl InboxPage {
             .text_color(theme.text_muted)
             .child("Your day so far")
             .children(
-                match (self.runs_updated, self.runs_failed) {
-                    (Some(at), false) => Some(format!("Updated {}", at.format("%I:%M %p"))),
-                    (Some(at), true) => {
-                        Some(format!("Updated {}, refresh failed", at.format("%I:%M %p")))
-                    }
-                    (None, true) => Some("Runs did not load".to_string()),
-                    (None, false) => None,
-                }
-                .map(|label| div().opacity(0.8).child(SharedString::from(label))),
+                zeron_proto::today::updated_label(self.runs_updated, self.runs_failed)
+                    .map(|label| div().opacity(0.8).child(SharedString::from(label))),
             );
         let body = if sentences.is_empty() {
             let copy = if self.runs_failed && self.runs.is_none() {
