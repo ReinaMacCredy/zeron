@@ -74,6 +74,50 @@ pub struct SupervisorWake {
     pub delivery: WakeDelivery,
 }
 
+impl SupervisorEventKind {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::StepFailed => "step failed",
+            Self::NeedsYou => "needs you",
+            Self::MissionDone => "mission done",
+            Self::MissionSilent => "mission silent",
+            Self::LeadSilent => "lead silent",
+            Self::Escalation => "lead escalated",
+            Self::PlanEdited => "plan edited",
+            Self::Resource => "resource contention",
+            Self::Heartbeat => "check-in",
+            Self::NodeFailed => "thread failed",
+            Self::NodeFinished => "delegated task ended",
+            Self::QuestionWaiting => "question waiting",
+            Self::Dirty => "uncommitted files",
+            Self::Unmerged => "unmerged branch",
+            Self::LimitIdle => "idle after limit reset",
+            Self::LostWake => "lost wake",
+            Self::MergeBlocked => "merge blocked",
+        }
+    }
+}
+
+impl WakeDelivery {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Started => "Started a turn".into(),
+            Self::Steered => "Steered its turn".into(),
+            Self::HeldForTurnEnd => "Held for turn end".into(),
+            Self::HeldByStop => "Held by your Stop".into(),
+            Self::Failed { error } => format!("Failed: {error}"),
+            Self::Dropped => "Dropped".into(),
+        }
+    }
+}
+
+pub fn wakes_this_hour(wakes: &[SupervisorWake], now: DateTime<Utc>) -> usize {
+    wakes
+        .iter()
+        .filter(|wake| wake.woke() && now - wake.at < chrono::Duration::hours(1))
+        .count()
+}
+
 impl SupervisorWake {
     pub fn woke(&self) -> bool {
         !matches!(
@@ -99,6 +143,16 @@ pub enum ItemWhy {
     Goal,
     Spend,
     Decision,
+}
+
+impl ItemWhy {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Goal => "Goal",
+            Self::Spend => "Spend",
+            Self::Decision => "Decision",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,6 +235,79 @@ pub struct NeedsYouInput {
 pub enum NeedsYouRow {
     Item(SupervisorItem),
     Input(NeedsYouInput),
+}
+
+const TITLE_CHARS: usize = 120;
+
+impl NeedsYouInput {
+    pub fn key(&self) -> String {
+        format!("input:{}:{}", self.chat_id, self.request_id)
+    }
+
+    pub fn title(&self) -> String {
+        let Some(first) = self.questions.first() else {
+            return "A question".into();
+        };
+        let text = if first.header.trim().is_empty() {
+            &first.question
+        } else {
+            &first.header
+        };
+        clip(&crate::view::single_line(text), TITLE_CHARS)
+    }
+}
+
+fn clip(text: &str, chars: usize) -> String {
+    match text.char_indices().nth(chars) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text.to_owned(),
+    }
+}
+
+impl NeedsYouRow {
+    pub fn title(&self) -> String {
+        match self {
+            Self::Item(item) => clip(&item.title, TITLE_CHARS),
+            Self::Input(input) => input.title(),
+        }
+    }
+
+    pub fn key(&self) -> String {
+        match self {
+            Self::Item(item) => format!("item:{}", item.id),
+            Self::Input(input) => input.key(),
+        }
+    }
+
+    pub fn origin(&self) -> (Option<&str>, &str) {
+        match self {
+            Self::Item(item) => (item.task_id.as_deref(), item.raiser_chat_id.as_str()),
+            Self::Input(input) => (input.task_id.as_deref(), input.chat_id.as_str()),
+        }
+    }
+
+    pub fn task_id(&self) -> Option<&str> {
+        self.origin().0
+    }
+
+    pub fn at(&self) -> DateTime<Utc> {
+        match self {
+            Self::Item(item) => item.at,
+            Self::Input(input) => input.at,
+        }
+    }
+
+    /// A watched plain tree has no task, so its threads' asks group under the tree's root chat.
+    pub fn group(&self, root_of: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+        match self {
+            Self::Input(input)
+                if input.task_id.is_none() && input.asker != InputAsker::Supervisor =>
+            {
+                root_of(&input.chat_id)
+            }
+            row => row.task_id().map(str::to_owned),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -502,5 +629,24 @@ impl SupervisorSettings {
 
     pub fn full_authority(&self) -> bool {
         self.decide_for_me || self.goal_and_spend
+    }
+}
+
+/// Only the changed fields, so a concurrent change to another field survives.
+pub fn settings_patch(
+    before: Option<SupervisorSettings>,
+    after: SupervisorSettings,
+) -> serde_json::Value {
+    let after = serde_json::to_value(after).unwrap_or_default();
+    match (before.map(serde_json::to_value), after) {
+        (Some(Ok(serde_json::Value::Object(before))), serde_json::Value::Object(after)) => {
+            serde_json::Value::Object(
+                after
+                    .into_iter()
+                    .filter(|(key, value)| before.get(key) != Some(value))
+                    .collect(),
+            )
+        }
+        (_, after) => after,
     }
 }

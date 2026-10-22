@@ -14,11 +14,11 @@ use gpui::{
 };
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::supervisor::{
-    CheckTool, InputAsker, InterventionChip, InterventionKind, InterventionTrigger, ItemWhy,
-    LeadQuestion, NeedsYouInput, NeedsYouRow, NextCheckKind, PlanApproval, QuestionState, Raiser,
-    ResourceState, SettledBy, SharedResource, SupervisorEventKind, SupervisorIntervention,
-    SupervisorItem, SupervisorSettings, SupervisorSnapshot, SupervisorState, SupervisorWake,
-    WAKES_PER_HOUR, WakeDelivery, is_supervisor_chat,
+    CheckTool, InputAsker, InterventionChip, InterventionKind, InterventionTrigger, LeadQuestion,
+    NeedsYouInput, NeedsYouRow, NextCheckKind, PlanApproval, QuestionState, Raiser, ResourceState,
+    SettledBy, SharedResource, SupervisorIntervention, SupervisorItem, SupervisorSettings,
+    SupervisorSnapshot, SupervisorState, SupervisorWake, WAKES_PER_HOUR, WakeDelivery,
+    is_supervisor_chat,
 };
 use zeron_proto::{
     AgentProfile, Chat, ChatConfig, ChatIndicator, PermissionMode, PlanProgress, SandboxLevel,
@@ -102,43 +102,6 @@ pub(crate) fn needs_you_route(
     }
 }
 
-pub(crate) fn row_key(row: &NeedsYouRow) -> String {
-    match row {
-        NeedsYouRow::Item(item) => format!("item:{}", item.id),
-        NeedsYouRow::Input(input) => input_key(input),
-    }
-}
-
-fn input_key(input: &NeedsYouInput) -> String {
-    format!("input:{}:{}", input.chat_id, input.request_id)
-}
-
-pub(crate) fn row_origin(row: &NeedsYouRow) -> (Option<&str>, &str) {
-    match row {
-        NeedsYouRow::Item(item) => (item.task_id.as_deref(), item.raiser_chat_id.as_str()),
-        NeedsYouRow::Input(input) => (input.task_id.as_deref(), input.chat_id.as_str()),
-    }
-}
-
-pub(crate) fn row_title(row: &NeedsYouRow) -> String {
-    match row {
-        NeedsYouRow::Item(item) => clip_to(&item.title, TITLE_CHARS),
-        NeedsYouRow::Input(input) => input_title(&input.questions),
-    }
-}
-
-fn input_title(questions: &[UserInputQuestion]) -> String {
-    let Some(first) = questions.first() else {
-        return "A question".into();
-    };
-    let text = if first.header.trim().is_empty() {
-        &first.question
-    } else {
-        &first.header
-    };
-    clip_to(&crate::transcript::single_line(text), TITLE_CHARS)
-}
-
 pub(crate) fn fresh_needs_you(
     seen: &mut Option<HashSet<String>>,
     rows: &[NeedsYouRow],
@@ -146,12 +109,12 @@ pub(crate) fn fresh_needs_you(
     let fresh = match seen.as_ref() {
         Some(seen) => rows
             .iter()
-            .filter(|row| !seen.contains(&row_key(row)))
+            .filter(|row| !seen.contains(&row.key()))
             .cloned()
             .collect(),
         None => Vec::new(),
     };
-    *seen = Some(rows.iter().map(row_key).collect());
+    *seen = Some(rows.iter().map(NeedsYouRow::key).collect());
     fresh
 }
 
@@ -173,98 +136,34 @@ pub(crate) fn no_effect_yet(row: &SupervisorIntervention, now: DateTime<Utc>) ->
     matches!(row.chips.as_slice(), [InterventionChip::Sent]) && now > no_effect_since(row.at)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ApprovalState {
-    Held { secs: i64 },
-    Sent,
-    Started,
-    TakenBack,
-}
-
-impl ApprovalState {
-    pub(crate) fn line(self) -> String {
-        match self {
-            Self::Held { secs } => format!(
-                "Approved by the Supervisor · starts in {}:{:02}",
-                secs / 60,
-                secs % 60
-            ),
-            Self::Sent => "Approved by the Supervisor · no step has started yet".into(),
-            Self::Started => "Approved by the Supervisor · steps already started. To change course, edit the plan in Mission Control or message the lead.".into(),
-            Self::TakenBack => "You took this approval back · the plan went back to review".into(),
-        }
-    }
-
-    pub(crate) fn can_take_back(self) -> bool {
-        matches!(self, Self::Held { .. } | Self::Sent)
-    }
-}
+pub(crate) use zeron_proto::mission::{ApprovalState, HELD_APPROVAL};
 
 pub(crate) fn approval_state(
     row: &SupervisorIntervention,
     state: &AppState,
     now: DateTime<Utc>,
 ) -> Option<ApprovalState> {
-    let task_id = row.task_id.as_deref()?;
-    let started = || {
-        state.task_steps.iter().any(|step| {
-            step.task_id == task_id
-                && !step.deleted
-                && (step.chat_id.is_some() || step.outcome.is_some())
-        })
-    };
-    Some(match row.approval.as_ref()? {
-        PlanApproval::TakenBack { .. } => ApprovalState::TakenBack,
-        _ if started() => ApprovalState::Started,
-        PlanApproval::Held { starts_at } => ApprovalState::Held {
-            secs: ((*starts_at - now).num_milliseconds().max(0) + 999) / 1000,
-        },
-        PlanApproval::Sent => ApprovalState::Sent,
-    })
+    zeron_proto::mission::approval_state(row, &state.task_steps, now)
 }
 
-/// The Supervisor's newest approval of the mission's plan, as the person can still act on it.
 pub(crate) fn plan_approval(
     state: &AppState,
     task_id: &str,
     now: DateTime<Utc>,
 ) -> Option<ApprovalState> {
-    let row = state
-        .supervisor
-        .as_ref()?
-        .interventions
-        .iter()
-        .find(|row| {
-            row.kind == InterventionKind::Approve && row.task_id.as_deref() == Some(task_id)
-        })?;
-    approval_state(row, state, now)
+    zeron_proto::mission::plan_approval(
+        &state.supervisor.as_ref()?.interventions,
+        &state.task_steps,
+        task_id,
+        now,
+    )
 }
-
-pub(crate) const HELD_APPROVAL: &str = "Plan approved · can take back";
 
 pub(crate) fn approval_held(state: &AppState, task_id: &str, now: DateTime<Utc>) -> bool {
     matches!(
         plan_approval(state, task_id, now),
         Some(ApprovalState::Held { .. })
     )
-}
-
-pub(crate) fn settings_patch(
-    before: Option<SupervisorSettings>,
-    after: SupervisorSettings,
-) -> serde_json::Value {
-    let after = serde_json::to_value(after).unwrap_or_default();
-    match (before.map(serde_json::to_value), after) {
-        (Some(Ok(serde_json::Value::Object(before))), serde_json::Value::Object(after)) => {
-            serde_json::Value::Object(
-                after
-                    .into_iter()
-                    .filter(|(key, value)| before.get(key) != Some(value))
-                    .collect(),
-            )
-        }
-        (_, after) => after,
-    }
 }
 
 fn take_back_key(task_id: &str) -> String {
@@ -454,47 +353,6 @@ fn messages_it_got(
         .collect()
 }
 
-fn kind_word(kind: SupervisorEventKind) -> &'static str {
-    match kind {
-        SupervisorEventKind::StepFailed => "step failed",
-        SupervisorEventKind::NeedsYou => "needs you",
-        SupervisorEventKind::MissionDone => "mission done",
-        SupervisorEventKind::MissionSilent => "mission silent",
-        SupervisorEventKind::LeadSilent => "lead silent",
-        SupervisorEventKind::Escalation => "lead escalated",
-        SupervisorEventKind::PlanEdited => "plan edited",
-        SupervisorEventKind::Resource => "resource contention",
-        SupervisorEventKind::Heartbeat => "check-in",
-        SupervisorEventKind::NodeFailed => "thread failed",
-        SupervisorEventKind::NodeFinished => "delegated task ended",
-        SupervisorEventKind::QuestionWaiting => "question waiting",
-        SupervisorEventKind::Dirty => "uncommitted files",
-        SupervisorEventKind::Unmerged => "unmerged branch",
-        SupervisorEventKind::LimitIdle => "idle after limit reset",
-        SupervisorEventKind::LostWake => "lost wake",
-        SupervisorEventKind::MergeBlocked => "merge blocked",
-    }
-}
-
-fn delivery_label(delivery: &WakeDelivery) -> String {
-    match delivery {
-        WakeDelivery::Started => "Started a turn".into(),
-        WakeDelivery::Steered => "Steered its turn".into(),
-        WakeDelivery::HeldForTurnEnd => "Held for turn end".into(),
-        WakeDelivery::HeldByStop => "Held by your Stop".into(),
-        WakeDelivery::Failed { error } => format!("Failed: {error}"),
-        WakeDelivery::Dropped => "Dropped".into(),
-    }
-}
-
-fn why_label(why: ItemWhy) -> &'static str {
-    match why {
-        ItemWhy::Goal => "Goal",
-        ItemWhy::Spend => "Spend",
-        ItemWhy::Decision => "Decision",
-    }
-}
-
 fn intervention_kind_label(kind: InterventionKind) -> &'static str {
     match kind {
         InterventionKind::Send => "Message",
@@ -667,8 +525,8 @@ fn clock(at: DateTime<Utc>) -> String {
 fn wake_reason(wake: &SupervisorWake) -> String {
     match wake.events.as_slice() {
         [] => "nothing new".into(),
-        [one] => kind_word(one.kind).into(),
-        [first, rest @ ..] => format!("{} and {} more", kind_word(first.kind), rest.len()),
+        [one] => one.kind.word().into(),
+        [first, rest @ ..] => format!("{} and {} more", first.kind.word(), rest.len()),
     }
 }
 
@@ -710,13 +568,6 @@ enum Part {
 
 fn text(value: impl Into<String>) -> Part {
     Part::Text(value.into())
-}
-
-fn wakes_this_hour(wakes: &[SupervisorWake], now: DateTime<Utc>) -> usize {
-    wakes
-        .iter()
-        .filter(|wake| wake.woke() && now - wake.at < chrono::Duration::hours(1))
-        .count()
 }
 
 fn target_name(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> String {
@@ -848,7 +699,7 @@ fn held_line(held: &[&SupervisorWake]) -> String {
     };
     let mut reasons: Vec<&str> = Vec::new();
     for event in held.iter().flat_map(|wake| &wake.events) {
-        let word = kind_word(event.kind);
+        let word = event.kind.word();
         if !reasons.contains(&word) {
             reasons.push(word);
         }
@@ -1455,8 +1306,8 @@ impl SupervisorPage {
                 .supervisor
                 .iter()
                 .flat_map(|snapshot| &snapshot.needs_you)
-                .filter(|row| arrived.contains(&row_key(row)))
-                .filter_map(|row| feed::needs_group(row, &root_id(state)))
+                .filter(|row| arrived.contains(&row.key()))
+                .filter_map(|row| row.group(&root_id(state)))
                 .collect();
             for task in tasks {
                 self.glows
@@ -1470,7 +1321,7 @@ impl SupervisorPage {
             .read(cx)
             .supervisor
             .as_ref()
-            .map(|snapshot| snapshot.needs_you.iter().map(row_key).collect())
+            .map(|snapshot| snapshot.needs_you.iter().map(NeedsYouRow::key).collect())
             .unwrap_or_default();
         let rows = &self.rows;
         self.replies
@@ -1575,13 +1426,13 @@ impl SupervisorPage {
             .read(cx)
             .supervisor
             .as_ref()
-            .is_some_and(|snapshot| snapshot.needs_you.iter().any(|row| row_key(row) == key))
+            .is_some_and(|snapshot| snapshot.needs_you.iter().any(|row| row.key() == key))
     }
 
     fn ready(&self, row: &NeedsYouRow) -> Option<(String, Option<Vec<UserInputAnswer>>)> {
         match row {
             NeedsYouRow::Item(_) => {
-                let choice = self.staged(&row_key(row), "").into_iter().next()?;
+                let choice = self.staged(&row.key(), "").into_iter().next()?;
                 Some((choice, None))
             }
             NeedsYouRow::Input(input) => {
@@ -1598,13 +1449,13 @@ impl SupervisorPage {
             .values()
             .filter(|motion| motion.row.group.as_deref().unwrap_or_default() == group)
             .filter_map(|motion| inbox::sheet_row(&motion.row.entry))
-            .filter(|row| self.still_open(&row_key(row), cx))
+            .filter(|row| self.still_open(&row.key(), cx))
             .filter(|row| {
                 self.replies
-                    .get(&row_key(row))
+                    .get(&row.key())
                     .is_none_or(|reply| reply.failed())
             })
-            .filter_map(|row| Some((row_key(row), self.ready(row)?.0)))
+            .filter_map(|row| Some((row.key(), self.ready(row)?.0)))
             .collect();
         if ready.is_empty() {
             return;
@@ -1651,14 +1502,14 @@ impl SupervisorPage {
             .filter_map(|motion| inbox::sheet_row(&motion.row.entry).cloned())
             .filter(|row| {
                 self.replies
-                    .get(&row_key(row))
+                    .get(&row.key())
                     .is_some_and(|reply| reply.stage == Stage::Held)
             })
             .collect();
         let mut items = Vec::new();
         let mut inputs = Vec::new();
         for row in &held {
-            let key = row_key(row);
+            let key = row.key();
             let ready = self.ready(row).filter(|_| self.still_open(&key, cx));
             let Some((choice, answers)) = ready else {
                 self.replies.remove(&key);
@@ -1795,7 +1646,7 @@ impl SupervisorPage {
     }
 
     fn picked_answers(&self, input: &NeedsYouInput) -> Option<Vec<UserInputAnswer>> {
-        let picks = self.picks.get(&input_key(input))?;
+        let picks = self.picks.get(&input.key())?;
         input
             .questions
             .iter()
@@ -1876,7 +1727,7 @@ impl SupervisorPage {
             return;
         };
         let previous = self.settings.ready().copied();
-        let patch = settings_patch(previous, settings);
+        let patch = zeron_proto::supervisor::settings_patch(previous, settings);
         self.settings = Loadable::Ready(settings);
         self.settings_error = None;
         self.save_task = Some(cx.spawn(async move |page, cx| {
@@ -2711,7 +2562,7 @@ impl SupervisorPage {
                     ),
                     Some(format!(
                         "{} of {WAKES_PER_HOUR} wakes this hour",
-                        wakes_this_hour(&snap.wakes, utc)
+                        zeron_proto::supervisor::wakes_this_hour(&snap.wakes, utc)
                     )),
                     vec![
                         ("Last", last_parts(snap, state, utc)),
@@ -4055,7 +3906,7 @@ fn render_wake_log(wakes: &[SupervisorWake], theme: &Theme) -> AnyElement {
                                     "{} {} · {}",
                                     wake.events.len(),
                                     plural(wake.events.len(), "event", "events"),
-                                    delivery_label(&wake.delivery)
+                                    wake.delivery.label()
                                 )),
                         ),
                 )
@@ -4227,6 +4078,7 @@ fn enter_block(progress: f32, element: impl IntoElement) -> gpui::Div {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeron_proto::supervisor::ItemWhy;
 
     fn entry(id: &str, role: MessageRole, from: Option<&str>, text: &str) -> SessionMessageEntry {
         SessionMessageEntry {
@@ -4405,11 +4257,11 @@ mod tests {
             ..before
         };
         assert_eq!(
-            settings_patch(Some(before), after),
+            zeron_proto::supervisor::settings_patch(Some(before), after),
             serde_json::json!({ "decideForMe": after.decide_for_me })
         );
         assert_eq!(
-            settings_patch(None, after),
+            zeron_proto::supervisor::settings_patch(None, after),
             serde_json::to_value(after).unwrap()
         );
     }
@@ -4454,7 +4306,7 @@ mod tests {
     #[test]
     fn the_first_snapshot_seeds_silently_and_later_ones_report_new_rows() {
         let mut seen = None;
-        let keys = |rows: Vec<NeedsYouRow>| rows.iter().map(row_key).collect::<Vec<_>>();
+        let keys = |rows: Vec<NeedsYouRow>| rows.iter().map(NeedsYouRow::key).collect::<Vec<_>>();
         assert!(fresh_needs_you(&mut seen, &[item("a")]).is_empty());
         assert_eq!(
             keys(fresh_needs_you(&mut seen, &[item("a"), item("b")])),
