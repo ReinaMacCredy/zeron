@@ -659,7 +659,7 @@ pub(crate) async fn load_home_prs(
                 Err(error) => {
                     prs.error.get_or_insert_with(|| {
                         let error = crate::pull_requests::map_rpc_error(&error, "This device");
-                        crate::pull_requests::error_copy(&error).0
+                        error.copy().0
                     });
                 }
             }

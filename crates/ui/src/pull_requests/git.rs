@@ -16,6 +16,12 @@ use zeron_proto::{
 };
 use zeron_rpc::{RpcError, methods};
 
+use zeron_proto::git_tab::{
+    self, SUBJECT_LIMIT, agent_banner, clean_status, publish_destination, push_direction,
+    short_sha, status_letter, subject_chars, sync_note,
+};
+pub(super) use zeron_proto::git_tab::{SyncKind, changed_files, staged_files};
+
 use crate::changes::{self, FileDiff};
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::history::{GitHistory, GitHistoryEvent, GitHistoryTarget};
@@ -35,7 +41,6 @@ const POLL_INTERVAL: Duration = Duration::from_secs(4);
 const WATCH_RETRY: Duration = Duration::from_secs(2);
 const COMMIT_FILE_ROW_HEIGHT: f32 = 26.0;
 const HISTORY_KEEP_WIDTH: f32 = 480.0;
-const SUBJECT_LIMIT: usize = 72;
 const MESSAGE_MIN_HEIGHT: f32 = 44.0;
 const TRAY_MAX_HEIGHT: f32 = 220.0;
 const DIFF_LINE_LIMIT: usize = 400;
@@ -53,12 +58,6 @@ pub(super) struct CheckoutOption {
     pub label: SharedString,
     pub detail: SharedString,
     pub live: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SyncKind {
-    Push,
-    Pull,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -313,12 +312,6 @@ fn decode<T: serde::de::DeserializeOwned>(
         .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))
 }
 
-fn push_direction(tree: &WorkingTree) -> SyncDirection {
-    SyncDirection::Push {
-        set_upstream: push_sets_upstream(tree),
-    }
-}
-
 fn busy_policy(cx: &App) -> GitAgentBusyPolicy {
     crate::settings::git_agent_busy_policy(cx).into()
 }
@@ -330,20 +323,6 @@ fn in_section(tree: &WorkingTree, staged: bool, path: &str) -> bool {
         changed_files(tree)
     };
     rows.iter().any(|file| file.path == path)
-}
-
-fn agent_banner(policy: GitAgentBusyPolicy) -> &'static str {
-    match policy {
-        GitAgentBusyPolicy::SafeOnly => {
-            "An agent is running in this worktree. Stage, unstage and commit of staged files still work; other Git actions wait until it stops."
-        }
-        GitAgentBusyPolicy::BlockAll => {
-            "An agent is running in this worktree. Git is read-only here until it stops."
-        }
-        GitAgentBusyPolicy::AllowAll => {
-            "An agent is running in this worktree. Git actions here can collide with its edits."
-        }
-    }
 }
 
 fn conflict_note(conflicts: &[String]) -> String {
@@ -364,51 +343,6 @@ fn conflict_note(conflicts: &[String]) -> String {
     )
 }
 
-fn commit_count(count: u32) -> String {
-    if count == 1 {
-        "1 commit".to_string()
-    } else {
-        format!("{count} commits")
-    }
-}
-
-fn publish_destination(tree: &WorkingTree) -> Option<String> {
-    let (upstream, remote, branch) = (
-        tree.upstream.as_deref()?,
-        tree.push_remote.as_deref()?,
-        tree.branch.as_deref()?,
-    );
-    let destination = format!("{remote}/{branch}");
-    (upstream != destination).then_some(destination)
-}
-
-fn push_sets_upstream(tree: &WorkingTree) -> bool {
-    tree.upstream.is_none() || publish_destination(tree).is_some()
-}
-
-fn sync_note(
-    kind: SyncKind,
-    branch: &str,
-    destination: Option<&str>,
-    reply: &SyncBranchReply,
-) -> String {
-    let upstream = destination
-        .or(reply.upstream.as_deref())
-        .unwrap_or("its upstream");
-    match kind {
-        SyncKind::Push if reply.commits == 0 => format!("Everything was already on {upstream}."),
-        SyncKind::Push => format!("Pushed {} to {upstream}.", commit_count(reply.commits)),
-        SyncKind::Pull if reply.commits == 0 => {
-            format!("{branch} is already up to date with {upstream}.")
-        }
-        SyncKind::Pull => format!("Pulled {} into {branch}.", commit_count(reply.commits)),
-    }
-}
-
-fn short_sha(sha: &str) -> String {
-    sha.chars().take(7).collect()
-}
-
 fn checkout_target(commit: &GitHistoryCommit, tree: &WorkingTree) -> Option<(String, bool)> {
     let on_commit = tree.head_sha.as_deref() == Some(commit.sha.as_str());
     let branch = commit
@@ -424,42 +358,8 @@ fn checkout_target(commit: &GitHistoryCommit, tree: &WorkingTree) -> Option<(Str
     }
 }
 
-fn clean_status(tree: &WorkingTree) -> String {
-    let mut parts = vec![
-        "Working tree clean".to_string(),
-        tree.branch
-            .clone()
-            .unwrap_or_else(|| "detached HEAD".into()),
-    ];
-    if tree.ahead > 0 {
-        parts.push(format!("{} ahead", tree.ahead));
-    }
-    if tree.behind > 0 {
-        parts.push(format!("{} behind", tree.behind));
-    }
-    parts.join(" · ")
-}
-
-fn subject_chars(message: &str) -> usize {
-    message.lines().next().unwrap_or_default().chars().count()
-}
-
 fn same_path(left: &str, right: &str) -> bool {
     left.trim_end_matches('/') == right.trim_end_matches('/')
-}
-
-fn status_letter(state: GitFileState) -> &'static str {
-    match state {
-        GitFileState::Added => "A",
-        GitFileState::Modified => "M",
-        GitFileState::Deleted => "D",
-        GitFileState::Renamed => "R",
-        GitFileState::Copied => "C",
-        GitFileState::Unmerged => "!",
-        GitFileState::Untracked => "U",
-        GitFileState::TypeChanged => "T",
-        GitFileState::Unchanged => " ",
-    }
 }
 
 fn state_color(state: GitFileState, theme: &Theme) -> gpui::Hsla {
@@ -469,17 +369,6 @@ fn state_color(state: GitFileState, theme: &Theme) -> gpui::Hsla {
         GitFileState::Renamed | GitFileState::Copied => theme.accent,
         _ => theme.warning,
     }
-}
-
-pub(super) fn staged_files(tree: &WorkingTree) -> Vec<&WorkingTreeFile> {
-    tree.files.iter().filter(|file| file.is_staged()).collect()
-}
-
-pub(super) fn changed_files(tree: &WorkingTree) -> Vec<&WorkingTreeFile> {
-    tree.files
-        .iter()
-        .filter(|file| file.worktree != GitFileState::Unchanged)
-        .collect()
 }
 
 pub(super) fn checkout_options(state: &AppState, space: &GitSpace) -> Vec<CheckoutOption> {
@@ -1541,109 +1430,22 @@ impl GitTab {
         self.syncing.is_some() || self.pending.is_some()
     }
 
-    fn push_refusal(
-        &self,
-        tree: &WorkingTree,
-        policy: GitAgentBusyPolicy,
-        cx: &App,
-    ) -> Option<&'static str> {
-        if !self.syncs_branches(cx) {
-            return Some("Zeron on this device is too old to push. Update it first.");
-        }
-        if self.busy_for_sync() {
-            return Some("Another Git action is still running.");
-        }
-        if tree.agent_active
-            && !policy.allows_sync(SyncDirection::Push {
-                set_upstream: false,
-            })
-        {
-            return Some(agent_banner(policy));
-        }
-        if tree.branch.is_none() {
-            return Some("HEAD is detached. Check out a branch to push.");
-        }
-        if tree.head_sha.is_none() {
-            return Some("This branch has no commits yet.");
-        }
-        if tree.push_remote.is_none() {
-            return Some(
-                "There is no remote to push to. Add one named origin, or set remote.pushDefault.",
-            );
-        }
-        None
-    }
-
     pub(super) fn sync_refusal(&self, kind: SyncKind, cx: &App) -> Option<SharedString> {
         let Some(tree) = self.tree.as_ref() else {
             return Some("Reading the working tree…".into());
         };
-        let policy = busy_policy(cx);
-        match kind {
-            SyncKind::Push => {
-                if let Some(reason) = self.push_refusal(tree, policy, cx) {
-                    return Some(reason.into());
-                }
-                match (&tree.upstream, &tree.branch) {
-                    (Some(upstream), Some(branch)) if tree.ahead == 0 => {
-                        Some(format!("Nothing to push. {branch} matches {upstream}.").into())
-                    }
-                    _ => None,
-                }
-            }
-            SyncKind::Pull => {
-                if !self.syncs_branches(cx) {
-                    return Some(
-                        "Zeron on this device is too old to pull. Update it first.".into(),
-                    );
-                }
-                if self.busy_for_sync() {
-                    return Some("Another Git action is still running.".into());
-                }
-                if tree.agent_active && !policy.allows_sync(SyncDirection::Pull) {
-                    return Some(match policy {
-                        GitAgentBusyPolicy::SafeOnly => {
-                            "An agent is running in this worktree. Pull waits until it stops, so it cannot rewrite files under the agent.".into()
-                        }
-                        _ => agent_banner(policy).into(),
-                    });
-                }
-                if tree.branch.is_none() {
-                    return Some("HEAD is detached. Check out a branch to pull.".into());
-                }
-                if tree.upstream.is_none() {
-                    return Some("This branch has no upstream to pull from. Push it first.".into());
-                }
-                None
-            }
-        }
+        git_tab::sync_refusal(
+            kind,
+            tree,
+            busy_policy(cx),
+            self.syncs_branches(cx),
+            self.busy_for_sync(),
+        )
+        .map(SharedString::from)
     }
 
     pub(super) fn push_prompt(&self) -> Option<SharedString> {
-        let tree = self.tree.as_ref()?;
-        let branch = tree.branch.as_deref()?;
-        let commits = commit_count(tree.ahead);
-        if let Some(destination) = publish_destination(tree) {
-            let remote = tree.push_remote.as_deref().unwrap_or_default();
-            let upstream = tree.upstream.as_deref().unwrap_or_default();
-            let mut prompt = format!("Push {commits} from {branch} to {destination}?");
-            if upstream.starts_with(&format!("{remote}/")) {
-                prompt.push_str(&format!(
-                    " It will track {destination} instead of {upstream}."
-                ));
-            }
-            return Some(prompt.into());
-        }
-        Some(
-            match (&tree.upstream, &tree.push_remote) {
-                (Some(upstream), _) => format!("Push {commits} from {branch} to {upstream}?"),
-                (None, Some(remote)) => format!(
-                    "Push {commits} to {remote} as the new branch {branch}? It will track {remote}/{branch}."
-                ),
-                (None, None) => return None,
-            }
-            .into(),
-        )
+        git_tab::push_prompt(self.tree.as_ref()?).map(SharedString::from)
     }
 
     pub(super) fn open_sync(&mut self, kind: SyncKind, cx: &mut Context<Self>) {
@@ -7273,7 +7075,10 @@ mod tests {
         let mut triangular = tracking_main_tree();
         triangular["pushRemote"] = "fork".into();
         let triangular: WorkingTree = serde_json::from_value(triangular).unwrap();
-        assert!(push_sets_upstream(&triangular));
+        assert!(matches!(
+            push_direction(&triangular),
+            SyncDirection::Push { set_upstream: true }
+        ));
         tab.update(cx, |tab, _| tab.tree = Some(triangular));
         tab.read_with(cx, |tab, _| {
             assert_eq!(

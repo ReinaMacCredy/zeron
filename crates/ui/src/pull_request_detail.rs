@@ -21,7 +21,8 @@ use gpui::{
 #[cfg(test)]
 use std::time::Duration;
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Instant};
-use zeron_proto::change_request_assessment::{CiState, Facts, check_failed, check_status};
+use zeron_proto::change_request_assessment::Facts;
+use zeron_proto::pull_request::detail::{StatusGlyph, StatusTone, checks_empty_copy, ci_status};
 use zeron_proto::{ChangeRequestDetail, ChangeRequestListItem};
 use zeron_rpc::methods;
 
@@ -61,25 +62,11 @@ pub struct AddPullRequestProject(pub String);
 /// What went wrong and what to do, in words. Error codes and transport
 /// details never reach the reader.
 fn failure_reason(error: &zeron_rpc::RpcError) -> &'static str {
-    use zeron_rpc::{RpcError, capability_errors as codes};
+    use zeron_proto::pull_request::detail;
     match error {
-        RpcError::Capability(code) if code == codes::PULL_REQUESTS_CLI_UNAVAILABLE => {
-            "Install GitHub CLI (gh) on this device and sign in."
-        }
-        RpcError::Capability(code) if code == codes::PULL_REQUESTS_AUTHENTICATION => {
-            "Run gh auth login on this device, then refresh."
-        }
-        RpcError::Capability(code) if code == codes::PULL_REQUESTS_RATE_LIMITED => {
-            "GitHub’s rate limit was reached. Try again in 15 minutes."
-        }
-        RpcError::Capability(code) if code == codes::PULL_REQUESTS_TIMEOUT => {
-            "GitHub didn’t respond in time. Try again."
-        }
-        RpcError::Capability(code) if code == codes::PULL_REQUESTS_DECODE => {
-            "GitHub’s response was too large or unreadable. Open it on GitHub instead."
-        }
-        RpcError::UnknownMethod(_) => "Update Zeron on the selected device.",
-        _ => "Check the link and your connection, then try again.",
+        zeron_rpc::RpcError::Capability(code) => detail::failure_reason(code),
+        zeron_rpc::RpcError::UnknownMethod(_) => detail::UPDATE_REQUIRED_REASON,
+        _ => detail::failure_reason(""),
     }
 }
 
@@ -1606,72 +1593,18 @@ fn action(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Statefu
         .when(!icon_only, |el| el.child(label))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StatusTone {
-    Neutral,
-    Positive,
-    Warning,
-    Negative,
-    Merged,
-}
-
-fn ci_status(detail: &ChangeRequestDetail) -> &'static str {
-    match Facts::from_detail(detail).assess().ci.state {
-        CiState::Unknown => "CI unavailable",
-        CiState::NoChecks => "No checks reported",
-        CiState::Failed => "FAILURE",
-        CiState::Pending => "PENDING",
-        CiState::Passed => "SUCCESS",
-        CiState::Skipped => "SKIPPED",
-    }
-}
-
-fn assessment_ci_empty_copy(detail: &ChangeRequestDetail) -> &'static str {
-    if Facts::from_detail(detail).assess().ci.state == CiState::Unknown {
-        "CI metadata is unavailable. Refresh to try again."
-    } else if Facts::from_detail(detail).assess().ci.state == CiState::NoChecks {
-        "No checks reported."
-    } else {
-        "Check details are unavailable. Open this pull request on GitHub."
-    }
-}
-
 fn status_style(raw: &str) -> (String, &'static str, StatusTone) {
     use crate::icons;
-    match raw.to_ascii_uppercase().replace(' ', "_").as_str() {
-        "OPEN" => ("Open".into(), icons::PULL_REQUEST, StatusTone::Positive),
-        "MERGED" => ("Merged".into(), icons::PULL_REQUEST, StatusTone::Merged),
-        "CLOSED" => ("Closed".into(), icons::CLOSE_CIRCLE, StatusTone::Negative),
-        "DRAFT" => ("Draft".into(), icons::DOCUMENT, StatusTone::Neutral),
-        "APPROVED" => ("Approved".into(), icons::CHECK, StatusTone::Positive),
-        "SUCCESS" => ("Passed".into(), icons::CHECK, StatusTone::Positive),
-        "FAILURE" | "ERROR" | "TIMED_OUT" | "ACTION_REQUIRED" => {
-            (humanize(raw), icons::CLOSE_CIRCLE, StatusTone::Negative)
-        }
-        "CHANGES_REQUESTED" => (
-            "Changes requested".into(),
-            icons::DANGER_TRIANGLE,
-            StatusTone::Warning,
-        ),
-        "REVIEW_REQUIRED" => (
-            "Awaiting review".into(),
-            icons::CLOCK_CIRCLE,
-            StatusTone::Warning,
-        ),
-        "IN_PROGRESS" | "PENDING" | "QUEUED" | "WAITING" => {
-            (humanize(raw), icons::CLOCK_CIRCLE, StatusTone::Warning)
-        }
-        _ => (humanize(raw), icons::DOCUMENT, StatusTone::Neutral),
-    }
-}
-
-fn humanize(raw: &str) -> String {
-    let text = raw.replace('_', " ").to_lowercase();
-    let mut chars = text.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
-        .unwrap_or_else(|| "Not reported".into())
+    let (label, glyph, tone) = zeron_proto::pull_request::detail::status_style(raw);
+    let glyph = match glyph {
+        StatusGlyph::PullRequest => icons::PULL_REQUEST,
+        StatusGlyph::CloseCircle => icons::CLOSE_CIRCLE,
+        StatusGlyph::Document => icons::DOCUMENT,
+        StatusGlyph::Check => icons::CHECK,
+        StatusGlyph::DangerTriangle => icons::DANGER_TRIANGLE,
+        StatusGlyph::ClockCircle => icons::CLOCK_CIRCLE,
+    };
+    (label, glyph, tone)
 }
 
 fn status_chip(raw: &str, theme: &Theme) -> AnyElement {
@@ -2054,7 +1987,7 @@ impl Render for PullRequestDetailPage {
                                 div()
                                     .p(px(16.0))
                                     .text_color(theme.text_muted)
-                                    .child(assessment_ci_empty_copy(detail)),
+                                    .child(checks_empty_copy(detail)),
                             );
                         }
                         for (index, check) in detail
@@ -2775,7 +2708,9 @@ mod tests {
         );
         cx.simulate_keystrokes("cmd-c");
         assert_eq!(
-            cx.read_from_clipboard().and_then(|item| item.text()).as_deref(),
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
             Some("First")
         );
         page.update(cx, |page, cx| page.select_tab(Tab::Activity, cx));
@@ -3279,58 +3214,6 @@ mod tests {
             )),
             "Run gh auth login on this device, then refresh."
         );
-    }
-
-    #[test]
-    fn ci_summary_handles_mixed_and_unreported_checks() {
-        let check = |conclusion: &str, state: &str, status: &str| zeron_proto::ChangeRequestCheck {
-            conclusion: conclusion.into(),
-            state: state.into(),
-            status: status.into(),
-            ..Default::default()
-        };
-        let ci_status = |checks: &[zeron_proto::ChangeRequestCheck]| {
-            super::ci_status(&ChangeRequestDetail {
-                ci: zeron_proto::change_request_assessment::ChangeRequestCi::from_checks(checks),
-                status_check_rollup: checks.to_vec(),
-                ..Default::default()
-            })
-        };
-        assert_eq!(
-            super::ci_status(&ChangeRequestDetail::default()),
-            "CI unavailable"
-        );
-        assert_eq!(ci_status(&[]), "No checks reported");
-        assert_eq!(
-            ci_status(&[
-                check("SUCCESS", "", "COMPLETED"),
-                check("SKIPPED", "", "COMPLETED")
-            ]),
-            "SUCCESS"
-        );
-        assert_eq!(
-            ci_status(&[check("", "SUCCESS", ""), check("", "", "IN_PROGRESS")]),
-            "PENDING"
-        );
-        assert_eq!(
-            ci_status(&[check("FAILURE", "", "COMPLETED"), check("", "", "QUEUED")]),
-            "FAILURE"
-        );
-        assert_eq!(ci_status(&[check("CANCELLED", "", "COMPLETED")]), "FAILURE");
-        assert_eq!(ci_status(&[check("SKIPPED", "", "COMPLETED")]), "SKIPPED");
-        assert_eq!(ci_status(&[check("", "", "")]), "PENDING");
-    }
-
-    #[test]
-    fn status_cues_distinguish_passed_pending_failed_and_skipped() {
-        assert_eq!(status_style("SUCCESS").2, StatusTone::Positive);
-        assert_eq!(status_style("IN_PROGRESS").2, StatusTone::Warning);
-        assert_eq!(status_style("FAILURE").2, StatusTone::Negative);
-        assert_eq!(status_style("SKIPPED").2, StatusTone::Neutral);
-        assert_eq!(status_style("CANCELLED").2, StatusTone::Neutral);
-        assert_eq!(status_style("MERGED").2, StatusTone::Merged);
-        assert_eq!(status_style("CHANGES_REQUESTED").0, "Changes requested");
-        assert_eq!(status_style("REVIEW_REQUIRED").0, "Awaiting review");
     }
 
     #[test]
@@ -3914,7 +3797,12 @@ mod tests {
             cx.simulate_resize(gpui::size(px(width), px(800.0)));
             cx.run_until_parked();
             let mut previous_right = px(0.0);
-            for selector in ["pr-detail-title", "pr-detail-refresh", "pr-copy-url", "pr-external"] {
+            for selector in [
+                "pr-detail-title",
+                "pr-detail-refresh",
+                "pr-copy-url",
+                "pr-external",
+            ] {
                 let bounds = cx.debug_bounds(selector).unwrap();
                 assert!(
                     bounds.left() >= previous_right && bounds.right() <= px(width),

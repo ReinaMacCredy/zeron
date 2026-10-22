@@ -5597,8 +5597,7 @@ impl RpcService for EngineRpc {
                                 .map_err(|error| RpcError::Failed(error.to_string()))?;
                         if tree.revision != request.expected_revision {
                             return Err(RpcError::Failed(
-                                "The working tree changed since it was shown. Check the refreshed list and try again."
-                                    .into(),
+                                zeron_proto::git_tab::WORKING_TREE_CHANGED.into(),
                             ));
                         }
                         let result =
