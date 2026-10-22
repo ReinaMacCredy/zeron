@@ -848,8 +848,9 @@ fn last_message(entries: &[SessionMessageEntry], wakes: &[SupervisorWake]) -> Op
                 _ => None,
             })
             .find(|text| !text.is_empty())?;
-        let who = match entry.role {
-            MessageRole::User => "You",
+        let who = match (&entry.role, entry.from_chat_id.as_deref()) {
+            (MessageRole::User, None) => "You",
+            (MessageRole::User, Some(from)) if !is_supervisor_chat(from) => "A thread",
             _ => "Supervisor",
         };
         Some(format!(
