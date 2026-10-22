@@ -1187,7 +1187,7 @@ pub struct SupervisorPage {
     settings_error: Option<String>,
     ensure: Ensure,
     ensured: Option<String>,
-    toggled: HashSet<String>,
+    opened: HashMap<String, bool>,
     drawer: Option<Owner>,
     drawer_open: bool,
     drawer_slide: Tween,
@@ -1260,7 +1260,7 @@ impl SupervisorPage {
             settings_error: None,
             ensure: Ensure::Idle,
             ensured: None,
-            toggled: HashSet::new(),
+            opened: HashMap::new(),
             drawer: None,
             drawer_open: false,
             drawer_slide: Tween::at(0.0, now),
@@ -2042,7 +2042,10 @@ impl SupervisorPage {
     }
 
     fn mission_open(&self, mission: &Mission) -> bool {
-        mission.starts_open != self.toggled.contains(&mission.key)
+        self.opened
+            .get(&mission.key)
+            .copied()
+            .unwrap_or(mission.starts_open)
     }
 
     fn watched_by_everything(&self, mission: &Mission, cx: &App) -> bool {
@@ -2124,10 +2127,8 @@ impl SupervisorPage {
         .detach();
     }
 
-    fn toggle_mission(&mut self, task_id: &str, cx: &mut Context<Self>) {
-        if !self.toggled.remove(task_id) {
-            self.toggled.insert(task_id.to_owned());
-        }
+    fn set_mission_open(&mut self, key: &str, open: bool, cx: &mut Context<Self>) {
+        self.opened.insert(key.to_owned(), open);
         cx.notify();
     }
 
@@ -2200,6 +2201,13 @@ impl SupervisorPage {
                 .unwrap_or_default()
                 .to_owned();
             *open_groups.entry(key).or_default() |= motion.fold.tween.target() > 0.0;
+        }
+        if self
+            .hovered
+            .as_ref()
+            .is_some_and(|key| open_groups.get(key) != Some(&true))
+        {
+            self.hovered = None;
         }
         for (key, open) in &open_groups {
             let count = feed
@@ -2325,6 +2333,8 @@ impl SupervisorPage {
             }
         }
         self.missions
+            .retain(|id, _| missions.iter().any(|mission| &mission.key == id));
+        self.opened
             .retain(|id, _| missions.iter().any(|mission| &mission.key == id));
     }
 

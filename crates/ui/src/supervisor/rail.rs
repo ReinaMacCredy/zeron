@@ -505,9 +505,9 @@ impl SupervisorPage {
                     .child(div().h_full().w(relative(fill)).bg(arc)),
             )
             .child(chevron(theme, turn * 90.0))
-            .on_click(
-                cx.listener(move |page, _: &ClickEvent, _, cx| page.toggle_mission(&toggle_id, cx)),
-            );
+            .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
+                page.set_mission_open(&toggle_id, !expanded, cx)
+            }));
         let body = motion
             .filter(|motion| !motion.fold.gone(now))
             .map(|motion| {
