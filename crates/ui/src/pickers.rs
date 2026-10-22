@@ -250,8 +250,12 @@ pub struct ResolvedRunConfig {
 impl ResolvedRunConfig {
     /// The `ChatConfig` recorded on `Mutate createChat` (needs a known harness).
     pub fn chat_config(&self) -> Option<ChatConfig> {
-        Some(ChatConfig {
-            harness: self.harness?,
+        Some(self.config_on(self.harness?))
+    }
+
+    pub fn config_on(&self, harness: HarnessId) -> ChatConfig {
+        ChatConfig {
+            harness,
             model: self.model.clone(),
             reasoning: self.reasoning,
             model_options: self.model_options.clone(),
@@ -261,7 +265,7 @@ impl ResolvedRunConfig {
             profile_id: self.profile_id.clone(),
             instance_id: self.instance_id.clone(),
             disabled_tools: self.disabled_tools.clone(),
-        })
+        }
     }
 }
 
@@ -1002,9 +1006,10 @@ struct PendingModelSwitch {
     to: String,
     harness: Option<HarnessId>,
     instance: Option<String>,
-    profile: Option<profiles::ProfilePick>,
+    profile: Option<zeron_proto::AgentProfile>,
 }
 
+use zeron_proto::picker::catalog_error_text;
 use zeron_proto::model_switch::{
     ModelSwitchPrompt, model_switch_prompt, needs_switch_warning, provider_switch_prompt,
 };
@@ -3243,7 +3248,7 @@ impl Pickers {
         let prompt = self.switch_prompt(&pending, cx);
         let note = (prompt.note, prompt.note_hint);
         self.update_chat_config(cx, Some(note), move |config| match pending.profile {
-            Some(pick) => pick.write(config),
+            Some(pick) => pick.apply_to(config),
             None => {
                 if let Some(harness) = pending.harness {
                     config.harness = harness;
@@ -8853,19 +8858,6 @@ pub(crate) fn curated_model_label(harness: HarnessId, id: &str) -> Option<String
         .map(|m| m.label.clone())
 }
 
-fn catalog_error_text(message: &str) -> &str {
-    message
-        .strip_prefix("model discovery ")
-        .and_then(|rest| rest.split_once(": "))
-        .filter(|(code, _)| {
-            matches!(
-                *code,
-                "timeout" | "failed" | "missing_executable" | "auth_required"
-            )
-        })
-        .map_or(message, |(_, text)| text)
-}
-
 /// Display-side model-list hygiene, mirroring the engine's discovery-side
 /// fold (`models_from_session`) for catalogs served by OLDER engines (the
 /// space's device may run any version): the `default` alias row drops when a
@@ -9324,7 +9316,7 @@ impl Render for Pickers {
             self.boot_profile_edit = false;
             self.open_profile_edit(
                 Some(profile.id.clone()),
-                crate::agent_profiles::draft_of(&profile),
+                profile.draft(),
                 cx,
             );
             if let Some(edit) = self.profile_edit.as_mut() {

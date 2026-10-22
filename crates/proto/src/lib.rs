@@ -25,6 +25,7 @@ pub mod model_catalog;
 pub mod model_options;
 pub mod model_switch;
 pub mod motion;
+pub mod picker;
 pub mod prediction;
 pub mod preview;
 pub mod projectless;

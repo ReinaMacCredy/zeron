@@ -14,7 +14,7 @@ use zeron_proto::{
 use zeron_rpc::methods;
 
 use crate::agent_profiles::{
-    ProfileWrite, blank_draft, brand_badge, draft_of, draft_summary, expand_toggle, folded_row,
+    ProfileWrite, blank_draft, brand_badge, draft_summary, expand_toggle, folded_row,
     in_pairs, mode_label, options_for_model, rules_on, set_rules, set_zeron_group, summary,
     token_count, unlisted_rules, zeron_rule, zeron_unlocked,
 };
@@ -1349,7 +1349,7 @@ impl Render for AgentProfilesPage {
                 let mut block = widgets::section_card(&theme).mt(px(8.0));
                 for (ix, profile) in profiles.iter().enumerate() {
                     let edit_id = profile.id.clone();
-                    let edit_draft = draft_of(profile);
+                    let edit_draft = profile.draft();
                     let line = summary(
                         profile,
                         &self.harness_name(profile.harness),
