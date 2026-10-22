@@ -5541,7 +5541,8 @@ fn subagent_chip_update(event: &AgentEvent) -> Option<&'static str> {
     match event {
         AgentEvent::Done { status, .. } => Some(match status {
             DoneStatus::Errored => "failed",
-            _ => "done",
+            DoneStatus::Interrupted => "stopped",
+            DoneStatus::Completed => "done",
         }),
         _ => Some("running"),
     }
@@ -7267,7 +7268,8 @@ async fn drive_run(
             },
         );
         let doc_id = sink.doc_id.clone();
-        let _ = doc_ref.update_subagent_chip(&parent_id, None, Some("failed"), None);
+        let ended = if interrupted { "stopped" } else { "failed" };
+        let _ = doc_ref.update_subagent_chip(&parent_id, None, Some(ended), None);
         if let Some(json) = sink.finish(&device_id, MessageStatus::Aborted)
             && let Some(host) = inner.doc_host()
         {

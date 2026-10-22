@@ -207,6 +207,7 @@ impl<'a> Walk<'a> {
             let (status, word) = match subagent_status {
                 Some(SubagentStatus::Done) => (Status::Done, "Done"),
                 Some(SubagentStatus::Failed) => (Status::Failed, "Failed"),
+                Some(SubagentStatus::Stopped) => (Status::Stopped, "Stopped"),
                 _ => (Status::Running, "Working"),
             };
             let model = call.subagent_model();

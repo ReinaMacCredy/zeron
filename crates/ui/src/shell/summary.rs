@@ -880,6 +880,9 @@ impl Shell {
                     Some(zeron_doc::SubagentStatus::Failed) => {
                         Some(SidecarValue::Tone("Failed".into(), theme.danger))
                     }
+                    Some(zeron_doc::SubagentStatus::Stopped) => {
+                        Some(SidecarValue::Tone("Stopped".into(), theme.text_muted))
+                    }
                     _ => None,
                 };
                 let (mark, tint) =

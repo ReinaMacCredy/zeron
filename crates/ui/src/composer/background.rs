@@ -107,6 +107,7 @@ pub(crate) fn agent_runs(transcript: &[SessionMessageEntry], turn_start: usize) 
                     SubagentStatus::Running => RunState::Working,
                     SubagentStatus::Done => RunState::Completed,
                     SubagentStatus::Failed => RunState::Failed,
+                    SubagentStatus::Stopped => RunState::Stopped,
                 };
                 (ix >= turn_start || state == RunState::Working).then(|| AgentRun {
                     part_id: id.clone(),

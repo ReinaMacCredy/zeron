@@ -60,7 +60,7 @@ With Zeron's `task_status` tool, the agent reads where a task stands: still work
 
 ## The Live state column
 
-The **Live state** column on the right of a chat lists **Subagents**, with a count of running ones. Each row shows the agent's icon, its task, and its model. A running row shows its elapsed time; a failed one reads **Failed**. Finished agents fold under **Previous agents**. Click any row to open that agent.
+The **Live state** column on the right of a chat lists **Subagents**, with a count of running ones. Each row shows the agent's icon, its task, and its model. A running row shows its elapsed time; a failed one reads **Failed**, and one that was stopped reads **Stopped**. Finished agents fold under **Previous agents**. Click any row to open that agent.
 
 The chevron at the top collapses the column to a narrow rail, and the rail's chevron expands it again. When the right pane is open, the rail button opens the same content as a **Live state** popover.
 

@@ -238,7 +238,7 @@ impl SubagentRow {
     pub fn frozen(&self) -> bool {
         matches!(
             self.status,
-            Some(SubagentStatus::Done) | Some(SubagentStatus::Failed)
+            Some(SubagentStatus::Done | SubagentStatus::Failed | SubagentStatus::Stopped)
         )
     }
 
@@ -247,7 +247,7 @@ impl SubagentRow {
             Some(SubagentStatus::Running) => ChatIndicator::Working,
             Some(SubagentStatus::Done) => ChatIndicator::Completed,
             Some(SubagentStatus::Failed) => ChatIndicator::Errored,
-            None => ChatIndicator::Idle,
+            Some(SubagentStatus::Stopped) | None => ChatIndicator::Idle,
         }
     }
 }

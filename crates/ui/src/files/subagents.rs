@@ -92,7 +92,7 @@ impl SubagentPlan {
         let mut plan = Self::default();
         for row in rows {
             match row.status {
-                Some(SubagentStatus::Done) => plan.completed.push(row),
+                Some(SubagentStatus::Done | SubagentStatus::Stopped) => plan.completed.push(row),
                 Some(SubagentStatus::Failed) => plan.failed.push(row),
                 _ => plan.active.push(row),
             }

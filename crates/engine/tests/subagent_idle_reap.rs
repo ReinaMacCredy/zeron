@@ -314,3 +314,28 @@ async fn reaper_still_ends_a_session_whose_subagent_went_silent() {
 
     core.sessions.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_teardown_stamps_a_live_subagent_stopped_not_failed() {
+    let Parked { core, feed, _dir } = park_after_spawn().await;
+
+    feed.send(tagged(AgentEvent::TextDelta {
+        text: "starting. ".into(),
+    }))
+    .unwrap();
+    wait_for(
+        || chip_status(&core) == Some(SubagentStatus::Running),
+        "subagent chip to run",
+    )
+    .await;
+
+    assert!(core.sessions.terminate(CHAT).await.unwrap());
+    wait_for(
+        || chip_status(&core).is_some_and(|s| s != SubagentStatus::Running),
+        "subagent chip to settle",
+    )
+    .await;
+    assert_eq!(chip_status(&core), Some(SubagentStatus::Stopped));
+
+    core.sessions.shutdown().await;
+}

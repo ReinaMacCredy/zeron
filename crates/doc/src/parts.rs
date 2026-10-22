@@ -120,6 +120,7 @@ pub enum SubagentStatus {
     Running,
     Done,
     Failed,
+    Stopped,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -634,7 +635,8 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
             let status = match event.as_ref() {
                 AgentEvent::Done { status, .. } => Some(match status {
                     zeron_proto::DoneStatus::Errored => SubagentStatus::Failed,
-                    _ => SubagentStatus::Done,
+                    zeron_proto::DoneStatus::Interrupted => SubagentStatus::Stopped,
+                    zeron_proto::DoneStatus::Completed => SubagentStatus::Done,
                 }),
                 // A new assignment reopens a settled chip. Providers may
                 // announce it with user text or a confirmed turn boundary.
@@ -663,7 +665,11 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                         // never regress a terminal state.
                         None if !matches!(
                             subagent_status,
-                            Some(SubagentStatus::Done) | Some(SubagentStatus::Failed)
+                            Some(
+                                SubagentStatus::Done
+                                    | SubagentStatus::Failed
+                                    | SubagentStatus::Stopped
+                            )
                         ) =>
                         {
                             *subagent_status = Some(SubagentStatus::Running);
@@ -1626,6 +1632,29 @@ mod tests {
                 subagent_status, ..
             } => assert_eq!(*subagent_status, Some(SubagentStatus::Done)),
             other => panic!("{other:?}"),
+        }
+        for (status, expect) in [
+            (DoneStatus::Interrupted, SubagentStatus::Stopped),
+            (DoneStatus::Completed, SubagentStatus::Done),
+        ] {
+            fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::Subagent {
+                    parent_tool_use_id: "toolu_sub".into(),
+                    event: Box::new(AgentEvent::Done {
+                        status,
+                        result: None,
+                        error: None,
+                        session_id: None,
+                    }),
+                },
+            );
+            match &parts[0] {
+                MessagePart::Tool {
+                    subagent_status, ..
+                } => assert_eq!(*subagent_status, Some(expect)),
+                other => panic!("{other:?}"),
+            }
         }
         // A confirmed follow-up can reopen the same chip without user text.
         fold_event_into_parts(

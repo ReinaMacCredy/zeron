@@ -1501,6 +1501,7 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
                     Some(SubagentStatus::Running) => 1 << 1,
                     Some(SubagentStatus::Done) => 2 << 1,
                     Some(SubagentStatus::Failed) => 3 << 1,
+                    Some(SubagentStatus::Stopped) => 4 << 1,
                 },
         );
         if let Some(tail) = &t.subagent_tail {
@@ -6305,7 +6306,11 @@ impl Transcript {
                             status: view.status.map(|status| match status {
                                 zeron_proto::DelegationStatus::Running => SubagentStatus::Running,
                                 zeron_proto::DelegationStatus::Completed => SubagentStatus::Done,
-                                _ => SubagentStatus::Failed,
+                                zeron_proto::DelegationStatus::Cancelled
+                                | zeron_proto::DelegationStatus::Interrupted => {
+                                    SubagentStatus::Stopped
+                                }
+                                zeron_proto::DelegationStatus::Failed => SubagentStatus::Failed,
                             }),
                             delegated: true,
                             harness: view.harness,
@@ -12162,7 +12167,11 @@ impl Transcript {
                     let title = subagent_tab_title(&tool.call);
                     let frozen = matches!(
                         tool.subagent_status,
-                        Some(SubagentStatus::Done) | Some(SubagentStatus::Failed)
+                        Some(
+                            SubagentStatus::Done
+                                | SubagentStatus::Failed
+                                | SubagentStatus::Stopped
+                        )
                     );
                     let harness = self.state.read(cx).chat_harness(&chat_id);
                     let (glyph, tint) =
@@ -15044,6 +15053,7 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
                         Some(SubagentStatus::Running) => 1 << 1,
                         Some(SubagentStatus::Done) => 2 << 1,
                         Some(SubagentStatus::Failed) => 3 << 1,
+                        Some(SubagentStatus::Stopped) => 4 << 1,
                     },
             );
             if let Some(tail) = subagent_tail {

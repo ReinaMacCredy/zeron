@@ -141,7 +141,7 @@ struct DocPartJson {
     /// Subagent doc/blob ref carried by a spawn chip (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     subagent_ref: Option<String>,
-    /// Subagent lifecycle ("running"/"done"/"failed", additive).
+    /// Subagent lifecycle ("running"/"done"/"failed"/"stopped", additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     subagent_status: Option<String>,
     /// One-line live tail of the subagent's output (additive).
@@ -259,6 +259,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
                     SubagentStatus::Running => "running",
                     SubagentStatus::Done => "done",
                     SubagentStatus::Failed => "failed",
+                    SubagentStatus::Stopped => "stopped",
                 }
                 .to_owned()
             }),
@@ -340,6 +341,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                     "running" => Some(SubagentStatus::Running),
                     "done" => Some(SubagentStatus::Done),
                     "failed" => Some(SubagentStatus::Failed),
+                    "stopped" => Some(SubagentStatus::Stopped),
                     _ => None,
                 }),
                 subagent_tail: p.subagent_tail,
