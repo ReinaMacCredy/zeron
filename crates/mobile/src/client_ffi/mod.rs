@@ -23,7 +23,6 @@ use std::sync::Arc;
 use zeron_client as zc;
 
 pub use session::*;
-pub use tasks::*;
 pub use types::*;
 
 /// Receives coalesced change events (at most one burst per display frame).
