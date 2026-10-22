@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use loro::{Container, LoroDoc, ToJson, ValueOrContainer};
+use loro::{Container, LoroDoc, LoroValue, ToJson, ValueOrContainer};
 use serde::Deserialize;
 use zeron_doc::{MessageRole, MessageStatus};
 use zeron_proto::{Chat, TodayRun, TodayRunStatus, TodayRuns, TodayWait};
@@ -65,17 +65,6 @@ pub(crate) fn turns_since(doc: &LoroDoc, since_ms: i64) -> Vec<Turn> {
     turns
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PartHead {
-    #[serde(default)]
-    kind: String,
-    #[serde(default)]
-    asked_at_ms: Option<i64>,
-    #[serde(default)]
-    answered_at_ms: Option<i64>,
-}
-
 /// Questions stamped with when they were asked, as `(asked, answered)`; older parts carry no stamp.
 pub(crate) fn waits_since(doc: &LoroDoc, since_ms: i64) -> Vec<(i64, Option<i64>)> {
     let messages = doc.get_list("messages");
@@ -87,16 +76,25 @@ pub(crate) fn waits_since(doc: &LoroDoc, since_ms: i64) -> Vec<(i64, Option<i64>
         let Some(ValueOrContainer::Container(Container::List(parts))) = map.get("parts") else {
             continue;
         };
-        let Ok(parts) =
-            serde_json::from_value::<Vec<PartHead>>(parts.get_deep_value().to_json_value())
-        else {
-            continue;
-        };
-        for part in parts.into_iter().filter(|part| part.kind == "input") {
-            if let Some(asked) = part.asked_at_ms
-                && part.answered_at_ms.is_none_or(|ended| ended >= since_ms)
+        for part in 0..parts.len() {
+            let Some(ValueOrContainer::Container(Container::Map(part))) = parts.get(part) else {
+                continue;
+            };
+            let field = |key: &str| match part.get(key) {
+                Some(ValueOrContainer::Value(value)) => Some(value),
+                _ => None,
+            };
+            let stamp = |key: &str| match field(key) {
+                Some(LoroValue::I64(ms)) => Some(ms),
+                _ => None,
+            };
+            let input =
+                matches!(field("kind"), Some(LoroValue::String(kind)) if kind.as_str() == "input");
+            if input
+                && let Some(asked) = stamp("askedAtMs")
+                && stamp("answeredAtMs").is_none_or(|ended| ended >= since_ms)
             {
-                waits.push((asked, part.answered_at_ms));
+                waits.push((asked, stamp("answeredAtMs")));
             }
         }
     }
