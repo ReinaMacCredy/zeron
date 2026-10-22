@@ -552,6 +552,10 @@ fn checked_path(path: &str) -> Result<(), EngineError> {
         || path.len() > MAX_PATH_BYTES
         || path.contains('\0')
         || path.starts_with('/')
+        || matches!(
+            Path::new(path).components().next(),
+            Some(std::path::Component::Prefix(_))
+        )
         || path.split(['/', '\\']).any(|part| {
             part.is_empty() || part == "." || part == ".." || part.eq_ignore_ascii_case(".git")
         });
