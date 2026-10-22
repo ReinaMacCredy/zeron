@@ -536,7 +536,7 @@ impl TasksPage {
     fn measured_header(&self, open: usize, morphing: bool, theme: &Theme) -> gpui::Div {
         Self::header(theme, open)
             .when(morphing, |el| el.opacity(0.0))
-            .child(morph::measure(&self.painted, Key::Header, Edges::default()))
+            .child(morph::record(&self.painted, Key::Header, Edges::default()))
     }
 
     fn header(theme: &Theme, open: usize) -> gpui::Div {
@@ -836,7 +836,7 @@ impl TasksPage {
             .cursor_pointer()
             .when(!selected, |el| el.hover(move |s| s.bg(hover)))
             .when(morphing, |el| el.opacity(0.0))
-            .child(morph::measure(
+            .child(morph::record(
                 &self.painted,
                 Key::Task(task_id.clone()),
                 ROW_BORDER,
@@ -963,7 +963,7 @@ impl TasksPage {
             .border_t_2()
             .border_color(gpui::transparent_black())
             .when_some(fade, |el, fade| el.opacity(fade))
-            .child(morph::measure(&self.painted, Key::Add, ROW_BORDER))
+            .child(morph::record(&self.painted, Key::Add, ROW_BORDER))
             .drag_over::<TaskDrag>(move |style, _, _, _| style.border_color(accent))
             .on_drop(cx.listener(|page, drag: &TaskDrag, _, cx| {
                 page.reorder(&drag.task_id, None, cx);
@@ -1073,7 +1073,7 @@ impl TasksPage {
             .when_some(morph, |el, elapsed| {
                 el.opacity(morph::extra_t(elapsed, true))
             })
-            .child(morph::measure(&self.painted, Key::Done, Edges::default()))
+            .child(morph::record(&self.painted, Key::Done, Edges::default()))
             .on_click(cx.listener(|page, _: &ClickEvent, _, cx| {
                 page.done_open = !page.done_open;
                 cx.notify();
@@ -1171,7 +1171,7 @@ impl TasksPage {
             .cursor_pointer()
             .hover(|s| s.border_color(theme.border_strong))
             .when(morphing, |el| el.opacity(0.0))
-            .child(morph::measure(
+            .child(morph::record(
                 &self.painted,
                 Key::Task(task_id.clone()),
                 Edges::all(1.0),
@@ -1370,7 +1370,7 @@ impl TasksPage {
                             .top(px(morph::COLUMN_RISE * (1.0 - column)))
                             .opacity(column)
                     })
-                    .child(morph::measure(
+                    .child(morph::record(
                         &self.painted,
                         Key::Column(ix),
                         Edges::all(1.0),
@@ -1382,7 +1382,7 @@ impl TasksPage {
                                     .top(px(-morph::HEAD_RISE * (1.0 - head)))
                                     .opacity(head)
                             })
-                            .child(morph::measure(
+                            .child(morph::record(
                                 &self.painted,
                                 Key::ColumnHead(ix),
                                 Edges::default(),
