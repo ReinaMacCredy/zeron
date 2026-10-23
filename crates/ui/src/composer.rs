@@ -7434,7 +7434,7 @@ impl Composer {
         running: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui::Stateful<gpui::Div> {
         let now = Instant::now();
         let slot = if self.running_tab {
             2.0
@@ -7451,6 +7451,7 @@ impl Composer {
             window.request_animation_frame();
         }
         let position = self.home_tab_slide.value_unclamped_at(now);
+        let current = slot as usize;
         let amount = |slot: usize| (1.0 - (position - slot as f32).abs()).clamp(0.0, 1.0);
         let tab = |id: &'static str,
                    label: &'static str,
@@ -7473,6 +7474,8 @@ impl Composer {
                 .cursor_pointer()
                 .role(Role::Tab)
                 .aria_label(label)
+                .aria_selected(slot == current)
+                .when_some(count, |el, count| el.aria_description(count.to_string()))
                 .text_color(color)
                 .hover(|style| style.text_color(theme.text))
                 .when_some(glyph, |el, glyph| {
@@ -7505,6 +7508,9 @@ impl Composer {
         .absolute()
         .inset_0();
         div()
+            .id("composer-home-tabs")
+            .role(Role::TabList)
+            .aria_label("New thread mode")
             .relative()
             .flex()
             .items_center()
@@ -13370,6 +13376,7 @@ impl Composer {
                     .id("wizard-submit")
                     .role(Role::Button)
                     .aria_label(if last { "Submit" } else { "Next" })
+                    .aria_disabled(!can_advance)
                     .px(px(16.0))
                     .when(!can_advance, |el| el.opacity(0.4))
                     .on_click(cx.listener(move |this, _, _, cx| this.host_advance(host, cx))),
@@ -14018,6 +14025,7 @@ impl Composer {
             .debug_selector(move || id.into())
             .role(Role::Button)
             .aria_label(label)
+            .aria_disabled(blocked)
             .h(px(28.0))
             .flex_none()
             .flex()
@@ -14216,6 +14224,7 @@ pub(crate) fn send_circle(
         .debug_selector(move || id.into())
         .role(Role::Button)
         .aria_label("Send message")
+        .aria_disabled(blocked)
         .size(px(28.0))
         .flex_none()
         .rounded_full()

@@ -875,6 +875,46 @@ impl ToolDetail {
             Self::Output { .. } | Self::Thought { .. } => None,
         }
     }
+
+    fn a11y(&self) -> (&'static str, String) {
+        let lines = |lines: Vec<String>| lines.join("\n");
+        match self {
+            Self::Output {
+                lines: output,
+                truncated_by,
+            } => {
+                let mut text = lines(output.iter().map(ToString::to_string).collect());
+                if *truncated_by > 0 {
+                    text += &format!("\n… {truncated_by} more lines");
+                }
+                ("Output", text)
+            }
+            Self::Thought { lines: thought } => (
+                "Thought",
+                lines(
+                    thought
+                        .iter()
+                        .map(|line| line.iter().map(|run| run.text.as_str()).collect())
+                        .collect(),
+                ),
+            ),
+            Self::Diff { file, .. } => (
+                "Changes",
+                format!("{} +{} −{}", file.path, file.additions, file.deletions),
+            ),
+            Self::Stats { stats } => (
+                "Changes",
+                lines(
+                    stats
+                        .iter()
+                        .map(|stat| {
+                            format!("{} +{} −{}", stat.path, stat.additions, stat.deletions)
+                        })
+                        .collect(),
+                ),
+            ),
+        }
+    }
 }
 
 /// Max verbatim output lines per chip before the counted tail row.
@@ -1224,6 +1264,7 @@ pub enum RowKind {
         /// answer as a resumed turn).
         header: SharedString,
         resolved: bool,
+        answer: Option<SharedString>,
     },
     ErrorChip {
         message: SharedString,
@@ -1332,14 +1373,24 @@ fn row_a11y(kind: &RowKind) -> Option<(SharedString, SharedString)> {
         RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => {
             ("", block_plain_text(&tree.blocks.get(*block_ix)?.block))
         }
-        RowKind::InputChip { header, resolved } => (
-            "Question: ",
-            if *resolved {
-                header.to_string()
+        RowKind::InputChip {
+            header,
+            resolved,
+            answer,
+        } => {
+            let text = if *resolved {
+                header.trim()
             } else {
-                "Awaiting your answer…".to_owned()
-            },
-        ),
+                "Awaiting your answer…"
+            };
+            let value = answer.as_deref().map(str::trim).unwrap_or(text);
+            return (!text.is_empty()).then(|| {
+                (
+                    format!("Question: {}", a11y_clip(text, 200)).into(),
+                    a11y_clip(value, 4000).into(),
+                )
+            });
+        }
         _ => return None,
     };
     let text = text.trim();
@@ -2306,6 +2357,7 @@ pub fn rows_for_entry(
                         id: part_id,
                         questions,
                         resolved,
+                        answers,
                         ..
                     } => {
                         // Model-generated header onto the one-line chip.
@@ -2316,13 +2368,27 @@ pub fn rows_for_entry(
                                 .unwrap_or_else(|| "Question".to_string()),
                         )
                         .into();
+                        let answer = answers
+                            .as_ref()
+                            .map(|answers| {
+                                answers
+                                    .iter()
+                                    .map(|answer| answer.labels.join(", "))
+                                    .filter(|labels| !labels.is_empty())
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
+                            })
+                            .filter(|answer| !answer.is_empty())
+                            .map(SharedString::from);
+                        let hashed = format!("{header}\0{}", answer.as_deref().unwrap_or(""));
                         rows.push(Row {
                             id: format!("{}#{}", entry.id, part_id).into(),
-                            version: fnv1a(header.as_bytes()) << 1 | *resolved as u64,
+                            version: fnv1a(hashed.as_bytes()) << 1 | *resolved as u64,
                             turn_start: false,
                             kind: RowKind::InputChip {
                                 header,
                                 resolved: *resolved,
+                                answer,
                             },
                             entry_id: entry_id.clone(),
                             timestamp: None,
@@ -10592,7 +10658,9 @@ impl Transcript {
                 &theme,
                 cx,
             ),
-            RowKind::InputChip { header, resolved } => {
+            RowKind::InputChip {
+                header, resolved, ..
+            } => {
                 input_chip(header.clone(), *resolved, &theme)
             }
             RowKind::GeneratedImage {
@@ -10707,15 +10775,22 @@ impl Transcript {
         let copy_text = row.copy_text.clone();
         let copy_entry_id = row.entry_id.clone();
         let strip = row.timestamp.map(|ms| {
+            let time = SharedString::from(format_timestamp(ms, &chrono::Local));
             let timestamp = div()
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted.opacity(0.55))
-                .child(SharedString::from(format_timestamp(ms, &chrono::Local)));
+                .child(time.clone());
             let copy = copy_text.map(|text| {
                 let entry_id = copy_entry_id.clone();
                 let fade_key = format!("copy-message-hover-{entry_id}");
                 div()
                     .id(SharedString::from(format!("copy-message-{entry_id}")))
+                    .role(gpui::Role::Button)
+                    .aria_label(if copied_message {
+                        "Copied"
+                    } else {
+                        "Copy message"
+                    })
                     .size(px(Theme::SPACE_MD * 2.0))
                     .flex()
                     .items_center()
@@ -10746,6 +10821,9 @@ impl Transcript {
             });
             let branch = self.branch_action(&row, is_user_row, &theme, cx);
             let metadata = div()
+                .id(SharedString::from(format!("message-footer-{}", row.id)))
+                .role(gpui::Role::Group)
+                .aria_label(time)
                 .flex()
                 .flex_row()
                 .items_center()
@@ -10950,15 +11028,18 @@ impl Transcript {
             .as_ref()
             .map(|t| t.to_string())
             .unwrap_or_default();
-        let (glyph, label) = match kind {
-            BranchKind::Fork => (crate::icons::GIT_BRANCH, "fork"),
-            BranchKind::Rewind => (crate::icons::RESTART, "rewind"),
+        let (glyph, label, name) = match kind {
+            BranchKind::Fork => (crate::icons::GIT_BRANCH, "fork", "Fork chat from here"),
+            BranchKind::Rewind => (crate::icons::RESTART, "rewind", "Rewind to here"),
         };
         let fade_key = format!("{label}-message-hover-{entry_id}");
         let dimmed = blocked.is_some();
         Some(
             div()
                 .id(SharedString::from(format!("{label}-message-{entry_id}")))
+                .role(gpui::Role::Button)
+                .aria_label(name)
+                .when_some(blocked.clone(), |el, why| el.aria_description(why))
                 .size(px(Theme::SPACE_MD * 2.0))
                 .flex()
                 .items_center()
@@ -12318,6 +12399,7 @@ impl Transcript {
                                     .when(!collapses, |body| body.px(px(CHIP_CARD_PAD_X)))
                                     .child(detail_body(
                                         invocation,
+                                        Some("Call"),
                                         None,
                                         &format!("{key}-call"),
                                         theme,
@@ -12342,6 +12424,7 @@ impl Transcript {
                                     .when(!collapses, |body| body.px(px(CHIP_CARD_PAD_X)))
                                     .child(detail_body(
                                         detail,
+                                        None,
                                         detail_highlights[ix].clone(),
                                         &format!("{key}-out"),
                                         theme,
@@ -13563,12 +13646,18 @@ fn file_badge_name(path: &str) -> &str {
 /// lines, indentation intact, counted-tail truncation.
 fn detail_body(
     detail: &ToolDetail,
+    label: Option<&'static str>,
     diff_highlights: Option<Arc<crate::changes::DiffHighlights>>,
     selection_key: &str,
     theme: &Theme,
 ) -> AnyElement {
+    let (kind, text) = detail.a11y();
     let body = div()
+        .id(SharedString::from(format!("{selection_key}-body")))
         .debug_selector(|| "tool-detail-body".into())
+        .role(gpui::Role::Group)
+        .aria_label(label.unwrap_or(kind))
+        .aria_value(a11y_clip(&text, 4000))
         .w_full()
         .min_w_0()
         .flex()
@@ -17209,6 +17298,7 @@ mod tests {
                             lines: vec!["cat /workspace/src/main.rs".into()],
                             truncated_by: 0,
                         },
+                        None,
                         None,
                         "probe",
                         &theme,

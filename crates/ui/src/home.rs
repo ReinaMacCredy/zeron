@@ -489,6 +489,9 @@ impl HomeView {
                 let id: SharedString = format!("home-pr-project-{index}").into();
                 popover::menu_row(theme, selected, id.clone())
                     .id(id)
+                    .role(gpui::Role::MenuItemRadio)
+                    .aria_label(name.clone())
+                    .aria_toggled(selected.into())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.pr_pick = Some(pick.clone());
                         this.close_pr_menu(cx);
@@ -1045,6 +1048,9 @@ impl HomeView {
                     let id: SharedString = format!("home-working-{chat_id}").into();
                     div()
                         .id(id.clone())
+                        .role(gpui::Role::Button)
+                        .aria_label(title.clone())
+                        .aria_description(elapsed.clone())
                         .flex()
                         .flex_col()
                         .px(px(6.0))
@@ -1136,6 +1142,8 @@ impl HomeView {
                 div()
                     .id("home-mission-more")
                     .debug_selector(|| "home-mission-more".into())
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("+{} more · Open Tasks", count - MISSION_ROWS))
                     .py(px(4.0))
                     .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_faint)
@@ -1335,6 +1343,9 @@ impl HomeView {
                         let id: SharedString = format!("home-git-project-{index}").into();
                         popover::menu_row(theme, selected, id.clone())
                             .id(id)
+                            .role(gpui::Role::MenuItemRadio)
+                            .aria_label(name.clone())
+                            .aria_toggled(selected.into())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.select_git_project(space_id.clone(), cx)
                             }))
@@ -1441,6 +1452,9 @@ impl HomeView {
         let hovered = self.meter_hover == Some(label);
         div()
             .id(SharedString::from(format!("home-meter-{label}")))
+            .role(gpui::Role::Meter)
+            .aria_label(label)
+            .aria_value(detail.clone())
             .relative()
             .flex_1()
             .flex()
@@ -1541,6 +1555,9 @@ impl HomeView {
                         let url = format!("http://localhost:{}", service.port);
                         div()
                             .id(SharedString::from(format!("home-service-{}", service.port)))
+                            .role(gpui::Role::Link)
+                            .aria_label(label.clone())
+                            .aria_description(format!(":{} {right}", service.port))
                             .h(px(ROW_HEIGHT))
                             .flex()
                             .items_center()
@@ -1613,6 +1630,8 @@ impl HomeView {
                     let chat_id = area.chat_id.clone();
                     div()
                         .id(SharedString::from(format!("home-recent-{index}")))
+                        .role(gpui::Role::Button)
+                        .aria_label(area.label.clone())
                         .h(px(ROW_HEIGHT))
                         .flex()
                         .items_center()
@@ -1677,6 +1696,9 @@ impl HomeView {
                             let url = item.url.clone();
                             div()
                                 .id(SharedString::from(format!("home-ci-{}", item.url)))
+                                .role(gpui::Role::Button)
+                                .aria_label(check.clone())
+                                .aria_description(format!("{repo}#{}", item.number))
                                 .h(px(ROW_HEIGHT))
                                 .flex()
                                 .items_center()
@@ -1768,6 +1790,9 @@ fn pr_row(
     };
     div()
         .id(SharedString::from(format!("home-pr-{}", item.url)))
+        .role(gpui::Role::Button)
+        .aria_label(item.title.clone())
+        .aria_description(format!("{repo}#{} · {right}", item.number))
         .h(px(ROW_HEIGHT))
         .flex()
         .items_center()
@@ -1844,6 +1869,9 @@ fn mission_row(theme: &Theme, row: MissionRow, cx: &mut Context<HomeView>) -> An
     div()
         .id(id.clone())
         .debug_selector(move || id.to_string())
+        .role(gpui::Role::Button)
+        .aria_label(row.title.clone())
+        .aria_description(row.label.clone())
         .h(px(ROW_HEIGHT))
         .flex()
         .items_center()
@@ -2056,6 +2084,9 @@ fn filter_trigger(
     div()
         .id(id)
         .debug_selector(move || id.to_string())
+        .role(gpui::Role::Button)
+        .aria_label(label.clone())
+        .aria_expanded(open)
         .flex()
         .items_center()
         .gap(px(4.0))
@@ -2095,6 +2126,10 @@ fn card(
     body: Vec<AnyElement>,
 ) -> AnyElement {
     div()
+        .id(SharedString::from(format!("home-card-{title}")))
+        .role(gpui::Role::Group)
+        .aria_label(title)
+        .when_some(count.clone(), |el, count| el.aria_description(count))
         .w_full()
         .flex()
         .flex_col()
