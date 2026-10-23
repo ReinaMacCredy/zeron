@@ -217,7 +217,7 @@ final class GitViewController: UIViewController, UITableViewDataSource, UITableV
         guard let tree else { return }
         if let refusal = tree.pushRefusal { return Toast.show(refusal, in: view.window) }
         let alert = UIAlertController(title: tree.pushPrompt ?? "Push \(tree.branch)?", message: picker.configuration?.attributedTitle.map { String($0.characters) }, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "Close", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         alert.addAction(UIAlertAction(title: "Push", style: .default) { [weak self] _ in
             self?.pushButton.configuration?.title = "Pushing…"
             self?.run { try await $0.push() }
