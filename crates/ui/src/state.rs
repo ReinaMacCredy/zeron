@@ -752,12 +752,7 @@ pub(crate) struct CanvasTarget {
     device: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ComposerPrediction {
-    pub entry_id: String,
-    pub text: String,
-}
+pub use zeron_proto::prediction::ComposerPrediction;
 
 /// Root application state. Reducer methods (`apply_*`, [`Self::session_for`], …)
 /// are plain `&mut self` functions so tests construct the struct directly; gpui
@@ -1219,13 +1214,8 @@ impl AppState {
     }
 
     fn withdraw_staged_finding(&mut self, key: &str, comment_id: &str) {
-        if let Some(finding) = comment_id.strip_prefix(crate::review::STAGED_PREFIX)
-            && let Some(run) = self
-                .reviews
-                .get_mut(key)
-                .and_then(|review| review.run.as_mut())
-        {
-            run.withdraw(finding);
+        if let Some(review) = self.reviews.get_mut(key) {
+            review.withdraw_comment(comment_id);
         }
     }
 
@@ -2820,11 +2810,7 @@ impl AppState {
         let mut sidechats: Vec<&Chat> = self
             .chats
             .iter()
-            .filter(|c| {
-                c.sidechat_source_chat_id.as_deref() == Some(chat_id)
-                    && !c.archived
-                    && !c.sidechat_expired(now)
-            })
+            .filter(|c| c.live_sidechat_source(now) == Some(chat_id))
             .collect();
         sidechats.sort_by_key(|c| c.created_at);
         sidechats

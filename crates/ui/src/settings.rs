@@ -1335,15 +1335,7 @@ fn flush_latest(cx: &mut App) {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub enum SidebarOrganization {
-    ByProject,
-    ByDevice,
-    #[default]
-    InOneList,
-    Inbox,
-}
+pub use zeron_proto::sidebar_view::{SidebarOrganization, SidebarSort};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -1368,14 +1360,6 @@ pub enum ChatMission {
     #[default]
     Lead,
     NewMission,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub enum SidebarSort {
-    #[default]
-    LastUpdated,
-    Created,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

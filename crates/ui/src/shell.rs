@@ -2393,20 +2393,12 @@ fn btw_tab_title(
     chat: &zeron_proto::Chat,
     now: chrono::DateTime<Utc>,
 ) -> SharedString {
-    let title = state
-        .first_prompt_of(&chat.id)
-        .or_else(|| {
-            (!state.unstarted_sidechat(chat, now))
-                .then(|| chat.last_message_preview.clone())
-                .flatten()
-        })
-        .and_then(|text| {
-            text.lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .map(str::to_string)
-        });
-    title.unwrap_or_else(|| "New btw".to_string()).into()
+    let prompt = state.first_prompt_of(&chat.id).or_else(|| {
+        (!state.unstarted_sidechat(chat, now))
+            .then(|| chat.last_message_preview.clone())
+            .flatten()
+    });
+    zeron_proto::sidechat::sidechat_tab_title(prompt.as_deref()).into()
 }
 
 /// Sidebar render identity lets transcript/caret frames reuse its GPUI scene.
@@ -6445,7 +6437,7 @@ impl Shell {
                         tracing::warn!(%err, "ContinueInNewThread failed");
                         shell.show_notice(
                             crate::toast::ToastKind::Error,
-                            format!("Couldn't continue in a new thread: {err}"),
+                            zeron_proto::handoff::handoff_failed_message(&err),
                             cx,
                         );
                         cx.notify();
@@ -11547,7 +11539,7 @@ impl Shell {
         branch: Option<SharedString>,
         change_request: Option<zeron_proto::ChangeRequestSummary>,
         // Every harness the chat ran on, current last
-        // (`pickers::chat_harness_marks`); empty hides the mark.
+        // (`Chat::harness_marks`); empty hides the mark.
         harnesses: Vec<crate::provider_instances::InstanceIcon>,
         // Title of the chat whose agent opened this one (thread tools); the
         // row names it on its metadata line.
@@ -11715,11 +11707,11 @@ impl Shell {
         let working =
             status == zeron_proto::ChatIndicator::Working && !queued && !undelivered && !expired;
         let ring =
-            crate::composer::background::sidebar_ring(status, self.state.read(cx).session_for(&id))
+            zeron_proto::background::sidebar_ring(status, self.state.read(cx).session_for(&id))
                 .filter(|_| !queued && !undelivered && !expired);
         let work_label = ring.filter(|_| working).and_then(|_| {
             let state = self.state.read(cx);
-            crate::composer::background::ring_label(&state.session_for(&id)?.background_tasks)
+            zeron_proto::background::ring_label(&state.session_for(&id)?.background_tasks)
         });
         let status_label: Option<SharedString> = match work_label {
             Some(label) => Some(label.into()),
@@ -12500,11 +12492,11 @@ impl Shell {
         let settled_state = queued || undelivered || expired;
         let working = status == Status::Working && !settled_state;
         let ring =
-            crate::composer::background::sidebar_ring(status, self.state.read(cx).session_for(&id))
+            zeron_proto::background::sidebar_ring(status, self.state.read(cx).session_for(&id))
                 .filter(|_| !settled_state);
         let work_label = ring.filter(|_| working).and_then(|_| {
             let state = self.state.read(cx);
-            crate::composer::background::ring_label(&state.session_for(&id)?.background_tasks)
+            zeron_proto::background::ring_label(&state.session_for(&id)?.background_tasks)
         });
         let (status_label, status_icon, status_color): (Option<SharedString>, &str, gpui::Hsla) =
             if expired {
@@ -16418,32 +16410,17 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let excerpt = if modal.excerpt.is_empty() {
-            String::new()
+        let rewind = matches!(modal.kind, BranchKind::Rewind);
+        let zeron_proto::transcript::BranchCopy {
+            title,
+            context,
+            option,
+            detail,
+        } = zeron_proto::transcript::branch_copy(rewind, &modal.excerpt);
+        let (glyph, danger) = if rewind {
+            (icons::RESTART, true)
         } else {
-            let mut text: String = modal.excerpt.chars().take(72).collect();
-            if modal.excerpt.chars().count() > 72 {
-                text.push('\u{2026}');
-            }
-            format!("\u{201C}{text}\u{201D}")
-        };
-        let (title, context, option, detail, glyph, danger) = match modal.kind {
-            BranchKind::Fork => (
-                "Fork chat from here",
-                format!("After {excerpt}"),
-                "Fork in this workspace",
-                "New chat with the conversation through this reply. This chat stays as is.",
-                icons::GIT_BRANCH,
-                false,
-            ),
-            BranchKind::Rewind => (
-                "Rewind to here",
-                format!("Before {excerpt}"),
-                "Restore conversation",
-                "Removes this prompt and everything after it and puts the prompt back in the composer. Files on disk stay as they are.",
-                icons::RESTART,
-                true,
-            ),
+            (icons::GIT_BRANCH, false)
         };
         let option_row = popover::menu_row(theme, false, "branch-modal-option")
             .id("branch-modal-option")
@@ -17723,9 +17700,9 @@ impl Shell {
                                 .text_size(crate::typography::ui_rems(11.0))
                                 .text_color(theme.text_muted)
                                 .truncate()
-                                .child(SharedString::from(format!(
-                                    "Sidechat of {source_title} · source transcript copied as reference-only context"
-                                ))),
+                                .child(SharedString::from(
+                                    zeron_proto::sidechat::sidechat_context_line(&source_title),
+                                )),
                         )
                         .child(div().flex_1().min_h_0().child(transcript))
                         .child(div().flex_none().child(composer))
@@ -17870,7 +17847,7 @@ impl Shell {
                             row(
                                 "surface-card-sidechat",
                                 icons::CHAT_ROUND_LINE,
-                                "New sidechat",
+                                zeron_proto::sidechat::NEW_SIDECHAT,
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if let Some(source) = this.sidechat_source_chat(cx) {
@@ -18545,7 +18522,9 @@ impl Shell {
                                             .size(px(13.0))
                                             .text_color(theme.text_muted),
                                     )
-                                    .child(SharedString::from("New sidechat")),
+                                    .child(SharedString::from(
+                                        zeron_proto::sidechat::NEW_SIDECHAT,
+                                    )),
                             )
                         })
                         .when(git_surfaces, |menu| {

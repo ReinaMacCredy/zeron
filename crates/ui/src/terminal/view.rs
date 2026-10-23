@@ -17,6 +17,7 @@ use gpui::{
 };
 
 use crate::theme::{Appearance, Theme, rgb_to_hsl};
+use zeron_proto::terminal_extended_rgb;
 
 use super::emulator::{CellColor, CellSnapshot, Side};
 use super::panel::TerminalPanel;
@@ -57,56 +58,16 @@ fn rgb8(r: u8, g: u8, b: u8) -> Hsla {
     gpui::hsla(h, s, l, 1.0)
 }
 
-/// xterm 256-color cube component levels.
-const CUBE_LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
-
-/// Resolve the xterm extended-color range to RGB components.
-///
-/// Three ranges, treated differently on purpose:
-///
-/// - **0-15** are named slots and are resolved directly from `Theme::terminal`.
-/// - **16-231** is the 6×6×6 cube: a program asking for index 196 is asking for
-///   `#ff0000` by arithmetic, and remapping it would be inventing colors the
-///   caller did not pick. Left alone in both appearances, same as iTerm/Apple
-///   Terminal light themes.
-/// - **232-255** is the grayscale ramp, which tools use for *de-emphasis*
-///   rather than for a specific grey. Its dark→light direction only reads as
-///   "dim" on a dark background, so light mode mirrors the ramp: index 232
-///   stays the faintest and 255 the strongest in both. Without this the ramp is
-///   the single biggest legibility hole on white, because its bright end —
-///   where most "dim hint" text lands — is the end that vanishes.
-fn extended_indexed_rgb(appearance: Appearance, index: u8) -> (u8, u8, u8) {
-    match index {
-        0..=15 => unreachable!("ANSI16 is resolved from the active theme"),
-        16..=231 => {
-            let n = index as usize - 16;
-            (
-                CUBE_LEVELS[n / 36],
-                CUBE_LEVELS[(n / 6) % 6],
-                CUBE_LEVELS[n % 6],
-            )
-        }
-        232..=255 => {
-            let step = index - 232;
-            let step = match appearance {
-                Appearance::Dark => step,
-                Appearance::Light => 23 - step,
-            };
-            let v = 8 + 10 * step;
-            (v, v, v)
-        }
-    }
-}
-
 /// Resolve a cell color to paint against the theme.
 pub fn resolve_color(color: CellColor, theme: &Theme) -> Hsla {
     match color {
         CellColor::Foreground => theme.terminal.foreground,
         CellColor::Background => theme.terminal.background,
-        CellColor::Indexed(ix @ 0..=15) => theme.terminal.ansi[ix as usize],
         CellColor::Indexed(ix) => {
-            let (r, g, b) = extended_indexed_rgb(theme.appearance, ix);
-            rgb8(r, g, b)
+            match terminal_extended_rgb(matches!(theme.appearance, Appearance::Dark), ix) {
+                Some((r, g, b)) => rgb8(r, g, b),
+                None => theme.terminal.ansi[ix as usize],
+            }
         }
         CellColor::Rgb(r, g, b) => rgb8(r, g, b),
     }
@@ -924,32 +885,6 @@ mod tests {
         // Empty pushes never schedule.
         let mut c = InputCoalescer::default();
         assert!(!c.push(b""));
-    }
-
-    #[test]
-    fn cube_is_appearance_independent() {
-        for appearance in [Appearance::Dark, Appearance::Light] {
-            // 16 = cube origin (0,0,0); 231 = cube max (255,255,255).
-            assert_eq!(extended_indexed_rgb(appearance, 16), (0, 0, 0));
-            assert_eq!(extended_indexed_rgb(appearance, 231), (255, 255, 255));
-            // 196 = pure red corner: 16 + 36*5.
-            assert_eq!(extended_indexed_rgb(appearance, 196), (255, 0, 0));
-            // 21 = pure blue corner.
-            assert_eq!(extended_indexed_rgb(appearance, 21), (0, 0, 255));
-        }
-    }
-
-    #[test]
-    fn grayscale_ramp_mirrors_in_light() {
-        // Dark: 232 → 8 (faintest), 255 → 238 (strongest).
-        assert_eq!(extended_indexed_rgb(Appearance::Dark, 232), (8, 8, 8));
-        assert_eq!(extended_indexed_rgb(Appearance::Dark, 255), (238, 238, 238));
-        // Light reverses it so the faint end stays faint against white.
-        assert_eq!(
-            extended_indexed_rgb(Appearance::Light, 232),
-            (238, 238, 238)
-        );
-        assert_eq!(extended_indexed_rgb(Appearance::Light, 255), (8, 8, 8));
     }
 
     #[test]

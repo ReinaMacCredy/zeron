@@ -6,7 +6,8 @@ use gpui::{
 };
 use zeron_engine::registry::HarnessDescriptor;
 use zeron_proto::tools::{
-    HarnessToolInventory, TOOL_GROUPS, ToolGroup, ToolSettingsState, tool_group,
+    HarnessToolInventory, TOOL_GROUPS, ToolGroup, ToolSettingsState, rules_on, set_rules,
+    set_zeron_group, tool_group, unlisted_rules, zeron_rule, zeron_unlocked,
 };
 use zeron_proto::{
     AgentProfile, AgentProfileDraft, HarnessId, Model, PermissionMode, ReasoningLevel,
@@ -14,9 +15,8 @@ use zeron_proto::{
 use zeron_rpc::methods;
 
 use crate::agent_profiles::{
-    ProfileWrite, blank_draft, brand_badge, draft_of, draft_summary, expand_toggle, folded_row,
-    in_pairs, mode_label, options_for_model, rules_on, set_rules, set_zeron_group, summary,
-    token_count, unlisted_rules, zeron_rule, zeron_unlocked,
+    ProfileWrite, blank_draft, brand_badge, draft_summary, expand_toggle, folded_row, in_pairs,
+    mode_label, options_for_model, summary, token_count,
 };
 use crate::composer::{ComposerInput, ComposerInputEvent, INPUT_LINE_HEIGHT, scrolling_field};
 use crate::device_panel::setup::activate;
@@ -25,12 +25,6 @@ use crate::popover::{self, Loadable};
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
-
-const MODES: [PermissionMode; 3] = [
-    PermissionMode::Ask,
-    PermissionMode::Auto,
-    PermissionMode::Full,
-];
 
 struct Editor {
     profile_id: Option<String>,
@@ -664,14 +658,14 @@ impl AgentProfilesPage {
 
         let mode_ix = draft
             .permission_mode
-            .and_then(|mode| MODES.iter().position(|m| *m == mode))
+            .and_then(|mode| PermissionMode::ALL.iter().position(|m| *m == mode))
             .map_or(0, |ix| ix + 1);
         let mode_select = widgets::select("profile-mode", "Mode", &theme, |page: &mut Self| {
             &mut page.mode_select
         })
         .options(
             std::iter::once(widgets::SelectOption::new("Keep current")).chain(
-                MODES
+                PermissionMode::ALL
                     .iter()
                     .map(|mode| widgets::SelectOption::new(mode_label(*mode)).detail(mode.label())),
             ),
@@ -680,7 +674,7 @@ impl AgentProfilesPage {
         .width(196.0)
         .on_select(|page, ix, _, cx| {
             page.edit_draft(cx, |draft| {
-                draft.permission_mode = ix.checked_sub(1).map(|ix| MODES[ix]);
+                draft.permission_mode = ix.checked_sub(1).map(|ix| PermissionMode::ALL[ix]);
             });
         })
         .render(&self.mode_select, cx);
@@ -1355,7 +1349,7 @@ impl Render for AgentProfilesPage {
                 let mut block = widgets::section_card(&theme).mt(px(8.0));
                 for (ix, profile) in profiles.iter().enumerate() {
                     let edit_id = profile.id.clone();
-                    let edit_draft = draft_of(profile);
+                    let edit_draft = profile.draft();
                     let line = summary(
                         profile,
                         &self.harness_name(profile.harness),

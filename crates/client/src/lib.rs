@@ -33,14 +33,24 @@ pub mod config;
 pub mod connectivity;
 mod demo;
 pub mod error;
+pub mod handoff;
 pub mod events;
+pub mod host_settings;
+pub mod invocations;
 mod live;
+pub mod model_picks;
+pub mod model_menu;
+pub mod model_switch;
 pub mod rpc;
 pub mod runtime;
 pub mod session;
+pub mod sidechat;
+pub mod thread_mentions;
 pub mod workspace;
 
-pub use client::{Client, NewSession, PRELOAD_CAP, PushPrefs, SessionTarget, WARM_SESSION_CAP};
+pub use client::{
+    Client, NewSession, PRELOAD_CAP, PushPrefs, SessionTarget, WARM_SESSION_CAP,
+};
 pub use config::{
     AuthTokens, ClientConfig, Credentials, DemoFixture, DemoOptions, StreamSpeed, TranscriptScale,
 };
@@ -50,17 +60,24 @@ pub use events::{ClientEvent, ClientListener};
 pub use session::{
     AppendHint, BusyPolicy, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest,
     LiveStatus, LocalEcho, OutgoingAttachment, PendingKind, PendingSend, QueueEditAction,
-    QueueEditFinish, QueueEditLease, QueueEditStart, QueueGate, QueueItem, RoomState, SendOutcome,
-    SendRequest, SessionHandle, SessionSnapshot, SnapshotDelta, SnapshotWatch,
+    QueueEditFinish, QueueEditLease, QueueEditStart, QueueGate, QueueItem, QueuePrimaryAction,
+    RoomState, SendOutcome, SendRequest, SessionHandle, SessionSnapshot, SkillFile, SnapshotDelta,
+    SnapshotWatch,
 };
 pub use workspace::{
-    DeviceView, FrontPage, ProjectRef, ProjectView, PullRequestGroups, SearchField, SearchHit,
-    SectionView, SessionRow, WorkspaceSnapshot, project_color_index, relative_time_label,
+    ApprovalView, Brief, BriefMessage, ContextChat, DeviceView, EstimateLine, FrontGroup,
+    FrontPage, HostRef, ItemSend, MissionFromChat, MissionOptions, MissionStrip, NeedsYouEntry,
+    NeedsYouKind, OutlineRow, PlanEstimate, ProjectRef, ProjectView, PullRequestGroups,
+    SearchField, SearchHit, SectionView, SessionRow, SidebarView, StepView, SupervisorHost,
+    SupervisorPage, TaskDetail, TaskDraft, TaskRow, TasksPage, TodayPage, TodayPart,
+    TodayPullRequests, TodaySlot, TodayTask, TodayUsage, WakeEntry, WatchState, WorkspaceSnapshot,
+    project_color_index, relative_time_label,
 };
 
 /// Re-exported so consumers (the layout engine) name the exact doc types the
 /// transcript carries without a direct `zeron-doc` dependency.
 pub use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+pub use zeron_proto::sidebar_view::{SidebarOrganization, SidebarSort};
 pub use zeron_proto::{
     ChangeRequestState, ChangeRequestSummary, ChatConfig, ChatIndicator, ContextUsage,
     UserInputAnswer, UserInputQuestion, WorktreeSpec,

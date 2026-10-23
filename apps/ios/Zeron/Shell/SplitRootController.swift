@@ -7,6 +7,15 @@ protocol AppRouter: AnyObject {
     func presentNewSession(prompt: String?)
     func showSettings()
     func showSearch()
+    func showPullRequests(git: Bool, history: Bool)
+    func openPullRequest(url: String, deviceId: String?)
+}
+
+extension AppModel {
+    func pullRequestDevice(_ preferred: String?) -> String? {
+        let devices = client?.pullRequestDevices() ?? []
+        return devices.first { $0.id == preferred }?.id ?? devices.first { $0.online }?.id ?? devices.first?.id
+    }
 }
 
 /// iPad shell: Zeron mobile with a sidebar. The sidebar is the phone's
@@ -136,6 +145,25 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
         guard !isCollapsed else { return tabs.showSearch() }
         if displayMode == .secondaryOnly { show(.primary) }
         sidebar.focusSearch()
+    }
+
+    func showPullRequests(git: Bool, history: Bool) {
+        guard !isCollapsed else { return tabs.showPullRequests(git: git, history: history) }
+        if presentedViewController != nil { dismiss(animated: true) }
+        currentChatId = nil
+        sidebar.currentChatId = nil
+        let board = PullRequestsViewController(app: app, segment: git ? .git : .pulls)
+        detail.setViewControllers([board], animated: false)
+        if history { board.showGit(history: true) }
+    }
+
+    func openPullRequest(url: String, deviceId: String?) {
+        guard !isCollapsed else { return tabs.openPullRequest(url: url, deviceId: deviceId) }
+        guard let device = app.pullRequestDevice(deviceId) else { return Toast.show("No Mac serves pull requests.", in: view.window) }
+        if presentedViewController != nil { dismiss(animated: true) }
+        currentChatId = nil
+        sidebar.currentChatId = nil
+        detail.setViewControllers([PullRequestsViewController(app: app), PullRequestViewController(app: app, deviceId: device, url: url)], animated: false)
     }
 
     /// A session came on screen in either shell (sidebar, tabs, search):

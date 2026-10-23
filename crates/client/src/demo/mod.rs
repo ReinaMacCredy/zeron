@@ -9,9 +9,16 @@
 //! id), streaming replies through `SegmentWriter`, flipping session status
 //! rows, draining the queue, and answering relay RPCs.
 
+mod composer;
 mod fixtures;
+mod git;
+mod missions;
 mod png;
+mod review;
+mod settings;
+mod terminals;
 mod transcripts;
+mod pages;
 mod visuals;
 
 use std::collections::{HashMap, HashSet};
@@ -23,9 +30,10 @@ use chrono::Utc;
 use tokio_util::sync::CancellationToken;
 use zeron_doc::{
     MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, SegmentWriter,
-    SessionCommandPayload, SessionCommandStatus, SessionDoc,
+    SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry,
 };
-use zeron_proto::{FolderEntry, FolderListing, RepoRef, Session, SessionStatus};
+use zeron_proto::computer::cards::{COMPUTER_DESKTOP_REVOKED_NOTE, RevokeSource};
+use zeron_proto::{Chat, FolderEntry, FolderListing, RepoRef, Session, SessionStatus};
 
 use crate::catalog::{self, HarnessInfo, ModelInfo};
 use crate::client::ClientInner;
@@ -42,6 +50,10 @@ const ADOPT_DELAY: Duration = Duration::from_millis(180);
 /// Engines heartbeat live session rows well inside the 45s staleness gate.
 const HEARTBEAT: Duration = Duration::from_secs(10);
 const LEASE_MS: i64 = 60_000;
+const DEMO_TOKEN_RATE: u32 = 58;
+const COMPUTER_CHAT: &str = "chat-computer";
+const DEMO_SKILL_PATH: &str = "/Users/dev/.claude/skills/review/SKILL.md";
+const DEMO_SKILL_MD: &str = "---\nname: review\ndescription: Review the current diff before it merges.\n---\n\n# Review\n\n1. Read the diff against `main`.\n2. Flag behavior changes without a test.\n3. Report findings as `file:line` with a one-line fix.\n";
 
 /// A tiny deterministic PRNG (xorshift64*): demo cadence is reproducible.
 struct Rng(u64);
@@ -78,8 +90,15 @@ pub(crate) struct DemoHost {
     processed: Mutex<HashSet<String>>,
     leases: Mutex<HashMap<String, Lease>>,
     uploads: Mutex<HashMap<String, Arc<Vec<u8>>>>,
+    forks: Mutex<HashMap<String, Vec<SessionMessageEntry>>>,
+    supervisor_settings: Mutex<HashMap<String, zeron_proto::supervisor::SupervisorSettings>>,
+    refused_sends: Mutex<HashSet<String>>,
     rng: Mutex<Rng>,
     cancel: Mutex<Option<CancellationToken>>,
+    git: Mutex<git::GitDemo>,
+    settings: Mutex<settings::HostSettings>,
+    terminals: Mutex<terminals::HostTerminals>,
+    computer_stopped: Mutex<HashSet<String>>,
 }
 
 fn doc_err(err: zeron_doc::DocError) -> ClientError {
@@ -98,8 +117,15 @@ impl DemoHost {
             processed: Mutex::new(HashSet::new()),
             leases: Mutex::new(HashMap::new()),
             uploads: Mutex::new(HashMap::new()),
+            forks: Mutex::new(HashMap::new()),
+            supervisor_settings: Mutex::new(HashMap::new()),
+            refused_sends: Mutex::new(HashSet::new()),
             rng: Mutex::new(Rng(0x9e37_79b9_7f4a_7c15)),
             cancel: Mutex::new(None),
+            git: Mutex::new(git::GitDemo::new()),
+            settings: Mutex::new(settings::HostSettings::new()),
+            terminals: Mutex::new(terminals::HostTerminals::new(now_ms())),
+            computer_stopped: Mutex::new(HashSet::new()),
         })
     }
 
@@ -122,6 +148,31 @@ impl DemoHost {
             .map_err(doc_err)?;
         for status in seeded.change_requests {
             client.workspace.put_change_request(status);
+        }
+        for (device, limits) in seeded.limits {
+            client.workspace.put_limits(device, limits);
+        }
+        for (device, days) in fixtures::SETTLE_DAYS {
+            client.workspace.put_settle_days(device, days);
+        }
+        if seeded.missions {
+            for (device, snapshot) in missions::supervisors(Utc::now()) {
+                client.workspace.put_supervisor(device, snapshot);
+            }
+        }
+        if let Some(held) = composer::background_session("chat-home") {
+            let idle = Session {
+                status: SessionStatus::Idle,
+                held_by_subagents: false,
+                ..held.clone()
+            };
+            let veil = Session {
+                chat_id: "chat-veil".into(),
+                ..held
+            };
+            client
+                .workspace
+                .put_host_sessions(fixtures::MAC, vec![idle, veil]);
         }
         self.beat_presence(client);
         Ok(())
@@ -187,6 +238,21 @@ impl DemoHost {
         lock(&self.cancel).clone().unwrap_or_default()
     }
 
+    pub(crate) fn prediction(
+        &self,
+        chat_id: &str,
+    ) -> Option<zeron_proto::prediction::ComposerPrediction> {
+        composer::prediction(chat_id)
+    }
+
+    pub(crate) fn background_session(&self, chat_id: &str) -> Option<Session> {
+        composer::background_session(chat_id)
+    }
+
+    pub(crate) fn shell_output(&self, task_id: &str) -> Vec<String> {
+        composer::shell_output(task_id)
+    }
+
     fn host_of(&self, client: &ClientInner, chat_id: &str) -> String {
         client
             .workspace
@@ -214,15 +280,18 @@ impl DemoHost {
             .as_ref()
             .and_then(|c| c.last_message_at)
             .map_or_else(now_ms, |t| t.timestamp_millis());
-        let entries = match (chat_id, self.options.transcript_scale.turns()) {
-            ("chat-veil", Some(turns)) => {
+        let forked = lock(&self.forks).get(chat_id).cloned();
+        let entries = match (forked, chat_id, self.options.transcript_scale.turns()) {
+            (Some(forked), _, _) => forked,
+            (None, "chat-veil", Some(turns)) => {
                 transcripts::synthetic(turns, &host, now_ms() - turns as i64 * 60_000)
             }
-            _ => transcripts::fixture(chat_id, &host, last),
+            (None, _, _) => transcripts::fixture(chat_id, &host, last),
         };
         for entry in &entries {
             doc.push_message(entry).map_err(doc_err)?;
         }
+        composer::seed_meta(chat_id, &doc, now_ms()).map_err(doc_err)?;
         Ok(doc)
     }
 
@@ -366,8 +435,9 @@ impl DemoHost {
                     });
                     let _ =
                         core.write(|doc| doc.resolve_input(&request_id, Some(&answers), now_ms()));
+                    missions::input_answered(&client, chat_id, &request_id);
                     let steps = if consent {
-                        transcripts::consent_answered(crate::computer::consent_outcome(
+                        transcripts::consent_answered(zeron_proto::computer::cards::consent_outcome(
                             true,
                             Some(&answers),
                         ))
@@ -477,6 +547,11 @@ impl DemoHost {
                 background_tasks: Vec::new(),
             })
         });
+        if let Some(core) = client.session_core(chat_id) {
+            core.set_token_rate(
+                matches!(status, SessionStatus::Working).then_some(DEMO_TOKEN_RATE),
+            );
+        }
     }
 
     fn cadence(&self, reasoning: bool) -> Duration {
@@ -500,6 +575,9 @@ impl DemoHost {
         let root = self.cancel_token();
         if root.is_cancelled() {
             return;
+        }
+        if let (Some((_, prompt, _)), Ok(client)) = (&user, self.client()) {
+            review::prompt_sent(&client, &chat_id, prompt);
         }
         let token = root.child_token();
         let turn_id = self.turn_seq.fetch_add(1, Ordering::Relaxed);
@@ -773,6 +851,73 @@ impl DemoHost {
         );
     }
 
+    fn revoke_computer(
+        &self,
+        client: &Arc<ClientInner>,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let chat_id = params["chatId"].as_str().unwrap_or_default();
+        let revoked = chat_id == COMPUTER_CHAT && lock(&self.computer_stopped).insert(chat_id.to_owned());
+        if revoked && let Some(core) = client.session_core(chat_id) {
+            let now = now_ms();
+            let host = client
+                .workspace
+                .chat(chat_id)
+                .map(|chat| chat.device_id)
+                .unwrap_or_default();
+            let entry = transcripts::entry(
+                &format!("revoked-{now}"),
+                MessageRole::System,
+                &host,
+                now,
+                vec![
+                    transcripts::text("t0", COMPUTER_DESKTOP_REVOKED_NOTE),
+                    transcripts::text("t1", RevokeSource::Stop.hint()),
+                ],
+            );
+            core.write(|doc| doc.push_message(&entry))?;
+        }
+        Ok(serde_json::json!({ "revoked": revoked }))
+    }
+
+    fn fork_chat(
+        &self,
+        client: &Arc<ClientInner>,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let source_id = params["sourceChatId"].as_str().unwrap_or_default();
+        let entry_id = params["entryId"].as_str().unwrap_or_default();
+        let new_id = params["chatId"].as_str().unwrap_or_default().to_owned();
+        let source = client
+            .workspace
+            .chat(source_id)
+            .ok_or_else(|| ClientError::NotFound(source_id.to_owned()))?;
+        let core = client
+            .session_core(source_id)
+            .ok_or_else(|| ClientError::NotFound(source_id.to_owned()))?;
+        let entries = core.doc().read_entries().map_err(doc_err)?;
+        let ix = entries
+            .iter()
+            .position(|e| e.id == entry_id && e.role == MessageRole::Assistant)
+            .ok_or_else(|| ClientError::HostError("That reply is no longer in the chat.".into()))?;
+        let end = entries[ix + 1..]
+            .iter()
+            .position(|e| e.role == MessageRole::User)
+            .map_or(entries.len(), |n| ix + 1 + n);
+        let seed = source.title.clone().unwrap_or_else(|| "chat".into());
+        let chat = Chat {
+            id: new_id.clone(),
+            title: Some(format!("Fork: {seed}")),
+            forked_from_chat_id: Some(source_id.to_owned()),
+            created_at: Utc::now(),
+            last_seen_at: None,
+            ..source
+        };
+        lock(&self.forks).insert(new_id, entries[..end].to_vec());
+        client.registry_write(|doc| doc.upsert_chat(&chat))?;
+        Ok(serde_json::to_value(&chat).unwrap_or_default())
+    }
+
     fn is_viewing(&self, core: &SessionCore) -> bool {
         core.view_attached()
     }
@@ -791,11 +936,65 @@ impl DemoHost {
             return Err(ClientError::HostUnavailable(device_id.to_owned()));
         }
         tokio::time::sleep(Duration::from_millis(80)).await;
+        match method {
+            m::HARNESS_COMPACTION => {
+                return Ok(serde_json::json!({ "compaction": "native", "branching": true }));
+            }
+            m::FORK_CHAT => return self.fork_chat(&client, &params),
+            m::FETCH_TOOL_BLOB => return Ok(demo_blob(&params)),
+            m::GET_SESSION_STATS => return Ok(missions::session_stats(&params)),
+            m::COMPUTER_REVOKE_DESKTOP => return self.revoke_computer(&client, &params),
+            m::RESOLVE_LIMIT_OFFER | m::SET_LIMIT_RESUME => {
+                return Ok(limit_rpc(&client, method == m::SET_LIMIT_RESUME, &params));
+            }
+            _ => {}
+        }
+        if let Some(reply) = self.review_call(&client, device_id, method, &params) {
+            return reply;
+        }
+        if let Some(reply) = lock(&self.git).handle(method, &params) {
+            return reply;
+        }
+        if terminals::HostTerminals::handles(method) {
+            return lock(&self.terminals).call(method, &params, now_ms());
+        }
+        let plan_estimate = method == m::PREVIEW_ROUTES && params.get("roles").is_some();
+        if settings::HostSettings::handles(method) && !plan_estimate {
+            return lock(&self.settings).call(device_id, method, &params);
+        }
+        if let Some(reply) = fixtures::today_reply(device_id, method, now_ms()) {
+            return Ok(reply);
+        }
+        if let Some(catalog) = composer::invocation_catalog(method) {
+            return Ok(catalog);
+        }
+        if method == m::CONTINUE_IN_NEW_THREAD {
+            return composer::continue_in_new_thread(&client, &params);
+        }
+        if method == m::CREATE_SIDECHAT {
+            return composer::create_sidechat(&client, &params);
+        }
+        if let Some(reply) = composer::instance_models(method, &params) {
+            return reply;
+        }
+        if let Some(reply) = missions::host_call(
+            &client,
+            &self.supervisor_settings,
+            &self.refused_sends,
+            device_id,
+            method,
+            &params,
+        ) {
+            return reply;
+        }
         let chat_id = params["chatId"].as_str().unwrap_or_default().to_owned();
         let id = params["id"].as_str().unwrap_or_default().to_owned();
         let core = client
             .session_core(&chat_id)
             .ok_or_else(|| ClientError::NotFound(chat_id.clone()))?;
+        if method == m::STOP_BACKGROUND_TASK {
+            return composer::stop_background_task(&core, &params);
+        }
         let row = core
             .doc()
             .read_queue()
@@ -917,12 +1116,102 @@ impl DemoHost {
                     None => serde_json::json!({ "sent": false }),
                 }
             }
+            m::LIST_SKILLS => serde_json::json!([{
+                "name": "review",
+                "path": DEMO_SKILL_PATH,
+                "description": "Review the current diff before it merges.",
+                "enabled": true,
+            }]),
+            m::READ_WORKSPACE_FILE => {
+                let path = params["path"].as_str().unwrap_or_default();
+                if path != DEMO_SKILL_PATH {
+                    return Err(ClientError::HostError(format!(
+                        "{path} is not on this host"
+                    )));
+                }
+                serde_json::json!({
+                    "checkoutId": "demo",
+                    "path": path,
+                    "text": DEMO_SKILL_MD,
+                    "size": DEMO_SKILL_MD.len(),
+                    "encoding": "utf8",
+                    "readOnlyReason": "outsideWorkspace",
+                    "truncated": false,
+                })
+            }
+            m::REWIND_CHAT => {
+                let entry_id = params["entryId"].as_str().unwrap_or_default();
+                let prompt = core
+                    .snapshot()
+                    .entry(entry_id)
+                    .map(|entry| {
+                        entry
+                            .message
+                            .parts
+                            .iter()
+                            .filter_map(|part| match part {
+                                MessagePart::Text { text, .. } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n\n")
+                            .trim()
+                            .to_owned()
+                    })
+                    .unwrap_or_default();
+                let removed = core.write(|doc| doc.truncate_from(entry_id))?;
+                serde_json::json!({ "prompt": prompt, "removed": removed })
+            }
+            m::MUTATE if params["op"] == "setChatConfig" => {
+                let config: zeron_proto::ChatConfig =
+                    serde_json::from_value(params["config"].clone())
+                        .map_err(|err| ClientError::InvalidArgument(err.to_string()))?;
+                client.registry_write(|doc| doc.set_chat_config(&chat_id, &config))?;
+                if let Some(note) = params["note"]["text"].as_str() {
+                    let mut parts = vec![transcripts::text("t0", note)];
+                    parts.extend(
+                        params["note"]["hint"]
+                            .as_str()
+                            .map(|hint| transcripts::text("t1", hint)),
+                    );
+                    let host = self.host_of(&client, &chat_id);
+                    let entry = transcripts::entry(
+                        &crate::new_id(),
+                        zeron_doc::MessageRole::System,
+                        &host,
+                        now,
+                        parts,
+                    );
+                    core.write(|doc| doc.push_message(&entry))?;
+                }
+                serde_json::json!({})
+            }
+            m::COMPACT_CHAT => {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                let host = self.host_of(&client, &chat_id);
+                let entry = transcripts::entry(
+                    &crate::new_id(),
+                    zeron_doc::MessageRole::System,
+                    &host,
+                    now,
+                    vec![transcripts::text(
+                        "t0",
+                        "Context compacted · 184.3k → 21.0k tokens",
+                    )],
+                );
+                core.write(|doc| {
+                    doc.push_message(&entry)?;
+                    doc.update_context_usage(Some(21_000), None)
+                })?;
+                serde_json::json!({ "compacted": true })
+            }
             m::REMOVE_QUEUED_MESSAGE => {
                 let removed = core.write(|doc| doc.remove_queued(&id))?;
                 serde_json::json!({ "removed": removed })
             }
             m::GET_COMPUTER_STILL_FRAME => {
-                let frame = self.options.computer_still.then(|| {
+                let stopped = lock(&self.computer_stopped).contains(&chat_id);
+                let frame = (self.options.computer_still && !stopped).then(|| {
                     serde_json::json!({
                         "sequence": 1,
                         "timestampMs": now as f64,
@@ -945,21 +1234,52 @@ impl DemoHost {
             harness.steering_mode = Some("step-boundary".into());
             harness.enabled = Some(true);
         }
-        list.push(HarnessInfo {
-            id: "opencode".into(),
-            label: "OpenCode".into(),
-            supports_steering: Some(false),
-            steering_mode: Some("turn-boundary".into()),
-            reasoning_levels: Vec::new(),
-            installed: true,
-            enabled: Some(true),
-        });
+        for (id, label) in [
+            ("opencode", "OpenCode"),
+            ("cursor", "Cursor"),
+            ("devin", "Devin"),
+            ("grok", "Grok"),
+            ("hermes", "Hermes"),
+            ("pi", "Pi"),
+            ("antigravity", "Antigravity"),
+            ("acp", "ACP agent"),
+        ] {
+            list.push(HarnessInfo {
+                id: id.into(),
+                label: label.into(),
+                supports_steering: Some(false),
+                steering_mode: Some("turn-boundary".into()),
+                reasoning_levels: Vec::new(),
+                installed: true,
+                enabled: Some(true),
+            });
+        }
+        let disabled = lock(&self.settings).disabled_harnesses.clone();
+        for harness in &mut list {
+            if disabled.contains(&harness.id) {
+                harness.enabled = Some(false);
+            }
+        }
         list
     }
 
     pub(crate) async fn list_models(&self, harness: &str) -> Vec<ModelInfo> {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        catalog::fallback_models(harness)
+        let mut models = match harness {
+            "cursor" | "acp" => vec![ModelInfo {
+                id: "default".into(),
+                label: "Agent default".into(),
+                description: None,
+                reasoning_levels: Vec::new(),
+                options: Vec::new(),
+                is_new: false,
+            }],
+            _ => catalog::fallback_models(harness),
+        };
+        for model in &mut models {
+            model.is_new = model.id == "claude-sonnet-5-5";
+        }
+        models
     }
 
     fn seeded_refs(path: &str) -> Vec<RepoRef> {
@@ -1107,6 +1427,9 @@ impl DemoHost {
         if let Some(bytes) = visuals::read(path) {
             return Ok(Arc::new(bytes));
         }
+        if let Some(bytes) = pages::read(path).or_else(|| composer::icon(path)) {
+            return Ok(Arc::new(bytes));
+        }
         transcripts::DEMO_IMAGES
             .iter()
             .find(|(p, ..)| *p == path)
@@ -1144,3 +1467,48 @@ fn text_hash(text: &str) -> String {
     text.hash(&mut h);
     format!("{:016x}", h.finish())
 }
+
+fn limit_rpc(
+    client: &Arc<ClientInner>,
+    toggle: bool,
+    params: &serde_json::Value,
+) -> serde_json::Value {
+    let chat_id = params["chatId"].as_str().unwrap_or_default();
+    let mut changed = false;
+    for (device, mut limits) in client.workspace.limits() {
+        let Some(i) = limits.chats.iter().position(|c| c.chat_id == chat_id) else {
+            continue;
+        };
+        match (toggle, params["choice"].as_str()) {
+            (true, _) => limits.chats[i].auto = params["auto"].as_bool().unwrap_or(true),
+            (false, Some("hold")) => {
+                if let Some(offer) = &mut limits.chats[i].offer {
+                    offer.act_at = None;
+                }
+            }
+            (false, Some("switch")) => {
+                limits.chats.remove(i);
+            }
+            (false, _) => limits.chats[i].offer = None,
+        }
+        changed = true;
+        client.limits_changed(&device, limits);
+    }
+    serde_json::json!({ "changed": changed })
+}
+
+fn demo_blob(params: &serde_json::Value) -> serde_json::Value {
+    let blob_ref = params["blobRef"].as_str().unwrap_or_default();
+    let text = match blob_ref.strip_suffix(".diff") {
+        Some(_) => serde_json::to_string(&zeron_proto::ToolDiff {
+            path: "crates/ui/src/markdown/veil.rs".into(),
+            old_text: Some("fn veil(alpha: f32) -> f32 {\n    alpha\n}\n".into()),
+            new_text: "fn veil(alpha: f32) -> f32 {\n    alpha.clamp(0.0, 1.0) * VEIL_DIM\n}\n\nconst VEIL_DIM: f32 = 0.6;\n".into(),
+            line_offset: Some(40),
+        })
+        .unwrap_or_default(),
+        None => (1..=60).map(|i| format!("line {i} of the full output\n")).collect(),
+    };
+    serde_json::json!({ "text": text })
+}
+

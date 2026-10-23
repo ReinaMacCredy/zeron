@@ -133,7 +133,7 @@ fn auto_compact_window(request: &RunRequest) -> Option<u64> {
         .model_options
         .get("autoCompact")
         .and_then(Value::as_str)
-        .and_then(catalog::auto_compact_tokens)
+        .and_then(zeron_proto::model_options::auto_compact_tokens)
 }
 
 /// Zeron's own server is left out: its tools are switched one by one.

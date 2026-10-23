@@ -1005,12 +1005,8 @@ pub(crate) async fn verify_rev(root: &Path, spec: &str) -> Result<Option<String>
     Ok((!sha.is_empty()).then_some(sha))
 }
 
-pub(crate) fn is_commit_id(rev: &str) -> bool {
-    (4..=64).contains(&rev.len()) && rev.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
 pub(crate) async fn resolve_commit(root: &Path, rev: &str) -> Result<String, EngineError> {
-    if !is_commit_id(rev) {
+    if !zeron_proto::review::is_commit_id(rev) {
         return Err(EngineError::Other(format!("not a commit id: {rev:?}")));
     }
     verify_rev(root, &format!("{rev}^{{commit}}"))

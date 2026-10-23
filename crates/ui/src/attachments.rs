@@ -44,31 +44,10 @@ const MAX_READ_CHUNKS: usize = 1_000;
 // Text transport (message-attachments.ts)
 // ---------------------------------------------------------------------------
 
-/// The body used for image-only sends (`use-attachments.ts`).
-pub const ATTACHMENT_ONLY_TEXT: &str = "See the attached image(s).";
-/// The body used when any attachment is not an image.
-pub const FILE_ATTACHMENT_ONLY_TEXT: &str = "See the attached file(s).";
-
-/// Whether `text` is the placeholder body of an attachments-only send.
-pub fn is_attachment_only_text(text: &str) -> bool {
-    text == ATTACHMENT_ONLY_TEXT || text == FILE_ATTACHMENT_ONLY_TEXT
-}
-
-/// The placeholder body for an attachments-only send of `paths`.
-pub fn attachment_only_text(paths: &[String]) -> &'static str {
-    if paths.iter().all(|path| is_image_path(path)) {
-        ATTACHMENT_ONLY_TEXT
-    } else {
-        FILE_ATTACHMENT_ONLY_TEXT
-    }
-}
-
-/// Whether an attachment ref names an image, as opposed to any other file.
-pub fn is_image_path(path: &str) -> bool {
-    format_by_extension(Path::new(path)).is_some()
-}
-
-pub use zeron_proto::attachment_mentions::attachment_display_name;
+pub use zeron_proto::attachment_mentions::{
+    ATTACHMENT_ONLY_TEXT, FILE_ATTACHMENT_ONLY_TEXT, PASTED_TEXT_MIN_CHARS,
+    attachment_display_name, attachment_only_text, is_attachment_only_text, is_image_path,
+};
 
 /// Whether `mention` is the chip for the attachment at `path`.
 pub fn chip_names_attachment(
@@ -423,7 +402,6 @@ pub fn stage_clipboard_image(image: Image) -> StagedAttachment {
     StagedAttachment::from_image(ensure_extension("image", image.format), image)
 }
 
-pub const PASTED_TEXT_MIN_CHARS: usize = 5_000;
 
 pub fn stage_pasted_text(text: String) -> Result<StagedAttachment, String> {
     if text.len() as u64 > MAX_ATTACHMENT_BYTES {

@@ -28,13 +28,15 @@ final class ComputerSurfacesUITests: XCTestCase {
         let app = launch()
         let allow = app.buttons["computer-consent-allow"]
         XCTAssertTrue(allow.waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["computer-consent-decline"].exists)
+        XCTAssertTrue(app.buttons["computer-consent-deny"].exists)
+        XCTAssertTrue(app.buttons["computer-consent-always"].exists)
+        XCTAssertTrue(label(app, containing: "Elevated Risk").exists, "Terminal carries the risk band")
         XCTAssertTrue(app.textViews["composer-input"].exists, "a consent card never replaces the composer")
         snapshot(app, "consent-open")
         allow.tap()
         XCTAssertTrue(allow.waitForNonExistence(timeout: 5))
-        XCTAssertTrue(label(app, containing: "until the turn ends", "Allowed").waitForExistence(timeout: 5))
-        XCTAssertTrue(label(app, containing: "Calculator shows 4 again").waitForExistence(timeout: 15))
+        XCTAssertTrue(label(app, containing: "Allowed Terminal for this task").waitForExistence(timeout: 5))
+        XCTAssertTrue(label(app, containing: "Pasted 4 into Terminal").waitForExistence(timeout: 15))
         snapshot(app, "consent-allowed")
     }
 
@@ -58,7 +60,13 @@ final class ComputerSurfacesUITests: XCTestCase {
         let still = app.images["computer-still"]
         XCTAssertTrue(still.waitForExistence(timeout: 10))
         snapshot(app, "still-preview")
+        XCTAssertTrue(app.staticTexts["computer-still-live"].exists)
         app.buttons["computer-still-hide"].tap()
+        let hide = app.buttons["Hide for this task"]
+        XCTAssertTrue(hide.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Hide for all active tasks"].exists)
+        snapshot(app, "still-hide-menu")
+        hide.tap()
         XCTAssertTrue(still.waitForNonExistence(timeout: 5))
     }
 }

@@ -4085,7 +4085,7 @@ impl Inner {
         let handle = self.doc_host()?.open(chat_id).ok()?;
         let usage = handle.doc().context_usage()?;
         let window = config
-            .and_then(zeron_harness::claude::catalog::chat_budget)
+            .and_then(zeron_proto::model_options::chat_budget)
             .or(usage.window);
         Some((usage.tokens?, handle.doc().context_baseline(), window))
     }

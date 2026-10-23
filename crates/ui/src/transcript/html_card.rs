@@ -3,6 +3,7 @@
 //! the height the page reports.
 use super::*;
 use crate::html_render::{clamp_height, frame_height, overflows, scrolls_inside};
+use zeron_proto::html_render::{page_file_name, source_text};
 
 /// Live pages a transcript keeps at once; one scrolled away longest closes
 /// first and reloads when it scrolls back.
@@ -13,9 +14,6 @@ const KEPT_PAGES: usize = 24;
 const KEPT_BYTES: usize = 64 * 1024 * 1024;
 /// A page whose web process keeps dying stops reloading after this many.
 const MAX_CRASHES: u8 = 2;
-/// The Source view shows at most this much text; inlined image data is
-/// summarized first, since a page can carry megabytes of it.
-const MAX_SOURCE_CHARS: usize = 200_000;
 #[cfg(target_os = "macos")]
 const LOAD_LIVE: std::time::Duration = std::time::Duration::from_secs(3);
 #[cfg(target_os = "macos")]
@@ -686,56 +684,6 @@ pub(super) fn native_mask(
 
 const SHEET_SUFFIX: &str = "#sheet";
 
-/// The page as the Source view shows it: inlined image data summarized,
-/// long pages cut with a pointer to Save .html for the whole file.
-fn source_text(html: &str) -> String {
-    let mut out = String::with_capacity(html.len().min(MAX_SOURCE_CHARS));
-    let mut rest = html;
-    while let Some(at) = rest.find(";base64,") {
-        let start = at + ";base64,".len();
-        let run = rest[start..]
-            .bytes()
-            .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
-            .count();
-        out.push_str(&rest[..start]);
-        if run > 256 {
-            out.push_str(&format!("…{} KB…", run * 3 / 4 / 1024));
-        } else {
-            out.push_str(&rest[start..start + run]);
-        }
-        rest = &rest[start + run..];
-    }
-    out.push_str(rest);
-    if out.chars().count() > MAX_SOURCE_CHARS {
-        let cut: String = out.chars().take(MAX_SOURCE_CHARS).collect();
-        return format!("{cut}\n\n… Save .html for the whole page.");
-    }
-    out
-}
-
-/// A readable download name: the title without characters file systems reject.
-fn page_file_name(title: &str) -> String {
-    let cleaned: String = title
-        .chars()
-        .map(|c| {
-            if c.is_control() || matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect();
-    let name: String = cleaned
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(120)
-        .collect();
-    let name = name.trim();
-    format!("{}.html", if name.is_empty() { "Page" } else { name })
-}
-
 impl Transcript {
     fn open_html_sheet(
         &mut self,
@@ -1219,26 +1167,5 @@ mod tests {
         assert_eq!(covered_parts(card, None), vec![card]);
         let hidden = Bounds::from_corners(point(px(0.0), px(700.0)), point(px(400.0), px(700.0)));
         assert_eq!(covered_parts(card, Some(hidden)), vec![card]);
-    }
-
-    #[test]
-    fn the_source_view_summarizes_inlined_images_and_cuts_long_pages() {
-        let image = "A".repeat(4096);
-        let html = format!(
-            r#"<img src="data:image/png;base64,{image}"><img src="data:image/gif;base64,R0lG">"#
-        );
-        let shown = source_text(&html);
-        assert!(shown.contains("data:image/png;base64,…3 KB…"));
-        assert!(shown.contains("base64,R0lG"));
-        assert!(!shown.contains(&image));
-        let long = "x".repeat(MAX_SOURCE_CHARS + 10);
-        assert!(source_text(&long).ends_with("Save .html for the whole page."));
-    }
-
-    #[test]
-    fn download_names_drop_characters_file_systems_reject() {
-        assert_eq!(page_file_name("Q3: tokens / turn?"), "Q3 tokens turn.html");
-        assert_eq!(page_file_name("  "), "Page.html");
-        assert_eq!(page_file_name(&"a".repeat(300)).len(), 125);
     }
 }

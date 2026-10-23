@@ -12,6 +12,9 @@ struct SessionChrome: Equatable {
         case notDelivered
         case failed(String)
         case editing
+        case limit(String)
+        case notice(String)
+        case offer(title: String, body: String)
     }
 
     struct Question: Equatable {
@@ -33,11 +36,18 @@ struct SessionChrome: Equatable {
         let text: String
         let thumbnail: UIImage?
         let gate: String?
+        var from: String? = nil
+        /// What the row's arrow does; nil while it cannot deliver.
+        var action: QueuePrimaryAction? = nil
+        /// An image attachment's reference, loaded as the row's thumbnail.
+        var image: String? = nil
     }
 
     var title = ""
     var subtitle = ""
+    var hostName: String?
     var running = false
+    var resumable = false
     var canSteer = false
     var placeholder = "Message"
     var chips: [ComposerChip] = []
@@ -45,12 +55,23 @@ struct SessionChrome: Equatable {
     var questions: (requestId: String, items: [Question])?
     var queue: [QueuedItem] = []
     var error: String?
+    var limitPill: LimitPill?
+    var prediction: String?
+
+    struct Comments: Equatable {
+        let title: String
+        let clear: String
+        let items: [StagedCommentChip]
+    }
+
+    var comments: Comments?
 
     static func == (a: SessionChrome, b: SessionChrome) -> Bool {
-        a.title == b.title && a.subtitle == b.subtitle && a.running == b.running && a.canSteer == b.canSteer
+        a.title == b.title && a.subtitle == b.subtitle && a.hostName == b.hostName && a.running == b.running && a.canSteer == b.canSteer
             && a.placeholder == b.placeholder && a.chips == b.chips && a.banner == b.banner
             && a.questions?.requestId == b.questions?.requestId && a.questions?.items == b.questions?.items
-            && a.queue == b.queue && a.error == b.error
+            && a.queue == b.queue && a.error == b.error && a.limitPill == b.limitPill && a.prediction == b.prediction
+            && a.comments == b.comments
     }
 }
 
@@ -58,6 +79,7 @@ struct SessionChrome: Equatable {
 protocol SessionSource: AnyObject {
     var chrome: SessionChrome { get }
     var onChange: (() -> Void)? { get set }
+    var onPresent: ((UIViewController) -> Void)? { get set }
     /// Bind the Rust layout engine to this session's transcript.
     func attach(_ engine: TranscriptView)
     func detach()
@@ -70,7 +92,14 @@ protocol SessionSource: AnyObject {
     func answer(requestId: String, answers: [(questionId: String, labels: [String])])
     func answerConsent(requestId: String, questionId: String, answer: String)
     func computerStill() async -> (sequence: UInt64, image: UIImage)?
+    func computerStop() async throws -> Bool
+    func terminals() async throws -> [TerminalTab]
+    func terminal(_ id: String, dark: Bool) async throws -> TerminalView
+    func projectActions() async throws -> ProjectActions?
+    func runProjectAction(_ id: String) async throws -> String
     func queueAction(_ id: String, _ action: QueueAction)
+    /// The queue error was shown; a repeat of it shows again.
+    func clearQueueError()
     func retryDelivery()
     /// Lease a queued message for editing; returns its text when acquired.
     func beginEdit(_ id: String) async -> String?
@@ -78,11 +107,50 @@ protocol SessionSource: AnyObject {
     func finishEdit(text: String?) async
     /// Menu for a composer chip (model, effort, branch…), or nil.
     func chipMenu(_ id: String) -> UIMenu?
+    func chipSheet(_ id: String) -> UIViewController?
     func loadImage(_ reference: String, into view: UIImageView)
     /// An attachment's picture, for opening it full size (an image chip).
     func image(_ reference: String) async -> UIImage?
+    func attachmentText(_ reference: String) async -> String?
     /// Workspace files for `@` mentions.
     func searchFiles(_ query: String) async -> [FileMatch]
+    func branchBlocked(rewind: Bool) async -> String?
+    func fork(from entryId: String) async throws -> String
+    func rewind(to entryId: String) async throws -> String
+    func skillFile(name: String, path: String?) async throws -> SkillFile
+    func chatUsage() async -> UsageMeter?
+    func limitCard(chatId: String) -> LimitCard?
+    func resolveLimit(chatId: String, choice: String) async throws
+    func setLimitResume(chatId: String, auto: Bool) async throws
+    func htmlPage(deviceId: String, path: String) async -> String?
+    func threadMentions(_ query: String) -> [ThreadMention]
+    func invocationCatalog(skill: Bool) async -> InvocationCatalog?
+    var compactBlocked: String? { get }
+    func compact(focus: String?)
+    func keepFullHistory()
+    func handoffMenu(open: @escaping (String) -> Void) -> UIMenuElement?
+    func agentsAction(open: @escaping (String) -> Void) -> UIAction?
+    func reviewAction() -> UIAction?
+    func chatChanges() async -> ChatChangesView?
+    func openChanges(from host: UIViewController, title: String)
+    func removeStagedComment(_ id: String)
+    func clearStagedComments()
+}
+
+extension SessionSource {
+    func clearQueueError() {}
+    func chipSheet(_ id: String) -> UIViewController? { nil }
+    func invocationCatalog(skill: Bool) async -> InvocationCatalog? { nil }
+    var compactBlocked: String? { nil }
+    func compact(focus: String?) {}
+    func keepFullHistory() {}
+    func handoffMenu(open: @escaping (String) -> Void) -> UIMenuElement? { nil }
+    func agentsAction(open: @escaping (String) -> Void) -> UIAction? { nil }
+    func reviewAction() -> UIAction? { nil }
+    func chatChanges() async -> ChatChangesView? { nil }
+    func openChanges(from host: UIViewController, title: String) {}
+    func removeStagedComment(_ id: String) {}
+    func clearStagedComments() {}
 }
 
 enum QueueAction {
@@ -98,6 +166,7 @@ enum QueueAction {
 final class FixtureSessionSource: SessionSource {
     private(set) var chrome = SessionChrome()
     var onChange: (() -> Void)?
+    var onPresent: ((UIViewController) -> Void)?
     private weak var engine: TranscriptView?
     private var entries: [DebugEntry] = []
     private var timer: Timer?
@@ -137,7 +206,7 @@ final class FixtureSessionSource: SessionSource {
 
     func send(text: String, images: [StagedImage], mode: DeliveryMode) -> Bool {
         if chrome.running, mode == .queue {
-            update { $0.queue.append(.init(id: UUID().uuidString, text: text, thumbnail: images.first?.thumbnail, gate: nil)) }
+            update { $0.queue.append(.init(id: UUID().uuidString, text: text, thumbnail: images.first?.thumbnail, gate: nil, action: images.isEmpty ? .steer : .sendNow)) }
             return true
         }
         timer?.invalidate()
@@ -196,6 +265,11 @@ final class FixtureSessionSource: SessionSource {
 
     func answerConsent(requestId: String, questionId: String, answer: String) {}
     func computerStill() async -> (sequence: UInt64, image: UIImage)? { nil }
+    func computerStop() async throws -> Bool { false }
+    func terminals() async throws -> [TerminalTab] { [] }
+    func terminal(_ id: String, dark: Bool) async throws -> TerminalView { throw CancellationError() }
+    func projectActions() async throws -> ProjectActions? { nil }
+    func runProjectAction(_ id: String) async throws -> String { throw CancellationError() }
 
     func queueAction(_ id: String, _ action: QueueAction) {
         update { chrome in
@@ -236,5 +310,16 @@ final class FixtureSessionSource: SessionSource {
     }
     func loadImage(_ reference: String, into view: UIImageView) {}
     func image(_ reference: String) async -> UIImage? { nil }
+    func attachmentText(_ reference: String) async -> String? { nil }
     func searchFiles(_ query: String) async -> [FileMatch] { [] }
+    func branchBlocked(rewind: Bool) async -> String? { "Not available in the lab" }
+    func fork(from entryId: String) async throws -> String { throw CancellationError() }
+    func rewind(to entryId: String) async throws -> String { throw CancellationError() }
+    func skillFile(name: String, path: String?) async throws -> SkillFile { throw CancellationError() }
+    func chatUsage() async -> UsageMeter? { nil }
+    func limitCard(chatId: String) -> LimitCard? { nil }
+    func resolveLimit(chatId: String, choice: String) async throws { throw CancellationError() }
+    func setLimitResume(chatId: String, auto: Bool) async throws { throw CancellationError() }
+    func htmlPage(deviceId: String, path: String) async -> String? { nil }
+    func threadMentions(_ query: String) -> [ThreadMention] { [] }
 }

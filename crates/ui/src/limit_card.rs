@@ -44,15 +44,6 @@ pub(crate) struct LimitCard<'a> {
     pub on_resolve: Rc<dyn Fn(&'static str, &mut Window, &mut App)>,
 }
 
-fn duration(ms: i64) -> String {
-    let mins = (ms / 60_000).max(0);
-    match (mins / 60, mins % 60) {
-        (0, m) => format!("{m}m"),
-        (h, 0) => format!("{h}h"),
-        (h, m) => format!("{h}h {m}m"),
-    }
-}
-
 fn radio(selected: bool, tint: Hsla, theme: &Theme) -> AnyElement {
     div()
         .size(px(14.0))
@@ -117,11 +108,14 @@ pub(crate) fn limit_card(card: LimitCard, theme: &Theme, cx: &App) -> AnyElement
     let name = harness.map_or("The agent", HarnessId::display_name);
     let now = chrono::Utc::now().timestamp_millis();
     let reset = resets_at.and_then(crate::route_badge::clock);
-    let resets_line = match (&reset, resets_at) {
-        (Some(at), Some(ms)) if ms > now => format!("resets {at}, in {}", duration(ms - now)),
-        (Some(at), _) => format!("resets {at}"),
-        _ => "reset time unknown".to_string(),
-    };
+    let target = offer.to.as_ref().map(|to| target_text(to, cx));
+    let copy = zeron_proto::transcript::limit_card_copy(
+        name,
+        reset.as_deref(),
+        resets_at.map(|ms| ms - now),
+        target.as_deref(),
+        auto,
+    );
     let option =
         |choice: OfferChoice, lead: &str, mark: Option<AnyElement>, title: String, sub: String| {
             let on_select = on_select.clone();
@@ -192,33 +186,22 @@ pub(crate) fn limit_card(card: LimitCard, theme: &Theme, cx: &App) -> AnyElement
                         ),
                 )
         };
-    let switch = offer.to.as_ref().map(|to| {
-        option(
-            OfferChoice::Switch,
-            "Switch to ",
-            Some(brand_mark(to, 12.0, theme)),
-            format!("{} (keeps transcript)", target_text(to, cx)),
-            format!("Same thread, provider switched. Back to {name} only if you switch it again."),
-        )
-    });
-    let wait = option(
-        OfferChoice::Wait,
-        "",
-        None,
-        match &reset {
-            Some(at) => format!("Wait for reset {at}"),
-            None => "Wait for reset".to_string(),
-        },
-        if auto {
-            format!("Auto-resumes on {name} at reset, as today.")
-        } else {
-            "Auto-resume is not armed: the thread stops here and its parent is told.".to_string()
-        },
-    );
-    let act = match selected {
-        OfferChoice::Switch => ("switch", "Switch now"),
-        OfferChoice::Wait => ("wait", "Wait now"),
-    };
+    let switch = offer
+        .to
+        .as_ref()
+        .zip(copy.switch)
+        .map(|(to, (title, sub))| {
+            option(
+                OfferChoice::Switch,
+                "Switch to ",
+                Some(brand_mark(to, 12.0, theme)),
+                title,
+                sub,
+            )
+        });
+    let (wait_title, wait_sub) = copy.wait;
+    let wait = option(OfferChoice::Wait, "", None, wait_title, wait_sub);
+    let act = (selected.wire(), selected.act_label());
     let footer = {
         let cancel = on_resolve.clone();
         let now_resolve = on_resolve.clone();
@@ -228,10 +211,7 @@ pub(crate) fn limit_card(card: LimitCard, theme: &Theme, cx: &App) -> AnyElement
             .items_center()
             .gap(px(10.0))
             .when_some(countdown, |el, (secs, fraction)| {
-                let verb = match offer.preselect {
-                    OfferChoice::Switch => "Switching",
-                    OfferChoice::Wait => "Waiting",
-                };
+                let verb = offer.preselect.countdown_verb();
                 el.child(
                     div()
                         .flex_none()
@@ -285,7 +265,7 @@ pub(crate) fn limit_card(card: LimitCard, theme: &Theme, cx: &App) -> AnyElement
                 .id(id.clone())
                 .debug_selector(|| "limit-card".into())
                 .role(gpui::Role::Group)
-                .aria_label(SharedString::from(format!("{name} hit its usage limit")))
+                .aria_label(SharedString::from(copy.title.clone()))
                 .w_full()
                 .p(px(12.0))
                 .flex()
@@ -313,14 +293,14 @@ pub(crate) fn limit_card(card: LimitCard, theme: &Theme, cx: &App) -> AnyElement
                                 .flex_1()
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.text)
-                                .child(SharedString::from(format!("{name} hit its usage limit"))),
+                                .child(SharedString::from(copy.title.clone())),
                         )
                         .child(
                             div()
                                 .flex_none()
                                 .text_size(crate::typography::ui_rems(11.5))
                                 .text_color(theme.text_faint)
-                                .child(SharedString::from(resets_line)),
+                                .child(SharedString::from(copy.resets)),
                         ),
                 )
                 .children(switch)
@@ -328,17 +308,4 @@ pub(crate) fn limit_card(card: LimitCard, theme: &Theme, cx: &App) -> AnyElement
                 .child(footer),
         )
         .into_any_element()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reset_durations_read_in_hours_and_minutes() {
-        assert_eq!(duration(72 * 60_000), "1h 12m");
-        assert_eq!(duration(120 * 60_000), "2h");
-        assert_eq!(duration(5 * 60_000 + 59_000), "5m");
-        assert_eq!(duration(-1), "0m");
-    }
 }

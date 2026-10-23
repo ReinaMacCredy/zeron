@@ -281,7 +281,7 @@ pub(super) fn subagent_rows(state: &AppState, chat_id: &str) -> Vec<SubagentRow>
             }
             let row = SubagentRow {
                 doc_id: doc_id.clone(),
-                title: crate::transcript::subagent_tab_title(call),
+                title: call.subagent_title().into(),
                 status: *subagent_status,
                 spawned_at,
             };

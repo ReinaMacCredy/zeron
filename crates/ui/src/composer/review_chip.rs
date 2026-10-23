@@ -7,11 +7,10 @@ use zeron_proto::{CheckoutDiff, HarnessId, Model};
 use zeron_rpc::methods;
 
 use super::{Composer, ComposerEvent};
-use crate::changes::{default_base_ref, parse_patch};
 use crate::popover::{self, Popup};
 use crate::review::{
-    self, FindingState, ReviewRun, ReviewScope, ReviewSettings, ReviewerChoice, ReviewerOptions,
-    RunStatus,
+    self, FindingState, Look, ReviewRun, ReviewScope, ReviewSettings, ReviewerChoice,
+    ReviewerOptions, RunStatus,
 };
 use crate::theme::Theme;
 
@@ -55,123 +54,43 @@ struct Target {
     harness: Option<HarnessId>,
 }
 
-enum Look {
-    Idle(u32, u32),
-    Empty(String),
-    Busy,
-    Findings(usize),
-    Again(u32, u32),
-    Stopped(u32, u32),
-    Clean,
-    Unreadable,
-    Failed(String),
-}
-
 async fn checkout_diff(
     engine: &crate::state::EngineHandle,
     target: &Target,
     scope: ReviewScope,
     commit: Option<&str>,
 ) -> Result<(CheckoutDiff, Option<String>), String> {
-    if scope == ReviewScope::Commit && commit.is_none() {
-        return Err("Pick a commit".to_string());
-    }
-    let base = match scope {
-        ReviewScope::Branch => {
-            let branches = engine
+    let branches: Vec<String> = match scope {
+        ReviewScope::Branch => serde_json::from_value(
+            engine
                 .client()
                 .call(
                     methods::LIST_BRANCHES,
                     serde_json::json!({ "repoPath": target.cwd }),
                 )
                 .await
-                .map_err(|err| err.to_string())?;
-            let branches: Vec<String> = serde_json::from_value(branches).unwrap_or_default();
-            Some(
-                default_base_ref(&branches, target.branch.as_deref())
-                    .ok_or_else(|| "No base branch to compare against".to_string())?,
-            )
-        }
-        _ => None,
+                .map_err(|err| err.to_string())?,
+        )
+        .unwrap_or_default(),
+        _ => Vec::new(),
     };
-    let mut params = serde_json::json!({
-        "cwd": target.cwd,
-        "mode": scope.mode(),
-        "chatId": target.chat_id,
-        "commitSha": commit,
-    });
-    if let Some(base) = &base {
-        params["baseRef"] = serde_json::Value::String(base.clone());
-    }
+    let base = review::diff_base(scope, commit, &branches, target.branch.as_deref())?;
     let value = engine
         .client()
-        .call(methods::GET_CHECKOUT_DIFF, params)
+        .call(
+            methods::GET_CHECKOUT_DIFF,
+            review::checkout_diff_params(
+                &target.cwd,
+                &target.chat_id,
+                scope,
+                commit,
+                base.as_deref(),
+            ),
+        )
         .await
         .map_err(|err| err.to_string())?;
     let diff = serde_json::from_value::<CheckoutDiff>(value).map_err(|err| err.to_string())?;
     Ok((diff, base))
-}
-
-fn chip_look(review: &review::ChatReview, scope: ReviewScope) -> Option<Look> {
-    let counts = review.changes(scope).filter(|(add, del)| add + del > 0);
-    let idle = || match counts {
-        Some((add, del)) => Some(Look::Idle(add, del)),
-        None => review.scope.is_some().then(|| {
-            Look::Empty(match (review.changes(scope), review.unavailable(scope)) {
-                (Some(_), _) => "No changes".to_string(),
-                (None, Some(message)) => capitalize(message),
-                (None, None) => "…".to_string(),
-            })
-        }),
-    };
-    let Some(run) = &review.run else {
-        return idle();
-    };
-    let open = run
-        .findings
-        .iter()
-        .filter(|finding| run.outcome(&finding.id).is_none())
-        .count();
-    let look = match &run.status {
-        status if run.busy() && *status != RunStatus::Done => Look::Busy,
-        RunStatus::Unreadable => Look::Unreadable,
-        RunStatus::Stopped => {
-            let (add, del) = counts.unwrap_or_default();
-            Look::Stopped(add, del)
-        }
-        RunStatus::Failed(message) => Look::Failed(message.clone()),
-        _ if run.outdated() > 0 => {
-            let (add, del) = counts.unwrap_or_default();
-            Look::Again(add, del)
-        }
-        _ if open > 0 => Look::Findings(open),
-        _ if run.reported > 0 || counts.is_none() => return idle(),
-        _ => Look::Clean,
-    };
-    Some(look)
-}
-
-fn outcome_counts(run: &ReviewRun) -> String {
-    let count = |states: &[FindingState]| {
-        run.findings
-            .iter()
-            .filter(|finding| states.contains(&run.state(&finding.id)))
-            .count()
-    };
-    [
-        (count(&[FindingState::Fixed]), "fixed"),
-        (count(&[FindingState::Skipped]), "skipped"),
-        (count(&[FindingState::NoChange]), "no change"),
-        (
-            count(&[FindingState::Open, FindingState::AgentOnIt]),
-            "open",
-        ),
-    ]
-    .into_iter()
-    .filter(|(n, _)| *n > 0)
-    .map(|(n, word)| format!("{n} {word}"))
-    .collect::<Vec<_>>()
-    .join(" · ")
 }
 
 fn badge_look(
@@ -187,49 +106,25 @@ fn badge_look(
     }
 }
 
-fn capitalize(text: &str) -> String {
-    let mut chars = text.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
-}
-
 async fn launch_review(
     engine: &crate::state::EngineHandle,
     target: &Target,
     scope: ReviewScope,
     commit: Option<&str>,
     choice: Option<&ReviewerChoice>,
-) -> Result<(String, String, Option<String>), String> {
+) -> Result<review::StartedReview, String> {
     let started = engine
         .client()
         .call(
             methods::START_REVIEW,
-            serde_json::json!({
-                "ownerChatId": target.chat_id,
-                "scope": scope.key(),
-                "commitSha": commit,
-                "reviewer": choice,
-            }),
+            review::start_params(&target.chat_id, scope, commit, choice),
         )
         .await
         .map_err(|err| err.to_string())?;
-    let task_id = started
-        .get("taskId")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "The reviewer did not start".to_string())?
-        .to_string();
-    let patch = started
-        .get("patch")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let note = started
-        .get("note")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    Ok((task_id, patch, note))
+    serde_json::from_value::<review::StartedReview>(started)
+        .ok()
+        .filter(|started| !started.task_id.is_empty())
+        .ok_or_else(|| "The reviewer did not start".to_string())
 }
 
 impl Composer {
@@ -274,18 +169,7 @@ impl Composer {
         task_id: Option<&str>,
         cx: &App,
     ) -> Option<zeron_proto::Chat> {
-        self.state
-            .read(cx)
-            .chats
-            .iter()
-            .filter(|chat| {
-                chat.delegation
-                    .as_ref()
-                    .is_some_and(|d| d.delegated_by_chat_id == chat_id && review::is_review(d))
-            })
-            .filter(|chat| task_id.is_none_or(|id| chat.id == id))
-            .max_by_key(|chat| chat.delegation.as_ref().map(|d| d.started_at))
-            .cloned()
+        review::reviewer_child(&self.state.read(cx).chats, chat_id, task_id).cloned()
     }
 
     pub(super) fn sync_review(&mut self, cx: &mut Context<Self>) {
@@ -295,50 +179,13 @@ impl Composer {
         let Some(target) = self.review_target(cx) else {
             return;
         };
-        let current = self
-            .state
-            .read(cx)
-            .reviews
-            .get(&target.chat_id)
-            .and_then(|review| review.run.as_ref())
-            .map(|run| run.task_id.clone());
-        let started_at = |chat: &zeron_proto::Chat| chat.delegation.as_ref().map(|d| d.started_at);
-        let adoptable = |child: &zeron_proto::Chat| match &current {
-            None => true,
-            Some(None) => false,
-            Some(Some(task)) => {
-                task != &child.id
-                    && self
-                        .reviewer_child(&target.chat_id, Some(task), cx)
-                        .is_none_or(|own| started_at(child) > started_at(&own))
-            }
-        };
-        if let Some(child) = self.reviewer_child(&target.chat_id, None, cx)
-            && adoptable(&child)
-            && let Some((scope, commit)) = child
-                .delegation
-                .as_ref()
-                .and_then(|d| d.client_request_id.as_deref())
-                .and_then(review::parse_request)
-        {
-            let mut run = ReviewRun::new(scope);
-            run.task_id = Some(child.id.clone());
-            run.commit = commit.clone();
-            run.status = RunStatus::Running;
-            self.state.update(cx, |state, _| {
-                let review = state.reviews.entry(target.chat_id.clone()).or_default();
-                if current.is_some() {
-                    review.scope = Some(scope);
-                    if let Some(sha) = commit {
-                        review.commit = Some(review::CommitPick {
-                            subject: sha.clone(),
-                            sha,
-                        });
-                    }
-                }
-                review.run = Some(run);
-            });
-        }
+        self.state.update(cx, |state, _| {
+            state
+                .reviews
+                .entry(target.chat_id.clone())
+                .or_default()
+                .adopt(&state.chats, &target.chat_id);
+        });
         self.read_finished_review(&target, cx);
         self.sync_review_outcomes(&target, cx);
         self.debug_open_findings(&target, cx);
@@ -425,26 +272,7 @@ impl Composer {
                         return;
                     }
                     for (scope, result) in fetched {
-                        let (diff, base) = match result {
-                            Ok(fetched) => fetched,
-                            Err(message) => {
-                                review.stats.insert(scope, Err(message));
-                                continue;
-                            }
-                        };
-                        review
-                            .stats
-                            .insert(scope, Ok((diff.additions, diff.deletions)));
-                        if base.is_some() {
-                            review.base = base;
-                        }
-                        if let Some(run) = review
-                            .run
-                            .as_mut()
-                            .filter(|run| run.scope == scope && run.status == RunStatus::Done)
-                        {
-                            review::refresh(&mut run.findings, &parse_patch(&diff.patch));
-                        }
+                        review.apply_stats(scope, result);
                     }
                     cx.notify();
                 });
@@ -455,31 +283,21 @@ impl Composer {
     }
 
     fn read_finished_review(&mut self, target: &Target, cx: &mut Context<Self>) {
-        let Some((task_id, scope, reviewed, commit)) = self
-            .state
-            .read(cx)
-            .reviews
-            .get(&target.chat_id)
-            .and_then(|review| review.run.as_ref())
-            .filter(|run| run.status == RunStatus::Running)
-            .and_then(|run| {
-                Some((
-                    run.task_id.clone()?,
-                    run.scope,
-                    run.reviewed.clone(),
-                    run.commit.clone(),
-                ))
-            })
+        let Some(review::FinishedRead {
+            task_id,
+            scope,
+            reviewed,
+            commit,
+        }) = ({
+            let state = self.state.read(cx);
+            state
+                .reviews
+                .get(&target.chat_id)
+                .and_then(|review| review.finished(&state.chats, &target.chat_id))
+        })
         else {
             return;
         };
-        let finished = self
-            .reviewer_child(&target.chat_id, Some(&task_id), cx)
-            .and_then(|child| child.delegation)
-            .is_some_and(|d| !d.is_running());
-        if !finished {
-            return;
-        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -504,37 +322,12 @@ impl Composer {
             };
             let outcome = match view {
                 Err(err) => review::ReadOutcome::Failed(err.to_string()),
-                Ok(view) => review::read_outcome(
-                    view.get("status")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default(),
-                    view.get("summary")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default(),
-                ),
+                Ok(view) => review::read_task_view(&view),
             };
             this.update(cx, |composer, cx| {
                 composer.set_run(&chat_id, cx, |run| {
-                    if run.task_id.as_deref() != Some(task_id.as_str()) {
-                        return;
-                    }
-                    match outcome {
-                        review::ReadOutcome::Stopped => run.status = RunStatus::Stopped,
-                        review::ReadOutcome::Failed(message) => {
-                            run.status = RunStatus::Failed(message)
-                        }
-                        review::ReadOutcome::Read(None) => run.status = RunStatus::Unreadable,
-                        review::ReadOutcome::Read(Some(mut findings)) => {
-                            let files = parse_patch(reviewed.as_deref().unwrap_or_default());
-                            if restored {
-                                review::refresh(&mut findings, &files);
-                            } else {
-                                review::place_new(&mut findings, &files);
-                            }
-                            run.reported = findings.len();
-                            run.findings = findings;
-                            run.status = RunStatus::Done;
-                        }
+                    if run.task_id.as_deref() == Some(task_id.as_str()) {
+                        run.apply_read(outcome, reviewed.as_deref(), restored);
                     }
                 });
             })
@@ -586,17 +379,10 @@ impl Composer {
                 .reviews
                 .get_mut(&target.chat_id)
                 .and_then(|review| review.run.as_mut())?;
-            if run.delegation != delegation || run.owner_working != owner_working {
-                run.delegation = delegation;
-                run.owner_working = owner_working;
+            if run.sync_child(delegation, owner_working) {
                 cx.notify();
             }
-            let withdrawals = run.unsent_withdrawals();
-            if withdrawals.is_empty() {
-                Some((run.unsent_hands(), false)).filter(|(ids, _)| !ids.is_empty())
-            } else {
-                Some((withdrawals, true))
-            }
+            run.next_hand()
         });
         let Some((ids, withdraw)) = unsent.filter(|_| self.review.hand_task.is_none()) else {
             return;
@@ -610,7 +396,7 @@ impl Composer {
                 .client()
                 .call(
                     methods::HAND_REVIEW_FINDINGS,
-                    serde_json::json!({ "ownerChatId": owner, "taskId": task_id, "ids": ids, "withdraw": withdraw }),
+                    review::hand_params(&owner, &task_id, &ids, withdraw),
                 )
                 .await;
             this.update(cx, |composer, cx| {
@@ -619,12 +405,7 @@ impl Composer {
                     tracing::warn!(error = %err, "review findings not handed");
                     composer.set_run(&owner, cx, |run| {
                         if run.task_id.as_deref() == Some(task_id.as_str()) {
-                            let sent = if withdraw {
-                                &mut run.withdrawn
-                            } else {
-                                &mut run.handed_here
-                            };
-                            sent.retain(|id| !ids.contains(id));
+                            run.hand_failed(&ids, withdraw);
                         }
                     });
                 }
@@ -656,56 +437,21 @@ impl Composer {
         self.close_review_menu(cx);
         let chat_id = target.chat_id.clone();
         let choice = self.reviewer_choice(&chat_id, cx);
-        let (chosen, commit) = self
-            .state
-            .read(cx)
-            .reviews
-            .get(&chat_id)
-            .map(|review| {
-                (
-                    review.reviewer.clone(),
-                    review.commit.as_ref().map(|pick| pick.sha.clone()),
-                )
-            })
-            .unwrap_or_default();
-        let commit = commit.filter(|_| scope == ReviewScope::Commit);
-        let mut run = ReviewRun::new(scope);
-        run.choice = Some(choice.clone());
-        run.commit = commit.clone();
-        let previous = self.state.update(cx, |state, cx| {
-            let previous = state
-                .reviews
-                .entry(chat_id.clone())
-                .or_default()
-                .run
-                .replace(run);
+        let (previous, chosen, commit) = self.state.update(cx, |state, cx| {
+            let review = state.reviews.entry(chat_id.clone()).or_default();
+            let previous = review.begin(scope, choice);
             cx.notify();
-            previous.filter(|run| run.status == RunStatus::Done && !run.findings.is_empty())
+            (
+                previous,
+                review.reviewer.clone(),
+                review.run.as_ref().and_then(|run| run.commit.clone()),
+            )
         });
         cx.spawn(async move |this, cx| {
             let started =
                 launch_review(&engine, &target, scope, commit.as_deref(), chosen.as_ref()).await;
             this.update(cx, |composer, cx| {
-                composer.set_run(&chat_id, cx, |run| {
-                    if run.status != RunStatus::Starting {
-                        return;
-                    }
-                    match started {
-                        Ok((task_id, patch, note)) => {
-                            run.task_id = Some(task_id);
-                            run.reviewed = Some(patch);
-                            run.note = note;
-                            run.status = RunStatus::Running;
-                        }
-                        Err(message) => match previous {
-                            Some(mut previous) => {
-                                previous.retry_error = Some(message);
-                                *run = previous;
-                            }
-                            None => run.status = RunStatus::Failed(message),
-                        },
-                    }
-                });
+                composer.set_run(&chat_id, cx, |run| run.apply_start(started, previous));
             })
             .ok();
         })
@@ -717,14 +463,9 @@ impl Composer {
             .read(cx)
             .reviews
             .get(chat_id)
-            .and_then(|review| review.reviewer.clone())
-            .or_else(|| {
-                self.review
-                    .settings
-                    .as_ref()
-                    .map(|settings| settings.reviewer.clone())
-            })
+            .cloned()
             .unwrap_or_default()
+            .effective_reviewer(self.review.settings.as_ref())
     }
 
     fn set_reviewer(&mut self, choice: ReviewerChoice, cx: &mut Context<Self>) {
@@ -789,7 +530,11 @@ impl Composer {
     }
 
     fn review_look(&self, target: &Target, scope: ReviewScope, cx: &App) -> Option<Look> {
-        chip_look(self.state.read(cx).reviews.get(&target.chat_id)?, scope)
+        self.state
+            .read(cx)
+            .reviews
+            .get(&target.chat_id)?
+            .look(scope)
     }
 
     pub(crate) fn render_review_chip(
@@ -839,94 +584,38 @@ impl Composer {
                         .child(format!("−{del}")),
                 )
         };
-        let review_label: SharedString = match (scope, &picked) {
-            (ReviewScope::Commit, Some(short)) => format!("Review {short}").into(),
-            _ => "Review".into(),
+        let label: SharedString = look.label(scope, picked.as_deref()).into();
+        let tip: SharedString = look.tip(scope).into();
+        let (icon, color, border, fill) = match &look {
+            Look::Idle(..) => (crate::icons::CHECKLIST, theme.text, theme.border, None),
+            Look::Findings(_) => (
+                crate::icons::CHECKLIST,
+                theme.danger,
+                theme.danger.opacity(0.45),
+                Some(theme.danger.opacity(0.10)),
+            ),
+            Look::Again(..) | Look::Stopped(..) => {
+                (crate::icons::REFRESH, theme.text_muted, theme.border, None)
+            }
+            Look::Clean => (
+                crate::icons::LUCIDE_CIRCLE_CHECK,
+                theme.success,
+                theme.success.opacity(0.40),
+                None,
+            ),
+            Look::Failed(_) => (
+                crate::icons::CHECKLIST,
+                theme.danger,
+                theme.danger.opacity(0.45),
+                None,
+            ),
+            Look::Empty(_) | Look::Busy | Look::Unreadable => (
+                crate::icons::CHECKLIST,
+                theme.text_muted,
+                theme.border,
+                None,
+            ),
         };
-        let (icon, label, color, border, fill, tip): (&str, SharedString, _, _, _, SharedString) =
-            match &look {
-                Look::Idle(..) => (
-                    crate::icons::CHECKLIST,
-                    review_label,
-                    theme.text,
-                    theme.border,
-                    None,
-                    format!(
-                        "Review {} with a fresh agent",
-                        scope.label(None).to_lowercase()
-                    )
-                    .into(),
-                ),
-                Look::Empty(_) => (
-                    crate::icons::CHECKLIST,
-                    review_label,
-                    theme.text_muted,
-                    theme.border,
-                    None,
-                    format!(
-                        "Nothing to review in {}. Pick another scope from the menu.",
-                        scope.label(None).to_lowercase()
-                    )
-                    .into(),
-                ),
-                Look::Busy => (
-                    crate::icons::CHECKLIST,
-                    "Reviewing".into(),
-                    theme.text_muted,
-                    theme.border,
-                    None,
-                    "The reviewer is working. Its progress is in the agents pill.".into(),
-                ),
-                Look::Findings(n) => (
-                    crate::icons::CHECKLIST,
-                    format!("{n} finding{}", if *n == 1 { "" } else { "s" }).into(),
-                    theme.danger,
-                    theme.danger.opacity(0.45),
-                    Some(theme.danger.opacity(0.10)),
-                    "Open the findings".into(),
-                ),
-                Look::Again(..) => (
-                    crate::icons::REFRESH,
-                    "Review again".into(),
-                    theme.text_muted,
-                    theme.border,
-                    None,
-                    "The code changed since the review. Some findings are outdated.".into(),
-                ),
-                Look::Stopped(..) => (
-                    crate::icons::REFRESH,
-                    "Review again".into(),
-                    theme.text_muted,
-                    theme.border,
-                    None,
-                    "The review was stopped. Click to run it again.".into(),
-                ),
-                Look::Clean => (
-                    crate::icons::LUCIDE_CIRCLE_CHECK,
-                    "No issues".into(),
-                    theme.success,
-                    theme.success.opacity(0.40),
-                    None,
-                    "The reviewer found no problems. Click to review again.".into(),
-                ),
-                Look::Unreadable => (
-                    crate::icons::CHECKLIST,
-                    "Couldn’t read findings".into(),
-                    theme.text_muted,
-                    theme.border,
-                    None,
-                    "The reviewer did not end with a findings block. Click to review again; its thread is in the agents pill."
-                        .into(),
-                ),
-                Look::Failed(message) => (
-                    crate::icons::CHECKLIST,
-                    "Review failed".into(),
-                    theme.danger,
-                    theme.danger.opacity(0.45),
-                    None,
-                    message.clone().into(),
-                ),
-            };
         let busy = matches!(look, Look::Busy);
         let stoppable = busy
             && self
@@ -934,16 +623,12 @@ impl Composer {
                 .read(cx)
                 .reviews
                 .get(&target.chat_id)
-                .is_some_and(|review| {
-                    review.run.as_ref().is_some_and(|run| {
-                        run.status == RunStatus::Running && run.task_id.is_some()
-                    })
-                });
+                .is_some_and(|review| review.run.as_ref().is_some_and(ReviewRun::stoppable));
         let stopping = stoppable && self.review.busy_hover;
         let (icon, label, color) = if stopping {
             (
                 crate::icons::STOP,
-                SharedString::from("Stop review"),
+                SharedString::from(review::STOP_LABEL),
                 theme.text,
             )
         } else {
@@ -988,7 +673,7 @@ impl Composer {
                 }))
             })
             .tooltip(crate::settings::widgets::text_tooltip(if stoppable {
-                SharedString::from("Stop the reviewer. The chat keeps running.")
+                SharedString::from(review::STOP_TIP)
             } else {
                 tip
             }))
@@ -1025,7 +710,7 @@ impl Composer {
             .id("composer-review-menu")
             .debug_selector(|| "composer-review-menu".into())
             .role(gpui::Role::Button)
-            .aria_label("Review options")
+            .aria_label(review::REVIEW_OPTIONS)
             .aria_expanded(self.review.menu.is_open())
             .h_full()
             .px(px(5.0))
@@ -1091,10 +776,13 @@ impl Composer {
         let Some(target) = self.review_target(cx) else {
             return;
         };
-        match self.review_look(&target, scope, cx) {
-            Some(Look::Findings(_)) => self.open_review_findings(cx),
-            Some(Look::Busy | Look::Empty(_)) | None => {}
-            Some(_) => self.start_review(scope, cx),
+        match self
+            .review_look(&target, scope, cx)
+            .map(|look| look.action())
+        {
+            Some(review::ChipAction::OpenFindings) => self.open_review_findings(cx),
+            Some(review::ChipAction::Start) => self.start_review(scope, cx),
+            Some(review::ChipAction::Inert) | None => {}
         }
     }
 
@@ -1118,26 +806,18 @@ impl Composer {
         target: &Target,
         cx: &App,
     ) -> Option<(String, &'static str, Option<gpui::Hsla>)> {
-        let last = self
+        let next = self.reviewer_choice(&target.chat_id, cx);
+        if !self
             .state
             .read(cx)
             .reviews
             .get(&target.chat_id)?
-            .run
-            .as_ref()?
-            .choice
-            .clone()?;
-        let next = self.reviewer_choice(&target.chat_id, cx);
-        if next == last {
+            .reviewer_changed(&next)
+        {
             return None;
         }
+        let name = review::choice_name(self.review.options.as_ref(), &next, target.harness);
         let options = self.review.options.clone().unwrap_or_default();
-        let name = match next {
-            ReviewerChoice::Auto if self.review.options.is_some() => {
-                review::resolve_reviewer(&next, target.harness, &options).name()
-            }
-            _ => options.label(&next),
-        };
         let (mark, tint) = review::brand(&options, &next, target.harness);
         Some((name, mark, tint))
     }
@@ -1163,29 +843,25 @@ impl Composer {
             .cloned()
             .unwrap_or_default();
         let busy = review.run.as_ref().is_some_and(ReviewRun::busy);
-        let on_base = target.branch.is_some() && target.branch == review.base;
-        let rows = ReviewScope::ALL
+        let rows = review
+            .scope_rows(target.branch.as_deref())
             .into_iter()
-            .filter(|scope| !(on_base && *scope == ReviewScope::Branch))
-            .map(|scope| {
-                let counts = review.changes(scope);
-                let unavailable = review.unavailable(scope).map(capitalize);
-                let empty =
-                    counts.is_some_and(|(add, del)| add + del == 0) || unavailable.is_some();
+            .map(|row| {
+                let scope = row.scope;
                 let id = SharedString::from(format!("composer-review-scope-{}", scope.key()));
                 let selector = id.clone();
                 popover::menu_row(&popup, false, id.clone())
                     .id(id)
                     .debug_selector(move || selector.to_string())
                     .role(gpui::Role::MenuItemRadio)
-                    .aria_label(scope.label(review.base.as_deref()))
+                    .aria_label(row.label.clone())
                     .gap(px(8.0))
                     .child(crate::settings::widgets::select_check(
                         &popup,
                         scope == selected,
                     ))
-                    .child(div().flex_1().child(scope.label(review.base.as_deref())))
-                    .child(match counts {
+                    .child(div().flex_1().child(row.label.clone()))
+                    .child(match row.counts {
                         Some((add, del)) => div()
                             .flex()
                             .gap(px(4.0))
@@ -1204,11 +880,11 @@ impl Composer {
                         None => div()
                             .text_size(crate::typography::ui_rems(11.0))
                             .text_color(popup.text_faint)
-                            .child(unavailable.clone().unwrap_or_else(|| "…".to_string()))
+                            .child(row.note.clone().unwrap_or_else(|| "…".to_string()))
                             .into_any_element(),
                     })
-                    .when(empty, |el| el.opacity(0.5))
-                    .when(unavailable.is_none(), |el| {
+                    .when(row.empty, |el| el.opacity(0.5))
+                    .when(row.note.is_none(), |el| {
                         el.on_click(
                             cx.listener(move |this, _, _, cx| this.set_review_scope(scope, cx)),
                         )
@@ -1218,64 +894,26 @@ impl Composer {
         rows.push(self.render_commit_row(&review, selected, &popup, window, cx));
         let effective = self.reviewer_choice(&target.chat_id, cx);
         let options = self.review.options.clone().unwrap_or_default();
-        let auto_name = self.review.options.as_ref().map(|options| {
-            review::resolve_reviewer(&ReviewerChoice::Auto, target.harness, options).name()
-        });
-        let same_slot = |a: &ReviewerChoice, b: &ReviewerChoice| match (a, b) {
-            (
-                ReviewerChoice::Harness { harness: a, .. },
-                ReviewerChoice::Harness { harness: b, .. },
-            ) => a == b,
-            _ => a == b,
-        };
-        let mut choices = options.choices();
-        if !choices.iter().any(|choice| same_slot(choice, &effective)) {
-            choices.insert(1, effective.clone());
-        }
         let open_models = self.review.submenu;
-        let reviewer_rows: Vec<AnyElement> = choices
-            .into_iter()
-            .enumerate()
-            .map(|(ix, choice)| {
-                let harness = match &choice {
-                    ReviewerChoice::Harness { harness, .. } => Some(*harness),
-                    _ => None,
-                };
-                let selected = same_slot(&choice, &effective);
-                let label = match harness {
-                    Some(harness) => options.label(&ReviewerChoice::Harness {
-                        harness,
-                        model: None,
-                        reasoning: None,
-                    }),
-                    None => options.label(&choice),
-                };
-                let detail = match (&choice, &effective) {
-                    (ReviewerChoice::Auto, _) => auto_name.clone(),
-                    (
-                        _,
-                        ReviewerChoice::Harness {
-                            harness: h,
-                            model,
-                            reasoning,
-                        },
-                    ) if selected
-                        && harness == Some(*h)
-                        && (model.is_some() || reasoning.is_some()) =>
-                    {
-                        let parts: Vec<String> =
-                            model
-                                .as_deref()
-                                .map(|model| self.model_label(*h, model))
-                                .into_iter()
-                                .chain(reasoning.map(|level| {
-                                    crate::pickers::reasoning_label(level).to_string()
-                                }))
-                                .collect();
-                        Some(parts.join(" · "))
-                    }
-                    _ => None,
-                };
+        let reviewer_rows: Vec<AnyElement> = review::reviewer_rows(
+            self.review.options.as_ref(),
+            &effective,
+            target.harness,
+            |harness, model| self.model_label(harness, model),
+        )
+        .into_iter()
+        .enumerate()
+        .map(
+            |(
+                ix,
+                review::ReviewerRow {
+                    choice,
+                    harness,
+                    label,
+                    detail,
+                    selected,
+                },
+            )| {
                 let (mark, tint) = review::brand(&options, &choice, target.harness);
                 let id = SharedString::from(format!("composer-reviewer-{ix}"));
                 let open = harness.is_some() && open_models.map(|(key, _)| key) == Some(ix);
@@ -1351,15 +989,10 @@ impl Composer {
                     )
                     .child(row)
                     .into_any_element()
-            })
-            .collect();
-        let review_label = match (selected, &review.commit) {
-            (ReviewScope::Commit, Some(pick)) => format!("Review commit {}", pick.short()),
-            _ => format!(
-                "Review {}",
-                selected.label(review.base.as_deref()).to_lowercase()
-            ),
-        };
+            },
+        )
+        .collect();
+        let review_label = review.start_label(selected);
         let review_now = popover::menu_row(&popup, false, "composer-review-now")
             .id("composer-review-now")
             .debug_selector(|| "composer-review-now".into())
@@ -1394,10 +1027,10 @@ impl Composer {
                 }
                 this.close_review_menu(cx);
             }))
-            .child(popover::menu_heading(&popup, "Scope"))
+            .child(popover::menu_heading(&popup, review::SCOPE_HEADING))
             .children(rows)
             .child(popover::menu_separator())
-            .child(popover::menu_heading(&popup, "Reviewer"))
+            .child(popover::menu_heading(&popup, review::REVIEWER_HEADING))
             .children(reviewer_rows)
             .child(popover::menu_separator())
             .child(review_now)
@@ -1645,7 +1278,8 @@ impl Composer {
                 .get(&harness)
                 .and_then(|models| models.iter().find(|m| m.id == id))
         });
-        let levels = review::reasoning_stops(options, harness, model_entry);
+        let levels =
+            options.reasoning_stops(harness, model_entry.map(|m| m.reasoning_levels.as_slice()));
         if levels.is_empty() {
             return None;
         }
@@ -1692,7 +1326,7 @@ impl Composer {
                         .child(
                             div()
                                 .flex_1()
-                                .child(popover::menu_heading(popup, "Thinking")),
+                                .child(popover::menu_heading(popup, review::THINKING_HEADING)),
                         )
                         .child(
                             div()
@@ -1723,13 +1357,13 @@ impl Composer {
             .id("composer-review-scope-commit")
             .relative()
             .role(gpui::Role::MenuItemRadio)
-            .aria_label("Commit")
+            .aria_label(review::COMMIT_LABEL)
             .gap(px(8.0))
             .child(crate::settings::widgets::select_check(
                 popup,
                 selected == ReviewScope::Commit,
             ))
-            .child(div().flex_1().child("Commit"))
+            .child(div().flex_1().child(review::COMMIT_LABEL))
             .children(picked.map(|pick| {
                 div()
                     .font_family(popup.font_mono.clone())
@@ -1849,7 +1483,7 @@ impl Composer {
             .review
             .commit_filter
             .as_ref()
-            .map(|input| input.read(cx).text().trim().to_lowercase())
+            .map(|input| input.read(cx).text().to_string())
             .unwrap_or_default();
         let current = review.commit.as_ref().map(|pick| pick.sha.clone());
         let now = chrono::Utc::now();
@@ -1865,11 +1499,7 @@ impl Composer {
             ],
             Some(commits) => commits
                 .iter()
-                .filter(|commit| {
-                    query.is_empty()
-                        || commit.subject.to_lowercase().contains(&query)
-                        || commit.sha.starts_with(&query)
-                })
+                .filter(|commit| review::commit_matches(&commit.subject, &commit.sha, &query))
                 .enumerate()
                 .map(|(ix, commit)| {
                     let pick = review::CommitPick {
@@ -1952,7 +1582,7 @@ impl Composer {
                                 .py(px(6.0))
                                 .text_size(crate::typography::ui_rems(12.0))
                                 .text_color(popup.text_faint)
-                                .child("No matching commits"),
+                                .child(review::NO_MATCHING_COMMITS),
                         )
                     }),
             )
@@ -1995,27 +1625,7 @@ impl Composer {
     }
 
     pub(super) fn review_pill_suffix(&self, doc_id: &str, cx: &App) -> Option<String> {
-        let run = self.review_run_for(doc_id, cx)?;
-        let suffix = match run.status {
-            RunStatus::Unreadable => "couldn’t read findings".to_string(),
-            RunStatus::Stopped => "stopped".to_string(),
-            RunStatus::Failed(_) => "failed".to_string(),
-            RunStatus::Done if run.reported == 0 => "no issues".to_string(),
-            RunStatus::Done if run.findings.is_empty() => format!("{} handled", run.reported),
-            RunStatus::Done => {
-                let mut text = outcome_counts(&run);
-                if run.outdated() > 0 {
-                    text.push_str(&format!(" · {} outdated", run.outdated()));
-                }
-                text
-            }
-            _ if run.note.is_some() => "working".to_string(),
-            _ => return None,
-        };
-        Some(match run.note {
-            Some(_) => format!("{suffix} · fallback"),
-            None => suffix,
-        })
+        self.review_run_for(doc_id, cx)?.pill_suffix()
     }
 
     pub(super) fn render_review_findings(
@@ -2025,7 +1635,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let run = self.review_run_for(doc_id, cx)?;
-        let listed = run.status == RunStatus::Done && !run.findings.is_empty();
+        let listed = run.findings_listed();
         if !listed && run.note.is_none() {
             return None;
         }
@@ -2037,29 +1647,17 @@ impl Composer {
             div()
                 .pb(px(4.0))
                 .text_color(theme.danger)
-                .child(format!("Review again failed: {message}"))
+                .child(review::retry_failed(&message))
         });
         let rows = run.findings.iter().map(|finding| {
-            let (tint, wash) = finding.severity.colors(theme);
+            let (tint, wash) = review::severity_colors(finding.severity, theme);
             let outdated = finding.placement == review::Placement::Outdated;
             let state = run.state(&finding.id);
-            let outcome = run.outcome(&finding.id);
-            let reason = outcome
-                .filter(|_| matches!(state, FindingState::Skipped | FindingState::NoChange))
-                .and_then(|outcome| outcome.note.clone());
-            let label = match outcome.and_then(|outcome| outcome.commit.as_deref()) {
-                Some(sha) if state == FindingState::Fixed => {
-                    format!("Fixed · {}", review::short_sha(sha))
-                }
-                _ => state.label().to_string(),
-            };
+            let reason = run.reason(&finding.id);
+            let label = run.state_label(&finding.id);
             let (badge_text, badge_bg, badge_border) = badge_look(state, theme);
             let id = finding.id.clone();
-            let meta = if outdated {
-                format!("{} · {} · outdated", finding.id, finding.location())
-            } else {
-                format!("{} · {}", finding.id, finding.location())
-            };
+            let meta = finding.meta();
             div()
                 .debug_selector({
                     let id = finding.id.clone();
@@ -2070,10 +1668,7 @@ impl Composer {
                 .items_start()
                 .gap(px(8.0))
                 .py(px(3.0))
-                .when(
-                    outdated || matches!(state, FindingState::Fixed | FindingState::NoChange),
-                    |el| el.opacity(0.5),
-                )
+                .when(outdated || state.settled(), |el| el.opacity(0.5))
                 .child(
                     div()
                         .flex_none()
@@ -2140,7 +1735,7 @@ impl Composer {
                             .hover(|s| s.bg(theme.glass_hover()))
                             .role(gpui::Role::Button)
                             .aria_label(format!("Dismiss {}", finding.title))
-                            .tooltip(crate::settings::widgets::text_tooltip("Dismiss"))
+                            .tooltip(crate::settings::widgets::text_tooltip(review::DISMISS))
                             .child(
                                 crate::icons::icon(crate::icons::CLOSE)
                                     .size(px(10.0))
@@ -2197,7 +1792,7 @@ impl Composer {
                                 el.child(
                                     button(
                                         "review-fix-all",
-                                        format!("Fix {fixable} remaining").into(),
+                                        review::fix_remaining(fixable).into(),
                                         true,
                                     )
                                     .on_click(cx.listener(
@@ -2209,7 +1804,7 @@ impl Composer {
                                 )
                             })
                             .child(
-                                button("review-open-changes", "Open Changes".into(), false)
+                                button("review-open-changes", review::OPEN_CHANGES.into(), false)
                                     .on_click(cx.listener(|_, _, _, cx| {
                                         cx.stop_propagation();
                                         cx.emit(ComposerEvent::OpenChanges);
@@ -2237,90 +1832,5 @@ impl Composer {
             state.dismiss_review_finding(&key, id);
             cx.notify();
         });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::review::ChatReview;
-
-    #[test]
-    fn a_picked_scope_with_nothing_to_review_keeps_the_chip() {
-        let turn = ReviewScope::LatestTurn;
-        let picked = |stat: Option<Result<(u32, u32), String>>| ChatReview {
-            scope: Some(turn),
-            stats: stat.into_iter().map(|stat| (turn, stat)).collect(),
-            ..ChatReview::default()
-        };
-        for review in [
-            picked(Some(Ok((0, 0)))),
-            picked(Some(Err("no turn recorded".into()))),
-            picked(None),
-        ] {
-            assert!(matches!(chip_look(&review, turn), Some(Look::Empty(_))));
-        }
-        let mut clean = picked(Some(Ok((0, 0))));
-        let mut run = ReviewRun::new(turn);
-        run.status = RunStatus::Done;
-        clean.run = Some(run);
-        assert!(matches!(chip_look(&clean, turn), Some(Look::Empty(_))));
-
-        let untouched = ChatReview {
-            stats: [(ReviewScope::Uncommitted, Ok((0, 0)))].into(),
-            ..ChatReview::default()
-        };
-        assert!(chip_look(&untouched, ReviewScope::Uncommitted).is_none());
-    }
-
-    #[test]
-    fn the_pill_counts_outcomes_and_leaves_out_the_empty_ones() {
-        let reply = (1..=5)
-            .map(|n| {
-                format!("{{\"path\":\"a\",\"line\":{n},\"severity\":\"bug\",\"title\":\"t\"}}")
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        let review::ReadOutcome::Read(Some(findings)) =
-            review::read_outcome("completed", &format!("```zeron-review\n[{reply}]\n```"))
-        else {
-            panic!("unread");
-        };
-        let mut delegation: zeron_proto::Delegation = serde_json::from_value(serde_json::json!({
-            "delegatedByChatId": "owner",
-            "depth": 1,
-            "anchor": "task",
-            "wake": "never",
-            "status": "completed",
-            "startedAt": "2026-10-17T10:00:00Z",
-        }))
-        .unwrap();
-        for (id, kind) in [
-            ("F1", zeron_proto::FindingOutcomeKind::Fixed),
-            ("F2", zeron_proto::FindingOutcomeKind::Fixed),
-            ("F3", zeron_proto::FindingOutcomeKind::Skipped),
-            ("F4", zeron_proto::FindingOutcomeKind::NoChange),
-        ] {
-            delegation.finding_outcomes.insert(
-                id.into(),
-                zeron_proto::FindingOutcome {
-                    outcome: kind,
-                    note: None,
-                    commit: None,
-                },
-            );
-        }
-        let mut run = ReviewRun::new(ReviewScope::Uncommitted);
-        run.status = RunStatus::Done;
-        run.findings = findings;
-        run.delegation = Some(delegation.clone());
-        assert_eq!(
-            outcome_counts(&run),
-            "2 fixed · 1 skipped · 1 no change · 1 open"
-        );
-        delegation.finding_outcomes.remove("F3");
-        delegation.finding_outcomes.remove("F4");
-        run.delegation = Some(delegation);
-        assert_eq!(outcome_counts(&run), "2 fixed · 3 open");
     }
 }

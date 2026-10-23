@@ -13837,6 +13837,8 @@ name = "zeron-mobile"
 version = "0.2.114"
 dependencies = [
  "async-trait",
+ "chrono",
+ "resvg",
  "serde",
  "serde_json",
  "similar",
@@ -13847,11 +13849,13 @@ dependencies = [
  "zatex",
  "zeron-client",
  "zeron-doc",
+ "zeron-docs",
  "zeron-markdown",
  "zeron-orb",
  "zeron-proto",
  "zeron-syntax",
  "zeron-text",
+ "zeron-theme",
  "zeron-veil",
  "zeron-visual",
  "zeron-visual-gpu",
@@ -13898,6 +13902,7 @@ dependencies = [
  "pulldown-cmark",
  "serde",
  "serde_json",
+ "url",
  "uuid",
 ]
 

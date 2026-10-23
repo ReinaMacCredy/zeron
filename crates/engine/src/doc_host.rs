@@ -5093,9 +5093,7 @@ impl DocHost {
             && item.task_steps.is_empty()
             && item.text != zeron_proto::RESUME_PROMPT;
         if !self.missing_row_attachments(item).is_empty() {
-            return Err(EngineError::Other(
-                "this message's images are still uploading".into(),
-            ));
+            return Err(EngineError::Other("its images are still uploading".into()));
         }
         let computer_control = self.computer_control_for(
             &sessions,

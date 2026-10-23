@@ -653,7 +653,7 @@ impl Pickers {
             .selected_model(cx)?
             .options
             .iter()
-            .find_map(|o| fast_mode_values(o).map(|(on, off)| (o, on, off)))?;
+            .find_map(|o| model_options::fast_mode_values(o).map(|(on, off)| (o, on, off)))?;
         let options = self.explicit_options(cx);
         let fast = options
             .get(&option.id)
@@ -674,7 +674,7 @@ impl Pickers {
         self.selected_model(cx)?
             .options
             .iter()
-            .find(|o| fast_mode_values(o).is_some())
+            .find(|o| model_options::fast_mode_values(o).is_some())
             .map(|o| o.id.clone())
     }
 

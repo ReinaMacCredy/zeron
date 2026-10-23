@@ -1,8 +1,8 @@
 use super::*;
 use crate::settings::SINCE_INTRO_ID;
-use crate::tasks::{SampleRow, StripTree, TaskCenter, TreeStatus, tree_glyph};
+use crate::tasks::{SampleRow, StatusTone, StripTree, TaskCenter, TreeStatus, tree_glyph};
 use std::time::Instant;
-use zeron_proto::TaskMode;
+use zeron_proto::mission::{INTRO_DISMISS, INTRO_NEXT, INTRO_PAGES, INTRO_TRY};
 
 const PAGE_IN: motion::MotionSpec = motion::MotionSpec::new(250, motion::EASE_OUT);
 const PAGE_SHIFT: f32 = 8.0;
@@ -22,27 +22,19 @@ struct Page {
 }
 
 const MISSION_PAGES: [Page; 4] = [
-    Page {
-        id: "",
-        title: "Start with a goal",
-        body: "Press Shift+Tab in the composer, or turn on Plan first on a task\u{2019}s card, and describe what you want done. Add up to five chats for the lead to read before it plans.",
-    },
-    Page {
-        id: "",
-        title: "Approve the plan",
-        body: "A lead agent turns your goal into steps you can edit, reorder and add images to. By default nothing runs until you click Approve and run.",
-    },
-    Page {
-        id: "",
-        title: "Watch every step",
-        body: "Each step runs on its own thread, side by side when steps don\u{2019}t depend on each other. The tree on the lead\u{2019}s thread follows them live, and the mission page adds each step\u{2019}s token count.",
-    },
-    Page {
-        id: "",
-        title: "A lead and a Supervisor watch",
-        body: "The lead reviews each step\u{2019}s work when it finishes and sends it back if something is missing. The Supervisor gathers what needs you into one sheet per mission, and one Send answers it all.",
-    },
+    mission_page(0),
+    mission_page(1),
+    mission_page(2),
+    mission_page(3),
 ];
+
+const fn mission_page(ix: usize) -> Page {
+    Page {
+        id: "",
+        title: INTRO_PAGES[ix].title,
+        body: INTRO_PAGES[ix].body,
+    }
+}
 
 const SINCE_PAGES: [Page; 4] = [
     Page {
@@ -83,7 +75,7 @@ impl Deck {
 
     fn cta(self) -> &'static str {
         match self {
-            Self::Mission => "Try Mission Control",
+            Self::Mission => INTRO_TRY,
             Self::Since => "Open Tasks",
         }
     }
@@ -145,10 +137,7 @@ pub(super) fn since_pages(seen: &[String]) -> Vec<usize> {
 }
 
 fn mission_started(state: &AppState) -> bool {
-    state
-        .tasks
-        .iter()
-        .any(|task| task.mode == TaskMode::Orchestrated)
+    !zeron_proto::mission::intro_due(&state.tasks)
 }
 
 fn mission_tab_open(state: &AppState, open_tabs: Option<&[String]>) -> bool {
@@ -381,7 +370,7 @@ impl Shell {
             popover::welcome_action(theme, "intro-finish", deck.cta(), true)
                 .on_click(cx.listener(move |this, _, _, cx| this.finish_intro(deck, cx)))
         } else {
-            popover::welcome_action(theme, "intro-next", "Next", true)
+            popover::welcome_action(theme, "intro-next", INTRO_NEXT, true)
                 .on_click(cx.listener(|this, _, _, cx| this.page_intro(1, cx)))
         };
         let card = popover::welcome_sheet(theme, "intro-card", content.title)
@@ -395,7 +384,7 @@ impl Shell {
                     .gap(px(8.0))
                     .child(dots)
                     .child(
-                        popover::welcome_action(theme, "intro-dismiss", "Not now", false)
+                        popover::welcome_action(theme, "intro-dismiss", INTRO_DISMISS, false)
                             .on_click(cx.listener(|this, _, _, cx| this.close_intro(cx))),
                     )
                     .child(next),

@@ -69,6 +69,10 @@ pub enum ColorRole {
     WarningTile,
     ButtonBorder,
     OnSolid,
+    Cyan,
+    AccentWash,
+    WarningWash,
+    CyanWash,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -77,6 +81,7 @@ pub enum CardAction {
         request_id: String,
         question_id: String,
         answer: String,
+        identifier: String,
     },
     EnableComputer,
 }
@@ -257,7 +262,12 @@ pub enum WidgetKind {
     Image { reference: String },
     /// Working indicator at the tail of a live turn. The painter ticks the
     /// elapsed label itself so time never forces a relayout.
-    Working { since_ms: Option<i64>, streaming: bool },
+    Working {
+        since_ms: Option<i64>,
+        word: String,
+        rate: Option<String>,
+        divider: bool,
+    },
     /// A small activity spinner (running tools).
     Spinner,
     /// Tap target revealing the full text in `payload` (truncated tool lines).
@@ -282,6 +292,13 @@ pub enum WidgetKind {
     CardButton { action: CardAction },
     /// An agent visual; `TranscriptView::visual(id)` is its live session.
     Visual { id: String },
+    HtmlRender { id: String, device_id: String, path: String, scrolls: bool },
+    HtmlExpand {
+        id: String,
+        device_id: String,
+        path: String,
+        title: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]

@@ -461,7 +461,14 @@ impl DelegationDelivery {
 impl Chat {
     pub fn sidechat_expired(&self, now: DateTime<Utc>) -> bool {
         self.sidechat_source_chat_id.is_some()
-            && now.signed_duration_since(self.created_at) >= chrono::Duration::hours(24)
+            && now.signed_duration_since(self.created_at)
+                >= chrono::Duration::hours(crate::sidechat::SIDECHAT_LIFETIME_HOURS)
+    }
+
+    pub fn live_sidechat_source(&self, now: DateTime<Utc>) -> Option<&str> {
+        self.sidechat_source_chat_id
+            .as_deref()
+            .filter(|_| !self.archived && !self.sidechat_expired(now))
     }
 
     /// A session the user sees in chat lists: neither a delegated child nor a
@@ -492,6 +499,28 @@ impl Chat {
 }
 
 impl Chat {
+    pub fn display_title(&self) -> String {
+        self.title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or("New session")
+            .to_owned()
+    }
+
+    /// Every harness the chat has run on, oldest first, the current one last:
+    /// the marks a session row or tab stacks. Empty before it has a config.
+    pub fn harness_marks(&self) -> Vec<HarnessId> {
+        let mut marks = self.previous_harnesses.clone();
+        if let Some(current) = self.config.as_ref().map(|c| c.harness) {
+            marks.retain(|h| *h != current);
+            marks.push(current);
+        }
+        marks
+    }
+}
+
+impl Chat {
     /// Ignores the live status; Working and AwaitingInput chats never settle.
     /// A chat with no messages never settles on its own, as in T3.
     pub fn settled_at(&self, after_days: u32, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
@@ -503,6 +532,22 @@ impl Chat {
             Some(settle) => settle.settled.then_some(settle.at),
             None => activity.filter(|at| *at < now - chrono::Duration::days(i64::from(after_days))),
         }
+    }
+
+    /// [`Chat::settled_at`] for a row showing `status`: a live turn keeps it in the Inbox.
+    pub fn inbox_settled_at(
+        &self,
+        status: ChatIndicator,
+        after_days: u32,
+        now: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        if matches!(
+            status,
+            ChatIndicator::Working | ChatIndicator::AwaitingInput
+        ) {
+            return None;
+        }
+        self.settled_at(after_days, now)
     }
 
     /// True when the chat has activity the user hasn't seen on any device.
@@ -756,6 +801,32 @@ pub enum StepTurnEnd {
     Completed,
     Failed,
     Stopped,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanEdit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overview_images: Option<Vec<String>>,
+    pub steps: Vec<PlanStepEdit>,
+    #[serde(default)]
+    pub remove_step_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanStepEdit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+    pub title: String,
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub images: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2177,6 +2248,18 @@ pub struct AgentUsageWindow {
     pub resets_at: Option<DateTime<Utc>>,
 }
 
+impl AgentAccountsSnapshot {
+    pub fn busiest_window(&self, harness: HarnessId) -> Option<(&str, f32)> {
+        self.accounts
+            .iter()
+            .find(|account| account.harness == harness && account.active)?
+            .usage_windows
+            .iter()
+            .max_by(|a, b| a.used_fraction.total_cmp(&b.used_fraction))
+            .map(|window| (window.label.as_str(), window.used_fraction.clamp(0.0, 1.0)))
+    }
+}
+
 /// Claude's usage credits, spent past the plan limits; amounts in `currency` units.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2272,6 +2355,30 @@ pub struct AgentProfilesSnapshot {
     pub profiles: Vec<AgentProfile>,
 }
 
+/// "Claude Code · Opus 5.5 · Auto · High · 2 tools off" under a profile's name.
+pub fn profile_line(
+    harness_name: &str,
+    model: Option<&str>,
+    mode: Option<PermissionMode>,
+    reasoning: Option<ReasoningLevel>,
+    tools_off: usize,
+) -> String {
+    let mut parts = vec![harness_name.to_string()];
+    if let Some(model) = model {
+        parts.push(model.to_string());
+    }
+    if let Some(mode) = mode {
+        parts.push(mode.short_label().to_string());
+    }
+    if let Some(level) = reasoning {
+        parts.push(level.label().to_string());
+    }
+    if tools_off > 0 {
+        parts.push(format!("{tools_off} tools off"));
+    }
+    parts.join(" · ")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectActionsSnapshot {
@@ -2337,6 +2444,80 @@ pub struct TerminalScreen {
     pub cursor_col: usize,
     pub lines: Vec<String>,
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub styled_lines: Vec<Vec<TerminalRun>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TerminalColor {
+    Indexed(u8),
+    Rgb(u8, u8, u8),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalRun {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fg: Option<TerminalColor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bg: Option<TerminalColor>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub italic: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub underline: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dim: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inverse: bool,
+}
+
+impl TerminalRun {
+    pub fn same_style(&self, other: &Self) -> bool {
+        (
+            self.fg,
+            self.bg,
+            self.bold,
+            self.italic,
+            self.underline,
+            self.dim,
+            self.inverse,
+        ) == (
+            other.fg,
+            other.bg,
+            other.bold,
+            other.italic,
+            other.underline,
+            other.dim,
+            other.inverse,
+        )
+    }
+}
+
+const TERMINAL_CUBE_LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+
+/// 16-231 is the xterm cube, left alone in both appearances; 232-255 is the
+/// grey ramp tools use for de-emphasis, so light mode mirrors it.
+pub fn terminal_extended_rgb(dark: bool, index: u8) -> Option<(u8, u8, u8)> {
+    match index {
+        0..=15 => None,
+        16..=231 => {
+            let n = index as usize - 16;
+            Some((
+                TERMINAL_CUBE_LEVELS[n / 36],
+                TERMINAL_CUBE_LEVELS[(n / 6) % 6],
+                TERMINAL_CUBE_LEVELS[n % 6],
+            ))
+        }
+        232..=255 => {
+            let step = index - 232;
+            let v = 8 + 10 * if dark { step } else { 23 - step };
+            Some((v, v, v))
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2452,6 +2633,38 @@ pub struct ChatConnectivity {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn the_terminal_cube_is_appearance_independent_and_the_grey_ramp_mirrors() {
+        for dark in [true, false] {
+            assert_eq!(terminal_extended_rgb(dark, 7), None);
+            assert_eq!(terminal_extended_rgb(dark, 16), Some((0, 0, 0)));
+            assert_eq!(terminal_extended_rgb(dark, 231), Some((255, 255, 255)));
+            assert_eq!(terminal_extended_rgb(dark, 196), Some((255, 0, 0)));
+            assert_eq!(terminal_extended_rgb(dark, 21), Some((0, 0, 255)));
+        }
+        assert_eq!(terminal_extended_rgb(true, 232), Some((8, 8, 8)));
+        assert_eq!(terminal_extended_rgb(true, 255), Some((238, 238, 238)));
+        assert_eq!(terminal_extended_rgb(false, 232), Some((238, 238, 238)));
+        assert_eq!(terminal_extended_rgb(false, 255), Some((8, 8, 8)));
+    }
+
+    #[test]
+    fn a_plain_screen_reply_omits_styled_lines_both_ways() {
+        let screen: TerminalScreen = serde_json::from_value(serde_json::json!({
+            "terminal": { "id": "t", "cwd": "/", "shell": "zsh" },
+            "cols": 80, "rows": 24, "altScreen": false, "cursorRow": 0, "cursorCol": 0,
+            "lines": ["$ ls"], "truncated": false,
+        }))
+        .unwrap();
+        assert!(screen.styled_lines.is_empty());
+        assert!(
+            serde_json::to_value(&screen)
+                .unwrap()
+                .get("styledLines")
+                .is_none()
+        );
+    }
 
     #[test]
     fn task_status_derives_from_completion_then_the_linked_thread() {

@@ -1,13 +1,16 @@
+use std::ops::Deref;
 use std::rc::Rc;
 
 use gpui::{AnyElement, App, SharedString, Window, div, prelude::*, px};
-use zeron_engine::routing::Role;
-use zeron_proto::{Chat, ChildRoute, RouteTarget, Task, TaskStep, ToolCall};
+use zeron_proto::route_preview::{self as rp, Labels};
+use zeron_proto::{Chat, RouteTarget, Task, TaskStep, ToolCall};
 
-use crate::route_badge::{self, OnRouteLink, RouteInfo, RouteLink, same_model, target_text};
+use crate::route_badge::{self, OnRouteLink, RouteInfo, RouteLink, target_text};
 use crate::theme::Theme;
 
-pub(crate) use zeron_engine::routing::preview::Preview;
+pub(crate) use zeron_proto::route_preview::{
+    Preview, multiplier_text, plan_steps, preview_key, preview_roles,
+};
 
 pub(crate) fn plan_task_id(call: &ToolCall) -> Option<String> {
     let input = match call {
@@ -25,56 +28,18 @@ pub(crate) fn plan_task_id(call: &ToolCall) -> Option<String> {
         .filter(|id| !id.is_empty())
 }
 
-pub(crate) fn plan_steps<'a>(task_id: &str, steps: &'a [TaskStep]) -> Vec<&'a TaskStep> {
-    let mut steps: Vec<&TaskStep> = steps
-        .iter()
-        .filter(|step| step.task_id == task_id && !step.deleted)
-        .collect();
-    steps.sort_by(|a, b| a.order_key.cmp(&b.order_key));
-    steps
-}
-
-pub(crate) fn role_of(step: &TaskStep) -> Option<&'static str> {
-    step.role.as_deref().and_then(Role::parse).map(Role::name)
-}
-
-/// Changes whenever the step set or a role changes, so the preview refetches.
-pub(crate) fn preview_key(steps: &[&TaskStep]) -> String {
-    steps
-        .iter()
-        .map(|step| format!("{}={}", step.id, role_of(step).unwrap_or("")))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-pub(crate) fn preview_roles(steps: &[&TaskStep]) -> Vec<&'static str> {
-    let mut roles: Vec<&'static str> = Vec::new();
-    for role in steps.iter().filter_map(|step| role_of(step)) {
-        if !roles.contains(&role) {
-            roles.push(role);
-        }
-    }
-    roles
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PlanLine {
-    pub title: String,
-    pub role: Option<&'static str>,
-    pub target: Option<RouteTarget>,
-    pub agent_picks: bool,
-    pub native: bool,
-    pub multiplier: Option<f64>,
-    pub planned: Option<f64>,
-    pub fallback: Option<String>,
+    pub line: rp::PlanLine,
     pub badge: Option<RouteInfo>,
 }
 
-fn until(resets_at: Option<i64>) -> String {
-    resets_at
-        .and_then(route_badge::clock)
-        .map(|at| format!(" until {at}"))
-        .unwrap_or_default()
+impl Deref for PlanLine {
+    type Target = rp::PlanLine;
+
+    fn deref(&self) -> &rp::PlanLine {
+        &self.line
+    }
 }
 
 fn runs_as(target: &RouteTarget, native: bool, cx: &App) -> String {
@@ -92,136 +57,35 @@ pub(crate) fn plan_lines(
     preview: Option<&Preview>,
     cx: &App,
 ) -> Vec<PlanLine> {
-    steps
-        .iter()
-        .map(|step| {
-            let role = role_of(step);
-            let row = role.and_then(|role| {
-                preview?
-                    .rows
+    let labels = Labels {
+        runs_as: &|target, native| runs_as(target, native, cx),
+        clock: &route_badge::clock,
+    };
+    rp::plan_lines(steps, chats, lead, preview, &labels)
+        .into_iter()
+        .zip(steps)
+        .map(|(line, step)| {
+            let bound = step.chat_id.as_deref().filter(|id| {
+                chats
                     .iter()
-                    .find(|row| row.role == role && row.source != "off")
+                    .any(|chat| chat.id == *id && chat.config.is_some())
             });
-            let mut line = PlanLine {
-                title: step.title.clone(),
-                role,
-                target: None,
-                agent_picks: false,
-                native: false,
-                multiplier: None,
-                planned: None,
-                fallback: None,
-                badge: None,
-            };
-            let bound = step.chat_id.as_deref().and_then(|id| {
-                let chat = chats.iter().find(|chat| chat.id == id)?;
-                Some((id, chat.config.as_ref().map(route_badge::target_of)?))
-            });
-            if let Some((chat_id, ran)) = bound {
-                line.multiplier = row
-                    .and_then(|row| {
-                        if row.target.as_ref().is_some_and(|t| same_model(t, &ran)) {
-                            return row.multiplier;
-                        }
-                        let fallback = row.fallback.as_ref()?;
-                        fallback
-                            .target
-                            .as_ref()
-                            .is_some_and(|t| same_model(t, &ran))
-                            .then_some(fallback.multiplier)
-                            .flatten()
-                    })
-                    .or_else(|| {
-                        lead.is_some_and(|lead| same_model(lead, &ran))
-                            .then_some(1.0)
-                    });
-                line.planned = line.multiplier;
-                line.badge = step
-                    .route
+            let badge = bound.and_then(|chat_id| {
+                step.route
                     .clone()
-                    .map(|route| RouteInfo::for_child(chats, chat_id, route));
-                line.target = Some(ran);
-                return line;
-            }
-            let Some(row) = row else {
-                if role.is_none() || preview.is_some() {
-                    line.agent_picks = true;
-                    line.target = lead.cloned();
-                    line.multiplier = Some(1.0);
-                    line.planned = Some(1.0);
-                }
-                return line;
-            };
-            let role = role.unwrap_or("general");
-            line.target = row.target.clone();
-            line.multiplier = row.multiplier;
-            line.planned = row.multiplier;
-            if let Some(fallback) = &row.fallback {
-                match &fallback.target {
-                    Some(target) => {
-                        line.fallback = Some(format!(
-                            "{role}: {}{}, runs as {}",
-                            fallback.reason,
-                            until(fallback.resets_at),
-                            runs_as(target, fallback.native, cx)
-                        ));
-                        line.target = Some(target.clone());
-                        line.native = fallback.native;
-                        line.multiplier = fallback.multiplier;
-                    }
-                    None => {
-                        let harness = row
-                            .target
-                            .as_ref()
-                            .map_or("The route", |target| target.harness.display_name());
-                        line.fallback = Some(format!(
-                            "{role}: {harness} out of quota{}, {}",
-                            until(fallback.resets_at),
-                            fallback.reason
-                        ));
-                    }
-                }
-            } else if row.source == ChildRoute::FELL_BACK {
-                line.fallback = Some(format!(
-                    "{role}: {}, runs as {}",
-                    row.reason.as_deref().unwrap_or("route unavailable"),
-                    row.target
-                        .as_ref()
-                        .map_or_else(|| "this chat's model".to_string(), |t| target_text(t, cx))
-                ));
-            }
-            line
+                    .map(|route| RouteInfo::for_child(chats, chat_id, route))
+            });
+            PlanLine { line, badge }
         })
         .collect()
 }
 
-pub(crate) fn multiplier_text(multiplier: f64) -> String {
-    let text = format!("{multiplier:.2}");
-    let text = text.trim_end_matches('0').trim_end_matches('.');
-    format!("{text}x")
+fn inner(lines: &[PlanLine]) -> Vec<rp::PlanLine> {
+    lines.iter().map(|line| line.line.clone()).collect()
 }
 
-pub(crate) struct Totals {
-    pub total: f64,
-    pub planned: f64,
-    pub raised: usize,
-}
-
-pub(crate) fn totals(lines: &[PlanLine]) -> Totals {
-    let cost = |m: Option<f64>| m.unwrap_or(1.0);
-    Totals {
-        total: lines.iter().map(|line| cost(line.multiplier)).sum(),
-        planned: lines
-            .iter()
-            .map(|line| cost(line.planned.or(line.multiplier)))
-            .sum(),
-        raised: lines
-            .iter()
-            .filter(|line| {
-                line.fallback.is_some() && cost(line.multiplier) > cost(line.planned) + 1e-9
-            })
-            .count(),
-    }
+pub(crate) fn totals(lines: &[PlanLine]) -> rp::Totals {
+    rp::totals(&inner(lines))
 }
 
 fn mix_label(target: &RouteTarget, native: bool, cx: &App) -> String {
@@ -241,25 +105,12 @@ fn mix_label(target: &RouteTarget, native: bool, cx: &App) -> String {
 }
 
 pub(crate) fn mix(lines: &[PlanLine], cx: &App) -> Vec<(RouteTarget, String, usize)> {
-    let mut groups: Vec<(RouteTarget, bool, String, usize)> = Vec::new();
-    for line in lines {
-        let Some(target) = &line.target else { continue };
-        match groups
-            .iter_mut()
-            .find(|(t, native, _, _)| same_model(t, target) && *native == line.native)
-        {
-            Some(group) => group.3 += 1,
-            None => groups.push((
-                target.clone(),
-                line.native,
-                mix_label(target, line.native, cx),
-                1,
-            )),
-        }
-    }
-    groups
+    rp::mix(&inner(lines))
         .into_iter()
-        .map(|(target, _, label, count)| (target, label, count))
+        .map(|(target, native, count)| {
+            let label = mix_label(&target, native, cx);
+            (target, label, count)
+        })
         .collect()
 }
 
@@ -556,7 +407,7 @@ pub(crate) fn plan_card(card: PlanCard, theme: &Theme, cx: &App) -> AnyElement {
     let start_label = if has_fallback {
         "Start with fallback"
     } else {
-        "Start mission"
+        zeron_proto::mission::START_MISSION
     };
     let start = task.plan_pending.then(|| {
         div()
@@ -644,32 +495,6 @@ pub(crate) fn plan_card(card: PlanCard, theme: &Theme, cx: &App) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn line(multiplier: f64, planned: f64, fallback: bool) -> PlanLine {
-        PlanLine {
-            title: String::new(),
-            role: Some("worker"),
-            target: None,
-            agent_picks: false,
-            native: false,
-            multiplier: Some(multiplier),
-            planned: Some(planned),
-            fallback: fallback.then(String::new),
-            badge: None,
-        }
-    }
-
-    #[test]
-    fn totals_count_only_fallbacks_that_raise_the_cost() {
-        let t = totals(&[
-            line(1.0, 0.04, true),
-            line(0.2, 0.2, false),
-            line(1.0, 1.0, true),
-        ]);
-        assert!((t.total - 2.2).abs() < 1e-9);
-        assert!((t.planned - 1.24).abs() < 1e-9);
-        assert_eq!(t.raised, 1);
-    }
 
     #[test]
     fn only_zeron_plan_calls_with_a_task_name_a_card() {

@@ -119,6 +119,7 @@ pub struct LiveStatus {
     pub streaming: bool,
     /// Stop is meaningful.
     pub can_interrupt: bool,
+    pub resumable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -149,6 +150,28 @@ pub struct QueueItem {
     pub gate: Option<QueueGate>,
     /// A Send-now / Remove is awaiting the host's acknowledgement.
     pub action_pending: bool,
+    pub from_label: Option<String>,
+    /// What the row's send button does; `None` while it cannot deliver.
+    pub primary_action: Option<QueuePrimaryAction>,
+    /// The first image attachment, for the row's thumbnail.
+    pub image: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum QueuePrimaryAction {
+    Steer,
+    SendNext,
+    SendNow,
+}
+
+impl From<zc::QueuePrimaryAction> for QueuePrimaryAction {
+    fn from(a: zc::QueuePrimaryAction) -> Self {
+        match a {
+            zc::QueuePrimaryAction::Steer => Self::Steer,
+            zc::QueuePrimaryAction::SendNext => Self::SendNext,
+            zc::QueuePrimaryAction::SendNow => Self::SendNow,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -218,6 +241,28 @@ pub struct InputRequest {
     pub questions: Vec<UserInputQuestion>,
 }
 
+impl From<&zc::InputRequest> for InputRequest {
+    fn from(i: &zc::InputRequest) -> Self {
+        Self {
+            entry_id: i.entry_id.clone(),
+            request_id: i.request_id.clone(),
+            questions: i
+                .questions
+                .iter()
+                .map(|q| UserInputQuestion {
+                    id: q.id.clone(),
+                    header: q.header.clone(),
+                    question: q.question.clone(),
+                    options: q.options.clone(),
+                    multi_select: q.multi_select,
+                    prefill: q.prefill.clone(),
+                    multiline: q.multiline,
+                })
+                .collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct RoomState {
     pub connected: bool,
@@ -258,6 +303,13 @@ pub struct ComposerState {
     /// Scroll-to-own-send target.
     pub last_submitted_message_id: Option<String>,
     pub context_usage: Option<ContextUsage>,
+    pub limit_pill: Option<crate::layout::LimitPill>,
+    pub compacting: bool,
+    pub compact_blocked: Option<String>,
+    pub resume_compaction: Option<super::composer::ResumeOffer>,
+    pub prediction: Option<String>,
+    pub review: Option<super::review::ReviewChipView>,
+    pub staged_comments: Vec<super::review::StagedCommentChip>,
 }
 
 impl From<&zc::ComposerState> for ComposerState {
@@ -287,6 +339,7 @@ impl From<&zc::ComposerState> for ComposerState {
                 working_since_ms: c.live.working_since_ms,
                 streaming: c.live.streaming,
                 can_interrupt: c.live.can_interrupt,
+                resumable: c.live.resumable,
             },
             queue: c
                 .queue
@@ -318,6 +371,9 @@ impl From<&zc::ComposerState> for ComposerState {
                         }
                     }),
                     action_pending: q.action_pending,
+                    from_label: q.from_label.clone(),
+                    primary_action: q.primary_action.map(Into::into),
+                    image: q.image.clone(),
                 })
                 .collect(),
             pending_sends: c.pending_sends.iter().map(Into::into).collect(),
@@ -329,29 +385,25 @@ impl From<&zc::ComposerState> for ComposerState {
                 degraded: c.room.degraded,
             },
             transfer_progress: c.transfer_progress,
-            open_input: c.open_input.as_ref().map(|i| InputRequest {
-                entry_id: i.entry_id.clone(),
-                request_id: i.request_id.clone(),
-                questions: i
-                    .questions
-                    .iter()
-                    .map(|q| UserInputQuestion {
-                        id: q.id.clone(),
-                        header: q.header.clone(),
-                        question: q.question.clone(),
-                        options: q.options.clone(),
-                        multi_select: q.multi_select,
-                        prefill: q.prefill.clone(),
-                        multiline: q.multiline,
-                    })
-                    .collect(),
-            }),
+            open_input: c.open_input.as_ref().map(Into::into),
             queue_error: c.queue_error.clone(),
             last_submitted_message_id: c.last_submitted_message_id.clone(),
             context_usage: c.context_usage.map(|u| ContextUsage {
                 tokens: u.tokens,
                 window: u.window,
             }),
+            limit_pill: c.limit.as_ref().map(crate::layout::limit_pill),
+            compacting: c.compacting,
+            compact_blocked: c.compact_blocked.clone(),
+            resume_compaction: c
+                .resume_compaction
+                .map(|offer| super::composer::ResumeOffer {
+                    title: zeron_proto::compaction::RESUME_COMPACTION_TITLE.into(),
+                    body: offer.body(),
+                }),
+            prediction: c.prediction.clone(),
+            review: c.review.as_ref().map(Into::into),
+            staged_comments: super::review::staged_chips(&c.staged_comments),
         }
     }
 }
@@ -371,6 +423,13 @@ pub struct TranscriptStatus {
     pub working_since_ms: Option<i64>,
     /// Id of the newest entry (host or echo).
     pub last_entry_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SkillFile {
+    pub path: String,
+    pub text: String,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -570,6 +629,49 @@ impl SessionHandle {
         }))
     }
 
+    pub async fn computer_stop(&self) -> CoreResult<bool> {
+        let inner = self.inner.clone();
+        Ok(on_runtime(async move { inner.computer_stop().await }).await?)
+    }
+
+    pub async fn list_terminals(&self) -> CoreResult<Vec<crate::terminal::TerminalTab>> {
+        let inner = self.inner.clone();
+        let infos = on_runtime(async move { inner.list_terminals().await }).await?;
+        Ok(infos.iter().map(crate::terminal::tab).collect())
+    }
+
+    pub async fn read_terminal(
+        &self,
+        terminal_id: String,
+        dark: bool,
+    ) -> CoreResult<crate::terminal::TerminalView> {
+        let inner = self.inner.clone();
+        let screen = on_runtime(async move { inner.read_terminal(&terminal_id).await }).await?;
+        Ok(crate::terminal::view(&screen, dark))
+    }
+
+    pub async fn list_project_actions(
+        &self,
+    ) -> CoreResult<Option<crate::terminal::ProjectActions>> {
+        let inner = self.inner.clone();
+        let snapshot = on_runtime(async move { inner.list_project_actions().await }).await?;
+        Ok(snapshot.map(|snapshot| crate::terminal::ProjectActions {
+            actions: snapshot
+                .actions
+                .iter()
+                .map(crate::terminal::action_item)
+                .collect(),
+            issue: snapshot.project_file_issue,
+        }))
+    }
+
+    pub async fn run_project_action(&self, action_id: String) -> CoreResult<String> {
+        let inner = self.inner.clone();
+        let run =
+            on_runtime(async move { inner.run_project_action(&action_id, 120, 32).await }).await?;
+        Ok(run.terminal.id)
+    }
+
     /// Park a message on the shared queue directly. Returns the row id.
     pub fn enqueue(
         &self,
@@ -662,6 +764,35 @@ impl SessionHandle {
 
     pub fn clear_queue_error(&self) {
         self.inner.clear_queue_error();
+    }
+
+    pub async fn fork_from(&self, entry_id: String) -> CoreResult<String> {
+        let inner = self.inner.clone();
+        on_runtime(async move { inner.fork_from(&entry_id).await }).await
+    }
+
+    pub async fn rewind_to(&self, entry_id: String) -> CoreResult<String> {
+        let inner = self.inner.clone();
+        on_runtime(async move { inner.rewind_to(&entry_id).await }).await
+    }
+
+    pub async fn skill_file(&self, name: String, path: Option<String>) -> CoreResult<SkillFile> {
+        let inner = self.inner.clone();
+        let file =
+            on_runtime(async move { inner.skill_file(&name, path.as_deref()).await }).await?;
+        Ok(SkillFile {
+            path: file.path,
+            text: file.text,
+            truncated: file.truncated,
+        })
+    }
+
+    pub async fn branch_blocked(&self, rewind: bool) -> Option<String> {
+        let inner = self.inner.clone();
+        zc::runtime::run(async move { Ok(inner.branch_blocked(rewind).await) })
+            .await
+            .ok()
+            .flatten()
     }
 
     /// "Not delivered — tap to retry".

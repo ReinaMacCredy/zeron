@@ -2,50 +2,60 @@ import PhotosUI
 import UIKit
 import UniformTypeIdentifiers
 
-/// Presents the attach menu (Photos / Camera / Files / Paste) and turns picks
-/// into `StagedImage`s: HEIC→JPEG, long side ≤ 2560px, ≤ 24 MB.
+/// The attach card's actions (Camera / Photos / Files / Paste, plus the
+/// inline grid's picks) turning into `StagedImage`s: HEIC→JPEG, long side
+/// ≤ 2560px, ≤ 24 MB.
 final class AttachmentPicker: NSObject, PHPickerViewControllerDelegate, UIImagePickerControllerDelegate, UINavigationControllerDelegate, UIDocumentPickerDelegate {
     private weak var host: UIViewController?
+    let limit: Int
     private let completion: ([StagedImage]) -> Void
     private var retainSelf: AttachmentPicker?
 
-    init(host: UIViewController, completion: @escaping ([StagedImage]) -> Void) {
+    init(host: UIViewController, limit: Int, completion: @escaping ([StagedImage]) -> Void) {
         self.host = host
+        self.limit = max(1, limit)
         self.completion = completion
     }
 
-    static func menu(host: UIViewController, limit: Int, completion: @escaping ([StagedImage]) -> Void) -> UIMenu {
-        var items: [UIMenuElement] = [
-            UIAction(title: "Photo Library", image: UIImage(systemName: "photo.on.rectangle")) { _ in
-                AttachmentPicker(host: host, completion: completion).presentPhotos(limit: limit)
-            },
-        ]
-        if UIImagePickerController.isSourceTypeAvailable(.camera) {
-            items.append(UIAction(title: "Take Photo", image: UIImage(systemName: "camera")) { _ in
-                AttachmentPicker(host: host, completion: completion).presentCamera()
-            })
-        }
-        items.append(UIAction(title: "Choose File", image: UIImage(systemName: "folder")) { _ in
-            AttachmentPicker(host: host, completion: completion).presentFiles()
-        })
-        if UIPasteboard.general.hasImages {
-            items.append(UIAction(title: "Paste Image", image: UIImage(systemName: "doc.on.clipboard")) { _ in
-                let staged = UIPasteboard.general.images?.compactMap { AttachmentPicker.stage(image: $0) } ?? []
-                completion(staged)
-            })
-        }
-        return UIMenu(children: items)
+    var canTakePhoto: Bool { UIImagePickerController.isSourceTypeAvailable(.camera) }
+    var canPaste: Bool { UIPasteboard.general.hasImages }
+
+    func pasteImages() {
+        completion(UIPasteboard.general.images?.compactMap { AttachmentPicker.stage(image: $0) } ?? [])
     }
 
-    func presentPhotos(limit: Int) {
+    func presentPhotos() {
         var config = PHPickerConfiguration(photoLibrary: .shared())
         config.filter = .images
-        config.selectionLimit = max(1, limit)
+        config.selectionLimit = limit
         config.preferredAssetRepresentationMode = .current
         let picker = PHPickerViewController(configuration: config)
         picker.delegate = self
         retainSelf = self
         host?.present(picker, animated: true)
+    }
+
+    /// Picks from the inline recent-photos grid, attached in selection order.
+    func attach(_ assets: [PHAsset]) {
+        let options = PHImageRequestOptions()
+        options.isNetworkAccessAllowed = true
+        options.deliveryMode = .highQualityFormat
+        options.version = .current
+        var staged = [StagedImage?](repeating: nil, count: assets.count)
+        let group = DispatchGroup()
+        for (i, asset) in assets.prefix(limit).enumerated() {
+            group.enter()
+            PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let s = data.flatMap(UIImage.init(data:)).flatMap { AttachmentPicker.stage(image: $0) }
+                    DispatchQueue.main.async {
+                        staged[i] = s
+                        group.leave()
+                    }
+                }
+            }
+        }
+        group.notify(queue: .main) { [completion] in completion(staged.compactMap { $0 }) }
     }
 
     func presentCamera() {
@@ -116,7 +126,8 @@ final class AttachmentPicker: NSObject, PHPickerViewControllerDelegate, UIImageP
         format.scale = 1
         let resized = scale < 1 ? UIGraphicsImageRenderer(size: target, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: target)) } : image
         guard let data = resized.jpegData(compressionQuality: 0.86), data.count <= 24 * 1024 * 1024 else { return nil }
-        let thumb = resized.preparingThumbnail(of: CGSize(width: 180, height: 180)) ?? resized
+        let fill = min(1, 312 / max(1, min(target.width, target.height)))
+        let thumb = resized.preparingThumbnail(of: CGSize(width: (target.width * fill).rounded(), height: (target.height * fill).rounded())) ?? resized
         let id = UUID().uuidString.lowercased()
         return StagedImage(id: id, name: "\(name ?? "image-\(id.prefix(8))").jpg", data: data, thumbnail: thumb)
     }

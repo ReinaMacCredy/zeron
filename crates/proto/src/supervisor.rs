@@ -7,8 +7,70 @@ pub const CHAT_PREFIX: &str = "supervisor-";
 pub const CHAT_TITLE: &str = "Supervisor";
 pub const WAKES_PER_HOUR: usize = 12;
 
+pub const PROFILE_ID: &str = "slp-supervisor";
+
 pub fn is_supervisor_chat(chat_id: &str) -> bool {
     chat_id.starts_with(CHAT_PREFIX)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BriefSender {
+    You,
+    Lead,
+    Supervisor,
+    Step(String),
+    Itself,
+    Thread,
+}
+
+impl BriefSender {
+    pub fn tag(&self) -> String {
+        match self {
+            Self::You => "From you".into(),
+            Self::Lead => "From Lead".into(),
+            Self::Supervisor => "From Supervisor".into(),
+            Self::Step(label) => format!("From {label}"),
+            Self::Itself => "Auto-continue".into(),
+            Self::Thread => "From another thread".into(),
+        }
+    }
+}
+
+pub fn brief_sender(
+    from: Option<&str>,
+    own: &str,
+    lead: Option<&str>,
+    step_label: &dyn Fn(&str) -> Option<String>,
+) -> BriefSender {
+    let Some(from) = from else {
+        return BriefSender::You;
+    };
+    if is_supervisor_chat(from) {
+        BriefSender::Supervisor
+    } else if from == own {
+        BriefSender::Itself
+    } else if Some(from) == lead {
+        BriefSender::Lead
+    } else {
+        step_label(from).map_or(BriefSender::Thread, BriefSender::Step)
+    }
+}
+
+pub fn profile_config(profile: &crate::AgentProfile) -> crate::ChatConfig {
+    crate::ChatConfig {
+        harness: profile.harness,
+        model: profile.model.clone(),
+        reasoning: profile.reasoning,
+        model_options: profile.model_options.clone(),
+        sandbox: crate::SandboxLevel::WorkspaceWrite,
+        permission_mode: profile
+            .permission_mode
+            .unwrap_or(crate::PermissionMode::Full),
+        instructions: profile.instructions.clone(),
+        profile_id: Some(profile.id.clone()),
+        instance_id: None,
+        disabled_tools: profile.disabled_tools.clone(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +136,50 @@ pub struct SupervisorWake {
     pub delivery: WakeDelivery,
 }
 
+impl SupervisorEventKind {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::StepFailed => "step failed",
+            Self::NeedsYou => "needs you",
+            Self::MissionDone => "mission done",
+            Self::MissionSilent => "mission silent",
+            Self::LeadSilent => "lead silent",
+            Self::Escalation => "lead escalated",
+            Self::PlanEdited => "plan edited",
+            Self::Resource => "resource contention",
+            Self::Heartbeat => "check-in",
+            Self::NodeFailed => "thread failed",
+            Self::NodeFinished => "delegated task ended",
+            Self::QuestionWaiting => "question waiting",
+            Self::Dirty => "uncommitted files",
+            Self::Unmerged => "unmerged branch",
+            Self::LimitIdle => "idle after limit reset",
+            Self::LostWake => "lost wake",
+            Self::MergeBlocked => "merge blocked",
+        }
+    }
+}
+
+impl WakeDelivery {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Started => "Started a turn".into(),
+            Self::Steered => "Steered its turn".into(),
+            Self::HeldForTurnEnd => "Held for turn end".into(),
+            Self::HeldByStop => "Held by your Stop".into(),
+            Self::Failed { error } => format!("Failed: {error}"),
+            Self::Dropped => "Dropped".into(),
+        }
+    }
+}
+
+pub fn wakes_this_hour(wakes: &[SupervisorWake], now: DateTime<Utc>) -> usize {
+    wakes
+        .iter()
+        .filter(|wake| wake.woke() && now - wake.at < chrono::Duration::hours(1))
+        .count()
+}
+
 impl SupervisorWake {
     pub fn woke(&self) -> bool {
         !matches!(
@@ -99,6 +205,16 @@ pub enum ItemWhy {
     Goal,
     Spend,
     Decision,
+}
+
+impl ItemWhy {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Goal => "Goal",
+            Self::Spend => "Spend",
+            Self::Decision => "Decision",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,6 +297,111 @@ pub struct NeedsYouInput {
 pub enum NeedsYouRow {
     Item(SupervisorItem),
     Input(NeedsYouInput),
+}
+
+const TITLE_CHARS: usize = 120;
+
+impl NeedsYouInput {
+    pub fn key(&self) -> String {
+        format!("input:{}:{}", self.chat_id, self.request_id)
+    }
+
+    pub fn title(&self) -> String {
+        let Some(first) = self.questions.first() else {
+            return "A question".into();
+        };
+        let text = if first.header.trim().is_empty() {
+            &first.question
+        } else {
+            &first.header
+        };
+        clip(&crate::view::single_line(text), TITLE_CHARS)
+    }
+}
+
+fn clip(text: &str, chars: usize) -> String {
+    match text.char_indices().nth(chars) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text.to_owned(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendDest {
+    Lead,
+    Step,
+    Supervisor,
+    Thread,
+}
+
+impl SendDest {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Lead => "the Lead",
+            Self::Step => "the step",
+            Self::Thread => "the thread",
+            Self::Supervisor => "the Supervisor",
+        }
+    }
+}
+
+impl NeedsYouRow {
+    pub fn dest(&self) -> SendDest {
+        match self {
+            Self::Item(item) if item.task_id.is_some() => SendDest::Lead,
+            Self::Item(_) => SendDest::Supervisor,
+            Self::Input(input) => match input.asker {
+                InputAsker::Lead => SendDest::Lead,
+                InputAsker::Step => SendDest::Step,
+                InputAsker::Thread => SendDest::Thread,
+                InputAsker::Supervisor => SendDest::Supervisor,
+            },
+        }
+    }
+
+    pub fn title(&self) -> String {
+        match self {
+            Self::Item(item) => clip(&item.title, TITLE_CHARS),
+            Self::Input(input) => input.title(),
+        }
+    }
+
+    pub fn key(&self) -> String {
+        match self {
+            Self::Item(item) => format!("item:{}", item.id),
+            Self::Input(input) => input.key(),
+        }
+    }
+
+    pub fn origin(&self) -> (Option<&str>, &str) {
+        match self {
+            Self::Item(item) => (item.task_id.as_deref(), item.raiser_chat_id.as_str()),
+            Self::Input(input) => (input.task_id.as_deref(), input.chat_id.as_str()),
+        }
+    }
+
+    pub fn task_id(&self) -> Option<&str> {
+        self.origin().0
+    }
+
+    pub fn at(&self) -> DateTime<Utc> {
+        match self {
+            Self::Item(item) => item.at,
+            Self::Input(input) => input.at,
+        }
+    }
+
+    /// A watched plain tree has no task, so its threads' asks group under the tree's root chat.
+    pub fn group(&self, root_of: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+        match self {
+            Self::Input(input)
+                if input.task_id.is_none() && input.asker != InputAsker::Supervisor =>
+            {
+                root_of(&input.chat_id)
+            }
+            row => row.task_id().map(str::to_owned),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -460,6 +681,24 @@ impl SupervisorSnapshot {
     pub fn needs_you_count(&self) -> usize {
         self.needs_you.len()
     }
+
+    pub fn held_wakes(&self) -> Vec<&SupervisorWake> {
+        let mut held: Vec<&SupervisorWake> = self
+            .wakes
+            .iter()
+            .filter(|wake| wake.delivery == WakeDelivery::HeldByStop)
+            .take(self.waiting)
+            .collect();
+        held.reverse();
+        held
+    }
+
+    pub fn watches(&self, tasks: &[crate::Task], root: &str) -> bool {
+        match crate::plan_of_chat(tasks, root) {
+            Some(task) => !self.unwatched.iter().any(|id| *id == task.id),
+            None => self.watch_everything || self.watched_roots.iter().any(|id| id == root),
+        }
+    }
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -502,5 +741,24 @@ impl SupervisorSettings {
 
     pub fn full_authority(&self) -> bool {
         self.decide_for_me || self.goal_and_spend
+    }
+}
+
+/// Only the changed fields, so a concurrent change to another field survives.
+pub fn settings_patch(
+    before: Option<SupervisorSettings>,
+    after: SupervisorSettings,
+) -> serde_json::Value {
+    let after = serde_json::to_value(after).unwrap_or_default();
+    match (before.map(serde_json::to_value), after) {
+        (Some(Ok(serde_json::Value::Object(before))), serde_json::Value::Object(after)) => {
+            serde_json::Value::Object(
+                after
+                    .into_iter()
+                    .filter(|(key, value)| before.get(key) != Some(value))
+                    .collect(),
+            )
+        }
+        (_, after) => after,
     }
 }

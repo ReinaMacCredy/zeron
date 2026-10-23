@@ -29,8 +29,11 @@ use gpui::{
 
 use zeron_doc::MessageRole;
 use zeron_engine::registry::{HarnessDescriptor, TitleSettings};
+use zeron_proto::model_options::{
+    self, AUTO_COMPACT, CONTEXT_WINDOW, compact_applies, compact_tokens,
+};
 use zeron_proto::{
-    ChatConfig, FolderListing, HarnessId, Model, ModelCatalog, ModelOption, ModelOptionChoice,
+    ChatConfig, FolderListing, HarnessId, Model, ModelCatalog,
     PermissionMode, ProviderInstance, ReasoningLevel, RepoRef, SandboxLevel, Space,
 };
 use zeron_rpc::methods;
@@ -56,27 +59,11 @@ fn new_model_badge(theme: &Theme) -> AnyElement {
 /// pagination plumbing).
 const MAX_REF_ROWS: usize = 300;
 
-/// Row order of the permission dropdown (least to most permissive).
-const PERMISSION_MODES: [PermissionMode; 3] = [
-    PermissionMode::Ask,
-    PermissionMode::Auto,
-    PermissionMode::Full,
-];
-
 fn permission_icon(mode: PermissionMode) -> &'static str {
     match mode {
         PermissionMode::Ask => crate::icons::CHECKLIST,
         PermissionMode::Auto => crate::icons::BOT,
         PermissionMode::Full => crate::icons::DANGER_TRIANGLE,
-    }
-}
-
-/// One line each at the popover's width — rows must read the same height.
-fn permission_description(mode: PermissionMode) -> &'static str {
-    match mode {
-        PermissionMode::Ask => "Always ask before tools and commands",
-        PermissionMode::Auto => "Only ask for actions flagged as unsafe",
-        PermissionMode::Full => "Any file, any command, no prompts",
     }
 }
 
@@ -263,8 +250,12 @@ pub struct ResolvedRunConfig {
 impl ResolvedRunConfig {
     /// The `ChatConfig` recorded on `Mutate createChat` (needs a known harness).
     pub fn chat_config(&self) -> Option<ChatConfig> {
-        Some(ChatConfig {
-            harness: self.harness?,
+        Some(self.config_on(self.harness?))
+    }
+
+    pub fn config_on(&self, harness: HarnessId) -> ChatConfig {
+        ChatConfig {
+            harness,
             model: self.model.clone(),
             reasoning: self.reasoning,
             model_options: self.model_options.clone(),
@@ -274,7 +265,7 @@ impl ResolvedRunConfig {
             profile_id: self.profile_id.clone(),
             instance_id: self.instance_id.clone(),
             disabled_tools: self.disabled_tools.clone(),
-        })
+        }
     }
 }
 
@@ -344,17 +335,7 @@ pub fn clamp_reasoning(
 // ---------------------------------------------------------------------------
 
 pub fn reasoning_label(level: ReasoningLevel) -> &'static str {
-    match level {
-        ReasoningLevel::Minimal => "Minimal",
-        ReasoningLevel::Low => "Low",
-        ReasoningLevel::Medium => "Medium",
-        ReasoningLevel::High => "High",
-        ReasoningLevel::XHigh => "X-High",
-        ReasoningLevel::Max => "Max",
-        ReasoningLevel::Ultra => "Ultra",
-        ReasoningLevel::Ultracode => "Ultracode",
-        ReasoningLevel::Ultrathink => "Ultrathink",
-    }
+    level.label()
 }
 
 /// Keep only the picks `model` still offers. Remembered picks outlive the
@@ -917,29 +898,6 @@ struct SettingGroup {
     choices: Vec<SettingChoice>,
 }
 
-/// The speed selects the effort card's bolt can stand in for, as (option id,
-/// the choice that means "fast"): Claude's `fastMode` off/on and Codex's
-/// `serviceTier` Standard/Fast. The bolt owns one only while the model also
-/// has a ladder AND the select is exactly that pair; a richer tier list
-/// (Flex, Ultra Fast) has no bolt shape and stays a row.
-const SPEED_TOGGLES: [(&str, &str); 2] = [("fastMode", "on"), ("serviceTier", "fast")];
-
-/// The model's speed select as the bolt sees it: `(option, off choice, on
-/// choice)`.
-fn speed_toggle_option(
-    model: &Model,
-) -> Option<(&ModelOption, &ModelOptionChoice, &ModelOptionChoice)> {
-    SPEED_TOGGLES.into_iter().find_map(|(id, on_id)| {
-        let option = model.options.iter().find(|o| o.id == id)?;
-        if option.choices.len() != 2 {
-            return None;
-        }
-        let on = option.choices.iter().find(|c| c.id == on_id)?;
-        let off = option.choices.iter().find(|c| c.id != on_id)?;
-        Some((option, off, on))
-    })
-}
-
 /// The bolt's state for the selected model.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SpeedToggle {
@@ -1002,8 +960,6 @@ impl EffortTween {
     }
 }
 
-const CONTEXT_WINDOW: &str = "contextWindow";
-const AUTO_COMPACT: &str = "autoCompact";
 const CONTEXT_CARD_HEIGHT: f32 = 104.0;
 const CONTEXT_WARNING_HEIGHT: f32 = 32.0;
 const CONTEXT_STOP_LABEL_WIDTH: f32 = 36.0;
@@ -1036,15 +992,8 @@ fn selected_value(group: &SettingGroup) -> &str {
         .unwrap_or_default()
 }
 
-// Auto is the model's tuned 1M window, so it closes the track after the explicit sizes.
 fn context_long_stops(compact: &SettingGroup) -> Vec<&SettingChoice> {
-    let (auto, sized): (Vec<_>, Vec<_>) = compact.choices.iter().partition(|c| c.value == "auto");
-    sized.into_iter().chain(auto).collect()
-}
-
-fn compact_applies(window_choice: &str) -> bool {
-    zeron_harness::claude::catalog::context_window_tokens(window_choice)
-        .is_some_and(|tokens| tokens > 200_000)
+    model_options::context_long_stops(&compact.choices, |c| &c.value)
 }
 
 /// A mid-chat model pick awaiting the switch-model dialog's answer. With
@@ -1057,60 +1006,13 @@ struct PendingModelSwitch {
     to: String,
     harness: Option<HarnessId>,
     instance: Option<String>,
-    profile: Option<profiles::ProfilePick>,
+    profile: Option<zeron_proto::AgentProfile>,
 }
 
-/// A model pick on an existing chat warns before it lands only when there
-/// is history for the harness to re-read and the pick is a real change.
-fn needs_switch_warning(has_history: bool, current: Option<&str>, next: &str) -> bool {
-    has_history && current != Some(next)
-}
-
-/// The switch-model dialog's body, in the harness's own terms: Claude Code
-/// re-reads the whole cached history on the next turn; Codex warns of
-/// degraded performance and an automatic compaction.
-fn switch_warning(harness: Option<HarnessId>, to: &str) -> String {
-    match harness {
-        Some(HarnessId::ClaudeCode) => format!(
-            "This conversation is cached for the current model. Switching to {to} means the full history gets re-read on your next message."
-        ),
-        Some(HarnessId::Codex) => "Changing models mid-conversation will degrade performance. Context may automatically compact.".into(),
-        _ => format!(
-            "Changing models mid-conversation may degrade performance. Switching to {to} means the full history gets re-read on your next message."
-        ),
-    }
-}
-
-/// The switch-provider dialog's body: the chat's session belongs to the
-/// harness that produced it, so the new one starts fresh with the
-/// conversation handed over as text.
-fn provider_switch_warning(from: &str, to: &str) -> String {
-    format!(
-        "{to} has never seen this chat. The {from} session is closed; on your next message the conversation so far is handed to {to} as plain text. Tool results, open files and {from}'s cache are not carried over."
-    )
-}
-
-/// The transcript divider's hover hint after a provider switch.
-fn provider_switch_hint(from: &str, to: &str) -> String {
-    format!(
-        "{from} session closed. The messages above were handed to {to} as text on the next turn; {from}'s tool results and file state were not carried."
-    )
-}
-
-/// The transcript divider's hover hint once the switch has happened.
-fn switch_hint(harness: Option<HarnessId>) -> &'static str {
-    match harness {
-        Some(HarnessId::ClaudeCode) => {
-            "Changing models mid-conversation drops the prompt cache. The full history is re-read on the next message."
-        }
-        Some(HarnessId::Codex) => {
-            "Changing models mid-conversation will degrade performance. Context may automatically compact."
-        }
-        _ => {
-            "Changing models mid-conversation may degrade performance. The full history is re-read on the next message."
-        }
-    }
-}
+use zeron_proto::picker::catalog_error_text;
+use zeron_proto::model_switch::{
+    ModelSwitchPrompt, model_switch_prompt, needs_switch_warning, provider_switch_prompt,
+};
 
 pub struct Pickers {
     state: Entity<AppState>,
@@ -2534,7 +2436,7 @@ impl Pickers {
             PickerKind::HarnessModel => self.selected_model_index(cx),
             PickerKind::Space => self.selected_project_index(cx),
             PickerKind::Device => self.selected_device_index(cx),
-            PickerKind::Permission => PERMISSION_MODES
+            PickerKind::Permission => PermissionMode::ALL
                 .iter()
                 .position(|m| *m == self.effective_permission_mode(cx))
                 .unwrap_or(0),
@@ -3343,9 +3245,10 @@ impl Pickers {
         let Some(pending) = self.pending_model_switch.take() else {
             return;
         };
-        let note = self.switch_note(&pending, cx);
+        let prompt = self.switch_prompt(&pending, cx);
+        let note = (prompt.note, prompt.note_hint);
         self.update_chat_config(cx, Some(note), move |config| match pending.profile {
-            Some(pick) => pick.write(config),
+            Some(pick) => pick.apply_to(config),
             None => {
                 if let Some(harness) = pending.harness {
                     config.harness = harness;
@@ -3358,21 +3261,16 @@ impl Pickers {
         cx.notify();
     }
 
-    fn switch_note(&self, pending: &PendingModelSwitch, cx: &App) -> (String, String) {
+    fn switch_prompt(&self, pending: &PendingModelSwitch, cx: &App) -> ModelSwitchPrompt {
         let harness = self.effective_harness(cx);
         match (harness, pending.harness) {
-            (Some(from), Some(to)) => {
-                let from = self.provider_label(from, self.effective_instance(cx).as_deref());
-                let to = self.provider_label(to, pending.instance.as_deref());
-                (
-                    format!("Provider changed from {from} to {to}."),
-                    provider_switch_hint(&from, &to),
-                )
-            }
-            _ => (
-                format!("Model changed from {} to {}.", pending.from, pending.to),
-                switch_hint(harness).to_string(),
+            (Some(from), Some(to)) => provider_switch_prompt(
+                &self.provider_label(from, self.effective_instance(cx).as_deref()),
+                &self.provider_label(to, pending.instance.as_deref()),
+                &pending.from,
+                &pending.to,
             ),
+            _ => model_switch_prompt(harness, &pending.from, &pending.to),
         }
     }
 
@@ -3464,10 +3362,10 @@ impl Pickers {
     }
 
     /// The bolt's speed toggle when the selected model exposes one
-    /// ([`speed_toggle_option`]).
+    /// ([`model_options::speed_toggle_option`]).
     fn speed_toggle(&self, cx: &App) -> Option<SpeedToggle> {
         let model = self.selected_model(cx)?;
-        let (option, off, on) = speed_toggle_option(model)?;
+        let (option, off, on) = model_options::speed_toggle_option(&model.options)?;
         let selections = self.explicit_options(cx);
         let choice = selections
             .get(&option.id)
@@ -4953,7 +4851,7 @@ impl Pickers {
                     }
                     Some(PickerKind::Space) => self.filtered_project_rows(cx).len() + 1,
                     Some(PickerKind::Device) => self.filtered_device_rows(cx).len(),
-                    Some(PickerKind::Permission) => PERMISSION_MODES.len(),
+                    Some(PickerKind::Permission) => PermissionMode::ALL.len(),
                     None => 0,
                 };
                 let current = (self.active != NO_ACTIVE_ROW).then_some(self.active);
@@ -4982,7 +4880,7 @@ impl Pickers {
                     };
                     self.pick_checkout(kind, cx);
                 } else if self.open_kind() == Some(PickerKind::Permission) {
-                    if let Some(mode) = PERMISSION_MODES.get(self.active) {
+                    if let Some(mode) = PermissionMode::ALL.get(self.active) {
                         self.pick_permission(*mode, cx);
                     }
                 } else {
@@ -6243,7 +6141,7 @@ impl Pickers {
             .flex_col()
             .gap(px(2.0))
             .child(popover::menu_heading(&theme, "Approve agent actions"))
-            .children(PERMISSION_MODES.into_iter().enumerate().map(|(ix, mode)| {
+            .children(PermissionMode::ALL.into_iter().enumerate().map(|(ix, mode)| {
                 let is_selected = current == mode;
                 let tone = if mode == PermissionMode::Full {
                     theme.warning
@@ -6286,7 +6184,7 @@ impl Pickers {
                                 .truncate()
                                 .text_size(crate::typography::ui_rems(11.0))
                                 .text_color(theme.text_muted)
-                                .child(SharedString::from(permission_description(mode))),
+                                .child(SharedString::from(mode.description())),
                         ),
                 )
                 .when(is_selected, |el| {
@@ -7275,7 +7173,7 @@ impl Pickers {
         // With a ladder the Reasoning group renders as the effort card, whose
         // bolt owns the speed select; ladderless models keep it as a row.
         let bolt_owns = (!levels.is_empty())
-            .then(|| self.selected_model(cx).and_then(speed_toggle_option))
+            .then(|| self.selected_model(cx).and_then(|m| model_options::speed_toggle_option(&m.options)))
             .flatten()
             .map(|(option, _, _)| ModelSetting::Option(option.id.clone()));
         let mut groups = self.live_groups(cx);
@@ -7997,7 +7895,7 @@ impl Pickers {
         let (window_cursor, compact_cursor) = (cursor(CONTEXT_WINDOW), cursor(AUTO_COMPACT));
         let window_choice = selected_value(&window);
         let on = compact_applies(window_choice);
-        let threshold = zeron_harness::claude::catalog::compact_threshold(
+        let threshold = model_options::compact_threshold(
             window_choice,
             selected_value(&compact),
         )
@@ -8718,38 +8616,6 @@ fn stepped_track(
         )
 }
 
-fn context_window_warning(
-    option_id: &str,
-    choice_id: &str,
-    selected: bool,
-    usage: Option<zeron_proto::ContextUsage>,
-) -> Option<String> {
-    if option_id != "contextWindow" {
-        return None;
-    }
-    let capacity = zeron_harness::claude::catalog::context_window_tokens(choice_id)?;
-    let tokens = usage?.tokens?;
-    let in_use = compact_tokens(tokens);
-    (tokens > capacity).then(|| {
-        if selected {
-            format!("~{in_use} in use; the next message compacts it")
-        } else {
-            format!(
-                "Switching to {} compacts this chat (~{in_use} in use)",
-                compact_tokens(capacity)
-            )
-        }
-    })
-}
-
-pub(crate) fn compact_tokens(tokens: u64) -> String {
-    if tokens >= 999_500 {
-        format!("{:.1}M", tokens as f64 / 1_000_000.0)
-    } else {
-        format!("{}K", (tokens + 500) / 1_000)
-    }
-}
-
 /// The "Default" marker beside a section's default choice: a ghost badge —
 /// bare muted text, no border or fill (user request; t3code draws an outline
 /// pill here).
@@ -8800,12 +8666,15 @@ fn build_setting_groups(
                     reasoning: None,
                     selected: selected == choice.id,
                     default: option.default_choice == choice.id,
-                    warning: context_window_warning(
-                        &option.id,
-                        &choice.id,
-                        selected == choice.id,
-                        usage,
-                    ),
+                    warning: (option.id == CONTEXT_WINDOW)
+                        .then(|| {
+                            model_options::context_window_warning(
+                                &choice.id,
+                                selected == choice.id,
+                                usage.and_then(|u| u.tokens),
+                            )
+                        })
+                        .flatten(),
                 })
                 .collect(),
         });
@@ -8989,19 +8858,6 @@ pub(crate) fn curated_model_label(harness: HarnessId, id: &str) -> Option<String
         .map(|m| m.label.clone())
 }
 
-fn catalog_error_text(message: &str) -> &str {
-    message
-        .strip_prefix("model discovery ")
-        .and_then(|rest| rest.split_once(": "))
-        .filter(|(code, _)| {
-            matches!(
-                *code,
-                "timeout" | "failed" | "missing_executable" | "auth_required"
-            )
-        })
-        .map_or(message, |(_, text)| text)
-}
-
 /// Display-side model-list hygiene, mirroring the engine's discovery-side
 /// fold (`models_from_session`) for catalogs served by OLDER engines (the
 /// space's device may run any version): the `default` alias row drops when a
@@ -9066,18 +8922,7 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
         .collect()
 }
 
-/// Every harness a chat has run on, oldest first, the current one last: the
-/// marks a sidebar row or tab stacks. Empty when the row has no config yet.
-pub(crate) fn chat_harness_marks(chat: &zeron_proto::Chat) -> Vec<HarnessId> {
-    let mut marks = chat.previous_harnesses.clone();
-    if let Some(current) = chat.config.as_ref().map(|c| c.harness) {
-        marks.retain(|h| *h != current);
-        marks.push(current);
-    }
-    marks
-}
-
-/// The marks of [`chat_harness_marks`] as one element: a single mark plain,
+/// The marks of [`zeron_proto::Chat::harness_marks`] as one element: a single mark plain,
 /// several overlapping left to right so the current harness sits on top,
 /// the way a group avatar stacks its members.
 pub(crate) fn harness_mark_stack(
@@ -9125,7 +8970,8 @@ pub(crate) fn chat_mark(chat: &zeron_proto::Chat, cx: &App) -> Option<InstanceIc
 }
 
 pub(crate) fn chat_marks(chat: &zeron_proto::Chat, cx: &App) -> Vec<InstanceIcon> {
-    let mut marks: Vec<InstanceIcon> = chat_harness_marks(chat)
+    let mut marks: Vec<InstanceIcon> = chat
+        .harness_marks()
         .into_iter()
         .map(InstanceIcon::harness)
         .collect();
@@ -9182,21 +9028,7 @@ pub(crate) fn agent_brand_icon(
     harness: Option<HarnessId>,
     model: Option<&str>,
 ) -> (&'static str, Option<gpui::Hsla>) {
-    let model = model
-        .map(|m| m.split('[').next().unwrap_or(m).trim().to_ascii_lowercase())
-        .unwrap_or_default();
-    let (provider, id) = model.split_once('/').unwrap_or(("", &model));
-    let maker = match provider {
-        "anthropic" => Some(HarnessId::ClaudeCode),
-        "openai" => Some(HarnessId::Codex),
-        "xai" => Some(HarnessId::Grok),
-        _ if id.starts_with("claude") => Some(HarnessId::ClaudeCode),
-        _ if id.starts_with("gpt") || id.contains("codex") => Some(HarnessId::Codex),
-        _ if id.starts_with("grok") => Some(HarnessId::Grok),
-        _ => None,
-    };
-    maker
-        .or(harness)
+    HarnessId::brand_of(harness, model)
         .map(harness_brand_icon)
         .unwrap_or((crate::icons::BOT, None))
 }
@@ -9330,34 +9162,6 @@ fn resizing_chip_text(
     .into_any_element()
 }
 
-/// Fast mode's `(on, off)` choices, whatever form a harness gives it: a
-/// `fastMode`/`fast_mode` on/off toggle (Claude), Cursor's `fast` true/false,
-/// or a tier/speed option offering `fast` (Codex, Devin). Off is the default
-/// when fast isn't, else the other choice — Cursor runs some models fast by
-/// default. Every model then gets the same fast-mode UI.
-fn fast_mode_values(option: &zeron_proto::ModelOption) -> Option<(&str, &str)> {
-    let has = |id: &str| option.choices.iter().any(|choice| choice.id == id);
-    let on = if matches!(option.id.as_str(), "fastMode" | "fast_mode") && has("on") {
-        "on"
-    } else if option.id == "fast" && has("true") {
-        "true"
-    } else if has("fast") {
-        "fast"
-    } else {
-        return None;
-    };
-    let off = if option.default_choice != on && has(&option.default_choice) {
-        option.default_choice.as_str()
-    } else {
-        option
-            .choices
-            .iter()
-            .map(|choice| choice.id.as_str())
-            .find(|id| *id != on)?
-    };
-    Some((on, off))
-}
-
 /// Attach the (single) open popover above a selector trigger.
 fn attach_overlay(
     chip: gpui::Stateful<gpui::Div>,
@@ -9488,7 +9292,7 @@ impl Render for Pickers {
             self.boot_profile_edit = false;
             self.open_profile_edit(
                 Some(profile.id.clone()),
-                crate::agent_profiles::draft_of(&profile),
+                profile.draft(),
                 cx,
             );
             if let Some(edit) = self.profile_edit.as_mut() {
@@ -9631,16 +9435,7 @@ impl Render for Pickers {
                     .map(|label| (label, None))
             });
         let fast = self.selected_model(cx).is_some_and(|model| {
-            model.options.iter().any(|option| {
-                fast_mode_values(option).is_some_and(|(on, _)| {
-                    self.resolved(cx)
-                        .model_options
-                        .get(&option.id)
-                        .and_then(|value| value.as_str())
-                        .unwrap_or(&option.default_choice)
-                        == on
-                })
-            })
+            model_options::fast_mode_on(&model.options, &self.resolved(cx).model_options)
         });
         let chip_profile = self
             .title
@@ -9719,33 +9514,16 @@ impl Pickers {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let provider = pending
-            .harness
-            .and_then(|to| self.effective_harness(cx).map(|from| (from, to)));
-        let body = match provider {
-            Some((from, to)) => provider_switch_warning(
-                &self.provider_label(from, self.effective_instance(cx).as_deref()),
-                &self.provider_label(to, pending.instance.as_deref()),
-            ),
-            None => switch_warning(self.effective_harness(cx), &pending.to),
-        };
-        let (title, lead, yes_detail, no_title) = match provider {
-            Some(_) => (
-                "Switch provider?",
-                format!("{} starts from a text copy of this chat", pending.to),
-                format!(
-                    "Same chat, same tab. A divider marks where {} stopped.",
-                    pending.from
-                ),
-                format!("No, keep {}", pending.from),
-            ),
-            None => (
-                "Switch model?",
-                "Your next response will be slower and use more tokens".to_string(),
-                "Applies to this chat only. The change is marked in the transcript.".to_string(),
-                "No, go back".to_string(),
-            ),
-        };
+        let ModelSwitchPrompt {
+            title,
+            lead,
+            body,
+            confirm,
+            confirm_detail,
+            cancel,
+            cancel_detail,
+            ..
+        } = self.switch_prompt(pending, cx);
         let option =
             |number: &'static str, title: String, detail: String, fade_key: &'static str| {
                 popover::menu_row(theme, false, fade_key)
@@ -9775,22 +9553,12 @@ impl Pickers {
                             ),
                     )
             };
-        let yes = option(
-            "1.",
-            format!("Yes, switch to {}", pending.to),
-            yes_detail,
-            "model-switch-yes",
-        )
-        .on_click(cx.listener(|this, _, _, cx| this.confirm_model_switch(cx)));
-        let no = option(
-            "2.",
-            no_title,
-            format!("Keep {} for this chat.", pending.from),
-            "model-switch-no",
-        )
-        .on_click(cx.listener(|this, _, _, cx| this.cancel_model_switch(cx)));
+        let yes = option("1.", confirm, confirm_detail, "model-switch-yes")
+            .on_click(cx.listener(|this, _, _, cx| this.confirm_model_switch(cx)));
+        let no = option("2.", cancel, cancel_detail, "model-switch-no")
+            .on_click(cx.listener(|this, _, _, cx| this.cancel_model_switch(cx)));
         let card = popover::dialog_card(theme)
-            .child(popover::dialog_title(theme, title))
+            .child(popover::dialog_title(theme, &title))
             .child(
                 div()
                     .mt(px(6.0))
@@ -9928,6 +9696,7 @@ impl Pickers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeron_proto::model_switch::{provider_switch_hint, provider_switch_warning, switch_warning};
     use zeron_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
 
     #[test]
@@ -9971,7 +9740,7 @@ mod tests {
         assert!(switch_warning(Some(HarnessId::ClaudeCode), "Opus 5").contains("cached"));
         assert!(switch_warning(Some(HarnessId::Codex), "GPT-5.6 Luna").contains("compact"));
         assert!(switch_warning(Some(HarnessId::Mock), "Mock B").contains("Mock B"));
-        assert!(switch_hint(None).contains("re-read"));
+        assert!(zeron_proto::model_switch::switch_hint(None).contains("re-read"));
     }
 
     struct ModelShortcutHost {
@@ -10609,66 +10378,6 @@ mod tests {
                 })
                 .unwrap();
         }
-    }
-
-    #[test]
-    fn every_fast_mode_encoding_gets_the_same_controls() {
-        let option = |id: &str, choices: &[&str], default: &str| ModelOption {
-            id: id.into(),
-            label: id.into(),
-            choices: choices
-                .iter()
-                .map(|c| ModelOptionChoice {
-                    id: (*c).into(),
-                    label: (*c).into(),
-                })
-                .collect(),
-            default_choice: default.into(),
-        };
-        // Codex tier, Claude toggle, ACP speed and the snake_case toggle.
-        assert_eq!(
-            fast_mode_values(&option("serviceTier", &["default", "fast"], "default")),
-            Some(("fast", "default"))
-        );
-        assert_eq!(
-            fast_mode_values(&option("fastMode", &["off", "on"], "off")),
-            Some(("on", "off"))
-        );
-        assert_eq!(
-            fast_mode_values(&option("speed", &["standard", "fast"], "standard")),
-            Some(("fast", "standard"))
-        );
-        assert_eq!(
-            fast_mode_values(&option("fast_mode", &["off", "on"], "off")),
-            Some(("on", "off"))
-        );
-        // Cursor's true/false switch, off by default (Opus) and on by
-        // default (Grok, Composer): both still toggle between the two.
-        assert_eq!(
-            fast_mode_values(&option("fast", &["false", "true"], "false")),
-            Some(("true", "false"))
-        );
-        assert_eq!(
-            fast_mode_values(&option("fast", &["false", "true"], "true")),
-            Some(("true", "false"))
-        );
-        assert_eq!(
-            fast_mode_values(&option("serviceTier", &["default", "fast"], "fast")),
-            Some(("fast", "default"))
-        );
-        // Not fast mode: other toggles, including Cursor's true/false ones.
-        assert_eq!(
-            fast_mode_values(&option("thinking", &["off", "on"], "off")),
-            None
-        );
-        assert_eq!(
-            fast_mode_values(&option("thinking", &["false", "true"], "true")),
-            None
-        );
-        assert_eq!(
-            fast_mode_values(&option("contextWindow", &["200k", "1m"], "200k")),
-            None
-        );
     }
 
     #[gpui::test]
@@ -12515,7 +12224,7 @@ mod tests {
             unsettled_at: None,
         };
         assert_eq!(
-            chat_harness_marks(&chat),
+            chat.harness_marks(),
             vec![HarnessId::ClaudeCode, HarnessId::Codex]
         );
         chat.config = Some(ChatConfig {
@@ -12531,7 +12240,7 @@ mod tests {
             disabled_tools: Vec::new(),
         });
         assert_eq!(
-            chat_harness_marks(&chat),
+            chat.harness_marks(),
             vec![HarnessId::Codex, HarnessId::ClaudeCode]
         );
     }
@@ -13452,46 +13161,6 @@ mod tests {
         })
     }
 
-    #[test]
-    fn context_window_warning_needs_usage_above_the_choice() {
-        let usage = |tokens| {
-            Some(zeron_proto::ContextUsage {
-                tokens,
-                window: Some(1_000_000),
-            })
-        };
-        assert_eq!(
-            context_window_warning("contextWindow", "200k", true, usage(Some(230_412))).as_deref(),
-            Some("~230K in use; the next message compacts it")
-        );
-        assert_eq!(
-            context_window_warning("contextWindow", "200k", false, usage(Some(230_412))).as_deref(),
-            Some("Switching to 200K compacts this chat (~230K in use)")
-        );
-        assert_eq!(
-            context_window_warning("contextWindow", "200k", false, usage(Some(200_000))),
-            None
-        );
-        assert_eq!(
-            context_window_warning("contextWindow", "1m", true, usage(Some(230_412))),
-            None
-        );
-        assert_eq!(
-            context_window_warning("contextWindow", "200k", false, usage(None)),
-            None
-        );
-        assert_eq!(
-            context_window_warning("contextWindow", "200k", false, None),
-            None
-        );
-        assert_eq!(
-            context_window_warning("serviceTier", "200k", false, usage(Some(230_412))),
-            None
-        );
-        assert_eq!(compact_tokens(200_001), "200K");
-        assert_eq!(compact_tokens(1_240_000), "1.2M");
-    }
-
     #[gpui::test]
     fn the_context_window_menu_warns_from_the_selected_chat_usage(cx: &mut gpui::TestAppContext) {
         let handle = existing_claude_chat(cx);
@@ -13684,19 +13353,6 @@ mod tests {
             ));
         }
         model
-    }
-
-    #[test]
-    fn compact_threshold_sits_33k_under_the_effective_window() {
-        let at = |window, compact| {
-            zeron_harness::claude::catalog::compact_threshold(window, compact).map(compact_tokens)
-        };
-        assert_eq!(at("1m", "auto").as_deref(), Some("967K"));
-        assert_eq!(at("1m", "300k").as_deref(), Some("267K"));
-        assert_eq!(at("1m", "400k").as_deref(), Some("367K"));
-        assert_eq!(at("200k", "auto").as_deref(), Some("167K"));
-        assert_eq!(at("200k", "800k").as_deref(), Some("167K"));
-        assert_eq!(at("standard", "auto"), None);
     }
 
     #[test]
@@ -14396,7 +14052,7 @@ mod tests {
                 let pending = pickers.pending_model_switch.clone().expect("dialog");
                 assert_eq!(pending.instance.as_deref(), Some("codex_work"));
                 assert_eq!(
-                    pickers.switch_note(&pending, cx).0,
+                    pickers.switch_prompt(&pending, cx).note,
                     "Provider changed from Claude Code to Codex Work."
                 );
                 pickers.confirm_model_switch(cx);
@@ -14412,7 +14068,7 @@ mod tests {
                 pickers.activate_model_index(0, cx);
                 let pending = pickers.pending_model_switch.clone().expect("dialog");
                 assert_eq!(
-                    pickers.switch_note(&pending, cx).0,
+                    pickers.switch_prompt(&pending, cx).note,
                     "Provider changed from Codex Work to Codex."
                 );
                 pickers.confirm_model_switch(cx);

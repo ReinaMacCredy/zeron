@@ -467,15 +467,9 @@ impl Shell {
     /// harness: `(label, fraction)`.
     fn summary_usage(&self, chat: &zeron_proto::Chat, cx: &App) -> Option<(String, f32)> {
         let harness = chat.config.as_ref()?.harness;
-        let account = crate::account_usage::active_account(
-            crate::account_usage::local_snapshot(cx)?,
-            harness,
-        )?;
-        account
-            .usage_windows
-            .iter()
-            .max_by(|a, b| a.used_fraction.total_cmp(&b.used_fraction))
-            .map(|window| (window.label.clone(), window.used_fraction.clamp(0.0, 1.0)))
+        crate::account_usage::local_snapshot(cx)?
+            .busiest_window(harness)
+            .map(|(label, fraction)| (label.to_owned(), fraction))
     }
 
     fn sidecar_actions_section(&self, theme: &Theme, cx: &App) -> Option<SidecarSection> {
@@ -683,9 +677,14 @@ impl Shell {
         let mut on = Vec::new();
         if git {
             on.push(
-                SidecarEntry::new("changes", 0, icons::ASTRA_PLUS_MINUS, "Changes")
-                    .value(counts.map(|(files, add, del)| SidecarValue::Counts(files, add, del)))
-                    .action(|this, window, cx| this.focus_changes(window, cx)),
+                SidecarEntry::new(
+                    "changes",
+                    0,
+                    icons::ASTRA_PLUS_MINUS,
+                    zeron_proto::badges::CHANGES_TITLE,
+                )
+                .value(counts.map(|(files, add, del)| SidecarValue::Counts(files, add, del)))
+                .action(|this, window, cx| this.focus_changes(window, cx)),
             );
         }
         on.push(
@@ -834,11 +833,15 @@ impl Shell {
                 .collect();
             if let Some(source) = source {
                 entries.push(
-                    SidecarEntry::new("new-sidechat", 0, icons::ASTRA_PLUS, "New sidechat").action(
-                        move |this, _, cx| {
-                            this.create_sidechat(source.clone(), None, Default::default(), cx)
-                        },
-                    ),
+                    SidecarEntry::new(
+                        "new-sidechat",
+                        0,
+                        icons::ASTRA_PLUS,
+                        zeron_proto::sidechat::NEW_SIDECHAT,
+                    )
+                    .action(move |this, _, cx| {
+                        this.create_sidechat(source.clone(), None, Default::default(), cx)
+                    }),
                 );
             }
             entries.push(
@@ -1703,11 +1706,7 @@ fn sidecar_value(theme: &Theme, value: &SidecarValue) -> AnyElement {
             )))
             .into_any_element(),
         SidecarValue::Counts(files, add, del) => {
-            let files = if *files == 1 {
-                "1 file".to_string()
-            } else {
-                format!("{files} files")
-            };
+            let files = zeron_proto::badges::files_label(*files);
             div()
                 .flex_none()
                 .flex()

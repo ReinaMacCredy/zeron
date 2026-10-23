@@ -670,6 +670,8 @@ struct ReadTerminalParams {
     chat_id: String,
     #[serde(default)]
     lines: Option<usize>,
+    #[serde(default)]
+    styled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3031,6 +3033,8 @@ fn forwardable(method: &str) -> bool {
             | methods::COMPLETE_AGENT_LOGIN
             | methods::POLL_AGENT_LOGIN
             | methods::CANCEL_AGENT_LOGIN
+            // The usage summary reads this device's agent session logs.
+            | methods::GET_USAGE_SUMMARY
             // Uploads/attachments target the chat's host device (the agent reads
             // the committed file from that device's disk).
             | methods::UPLOAD_CHUNK
@@ -5632,8 +5636,7 @@ impl RpcService for EngineRpc {
                                 .map_err(|error| RpcError::Failed(error.to_string()))?;
                         if tree.revision != request.expected_revision {
                             return Err(RpcError::Failed(
-                                "The working tree changed since it was shown. Check the refreshed list and try again."
-                                    .into(),
+                                zeron_proto::git_tab::WORKING_TREE_CHANGED.into(),
                             ));
                         }
                         let result =
@@ -6147,6 +6150,7 @@ impl RpcService for EngineRpc {
                         &p.terminal_id,
                         &p.chat_id,
                         p.lines.unwrap_or(80).clamp(1, 2000),
+                        p.styled,
                     )
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&screen)
@@ -6338,7 +6342,8 @@ impl RpcService for EngineRpc {
             }
             methods::READ_ATTACHMENT_CHUNK => {
                 let p: ReadAttachmentChunkParams = parse_params(params)?;
-                // Path jail: the uploads dir plus every workspace-known chat cwd.
+                // Path jail: the uploads dir, the ACP registry icons, and every
+                // workspace-known chat cwd.
                 let roots: Vec<std::path::PathBuf> = self
                     .workspace
                     .read_chats()
@@ -6346,6 +6351,11 @@ impl RpcService for EngineRpc {
                     .into_iter()
                     .filter_map(|chat| chat.cwd)
                     .map(std::path::PathBuf::from)
+                    .chain(
+                        self.provider_instances
+                            .as_ref()
+                            .map(|store| store.data_dir().join("registry-icons")),
+                    )
                     .collect();
                 let uploads = self.uploads.clone();
                 let chunk = tokio::task::spawn_blocking(move || {
@@ -7407,6 +7417,7 @@ mod tests {
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));
         assert!(forwardable(methods::QUEUE_COMMAND));
+        assert!(forwardable(methods::GET_USAGE_SUMMARY));
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));
         assert!(forwardable(methods::FETCH_ALL));

@@ -16,12 +16,12 @@ use super::manager::{
 };
 use crate::sessions::SessionsEngine;
 
-pub const COMPUTER_CONSENT_ALLOW: &str = "Allow";
-pub const COMPUTER_CONSENT_DECLINE: &str = "Deny";
-pub const COMPUTER_CONSENT_ALWAYS_PREFIX: &str = "Always allow ";
+pub use zeron_proto::computer::cards::{
+    COMPUTER_CONSENT_ALLOW, COMPUTER_CONSENT_ALWAYS_PREFIX, COMPUTER_CONSENT_DECLINE,
+    COMPUTER_FOREGROUND_ALLOW, COMPUTER_FOREGROUND_DECLINE, consent_always_label,
+    foreground_allowed,
+};
 pub const COMPUTER_FOREGROUND_QUESTION_ID: &str = "foreground";
-pub const COMPUTER_FOREGROUND_ALLOW: &str = "Allow for this turn";
-pub const COMPUTER_FOREGROUND_DECLINE: &str = "No";
 
 pub type PendingSink =
     Arc<dyn Fn(&str, Option<&str>, &str, Option<ComputerPendingRequest>) + Send + Sync>;
@@ -85,11 +85,6 @@ impl EngineComputerSeams {
 
 pub fn consent_app_title(app: &ComputerConsentApp) -> String {
     format!("Allow Computer to use {}?", app.name)
-}
-
-pub fn consent_always_label(app: &ComputerConsentApp) -> Option<String> {
-    app.verified()
-        .then(|| format!("{COMPUTER_CONSENT_ALWAYS_PREFIX}{}", app.name))
 }
 
 pub fn consent_question(card: &ComputerConsentCard) -> UserInputQuestion {
@@ -179,18 +174,6 @@ pub fn foreground_question(app: Option<&ComputerConsentApp>) -> UserInputQuestio
         kind: Some(UserInputKind::Foreground { app: app.cloned() }),
         prefill: None,
         multiline: false,
-    }
-}
-
-pub fn foreground_allowed(answers: &[UserInputAnswer]) -> Option<bool> {
-    let labels: Vec<&str> = answers
-        .iter()
-        .flat_map(|answer| answer.labels.iter().map(String::as_str))
-        .collect();
-    if labels.is_empty() {
-        None
-    } else {
-        Some(labels.contains(&COMPUTER_FOREGROUND_ALLOW))
     }
 }
 

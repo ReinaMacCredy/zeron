@@ -6,6 +6,10 @@ import UIKit
 final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
     var onSubmit: (([(questionId: String, labels: [String])]) -> Void)?
     var onHeightChange: (() -> Void)?
+    var onOpenThread: (() -> Void)? {
+        didSet { other.placeholder = onOpenThread == nil ? "Other…" : "Type my own…" }
+    }
+    var quickAnswer = true { didSet { render() } }
 
     private let card = Glass.surface(radius: 26)
     private let header = UILabel()
@@ -57,7 +61,10 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
         backConfig.title = "Back"
         backConfig.baseForegroundColor = Palette.secondary
         back.configuration = backConfig
-        back.addAction(UIAction { [weak self] _ in self?.go(-1) }, for: .touchUpInside)
+        back.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            if self.page == 0, let open = self.onOpenThread { open() } else { self.go(-1) }
+        }, for: .touchUpInside)
         var nextConfig = UIButton.Configuration.prominentGlass()
         nextConfig.title = "Next"
         nextConfig.baseBackgroundColor = Palette.text
@@ -135,13 +142,20 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
             b.addAction(UIAction { [weak self] _ in self?.pick(option) }, for: .touchUpInside)
             options.addArrangedSubview(b)
         }
-        other.isHidden = q.multiline
-        editor.isHidden = !q.multiline
+        options.isHidden = !quickAnswer
+        other.isHidden = q.multiline || !quickAnswer
+        editor.isHidden = !q.multiline || !quickAnswer
+        nextButton.isHidden = !quickAnswer
         other.text = custom[q.id]
         editor.text = custom[q.id]
-        back.isHidden = page == 0
+        let opens = page == 0 && onOpenThread != nil
+        back.isHidden = page == 0 && !opens
+        var b = back.configuration
+        b?.title = opens ? "Open thread" : "Back"
+        back.configuration = b
+        back.accessibilityIdentifier = opens ? "question-open-thread" : nil
         var n = nextButton.configuration
-        n?.title = page == items.count - 1 ? "Submit" : "Next"
+        n?.title = page == items.count - 1 ? (onOpenThread == nil ? "Submit" : "Send") : "Next"
         nextButton.configuration = n
         nextButton.isEnabled = answered(q)
         onHeightChange?()
@@ -217,6 +231,7 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
 /// Messages waiting for the current turn to end, stacked above the composer.
 final class QueuePanel: UIView {
     var onAction: ((String, QueueAction) -> Void)?
+    var loadImage: ((String, UIImageView) -> Void)?
     private let card = Glass.surface(radius: 20)
     private let stack = UIStackView()
     private(set) var items: [SessionChrome.QueuedItem] = []
@@ -267,23 +282,49 @@ final class QueuePanel: UIView {
 
     private func row(_ item: SessionChrome.QueuedItem, index: Int, count: Int) -> UIView {
         let v = UIView()
-        v.heightAnchor.constraint(equalToConstant: 40).isActive = true
+        v.heightAnchor.constraint(equalToConstant: item.from == nil ? 40 : 52).isActive = true
         let icon = UIImageView(image: UIImage(systemName: "clock", withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .medium)))
         icon.tintColor = Palette.tertiary
         let thumb = UIImageView(image: item.thumbnail)
         thumb.contentMode = .scaleAspectFill
         thumb.clipsToBounds = true
         thumb.layer.cornerRadius = 6
-        thumb.isHidden = item.thumbnail == nil
+        thumb.backgroundColor = Palette.controlFill
+        let hasThumb = item.thumbnail != nil || item.image != nil
+        thumb.isHidden = !hasThumb
+        if item.thumbnail == nil, let image = item.image { loadImage?(image, thumb) }
         let label = FadingLabel()
         label.text = item.gate.map { "\($0) · \(item.text)" } ?? item.text
         label.font = Fonts.ui(.sans, 15)
         label.textColor = Palette.text
+        let from = UILabel()
+        from.text = item.from
+        from.font = Fonts.ui(.sans, 12)
+        from.textColor = Palette.tertiary
+        from.isHidden = item.from == nil
+        let text = UIStackView(arrangedSubviews: [label, from])
+        text.axis = .vertical
+        text.spacing = 1
         var sendConfig = UIButton.Configuration.plain()
         sendConfig.image = UIImage(systemName: "arrow.up.circle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .regular))
         sendConfig.baseForegroundColor = Palette.text
-        let send = UIButton(configuration: sendConfig, primaryAction: UIAction { [weak self] _ in self?.onAction?(item.id, .sendNow) })
-        send.accessibilityLabel = "Send"
+        let send = UIButton(configuration: sendConfig, primaryAction: UIAction { [weak self] _ in
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            self?.onAction?(item.id, .sendNow)
+        })
+        send.isEnabled = item.action != nil
+        send.accessibilityLabel = switch item.action {
+        case .steer?: "Steer"
+        case .sendNext?: "Send next"
+        case .sendNow?: "Send now"
+        case nil: "Send"
+        }
+        send.accessibilityHint = switch item.action {
+        case .steer?: "Keeps the current work running"
+        case .sendNext?: "Sends when the current turn ends; this agent cannot steer mid-turn"
+        case .sendNow?: "Stops the current turn to send the attachments"
+        case nil: nil
+        }
         var moreConfig = UIButton.Configuration.plain()
         moreConfig.image = UIImage(systemName: "ellipsis", withConfiguration: UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold))
         moreConfig.baseForegroundColor = Palette.secondary
@@ -296,16 +337,18 @@ final class QueuePanel: UIView {
             UIAction(title: "Move Down", image: UIImage(systemName: "arrow.down"), attributes: index == count - 1 ? .disabled : []) { [weak self] _ in self?.onAction?(item.id, .moveDown) },
             UIAction(title: "Remove", image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in self?.onAction?(item.id, .remove) },
         ])
-        for s in [icon, thumb, label, send, more] {
+        for s in [icon, thumb, text, send, more] {
             s.translatesAutoresizingMaskIntoConstraints = false
             v.addSubview(s)
         }
         // A long message fades inside the row; it must never outweigh the
         // row's width (it used to stretch the row past the card and push the
         // send / more buttons off the edge).
-        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        for b in [send, more] {
+        for l in [text, label, from] {
+            l.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            l.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        }
+        for b in [icon, send, more] {
             b.setContentCompressionResistancePriority(.required, for: .horizontal)
             b.setContentHuggingPriority(.required, for: .horizontal)
         }
@@ -314,11 +357,13 @@ final class QueuePanel: UIView {
             icon.centerYAnchor.constraint(equalTo: v.centerYAnchor),
             thumb.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
             thumb.centerYAnchor.constraint(equalTo: v.centerYAnchor),
-            thumb.widthAnchor.constraint(equalToConstant: item.thumbnail == nil ? 0 : 26),
+            thumb.widthAnchor.constraint(equalToConstant: hasThumb ? 26 : 0),
             thumb.heightAnchor.constraint(equalToConstant: 26),
-            label.leadingAnchor.constraint(equalTo: thumb.trailingAnchor, constant: item.thumbnail == nil ? 0 : 8),
-            label.centerYAnchor.constraint(equalTo: v.centerYAnchor),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: send.leadingAnchor, constant: -4),
+            text.leadingAnchor.constraint(equalTo: thumb.trailingAnchor, constant: hasThumb ? 8 : 0),
+            text.centerYAnchor.constraint(equalTo: v.centerYAnchor),
+            // Equal, not at-most: every horizontal priority on the text is
+            // low, so at-most let Auto Layout collapse it to zero width.
+            text.trailingAnchor.constraint(equalTo: send.leadingAnchor, constant: -4),
             send.trailingAnchor.constraint(equalTo: more.leadingAnchor),
             send.centerYAnchor.constraint(equalTo: v.centerYAnchor),
             more.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -4),

@@ -9,9 +9,12 @@
 uniffi::setup_scaffolding!("zeron_core");
 
 mod client_ffi;
+pub mod docs;
 pub mod layout;
 pub mod caption;
+pub mod icon;
 pub mod orb;
+pub mod terminal;
 pub mod wallpaper;
 pub mod visual;
 

@@ -45,6 +45,25 @@ impl HarnessId {
             HarnessId::Mock => "Mock",
         }
     }
+
+    /// Whose brand mark an agent wears: the model's maker when the model id
+    /// names one, else the harness running it.
+    pub fn brand_of(harness: Option<HarnessId>, model: Option<&str>) -> Option<HarnessId> {
+        let model = model
+            .map(|m| m.split('[').next().unwrap_or(m).trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        let (provider, id) = model.split_once('/').unwrap_or(("", &model));
+        let maker = match provider {
+            "anthropic" => Some(HarnessId::ClaudeCode),
+            "openai" => Some(HarnessId::Codex),
+            "xai" => Some(HarnessId::Grok),
+            _ if id.starts_with("claude") => Some(HarnessId::ClaudeCode),
+            _ if id.starts_with("gpt") || id.contains("codex") => Some(HarnessId::Codex),
+            _ if id.starts_with("grok") => Some(HarnessId::Grok),
+            _ => None,
+        };
+        maker.or(harness)
+    }
 }
 
 /// Durable user preference for one agent's independently-installed CLI.
@@ -167,6 +186,29 @@ pub enum OfferChoice {
     Wait,
 }
 
+impl OfferChoice {
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Switch => "switch",
+            Self::Wait => "wait",
+        }
+    }
+
+    pub fn act_label(self) -> &'static str {
+        match self {
+            Self::Switch => "Switch now",
+            Self::Wait => "Wait now",
+        }
+    }
+
+    pub fn countdown_verb(self) -> &'static str {
+        match self {
+            Self::Switch => "Switching",
+            Self::Wait => "Waiting",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LimitOffer {
@@ -186,6 +228,45 @@ pub struct LimitResumes {
 }
 
 impl HarnessUpdateStatus {
+    /// A provider's version line: the installed version, plus only what the
+    /// Update button doesn't already say (progress, a failure). Up-to-date
+    /// providers, checks in flight and providers whose updates aren't
+    /// monitored show just the version, so rows don't flash through states
+    /// while checks run.
+    pub fn version_line(&self) -> String {
+        let installed = self
+            .installed_version
+            .as_deref()
+            .map(|version| format!("v{version}"));
+        let with = |detail: &str| match &installed {
+            Some(version) => format!("{version} · {detail}"),
+            None => detail.to_owned(),
+        };
+        let version_only = || installed.clone().unwrap_or_default();
+        match self.phase {
+            HarnessUpdatePhase::Dormant
+            | HarnessUpdatePhase::Checking
+            | HarnessUpdatePhase::Current => version_only(),
+            HarnessUpdatePhase::Available | HarnessUpdatePhase::ManualActionRequired
+                if self.can_apply =>
+            {
+                version_only()
+            }
+            HarnessUpdatePhase::Available => match self.latest_version.as_deref() {
+                Some(latest) => with(&format!("v{latest} available")),
+                None => with("Update available"),
+            },
+            HarnessUpdatePhase::ManualActionRequired => version_only(),
+            HarnessUpdatePhase::WaitingForIdle => with("Waiting for agent to be idle"),
+            HarnessUpdatePhase::Preparing => with("Preparing update…"),
+            HarnessUpdatePhase::Downloading => with("Downloading…"),
+            HarnessUpdatePhase::Installing => with("Installing…"),
+            HarnessUpdatePhase::Verifying => with("Verifying…"),
+            HarnessUpdatePhase::Updated => with("Updated"),
+            HarnessUpdatePhase::Failed => with("Couldn't check for updates"),
+        }
+    }
+
     /// Home notices describe discovered releases or an update in progress.
     /// Manual checks remain available in Settings without implying that a
     /// newer release exists.
@@ -220,6 +301,22 @@ pub enum ReasoningLevel {
     Ultrathink,
 }
 
+impl ReasoningLevel {
+    pub fn label(self) -> &'static str {
+        match self {
+            ReasoningLevel::Minimal => "Minimal",
+            ReasoningLevel::Low => "Low",
+            ReasoningLevel::Medium => "Medium",
+            ReasoningLevel::High => "High",
+            ReasoningLevel::XHigh => "X-High",
+            ReasoningLevel::Max => "Max",
+            ReasoningLevel::Ultra => "Ultra",
+            ReasoningLevel::Ultracode => "Ultracode",
+            ReasoningLevel::Ultrathink => "Ultrathink",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxLevel {
@@ -249,6 +346,12 @@ pub enum PermissionMode {
 }
 
 impl PermissionMode {
+    pub const ALL: [PermissionMode; 3] = [
+        PermissionMode::Ask,
+        PermissionMode::Auto,
+        PermissionMode::Full,
+    ];
+
     pub fn sandbox(self) -> SandboxLevel {
         match self {
             PermissionMode::Ask | PermissionMode::Auto => SandboxLevel::WorkspaceWrite,
@@ -275,6 +378,22 @@ impl PermissionMode {
             PermissionMode::Full => "Full access",
         }
     }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            PermissionMode::Ask => "Ask",
+            PermissionMode::Auto => "Auto",
+            PermissionMode::Full => "Full",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            PermissionMode::Ask => "Always ask before tools and commands",
+            PermissionMode::Auto => "Only ask for actions flagged as unsafe",
+            PermissionMode::Full => "Any file, any command, no prompts",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,6 +403,18 @@ pub enum SteeringMode {
     StepBoundary,
     /// Steer delivered only between turns.
     TurnBoundary,
+}
+
+/// The caption under the composer when a Steer follow-up will queue because
+/// the agent only takes input between turns.
+pub fn steer_queues_notice(
+    queueing: bool,
+    prefers_steer: bool,
+    steers_mid_turn: bool,
+) -> Option<&'static str> {
+    (queueing && prefers_steer && !steers_mid_turn).then_some(
+        "This agent can't be steered mid-turn. Your message will be queued and sent when the current turn finishes.",
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -301,7 +432,7 @@ pub struct Model {
     pub options: Vec<ModelOption>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelOption {
     pub id: String,
@@ -310,7 +441,7 @@ pub struct ModelOption {
     pub default_choice: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelOptionChoice {
     pub id: String,
@@ -612,6 +743,43 @@ impl ToolCall {
             .filter(|model| !model.is_empty())
     }
 
+    /// Tab title for a spawn chip's subagent surface: the BARE task description
+    /// ("verify the marker pipeline"). The chip keeps the tool's fuller name;
+    /// the input's description/prompt back up a bare name (older docs).
+    pub fn subagent_title(&self) -> String {
+        let (name, input) = match self {
+            ToolCall::Unknown { name, input } => (name.as_str(), input.as_ref()),
+            ToolCall::Mcp { tool, input, .. } => (tool.as_str(), input.as_ref()),
+            _ => return "Subagent".into(),
+        };
+        let candidates = [
+            Some(name),
+            input.and_then(|i| i.get("description")?.as_str()),
+            input.and_then(|i| i.get("prompt")?.as_str()),
+        ];
+        candidates
+            .into_iter()
+            .flatten()
+            .find_map(|text| title_line(strip_spawn_prefix(text), SUBAGENT_TITLE_MAX))
+            .unwrap_or_else(|| "Subagent".into())
+    }
+
+    pub fn subagent_reasoning(&self) -> Option<ReasoningLevel> {
+        let (ToolCall::Unknown { input, .. } | ToolCall::Mcp { input, .. }) = self else {
+            return None;
+        };
+        let input = input.as_ref()?;
+        SUBAGENT_EFFORT_KEYS.iter().find_map(|key| {
+            let raw = input
+                .get(*key)?
+                .as_str()?
+                .trim()
+                .to_ascii_lowercase()
+                .replace(['-', '_'], "");
+            serde_json::from_value(serde_json::Value::String(raw)).ok()
+        })
+    }
+
     /// Claude's advisor consultation — a SERVER tool whose answer comes back
     /// encrypted, so the only client-visible facts are that it ran and for
     /// how long. Decoded as an Unknown named [`ADVISOR_TOOL_NAME`]; the chip
@@ -652,6 +820,45 @@ pub const ADVISOR_TOOL_NAME: &str = "Advisor";
 /// disagree on the spelling, so the lookup is by key set, not by harness —
 /// a new adapter naming it any of these needs no code change here.
 pub const SUBAGENT_MODEL_KEYS: [&str; 4] = ["model", "modelId", "model_id", "subagent_model"];
+
+const SUBAGENT_EFFORT_KEYS: [&str; 4] = ["effort", "reasoning_effort", "reasoningEffort", "reasoning"];
+
+/// Max chars a subagent tab title keeps. The strip chip is fixed-width and
+/// truncates visually, but the derived title also rides drag ghosts and any
+/// future pickers — cap it at the source.
+pub const SUBAGENT_TITLE_MAX: usize = 40;
+
+/// First line of `text`, trimmed, capped at `max` chars with an ellipsis.
+fn title_line(text: &str, max: usize) -> Option<String> {
+    let line = text.lines().find(|l| !l.trim().is_empty())?.trim();
+    let mut out: String = line.chars().take(max).collect();
+    if line.chars().count() > max {
+        out.push('…');
+    }
+    Some(out)
+}
+
+/// Drop a leading "Agent"/"Task" genus (with its `:` and spacing) from a
+/// spawn-title candidate. Only a real word boundary strips — "Taskmaster"
+/// keeps its name. A bare "Agent"/"Task" strips to "" (no context at all).
+fn strip_spawn_prefix(text: &str) -> &str {
+    let t = text.trim();
+    for prefix in ["agent", "task"] {
+        if t.len() >= prefix.len()
+            && t.is_char_boundary(prefix.len())
+            && t[..prefix.len()].eq_ignore_ascii_case(prefix)
+        {
+            let rest = &t[prefix.len()..];
+            if rest.is_empty() {
+                return "";
+            }
+            if rest.starts_with(':') || rest.starts_with(char::is_whitespace) {
+                return rest.trim_start_matches(':').trim();
+            }
+        }
+    }
+    t
+}
 
 /// The spawn-input keys [`sanitize_tool_call`](crate::) must preserve so the
 /// chip can name the child's model. Deliberately tiny: everything else on a
@@ -1252,6 +1459,80 @@ mod tests {
             Some("/home/u/.claude/skills/review/SKILL.md")
         );
         assert_eq!(skill("/home/u/.ssh/config").skill_path(), None);
+    }
+
+    #[test]
+    fn subagent_titles() {
+        // The tab is the BARE task — the "Agent:" genus is stripped.
+        let named = ToolCall::Unknown {
+            name: "Agent: scan repo".into(),
+            input: None,
+        };
+        assert_eq!(named.subagent_title(), "scan repo");
+        // A bare "Task"/"Agent" digs the description out of the call input
+        // (which sheds any genus of its own).
+        let bare = ToolCall::Unknown {
+            name: "Task".into(),
+            input: Some(serde_json::json!({
+                "description": "Agent: audit the auth flow",
+                "prompt": "very long instructions…",
+            })),
+        };
+        assert_eq!(bare.subagent_title(), "audit the auth flow");
+        // Word boundaries only — a name that merely STARTS with the genus
+        // keeps itself.
+        let compound = ToolCall::Unknown {
+            name: "Taskmaster".into(),
+            input: None,
+        };
+        assert_eq!(compound.subagent_title(), "Taskmaster");
+        // Nothing to derive → the generic label.
+        let blank = ToolCall::Unknown {
+            name: "agent".into(),
+            input: None,
+        };
+        assert_eq!(blank.subagent_title(), "Subagent");
+        // Absurd lengths cap with an ellipsis; multiline prompts keep only
+        // their first line.
+        let long = ToolCall::Unknown {
+            name: "x".repeat(120),
+            input: None,
+        };
+        let title = long.subagent_title();
+        assert_eq!(title.chars().count(), SUBAGENT_TITLE_MAX + 1);
+        assert!(title.ends_with('…'));
+        // Non-spawn-shaped calls stay generic.
+        assert_eq!(
+            ToolCall::Exec {
+                command: "ls".into()
+            }
+            .subagent_title(),
+            "Subagent"
+        );
+    }
+
+    #[test]
+    fn a_spawn_names_its_own_level_under_any_spelling() {
+        let spawn = |input: serde_json::Value| ToolCall::Unknown {
+            name: "Agent".into(),
+            input: Some(input),
+        };
+        assert_eq!(
+            spawn(serde_json::json!({ "effort": "X-High" })).subagent_reasoning(),
+            Some(ReasoningLevel::XHigh)
+        );
+        assert_eq!(
+            spawn(serde_json::json!({ "reasoning_effort": "medium" })).subagent_reasoning(),
+            Some(ReasoningLevel::Medium)
+        );
+        assert_eq!(
+            spawn(serde_json::json!({ "reasoning": "loud" })).subagent_reasoning(),
+            None
+        );
+        assert_eq!(
+            spawn(serde_json::json!({ "model": "opus" })).subagent_reasoning(),
+            None
+        );
     }
 
     /// Drivers spell the key differently; the chip must not care which one

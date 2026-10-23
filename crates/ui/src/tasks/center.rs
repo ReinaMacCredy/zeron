@@ -82,28 +82,7 @@ pub enum TaskCenterEvent {
     Back,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanEdit {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub overview: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub overview_images: Option<Vec<String>>,
-    pub steps: Vec<PlanStepEdit>,
-    pub remove_step_ids: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub order: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanStepEdit {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub step_id: Option<String>,
-    pub title: String,
-    pub notes: String,
-    pub images: Vec<String>,
-}
+pub use zeron_proto::{PlanEdit, PlanStepEdit};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selection {
@@ -1483,47 +1462,6 @@ impl TaskCenter {
                 )
                 .into_any_element(),
         )
-    }
-
-    pub(super) fn lead_line(task: &zeron_proto::Task, plan: &Rollup) -> String {
-        let running = plan.count(StepStatus::Working);
-        let working = plan.lead == Some(ChatIndicator::Working);
-        if task.completed_at.is_some() {
-            "Done".into()
-        } else if plan.lead.is_none() {
-            "Not started".into()
-        } else if let Some(lead) = plan.lead.filter(|_| !super::is_mission(task, plan)) {
-            super::TasksPage::linked_label(lead).into()
-        } else if plan.phase(task) == super::PlanPhase::Planning {
-            "Planning".into()
-        } else if plan.lead == Some(ChatIndicator::Errored) {
-            "Failed".into()
-        } else if let Some(waits) = Self::lead_waits(task, plan).filter(|_| !working) {
-            waits
-        } else if running > 0 {
-            format!("Watching {running} {}", plural(running, "step", "steps"))
-        } else if working {
-            "Working".into()
-        } else {
-            "Idle".into()
-        }
-    }
-
-    pub(super) fn lead_waits(task: &zeron_proto::Task, plan: &Rollup) -> Option<String> {
-        let mut waits = Vec::new();
-        if plan.phase(task) == super::PlanPhase::PlanReady {
-            waits.push("Plan review".to_owned());
-        }
-        let questions = plan
-            .questions
-            .max(usize::from(plan.lead == Some(ChatIndicator::AwaitingInput)));
-        if questions > 0 {
-            waits.push(format!(
-                "{questions} {}",
-                plural(questions, "question", "questions")
-            ));
-        }
-        (!waits.is_empty()).then(|| waits.join(", "))
     }
 
     fn render_reads(
