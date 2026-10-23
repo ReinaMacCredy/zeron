@@ -499,31 +499,27 @@ final class SessionFlowTests: XCTestCase {
     }
 
     /// Needs `simctl privacy grant photos` and `simctl addmedia` on the simulator.
-    func testAttachCardReplacesKeyboardAddsRecentPhotos() throws {
+    func testAttachCardOverKeyboardAddsRecentPhotos() throws {
         let app = launch(["-route", "chat:chat-ios-keyboard"])
         let input = app.textViews["composer-input"]
         let attach = app.buttons["composer-attach"]
         let photos = app.buttons["attach-photos"]
+        let keyboard = app.keyboards.firstMatch
         XCTAssertTrue(input.waitForExistence(timeout: 10))
         input.tap()
-        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
         sleep(1)
         snapshot(app, "keyboard-open")
 
         attach.tap()
         XCTAssertTrue(photos.waitForExistence(timeout: 5))
         sleep(1)
-        snapshot(app, "attach-card-in-keyboard")
-        XCTAssertTrue(app.buttons["attach-files"].isHittable, "card rows reachable where the keyboard was")
+        snapshot(app, "attach-menu")
+        XCTAssertTrue(app.buttons["attach-files"].isHittable, "card rows reachable")
+        XCTAssertTrue(keyboard.exists, "the keys stay up under the menu")
         attach.tap()
         XCTAssertTrue(photos.waitForNonExistence(timeout: 5), "\"+\" again closes the card")
-        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "keyboard comes back")
-
-        attach.tap()
-        XCTAssertTrue(photos.waitForExistence(timeout: 5))
-        input.tap()
-        XCTAssertTrue(photos.waitForNonExistence(timeout: 5), "tapping the text closes the card")
-        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "keyboard comes back")
+        XCTAssertTrue(keyboard.exists, "keyboard stays")
 
         attach.tap()
         XCTAssertTrue(photos.waitForExistence(timeout: 5))
@@ -541,11 +537,36 @@ final class SessionFlowTests: XCTestCase {
         sleep(1)
         snapshot(app, "attach-grid-selected")
         app.buttons["attach-grid-main"].tap()
-        let attached = NSPredicate(format: "count == 2")
-        expectation(for: attached, evaluatedWith: app.buttons.matching(identifier: "Remove image"))
+        let removeButtons = app.buttons.matching(identifier: "Remove image")
+        expectation(for: NSPredicate(format: "count == 2"), evaluatedWith: removeButtons)
         waitForExpectations(timeout: 10)
         XCTAssertFalse(grid.exists, "card closed")
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5), "keyboard back after the grid")
+        sleep(1)
         snapshot(app, "attached")
+
+        let first = app.buttons["Image 1 of 2"]
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        first.tap()
+        let close = app.buttons["attachment-preview-close"]
+        XCTAssertTrue(close.waitForExistence(timeout: 5), "preview opens")
+        sleep(1)
+        snapshot(app, "attachment-preview")
+        close.tap()
+        XCTAssertTrue(close.waitForNonExistence(timeout: 5), "preview closes")
+
+        first.tap()
+        let remove = app.buttons["attachment-preview-remove"]
+        XCTAssertTrue(remove.waitForExistence(timeout: 5))
+        remove.tap()
+        expectation(for: NSPredicate(format: "count == 1"), evaluatedWith: removeButtons)
+        waitForExpectations(timeout: 5)
+        XCTAssertTrue(app.buttons["Image 1 of 1"].exists, "labels renumber")
+        sleep(1)
+        snapshot(app, "removed")
+        removeButtons.firstMatch.tap()
+        expectation(for: NSPredicate(format: "count == 0"), evaluatedWith: removeButtons)
+        waitForExpectations(timeout: 5)
     }
 
     /// Run after `simctl privacy revoke photos`, with TEST_RUNNER_ZERON_PHOTOS_DENIED=1.
