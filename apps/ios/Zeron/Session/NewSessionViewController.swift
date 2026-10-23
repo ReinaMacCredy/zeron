@@ -284,7 +284,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         let modelTitle = model?.label ?? draft.model.map { modelLabel(harness: draft.harness, model: $0) } ?? fallbackModels(harness: draft.harness).first?.label ?? HarnessNames.label(draft.harness)
         chips.append(ComposerChip(id: "model", title: modelTitle, symbol: nil, icon: BrandMarks.image(for: draft.harness, side: 13)))
         if let efforts = model?.efforts, !efforts.isEmpty {
-            chips.append(ComposerChip(id: "effort", title: (draft.effort ?? efforts[efforts.count / 2]).capitalized, symbol: "gauge.with.dots.needle.67percent"))
+            chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: draft.effort ?? efforts[efforts.count / 2]), symbol: "gauge.with.dots.needle.67percent"))
         }
         let labels = missionComposerLabels(fromChat: false)
         chips.append(ComposerChip(id: "mission", title: labels.start, symbol: "target", tint: mission ? Palette.accent : nil))
@@ -423,7 +423,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     private func effortMenu() -> UIMenu {
         let model = models.first { $0.harness == draft.harness && $0.id == draft.model } ?? models.first { $0.harness == draft.harness }
         return UIMenu(title: "Reasoning effort", children: (model?.efforts ?? []).map { e in
-            UIAction(title: e.capitalized, state: e == draft.effort ? .on : .off) { [weak self] _ in
+            UIAction(title: reasoningLabel(level: e), state: e == draft.effort ? .on : .off) { [weak self] _ in
                 self?.draft.effort = e
                 self?.refreshChips()
             }
