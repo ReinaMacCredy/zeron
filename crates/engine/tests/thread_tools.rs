@@ -301,6 +301,7 @@ fn queue_run(core: &EngineCore, chat_id: &str, command_id: &str, message_id: &st
                     computer_control: false,
                     mcp: None,
                     disabled_tools: Vec::new(),
+                    env: Default::default(),
                 },
                 message_id: message_id.into(),
             },

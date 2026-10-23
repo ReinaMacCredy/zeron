@@ -95,6 +95,16 @@ use zeron_proto::{
 use crate::repos::home_dir;
 use crate::{EngineError, new_id, now_ms};
 
+/// What a relayed sign-in callback answered ([`AgentAccounts::relay_callback`]):
+/// the device that caught the browser redirect answers the browser alike.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayedCallback {
+    pub status: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+}
+
 mod oauth;
 #[cfg(test)]
 mod provider_tests;
@@ -210,16 +220,19 @@ impl AgentAccountsConfig {
             Some(dir) => dir.join(".claude.json"),
             None => home_dir().join(".claude.json"),
         };
+        // A Cloud device's logins are files the credential broker writes;
+        // it never has (or prompts for) a keychain.
+        let keychain = cfg!(target_os = "macos") && !crate::runner::is_cloud_platform();
         Self {
             data_dir: data_dir.to_path_buf(),
-            claude_keychain_service: cfg!(target_os = "macos")
+            claude_keychain_service: keychain
                 .then(|| claude_keychain_service(claude_dir.as_deref())),
             claude_config_dir: claude_dir.unwrap_or_else(|| home_dir().join(".claude")),
             claude_config_file,
             codex_home: env_dir("CODEX_HOME").unwrap_or_else(|| home_dir().join(".codex")),
             cursor_sdk_auth_file: home_dir().join(".cursor").join("sdk").join("auth.json"),
             antigravity_home: zeron_harness::acp::antigravity_home().ok(),
-            antigravity_keychain: cfg!(target_os = "macos")
+            antigravity_keychain: keychain
                 && std::env::var_os("AGY_ACP_FORCE_FILE_STORAGE")
                     .is_none_or(|v| !matches!(v.to_str(), Some("1" | "true"))),
             grok_home: stores::default_grok_home(),
@@ -421,6 +434,17 @@ impl Detected {
 
 // ── login flows ─────────────────────────────────────────────────────────────
 
+/// Where a CAPTURED sign-in goes instead of this device: the Cloud credential
+/// vault's upload ([`AgentAccounts::start_capture_login`]). Called with the
+/// provider's credential blob — Codex's `auth.json`, Claude's `claudeAiOauth`
+/// — and answers the user-facing reason on failure. `Fn`, not `FnOnce`: a
+/// mistyped paste-code may retry the same flow.
+pub type CaptureSink = Arc<
+    dyn Fn(serde_json::Value) -> futures::future::BoxFuture<'static, Result<(), String>>
+        + Send
+        + Sync,
+>;
+
 enum LoginFlow {
     Claude {
         verifier: String,
@@ -428,6 +452,9 @@ enum LoginFlow {
         /// verifier in the authorize url would defeat PKCE).
         state: String,
         started_at: Instant,
+        /// Capture-only: the redeemed tokens go here, never into a slot or
+        /// this device's live Claude store.
+        capture: Option<CaptureSink>,
     },
     /// A spawned login child polled to completion: `codex login` against a
     /// throwaway `CODEX_HOME`, the cursor shim's login mode minting into a
@@ -1621,17 +1648,23 @@ impl AgentAccounts {
     /// `localhost:<port>/callback` we serve, finishing when the browser lands
     /// there. Pasting the code is the fallback when no port can be bound.
     async fn start_claude_login(&self) -> AgentLoginStart {
+        self.start_claude_login_with(None).await
+    }
+
+    /// [`Self::start_claude_login`]; with `capture`, the redeemed tokens go
+    /// there instead of a slot / the live login.
+    async fn start_claude_login_with(&self, capture: Option<CaptureSink>) -> AgentLoginStart {
         match tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await {
             Ok(listener) => match listener.local_addr() {
-                Ok(address) => self.start_claude_loopback_login(listener, address.port()),
+                Ok(address) => self.start_claude_loopback_login(listener, address.port(), capture),
                 Err(error) => {
                     tracing::warn!(%error, "Claude login callback has no port; pasting the code instead");
-                    self.start_claude_paste_login()
+                    self.start_claude_paste_login_with(capture)
                 }
             },
             Err(error) => {
                 tracing::warn!(%error, "no loopback port for the Claude login; pasting the code instead");
-                self.start_claude_paste_login()
+                self.start_claude_paste_login_with(capture)
             }
         }
     }
@@ -1640,6 +1673,7 @@ impl AgentAccounts {
         &self,
         listener: tokio::net::TcpListener,
         port: u16,
+        capture: Option<CaptureSink>,
     ) -> AgentLoginStart {
         let login_id = new_id();
         let (verifier, challenge) = pkce_pair();
@@ -1662,7 +1696,13 @@ impl AgentAccounts {
         let outcome_state = task_state.clone();
         let handle = tokio::spawn(async move {
             let outcome = this
-                .finish_claude_loopback_login(listener, &state, &verifier, &redirect)
+                .finish_claude_loopback_login(
+                    listener,
+                    &state,
+                    &verifier,
+                    &redirect,
+                    capture.as_ref(),
+                )
                 .await;
             lock(&outcome_state).outcome = Some(outcome.map_err(|e| e.to_string()));
         });
@@ -1693,6 +1733,7 @@ impl AgentAccounts {
         state: &str,
         verifier: &str,
         redirect: &str,
+        capture: Option<&CaptureSink>,
     ) -> Result<(), EngineError> {
         use tokio::io::AsyncWriteExt as _;
         let (callback, mut browser) = await_claude_callback(&listener, state).await;
@@ -1706,6 +1747,7 @@ impl AgentAccounts {
                     verifier,
                     redirect,
                     CLAUDE_LOOPBACK_SCOPES,
+                    capture,
                 )
                 .await
             }
@@ -1734,7 +1776,12 @@ impl AgentAccounts {
 
     /// The paste-code fallback: Anthropic's manual redirect shows the code
     /// for the user to paste back ([`Self::complete_login`]).
+    #[cfg(test)]
     fn start_claude_paste_login(&self) -> AgentLoginStart {
+        self.start_claude_paste_login_with(None)
+    }
+
+    fn start_claude_paste_login_with(&self, capture: Option<CaptureSink>) -> AgentLoginStart {
         let login_id = new_id();
         let (verifier, challenge) = pkce_pair();
         let state = random_url_token();
@@ -1751,6 +1798,7 @@ impl AgentAccounts {
                 verifier,
                 state,
                 started_at: Instant::now(),
+                capture,
             },
         );
         AgentLoginStart {
@@ -1926,6 +1974,154 @@ impl AgentAccounts {
             .login_command(home)
     }
 
+    /// Sign in to `harness` for a credential that LEAVES this device — the
+    /// Cloud credential vault (docs/design/cloud-device.md, "Sign-in stays on
+    /// the device"). The provider's own flow runs exactly as for "Add
+    /// account", but the result goes to `capture` and nowhere else: no slot,
+    /// no live credential store or Keychain, no adoption. This device's own
+    /// login is untouched and the capturer is the grant's only refresher.
+    ///
+    /// Same lifecycle as [`Self::start_login`]: the reply is an
+    /// [`AgentLoginStart`]; a `browser` flow is polled with
+    /// [`Self::poll_login`] (`done` once `capture` succeeded, its message on
+    /// failure), a `paste-code` flow is finished with [`Self::complete_login`],
+    /// and [`Self::cancel_login`] stops either. Abandoned flows are reaped
+    /// after [`FLOW_TTL`].
+    pub async fn start_capture_login(
+        &self,
+        harness: HarnessId,
+        capture: CaptureSink,
+    ) -> Result<AgentLoginStart, EngineError> {
+        self.sweep_flows();
+        let mut start = match harness {
+            HarnessId::ClaudeCode => {
+                self.reap_spawned_flows(HarnessId::ClaudeCode);
+                self.start_claude_login_with(Some(capture)).await
+            }
+            HarnessId::Codex => self.start_codex_capture(capture).await?,
+            other => {
+                return Err(EngineError::Other(format!(
+                    "{other:?} sign-ins can't be connected to Cloud"
+                )));
+            }
+        };
+        if start.callback_port.is_none() {
+            start.callback_port = loopback_port(&start.url);
+        }
+        Ok(start)
+    }
+
+    /// Codex half of [`Self::start_capture_login`]: `codex login` into a
+    /// throwaway `CODEX_HOME`; once its `auth.json` holds a ChatGPT token set
+    /// it goes to `capture` and the home is shredded. Holds ChatGPT's fixed
+    /// callback port like every Codex sign-in, so a newer one supersedes it.
+    async fn start_codex_capture(
+        &self,
+        capture: CaptureSink,
+    ) -> Result<AgentLoginStart, EngineError> {
+        self.reap_spawned_flows(HarnessId::Codex);
+        self.reap_port_flows(oauth::OPENAI_LOOPBACK_PORT);
+        let login_id = new_id();
+        let home = self.login_home(&login_id)?;
+        // From here on every exit path — error, success, cancel (abort),
+        // engine shutdown — shreds the throwaway home.
+        let shred = ShredOnDrop(home.clone());
+        let cli = lock(&self.inner.cli_overrides)
+            .get(&HarnessId::Codex)
+            .cloned();
+        let mut command = match cli {
+            Some(cli) => {
+                let mut command = zeron_harness::process::Command::new(cli);
+                command.arg("login").env("CODEX_HOME", &home);
+                command
+            }
+            None => self.codex_login_command(&home).map_err(|err| {
+                EngineError::Other(match err {
+                    zeron_harness::HarnessError::NotInstalled(hint) => format!(
+                        "The `codex` CLI was not found on this device — install it first. ({hint})"
+                    ),
+                    other => format!("Could not resolve the codex CLI for login: {other}"),
+                })
+            })?,
+        };
+        command
+            .stdin(zeron_harness::process::Stdio::null())
+            .stdout(zeron_harness::process::Stdio::piped())
+            .stderr(zeron_harness::process::Stdio::piped());
+        // The app opens the one authorization tab (see `start_codex_login`).
+        #[cfg(unix)]
+        if let Some(noop_browser) = ensure_noop_browser(&self.inner.config.root_dir()) {
+            command.env("BROWSER", noop_browser);
+        }
+        let child = command.spawn().map_err(|err| {
+            EngineError::Other(if err.kind() == std::io::ErrorKind::NotFound {
+                "The `codex` CLI was not found on this device — install it first.".into()
+            } else {
+                format!("Could not start the codex sign-in: {err}")
+            })
+        })?;
+        let (child, output, exit) = wire_login_child(child);
+        let kill = KillOnDrop(child);
+        let url = await_login_url(&output, &exit, scan_openai_url).await;
+        if url.is_empty()
+            && let Some(code) = *lock(&exit)
+        {
+            return Err(EngineError::Other(login_child_failure(code, &output)));
+        }
+        let state = Arc::new(Mutex::new(TaskLoginState {
+            url: (!url.is_empty()).then(|| url.clone()),
+            ..Default::default()
+        }));
+        let task_state = state.clone();
+        let auth_file = home.join("auth.json");
+        let handle = tokio::spawn(async move {
+            let waited = tokio::time::timeout(
+                FLOW_TTL,
+                await_codex_capture(&auth_file, &output, &exit, &task_state),
+            )
+            .await
+            .unwrap_or_else(|_| Err("The sign-in timed out — start again.".into()));
+            // The CLI answers the browser right after writing auth.json; give
+            // it a moment to exit on its own, then stop it either way.
+            if waited.is_ok() {
+                for _ in 0..30 {
+                    if lock(&exit).is_some() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+            drop(kill);
+            // Off the disk before the upload: the token set lives on only in
+            // this task's memory until the capturer has it.
+            drop(shred);
+            let outcome = match waited {
+                Ok(auth) => capture(auth).await,
+                Err(message) => Err(message),
+            };
+            lock(&task_state).outcome = Some(outcome);
+        });
+        lock(&self.inner.flows).insert(
+            login_id.clone(),
+            LoginFlow::Task {
+                harness: HarnessId::Codex,
+                started_at: Instant::now(),
+                state,
+                handle,
+                // The task's own guard shreds the home; a plain remove here
+                // could beat it to the files.
+                home: None,
+                port: Some(oauth::OPENAI_LOOPBACK_PORT),
+            },
+        );
+        Ok(AgentLoginStart {
+            login_id,
+            url,
+            mode: AgentLoginMode::Browser,
+            callback_port: None,
+        })
+    }
+
     /// Antigravity: its ACP server's own Google sign-in. The start replies at
     /// once — a first sign-in may download a large server — and polls carry
     /// the browser url once the server prints it. A server that already holds
@@ -2086,10 +2282,13 @@ impl AgentAccounts {
         login_id: &str,
         code: &str,
     ) -> Result<AgentAccountsSnapshot, EngineError> {
-        let (verifier, expected_state) = match lock(&self.inner.flows).get(login_id) {
+        let (verifier, expected_state, capture) = match lock(&self.inner.flows).get(login_id) {
             Some(LoginFlow::Claude {
-                verifier, state, ..
-            }) => (verifier.clone(), state.clone()),
+                verifier,
+                state,
+                capture,
+                ..
+            }) => (verifier.clone(), state.clone(), capture.clone()),
             _ => {
                 return Err(EngineError::Other(
                     "This sign-in attempt expired — start again.".into(),
@@ -2117,6 +2316,7 @@ impl AgentAccounts {
             &verifier,
             CLAUDE_REDIRECT,
             CLAUDE_SCOPES,
+            capture.as_ref(),
         )
         .await?;
         self.remove_flow(login_id);
@@ -2125,7 +2325,10 @@ impl AgentAccounts {
 
     /// Redeem a Claude authorization code at `token_url` and save the account
     /// as a slot (see [`Self::adopt_if_live`] for when it also becomes live).
-    /// `redirect` must be the one the authorize url named.
+    /// `redirect` must be the one the authorize url named. With `capture`
+    /// the `claudeAiOauth` blob goes there INSTEAD: no slot, no live store,
+    /// no Keychain — the capturer becomes the grant's only holder.
+    #[allow(clippy::too_many_arguments)]
     async fn redeem_claude_code(
         &self,
         token_url: &str,
@@ -2134,6 +2337,7 @@ impl AgentAccounts {
         verifier: &str,
         redirect: &str,
         default_scopes: &str,
+        capture: Option<&CaptureSink>,
     ) -> Result<(), EngineError> {
         let token = self
             .inner
@@ -2235,6 +2439,19 @@ impl AgentAccounts {
         });
         if let (Some(sub), Some(map)) = (subscription_type, oauth.as_object_mut()) {
             map.insert("subscriptionType".into(), serde_json::json!(sub));
+        }
+        if let Some(capture) = capture {
+            // The login's identity rides along (never secret): Cloud keeps
+            // several logins and tells them apart by it.
+            let profile = serde_json::json!({
+                "email": email,
+                "displayName": display_name,
+                "organization": org_name,
+                "plan": claude_plan(org_type.as_deref(), rate_tier.as_deref()),
+            });
+            return capture(serde_json::json!({ "credential": oauth, "profile": profile }))
+                .await
+                .map_err(EngineError::Other);
         }
         let mut oauth_account = serde_json::json!({
             "accountUuid": account_uuid,
@@ -2449,6 +2666,78 @@ impl AgentAccounts {
         };
         self.remove_flow(login_id);
         Some(poll)
+    }
+
+    /// Replay a sign-in's browser callback that another device caught on its
+    /// own loopback (the phone, which can't pipe the connection): one GET of
+    /// `path` to the port this login registered for `requester` — only a
+    /// live login that device started, only that port, only a plain path.
+    /// The CLI (or engine) listening there finishes the login as if the
+    /// browser had landed on this computer.
+    pub async fn relay_callback(
+        &self,
+        login_id: &str,
+        requester: &str,
+        path: &str,
+    ) -> Result<RelayedCallback, EngineError> {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let port = self
+            .inner
+            .callback_routes
+            .port_for(login_id, requester)
+            .map_err(|e| EngineError::Other(e.to_string()))?;
+        if !path.starts_with('/')
+            || path.len() > 8 * 1024
+            || path.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(EngineError::Other("not a sign-in callback path".into()));
+        }
+        let connect = async {
+            match tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await {
+                Ok(socket) => Ok(socket),
+                Err(v4) => tokio::net::TcpStream::connect((std::net::Ipv6Addr::LOCALHOST, port))
+                    .await
+                    .map_err(|_| v4),
+            }
+        };
+        let exchange = async {
+            let mut socket = connect.await?;
+            let request = format!(
+                "GET {path} HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n"
+            );
+            socket.write_all(request.as_bytes()).await?;
+            let mut response = Vec::new();
+            let mut buf = [0u8; 4096];
+            while response.len() < 64 * 1024 {
+                let read = socket.read(&mut buf).await?;
+                if read == 0 {
+                    break;
+                }
+                response.extend_from_slice(&buf[..read]);
+                if response.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Ok::<_, std::io::Error>(response)
+        };
+        let response = tokio::time::timeout(Duration::from_secs(20), exchange)
+            .await
+            .map_err(|_| EngineError::Other("the sign-in didn't answer its callback".into()))?
+            .map_err(|e| EngineError::Other(format!("couldn't reach the sign-in: {e}")))?;
+        let head = String::from_utf8_lossy(&response);
+        let status = head
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|code| code.parse::<u16>().ok())
+            .unwrap_or(0);
+        let location = head.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("location")
+                .then(|| value.trim().to_owned())
+        });
+        Ok(RelayedCallback { status, location })
     }
 
     /// Drop a flow's bookkeeping, and with it any callback route it published.
@@ -2704,9 +2993,28 @@ impl AgentAccounts {
             // wherever Claude Code will READ it (see `read_claude_credentials`):
             // the Keychain whenever it holds an item or no file exists; the
             // file only for a file-only (Keychain-less) login.
-            if keychain::has_item(service).await || !self.inner.config.claude_creds_file().exists()
-            {
-                return keychain::write_credentials(service, &json).await;
+            let has_item = keychain::has_item(service).await;
+            if has_item || !self.inner.config.claude_creds_file().exists() {
+                match keychain::write_credentials(service, &json).await {
+                    Ok(()) => return Ok(()),
+                    // Claude Code's own fallback when the Keychain can't be
+                    // used (no item it can see, writes refused — e.g. an
+                    // engine outside the login session): the plaintext file,
+                    // which it reads whenever the Keychain holds nothing. A
+                    // failed write must not leave the CLI signed out.
+                    Err(err) if !has_item => {
+                        tracing::warn!(error = %err, "Keychain write failed; using Claude Code's credentials file");
+                    }
+                    // An item we can't update would shadow the file (the
+                    // Keychain is read first): say how to recover.
+                    Err(err) => {
+                        return Err(EngineError::Other(format!(
+                            "macOS Keychain wouldn't update the Claude Code login, so it can't \
+                             be switched here. Run `claude` in a terminal and sign in with \
+                             /login, then refresh. ({err})"
+                        )));
+                    }
+                }
             }
         }
         std::fs::create_dir_all(&self.inner.config.claude_config_dir)?;
@@ -3128,9 +3436,31 @@ pub(crate) mod keychain {
 
     const EXEC_TIMEOUT: Duration = Duration::from_secs(15);
 
+    /// Tests stand a fake `security` in (never a real Keychain).
+    #[cfg(test)]
+    pub(super) static SECURITY_OVERRIDE: std::sync::Mutex<Option<std::path::PathBuf>> =
+        std::sync::Mutex::new(None);
+
+    fn security_bin() -> std::path::PathBuf {
+        #[cfg(test)]
+        if let Some(path) = SECURITY_OVERRIDE.lock().unwrap().clone() {
+            return path;
+        }
+        std::path::PathBuf::from("/usr/bin/security")
+    }
+
     async fn exec(args: &[&str]) -> (bool, String, String) {
+        // A Cloud device never uses a keychain (see `detect`); this also
+        // covers lookups that don't go through the config.
+        if crate::runner::is_cloud_platform() {
+            return (
+                false,
+                String::new(),
+                "a Cloud device has no keychain".into(),
+            );
+        }
         // Absolute path: a PATH-planted `security` must never see secrets.
-        let run = tokio::process::Command::new("/usr/bin/security")
+        let run = tokio::process::Command::new(security_bin())
             .args(args)
             .stdin(std::process::Stdio::null())
             .output();
@@ -3481,14 +3811,7 @@ fn claude_plan(org_type: Option<&str>, tier: Option<&str>) -> Option<String> {
 }
 
 fn codex_plan(plan: Option<&str>) -> Option<String> {
-    let plan = plan?;
-    let mut chars = plan.chars();
-    let first = chars.next()?;
-    Some(format!(
-        "ChatGPT {}{}",
-        first.to_uppercase(),
-        chars.as_str()
-    ))
+    zeron_proto::plan_usage::codex_plan(plan)
 }
 
 /// Meter label for a Codex rate-limit window from its `limit_window_seconds`:
@@ -3497,14 +3820,7 @@ fn codex_plan(plan: Option<&str>) -> Option<String> {
 /// week" rule mislabeled the monthly window "Week"; thresholds in seconds
 /// leave the middle gaps to the nearest label rather than guessing a plan.
 fn codex_window_label(span_seconds: i64) -> &'static str {
-    const DAY: i64 = 86_400;
-    if span_seconds >= 28 * DAY {
-        "Month"
-    } else if span_seconds >= 5 * DAY {
-        "Week"
-    } else {
-        "Session"
-    }
+    zeron_proto::plan_usage::codex_window_label(span_seconds)
 }
 
 /// Compose a target Claude login with the machine's current shared fields.
@@ -3687,13 +4003,7 @@ fn cursor_key_usable(auth: &serde_json::Value) -> bool {
 }
 
 fn parse_when(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
-    match value? {
-        serde_json::Value::Number(n) => DateTime::<Utc>::from_timestamp(n.as_i64()?, 0),
-        serde_json::Value::String(s) => DateTime::parse_from_rfc3339(s)
-            .ok()
-            .map(|t| t.with_timezone(&Utc)),
-        _ => None,
-    }
+    zeron_proto::plan_usage::parse_when(value)
 }
 
 fn usage_key(harness: HarnessId, account_key: &str) -> String {
@@ -3892,33 +4202,24 @@ fn short_duration(ms: i64) -> String {
     }
 }
 
+/// A usage reply from `harness`'s plan endpoint (Claude's `/api/oauth/usage`,
+/// Codex's `/wham/usage`) as windows and the live plan label — for logins
+/// whose usage is read elsewhere (Cloud's, by the vault).
+pub(crate) fn usage_windows_from_reply(
+    harness: HarnessId,
+    body: &serde_json::Value,
+) -> Option<(Vec<AgentUsageWindow>, Option<String>)> {
+    let snapshot = match harness {
+        HarnessId::ClaudeCode => claude_usage_windows(body),
+        HarnessId::Codex => codex_usage_snapshot(body),
+        _ => None,
+    }?;
+    Some((snapshot.windows, snapshot.plan_label))
+}
+
 /// Codex `/wham/usage`: primary/secondary windows + the live plan.
 fn codex_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
-    let rl = body.get("rate_limit")?;
-    let mut windows = Vec::new();
-    for key in ["primary_window", "secondary_window"] {
-        if let Some(w) = rl.get(key)
-            && let Some(used) = w.get("used_percent").and_then(|v| v.as_f64())
-        {
-            let span = w
-                .get("limit_window_seconds")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            windows.push(AgentUsageWindow {
-                label: codex_window_label(span).to_string(),
-                used_fraction: (used / 100.0) as f32,
-                resets_at: parse_when(w.get("reset_at")),
-            });
-        }
-    }
-    if windows.is_empty() {
-        return None;
-    }
-    // Live plan ("free"/"plus"/"pro"…) — beats the login-time JWT claim,
-    // so a plan change shows up on the next forced refresh without a
-    // re-login.
-    let plan_label = codex_plan(str_field(body, "plan_type").as_deref());
-    Some(UsageSnapshot {
+    zeron_proto::plan_usage::codex(body).map(|(windows, plan_label)| UsageSnapshot {
         windows,
         plan_label,
         extra_usage: None,
@@ -3930,51 +4231,7 @@ fn codex_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
 /// per-model weekly limits (`limits[]` rows of kind `weekly_scoped`, named by
 /// model), falling back to the older `seven_day_<model>` buckets.
 fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
-    let bucket = |key: &str, label: &str| {
-        let w = body.get(key)?;
-        Some(AgentUsageWindow {
-            label: label.to_string(),
-            used_fraction: (w.get("utilization")?.as_f64()? / 100.0) as f32,
-            resets_at: parse_when(w.get("resets_at")),
-        })
-    };
-    let mut windows: Vec<AgentUsageWindow> = [("five_hour", "Session"), ("seven_day", "Week")]
-        .into_iter()
-        .filter_map(|(key, label)| bucket(key, label))
-        .collect();
-    if windows.is_empty() {
-        return None;
-    }
-    let scoped: Vec<AgentUsageWindow> = body
-        .get("limits")
-        .and_then(|v| v.as_array())
-        .into_iter()
-        .flatten()
-        .filter(|row| row.get("kind").and_then(|v| v.as_str()) == Some("weekly_scoped"))
-        .filter_map(|row| {
-            let model = row.pointer("/scope/model")?;
-            let label = str_field(model, "display_name").or_else(|| str_field(model, "id"))?;
-            Some(AgentUsageWindow {
-                label,
-                used_fraction: (row.get("percent")?.as_f64()? / 100.0) as f32,
-                resets_at: parse_when(row.get("resets_at")),
-            })
-        })
-        .collect();
-    if scoped.is_empty() {
-        windows.extend(
-            [
-                ("seven_day_fable", "Fable"),
-                ("seven_day_opus", "Opus"),
-                ("seven_day_sonnet", "Sonnet"),
-            ]
-            .into_iter()
-            .filter_map(|(key, label)| bucket(key, label)),
-        );
-    } else {
-        windows.extend(scoped);
-    }
-    Some(UsageSnapshot {
+    zeron_proto::plan_usage::claude(body).map(|windows| UsageSnapshot {
         windows,
         plan_label: None,
         extra_usage: claude_extra_usage(body),
@@ -4262,6 +4519,134 @@ fn wire_login_child(mut child: zeron_harness::process::Child) -> LoginChildHandl
     (child, output, exit)
 }
 
+/// The user-facing reason a login child exited without credentials: its last
+/// output line, redacted (a CLI's last words can carry a url or a code).
+fn login_child_failure(code: Option<i32>, output: &Mutex<String>) -> String {
+    if code == Some(0) {
+        return "The sign-in finished without credentials.".into();
+    }
+    let output = lock(output);
+    let last = strip_ansi(&output)
+        .trim()
+        .lines()
+        .last()
+        .unwrap_or("sign-in failed")
+        .to_string();
+    zeron_harness::redact::redact_output(&last)
+}
+
+/// Wait for a captured `codex login` to write a ChatGPT token set into its
+/// throwaway home. An API-key login can't be refreshed by the vault, so it
+/// is refused rather than uploaded.
+async fn await_codex_capture(
+    auth_file: &Path,
+    output: &Mutex<String>,
+    exit: &Mutex<Option<Option<i32>>>,
+    state: &Mutex<TaskLoginState>,
+) -> Result<serde_json::Value, String> {
+    let complete = |auth: &serde_json::Value| {
+        let tokens = auth.get("tokens")?;
+        ["id_token", "access_token", "refresh_token"]
+            .iter()
+            .all(|k| {
+                tokens
+                    .get(k)
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|v| !v.is_empty())
+            })
+            .then_some(())
+    };
+    loop {
+        // Read before checking exit: the CLI may write and exit in one tick.
+        let exited = *lock(exit);
+        if let Some(auth) = read_json(auth_file) {
+            if complete(&auth).is_some() {
+                return Ok(auth);
+            }
+            if auth.get("OPENAI_API_KEY").is_some() && auth.get("tokens").is_none() {
+                return Err(
+                    "Codex signed in with an API key, which Cloud can't refresh — sign \
+                            in with ChatGPT, or save the key as an OpenAI API key instead."
+                        .into(),
+                );
+            }
+        }
+        if let Some(code) = exited {
+            return Err(login_child_failure(code, output));
+        }
+        {
+            let mut state = lock(state);
+            if state.url.is_none() {
+                state.url = scan_openai_url(&lock(output));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Kills a captured sign-in's CLI when its task ends or is aborted (cancel,
+/// a superseding sign-in, engine shutdown).
+struct KillOnDrop(Arc<Mutex<Option<zeron_harness::process::Child>>>);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Some(child) = lock(&self.0).as_mut() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+/// Securely deletes a captured sign-in's throwaway home when dropped: every
+/// regular file is overwritten with zeros and synced before the tree is
+/// removed. Best effort by nature — copy-on-write filesystems and SSD wear
+/// levelling may keep old blocks — but nothing readable stays behind under
+/// the path, and a crash leaves only `.login-*` dirs the startup sweep
+/// reclaims.
+struct ShredOnDrop(PathBuf);
+
+impl Drop for ShredOnDrop {
+    fn drop(&mut self) {
+        shred_dir(&self.0);
+    }
+}
+
+fn shred_dir(dir: &Path) {
+    fn overwrite(dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                overwrite(&entry.path());
+            } else if kind.is_file()
+                && let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(entry.path())
+                && let Ok(meta) = file.metadata()
+            {
+                use std::io::Write;
+                let zeros = [0u8; 4096];
+                let mut left = meta.len();
+                while left > 0 {
+                    let n = left.min(zeros.len() as u64) as usize;
+                    if file.write_all(&zeros[..n]).is_err() {
+                        break;
+                    }
+                    left -= n as u64;
+                }
+                let _ = file.sync_all();
+            }
+        }
+    }
+    overwrite(dir);
+    if let Err(error) = std::fs::remove_dir_all(dir)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(dir = %dir.display(), %error, "could not remove a sign-in home");
+    }
+}
+
 /// Wait briefly for the login child to print its authorize URL (empty when it
 /// exits or stays silent past the deadline — the flow still completes via
 /// poll; the UI just can't offer an open-browser button).
@@ -4530,6 +4915,73 @@ fn stage_file_atomic(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Keychain the engine can't use (the search and the write both
+    /// refused, as reported from an engine outside the login session) must
+    /// not leave Claude Code signed out: the login lands in its credentials
+    /// file, Claude Code's own fallback. An item it can't update would shadow
+    /// that file, so then it errs with the way out.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn claude_login_falls_back_to_the_file_when_the_keychain_refuses() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let security = dir.path().join("security");
+        let item = dir.path().join("item-exists");
+        std::fs::write(
+            &security,
+            format!(
+                "#!/bin/sh\n\
+                 case \"$1\" in\n\
+                 find-generic-password) [ -f '{}' ] && exit 0; exit 44 ;;\n\
+                 add-generic-password) echo 'security: SecKeychainSearchCreateFromAttributes: One or more parameters passed to a function were not valid.' >&2;\n\
+                   echo 'security: SecKeychainItemCreateFromContent (<default>): Unable to obtain authorization for this operation.' >&2; exit 1 ;;\n\
+                 esac\nexit 1\n",
+                item.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&security, std::fs::Permissions::from_mode(0o755)).unwrap();
+        *keychain::SECURITY_OVERRIDE.lock().unwrap() = Some(security);
+
+        let mut config = AgentAccountsConfig::isolated(&dir.path().join("root"));
+        config.claude_keychain_service = Some("Claude Code-credentials-test".into());
+        let accounts = AgentAccounts::new(config.clone());
+        let creds =
+            serde_json::json!({ "claudeAiOauth": { "accessToken": "a", "refreshToken": "r" } });
+
+        accounts
+            .write_claude_credentials(&creds)
+            .await
+            .expect("falls back to the file");
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(config.claude_creds_file()).unwrap()).unwrap();
+        assert_eq!(written, creds);
+        assert_eq!(
+            std::fs::metadata(config.claude_creds_file())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        // Read back the same way Claude Code would: Keychain empty → the file.
+        assert_eq!(
+            accounts.read_claude_credentials().await.0,
+            Some(creds.clone())
+        );
+
+        std::fs::remove_file(config.claude_creds_file()).unwrap();
+        std::fs::write(&item, "").unwrap();
+        let err = accounts.write_claude_credentials(&creds).await.unwrap_err();
+        assert!(err.to_string().contains("/login"), "{err}");
+        assert!(
+            !config.claude_creds_file().exists(),
+            "no file the Keychain item would shadow"
+        );
+
+        *keychain::SECURITY_OVERRIDE.lock().unwrap() = None;
+    }
 
     #[test]
     fn plan_labels() {
@@ -5578,6 +6030,52 @@ mod login_tests {
     }
 
     #[tokio::test]
+    async fn a_relayed_callback_reaches_only_the_requesters_login_port() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let tmp = tempfile::tempdir().unwrap();
+        let routes = zeron_preview::login::CallbackRoutes::default();
+        let accounts = AgentAccounts::with_callback_routes(config(tmp.path()), routes.clone());
+        // The CLI's loopback listener, waiting for the browser.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cli = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+            socket
+                .write_all(b"HTTP/1.1 302 Found\r\nLocation: https://example.com/done\r\n\r\n")
+                .await
+                .unwrap();
+            request
+        });
+        routes.register("login-1", port, "phone", Duration::from_secs(60));
+        // Another device, an unknown login, or a request that isn't a plain
+        // path go nowhere.
+        for (login, requester, path) in [
+            ("login-1", "laptop", "/callback"),
+            ("login-2", "phone", "/callback"),
+            ("login-1", "phone", "/callback HTTP/1.1\r\nX: y"),
+            ("login-1", "phone", "http://evil/"),
+        ] {
+            let refused = accounts.relay_callback(login, requester, path).await;
+            assert!(refused.is_err(), "{login} {requester} {path:?}");
+        }
+        // The phone's relay lands on the CLI exactly as the browser would.
+        let relayed = accounts
+            .relay_callback("login-1", "phone", "/callback?code=abc&state=xyz")
+            .await
+            .unwrap();
+        assert_eq!(relayed.status, 302);
+        assert_eq!(
+            relayed.location.as_deref(),
+            Some("https://example.com/done")
+        );
+        let request = cli.await.unwrap();
+        assert!(request.starts_with("GET /callback?code=abc&state=xyz HTTP/1.1\r\n"));
+    }
+
+    #[tokio::test]
     async fn a_login_for_another_device_publishes_its_callback_until_it_ends() {
         let tmp = tempfile::tempdir().unwrap();
         let routes = zeron_preview::login::CallbackRoutes::default();
@@ -5671,6 +6169,236 @@ mod login_tests {
         assert!(
             parent.for_instance(&instance).is_ok(),
             "a re-added instance builds fresh"
+        );
+    }
+
+    /// A capture sink that records what it is handed (the vault upload in
+    /// production), failing with `fail` when given.
+    fn recording_sink(
+        fail: Option<&'static str>,
+    ) -> (CaptureSink, Arc<Mutex<Vec<serde_json::Value>>>) {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let log = got.clone();
+        let sink: CaptureSink = Arc::new(move |value| {
+            let log = log.clone();
+            Box::pin(async move {
+                lock(&log).push(value);
+                fail.map_or(Ok(()), |message| Err(message.to_string()))
+            })
+        });
+        (sink, got)
+    }
+
+    /// [`poll_until_settled`] with room for a spawned CLI's own timing.
+    async fn poll_until_settled_slowly(accounts: &AgentAccounts, login_id: &str) -> AgentLoginPoll {
+        for _ in 0..200 {
+            let poll = accounts.poll_login(login_id).await.unwrap();
+            if poll.status != AgentLoginStatus::Pending {
+                return poll;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("login never settled");
+    }
+
+    fn no_sign_in_homes_left(root: &Path) -> bool {
+        std::fs::read_dir(config(root).root_dir())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .all(|e| !e.file_name().to_string_lossy().starts_with(".login-"))
+            })
+            .unwrap_or(true)
+    }
+
+    #[tokio::test]
+    async fn claude_capture_hands_off_tokens_without_touching_this_device() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (token_url, _server) = token_server().await;
+        let accounts = loopback_accounts(tmp.path(), token_url);
+        // No live login: a regular sign-in would go live here at once.
+        let (sink, captured) = recording_sink(None);
+        let start = accounts
+            .start_capture_login(HarnessId::ClaudeCode, sink)
+            .await
+            .unwrap();
+        assert_eq!(start.mode, AgentLoginMode::Browser);
+        let port = start.callback_port.unwrap();
+        let state = reqwest::Url::parse(&start.url)
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .unwrap()
+            .1
+            .into_owned();
+        let response = browser_get(port, &format!("/callback?code=good-code&state={state}")).await;
+        assert!(response.starts_with("HTTP/1.1 302"), "{response}");
+        let poll = poll_until_settled(&accounts, &start.login_id).await;
+        assert_eq!(poll.status, AgentLoginStatus::Done, "{:?}", poll.message);
+
+        // The capturer got the claudeAiOauth blob, with the login's
+        // profile beside it (what tells two stored logins apart)…
+        let captured = lock(&captured).clone();
+        assert_eq!(captured.len(), 1);
+        let credential = &captured[0]["credential"];
+        assert_eq!(credential["accessToken"], "access");
+        assert_eq!(credential["refreshToken"], "refresh");
+        assert!(credential["expiresAt"].as_i64().unwrap() > now_ms());
+        assert!(
+            credential["scopes"]
+                .as_array()
+                .is_some_and(|s| !s.is_empty())
+        );
+        assert!(captured[0]["profile"].is_object());
+        // …and nothing landed on this device: no live credentials, no
+        // identity rewrite, no slot, no account row.
+        let config = config(tmp.path());
+        assert!(!config.claude_creds_file().exists());
+        assert!(!config.claude_config_file.exists());
+        assert!(accounts.read_slots(HarnessId::ClaudeCode).is_empty());
+        let snapshot = accounts.list(false).await.unwrap();
+        assert!(
+            !snapshot
+                .accounts
+                .iter()
+                .any(|a| a.harness == HarnessId::ClaudeCode)
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_capture_keeps_the_live_login_and_reports_upload_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (token_url, _server) = token_server().await;
+        let accounts = loopback_accounts(tmp.path(), token_url);
+        write_live_claude(tmp.path(), "acct-bob", "bob@example.com", "bob-token");
+        accounts.list(false).await.unwrap();
+        let live_before = std::fs::read_to_string(config(tmp.path()).claude_creds_file()).unwrap();
+        let slots_before = accounts.read_slots(HarnessId::ClaudeCode).len();
+
+        let (sink, captured) = recording_sink(Some("The vault refused that sign-in."));
+        let start = accounts
+            .start_capture_login(HarnessId::ClaudeCode, sink)
+            .await
+            .unwrap();
+        let state = reqwest::Url::parse(&start.url)
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .unwrap()
+            .1
+            .into_owned();
+        let page = browser_get(
+            start.callback_port.unwrap(),
+            &format!("/callback?code=good-code&state={state}"),
+        )
+        .await;
+        assert!(page.starts_with("HTTP/1.1 400"), "{page}");
+        assert!(page.contains("The vault refused that sign-in."), "{page}");
+        let poll = poll_until_settled(&accounts, &start.login_id).await;
+        assert_eq!(poll.status, AgentLoginStatus::Error);
+        assert_eq!(
+            poll.message.as_deref(),
+            Some("The vault refused that sign-in.")
+        );
+        assert_eq!(lock(&captured).len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(config(tmp.path()).claude_creds_file()).unwrap(),
+            live_before,
+            "the live login is never rewritten"
+        );
+        assert_eq!(
+            accounts.read_slots(HarnessId::ClaudeCode).len(),
+            slots_before
+        );
+    }
+
+    /// A stand-in `codex` CLI: prints the authorize url, then writes
+    /// `auth_json` into `$CODEX_HOME/auth.json` and exits.
+    #[cfg(unix)]
+    fn fake_codex(root: &Path, auth_json: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = root.join("fake-codex");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n\
+                 echo 'Starting local login server on http://localhost:1455.' >&2\n\
+                 echo 'https://auth.openai.com/oauth/authorize?response_type=code&state=s' >&2\n\
+                 sleep 0.3\n\
+                 printf '%s' '{auth_json}' > \"$CODEX_HOME/auth.json\"\n\
+                 sleep 0.2\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_capture_uploads_auth_json_and_shreds_the_throwaway_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let accounts = AgentAccounts::new(config(tmp.path()));
+        accounts.override_cli(
+            HarnessId::Codex,
+            fake_codex(
+                tmp.path(),
+                r#"{"tokens":{"id_token":"id","access_token":"at","refresh_token":"rt","account_id":"acct"},"last_refresh":"2026-10-01T00:00:00Z"}"#,
+            ),
+        );
+        let (sink, captured) = recording_sink(None);
+        let start = accounts
+            .start_capture_login(HarnessId::Codex, sink)
+            .await
+            .unwrap();
+        assert!(
+            start.url.starts_with("https://auth.openai.com/"),
+            "{}",
+            start.url
+        );
+        let poll = poll_until_settled_slowly(&accounts, &start.login_id).await;
+        assert_eq!(poll.status, AgentLoginStatus::Done, "{:?}", poll.message);
+
+        let captured = lock(&captured).clone();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0]["tokens"]["refresh_token"], "rt");
+        // The throwaway home is gone and nothing touched this device's Codex.
+        assert!(no_sign_in_homes_left(tmp.path()));
+        assert!(!config(tmp.path()).codex_auth_file().exists());
+        assert!(accounts.read_slots(HarnessId::Codex).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_capture_refuses_an_api_key_login() {
+        let tmp = tempfile::tempdir().unwrap();
+        let accounts = AgentAccounts::new(config(tmp.path()));
+        accounts.override_cli(
+            HarnessId::Codex,
+            fake_codex(tmp.path(), r#"{"OPENAI_API_KEY":"sk-test"}"#),
+        );
+        let (sink, captured) = recording_sink(None);
+        let start = accounts
+            .start_capture_login(HarnessId::Codex, sink)
+            .await
+            .unwrap();
+        let poll = poll_until_settled_slowly(&accounts, &start.login_id).await;
+        assert_eq!(poll.status, AgentLoginStatus::Error);
+        assert!(poll.message.unwrap().contains("API key"));
+        assert!(lock(&captured).is_empty(), "nothing is uploaded");
+        assert!(no_sign_in_homes_left(tmp.path()));
+    }
+
+    #[tokio::test]
+    async fn capture_is_offered_for_claude_and_codex_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let accounts = AgentAccounts::new(config(tmp.path()));
+        let (sink, _) = recording_sink(None);
+        assert!(
+            accounts
+                .start_capture_login(HarnessId::Grok, sink)
+                .await
+                .is_err()
         );
     }
 }

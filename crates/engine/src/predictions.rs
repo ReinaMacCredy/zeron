@@ -393,6 +393,7 @@ impl Predictions {
         )
         .await?;
         match run_one_shot(
+            &self.registry,
             target.harness.as_ref(),
             target.lease,
             OneShot {

@@ -59,7 +59,7 @@ impl Io for Live {
     async fn engine(&mut self, method: &str, params: Value, first: bool) -> Result<Value, String> {
         if self.rpc.is_none() {
             let url = format!("ws://127.0.0.1:{}", self.app.ipc_port);
-            let client = zeron_rpc::connect_ws(&url)
+            let client = zeron_rpc::connect_ipc(self.app.ipc_port, Some(&self.app.data_dir))
                 .await
                 .map_err(|error| format!("no engine at {url}: {error}"))?;
             self.rpc = Some(client);

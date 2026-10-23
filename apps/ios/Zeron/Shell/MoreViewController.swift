@@ -1,7 +1,8 @@
 import UIKit
 import UserNotifications
 
-/// Settings & utilities: account, devices, appearance, archive, diagnostics.
+/// Settings & utilities: account, providers, Cloud and billing, devices,
+/// appearance, archive.
 final class MoreViewController: UIViewController, UICollectionViewDelegate {
     private let app: AppModel
     private var collectionView: UICollectionView!
@@ -96,6 +97,8 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         wallpaperObserver = NotificationCenter.default.addObserver(forName: WallpaperStore.didChange, object: nil, queue: .main) { [weak self] _ in self?.reload() }
         // Devices go on/offline and the org name backfills after opening.
         appToken = app.observe { [weak self] in self?.reload() }
+        cloudToken = app.cloud.observe { [weak self] in self?.reload() }
+        app.cloud.refresh()
         // Back from iOS Settings (notifications may have been allowed there).
         foregroundObserver = NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
             self?.refreshNotificationStatus()
@@ -183,6 +186,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
 
     private var wallpaperObserver: NSObjectProtocol?
     private var appToken: AnyObject?
+    private var cloudToken: AnyObject?
 
     private func reload() {
         var s = NSDiffableDataSourceSnapshot<String, Row>()
@@ -190,6 +194,20 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         s.appendItems([
             Row(id: "account", title: app.accountName, subtitle: app.accountDetail, symbol: "person.crop.circle", accessory: .none),
         ])
+        // Agents and where they run, as the desktop groups them: Providers,
+        // then Cloud and Billing when this account is offered Cloud.
+        s.appendSections(["Agents"])
+        var agents = [Row(id: "providers", title: "Providers", subtitle: "Agents and their accounts on each device", symbol: "cpu")]
+        let demoCloud = app.isDemo && ProcessInfo.processInfo.arguments.contains("-cloud")
+        if (!app.isDemo && app.cloud.available) || demoCloud {
+            let cloud = app.cloud
+            let github = cloud.githubAccount.map { "GitHub @\($0)" } ?? "Connect GitHub"
+            agents.append(Row(id: "cloud", title: "Cloud", subtitle: cloud.problem?.title ?? github, symbol: "cloud"))
+            let credits = cloud.credits.map { "\(CloudUI.credits($0)) credits" }
+            let plan = cloud.billing?.plan.map { "\($0.name) plan" }
+            agents.append(Row(id: "billing", title: "Billing", subtitle: [plan, credits].compactMap { $0 }.joined(separator: " · ").nonEmpty ?? "Plans and credits", symbol: "creditcard"))
+        }
+        s.appendItems(agents)
         s.appendSections(["Devices"])
         s.appendItems(app.hostOptions.map { Row(id: "device:\($0.id)", title: $0.name, subtitle: $0.online ? "Online" : "Offline", symbol: "desktopcomputer", accessory: .dot($0.online)) })
         if app.voice.available {
@@ -236,6 +254,12 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         guard let row = dataSource.itemIdentifier(for: path) else { return }
         switch row.id {
         case "voice": navigationController?.pushViewController(VoiceViewController(app: app), animated: true)
+        case "providers":
+            navigationController?.pushViewController(ProvidersViewController(app: app), animated: true)
+        case "cloud":
+            navigationController?.pushViewController(CloudSettingsViewController(app: app), animated: true)
+        case "billing":
+            navigationController?.pushViewController(BillingViewController(app: app), animated: true)
         case let id where id.hasPrefix("appearance:"):
             let style = Int(id.dropFirst(11)) ?? 0
             UserDefaults.standard.set(style, forKey: "appearance")

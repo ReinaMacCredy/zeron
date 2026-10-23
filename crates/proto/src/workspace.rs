@@ -27,6 +27,16 @@ pub mod capabilities {
     /// The host accepts `SidebarSectionChange::Move` and orders sections by
     /// their placed key; older hosts reject the action outright.
     pub const SIDEBAR_SECTION_ORDER_V1: &str = "sidebar-section-order-v1";
+    /// The engine posts the desktop banners (finished runs, questions,
+    /// failures, connection loss, agent updates) and takes viewport focus
+    /// through `SetViewportFocus`; a viewport attached to it posts none of
+    /// its own. Advertised only by desktop engines, so not in [`CURRENT`].
+    pub const DESKTOP_NOTIFICATIONS_V1: &str = "desktop-notifications-v1";
+    /// The host runs a chat on whichever provider its config names, resuming
+    /// each provider's own session and marking the switch in the transcript.
+    /// Older hosts resume the chat's one stored session whatever the
+    /// provider, so a switch there hands one provider another's session id.
+    pub const PROVIDER_SWITCH_V1: &str = "provider-switch-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -44,6 +54,7 @@ pub mod capabilities {
         PROJECTLESS_SCRATCH_V1,
         LIMIT_RESUME_V1,
         SIDEBAR_SECTION_ORDER_V1,
+        PROVIDER_SWITCH_V1,
         crate::voice::remote::CAPABILITY,
     ];
 
@@ -133,6 +144,7 @@ mod tests {
                     "projectless-scratch-v1",
                     "limit-resume-v1",
                     "sidebar-section-order-v1",
+                    "provider-switch-v1",
                     "voice-client-media-v1"
                 ],
             })

@@ -29,24 +29,29 @@ pub mod auth;
 pub mod catalog;
 mod client;
 pub mod computer;
+pub mod cloud;
 pub mod config;
 pub mod connectivity;
 mod demo;
 pub mod error;
 pub mod events;
 mod live;
+pub mod provider_login;
+pub mod providers;
 pub mod rpc;
 pub mod runtime;
 pub mod session;
 pub mod workspace;
 
 pub use client::{Client, NewSession, PRELOAD_CAP, PushPrefs, SessionTarget, WARM_SESSION_CAP};
+pub use cloud::CloudRepoRef;
 pub use config::{
     AuthTokens, ClientConfig, Credentials, DemoFixture, DemoOptions, StreamSpeed, TranscriptScale,
 };
 pub use connectivity::{Connectivity, ConnectivityState, SendState};
 pub use error::ClientError;
 pub use events::{ClientEvent, ClientListener};
+pub use provider_login::{LoginProvider, ProviderLoginStart};
 pub use session::{
     AppendHint, BusyPolicy, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest,
     LiveStatus, LocalEcho, OutgoingAttachment, PendingKind, PendingSend, QueueEditAction,

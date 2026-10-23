@@ -151,6 +151,8 @@ fn main() -> anyhow::Result<()> {
                             held_by_subagents: false,
                             compacting: false,
                             background_tasks: Vec::new(),
+                            last_turn_outcome: None,
+                            terminal_activity: None,
                             running_subagents: 0,
                             compact_plan: None,
                             classifying: None,

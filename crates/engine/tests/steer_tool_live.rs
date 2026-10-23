@@ -166,6 +166,7 @@ async fn steering_never_aborts_a_running_tool() {
                     computer_control: false,
                     permission_mode: Default::default(),
                     disabled_tools: Vec::new(),
+                    env: Default::default(),
                 },
             },
         )

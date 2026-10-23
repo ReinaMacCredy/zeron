@@ -78,7 +78,11 @@ pub(crate) struct ClientInner {
     path_online: AtomicBool,
     foreground: AtomicBool,
     synced: AtomicBool,
-    harness_catalogs: Mutex<HashMap<String, Vec<HarnessInfo>>>,
+    pub(crate) harness_catalogs: Mutex<HashMap<String, Vec<HarnessInfo>>>,
+    /// GitHub repositories Cloud reaches, as last read (lowercased
+    /// `owner/name`): starting a Cloud session needs one, and reading it
+    /// again would hold the new chat up.
+    pub(crate) cloud_repos: Mutex<HashMap<String, crate::cloud::CloudRepoRef>>,
 }
 
 impl Drop for ClientInner {
@@ -390,6 +394,7 @@ impl ClientInner {
                 .and_then(zeron_proto::version_triple)
                 .is_some_and(|v| v >= QUEUED_ATTACHMENTS_MIN),
             mid_turn_steering,
+            provider_switch: has(capability::PROVIDER_SWITCH_V1),
         }
     }
 
@@ -519,7 +524,7 @@ impl ClientInner {
 /// One signed-in account (or Demo mode). Cheap to clone.
 #[derive(Clone)]
 pub struct Client {
-    inner: Arc<ClientInner>,
+    pub(crate) inner: Arc<ClientInner>,
 }
 
 impl std::fmt::Debug for Client {
@@ -593,6 +598,7 @@ impl Client {
             foreground: AtomicBool::new(true),
             synced: AtomicBool::new(false),
             harness_catalogs: Mutex::new(HashMap::new()),
+            cloud_repos: Mutex::new(HashMap::new()),
             credentials: credentials.clone(),
             config,
         });
@@ -763,6 +769,7 @@ impl Client {
             created_at: now,
             harness_session_id: None,
             harness_session_cwd: None,
+            harness_session_harness: None,
             space_id,
             last_seen_at: None,
             room_gen: Some(2),
@@ -808,12 +815,64 @@ impl Client {
     }
 
     pub fn set_session_config(&self, chat_id: &str, config: &ChatConfig) -> Result<()> {
+        // A provider change needs a host that switches: an older one would
+        // resume the chat's stored session under the new provider.
+        if let Some(chat) = self.inner.workspace.chat(chat_id)
+            && chat
+                .config
+                .as_ref()
+                .is_some_and(|current| current.harness != config.harness)
+            && !self
+                .inner
+                .host_capabilities(&chat.device_id, None)
+                .provider_switch
+        {
+            return Err(ClientError::Unsupported(
+                "This chat's computer needs a newer Zeron to switch provider.".into(),
+            ));
+        }
         self.chat_write(chat_id, |doc| doc.set_chat_config(chat_id, config))
     }
 
     /// Remove the chat row (the doc itself stays on the edge).
     pub fn delete_session(&self, chat_id: &str) -> Result<()> {
+        let on_cloud = self
+            .inner
+            .workspace
+            .chat(chat_id)
+            .is_some_and(|chat| zeron_proto::is_cloud_device(&chat.device_id, ""));
+        // A Cloud chat's children on Cloud go with it: its delegates (each on
+        // a machine of its own, which would otherwise outlive the parent) and
+        // its side chats (on its machine, now gone).
+        let children: Vec<String> = if on_cloud {
+            let (state, _) = self.inner.workspace.state();
+            state
+                .chats
+                .iter()
+                .filter(|chat| {
+                    chat.is_child_of(chat_id) && zeron_proto::is_cloud_device(&chat.device_id, "")
+                })
+                .map(|chat| chat.id.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
         self.chat_write(chat_id, |doc| doc.delete_chat(chat_id))?;
+        for child in &children {
+            if let Err(err) = self.chat_write(child, |doc| doc.delete_chat(child)) {
+                tracing::warn!(chat = %child, error = %err, "deleting a Cloud chat's child failed");
+            }
+            self.forget_local_session(child);
+        }
+        if on_cloud {
+            self.delete_cloud_machines(std::iter::once(chat_id.to_owned()).chain(children).collect());
+        }
+        self.forget_local_session(chat_id);
+        Ok(())
+    }
+
+    /// Drop a deleted chat's open session and local snapshot.
+    fn forget_local_session(&self, chat_id: &str) {
         let core = lock(&self.inner.sessions).remove(chat_id);
         // A view may still hold the session: close its room now (it flushes
         // once), so nothing re-saves the snapshot deleted below.
@@ -826,7 +885,6 @@ impl Client {
         {
             tracing::debug!(error = %err, "local chat snapshot delete failed");
         }
-        Ok(())
     }
 
     /// Mid-session ref switch: retarget onto the ref's existing worktree (row
@@ -996,6 +1054,7 @@ impl Client {
             git_checked_at: None,
             checkout_id: None,
             repository_id: None,
+            github_repo: None,
             created_at: Utc::now(),
         };
         let id = space.id.clone();
@@ -1060,9 +1119,20 @@ impl Client {
 
     /// Delete a project and cascade its chats' rows.
     pub fn delete_project(&self, space_id: &str) -> Result<()> {
-        let deleted = self
-            .inner
-            .registry_write(|doc| doc.delete_space(space_id))?;
+        let mut cloud_chats = Vec::new();
+        let deleted = self.inner.registry_write(|doc| {
+            cloud_chats = doc
+                .read_chats()?
+                .into_iter()
+                .filter(|chat| {
+                    chat.space_id.as_deref() == Some(space_id)
+                        && zeron_proto::is_cloud_device(&chat.device_id, "")
+                })
+                .map(|chat| chat.id)
+                .collect();
+            doc.delete_space(space_id)
+        })?;
+        self.delete_cloud_machines(cloud_chats);
         let mut sessions = lock(&self.inner.sessions);
         for chat_id in deleted.chat_ids {
             sessions.remove(&chat_id);
@@ -1144,7 +1214,9 @@ impl Client {
     /// capability gating (mid-turn steering).
     pub async fn list_harnesses(&self, device_id: &str) -> Vec<HarnessInfo> {
         let list = match self.inner.backend() {
-            Backend::Demo(demo) => demo.list_harnesses(device_id).await,
+            Backend::Demo(demo) => {
+                crate::providers::with_demo_toggles(true, demo.list_harnesses(device_id).await)
+            }
             Backend::Live(live) => {
                 let cache = catalog::DiskCatalog::new(&self.inner.config.data_dir);
                 let reply = live
@@ -1188,6 +1260,9 @@ impl Client {
     pub async fn list_models(&self, device_id: &str, harness: &str) -> Vec<ModelInfo> {
         match self.inner.backend() {
             Backend::Demo(demo) => demo.list_models(harness).await,
+            Backend::Live(_) if zeron_proto::is_cloud_device(device_id, "") => {
+                self.cloud_models(harness).await
+            }
             Backend::Live(live) => {
                 let cache = catalog::DiskCatalog::new(&self.inner.config.data_dir);
                 let reply = live

@@ -21,6 +21,22 @@ if pgrep -f -x "$CONTENTS/MacOS/zeron" >/dev/null 2>&1; then
   echo "Zeron Dev is already running. Quit it before rebuilding the signed bundle." >&2
   exit 1
 fi
+# The app's background engine keeps running after the app quits. Rebuilding
+# replaces its executable, so stop this bundle's engine (only this bundle's:
+# matched by its exact path) — its sessions stop with it.
+ENGINE="$CONTENTS/MacOS/Zeron Engine"
+if pgrep -f -x "$ENGINE" >/dev/null 2>&1; then
+  echo "Stopping Zeron Dev's background engine before rebuilding." >&2
+  pkill -TERM -f -x "$ENGINE" || true
+  for _ in $(seq 1 100); do
+    pgrep -f -x "$ENGINE" >/dev/null 2>&1 || break
+    sleep 0.1
+  done
+  if pgrep -f -x "$ENGINE" >/dev/null 2>&1; then
+    echo "Zeron Dev's background engine didn't stop; quit it and retry." >&2
+    exit 1
+  fi
+fi
 
 cd "$ROOT"
 cargo build -p zeron
@@ -29,6 +45,7 @@ mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources/cua-driver" "$DATA_DIR"
 TARGET_DIR="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
 install -m 755 "$TARGET_DIR/debug/zeron" "$CONTENTS/MacOS/zeron"
 "$ROOT/scripts/build-cua-driver.sh" "$CONTENTS/Resources/cua-driver/cua-driver" >/dev/null
+install -m 755 "$TARGET_DIR/debug/zeron-engine" "$ENGINE"
 sed "s/__VERSION__/$VERSION/g" "$ROOT/dist/macos/Info-dev.plist" >"$CONTENTS/Info.plist"
 plutil -replace CFBundleIdentifier -string "$BUNDLE_ID" "$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.ZERON_DATA_DIR -string "$DATA_DIR" "$CONTENTS/Info.plist"
@@ -36,6 +53,13 @@ plutil -replace LSEnvironment.ZERON_IPC_PORT -string "$IPC_PORT" "$CONTENTS/Info
 if [[ -n "${CODEX_EXECUTABLE:-}" ]]; then
   plutil -insert LSEnvironment.CODEX_EXECUTABLE -string "$CODEX_EXECUTABLE" "$CONTENTS/Info.plist"
 fi
+# Another edge (staging, self-hosting) with its own sign-in client and
+# loopback callback: scripts/staging-app.sh.
+for var in ZERON_EDGE_URL ZERON_WORKOS_CLIENT_ID ZERON_CALLBACK_PORT; do
+  if [[ -n "${!var:-}" ]]; then
+    plutil -insert "LSEnvironment.$var" -string "${!var}" "$CONTENTS/Info.plist"
+  fi
+done
 
 mkdir -p "$CONTENTS/Resources/licenses"
 cp "$ROOT/crates/voice/NOTICE.md" "$CONTENTS/Resources/licenses"/parakeet-v3.txt
@@ -59,11 +83,14 @@ if [[ -z "$IDENTITY" ]]; then
   IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)"
 fi
 DRIVER="$CONTENTS/Resources/cua-driver/cua-driver"
+# Inside out: the driver and engine first, then the bundle that seals them.
 if [[ -n "$IDENTITY" ]]; then
   codesign --force --options runtime --sign "$IDENTITY" --identifier sh.zeron.cua-driver.dev "$DRIVER"
+  codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --sign "$IDENTITY" --identifier "$BUNDLE_ID.engine" "$ENGINE"
   codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP"
 else
   codesign --force --sign - --identifier sh.zeron.cua-driver.dev "$DRIVER"
+  codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --sign - --identifier "$BUNDLE_ID.engine" "$ENGINE"
   codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --sign - --identifier "$BUNDLE_ID" "$APP"
   echo "warning: no Apple Development signing identity found; macOS may ask for permissions again after a rebuild" >&2
 fi
@@ -86,6 +113,11 @@ OPEN_ENV=(
 if [[ -n "${CODEX_EXECUTABLE:-}" ]]; then
   OPEN_ENV+=(--env "CODEX_EXECUTABLE=$CODEX_EXECUTABLE")
 fi
+for var in ZERON_EDGE_URL ZERON_WORKOS_CLIENT_ID ZERON_CALLBACK_PORT; do
+  if [[ -n "${!var:-}" ]]; then
+    OPEN_ENV+=(--env "$var=${!var}")
+  fi
+done
 if [[ -n "${ZERON_OPEN_ROUTE:-}" ]]; then
   OPEN_ENV+=(--env "ZERON_OPEN_ROUTE=$ZERON_OPEN_ROUTE")
 fi

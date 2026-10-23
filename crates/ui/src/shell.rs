@@ -48,6 +48,8 @@ use crate::rail;
 use crate::settings::accounts::{self as accounts, AccountsPage};
 use crate::settings::appearance::{AppearancePage, AppearanceSettingsEvent};
 use crate::settings::archived::ArchivedPage;
+use crate::settings::billing::BillingPage;
+use crate::settings::cloud::CloudPage;
 use crate::settings::computer::ComputerPage;
 use crate::settings::device_hub::DeviceHubPage;
 use crate::settings::devices::DevicesPage;
@@ -654,6 +656,10 @@ pub fn apply_keymap(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsSection {
     Devices,
+    /// The user's Cloud device: lifecycle, its providers, GitHub.
+    Cloud,
+    /// Plan and credits for Cloud (Stripe).
+    Billing,
     /// Which harnesses the composer offers (enable/disable toggles) —
     /// labeled "Providers".
     Harnesses,
@@ -681,7 +687,7 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 18] = [
+    pub const ALL: [SettingsSection; 20] = [
         SettingsSection::General,
         SettingsSection::Home,
         SettingsSection::Appearance,
@@ -694,6 +700,8 @@ impl SettingsSection {
         SettingsSection::Routing,
         SettingsSection::CodeReview,
         SettingsSection::Devices,
+        SettingsSection::Cloud,
+        SettingsSection::Billing,
         SettingsSection::Files,
         SettingsSection::Appshots,
         SettingsSection::Computer,
@@ -716,6 +724,17 @@ impl SettingsSection {
         self != Self::Agents && (self != Self::Appshots || crate::appshots::is_desktop())
     }
 
+    /// [`Self::visible_in_nav`], plus what depends on the account: Cloud
+    /// and Billing only when the account is offered Cloud.
+    fn shown_in_nav(self, cloud_offered: bool) -> bool {
+        self.visible_in_nav() && (!self.needs_account() || cloud_offered)
+    }
+
+    /// Pages about the signed-in account (they open General when signed out).
+    fn needs_account(self) -> bool {
+        matches!(self, Self::Cloud | Self::Billing)
+    }
+
     /// Where a generic "open Settings" lands for a remembered section: legacy
     /// aliases resolve to their page, and a section this build does not show
     /// (Appshots off macOS/Linux) falls back to General.
@@ -732,6 +751,8 @@ impl SettingsSection {
     fn slug(self) -> &'static str {
         match self {
             SettingsSection::Devices => "devices",
+            SettingsSection::Cloud => "cloud",
+            SettingsSection::Billing => "billing",
             SettingsSection::Harnesses => "providers",
             SettingsSection::Tools => "tools",
             SettingsSection::AgentProfiles => "agent-profiles",
@@ -757,6 +778,8 @@ impl SettingsSection {
     pub(crate) fn from_slug(slug: &str) -> Option<Self> {
         Some(match slug {
             "devices" => SettingsSection::Devices,
+            "cloud" => SettingsSection::Cloud,
+            "billing" => SettingsSection::Billing,
             "providers" | "harnesses" => SettingsSection::Harnesses,
             "agents" => SettingsSection::Agents,
             "tools" => SettingsSection::Tools,
@@ -790,6 +813,8 @@ impl SettingsSection {
     pub fn label(self) -> &'static str {
         match self {
             SettingsSection::Devices => "Devices",
+            SettingsSection::Cloud => "Cloud",
+            SettingsSection::Billing => "Billing",
             SettingsSection::Harnesses => "Providers",
             SettingsSection::Tools => "Tools",
             SettingsSection::AgentProfiles => "Agent profiles",
@@ -1762,7 +1787,7 @@ fn bottom_stack_measurement_matches(
     measured_has_composer == expected_has_composer
 }
 
-fn new_thread_background_opacity(is_frost: bool) -> f32 {
+pub(crate) fn new_thread_background_opacity(is_frost: bool) -> f32 {
     if is_frost {
         NEW_THREAD_BACKGROUND_FROSTED_OPACITY
     } else {
@@ -1775,7 +1800,7 @@ pub(crate) fn new_thread_background_height(viewport_height: f32) -> f32 {
         .min(NEW_THREAD_BACKGROUND_MAX_HEIGHT)
 }
 
-fn new_thread_background(
+pub(crate) fn new_thread_background(
     artwork: Option<std::sync::Arc<gpui::RenderImage>>,
     adjustment: settings::NewThreadBackgroundAdjustment,
     hero_height: f32,
@@ -2713,6 +2738,10 @@ pub struct Shell {
     pull_request_cache:
         std::rc::Rc<std::cell::RefCell<crate::pull_request_detail::PullRequestCache>>,
     devices_page: Option<Entity<DevicesPage>>,
+    /// Rebuilt per visit and dropped on leaving, which stops its GitHub
+    /// polling and status re-checks.
+    cloud_page: Option<Entity<CloudPage>>,
+    billing_page: Option<Entity<BillingPage>>,
     agent_profiles_page: Option<Entity<crate::settings::agent_profiles::AgentProfilesPage>>,
     routing_page: Option<Entity<crate::settings::routing::RoutingPage>>,
     code_review_page: Option<Entity<crate::settings::code_review::CodeReviewPage>>,
@@ -2873,6 +2902,18 @@ pub struct Shell {
     _app_update_observation: Option<Subscription>,
     org: Option<OrgGateUi>,
     sync_flow: SyncFlow,
+    /// First-run setup in place of the Ready shell; built on first Ready
+    /// render from `onboarding_pending` (a fresh install, or
+    /// `ZERON_ONBOARDING=<step>`).
+    onboarding: Option<Entity<crate::onboarding::Onboarding>>,
+    /// Chats whose explorer showed their Cloud machine asleep: once it is
+    /// up, what failed while it slept is listed again.
+    files_machine_down: std::collections::HashSet<String>,
+    onboarding_pending: Option<crate::onboarding::Step>,
+    _onboarding_subscriptions: Vec<Subscription>,
+    /// The sign-in gate's Log in opened the browser: the gate waits for it
+    /// the way the sync opt-in does, with a way to open it again.
+    gate_sign_in_waiting: bool,
     mutate_task: Option<Task<()>>,
     auth_task: Option<Task<()>>,
     runtime_change_task: Option<Task<()>>,
@@ -3261,6 +3302,14 @@ impl Shell {
         // send on the selected chat (echo bubble + frozen thumbnail progress
         // ring) — display-only; a real upload can't be paused for a capture.
         let debug_upload = std::env::var("ZERON_DEMO_UPLOAD").ok();
+        // `ZERON_ONBOARDING=<step>` opens first-run setup at that step
+        // (welcome, appearance, sync, providers, done) even when finished.
+        let onboarding_pending = std::env::var("ZERON_ONBOARDING")
+            .ok()
+            .map(|step| crate::onboarding::Step::parse(&step))
+            .or_else(|| {
+                (!settings.onboarding_completed).then_some(crate::onboarding::Step::Welcome)
+            });
         let debug_gate = match std::env::var("ZERON_FORCE_GATE").ok().as_deref() {
             Some("signin") => Some(GatePhase::SignIn),
             Some("org") => Some(GatePhase::OrgGate),
@@ -3447,6 +3496,8 @@ impl Shell {
             pending_pull_request: None,
             pull_request_cache: Default::default(),
             devices_page: None,
+            cloud_page: None,
+            billing_page: None,
             agent_profiles_page: None,
             routing_page: None,
             code_review_page: None,
@@ -3562,6 +3613,11 @@ impl Shell {
             }),
             org: None,
             sync_flow: SyncFlow::Idle,
+            onboarding: None,
+            files_machine_down: Default::default(),
+            onboarding_pending,
+            _onboarding_subscriptions: Vec::new(),
+            gate_sign_in_waiting: false,
             mutate_task: None,
             auth_task: None,
             runtime_change_task: None,
@@ -3781,6 +3837,20 @@ impl Shell {
                 self.org = None;
             }
         }
+        // Logging in from setup means switching to the synced workspace;
+        // with no local work there's nothing to choose, so setup goes
+        // straight on instead of stopping at the offer.
+        if self.onboarding.is_some()
+            && self.sync_flow == (SyncFlow::SwitchOffer { notice_open: true })
+        {
+            let empty = {
+                let state = state.read(cx);
+                local_work_phrase(state.chats.len(), state.spaces.len()).is_none()
+            };
+            if empty {
+                self.start_synced_switch(false, cx);
+            }
+        }
         // The in-place local→synced switch: once the replacement runtime is
         // attached and Ready, kick the import (or finish) from here.
         self.drive_sync_switch(cx);
@@ -3936,13 +4006,18 @@ impl Shell {
             // focused app still stays a chime — you're already looking at
             // Zeron; the sidebar dot carries the rest.
             let app_focused = cx.active_window().is_some();
+            // The engine posts the banners when it can (with the window
+            // closed too); the app then only chimes.
+            let engine_posts = state.read(cx).engine_posts_banners();
             for (chat_id, status, send_pending, title, notify) in sessions {
                 let prev = self.sound_prev.insert(chat_id.clone(), status.clone());
                 // Keep side-chat baselines current, but never emit their
                 // completion, input-request, or failure sounds/banners.
                 if notify
                     && let Some(prev) = prev
-                    && let Some(sound) = status.sound_since(&prev, send_pending)
+                    && let Some(sound) = status
+                        .ping_since(&prev, send_pending)
+                        .map(crate::sound::Sound::from)
                 {
                     if self.settings.session_sound_enabled(sound) {
                         let should_play = sound != crate::sound::Sound::Attention
@@ -3953,7 +4028,8 @@ impl Shell {
                             crate::sound::play(sound);
                         }
                     }
-                    if self.settings.notifications_enabled
+                    if !engine_posts
+                        && self.settings.notifications_enabled
                         && !(self.settings.notifications_background_only && app_focused)
                     {
                         let title = title.unwrap_or_else(|| "New session".into());
@@ -3966,11 +4042,11 @@ impl Shell {
                     }
                 }
             }
-            if let Some(sound) = self.connectivity_notifications.update(
-                connectivity,
-                connectivity_observed,
-                std::time::Instant::now(),
-            ) {
+            if let Some(sound) = self
+                .connectivity_notifications
+                .update(connectivity, connectivity_observed, std::time::Instant::now())
+                .map(crate::sound::Sound::from)
+            {
                 if self.settings.session_sound_enabled(sound)
                     && self
                         .attention_sound_gate
@@ -3978,7 +4054,8 @@ impl Shell {
                 {
                     crate::sound::play(sound);
                 }
-                if self.settings.notifications_enabled
+                if !engine_posts
+                    && self.settings.notifications_enabled
                     && !(self.settings.notifications_background_only && app_focused)
                 {
                     let body = match connectivity {
@@ -4037,7 +4114,8 @@ impl Shell {
                         this.harness_update_seen.insert(key.clone());
                     }
                     let focused = cx.active_window().is_some();
-                    if this.settings.notifications_enabled
+                    if !this.state.read(cx).engine_posts_banners()
+                        && this.settings.notifications_enabled
                         && this.settings.agent_update_notifications
                         && !(this.settings.notifications_background_only && focused)
                     {
@@ -5515,7 +5593,38 @@ impl Shell {
                     cx,
                 );
             }
+            TranscriptEvent::SignIn { chat_id } => self.sign_in_for_chat(chat_id, cx),
         }
+    }
+
+    /// An error card's "Log in": Providers, aimed at the device the chat
+    /// runs on (Cloud's logins for Cloud chats), with its agent open and the
+    /// sign-in started.
+    fn sign_in_for_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let (target, harness) = {
+            let state = self.state.read(cx);
+            let Some(chat) = state.chats.iter().find(|chat| chat.id == chat_id) else {
+                return;
+            };
+            let Some(harness) = chat.config.as_ref().map(|config| config.harness) else {
+                return;
+            };
+            let target = if zeron_proto::is_cloud_device(&chat.device_id, "") {
+                Some(zeron_proto::CLOUD_ACCOUNTS_DEVICE.to_string())
+            } else if state.local_device_id.as_deref() == Some(chat.device_id.as_str()) {
+                None
+            } else {
+                Some(chat.device_id.clone())
+            };
+            (target, harness)
+        };
+        self.open_settings(SettingsSection::Harnesses, cx);
+        let state = self.state.clone();
+        let page = self
+            .harnesses_page
+            .get_or_insert_with(|| cx.new(|cx| HarnessesPage::new(state, cx)))
+            .clone();
+        page.update(cx, |page, cx| page.sign_in(target, harness, cx));
     }
 
     fn composer_for_transcript(&self, transcript: &Entity<Transcript>) -> Entity<Composer> {
@@ -7335,7 +7444,8 @@ impl Shell {
     ) {
         let was_active = self.resolved_right_active(cx) == surface;
         let restore_focus = was_active && self.navigation_focus.in_right(window, cx);
-        self.navigation_focus.remember(&self.shortcut_focus, window, cx);
+        self.navigation_focus
+            .remember(&self.shortcut_focus, window, cx);
         let key = self.panel_key(cx);
         let files = match surface {
             RightSurface::File(id) => self.file_surfaces.get(&id).cloned(),
@@ -8268,12 +8378,30 @@ impl Shell {
     }
 
     pub(crate) fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
-        let section = section.canonical();
+        let mut section = section.canonical();
+        // Signed out, or not offered Cloud: no Cloud or billing to manage.
+        if section.needs_account() && !self.state.read(cx).cloud_offered() {
+            section = SettingsSection::General;
+        }
         self.command_palette = None;
         // Recreate per visit: the page's ListHarnesses load re-probes which
         // CLIs are installed, so installing one shows up on the next open.
         if section == SettingsSection::Harnesses {
             self.harnesses_page = None;
+        }
+        // Cloud status is read once per visit (re-picking the page it already
+        // shows is not a new visit: it would only flash).
+        if section == SettingsSection::Cloud
+            && self.route != Route::Settings(SettingsSection::Cloud)
+        {
+            self.cloud_page = None;
+        }
+        // Billing too: a fresh read per visit (it then follows open Stripe
+        // pages until they land).
+        if section == SettingsSection::Billing
+            && self.route != Route::Settings(SettingsSection::Billing)
+        {
+            self.billing_page = None;
         }
         if section == SettingsSection::Tools {
             self.tools_page = None;
@@ -8837,6 +8965,26 @@ impl Shell {
                     self.devices_page = Some(cx.new(|cx| DevicesPage::new(state, cx)));
                 }
                 match &self.devices_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
+            SettingsSection::Cloud => {
+                if self.cloud_page.is_none() {
+                    let state = self.state.clone();
+                    self.cloud_page = Some(cx.new(|cx| CloudPage::new(state, cx)));
+                }
+                match &self.cloud_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
+            SettingsSection::Billing => {
+                if self.billing_page.is_none() {
+                    let state = self.state.clone();
+                    self.billing_page = Some(cx.new(|cx| BillingPage::new(state, cx)));
+                }
+                match &self.billing_page {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
@@ -9791,6 +9939,7 @@ impl Shell {
         };
         self.sync_flow = SyncFlow::SigningOut;
         self.runtime_change_error = None;
+        self.state.update(cx, |state, _| state.expect_engine_exit());
         let ipc_port = self.boot.ipc_port;
         let data_dir = self.data_dir.clone();
         let shutdown_dir = data_dir.clone();
@@ -9936,6 +10085,7 @@ impl Shell {
         self.sync_flow = SyncFlow::Switching { import };
         self.runtime_change_error = None;
         self.import_current = None;
+        self.state.update(cx, |state, _| state.expect_engine_exit());
         let ipc_port = self.boot.ipc_port;
         let data_dir = self.data_dir.clone();
         let transition = Tokio::spawn(cx, async move {
@@ -10139,6 +10289,7 @@ impl Shell {
         }
 
         self.runtime_change_error = None;
+        self.state.update(cx, |state, _| state.expect_engine_exit());
         let ipc_port = self.boot.ipc_port;
         let data_dir = self.data_dir.clone();
         let shutdown = Tokio::spawn(cx, async move {
@@ -10183,6 +10334,8 @@ impl Shell {
         self.close_user_menu(cx);
         if scope == Some(WorkspaceScope::Local) {
             self.sync_flow = SyncFlow::Enabling;
+        } else {
+            self.gate_sign_in_waiting = true;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
@@ -10204,6 +10357,7 @@ impl Shell {
                     {
                         shell.sync_flow = SyncFlow::Idle;
                     }
+                    shell.gate_sign_in_waiting = false;
                     shell.show_notice(crate::toast::ToastKind::Error, format!("Sign in failed: {err}"), cx);
                     cx.notify();
                 }
@@ -10211,6 +10365,412 @@ impl Shell {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// Back out of a sign-in that's waiting on the browser: the sync opt-in
+    /// clears its partial session; the gate just stops waiting.
+    fn cancel_sign_in_wait(&mut self, cx: &mut Context<Self>) {
+        if self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local) {
+            self.cancel_auth_setup(cx);
+        } else {
+            self.gate_sign_in_waiting = false;
+            cx.notify();
+        }
+    }
+
+    // ---- first-run setup ----
+
+    fn ensure_onboarding(&mut self, cx: &mut Context<Self>) {
+        if self.onboarding.is_some() {
+            return;
+        }
+        let Some(step) = self.onboarding_pending.take() else {
+            return;
+        };
+        let state = self.state.clone();
+        let onboarding = cx.new(|cx| crate::onboarding::Onboarding::new(state, step, cx));
+        use crate::onboarding::OnboardingEvent;
+        self._onboarding_subscriptions = vec![
+            cx.subscribe(&onboarding, |this, _, event, cx| match *event {
+                OnboardingEvent::SignIn => this.start_sign_in(cx),
+                OnboardingEvent::Finish { add_project } => this.finish_onboarding(add_project, cx),
+            }),
+            // Setup renders inside this view, so its changes repaint here.
+            cx.observe(&onboarding, |_, _, cx| cx.notify()),
+        ];
+        self.onboarding = Some(onboarding);
+    }
+
+    /// The full-window page that stands in for the Ready shell: first-run
+    /// setup, the sign-in flow on its own, or the sign-in flow inside setup's
+    /// sync step (same progress, same frame).
+    fn render_setup_page(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        self.ensure_onboarding(cx);
+        let slot = self.sign_in_slot(cx);
+        let parts = match (self.onboarding.clone(), slot) {
+            (Some(onboarding), slot) => {
+                onboarding.update(cx, |onboarding, cx| onboarding.page_parts(slot, window, cx))
+            }
+            (None, Some(slot)) => slot.into_page(),
+            (None, None) => return None,
+        };
+        Some(crate::onboarding::render_page(parts, window))
+    }
+
+    fn finish_onboarding(&mut self, add_project: bool, cx: &mut Context<Self>) {
+        self.onboarding = None;
+        self._onboarding_subscriptions.clear();
+        settings::update(settings::SavePolicy::Immediate, cx, |s| {
+            s.onboarding_completed = true;
+        });
+        if add_project {
+            self.open_add_space(cx);
+        }
+        cx.notify();
+    }
+
+    // ---- sign-in pages ----
+
+    /// The sign-in flow's current step as a page slot — waiting on the
+    /// browser, creating a workspace, then moving to (and filling) the
+    /// synced workspace — or `None` when it has nothing to show. Signing
+    /// out stays a dialog.
+    fn sign_in_slot(&mut self, cx: &mut Context<Self>) -> Option<crate::onboarding::SignInSlot> {
+        use crate::onboarding::{SignInSlot, footer_row, ghost, heading, primary, status_block};
+        let theme = Theme::of(cx).for_settings_surface();
+        let needs_org = matches!(
+            self.state.read(cx).auth.as_ref(),
+            Some(AuthState::NeedsOrganization { .. })
+        );
+        if self.sync_flow == SyncFlow::Enabling {
+            return Some(if needs_org {
+                self.org_slot(cx)
+            } else {
+                self.waiting_slot(&theme, cx)
+            });
+        }
+        let remote_engine = self
+            .state
+            .read(cx)
+            .engine()
+            .is_some_and(|engine| matches!(engine.mode(), EngineMode::Remote { .. }));
+        let runtime_change_label = if self.runtime_change_task.is_some() {
+            "Stopping engine…"
+        } else if remote_engine {
+            "Stop daemon and quit"
+        } else {
+            "Quit Zeron"
+        };
+        let signed_in_email: Option<SharedString> = match self.state.read(cx).auth.as_ref() {
+            Some(AuthState::SignedIn { user, .. }) => Some(SharedString::from(user.email.clone())),
+            _ => None,
+        };
+        // Spaces count as local work too: a projects-only profile must get
+        // the import choice, not a bare "Switch now".
+        let (local_chats, local_spaces) = {
+            let state = self.state.read(cx);
+            (state.chats.len(), state.spaces.len())
+        };
+        let work_phrase = local_work_phrase(local_chats, local_spaces);
+        let spinner = |key: &'static str, _: &mut Context<Self>| {
+            crate::loaders::ring_spinner(key, 12.0, theme.text_muted).into_any_element()
+        };
+        let check = || {
+            icon(icons::CHECK)
+                .size(px(14.0))
+                .text_color(theme.accent)
+                .into_any_element()
+        };
+        let error_line = |error: Option<SharedString>| {
+            error.map(|error| {
+                div()
+                    .mt(px(12.0))
+                    .px(px(8.0))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .line_height(px(17.0))
+                    .text_color(theme.danger)
+                    .child(error)
+            })
+        };
+        let slot = match self.sync_flow {
+            SyncFlow::Canceling => SignInSlot {
+                key: "sign-in-canceling".into(),
+                body: div()
+                    .flex()
+                    .flex_col()
+                    .child(heading(
+                        &theme,
+                        "Canceling sign-in",
+                        "Removing the partial sign-in before going back.",
+                    ))
+                    .child(status_block(&theme, spinner("sign-in-canceling-spinner", cx), "Canceling…", false))
+                    .into_any_element(),
+                footer: footer_row(None, Vec::new()),
+            },
+            // ── in-place switch wizard ────────────────────────────────────
+            SyncFlow::SwitchOffer { notice_open: true } => {
+                let subtitle: SharedString = match &work_phrase {
+                    Some(phrase) => format!(
+                        "Bring {phrase} from this device into your synced workspace, or start it fresh."
+                    )
+                    .into(),
+                    None => "Zeron can switch to your synced workspace now.".into(),
+                };
+                let mut forward = Vec::new();
+                if work_phrase.is_some() {
+                    forward.push(
+                        ghost(&theme, "sync-switch-fresh", "Start fresh")
+                            .on_click(cx.listener(|this, _, _, cx| this.start_synced_switch(false, cx)))
+                            .into_any_element(),
+                    );
+                    forward.push(
+                        primary(&theme, "sync-switch-import", "Bring my work", true)
+                            .on_click(cx.listener(|this, _, _, cx| this.start_synced_switch(true, cx)))
+                            .into_any_element(),
+                    );
+                } else {
+                    forward.push(
+                        primary(&theme, "sync-switch-now", "Switch now", true)
+                            .on_click(cx.listener(|this, _, _, cx| this.start_synced_switch(false, cx)))
+                            .into_any_element(),
+                    );
+                }
+                SignInSlot {
+                    key: "sign-in-offer".into(),
+                    body: div()
+                        .flex()
+                        .flex_col()
+                        .child(heading(&theme, "Sync is ready", subtitle))
+                        .child(status_block(
+                            &theme,
+                            check(),
+                            match &signed_in_email {
+                                Some(email) => format!("Signed in as {email}"),
+                                None => "You're signed in".into(),
+                            },
+                            true,
+                        ))
+                        .into_any_element(),
+                    footer: footer_row(
+                        Some(
+                            ghost(&theme, "sync-switch-later", "Later")
+                                .on_click(cx.listener(|this, _, _, cx| this.postpone_sync_restart(cx))),
+                        ),
+                        forward,
+                    ),
+                }
+            }
+            SyncFlow::Switching { import } => SignInSlot {
+                key: "sign-in-switching".into(),
+                body: div()
+                    .flex()
+                    .flex_col()
+                    .child(heading(
+                        &theme,
+                        "Setting up sync",
+                        if import {
+                            "Handing the engine over to your account. Your local sessions come along next."
+                        } else {
+                            "Handing the engine over to your account."
+                        },
+                    ))
+                    .child(status_block(
+                        &theme,
+                        spinner("sign-in-switching-spinner", cx),
+                        "Switching to your synced workspace…",
+                        false,
+                    ))
+                    .into_any_element(),
+                footer: footer_row(None, Vec::new()),
+            },
+            SyncFlow::Importing { done, total } => {
+                let fraction = if total == 0 {
+                    0.0
+                } else {
+                    (done as f32 / total as f32).clamp(0.0, 1.0)
+                };
+                let label: SharedString = if total == 0 {
+                    "Looking for local sessions…".into()
+                } else {
+                    format!("Importing session {} of {total}", (done + 1).min(total)).into()
+                };
+                let current = self.import_current.clone();
+                SignInSlot {
+                    key: "sign-in-importing".into(),
+                    body: div()
+                        .flex()
+                        .flex_col()
+                        .child(heading(&theme, "Bringing your work over", label))
+                        .child(
+                            settings::widgets::section_card(&theme).mt(px(28.0)).child(
+                                settings::widgets::card_row(&theme, true)
+                                    .min_h(px(44.0))
+                                    .py(px(12.0))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(10.0))
+                                            .when_some(current, |el, current| {
+                                                el.child(
+                                                    div()
+                                                        .truncate()
+                                                        .text_size(crate::typography::ui_rems(12.5))
+                                                        .text_color(theme.text_muted)
+                                                        .child(current),
+                                                )
+                                            })
+                                            .child(
+                                                // Determinate progress: a hairline track with an accent fill.
+                                                div()
+                                                    .h(px(4.0))
+                                                    .w_full()
+                                                    .rounded(px(2.0))
+                                                    .bg(theme.wash(0.12))
+                                                    .child(
+                                                        div()
+                                                            .h_full()
+                                                            .rounded(px(2.0))
+                                                            .bg(theme.accent_strong)
+                                                            .w(gpui::relative(fraction.max(0.04))),
+                                                    ),
+                                            ),
+                                    ),
+                            ),
+                        )
+                        .into_any_element(),
+                    footer: footer_row(None, Vec::new()),
+                }
+            }
+            SyncFlow::ImportDone { imported, skipped } => {
+                let subtitle: SharedString = match (imported, skipped) {
+                    (0, 0) => "Your synced workspace is ready.".into(),
+                    (n, 0) => format!(
+                        "{n} session{} moved into your synced workspace.",
+                        if n == 1 { "" } else { "s" },
+                    )
+                    .into(),
+                    (n, s) => format!(
+                        "{n} session{} imported, {s} already present.",
+                        if n == 1 { "" } else { "s" },
+                    )
+                    .into(),
+                };
+                SignInSlot {
+                    key: "sign-in-imported".into(),
+                    body: heading(&theme, "Your work is synced", subtitle).into_any_element(),
+                    footer: footer_row(
+                        None,
+                        vec![
+                            primary(&theme, "sync-switch-done", "Continue", true)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.sync_flow = SyncFlow::Idle;
+                                    cx.notify();
+                                }))
+                                .into_any_element(),
+                        ],
+                    ),
+                }
+            }
+            SyncFlow::ImportFailed { notice_open: true } => SignInSlot {
+                key: "sign-in-import-failed".into(),
+                body: div()
+                    .flex()
+                    .flex_col()
+                    .child(heading(
+                        &theme,
+                        "Import didn't finish",
+                        "Anything already imported is kept; retrying only copies what's missing.",
+                    ))
+                    .children(error_line(self.runtime_change_error.clone()))
+                    .into_any_element(),
+                footer: footer_row(
+                    Some(
+                        ghost(&theme, "import-failed-dismiss", "Later")
+                            .on_click(cx.listener(|this, _, _, cx| this.postpone_sync_restart(cx))),
+                    ),
+                    vec![
+                        primary(&theme, "import-failed-retry", "Retry import", true)
+                            .on_click(cx.listener(|this, _, _, cx| this.spawn_local_import(cx)))
+                            .into_any_element(),
+                    ],
+                ),
+            },
+            SyncFlow::RestartPending { notice_open: true } => SignInSlot {
+                key: "sign-in-restart".into(),
+                body: div()
+                    .flex()
+                    .flex_col()
+                    .child(heading(
+                        &theme,
+                        "Restart to finish",
+                        if remote_engine {
+                            "Zeron is using a background daemon. Stop it and quit Zeron, then reopen to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
+                        } else {
+                            "Quit and reopen Zeron to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
+                        },
+                    ))
+                    .children(error_line(self.runtime_change_error.clone()))
+                    .into_any_element(),
+                footer: footer_row(
+                    Some(
+                        ghost(&theme, "sync-restart-later", "Later")
+                            .on_click(cx.listener(|this, _, _, cx| this.postpone_sync_restart(cx))),
+                    ),
+                    vec![
+                        primary(&theme, "sync-restart-quit", runtime_change_label, true)
+                            .when(self.runtime_change_task.is_some(), |button| button.opacity(0.6))
+                            .on_click(cx.listener(|this, _, _, cx| this.quit_for_runtime_change(cx)))
+                            .into_any_element(),
+                    ],
+                ),
+            },
+            _ => return None,
+        };
+        Some(slot)
+    }
+
+    /// Log in opened the browser; this page holds until the signed-in edge
+    /// moves the flow on.
+    fn waiting_slot(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> crate::onboarding::SignInSlot {
+        use crate::onboarding::{SignInSlot, footer_row, ghost, heading, primary, status_block};
+        let spinner =
+            crate::loaders::ring_spinner("sign-in-waiting-spinner", 12.0, theme.text_muted)
+                .into_any_element();
+        SignInSlot {
+            key: "sign-in-waiting".into(),
+            body: div()
+                .flex()
+                .flex_col()
+                .child(heading(
+                    theme,
+                    "Finish logging in",
+                    "We opened your browser to log in to Zeron. Come back when you're done — this page moves on by itself.",
+                ))
+                .child(status_block(theme, spinner, "Waiting for your browser…", false))
+                .into_any_element(),
+            footer: footer_row(
+                Some(
+                    ghost(theme, "sync-enable-cancel", "Cancel")
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_sign_in_wait(cx))),
+                ),
+                vec![
+                    primary(theme, "sync-enable-open-browser", "Open browser again", true)
+                        .on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx)))
+                        .into_any_element(),
+                ],
+            ),
+        }
     }
 
     // ---- org gate ----
@@ -11369,8 +11929,11 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let cloud_offered = self.state.read(cx).cloud_offered();
         let section_icon = |item: SettingsSection| match item {
             SettingsSection::Devices => icons::MONITOR,
+            SettingsSection::Cloud => icons::CLOUD,
+            SettingsSection::Billing => icons::WALLET,
             SettingsSection::Harnesses => icons::WIDGET,
             SettingsSection::Tools => icons::LUCIDE_HAMMER,
             SettingsSection::AgentProfiles => icons::BOT,
@@ -11421,7 +11984,7 @@ impl Shell {
                         .children(
                             SettingsSection::ALL
                                 .into_iter()
-                                .filter(|item| item.visible_in_nav())
+                                .filter(|item| item.shown_in_nav(cloud_offered))
                                 .filter(|item| item.matches(&query))
                                 .map(|item| {
                                     let index = SettingsSection::ALL
@@ -11464,7 +12027,7 @@ impl Shell {
                                                 this.settings_search.read(cx).text().to_string();
                                             let items: Vec<_> = SettingsSection::ALL
                                                 .into_iter()
-                                                .filter(|s| s.visible_in_nav() && s.matches(&query))
+                                                .filter(|s| s.shown_in_nav(cloud_offered) && s.matches(&query))
                                                 .collect();
                                             let current =
                                                 items.iter().position(|s| *s == item).unwrap_or(0);
@@ -11622,15 +12185,26 @@ impl Shell {
             .map(|chat| chat.device_id.clone());
         let compact = search_query.is_none() && (slim || self.settings.sidebar_compact);
         let show_label = search_query.is_some() || self.settings.sidebar_show_project_label;
-        let remote = self
+        let host = self
             .state
             .read(cx)
             .chats
             .iter()
             .find(|chat| chat.id == id)
-            .is_some_and(|chat| {
-                self.state.read(cx).local_device_id.as_deref() != Some(chat.device_id.as_str())
-            });
+            .map(|chat| chat.device_id.clone());
+        let remote = host
+            .as_deref()
+            .is_some_and(|host| self.state.read(cx).local_device_id.as_deref() != Some(host));
+        // A chat on a Cloud session machine wears the cloud, not the generic
+        // remote-device globe.
+        let remote_glyph = if host
+            .as_deref()
+            .is_some_and(|host| zeron_proto::is_cloud_device(host, ""))
+        {
+            icons::CLOUD
+        } else {
+            icons::REMOTE_SERVER
+        };
         let project_icon = (project_icon && search_query.is_none())
             .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, selected, cx));
         let corner_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
@@ -11837,7 +12411,7 @@ impl Shell {
                 .into_any_element()
         } else if compact {
             if remote {
-                icon(icons::REMOTE_SERVER)
+                icon(remote_glyph)
                     .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
                     .text_color(theme.text_muted.opacity(0.5))
                     .into_any_element()
@@ -12188,7 +12762,7 @@ impl Shell {
                     .children(lead_rollup)
                     .when(!compact && !show_label && remote, |el| {
                         el.child(
-                            icon(icons::REMOTE_SERVER)
+                            icon(remote_glyph)
                                 .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
                                 .flex_none()
                                 .text_color(subline),
@@ -13568,13 +14142,19 @@ impl Shell {
         use zeron_proto::ConnectivityState as S;
         let conn = self.state.read(cx).connectivity.clone();
         let selected = self.state.read(cx).selected_chat.as_deref();
-        let chat = conn.chats.iter()
+        let chat = conn
+            .chats
+            .iter()
             .find(|c| Some(c.chat_id.as_str()) == selected);
         let chat_state = chat.map(|c| c.sync_state);
         let (label, glyph): (SharedString, AnyElement) = match conn.state {
             _ if chat_state == Some(zeron_proto::ChatSyncState::StorageError) => (
                 "Changes could not be saved".into(),
-                div().size(px(5.0)).rounded_full().bg(theme.warning).into_any_element(),
+                div()
+                    .size(px(5.0))
+                    .rounded_full()
+                    .bg(theme.warning)
+                    .into_any_element(),
             ),
             S::Disabled => return None,
             S::Connected => {
@@ -13582,9 +14162,13 @@ impl Shell {
                 (
                     caption.into(),
                     loaders::mini_mono_spinner(
-                        "chat-sync-spinner", 2.0, theme.text_muted,
-                        self.sidebar_pane.entity_id(), cx,
-                    ).into_any_element(),
+                        "chat-sync-spinner",
+                        2.0,
+                        theme.text_muted,
+                        self.sidebar_pane.entity_id(),
+                        cx,
+                    )
+                    .into_any_element(),
                 )
             }
             S::Offline => (
@@ -15209,333 +15793,15 @@ impl Shell {
             .into_any_element()
     }
 
+    /// Signing out, as a dialog over the app. Every step of signing in is a
+    /// page instead ([`Self::sign_in_slot`]).
     fn render_sync_overlay(
         &mut self,
         viewport: gpui::Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let theme = Theme::of(cx).for_popup();
-        let needs_org = matches!(
-            self.state.read(cx).auth.as_ref(),
-            Some(AuthState::NeedsOrganization { .. })
-        );
-        let remote_engine = self
-            .state
-            .read(cx)
-            .engine()
-            .is_some_and(|engine| matches!(engine.mode(), EngineMode::Remote { .. }));
-        let runtime_change_label = if self.runtime_change_task.is_some() {
-            "Stopping engine…"
-        } else if remote_engine {
-            "Stop daemon and quit"
-        } else {
-            "Quit Zeron"
-        };
-
-        if self.sync_flow == SyncFlow::Enabling && needs_org {
-            return Some(self.render_org_gate(cx));
-        }
-
-        let signed_in_email: Option<SharedString> = match self.state.read(cx).auth.as_ref() {
-            Some(AuthState::SignedIn { user, .. }) => Some(SharedString::from(user.email.clone())),
-            _ => None,
-        };
-        // Spaces count as local work too: a projects-only profile must get
-        // the import choice, not a bare "Switch now".
-        let (local_chats, local_spaces) = {
-            let state = self.state.read(cx);
-            (state.chats.len(), state.spaces.len())
-        };
-        let work_phrase = local_work_phrase(local_chats, local_spaces);
-
         let card = match self.sync_flow {
-            SyncFlow::Enabling => popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Enable sync"))
-                .child(
-                    div().mt(px(6.0)).child(popover::dialog_body(
-                        &theme,
-                        "Finish signing in in your browser. Zeron will keep using this local workspace until you quit and reopen.",
-                    )),
-                )
-                .child(
-                    div()
-                        .mt(px(16.0))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            popover::btn_ghost(&theme, "Cancel", "sync-enable-cancel")
-                                .id("sync-enable-cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.cancel_auth_setup(cx)
-                                })),
-                        )
-                        .child(
-                            popover::btn_primary(&theme, "Open browser again")
-                                .id("sync-enable-open-browser")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.start_sign_in(cx)
-                                })),
-                        ),
-                )
-                .into_any_element(),
-            SyncFlow::Canceling => popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Canceling sync setup…"))
-                .child(
-                    div().mt(px(6.0)).child(popover::dialog_body(
-                        &theme,
-                        "Removing the partial sign-in before returning to your local workspace.",
-                    )),
-                )
-                .into_any_element(),
-            // ── in-place switch wizard ────────────────────────────────────
-            SyncFlow::SwitchOffer { notice_open: true } => {
-                let has_local_work = work_phrase.is_some();
-                let body: SharedString = match (&signed_in_email, &work_phrase) {
-                    (Some(email), Some(phrase)) => format!(
-                        "You're signed in as {email}. Bring {phrase} from this device into your synced workspace, or start it fresh."
-                    )
-                    .into(),
-                    (Some(email), None) => format!(
-                        "You're signed in as {email}. Zeron can switch to your synced workspace now."
-                    )
-                    .into(),
-                    (None, Some(phrase)) => format!(
-                        "Bring {phrase} from this device into your synced workspace, or start it fresh."
-                    )
-                    .into(),
-                    (None, None) => "Zeron can switch to your synced workspace now.".into(),
-                };
-                let mut actions = div()
-                    .mt(px(16.0))
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .gap(px(8.0))
-                    .child(
-                        popover::btn_ghost(&theme, "Later", "sync-switch-later")
-                            .id("sync-switch-later")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.postpone_sync_restart(cx)
-                            })),
-                    );
-                if has_local_work {
-                    actions = actions
-                        .child(
-                            popover::btn_ghost(&theme, "Start fresh", "sync-switch-fresh")
-                                .id("sync-switch-fresh")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.start_synced_switch(false, cx)
-                                })),
-                        )
-                        .child(
-                            popover::btn_primary(&theme, "Bring my work")
-                                .id("sync-switch-import")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.start_synced_switch(true, cx)
-                                })),
-                        );
-                } else {
-                    actions = actions.child(
-                        popover::btn_primary(&theme, "Switch now")
-                            .id("sync-switch-now")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.start_synced_switch(false, cx)
-                            })),
-                    );
-                }
-                popover::dialog_card(&theme)
-                    .child(popover::dialog_title(&theme, "Sync is ready"))
-                    .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, body)))
-                    .child(actions)
-                    .into_any_element()
-            }
-            SyncFlow::Switching { import } => popover::dialog_card(&theme)
-                .child(popover::dialog_title(
-                    &theme,
-                    "Switching to your synced workspace…",
-                ))
-                .child(div().mt(px(6.0)).child(popover::dialog_body(
-                    &theme,
-                    if import {
-                        "Handing the engine over to your account. Your local sessions come along next."
-                    } else {
-                        "Handing the engine over to your account."
-                    },
-                )))
-                .into_any_element(),
-            SyncFlow::Importing { done, total } => {
-                let fraction = if total == 0 {
-                    0.0
-                } else {
-                    (done as f32 / total as f32).clamp(0.0, 1.0)
-                };
-                let label: SharedString = if total == 0 {
-                    "Looking for local sessions…".into()
-                } else {
-                    format!("Importing session {} of {total}", (done + 1).min(total)).into()
-                };
-                let mut card = popover::dialog_card(&theme)
-                    .child(popover::dialog_title(&theme, "Bringing your work over"))
-                    .child(
-                        div()
-                            .mt(px(6.0))
-                            .child(popover::dialog_body(&theme, label)),
-                    );
-                if let Some(current) = self.import_current.clone() {
-                    card = card.child(
-                        div()
-                            .mt(px(4.0))
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .line_height(px(17.0))
-                            .text_color(theme.text_muted)
-                            .overflow_hidden()
-                            .child(current),
-                    );
-                }
-                card.child(
-                    // Determinate progress: a hairline track with an accent fill.
-                    div()
-                        .mt(px(14.0))
-                        .h(px(4.0))
-                        .w_full()
-                        .rounded(px(2.0))
-                        .bg(theme.border)
-                        .child(
-                            div()
-                                .h_full()
-                                .rounded(px(2.0))
-                                .bg(theme.accent_strong)
-                                .w(gpui::relative(fraction.max(0.04))),
-                        ),
-                )
-                .into_any_element()
-            }
-            SyncFlow::ImportDone { imported, skipped } => {
-                let body: SharedString = match (imported, skipped) {
-                    (0, 0) => "Your synced workspace is ready.".into(),
-                    (n, 0) => format!(
-                        "{n} session{} moved into your synced workspace.",
-                        if n == 1 { "" } else { "s" },
-                    )
-                    .into(),
-                    (n, s) => format!(
-                        "{n} session{} imported, {s} already present.",
-                        if n == 1 { "" } else { "s" },
-                    )
-                    .into(),
-                };
-                popover::dialog_card(&theme)
-                    .child(popover::dialog_title(&theme, "You're all set"))
-                    .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, body)))
-                    .child(
-                        div()
-                            .mt(px(16.0))
-                            .flex()
-                            .flex_row()
-                            .justify_end()
-                            .child(
-                                popover::btn_primary(&theme, "Continue")
-                                    .id("sync-switch-done")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.sync_flow = SyncFlow::Idle;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .into_any_element()
-            }
-            SyncFlow::ImportFailed { notice_open: true } => popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Import didn't finish"))
-                .child(div().mt(px(6.0)).child(popover::dialog_body(
-                    &theme,
-                    "Anything already imported is kept; retrying only copies what's missing.",
-                )))
-                .when_some(self.runtime_change_error.clone(), |card, error| {
-                    card.child(
-                        div()
-                            .mt(px(10.0))
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .line_height(px(17.0))
-                            .text_color(theme.danger)
-                            .child(error),
-                    )
-                })
-                .child(
-                    div()
-                        .mt(px(16.0))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            popover::btn_ghost(&theme, "Later", "import-failed-dismiss")
-                                .id("import-failed-dismiss")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.postpone_sync_restart(cx)
-                                })),
-                        )
-                        .child(
-                            popover::btn_primary(&theme, "Retry import")
-                                .id("import-failed-retry")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.spawn_local_import(cx)
-                                })),
-                        ),
-                )
-                .into_any_element(),
-            SyncFlow::RestartPending { notice_open: true } => popover::dialog_card(&theme)
-                .child(popover::dialog_title(
-                    &theme,
-                    "Sync needs a restart",
-                ))
-                .child(
-                    div().mt(px(6.0)).child(popover::dialog_body(
-                        &theme,
-                        if remote_engine {
-                            "Zeron is using a background daemon. Stop it and quit Zeron, then reopen to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
-                        } else {
-                            "Quit and reopen Zeron to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
-                        },
-                    )),
-                )
-                .when_some(self.runtime_change_error.clone(), |card, error| {
-                    card.child(
-                        div()
-                            .mt(px(10.0))
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .line_height(px(17.0))
-                            .text_color(theme.danger)
-                            .child(error),
-                    )
-                })
-                .child(
-                    div()
-                        .mt(px(16.0))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            popover::btn_ghost(&theme, "Later", "sync-restart-later")
-                                .id("sync-restart-later")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.postpone_sync_restart(cx)
-                                })),
-                        )
-                        .child(
-                            popover::btn_primary(&theme, runtime_change_label)
-                                .id("sync-restart-quit")
-                                .when(self.runtime_change_task.is_some(), |button| {
-                                    button.opacity(0.6)
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.quit_for_runtime_change(cx)
-                                })),
-                        ),
-                )
-                .into_any_element(),
             SyncFlow::SignOutConfirm => popover::dialog_card(&theme)
                 .child(popover::dialog_title(&theme, "Sign out?"))
                 .child(
@@ -15577,11 +15843,7 @@ impl Shell {
                     )),
                 )
                 .into_any_element(),
-            SyncFlow::Idle
-            | SyncFlow::SwitchOffer { notice_open: false }
-            | SyncFlow::ImportFailed { notice_open: false }
-            | SyncFlow::RestartPending { notice_open: false }
-            | SyncFlow::SignedOutRestartRequired => return None,
+            _ => return None,
         };
 
         Some(popover::modal("sync-lifecycle-dialog", viewport, card))
@@ -16201,22 +16463,25 @@ impl Shell {
         }
 
         if let Some(chat_id) = self.delete_confirm.clone() {
+            let chat = self.state.read(cx).chats.iter().find(|c| c.id == chat_id);
             let title = transcript::single_line(
-                &self
-                    .state
-                    .read(cx)
-                    .chats
-                    .iter()
-                    .find(|c| c.id == chat_id)
+                &chat
                     .and_then(|c| c.title.clone())
                     .unwrap_or_else(|| "New session".into()),
             );
+            // A Cloud chat's machine goes with it (the engine deletes it).
+            let on_cloud = chat.is_some_and(|c| zeron_proto::is_cloud_device(&c.device_id, ""));
+            let body = if on_cloud {
+                format!(
+                    "\u{201C}{title}\u{201D} and its Cloud machine will be permanently deleted, \
+                     with anything not pushed from it. This can\u{2019}t be undone."
+                )
+            } else {
+                format!("\u{201C}{title}\u{201D} will be permanently deleted. This can\u{2019}t be undone.")
+            };
             let card = popover::dialog_card(&theme)
                 .child(popover::dialog_title(&theme, "Delete session?"))
-                .child(div().mt(px(6.0)).child(popover::dialog_body(
-                    &theme,
-                    format!("\u{201C}{title}\u{201D} will be permanently deleted. This can\u{2019}t be undone."),
-                )))
+                .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, body)))
                 .child(
                     div()
                         .mt(px(16.0))
@@ -17964,7 +18229,6 @@ impl Shell {
             .inset_0()
             .occlude()
             .bg(theme.bg)
-            .child(grid_backdrop(&theme))
             .child(
                 div()
                     .absolute()
@@ -18675,132 +18939,119 @@ impl Shell {
         cx.notify();
     }
 
-    fn render_gate_card(&mut self, phase: &GatePhase, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::of(cx).clone();
-        let content: AnyElement = match phase {
+    fn render_gate_card(
+        &mut self,
+        phase: &GatePhase,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx).for_settings_surface();
+        if *phase == GatePhase::SignIn && self.gate_sign_in_waiting {
+            let slot = self.waiting_slot(&theme, cx);
+            return crate::onboarding::render_page(slot.into_page(), window);
+        }
+        let (key, body): (&'static str, AnyElement) = match phase {
             // Backend unreachable: quiet centered copy (zeron Gate `Failed`),
             // plus a Retry affordance (the native engine doesn't self-redial).
-            GatePhase::Failed(error) => div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(Theme::SPACE_MD))
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(14.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(error.clone())),
-                )
-                .child(
-                    div()
-                        .id("retry-engine")
-                        .px(px(12.0))
-                        .py(px(6.0))
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(theme.border)
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .text_color(theme.text)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.glass_hover()))
-                        .on_click(cx.listener(|this, _, _, cx| this.retry_engine(cx)))
-                        .child(SharedString::from("Retry")),
-                )
-                .into_any_element(),
-            // Login card (zeron App.tsx Gate): centered card on the grid —
-            // logo, "Log in to Zeron", copy, full-width white Log in button.
-            _ => div()
-                .w(px(360.0))
-                .px(px(32.0))
-                .py(px(40.0))
-                .rounded(px(12.0))
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.surface_card)
-                .shadow_lg()
-                .flex()
-                .flex_col()
-                .items_center()
-                .text_center()
-                .child(
-                    icon(icons::ZERON_LOGO)
-                        .w(px(31.4))
-                        .h(px(36.0))
-                        .text_color(theme.text),
-                )
-                .child(
-                    div()
-                        .mt(px(24.0))
-                        .text_size(crate::typography::ui_rems(18.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child(SharedString::from("Log in to Zeron")),
-                )
-                .child(
-                    div()
-                        .mt(px(6.0))
-                        .mb(px(24.0))
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .line_height(px(19.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(
-                            "This opens your browser to finish logging in — you'll come right back.",
-                        )),
-                )
-                .child(
-                    div()
-                        .id("sign-in")
-                        .w_full()
-                        .h(px(36.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(6.0))
-                        .bg(theme.text)
-                        .text_size(crate::typography::ui_rems(14.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.on_solid)
-                        .cursor_pointer()
-                        .hover(|s| s.opacity(0.9))
-                        .on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx)))
-                        .child(SharedString::from("Log in")),
-                )
-                .into_any_element(),
-        };
-        div()
-            .size_full()
-            .relative()
-            .bg(theme.bg)
-            .child(grid_backdrop(&theme))
-            .child(
+            GatePhase::Failed(error) => (
+                "gate-failed",
                 div()
-                    .absolute()
-                    .inset_0()
                     .flex()
+                    .flex_col()
                     .items_center()
-                    .justify_center()
-                    // Keyed per phase (zeron App.tsx `<div key={phase}
-                    // className="animate-in">`): every gate swap replays the
-                    // 0.5s entrance instead of mutating one animated element.
-                    .child(motion::fade_in(
-                        match phase {
-                            GatePhase::SignIn => "gate-card-signin",
-                            _ => "gate-card-failed",
-                        },
-                        div().child(content),
-                    )),
-            )
-            .into_any_element()
+                    .text_center()
+                    .gap(px(Theme::SPACE_MD))
+                    .child(
+                        div()
+                            .text_size(crate::typography::ui_rems(14.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(error.clone())),
+                    )
+                    .child(
+                        crate::onboarding::ghost(&theme, "retry-engine", "Retry")
+                            .on_click(cx.listener(|this, _, _, cx| this.retry_engine(cx))),
+                    )
+                    .into_any_element(),
+            ),
+            // Log in: the logo, "Log in to Zeron", the copy and a wide Log in
+            // button, centered on the window like the setup welcome.
+            _ => (
+                "gate-signin",
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .text_center()
+                    .child(
+                        icon(icons::ZERON_LOGO)
+                            .w(px(31.4))
+                            .h(px(36.0))
+                            .text_color(theme.text),
+                    )
+                    .child(
+                        div()
+                            .mt(px(24.0))
+                            .text_size(crate::typography::ui_rems(22.0))
+                            .line_height(px(28.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child(SharedString::from("Log in to Zeron")),
+                    )
+                    .child(
+                        div()
+                            .mt(px(8.0))
+                            .max_w(px(340.0))
+                            .text_size(crate::typography::ui_rems(13.0))
+                            .line_height(px(19.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(
+                                "This opens your browser to finish logging in — you'll come right back.",
+                            )),
+                    )
+                    .child(
+                        div().mt(px(28.0)).w(px(320.0)).child(
+                            crate::onboarding::wide_button(&theme, "sign-in", "Log in")
+                                .on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx))),
+                        ),
+                    )
+                    .into_any_element(),
+            ),
+        };
+        crate::onboarding::render_page(
+            crate::onboarding::PageParts {
+                key: key.into(),
+                header: None,
+                body,
+                footer: None,
+                fixed: false,
+                backdrop: None,
+                measure: None,
+            },
+            window,
+        )
     }
 
-    /// Organization onboarding used by the synced gate and, for a local
-    /// runtime, only after the user explicitly starts the sync opt-in.
-    fn render_org_gate(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    /// Organization onboarding used by the synced gate as a page of its own.
+    /// A local runtime shows it as a step of the sync opt-in instead
+    /// ([`Self::sign_in_slot`]).
+    fn render_org_gate(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let slot = self.org_slot(cx);
+        crate::onboarding::render_page(slot.into_page(), window)
+    }
+
+    /// The workspace step: name a new workspace, or continue in one you
+    /// belong to, with the account escape hatch on the left.
+    fn org_slot(&mut self, cx: &mut Context<Self>) -> crate::onboarding::SignInSlot {
+        use crate::onboarding::{SignInSlot, footer_row, ghost, heading, primary};
         self.ensure_org_ui(cx);
-        let theme = Theme::of(cx).clone();
+        let theme = Theme::of(cx).for_settings_surface();
         let local_setup = self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local);
         let Some(org) = self.org.as_ref() else {
-            return Empty.into_any_element();
+            return SignInSlot {
+                key: "org-gate".into(),
+                body: Empty.into_any_element(),
+                footer: footer_row(None, Vec::new()),
+            };
         };
         let submitting = org.submitting;
         let error = org.error.clone();
@@ -18813,80 +19064,71 @@ impl Shell {
             .auth_user()
             .map(|u| u.email.clone().into());
 
-        let memberships: AnyElement =
-            match &orgs {
-                Loadable::Idle | Loadable::Loading => div()
-                    .mt(px(24.0))
-                    .child(popover::skeleton_rows(
-                        "org-skeleton",
-                        &theme,
-                        2,
-                        cx.entity_id(),
-                        cx,
-                    ))
-                    .into_any_element(),
-                Loadable::Error(message) => div()
-                    .mt(px(24.0))
-                    .child(
-                        popover::error_row(&theme, message).child(
-                            div()
-                                .id("orgs-retry")
-                                .px(px(Theme::SPACE_SM))
-                                .py(px(3.0))
-                                .rounded(px(Theme::CONTROL_RADIUS))
-                                .border_1()
-                                .border_color(theme.border)
-                                .text_color(theme.text)
-                                .cursor_pointer()
-                                .hover(|s| s.bg(theme.glass_hover()))
-                                .on_click(cx.listener(|this, _, _, cx| this.load_orgs(cx)))
-                                .child(SharedString::from("Retry")),
-                        ),
-                    )
-                    .into_any_element(),
-                Loadable::Ready(rows) if rows.is_empty() => Empty.into_any_element(),
-                Loadable::Ready(rows) => div()
-                    .mt(px(24.0))
-                    .flex()
-                    .flex_col()
-                    .child(
+        let memberships: AnyElement = match &orgs {
+            Loadable::Idle | Loadable::Loading => div()
+                .mt(px(24.0))
+                .child(popover::skeleton_rows(
+                    "org-skeleton",
+                    &theme,
+                    2,
+                    cx.entity_id(),
+                    cx,
+                ))
+                .into_any_element(),
+            Loadable::Error(message) => div()
+                .mt(px(24.0))
+                .child(
+                    popover::error_row(&theme, message).child(
                         div()
-                            .pb(px(8.0))
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text_muted.opacity(0.6))
-                            .child(SharedString::from(
-                                "Or continue in a workspace you belong to",
-                            )),
-                    )
-                    .child(div().flex().flex_col().gap(px(4.0)).children(
-                        rows.iter().enumerate().map(|(ix, row)| {
-                            let org_id = row.organization_id.clone();
-                            div()
-                                .id(("org-row", ix))
-                                .px(px(12.0))
-                                .py(px(8.0))
-                                .rounded(px(8.0))
-                                .border_1()
-                                .border_color(theme.border)
-                                .bg(theme.bg)
-                                .text_size(crate::typography::ui_rems(13.0))
-                                .text_color(theme.text)
-                                .when(submitting, |el| el.opacity(0.5))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(crate::theme::wash(0.11)))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.select_org(org_id.clone(), cx);
-                                }))
-                                .child(SharedString::from(row.name.clone()))
-                        }),
-                    ))
-                    .into_any_element(),
-            };
+                            .id("orgs-retry")
+                            .px(px(Theme::SPACE_SM))
+                            .py(px(3.0))
+                            .rounded(px(Theme::CONTROL_RADIUS))
+                            .border_1()
+                            .border_color(theme.border)
+                            .text_color(theme.text)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.glass_hover()))
+                            .on_click(cx.listener(|this, _, _, cx| this.load_orgs(cx)))
+                            .child(SharedString::from("Retry")),
+                    ),
+                )
+                .into_any_element(),
+            Loadable::Ready(rows) if rows.is_empty() => Empty.into_any_element(),
+            Loadable::Ready(rows) => settings::widgets::section(
+                &theme,
+                "Or continue in a workspace you belong to",
+                settings::widgets::section_card(&theme).mt_0().children(
+                    rows.iter().enumerate().map(|(ix, row)| {
+                        let org_id = row.organization_id.clone();
+                        div()
+                            .id(("org-row", ix))
+                            .when(submitting, |el| el.opacity(0.5))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.wash(0.04)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.select_org(org_id.clone(), cx);
+                            }))
+                            .child(
+                                settings::widgets::card_row(&theme, ix == 0)
+                                    .min_h(px(44.0))
+                                    .py(px(10.0))
+                                    .flex_nowrap()
+                                    .child(div().flex_1().min_w_0().child(
+                                        settings::widgets::row_title(&theme, row.name.clone()),
+                                    ))
+                                    .child(
+                                        icon(icons::ALT_ARROW_RIGHT)
+                                            .size(px(14.0))
+                                            .text_color(theme.text_muted),
+                                    ),
+                            )
+                    }),
+                ),
+            )
+            .into_any_element(),
+        };
 
-        // zeron App.tsx OrgGate: w-400 card on the grid — logo, headline,
-        // explainer (+ signed-in email), name form with a white Create button,
-        // then existing memberships and the account escape hatch.
         let blurb: SharedString = match email {
             Some(email) => format!(
                 "Zeron is organized around workspaces — create one for yourself or your team. Signed in as {email}."
@@ -18897,217 +19139,67 @@ impl Shell {
                     .into()
             }
         };
-        let card = div()
-            .w(px(400.0))
-            .px(px(32.0))
-            .py(px(36.0))
-            .rounded(px(12.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface_card)
-            .shadow_lg()
+        let body = div()
             .flex()
             .flex_col()
-            .child(
-                icon(icons::ZERON_LOGO)
-                    .w(px(24.4))
-                    .h(px(28.0))
-                    .text_color(theme.text),
-            )
+            .child(heading(&theme, "Create your workspace", blurb))
             .child(
                 div()
-                    .mt(px(20.0))
-                    .text_size(crate::typography::ui_rems(18.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child(SharedString::from("Create your workspace")),
-            )
-            .child(
-                div()
-                    .mt(px(6.0))
-                    .mb(px(24.0))
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .line_height(px(19.0))
-                    .text_color(theme.text_muted)
-                    .child(blurb),
-            )
-            .child(
-                div()
+                    .mt(px(24.0))
+                    .h(px(36.0))
                     .flex()
-                    .flex_row()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h(px(36.0))
-                            .flex()
-                            .items_center()
-                            .px(px(12.0))
-                            .rounded(px(8.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.bg)
-                            .text_size(crate::typography::ui_rems(13.0))
-                            .child(name_input),
-                    )
-                    .child(
-                        div()
-                            .id("create-org")
-                            .h(px(36.0))
-                            .px(px(16.0))
-                            .flex()
-                            .items_center()
-                            .rounded(px(6.0))
-                            .bg(theme.text)
-                            .text_size(crate::typography::ui_rems(14.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.on_solid)
-                            .when(submitting, |el| el.opacity(0.5))
-                            .cursor_pointer()
-                            .hover(|s| s.opacity(0.9))
-                            .on_click(cx.listener(|this, _, _, cx| this.create_org(cx)))
-                            .child(SharedString::from(if submitting {
-                                "Creating…"
-                            } else {
-                                "Create"
-                            })),
-                    ),
+                    .items_center()
+                    .px(px(12.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.input_bg)
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .child(name_input),
             )
             .child(memberships)
             .when_some(error, |el, message| {
                 el.child(
                     div()
-                        .mt(px(16.0))
+                        .mt(px(12.0))
+                        .px(px(8.0))
                         .text_size(crate::typography::ui_rems(12.0))
                         .line_height(px(17.0))
                         .text_color(theme.danger_muted.opacity(0.9)) // red-300
                         .child(message),
                 )
             })
-            .child(
-                div().mt(px(24.0)).flex().flex_row().child(
-                    div()
-                        .id("org-signout")
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_muted.opacity(0.6))
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme.text))
-                        .on_click(cx.listener(|this, _, _, cx| this.cancel_auth_setup(cx)))
-                        .child(SharedString::from(if local_setup {
-                            "Cancel sync setup"
-                        } else {
-                            "Use a different account"
-                        })),
-                ),
-            );
-
-        div()
-            .absolute()
-            .inset_0()
-            .occlude()
-            .bg(theme.bg)
-            .child(grid_backdrop(&theme))
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(motion::fade_in("org-gate-card", card)),
-            )
-            .into_any_element()
+            .into_any_element();
+        let footer = footer_row(
+            Some(
+                ghost(
+                    &theme,
+                    "org-signout",
+                    if local_setup {
+                        "Cancel sync setup"
+                    } else {
+                        "Use a different account"
+                    },
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.cancel_auth_setup(cx))),
+            ),
+            vec![
+                primary(
+                    &theme,
+                    "create-org",
+                    if submitting { "Creating…" } else { "Create" },
+                    !submitting,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.create_org(cx)))
+                .into_any_element(),
+            ],
+        );
+        SignInSlot {
+            key: "org-gate".into(),
+            body,
+            footer,
+        }
     }
-}
-
-/// The sign-in gate's faint grid backdrop (zeron styles.css `.bg-grid`):
-/// 44px hairlines at white 3.5%, with the radial mask approximated by edge
-/// gradients back into the page background (gpui has no mask-image).
-fn grid_backdrop(theme: &Theme) -> AnyElement {
-    let line = crate::theme::hairline(0.035);
-    let bg = theme.bg;
-    const STEP: f32 = 44.0;
-    const SPAN: f32 = 2640.0;
-    let verticals = (1..(SPAN / STEP) as usize).map(|i| {
-        div()
-            .absolute()
-            .left(px(i as f32 * STEP))
-            .top_0()
-            .bottom_0()
-            .w(px(1.0))
-            .bg(line)
-    });
-    let horizontals = (1..((SPAN * 0.75) / STEP) as usize).map(|i| {
-        div()
-            .absolute()
-            .top(px(i as f32 * STEP))
-            .left_0()
-            .right_0()
-            .h(px(1.0))
-            .bg(line)
-    });
-    div()
-        .absolute()
-        .inset_0()
-        .overflow_hidden()
-        .children(verticals)
-        .children(horizontals)
-        // Mask approximation: fade the grid back into the background toward
-        // the window edges (the original masks to an ellipse at 50% / 40%).
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .right_0()
-                .h(px(120.0))
-                .bg(gpui::linear_gradient(
-                    180.0,
-                    gpui::linear_color_stop(bg, 0.0),
-                    gpui::linear_color_stop(bg.opacity(0.0), 1.0),
-                )),
-        )
-        .child(
-            div()
-                .absolute()
-                .bottom_0()
-                .left_0()
-                .right_0()
-                .h(px(260.0))
-                .bg(gpui::linear_gradient(
-                    0.0,
-                    gpui::linear_color_stop(bg, 0.0),
-                    gpui::linear_color_stop(bg.opacity(0.0), 1.0),
-                )),
-        )
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .left_0()
-                .w(px(200.0))
-                .bg(gpui::linear_gradient(
-                    90.0,
-                    gpui::linear_color_stop(bg, 0.0),
-                    gpui::linear_color_stop(bg.opacity(0.0), 1.0),
-                )),
-        )
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .right_0()
-                .w(px(200.0))
-                .bg(gpui::linear_gradient(
-                    270.0,
-                    gpui::linear_color_stop(bg, 0.0),
-                    gpui::linear_color_stop(bg.opacity(0.0), 1.0),
-                )),
-        )
-        .into_any_element()
 }
 
 /// A size-6 icon button for the titlebar strip (zeron window-controls.tsx:
@@ -19393,6 +19485,15 @@ impl Render for Shell {
         }
         settings::wallpaper::preload(cx);
         self.sync_voice_stage(window, cx);
+        // Settings → Cloud lives only while shown: dropping it cancels a
+        // GitHub sign-in poll and its slow status re-checks.
+        if self.cloud_page.is_some() && self.route != Route::Settings(SettingsSection::Cloud) {
+            self.cloud_page = None;
+        }
+        // Leaving Billing stops its checks on open Stripe pages.
+        if self.billing_page.is_some() && self.route != Route::Settings(SettingsSection::Billing) {
+            self.billing_page = None;
+        }
         self.navigation_focus
             .remember(&self.shortcut_focus, window, cx);
         #[cfg(target_os = "macos")]
@@ -19562,10 +19663,21 @@ impl Render for Shell {
         self.reconcile_sidebar_peek(window, cx);
 
         if self.activation_sub.is_none() {
+            // The window's focus as it opens; changes follow below.
+            let active = window.is_window_active();
+            self.state
+                .update(cx, |state, cx| state.set_viewport_focused(active, cx));
             self.activation_sub = Some(cx.observe_window_activation(
                 window,
                 |this: &mut Shell, window, cx| {
                     motion::window_activation_changed(window.is_window_active(), cx);
+                    let active = window.is_window_active();
+                    this.state.update(cx, |state, cx| {
+                        state.set_viewport_focused(active, cx);
+                        if active {
+                            state.window_activated(cx);
+                        }
+                    });
                     if window.is_window_active()
                         && let Some(update) = crate::app_update::AppUpdate::global(cx)
                     {
@@ -19911,6 +20023,10 @@ impl Render for Shell {
         } else {
             gate.clone()
         };
+        // The gate's wait for the browser ends with the gate.
+        if render_gate != GatePhase::SignIn {
+            self.gate_sign_in_waiting = false;
+        }
         let root = match &render_gate {
             GatePhase::Ready => 'ready: {
                 // Focus is a sync signal: on the rising edge of window
@@ -19932,7 +20048,7 @@ impl Render for Shell {
                     let unseen_selected = {
                         let s = self.state.read(cx);
                         s.selected_chat_row()
-                            .filter(|c| c.unseen())
+                            .filter(|c| zeron_proto::view::has_unseen_activity(c, s.session_for(&c.id)))
                             .map(|c| c.id.clone())
                     };
                     if let Some(chat_id) = unseen_selected {
@@ -20245,6 +20361,28 @@ impl Render for Shell {
                 // Settings replaces the whole workspace, sidebar included. The
                 // chat layout stays unmounted; its entities keep their state
                 // for the return trip.
+                // First-run setup and the sign-in flow replace the whole
+                // workspace the way Settings does, on the same surface.
+                if let Some(setup) = self.render_setup_page(window, cx) {
+                    let overlays = self.render_overlays(window.viewport_size(), window, cx);
+                    let drag = self.titlebar_drag_region(
+                        "setup-titlebar",
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .right_0()
+                            .h(px(Theme::TITLEBAR_HEIGHT)),
+                        cx,
+                    );
+                    let page = div()
+                        .size_full()
+                        .relative()
+                        .child(setup)
+                        .child(drag)
+                        .children(overlays);
+                    break 'ready root.child(motion::fade_in("phase-setup", page));
+                }
                 let pr_route = matches!(self.route, Route::PullRequests);
                 let chat_under = self.task_chat_slide_t().is_some();
                 let page_route = pr_route
@@ -20667,11 +20805,11 @@ impl Render for Shell {
             }
             GatePhase::Loading => root, // splash overlay covers boot
             GatePhase::OrgGate => {
-                let card = self.render_org_gate(cx);
+                let card = self.render_org_gate(window, cx);
                 root.child(card)
             }
             phase @ (GatePhase::Failed(_) | GatePhase::SignIn) => {
-                let card = self.render_gate_card(phase, cx);
+                let card = self.render_gate_card(phase, window, cx);
                 root.child(card)
             }
         };
@@ -20786,6 +20924,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             harness_session_id: None,
             harness_session_cwd: None,
+            harness_session_harness: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
@@ -20930,17 +21069,26 @@ mod tests {
 
         chat.sync_state = S::Waiting;
         chat.connected = false;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Sync queued — changes are saved"));
+        assert_eq!(
+            chat_sync_pill_caption(&chat),
+            Some("Sync queued — changes are saved")
+        );
         chat.sync_state = S::Connecting;
         assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
         chat.sync_state = S::Offline;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Offline — changes are saved"));
+        assert_eq!(
+            chat_sync_pill_caption(&chat),
+            Some("Offline — changes are saved")
+        );
 
         // Real pending pushes remain visible even with a live room.
         chat.connected = true;
         chat.pending_pushes = 1;
         chat.sync_state = S::Waiting;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Sync queued — changes are saved"));
+        assert_eq!(
+            chat_sync_pill_caption(&chat),
+            Some("Sync queued — changes are saved")
+        );
         chat.sync_state = S::Connecting;
         assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
     }
@@ -21176,6 +21324,8 @@ mod tests {
             status,
             started_at: Some(updated_at),
             updated_at,
+            last_turn_outcome: None,
+            terminal_activity: None,
             running_subagents: 0,
             compact_plan: None,
             classifying: None,
@@ -22721,7 +22871,8 @@ mod exit_regressions {
                     settings::update(settings::SavePolicy::Immediate, cx, |settings| {
                         settings.wallpaper_folder = Some(dir.path().join("wallpapers"));
                         settings.wallpaper_source = Some(dir.path().join("wallpapers/current.png"));
-                        settings.wallpaper_history = vec![dir.path().join("wallpapers/current.png")];
+                        settings.wallpaper_history =
+                            vec![dir.path().join("wallpapers/current.png")];
                         settings.window_geometry = geometry;
                         settings.open_web_links_in_zeron = open_links_in_zeron;
                         settings.pull_request_destination =
@@ -22747,8 +22898,14 @@ mod exit_regressions {
                         shell.settings.terminal_height = 300.0 + step as f32;
                         shell.schedule_save(cx);
                         let current = settings::current(cx);
-                        assert_eq!(current.wallpaper_history, vec![dir.path().join("wallpapers/current.png")]);
-                        assert_eq!(current.wallpaper_folder, Some(dir.path().join("wallpapers")));
+                        assert_eq!(
+                            current.wallpaper_history,
+                            vec![dir.path().join("wallpapers/current.png")]
+                        );
+                        assert_eq!(
+                            current.wallpaper_folder,
+                            Some(dir.path().join("wallpapers"))
+                        );
                         assert_eq!(
                             current.wallpaper_source,
                             Some(dir.path().join("wallpapers/current.png"))
@@ -22797,7 +22954,10 @@ mod exit_regressions {
                         Some("remote-pr-device")
                     );
                     assert_eq!(loaded.window_geometry, geometry);
-                    assert_eq!(loaded.wallpaper_history, vec![dir.path().join("wallpapers/current.png")]);
+                    assert_eq!(
+                        loaded.wallpaper_history,
+                        vec![dir.path().join("wallpapers/current.png")]
+                    );
                     assert_eq!(loaded.wallpaper_folder, Some(dir.path().join("wallpapers")));
                     assert_eq!(
                         loaded.wallpaper_source,
@@ -23438,6 +23598,7 @@ mod exit_regressions {
         window
             .update(cx, |shell, _, cx| {
                 let space = |id: &str, device: &str| zeron_proto::Space {
+                    github_repo: None,
                     id: id.into(),
                     device_id: device.into(),
                     path: format!("/{id}"),
@@ -23714,6 +23875,7 @@ mod exit_regressions {
                         git_checked_at: None,
                         checkout_id: None,
                         repository_id: None,
+                        github_repo: None,
                         created_at: Utc::now(),
                     }]);
                     // Boot opened an existing project session after loading defaults.
@@ -23783,6 +23945,7 @@ mod exit_regressions {
             git_checked_at: None,
             checkout_id: None,
             repository_id: None,
+            github_repo: None,
             created_at: Utc::now(),
         };
         window
@@ -23804,6 +23967,7 @@ mod exit_regressions {
                         created_at: Utc::now(),
                         harness_session_id: None,
                         harness_session_cwd: None,
+                        harness_session_harness: None,
                         created_by_chat_id: None,
                         forked_from_chat_id: None,
                         sidechat_source_chat_id: None,
@@ -23819,7 +23983,10 @@ mod exit_regressions {
                 });
                 shell.settings.space_filter = None;
                 shell.open_chat("elsewhere".into(), cx);
-                assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("other"));
+                assert_eq!(
+                    shell.state.read(cx).selected_space.as_deref(),
+                    Some("other")
+                );
                 shell.open_new_session(None, cx);
                 let state = shell.state.read(cx);
                 assert!(state.selected_chat.is_none());
@@ -23870,6 +24037,7 @@ mod exit_regressions {
             git_checked_at: None,
             checkout_id: None,
             repository_id: None,
+            github_repo: None,
             created_at: Utc::now(),
         };
         window
@@ -24166,6 +24334,7 @@ mod exit_regressions {
                         git_checked_at: None,
                         checkout_id: None,
                         repository_id: None,
+                        github_repo: None,
                         created_at: Utc::now(),
                     }]);
                 });
@@ -24865,6 +25034,7 @@ mod right_tab_mouse_regressions {
                     created_at: chrono::Utc::now(),
                     harness_session_id: None,
                     harness_session_cwd: None,
+                    harness_session_harness: None,
                     space_id: None,
                     last_seen_at: None,
                     room_gen: None,
@@ -25002,6 +25172,7 @@ mod right_tab_mouse_regressions {
                 created_at: chrono::Utc::now() - chrono::Duration::minutes(10),
                 harness_session_id: None,
                 harness_session_cwd: None,
+                harness_session_harness: None,
                 space_id: None,
                 last_seen_at: None,
                 room_gen: None,
@@ -25583,6 +25754,11 @@ mod settings_modal_regressions {
         });
         window
             .update(cx, |shell, _, cx| {
+                // Signed out, Cloud has nothing to manage: its link opens General.
+                shell.open_settings(SettingsSection::Cloud, cx);
+                assert_eq!(shell.route, Route::Settings(SettingsSection::General));
+                shell.close_settings(cx);
+                sign_in(&shell.state, cx);
                 let history = shell.nav.current().clone();
                 let selected = shell.state.read(cx).selected_chat.clone();
                 for section in SettingsSection::ALL {
@@ -25743,6 +25919,8 @@ mod settings_modal_regressions {
         );
         for (route, section) in [
             ("settings/devices", SettingsSection::Devices),
+            ("settings/cloud", SettingsSection::Cloud),
+            ("settings/billing", SettingsSection::Billing),
             ("settings/providers", SettingsSection::Harnesses),
             ("settings/agents", SettingsSection::Harnesses),
             ("settings/harnesses", SettingsSection::Harnesses),
@@ -25764,7 +25942,7 @@ mod settings_modal_regressions {
                 "{route}"
             );
         }
-        assert_eq!(settings_open_route("settings/billing", remembered), None);
+        assert_eq!(settings_open_route("settings/payments", remembered), None);
         assert_eq!(settings_open_route("new", remembered), None);
     }
 
@@ -26042,6 +26220,77 @@ mod settings_modal_regressions {
                 shell.content_left() + shell.settings.sidebar_width
             );
         });
+    }
+
+    /// Signed in to an organization the edge offers Cloud (Cloud's settings
+    /// need both).
+    fn sign_in(state: &Entity<AppState>, cx: &mut App) {
+        state.update(cx, |state, _| {
+            state.auth = Some(zeron_proto::AuthState::SignedIn {
+                user: zeron_proto::UserProfile {
+                    id: "user-a".into(),
+                    email: "user@example.com".into(),
+                    name: None,
+                },
+                org_id: Some("org-a".into()),
+            });
+            state.cloud_status = Some(zeron_proto::CloudStatus {
+                available: true,
+                ..Default::default()
+            });
+        });
+    }
+
+    /// Settings → Cloud is rebuilt per visit and dropped on leaving, which is
+    /// what stops its GitHub polling and status re-checks.
+    #[gpui::test]
+    fn cloud_settings_page_lives_only_while_shown(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
+        shell.update(cx, |shell, cx| {
+            shell.debug_gate = Some(GatePhase::Ready);
+            sign_in(&shell.state, cx);
+            shell.open_settings(SettingsSection::Cloud, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        let first = shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.route, Route::Settings(SettingsSection::Cloud));
+            shell.cloud_page.clone().expect("Cloud page mounts")
+        });
+        shell.update(cx, |shell, cx| {
+            shell.open_settings(SettingsSection::Devices, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        shell.read_with(cx, |shell, _| assert!(shell.cloud_page.is_none()));
+        shell.update(cx, |shell, cx| {
+            shell.open_settings(SettingsSection::Cloud, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        let second = shell.read_with(cx, |shell, _| {
+            let second = shell.cloud_page.clone().expect("Cloud page remounts");
+            assert_ne!(first.entity_id(), second.entity_id());
+            second
+        });
+        // Picking Cloud again while it shows keeps the page (no flash).
+        shell.update(cx, |shell, cx| {
+            shell.open_settings(SettingsSection::Cloud, cx)
+        });
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(
+                shell.cloud_page.as_ref().map(|page| page.entity_id()),
+                Some(second.entity_id())
+            );
+        });
+        drop((first, second));
+        shell.update(cx, |shell, cx| shell.close_settings(cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        shell.read_with(cx, |shell, _| assert!(shell.cloud_page.is_none()));
     }
 
     #[gpui::test]

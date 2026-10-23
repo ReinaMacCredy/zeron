@@ -197,6 +197,7 @@ fn run_payload(prompt: &str, message_id: &str, cwd: &str) -> SessionCommandPaylo
             computer_control: false,
             mcp: None,
             disabled_tools: Vec::new(),
+            env: Default::default(),
         },
         message_id: message_id.into(),
     }

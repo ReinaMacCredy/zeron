@@ -565,6 +565,8 @@ mod tests {
             running_subagents: 0,
             compact_plan: None,
             classifying: None,
+            last_turn_outcome: Default::default(),
+            terminal_activity: Default::default(),
         };
         let set = |sessions: Vec<zeron_proto::Session>, cx: &mut gpui::TestAppContext| {
             state.update(cx, |state, cx| {

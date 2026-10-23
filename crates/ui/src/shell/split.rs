@@ -947,6 +947,7 @@ mod drag_regressions {
             delegation: None,
             settle: None,
             unsettled_at: None,
+            harness_session_harness: Default::default(),
         }
     }
 
@@ -1286,6 +1287,8 @@ mod drag_regressions {
                     running_subagents: 0,
                     compact_plan: None,
                     classifying: None,
+                    last_turn_outcome: Default::default(),
+                    terminal_activity: Default::default(),
                 });
             });
             std::mem::forget(dir);

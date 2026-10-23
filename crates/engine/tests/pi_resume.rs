@@ -39,6 +39,7 @@ async fn pi_idle_crash_next_dispatch_loads_stored_session() {
             forked_at: None,
             computer_control: false,
             disabled_tools: Vec::new(),
+            env: Default::default(),
         };
         core.sessions
             .dispatch(chat, HarnessId::Pi, req, None)
@@ -96,6 +97,7 @@ async fn timed_out_native_question_resolves_and_finishes_without_user_input() {
                 computer_control: false,
                 permission_mode: Default::default(),
                 disabled_tools: Vec::new(),
+                env: Default::default(),
             },
             None,
         )

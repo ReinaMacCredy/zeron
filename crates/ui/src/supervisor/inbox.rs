@@ -1524,7 +1524,7 @@ impl SupervisorPage {
         let selector = format!("supervisor-resume-{}", row.id);
         let resume = widgets::text_action(
             theme,
-            widgets::ActionTone::Outlined,
+            widgets::ActionTone::Filled,
             if sending { "Resuming…" } else { "Resume" },
         )
         .id(SharedString::from(selector.clone()))
@@ -1570,7 +1570,7 @@ impl SupervisorPage {
         let take_back = approval.can_take_back().then(|| {
             widgets::text_action(
                 theme,
-                widgets::ActionTone::Outlined,
+                widgets::ActionTone::Filled,
                 if sending {
                     "Taking back…"
                 } else {

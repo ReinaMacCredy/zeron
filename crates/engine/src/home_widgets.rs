@@ -423,6 +423,7 @@ mod tests {
             checkout_id: None,
             repository_id: repository.map(Into::into),
             created_at: chrono::Utc::now(),
+            github_repo: Default::default(),
         }
     }
 

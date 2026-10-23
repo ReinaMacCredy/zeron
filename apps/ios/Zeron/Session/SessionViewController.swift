@@ -14,9 +14,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private let queue = QueuePanel()
     private let pill = StatusPill()
     private let still = ComputerStillPreview()
+    /// A Cloud chat out of credits says so once, above the composer.
+    private let creditsNotice = CloudCreditsNotice()
     private let bottom = UIStackView()
+    private var bottomRest: NSLayoutConstraint?
     private let jump = Glass.circleButton(symbol: "arrow.down", size: 40, pointSize: 15)
-    private let titleView = SessionTitleView()
     private var shown = SessionChrome()
     private let openedAt = CACurrentMediaTime()
     private var reportedOpen = false
@@ -40,8 +42,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             self?.saveDraft()
         }
         navigationItem.largeTitleDisplayMode = .never
-        navigationItem.titleView = titleView
-        navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: sessionMenu())
+        // The title and "project @ device" head the ⋯ menu instead of
+        // crowding the bar.
+        navigationItem.titleView = UIView()
+        navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: sessionMenu(title: "", subtitle: ""))
+        navigationItem.rightBarButtonItem?.accessibilityIdentifier = "session-menu"
         // The session has its own composer, so the tab bar's voice control
         // steps aside with the accessory; the call stays a tap away up here.
         let voiceBar = VoiceBarItem(app: app, host: self)
@@ -64,6 +69,17 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         list.imageLoader = { [weak self] ref, iv in self?.source.loadImage(ref, into: iv) }
         list.imageFetcher = { [weak self] ref in await self?.source.image(ref) }
         // Hidden while following (the runway glide and tail spring travel).
+        // An error card's "Log in": that provider's sign-in, started at once.
+        list.onAction = { [weak self] action in
+            guard let self, action == "sign-in", let target = self.source.signInTarget() else { return }
+            let accounts = AgentAccountsViewController(app: self.app, target: target, signIn: true)
+            let nav = UINavigationController(rootViewController: accounts)
+            if let sheet = nav.sheetPresentationController {
+                sheet.detents = [.medium(), .large()]
+                sheet.prefersGrabberVisible = true
+            }
+            self.present(nav, animated: true)
+        }
         list.onDistanceFromBottom = { [weak self] d in
             guard let self else { return }
             self.setJumpVisible(d > 140 && !self.list.following)
@@ -90,6 +106,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             guard let self else { return UIMenu() }
             return AttachmentPicker.menu(host: self, limit: 8 - self.composer.images.count) { [weak self] in self?.composer.addImages($0) }
         }
+        // The model chip opens the picker sheet (tabs per provider).
+        composer.onChipTap = { [weak self] id, _ in
+            guard let self, id == "model", let picker = self.source.modelPicker() else { return }
+            self.present(picker, animated: true)
+        }
         composer.onSend = { [weak self] text, images, mode in
             guard let self else { return .kept }
             if self.editingQueueId != nil {
@@ -100,6 +121,12 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             // desktop runway; a message queued behind a live turn keeps the
             // live turn's runway and just follows.
             let queued = self.shown.running && mode == .queue
+            // Out of credits, a Cloud send can't wake its machine: say so
+            // (with a way to add some) instead of a send that never lands.
+            if self.cloudOutOfCredits {
+                self.creditsNotice.nudge()
+                return .kept
+            }
             guard self.source.send(text: text, images: images, mode: mode) else { return .kept }
             // Sending puts the keyboard away (the composer rests as the capsule).
             DispatchQueue.main.async { self.composer.resignFirstResponder() }
@@ -122,7 +149,15 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         pill.onTap = { [weak self] in
             guard let self else { return }
             if self.editingQueueId != nil { self.endEdit(commit: nil) }
-            if case .notDelivered = self.shown.banner { self.source.retryDelivery() }
+            if case .notDelivered = self.shown.banner {
+                self.source.retryDelivery()
+            }
+        }
+        // Watched whatever the row says now: a just-created Cloud chat's row
+        // may not have arrived yet.
+        cloudToken = app.cloud.observe { [weak self] in
+            guard let self, self.isCloud else { return }
+            self.render(animated: true)
         }
 
         bottom.axis = .vertical
@@ -131,7 +166,12 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         bottom.translatesAutoresizingMaskIntoConstraints = false
         let pillRow = UIStackView(arrangedSubviews: [pill, UIView()])
         pillRow.axis = .horizontal
-        for v in [pillRow, queue, questions, composer] { bottom.addArrangedSubview(v) }
+        creditsNotice.onAddCredits = { [weak self] in
+            guard let self else { return }
+            CloudRoutes.openBilling(app: self.app, from: self)
+        }
+        creditsNotice.isHidden = true
+        for v in [creditsNotice, pillRow, queue, questions, composer] { bottom.addArrangedSubview(v) }
         questions.isHidden = true
         queue.isHidden = true
         // Hidden panels start dematerialized so their first appearance grows in.
@@ -168,10 +208,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 fill.priority = .defaultHigh
                 return fill
             }(),
-            bottom.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -8),
             jump.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
             jump.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: -12),
         ])
+        bottomRest = pinAboveKeyboard(bottom)
 
         source.onChange = { [weak self] in self?.render(animated: true) }
         source.attach(engine)
@@ -181,7 +221,6 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        setAccessory(visible: false)
         // Coming back on screen (e.g. after a second copy of this chat was
         // popped and detached it): live again.
         if hasAppeared { source.reattach() }
@@ -195,44 +234,6 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
 
     deinit {
         if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }
-    }
-
-    /// Swap the tab accessory *inside* the push/pop animation so it travels
-    /// with the tab bar instead of snapping ahead of it (no empty glass pill,
-    /// no composer ghosting over the tab bar).
-    private func setAccessory(visible: Bool) {
-        guard let tabs = tabBarController as? MainTabController else { return }
-        guard let coordinator = transitionCoordinator else {
-            return tabs.setAccessoryVisible(visible, animated: false)
-        }
-        // Our bottom glass (composer stack) and the tab bar's glass never
-        // overlap: the stack fades opposite to the tab bar, tracking an
-        // interactive swipe-back too.
-        let bottomStack = bottom
-        let jumpButton = jump
-        if visible {
-            bottomStack.alpha = 1
-            tabs.prepareAccessoryForReveal()
-        } else {
-            bottomStack.alpha = 0
-        }
-        coordinator.animate(alongsideTransition: { _ in
-            if visible {
-                tabs.setAccessoryContentAlpha(1)
-                jumpButton.alpha = 0
-            } else {
-                tabs.setAccessoryVisible(false, animated: false)
-            }
-            bottomStack.alpha = visible ? 0 : 1
-        }, completion: { context in
-            // An interactive pop that's cancelled keeps the session on screen.
-            // Re-derive the accessory from what's actually on top rather than
-            // flipping: a cancelled pop also re-runs viewWillAppear, and two
-            // flips left "New session" showing over the session.
-            if context.isCancelled { bottomStack.alpha = 1 }
-            tabs.syncAccessory()
-            tabs.setAccessoryContentAlpha(1)
-        })
     }
 
     // MARK: Opening (loader, then the transcript)
@@ -282,12 +283,23 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         UIView.animate(withDuration: 0.18, delay: 0, options: [.curveEaseOut, .allowUserInteraction], animations: reveal)
     }
 
+    #if DEBUG
+    private static var debugPickerShown = false
+    #endif
+
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         hasAppeared = true
         landed = true
         (splitViewController as? SplitRootController)?.sessionDidAppear(chatId)
         list.settleEdgeEffect()
+        #if DEBUG
+        // Screenshots: `-model-picker` opens the picker once.
+        if ProcessInfo.processInfo.arguments.contains("-model-picker"), !Self.debugPickerShown, let picker = source.modelPicker() {
+            Self.debugPickerShown = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.present(picker, animated: true) }
+        }
+        #endif
         showTranscriptIfReady()
         if holdingTranscript {
             // Nothing to lay out (an empty or unreachable session): stop
@@ -298,7 +310,6 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 self.showTranscriptIfReady()
             }
         }
-        (tabBarController as? MainTabController)?.syncAccessory()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -306,7 +317,6 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         // Leaving mid-edit: give the queued row back and the draft its place.
         if editingQueueId != nil { endEdit(commit: nil) }
         saveDraft()
-        if isMovingFromParent { setAccessory(visible: true) }
     }
 
     /// Tear down only once the pop has really happened: an interactive
@@ -384,6 +394,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     }
 
     private let bottomFade = EdgeFadeOverlay()
+
+    override func viewWillLayoutSubviews() {
+        super.viewWillLayoutSubviews()
+        bottomRest?.constant = -composerRestGap
+    }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
@@ -495,11 +510,37 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         }
     }
 
+    private var cloudToken: AnyObject?
+
+    private var isCloud: Bool { app.row(chatId)?.isCloud == true }
+
+    /// Out of credits, the chat's Cloud machine can't start or wake.
+    private var cloudOutOfCredits: Bool { isCloud && app.cloud.outOfCredits }
+
+    /// A Cloud chat whose send can't land says why instead of a bare "Not
+    /// delivered": out of credits, the credits notice already does (the
+    /// pill steps aside); a failed machine, the pill names it.
+    private func cloudBanner(_ banner: SessionChrome.Banner) -> SessionChrome.Banner {
+        guard case .notDelivered = banner, isCloud else { return banner }
+        let cloud = app.cloud
+        cloud.refreshSessions()
+        if cloud.outOfCredits {
+            return .none
+        }
+        if let error = cloud.sessionError(chat: chatId, device: app.row(chatId)?.deviceId) {
+            return .failed("Cloud machine: \(error) · Tap to retry")
+        }
+        return banner
+    }
+
     private func render(animated: Bool) {
         let c = source.chrome
         let old = shown
         shown = c
-        titleView.set(title: c.title, subtitle: c.subtitle)
+        if c.title != old.title || c.subtitle != old.subtitle || navigationItem.title == nil {
+            navigationItem.title = c.title
+            navigationItem.rightBarButtonItem?.menu = sessionMenu(title: c.title, subtitle: c.subtitle)
+        }
         list.uploadProgress = c.uploadProgress
         composer.running = c.running
         still.working = c.running
@@ -517,8 +558,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             self.queue.isHidden = c.queue.isEmpty || asking
             self.queue.configure(c.queue)
             let editing = self.editingQueueId != nil
-            self.pill.superview?.isHidden = c.banner == .none && !editing
-            self.pill.banner = editing ? .editing : c.banner
+            let banner = editing ? .editing : self.cloudBanner(c.banner)
+            self.pill.superview?.isHidden = banner == .none
+            self.pill.banner = banner
+            self.creditsNotice.isHidden = !self.cloudOutOfCredits
             self.bottom.layoutIfNeeded()
             self.view.layoutIfNeeded()
         }
@@ -540,8 +583,12 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         }
     }
 
-    private func sessionMenu() -> UIMenu {
-        UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
+    /// Headed by the session's title over "project @ device".
+    private func sessionMenu(title: String, subtitle: String) -> UIMenu {
+        // The header wraps: title, then where it runs, on its own line (a
+        // menu's subtitle isn't drawn in the header).
+        let header = subtitle.isEmpty ? title : "\(title)\n\(subtitle)"
+        return UIMenu(title: header, children: [UIDeferredMenuElement.uncached { [weak self] done in
             guard let self else { return done([]) }
             let vm = self.app.session(self.chatId)
             let pinned = vm?.pinned ?? false
@@ -550,54 +597,131 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = self.engine.frame().plainText()
                 },
-                UIAction(title: "Archive", image: UIImage(systemName: "archivebox"), attributes: .destructive) { _ in
+                UIAction(title: "Archive", image: UIImage(systemName: "archivebox")) { _ in
                     self.app.archive(self.chatId)
-                    // Beside the iPad sidebar there's nothing to pop back to.
-                    if let split = self.splitViewController as? SplitRootController, !split.isCollapsed {
-                        split.showDraft(prompt: nil, focus: false)
-                    } else {
-                        self.navigationController?.popViewController(animated: true)
-                    }
+                    self.leave()
+                },
+                UIAction(title: "Delete", image: UIImage(systemName: "trash"), attributes: .destructive) { _ in
+                    self.confirmDelete(app: self.app, self.chatId) { self.leave() }
                 },
             ])
         }])
     }
+
+    /// Off this session once it's gone from the list. Beside the iPad
+    /// sidebar there's nothing to pop back to.
+    private func leave() {
+        if let split = splitViewController as? SplitRootController, !split.isCollapsed {
+            split.showDraft(prompt: nil, focus: false)
+        } else {
+            navigationController?.popViewController(animated: true)
+        }
+    }
 }
 
-/// Two-line navigation title: session title over "project @ device".
-final class SessionTitleView: UIView {
-    private let title = FadingLabel()
-    private let subtitle = FadingLabel()
+extension UIViewController {
+    /// "Delete session?" — permanent, like the desktop's dialog; a Cloud
+    /// session's machine goes with it. `then` runs after the delete.
+    func confirmDelete(app: AppModel?, _ id: String, then: @escaping () -> Void) {
+        guard let app else { return }
+        let row = app.row(id)
+        let title = row.map { $0.hasTitle ? $0.title : "New session" } ?? "This session"
+        let message = row?.isCloud == true
+            ? "\u{201C}\(title)\u{201D} and its Cloud machine will be permanently deleted, with anything not pushed from it. This can\u{2019}t be undone."
+            : "\u{201C}\(title)\u{201D} will be permanently deleted. This can\u{2019}t be undone."
+        let alert = UIAlertController(title: "Delete session?", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Delete", style: .destructive) { _ in
+            app.delete(id)
+            then()
+        })
+        present(alert, animated: true)
+    }
+
+    /// Pins a composer 8pt above the keyboard; at rest it sits on the safe
+    /// area, `composerRestGap` up. Returns the rest constraint.
+    func pinAboveKeyboard(_ bar: UIView) -> NSLayoutConstraint {
+        view.keyboardLayoutGuide.usesBottomSafeArea = false
+        let rest = bar.bottomAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -composerRestGap)
+        let down = bar.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        down.priority = .defaultLow
+        NSLayoutConstraint.activate([
+            bar.bottomAnchor.constraint(lessThanOrEqualTo: view.keyboardLayoutGuide.topAnchor, constant: -8),
+            rest,
+            down,
+        ])
+        return rest
+    }
+
+    /// Beside the sidebar the composer rests on the safe area, level with
+    /// the sidebar's bottom toolbar; on its own (tab shell, sheet) 8pt up.
+    var composerRestGap: CGFloat {
+        guard tabBarController == nil, let split = splitViewController, !split.isCollapsed else { return 8 }
+        return 0
+    }
+}
+
+/// "Out of Cloud credits" with its one way forward, above a Cloud chat's
+/// composer while the balance is spent. A send nudges it.
+final class CloudCreditsNotice: UIView {
+    var onAddCredits: (() -> Void)?
+    private let glass = Glass.surface()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        title.font = Fonts.ui(.sansSemibold, 16)
-        title.textColor = Palette.text
-        title.fitsAlignment = .center
-        subtitle.font = Fonts.ui(.sans, 12)
-        subtitle.textColor = Palette.secondary
-        subtitle.fitsAlignment = .center
-        let stack = UIStackView(arrangedSubviews: [title, subtitle])
-        stack.axis = .vertical
-        stack.alignment = .center
-        stack.spacing = 1
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
+        glass.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(glass)
+        let icon = UIImageView(image: CloudUI.symbol("exclamationmark.triangle.fill", 13, weight: .semibold))
+        icon.tintColor = Palette.danger
+        icon.contentMode = .center
+        let label = UILabel()
+        label.text = "Out of Cloud credits"
+        label.font = Fonts.ui(.sansMedium, 14)
+        label.textColor = Palette.text
+        label.setContentHuggingPriority(UILayoutPriority(1), for: .horizontal)
+        var c = UIButton.Configuration.filled()
+        c.title = "Add credits"
+        c.baseBackgroundColor = Palette.text
+        c.baseForegroundColor = Palette.background
+        c.cornerStyle = .capsule
+        c.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12)
+        c.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { a in
+            var a = a
+            a.font = Fonts.ui(.sansSemibold, 13)
+            return a
+        }
+        let button = UIButton(configuration: c, primaryAction: UIAction { [weak self] _ in self?.onAddCredits?() })
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        button.accessibilityIdentifier = "add-credits"
+        let row = UIStackView(arrangedSubviews: [icon, label, button])
+        row.alignment = .center
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        glass.contentView.addSubview(row)
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            widthAnchor.constraint(lessThanOrEqualToConstant: 240),
+            glass.topAnchor.constraint(equalTo: topAnchor),
+            glass.bottomAnchor.constraint(equalTo: bottomAnchor),
+            glass.leadingAnchor.constraint(equalTo: leadingAnchor),
+            glass.trailingAnchor.constraint(equalTo: trailingAnchor),
+            row.topAnchor.constraint(equalTo: glass.contentView.topAnchor, constant: 6),
+            row.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -6),
+            row.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 14),
+            row.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -6),
         ])
+        accessibilityIdentifier = "cloud-credits-notice"
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func set(title t: String, subtitle s: String) {
-        title.text = t
-        subtitle.text = s
-        subtitle.isHidden = s.isEmpty
+    /// A send was refused: a short shake and a warning tap point at it.
+    func nudge() {
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+        guard !UIAccessibility.isReduceMotionEnabled else { return }
+        let shake = CAKeyframeAnimation(keyPath: "transform.translation.x")
+        shake.values = [0, -8, 8, -5, 5, -2, 0]
+        shake.duration = 0.4
+        layer.add(shake, forKey: "nudge")
     }
 }
 

@@ -19,3 +19,5 @@ CLAUDE.md
 /docs/**/*.html
 /tmp/
 /.mcp.json
+.dev.vars
+.dev.vars.*

@@ -343,7 +343,7 @@ impl ToolsPage {
                         |page: &mut Self, cx| page.turn_all(true, cx),
                     ))
                     .child(activate(
-                        action(theme, "tools-all-off", "Turn all off", ActionTone::Outlined),
+                        action(theme, "tools-all-off", "Turn all off", ActionTone::Filled),
                         ready && live > 0,
                         cx,
                         |page: &mut Self, cx| page.turn_all(false, cx),

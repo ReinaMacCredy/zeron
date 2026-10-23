@@ -3,7 +3,21 @@ import { AUTH_USER_HEADER, type Env } from "./env";
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
 const HOST = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.localhost$/;
 const MAX_MESSAGE = 1024 * 1024;
-type Attachment = { device: string; connection: string; connected: number; lastSeen: number; budgetAt: number; messages: number };
+type Attachment = {
+  device: string;
+  connection: string;
+  connected: number;
+  lastSeen: number;
+  budgetAt: number;
+  messages: number;
+  /** A Cloud machine: publishes its own services, answers who contacted it. */
+  publisher?: boolean;
+  /** Publisher only: the devices that signaled it (the only ones it may answer). */
+  peers?: string[];
+};
+
+/** Set by the Worker for runner bearers (stripped from every request first). */
+export const PREVIEW_PUBLISHER_HEADER = "x-zeron-preview-publisher";
 type Service = Record<string, string | number | boolean>;
 
 export function previewCatalog(value: unknown, device: string): Service[] | undefined {
@@ -55,9 +69,19 @@ export class PreviewRoom {
     const [client, server] = Object.values(pair);
     this.state.acceptWebSocket(server);
     const now = Date.now();
-    server.serializeAttachment({ device, connection: crypto.randomUUID(), connected: now, lastSeen: now, budgetAt: now, messages: 0 } satisfies Attachment);
+    const publisher = request.headers.get(PREVIEW_PUBLISHER_HEADER) === "1";
+    server.serializeAttachment({
+      device,
+      connection: crypto.randomUUID(),
+      connected: now,
+      lastSeen: now,
+      budgetAt: now,
+      messages: 0,
+      ...(publisher ? { publisher, peers: [] } : {})
+    } satisfies Attachment);
     this.broadcast({ type: "catalog", device, services: [] }, server);
-    for (const other of this.sockets()) {
+    // A publisher never receives the other devices' services.
+    for (const other of publisher ? [] : this.sockets()) {
       const peer = this.info(other).device;
       if (peer && peer !== device) this.send(server, { type: "catalog", device: peer, services: this.catalog(peer) });
     }
@@ -81,11 +105,23 @@ export class PreviewRoom {
       this.state.storage.sql.exec("INSERT OR REPLACE INTO preview_catalog(device, services) VALUES (?, ?)", info.device, JSON.stringify(services));
       this.broadcast({ type: "catalog", device: info.device, services }, ws);
     } else if (value.type === "signal" && typeof value.to === "string" && ID.test(value.to) && value.to !== info.device) {
-      const signal = previewSignal(value.signal);
+      const signal = previewSignal(value.signal) as { kind?: string } | undefined;
       if (!signal) { ws.close(1008, "Invalid preview signaling"); return; }
+      // A publisher only responds to a device that contacted it (an offer or
+      // answer, whichever the pairing order asks of it); it never starts a
+      // pairing (a user's computer proxies its localhost services).
+      if (info.publisher && (signal.kind === "connect" || !(info.peers ?? []).includes(value.to))) {
+        ws.close(1008, "A Cloud machine only answers preview requests");
+        return;
+      }
       const target = this.sockets().find(peer => this.info(peer).device === value.to);
-      if (target) this.send(target, { type: "signal", from: info.device, signal });
-      else this.send(ws, { type: "gone", device: value.to });
+      if (target) {
+        const peer = this.info(target);
+        if (peer.publisher && !(peer.peers ?? []).includes(info.device)) {
+          target.serializeAttachment({ ...peer, peers: [...(peer.peers ?? []), info.device].slice(-32) });
+        }
+        this.send(target, { type: "signal", from: info.device, signal });
+      } else this.send(ws, { type: "gone", device: value.to });
     } else { ws.close(1008, "Unsupported preview message"); }
   }
   async webSocketClose(ws: WebSocket): Promise<void> { await this.remove(ws); }
@@ -110,7 +146,10 @@ export class PreviewRoom {
   private sockets(): WebSocket[] { return this.state.getWebSockets().filter(ws => this.info(ws)?.device); }
   private info(ws: WebSocket): Attachment { return ws.deserializeAttachment() as Attachment; }
   private send(ws: WebSocket, value: object): void { try { ws.send(JSON.stringify(value)); } catch { ws.close(1011, "Signaling disconnected"); } }
-  private broadcast(value: object, except: WebSocket): void { for (const ws of this.sockets()) if (ws !== except) this.send(ws, value); }
+  /** To every device but `except`, never to a publisher (it sees no one's services or presence). */
+  private broadcast(value: object, except: WebSocket): void {
+    for (const ws of this.sockets()) if (ws !== except && !this.info(ws).publisher) this.send(ws, value);
+  }
   private async remove(ws: WebSocket): Promise<void> {
     const info = this.info(ws);
     if (!info?.device) return;

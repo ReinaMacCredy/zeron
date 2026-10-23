@@ -236,6 +236,18 @@ pub fn flow_dot(phase_offset: f32, cx: &mut App) -> Option<gpui::QuadAnimation> 
     })
 }
 
+/// Where a loading spinner is in its turn (0..1, one turn per `period`), and
+/// keep `view` repainting on the loader clock while it shows. `None` when
+/// motion is reduced: the spinner rests in place.
+pub fn spin_phase(view: EntityId, period: Duration, cx: &mut App) -> Option<f32> {
+    if cx.reduce_motion() {
+        return None;
+    }
+    schedule_pulse_every(view, 1, cx);
+    let clock = cx.default_global::<PulseClock>();
+    Some((clock.epoch.elapsed().as_secs_f32() / period.as_secs_f32()).fract())
+}
+
 /// Schedule cosmetic animation through the same bounded clock as loaders.
 /// Renew only while painting an active animation; the clock parks after the
 /// last lease expires, including when a view is hidden or removed.

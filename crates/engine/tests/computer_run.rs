@@ -283,6 +283,7 @@ fn request(prompt: &str, mode: PermissionMode) -> RunRequest {
         computer_control: false,
         mcp: None,
         disabled_tools: Vec::new(),
+        env: Default::default(),
     }
 }
 

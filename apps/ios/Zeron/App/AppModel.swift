@@ -38,6 +38,8 @@ final class AppModel {
     }
 
     @MainActor lazy var voice = RemoteVoiceController(app: self)
+    /// Cloud for this account (status, GitHub, agent logins, billing).
+    @MainActor lazy var cloud = CloudStore(app: self)
     private(set) var client: CoreClient?
     private(set) var frontPage = FrontPage()
     private(set) var archived: [SessionRowVM] = []
@@ -188,8 +190,7 @@ final class AppModel {
     /// `-edge <url>` points at a local `wrangler dev` edge; otherwise production.
     static var edgeURL: String {
         #if DEBUG
-        let args = ProcessInfo.processInfo.arguments
-        if let i = args.firstIndex(of: "-edge"), i + 1 < args.count { return args[i + 1] }
+        if let edge = Endpoints.debugOverride("-edge", key: "debugEdgeURL") { return edge }
         #endif
         return Endpoints.edgeURL.absoluteString
     }
@@ -239,6 +240,7 @@ final class AppModel {
         AccountProfile.clear()
         clock?.invalidate()
         if forgetOnSignOut { try? FileManager.default.removeItem(at: Self.coreDir) }
+        cloud.reset()
         forgetOnSignOut = false
         // Nothing of the account stays in memory.
         frontPage = FrontPage()
@@ -365,6 +367,10 @@ final class AppModel {
         }
     }
 
+    /// Something outside the registry stream changed the workspace (a Cloud
+    /// project written here): rebuild now rather than on the next frame.
+    func workspaceDidChange() { refreshWorkspace() }
+
     private func refreshWorkspace() {
         guard let client else { return }
         let ws = client.workspace()
@@ -399,10 +405,13 @@ final class AppModel {
             if row.status == .working { counts.working += 1 }
             if row.status == .awaiting { counts.awaiting += 1 }
         }
+        // A row's own content (its model, say) counts even when the lists
+        // don't show it: open sessions read their chips from it.
+        let rowsChanged = all.count != rows.count || all.contains { rows[$0.key]?.revision != $0.value.revision }
         rows = all
         // Devices coming and going (Settings, host pickers) count as changes.
         let hosts = hostOptions
-        let changed = page != frontPage || archivedVMs != archived || counts != live || hosts != lastHosts
+        let changed = rowsChanged || page != frontPage || archivedVMs != archived || counts != live || hosts != lastHosts
         lastHosts = hosts
         live = counts
         frontPage = page
@@ -509,6 +518,8 @@ final class AppModel {
         Toast.show("Archived", action: "Undo", in: window) { [weak self] in self?.unarchive(id) }
     }
     func unarchive(_ id: String) { attempt("unarchive") { try client?.unarchiveSession(chatId: id) } }
+    /// Permanently: the row on every device (a Cloud chat's machine too).
+    func delete(_ id: String) { attempt("delete") { try client?.deleteSession(chatId: id) } }
     func move(_ id: String, toSection section: String?) { attempt("assign") { try client?.assignSection(chatId: id, sectionId: section) } }
     func movePin(_ id: String, after: String?, before: String?) {
         attempt("move pin") { try client?.movePin(chatId: id, after: after, before: before) }
@@ -572,8 +583,10 @@ final class AppModel {
         }
     }
 
-    var projectOptions: [ProjectOption] {
-        rawProjects.map { ProjectOption(id: $0.id, name: $0.name, path: $0.path, device: $0.deviceId, deviceName: $0.deviceName ?? deviceName($0.deviceId), online: $0.deviceOnline, git: $0.gitDetected, groupKey: $0.groupKey, groupName: $0.groupName, colorIndex: Int($0.colorIndex)) }
+    @MainActor var projectOptions: [ProjectOption] {
+        // A Cloud project runs only on Cloud: hidden when this account isn't
+        // offered Cloud (or no longer is).
+        rawProjects.filter { !$0.isCloud || isDemo || cloud.available }.map { ProjectOption(id: $0.id, name: $0.name, path: $0.path, device: $0.deviceId, deviceName: $0.deviceName ?? deviceName($0.deviceId), online: $0.deviceOnline, git: $0.gitDetected, groupKey: $0.groupKey, groupName: $0.groupName, colorIndex: Int($0.colorIndex), isCloud: $0.isCloud, githubRepo: $0.githubRepo) }
     }
 
     var hostOptions: [HostOption] {
@@ -591,7 +604,25 @@ final class AppModel {
         var out: [ModelChoice] = []
         for h in harnesses where h.offered {
             let models = (try? await client.listModels(deviceId: deviceId, harness: h.id)) ?? fallbackModels(harness: h.id)
-            out += models.map { ModelChoice(harness: h.id, harnessLabel: h.label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels) }
+            out += models.map { ModelChoice(harness: h.id, harnessLabel: h.label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels, detail: $0.description) }
+        }
+        return out
+    }
+
+    /// A Cloud chat created whose first message didn't go out yet.
+    private var unsentCloudChat: (key: String, chatId: String)?
+
+    /// The agents Cloud runs.
+    static let cloudHarnesses = ["claude-code", "codex"]
+
+    /// Cloud's models, as the edge lists them (no computer or Cloud machine
+    /// is asked).
+    func cloudModels() async -> [ModelChoice] {
+        guard let client else { return [] }
+        var out: [ModelChoice] = []
+        for h in Self.cloudHarnesses {
+            let label = HarnessNames.label(h)
+            out += await client.cloudModels(harness: h).map { ModelChoice(harness: h, harnessLabel: label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels, detail: $0.description) }
         }
         return out
     }
@@ -622,6 +653,39 @@ final class AppModel {
         guard let client, let p = rawProjects.first(where: { $0.id == projectId }) else { return [] }
         let refs = (try? await client.listRefs(deviceId: p.deviceId, repoPath: p.path)) ?? []
         return refs.sorted { $0.current && !$1.current }.map(\.name)
+    }
+
+    /// A session on its own Cloud machine in `draft.projectId` (a Cloud
+    /// project, or any project whose repository Cloud reaches): the edge
+    /// mints the machine, then the first message is sent as usual — it
+    /// waits in the chat until the machine is up.
+    @MainActor
+    func createCloudSession(draft: NewSessionDraft, text: String, images: [StagedImage]) async throws -> String {
+        guard let client, let spaceId = draft.projectId else { throw CoreError.Closed }
+        let config = ChatConfig(harness: draft.harness, model: draft.model, reasoning: draft.effort, modelOptions: [:], sandbox: .workspaceWrite)
+        // A retry after a failed first send reuses that chat (and machine)
+        // instead of starting a second one.
+        let chatId: String
+        // Only while nothing the chat was made with changed (its project,
+        // branch, provider, model): otherwise that's a different chat.
+        let key = "\(spaceId)|\(draft.branch ?? "")|\(draft.harness)|\(draft.model ?? "")"
+        if let unsent = unsentCloudChat, unsent.key == key, client.sessionRow(chatId: unsent.chatId) != nil {
+            chatId = unsent.chatId
+        } else {
+            chatId = try await client.createCloudSession(spaceId: spaceId, config: config, branch: draft.branch, title: nil)
+            unsentCloudChat = (key, chatId)
+        }
+        let handle = try client.openSession(chatId: chatId)
+        _ = try handle.send(request: SendRequest(text: text, attachments: images.map(\.outgoing), worktree: nil, busy: .queue))
+        unsentCloudChat = nil
+        noteDeliveryActivity()
+        refreshWorkspace()
+        return chatId
+    }
+
+    /// Branches of a Cloud project's repository (GitHub's, through Cloud).
+    func cloudBranches(repo: String) async -> [String] {
+        (try? await client?.githubBranches(repo: repo)) ?? []
     }
 
     /// Create the chat, open it, and send the first message.

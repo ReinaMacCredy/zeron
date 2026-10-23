@@ -71,6 +71,7 @@ async fn main() {
         forked_at: None,
         computer_control: false,
         disabled_tools: Vec::new(),
+        env: Default::default(),
     };
     let mut stream = OpencodeHarness::new()
         .run(request, controls)

@@ -1182,7 +1182,7 @@ impl AddProviderDialog {
                         if signed_in {
                             widgets::ActionTone::Solid
                         } else {
-                            widgets::ActionTone::Outlined
+                            widgets::ActionTone::Filled
                         },
                     )
                     .when(active, |el| el.opacity(0.5).cursor_default())
@@ -1201,7 +1201,7 @@ impl AddProviderDialog {
                 if first_step {
                     widgets::ActionTone::Quiet
                 } else {
-                    widgets::ActionTone::Outlined
+                    widgets::ActionTone::Filled
                 },
             )
             .when(busy, |el| el.opacity(0.5).cursor_default())
@@ -1231,7 +1231,7 @@ impl AddProviderDialog {
             }
             Step::Provider => {
                 footer = footer.child(
-                    button("add-provider-manual", widgets::ActionTone::Outlined)
+                    button("add-provider-manual", widgets::ActionTone::Filled)
                         .when(busy, |el| el.opacity(0.5).cursor_default())
                         .when(!busy, |el| {
                             el.on_click(cx.listener(|this, _, _, cx| this.go(Step::Identity, cx)))

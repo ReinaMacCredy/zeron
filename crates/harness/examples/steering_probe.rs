@@ -59,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
         computer_control: false,
         permission_mode: Default::default(),
         disabled_tools: Vec::new(),
+        env: Default::default(),
     };
     let controls = RunControls {
         realtime: None,

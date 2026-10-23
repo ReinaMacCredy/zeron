@@ -168,11 +168,13 @@ pub(crate) async fn classifier_target(
 }
 
 async fn ask(
+    registry: &HarnessRegistry,
     target: &OneShotTarget,
     prompt: String,
     attempt_timeout: std::time::Duration,
 ) -> Result<crate::titles::OneShotReply, crate::EngineError> {
     run_one_shot(
+        registry,
         target.harness.as_ref(),
         target.lease.clone(),
         OneShot {
@@ -198,6 +200,7 @@ fn add_usage(record: &mut ClassifierRecord, reply: &crate::titles::OneShotReply)
 
 /// Any failure reads as a follow-up: a missed compaction is retried later.
 pub(crate) async fn classify(
+    registry: &HarnessRegistry,
     target: OneShotTarget,
     input: String,
     agent_note: bool,
@@ -209,7 +212,7 @@ pub(crate) async fn classify(
         input: input.clone(),
         ..Default::default()
     };
-    match ask(&target, input.clone(), STAGE1_TIMEOUT).await {
+    match ask(registry, &target, input.clone(), STAGE1_TIMEOUT).await {
         Ok(reply) => {
             add_usage(&mut record, &reply);
             record.verdict = parse_stage1(&reply.text).unwrap_or(ClassifierVerdict::Failed);
@@ -222,7 +225,7 @@ pub(crate) async fn classify(
     }
     if record.verdict == ClassifierVerdict::Continue {
         record.decided_by = DecidedBy::Stage2;
-        match ask(&target, stage2_prompt(&input, agent_note), STAGE2_TIMEOUT).await {
+        match ask(registry, &target, stage2_prompt(&input, agent_note), STAGE2_TIMEOUT).await {
             Ok(reply) => {
                 add_usage(&mut record, &reply);
                 record.verdict = parse_stage2(&reply.text);

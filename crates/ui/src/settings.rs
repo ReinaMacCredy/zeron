@@ -21,6 +21,8 @@ pub mod add_provider;
 pub mod agent_profiles;
 pub mod appearance;
 pub mod archived;
+pub mod billing;
+pub mod cloud;
 pub mod code_review;
 pub mod compaction;
 pub mod composer;
@@ -1732,6 +1734,10 @@ pub struct UiSettings {
     pub chat_mission: ChatMission,
     /// Light/dark preference. Defaults to following the OS.
     pub appearance: crate::appearance::AppearanceMode,
+    /// First-run setup was finished or skipped. A file written before this
+    /// field existed reads as done (existing users never see it); only a
+    /// fresh install, with no settings file yet, starts it.
+    pub onboarding_completed: bool,
     /// Optional columns shown in every Git History pane.
     pub git_history_columns: GitHistoryColumns,
     /// User-adjusted widths for the resizable Git History columns.
@@ -1926,6 +1932,7 @@ impl Default for UiSettings {
             computer_getting_started_acknowledged: false,
             computer_effort_hint_dismissed: false,
             appearance: crate::appearance::AppearanceMode::default(),
+            onboarding_completed: true,
             git_history_columns: GitHistoryColumns::default(),
             git_history_column_widths: GitHistoryColumnWidths::default(),
             git_history_column_order: GitHistoryColumnOrder::default(),
@@ -2618,6 +2625,7 @@ impl UiSettings {
             tree_view,
             chat_mission,
             appearance,
+            onboarding_completed,
             git_history_columns,
             git_history_column_widths,
             git_history_column_order,
@@ -2934,6 +2942,13 @@ impl UiSettings {
                     }
                 }
             }
+            // No settings file yet: a fresh install, so first-run setup runs,
+            // on frosted glass whatever the theme recommends.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Self {
+                onboarding_completed: false,
+                surface: zeron_theme::SurfacePreference::Frosted,
+                ..Self::default()
+            },
             Err(_) => Self::default(),
         }
     }
@@ -3430,7 +3445,7 @@ mod tests {
         assert_eq!(legacy.sidebar_width, 300.0);
         // Unknown names and malformed values read as General without
         // defaulting the rest of the file.
-        for raw in [r#""billing""#, "42", "null", r#"{"section":"devices"}"#] {
+        for raw in [r#""payments""#, "42", "null", r#"{"section":"devices"}"#] {
             std::fs::write(
                 UiSettings::path(dir.path()),
                 format!(r#"{{"sidebarWidth": 300, "settingsSection": {raw}}}"#),
@@ -4029,6 +4044,22 @@ mod tests {
     }
 
     #[test]
+    fn only_a_fresh_install_starts_first_run_setup() {
+        let fresh = tempfile::tempdir().unwrap();
+        let fresh = UiSettings::load(fresh.path());
+        assert!(!fresh.onboarding_completed);
+        assert_eq!(fresh.surface, zeron_theme::SurfacePreference::Frosted);
+        // A settings file from before setup existed: that user is past it.
+        let existing = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(existing.path()),
+            r#"{"sidebarWidth": 280}"#,
+        )
+        .unwrap();
+        assert!(UiSettings::load(existing.path()).onboarding_completed);
+    }
+
+    #[test]
     fn round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let settings = UiSettings {
@@ -4246,6 +4277,7 @@ mod tests {
                 ..HomeWidgets::default()
             },
             legacy_accent_color: None,
+            onboarding_completed: false,
         };
         settings.save(dir.path()).unwrap();
         let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
@@ -4771,7 +4803,16 @@ mod tests {
     #[test]
     fn missing_and_corrupt_files_yield_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
+        // Defaults, except that a fresh install still has setup ahead of it,
+        // on frosted glass.
+        assert_eq!(
+            UiSettings::load(dir.path()),
+            UiSettings {
+                onboarding_completed: false,
+                surface: zeron_theme::SurfacePreference::Frosted,
+                ..UiSettings::default()
+            }
+        );
         std::fs::write(UiSettings::path(dir.path()), "{not json").unwrap();
         assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
     }

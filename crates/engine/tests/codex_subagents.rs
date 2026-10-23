@@ -70,6 +70,7 @@ async fn check_persistence(
         forked_at: None,
         computer_control: false,
         disabled_tools: Vec::new(),
+        env: Default::default(),
     };
     core.sessions
         .dispatch(

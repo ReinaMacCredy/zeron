@@ -378,6 +378,7 @@ pub(crate) fn raw_blocks(entries: &[SessionMessageEntry], hide_thinking: bool) -
                 ),
                 MessagePart::Error { message, .. } => push(RawRole::Error, message),
                 MessagePart::Fork { .. }
+                | MessagePart::Switch { .. }
                 | MessagePart::Visual { .. }
                 | MessagePart::Classifier { .. } => {}
             }
@@ -2064,6 +2065,8 @@ mod tests {
             running_subagents: 0,
             compact_plan: None,
             classifying: None,
+            last_turn_outcome: Default::default(),
+            terminal_activity: Default::default(),
         }
     }
 
@@ -2355,6 +2358,7 @@ mod tests {
             delegation: None,
             settle: None,
             unsettled_at: None,
+            harness_session_harness: Default::default(),
         }
     }
 

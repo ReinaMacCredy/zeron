@@ -13,6 +13,7 @@ zeron-sync.workspace = true
 zeron-harness.workspace = true
 zeron-rpc.workspace = true
 zeron-update.workspace = true
+zeron-notify.workspace = true
 zeron-visual.workspace = true
 loro.workspace = true
 tokio.workspace = true
@@ -30,6 +31,8 @@ chrono.workspace = true
 notify.workspace = true
 portable-pty.workspace = true
 base64 = "0.22"
+# Cloud runner identity: Ed25519 device key (already in the tree via rustls).
+ring = "0.17"
 toml = "0.8"
 libc.workspace = true
 gethostname.workspace = true

@@ -772,15 +772,20 @@ impl Shell {
                 .iter()
                 .filter(|found| found.kind != WorkspaceEntryKind::Directory)
                 .map(|found| (found.path.clone(), false));
-            PaletteSection::new(
+            let section = PaletteSection::new(
                 Section::RecentFiles,
                 opened
                     .chain(changed)
                     .filter(|(path, _)| seen.insert(path.clone()))
                     .take(limit)
                     .map(|(path, is_dir)| RowKind::File { path, is_dir }),
-            )
-            .with_status(palette.files.progress())
+            );
+            // Only once there are files to show: an empty "Searching…"
+            // section that then finds nothing would shrink the card away.
+            let status = (!section.rows.is_empty())
+                .then(|| palette.files.progress())
+                .flatten();
+            section.with_status(status)
         };
         let files = |limit| {
             PaletteSection::new(
@@ -1258,7 +1263,11 @@ impl Shell {
                     (None, None) => None,
                     _ => Some("?"),
                 };
-                let folder = match (project, state.device_name(&chat.device_id)) {
+                // A Cloud chat's own machine isn't a device worth naming.
+                let device = (!zeron_proto::is_cloud_device(&chat.device_id, ""))
+                    .then(|| state.device_name(&chat.device_id))
+                    .flatten();
+                let folder = match (project, device) {
                     (Some(project), Some(device)) => format!("{project} @ {device}"),
                     (Some(project), None) => project.to_string(),
                     (None, device) => device.unwrap_or_default().to_string(),
@@ -1339,6 +1348,7 @@ impl Shell {
         let focus = palette.focus.clone();
         let scroll = palette.scroll.clone();
         let current_tab = palette.tab;
+        let files_loading = palette.files.loading || palette.files.indexing;
         let theme = Theme::of(cx).for_popup();
         let mut children = Vec::new();
         let mut ix = 0;
@@ -1395,11 +1405,15 @@ impl Shell {
             .gap(px(SIDEBAR_LIST_GAP))
             .children(children)
             .when(sections.is_empty(), |el| {
-                el.child(palette_empty(
-                    &theme,
-                    "No results",
-                    "Try a command, chat title, project, or device.",
-                ))
+                let (title, hint) = match (current_tab, query.is_empty()) {
+                    (Tab::Files, true) if files_loading => ("Looking for recent files…", ""),
+                    (Tab::Files, true) => (
+                        "No recent files",
+                        "Files you open or change in this workspace show up here.",
+                    ),
+                    _ => ("No results", "Try a command, chat title, project, or device."),
+                };
+                el.child(palette_empty(&theme, title, hint))
             });
         let body = palette_results_fade(body, &scroll);
         let tabs = div()
@@ -1636,6 +1650,20 @@ pub(super) fn palette_footer() -> gpui::Div {
         .gap(px(12.0))
 }
 
+/// The card's chrome beside its results at their tallest: the search header,
+/// New project's breadcrumbs and the footer (Cmd+K has no crumbs and simply
+/// ends shorter).
+const PALETTE_CHROME_HEIGHT: f32 = 120.0;
+
+/// Where a palette card's top sits: where a card at its tallest would sit
+/// centered, never under the titlebar. Results growing or shrinking only
+/// move the bottom edge, and Cmd+K and New project share the line, so
+/// typing or switching between them never jumps the card.
+fn palette_top(viewport: gpui::Size<Pixels>) -> f32 {
+    let tallest = palette_results_height(viewport) + PALETTE_CHROME_HEIGHT;
+    ((f32::from(viewport.height) - tallest) / 2.0).max(Theme::TITLEBAR_HEIGHT + 16.0)
+}
+
 /// Mount a palette card over the scrimmed window, frosted like the composer.
 pub(super) fn palette_overlay(
     viewport: gpui::Size<Pixels>,
@@ -1655,8 +1683,9 @@ pub(super) fn palette_overlay(
                     // preserving its color through the frosted palette.
                     .bg(popover::scrim_alpha(0.35))
                     .flex()
+                    .flex_col()
                     .items_center()
-                    .justify_center()
+                    .pt(px(palette_top(viewport)))
                     .child(card),
             ),
     )

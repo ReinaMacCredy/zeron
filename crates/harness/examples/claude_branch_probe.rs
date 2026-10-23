@@ -98,6 +98,7 @@ fn request(prompt: &str, cwd: &str) -> RunRequest {
         computer_control: false,
         mcp: None,
         disabled_tools: Vec::new(),
+        env: Default::default(),
     }
 }
 

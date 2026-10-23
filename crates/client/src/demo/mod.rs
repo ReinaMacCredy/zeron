@@ -460,6 +460,8 @@ impl DemoHost {
         let _ = client.registry_write(|doc| {
             doc.upsert_session(&Session {
                 last_completed_turn: completed.map(str::to_owned),
+                last_turn_outcome: None,
+                terminal_activity: None,
                 running_subagents: 0,
                 compact_plan: None,
                 classifying: None,

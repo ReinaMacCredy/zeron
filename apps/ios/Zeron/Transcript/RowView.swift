@@ -39,6 +39,8 @@ protocol RowViewDelegate: AnyObject {
     func rowView(_ view: RowView, perform action: CardAction)
     /// The live view for an agent visual (kept across row reuse).
     func rowView(_ view: RowView, visualFor id: String) -> UIView?
+    /// A row's button (`sign-in` on an error card).
+    func rowView(_ view: RowView, perform action: String)
 }
 
 /// A reusable transcript row: canvas + horizontal scrollers + native widgets.
@@ -162,6 +164,7 @@ final class RowView: UIView {
         case .markdown: "row-markdown"
         case .tools: "row-tools"
         case .chip: "row-chip"
+        case .notice: "row-notice"
         case .image: "row-image"
         case .working: "row-working"
         case .card: "row-card"
@@ -295,6 +298,25 @@ final class RowView: UIView {
                     self.delegate?.rowView(self, toggleDetail: detail, open: open)
                 }, for: .touchUpInside)
                 view = b
+            case let .action(action, label):
+                var c = UIButton.Configuration.filled()
+                c.title = label
+                c.cornerStyle = .capsule
+                c.baseBackgroundColor = Palette.color(.dangerSoft)
+                c.baseForegroundColor = Palette.background
+                c.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12)
+                c.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { a in
+                    var a = a
+                    a.font = Fonts.ui(.sansSemibold, 14)
+                    return a
+                }
+                let b = UIButton(configuration: c, primaryAction: UIAction { [weak self] _ in
+                    guard let self else { return }
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    self.delegate?.rowView(self, perform: action)
+                })
+                b.accessibilityIdentifier = "transcript-action-\(action)"
+                view = b
             case .shimmer:
                 view = ShimmerView(model: model!, rect: rect)
             case let .cardButton(action):
@@ -319,6 +341,13 @@ final class RowView: UIView {
 
     static func asset(_ name: String) -> UIImage? {
         if let hit = assets[name] { return hit }
+        // `brand:<harness>`: a provider's logo (a switch seam's), drawn large
+        // and scaled down; tinted marks keep their colour.
+        if name.hasPrefix("brand:") {
+            let image = BrandMarks.image(for: String(name.dropFirst("brand:".count)), side: 32)
+            assets[name] = image
+            return image
+        }
         let image = (name.hasPrefix("tool-") || name.hasPrefix("fileicon-")) ? UIImage(named: name) : nil
         assets[name] = image
         return image

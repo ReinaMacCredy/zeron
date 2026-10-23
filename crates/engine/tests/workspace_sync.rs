@@ -162,6 +162,7 @@ fn run_request(prompt: &str) -> RunRequest {
         forked_at: None,
         computer_control: false,
         disabled_tools: Vec::new(),
+        env: Default::default(),
     }
 }
 
@@ -743,6 +744,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 git_checked_at: Some(now),
                 checkout_id: Some("co-1".into()),
                 repository_id: None,
+                github_repo: None,
                 created_at: now,
             })
             .unwrap();
@@ -763,6 +765,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 harness_session_id: Some("hs-9".into()),
                 room_gen: None,
                 harness_session_cwd: Some("/tmp/legacy".into()),
+                harness_session_harness: None,
                 space_id: Some("space-legacy".into()),
                 last_seen_at: Some(now),
                 sidechat_source_chat_id: None,
@@ -780,6 +783,8 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 held_by_subagents: false,
                 compacting: false,
                 background_tasks: Vec::new(),
+                last_turn_outcome: None,
+                terminal_activity: None,
                 running_subagents: 0,
                 compact_plan: None,
                 classifying: None,
@@ -864,4 +869,113 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
             .is_some(),
         "legacy snapshot retained for rollback"
     );
+}
+
+#[tokio::test]
+async fn a_cloud_project_names_its_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = assemble(dir.path(), "dev-a");
+
+    // Only the logical Cloud device takes a repository at create.
+    assert!(
+        a.workspace
+            .create_cloud_space("space-x", "dev-a", "/home/user/app", None, "acme/app")
+            .is_err()
+    );
+    a.workspace
+        .create_cloud_space("space-c", "cloud-acct", "/home/user/app", None, "acme/app")
+        .expect("create Cloud project");
+    // The same repository on Cloud again is the same project.
+    a.workspace
+        .create_cloud_space(
+            "space-d",
+            "cloud-acct",
+            "/home/user/app-2",
+            None,
+            "Acme/App",
+        )
+        .expect("idempotent");
+    let spaces = a.workspace.read_spaces().expect("spaces");
+    let cloud: Vec<_> = spaces
+        .iter()
+        .filter(|s| s.device_id == "cloud-acct")
+        .collect();
+    assert_eq!(cloud.len(), 1);
+    assert_eq!(cloud[0].id, "space-c");
+    assert_eq!(cloud[0].github_repo.as_deref(), Some("acme/app"));
+    assert!(cloud[0].git_detected);
+    assert_eq!(
+        cloud[0].repository_id.as_deref(),
+        Some("github.com/acme/app")
+    );
+
+    a.shutdown().await;
+}
+
+/// A Cloud project and a full clone of the same repository are one project:
+/// the Cloud row takes the clone's commit identity, whether it was created
+/// before the clone was known (healed) or after (stamped).
+#[tokio::test]
+async fn cloud_projects_group_with_a_full_clone_of_their_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = assemble(dir.path(), "dev-a");
+    a.workspace
+        .create_cloud_space(
+            "cloud-early",
+            "cloud-acct",
+            "/home/user/app",
+            None,
+            "acme/app",
+        )
+        .expect("create Cloud project");
+    a.workspace
+        .create_space("local", "dev-a", "/src/app", None, true)
+        .expect("create local project");
+    a.workspace
+        .set_space_git("local", true, None, Some("commit:root1"), Some("Acme/App"))
+        .expect("stamp the clone");
+    let repo_of = |id: &str| {
+        a.workspace
+            .read_spaces()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.repository_id)
+    };
+
+    // Healed: the clone's identity, never the other way round.
+    assert_eq!(
+        a.workspace
+            .align_cloud_spaces("acme/app", "commit:root1")
+            .unwrap(),
+        1
+    );
+    assert_eq!(repo_of("cloud-early").as_deref(), Some("commit:root1"));
+    assert_eq!(
+        a.workspace
+            .align_cloud_spaces("acme/app", "github.com/acme/app")
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        a.workspace
+            .align_cloud_spaces("acme/app", "commit:other")
+            .unwrap(),
+        0
+    );
+    assert_eq!(repo_of("cloud-early").as_deref(), Some("commit:root1"));
+
+    // Stamped: a Cloud project created once the clone is known.
+    a.workspace
+        .create_cloud_space(
+            "cloud-late",
+            "cloud-two",
+            "/home/user/app",
+            None,
+            "acme/app",
+        )
+        .expect("create on another Cloud device");
+    assert_eq!(repo_of("cloud-late").as_deref(), Some("commit:root1"));
+
+    a.shutdown().await;
 }

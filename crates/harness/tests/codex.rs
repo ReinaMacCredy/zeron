@@ -113,6 +113,7 @@ fn request(prompt: &str) -> RunRequest {
         forked_at: None,
         computer_control: false,
         disabled_tools: Vec::new(),
+        env: Default::default(),
     }
 }
 
@@ -2324,4 +2325,96 @@ async fn external_voice_keeps_canonical_events_without_any_local_helper() {
     assert!(!wire.contains("appendAudio"));
     token.cancel();
     pump.abort();
+}
+
+/// A wrapper around the fake app-server that dies (printing `reason`) on its
+/// first `fail` launches, then runs the fake. Counts launches in `count`.
+fn flaky_app_server(dir: &std::path::Path, fail: u32, reason: &str) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let count = dir.join("launches");
+    let script = dir.join("codex");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nn=$(cat '{count}' 2>/dev/null || echo 0)\nn=$((n+1))\necho $n > '{count}'\n\
+             if [ \"$n\" -le {fail} ]; then echo '{reason}' >&2; exit 1; fi\nexec '{fake}' \"$@\"\n",
+            count = count.display(),
+            fake = fixture_path().display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (script, count)
+}
+
+#[tokio::test]
+async fn an_app_server_that_dies_before_answering_is_relaunched() {
+    let dir = tempfile::tempdir().unwrap();
+    let (script, count) = flaky_app_server(dir.path(), 1, "cold start: not ready");
+    let (controls, _steer, _token) = controls("Yes");
+    let harness = CodexHarness::new().with_executable(script);
+    // As the happy-path test asks for it (the fake checks both).
+    let mut req = request("scenario:happy");
+    req.cwd = "/tmp".into();
+    req.model_options.insert(
+        "serviceTier".into(),
+        serde_json::Value::String("fast".into()),
+    );
+    let events = run_to_end(&harness, req, controls).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::SessionStarted { .. })),
+        "the second launch runs the turn: {events:?}"
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{:?}",
+        events.last()
+    );
+    assert_eq!(std::fs::read_to_string(count).unwrap().trim(), "2");
+}
+
+#[tokio::test]
+async fn an_app_server_that_keeps_dying_reports_what_it_printed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (script, count) = flaky_app_server(dir.path(), 99, "missing libssl.so.3");
+    let (controls, _steer, _token) = controls("Yes");
+    let harness = CodexHarness::new().with_executable(script);
+    let stream = harness
+        .run(request("scenario:happy"), controls)
+        .await
+        .expect("run starts");
+    // Three relaunches, 1 + 3 + 8 s apart.
+    let events = tokio::time::timeout(
+        Duration::from_secs(30),
+        stream.map(|r| r.expect("stream event")).collect::<Vec<_>>(),
+    )
+    .await
+    .expect("gives up in time");
+    match events.last() {
+        Some(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            error: Some(error),
+            ..
+        }) => {
+            assert!(error.starts_with("initialize:"), "{error}");
+            assert!(
+                error.contains("missing libssl.so.3"),
+                "the stderr tail: {error}"
+            );
+        }
+        other => panic!("expected an errored Done, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(count).unwrap().trim(),
+        "4",
+        "one launch + three relaunches"
+    );
 }

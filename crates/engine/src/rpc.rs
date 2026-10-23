@@ -911,6 +911,15 @@ struct FetchToolBlobParams {
     blob_ref: String,
 }
 
+/// Where a Cloud chat runs: its session device and that machine's checkout.
+struct CloudHost {
+    device_id: String,
+    cwd: Option<String>,
+    /// The edge wrote the chat's row (a delegate started from a Cloud
+    /// machine, which may only write rows it hosts).
+    row_written: bool,
+}
+
 /// The Mutate surface (feature-inventory §2 DataRpc), tagged by `op`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
@@ -939,6 +948,10 @@ enum MutateParams {
         /// grouping only.
         #[serde(default)]
         created_by_chat_id: Option<String>,
+        /// Run on Cloud (the checkout picker's Cloud): the chat gets its own
+        /// Cloud machine, cloning the project's GitHub repository.
+        #[serde(default)]
+        cloud: bool,
     },
     /// Create a space (device + folder pair). Idempotent by id; a live
     /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
@@ -952,6 +965,11 @@ enum MutateParams {
         name: Option<String>,
         #[serde(default)]
         git_detected: bool,
+        /// A Cloud project (`deviceId` the logical Cloud device): the GitHub
+        /// repository (`owner/name`) its sessions clone. Ignored elsewhere —
+        /// a device stamps its own folders.
+        #[serde(default)]
+        github_repo: Option<String>,
     },
     /// LWW display-name set; `name: None` clears back to basename(path).
     #[serde(rename_all = "camelCase")]
@@ -1210,6 +1228,10 @@ pub struct EngineRpc {
     html_preview: std::sync::Arc<crate::html_render::PreviewHost>,
     starting_tasks: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     plan_writes: std::sync::Arc<std::sync::Mutex<()>>,
+    /// Cloud runner only: vault grants (ListGithubRepos, credentialed CloneRepo).
+    credentials: Option<crate::credentials::CredentialBroker>,
+    /// Viewports' window focus, for desktop banners.
+    viewport_focus: crate::desktop_notify::ViewportFocus,
     engine_info: EngineInfo,
 }
 
@@ -1230,11 +1252,19 @@ impl EngineRpc {
         agent_accounts: AgentAccounts,
         workspace_scope: WorkspaceScope,
     ) -> Self {
+        sessions.track_terminal_activity(terminals.clone(), workspace.clone());
         let engine_info = EngineInfo {
             device_id: doc_host.device_id().to_string(),
             workspace_scope,
             cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
-            capabilities: zeron_proto::capabilities::current(),
+            capabilities: {
+                let mut capabilities = zeron_proto::capabilities::current();
+                if crate::desktop_notify::enabled() {
+                    capabilities
+                        .push(zeron_proto::capabilities::DESKTOP_NOTIFICATIONS_V1.to_string());
+                }
+                capabilities
+            },
         };
         let github = GitHubCli::new().with_store(repos.data_dir());
         Self {
@@ -1266,17 +1296,54 @@ impl EngineRpc {
             html_preview: Default::default(),
             starting_tasks: Default::default(),
             plan_writes: Default::default(),
+            credentials: None,
+            viewport_focus: Default::default(),
             engine_info,
         }
     }
 
     fn delete_chat(&self, chat_id: &str) -> Result<(), RpcError> {
+        let on_cloud = self
+            .workspace
+            .chat(chat_id)
+            .ok()
+            .flatten()
+            .is_some_and(|chat| zeron_proto::is_cloud_device(&chat.device_id, ""));
+        // A Cloud chat's children on Cloud go with it: its delegates
+        // (each on a machine of its own, which would otherwise outlive
+        // the parent) and its side chats (on its machine, now gone).
+        let children: Vec<String> = if on_cloud {
+            self.workspace
+                .read_chats()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|chat| {
+                    chat.is_child_of(chat_id) && zeron_proto::is_cloud_device(&chat.device_id, "")
+                })
+                .map(|chat| chat.id)
+                .collect()
+        } else {
+            Vec::new()
+        };
         self.voice.retire_chat(chat_id);
         self.workspace
             .delete_chat(chat_id)
             .map_err(|e| RpcError::Failed(e.to_string()))?;
         self.doc_host.purge_chat(chat_id);
         crate::html_render::remove_chat_pages(&self.uploads, chat_id);
+        for child in &children {
+            self.voice.retire_chat(child);
+            if let Err(err) = self.workspace.delete_chat(child) {
+                tracing::warn!(chat = %child, error = %err, "deleting a Cloud chat's child failed");
+            }
+            self.doc_host.purge_chat(child);
+            crate::html_render::remove_chat_pages(&self.uploads, child);
+        }
+        if on_cloud {
+            self.delete_cloud_machines(
+                std::iter::once(chat_id.to_owned()).chain(children).collect(),
+            );
+        }
         Ok(())
     }
 
@@ -1310,6 +1377,12 @@ impl EngineRpc {
     /// Attach the release checker (UpdateStatus stream + ApplyUpdate).
     pub fn with_updater(mut self, updater: zeron_update::Updater) -> Self {
         self.updater = Some(updater);
+        self
+    }
+
+    /// Share the core's viewport focus (`SetViewportFocus` writes it).
+    pub fn with_viewport_focus(mut self, focus: crate::desktop_notify::ViewportFocus) -> Self {
+        self.viewport_focus = focus;
         self
     }
 
@@ -1384,10 +1457,294 @@ impl EngineRpc {
         self
     }
 
+    /// Attach the Cloud runner's credential broker.
+    pub fn with_credentials(mut self, broker: crate::credentials::CredentialBroker) -> Self {
+        self.credentials = Some(broker);
+        self
+    }
+
     fn auth(&self) -> Result<&Auth, RpcError> {
         self.auth
             .as_ref()
             .ok_or_else(|| RpcError::Failed("auth unavailable".into()))
+    }
+
+    /// The edge client the IPC-only Cloud / vault methods act through, as the
+    /// signed-in user of this runtime's organization — or the unavailable
+    /// stand-in (local profile, development without an edge, signed out, no
+    /// organization), which answers without any network call.
+    fn cloud(&self) -> crate::cloud_client::CloudClient {
+        use crate::cloud_client::CloudClient;
+        if self.engine_info.workspace_scope == WorkspaceScope::Local {
+            return CloudClient::unavailable();
+        }
+        let Some(edge) = self.workspace.edge() else {
+            return CloudClient::unavailable();
+        };
+        let org_id = match &self.auth {
+            Some(auth) if auth.workos_enabled() => match auth.state() {
+                crate::auth::AuthState::SignedIn {
+                    org_id: Some(org_id),
+                    ..
+                } => org_id,
+                _ => return CloudClient::unavailable(),
+            },
+            // Development bearer: the profile's org scopes every room.
+            _ => self.workspace.org_id().to_string(),
+        };
+        CloudClient::new(edge.url.clone(), org_id, edge.token.clone())
+    }
+
+    /// A deleted Cloud chat takes its machine with it (and whatever is
+    /// uncommitted there): otherwise the sandbox outlives every way to reach
+    /// it. Best-effort and in the background — the chat is already gone. A
+    /// chat with no machine of its own (a side chat in its parent's) has no
+    /// session to delete, and the edge says so.
+    fn delete_cloud_machines(&self, chat_ids: Vec<String>) {
+        if chat_ids.is_empty() {
+            return;
+        }
+        let cloud = self.cloud();
+        tokio::spawn(async move {
+            for chat_id in chat_ids {
+                match cloud.delete_session(&chat_id).await {
+                    Ok(_) => tracing::info!(chat = %chat_id, "deleted chat's Cloud machine"),
+                    Err(err) => {
+                        tracing::warn!(chat = %chat_id, error = %err, "Cloud machine not deleted")
+                    }
+                }
+            }
+        });
+    }
+
+    /// The logical Cloud device (no engine; the edge writes its row with the
+    /// `cloud-account` capability), as opposed to a session's device.
+    fn is_cloud_account_device(&self, device_id: &str) -> bool {
+        if crate::cloud_accounts::is_cloud_accounts_target(device_id) {
+            return true;
+        }
+        self.workspace.read_devices().is_ok_and(|devices| {
+            devices.iter().any(|d| {
+                d.id == device_id
+                    && d.capabilities
+                        .iter()
+                        .any(|c| c == zeron_proto::CLOUD_ACCOUNT_CAPABILITY)
+            })
+        })
+    }
+
+    /// Requests aimed at a Cloud device that this engine answers itself:
+    /// harness and model catalogs come from this engine's own catalog
+    /// restricted to Cloud's harnesses (every session machine has both CLIs),
+    /// so opening a composer never dials — let alone wakes — a sandbox. The
+    /// logical Cloud device has no engine: its skill/command catalogs are the
+    /// global ones, and anything else fails fast. `None` = forward as usual.
+    async fn answer_for_cloud(
+        &self,
+        target: &str,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> Option<Result<RpcReply, RpcError>> {
+        let account = self.is_cloud_account_device(target);
+        let local = |drop: &[&str]| {
+            let mut params = params.clone();
+            if let Some(map) = params.as_object_mut() {
+                for key in ["targetDeviceId"].iter().chain(drop) {
+                    map.remove(*key);
+                }
+            }
+            params
+        };
+        match method {
+            methods::LIST_HARNESSES => {
+                // Enabled = Cloud has an account to run it with (unknown
+                // while the vault can't be read: then every one is).
+                let ready = crate::cloud_accounts::ready_harnesses(&self.cloud()).await;
+                let descriptors: Vec<_> = self
+                    .registry
+                    .descriptors()
+                    .into_iter()
+                    .filter(|d| crate::registry::CLOUD_HARNESS_IDS.contains(&d.id))
+                    .map(|mut d| {
+                        d.installed = true;
+                        d.enabled = Some(ready.as_ref().is_none_or(|ready| ready.contains(&d.id)));
+                        d
+                    })
+                    .collect();
+                Some(RpcReply::value(&descriptors))
+            }
+            methods::LIST_MODELS => {
+                let p: ListModelsParams = match parse_params(local(&[])) {
+                    Ok(p) => p,
+                    Err(e) => return Some(Err(e)),
+                };
+                if !crate::registry::CLOUD_HARNESS_IDS.contains(&p.harness) {
+                    return Some(Err(RpcError::Failed(
+                        "Cloud runs Codex and Claude Code only".into(),
+                    )));
+                }
+                Some(self.handle(method, local(&[])).await)
+            }
+            methods::LIST_SKILLS | methods::LIST_COMMANDS if account => Some(
+                self.handle(method, local(&["chatId", "spaceId", "path"]))
+                    .await,
+            ),
+            _ if account => Some(Err(RpcError::Failed(
+                crate::cloud_client::ACCOUNT_DEVICE_HAS_NO_ENGINE.into(),
+            ))),
+            _ => None,
+        }
+    }
+
+    /// `ListCloudBranches {repo, defaultBranch?}`: the branches a Cloud
+    /// session of `repo` can start from — GitHub's, through the user's
+    /// connection — the default first and marked current.
+    async fn cloud_branches(&self, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct P {
+            repo: String,
+            #[serde(default)]
+            default_branch: Option<String>,
+        }
+        let p: P = parse_params(params)?;
+        let mut names = self
+            .cloud()
+            .github_branches(&p.repo)
+            .await
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
+        if let Some(default) = &p.default_branch {
+            names.sort_by_key(|name| name != default);
+            if !names.contains(default) {
+                names.insert(0, default.clone());
+            }
+        }
+        let refs: Vec<zeron_proto::RepoRef> = names
+            .into_iter()
+            .map(|name| zeron_proto::RepoRef {
+                current: p.default_branch.as_deref() == Some(name.as_str()),
+                name,
+                worktree_path: None,
+            })
+            .collect();
+        RpcReply::value(&refs)
+    }
+
+    /// Where a chat runs when it runs on Cloud: its own new session machine
+    /// (minted by the edge, idempotent per chat) cloning the project's GitHub
+    /// repository — or, for a side chat whose parent runs on a session
+    /// machine, that same machine (they share files). `None` = not Cloud;
+    /// create normally.
+    async fn cloud_chat_host(
+        &self,
+        chat_id: &str,
+        space_id: Option<&str>,
+        parent_chat_id: Option<&str>,
+        branch: Option<&str>,
+        cloud: bool,
+        config: Option<&ChatConfig>,
+    ) -> Result<Option<CloudHost>, RpcError> {
+        let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
+        let on_cloud = |device_id: &str| device_id.starts_with(zeron_proto::CLOUD_DEVICE_PREFIX);
+        // A side chat of a Cloud chat shares its machine (and files), unless
+        // it asks for a Cloud session of its own.
+        if !cloud
+            && let Some(parent) = parent_chat_id
+            && let Some(parent) = self.workspace.chat(parent).map_err(failed)?
+            && on_cloud(&parent.device_id)
+        {
+            return Ok(Some(CloudHost {
+                device_id: parent.device_id,
+                cwd: parent.cwd,
+                row_written: false,
+            }));
+        }
+        if !cloud {
+            return Ok(None);
+        }
+        if let Some(existing) = self.workspace.chat(chat_id).map_err(failed)?
+            && on_cloud(&existing.device_id)
+        {
+            return Ok(Some(CloudHost {
+                device_id: existing.device_id,
+                cwd: existing.cwd,
+                // A Cloud machine may not write a delegate's row (the edge did).
+                row_written: crate::runner::session().is_some(),
+            }));
+        }
+        // On a Cloud machine: a delegate of the chat this machine runs, on a
+        // machine of its own (the edge clones the parent's repository and
+        // writes the delegate's row — a machine writes only rows it hosts).
+        if let Some(session) = crate::runner::session() {
+            let parent = parent_chat_id.ok_or_else(|| {
+                RpcError::Failed("A Cloud machine starts Cloud chats only as children of its chat.".into())
+            })?;
+            if parent != session.chat_id {
+                return Err(RpcError::Failed(
+                    "A Cloud machine starts Cloud chats only as children of the chat it runs.".into(),
+                ));
+            }
+            let started = self
+                .cloud()
+                .create_child_session(chat_id, parent, branch, config)
+                .await
+                .map_err(|e| RpcError::Failed(format!("Couldn't start a Cloud session: {e}")))?;
+            self.await_chat_row(chat_id).await?;
+            return Ok(Some(CloudHost {
+                device_id: started.device_id,
+                cwd: started.path,
+                row_written: true,
+            }));
+        }
+        let space_id =
+            space_id.ok_or_else(|| RpcError::Failed("Cloud sessions run in a project.".into()))?;
+        let space = self
+            .workspace
+            .space(space_id)
+            .map_err(failed)?
+            .ok_or_else(|| RpcError::Failed("That project no longer exists.".into()))?;
+        let full_name = space.github_repo.ok_or_else(|| {
+            RpcError::Failed("This project has no GitHub repository for Cloud to clone.".into())
+        })?;
+        let cloud_client = self.cloud();
+        let repo = cloud_client
+            .github_repos(Some(&full_name))
+            .await
+            .map_err(failed)?
+            .into_iter()
+            .find(|repo| repo.full_name.eq_ignore_ascii_case(&full_name))
+            .ok_or_else(|| {
+                RpcError::Failed(format!(
+                    "Cloud can't reach {full_name} — install the Zeron GitHub App on it in Settings → Cloud."
+                ))
+            })?;
+        let session = cloud_client
+            .create_session(chat_id, space_id, &repo, branch)
+            .await
+            .map_err(|e| RpcError::Failed(format!("Couldn't start a Cloud session: {e}")))?;
+        Ok(Some(CloudHost {
+            device_id: session.device_id,
+            cwd: session.path,
+            row_written: false,
+        }))
+    }
+
+    /// Wait for a chat row written elsewhere (the edge, for a delegate) to
+    /// reach this engine's registry, so what follows — a first prompt, a
+    /// title — finds it.
+    async fn await_chat_row(&self, chat_id: &str) -> Result<(), RpcError> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if self.workspace.chat(chat_id).ok().flatten().is_some() {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(RpcError::Failed(
+                    "The Cloud session started, but its chat hasn't synced here yet; try again shortly.".into(),
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 
     fn updater(&self) -> Result<&zeron_update::Updater, RpcError> {
@@ -2372,6 +2729,7 @@ impl EngineRpc {
                 branch,
                 cwd,
                 created_by_chat_id,
+                cloud: _,
             } => {
                 // A voice orchestrator is hidden, so the chats it creates are
                 // the user's top-level sessions rather than its side chats.
@@ -2400,17 +2758,52 @@ impl EngineRpc {
                 path,
                 name,
                 git_detected,
-            } => self
-                .workspace
-                .create_space(&space_id, &device_id, &path, name, git_detected)
-                .map_err(failed),
+                github_repo,
+            } => match github_repo {
+                Some(repo) if device_id.starts_with(zeron_proto::CLOUD_DEVICE_PREFIX) => self
+                    .workspace
+                    .create_cloud_space(&space_id, &device_id, &path, name, &repo)
+                    .map_err(failed),
+                _ => self
+                    .workspace
+                    .create_space(&space_id, &device_id, &path, name, git_detected)
+                    .map_err(failed),
+            },
             MutateParams::RenameSpace { space_id, name } => self
                 .workspace
                 .rename_space(&space_id, name.as_deref())
                 .map_err(failed)
                 .map(drop),
             MutateParams::DeleteSpace { space_id } => {
+                let chats = self.workspace.read_chats().unwrap_or_default();
+                let mut cloud_chats: Vec<String> = chats
+                    .iter()
+                    .filter(|chat| {
+                        chat.space_id.as_deref() == Some(space_id.as_str())
+                            && zeron_proto::is_cloud_device(&chat.device_id, "")
+                    })
+                    .map(|chat| chat.id.clone())
+                    .collect();
+                // Their children on Cloud with no project of their own (side
+                // chats on a deleted machine, delegates) go with them.
+                let orphans: Vec<String> = chats
+                    .iter()
+                    .filter(|chat| {
+                        chat.space_id.is_none()
+                            && zeron_proto::is_cloud_device(&chat.device_id, "")
+                            && cloud_chats.iter().any(|parent| chat.is_child_of(parent))
+                    })
+                    .map(|chat| chat.id.clone())
+                    .collect();
                 let deleted = self.workspace.delete_space(&space_id).map_err(failed)?;
+                for orphan in &orphans {
+                    if let Err(err) = self.workspace.delete_chat(orphan) {
+                        tracing::warn!(chat = %orphan, error = %err, "deleting a Cloud chat's child failed");
+                    }
+                    self.doc_host.purge_chat(orphan);
+                }
+                cloud_chats.extend(orphans);
+                self.delete_cloud_machines(cloud_chats);
                 // Best-effort teardown of live runs we host for the deleted chats
                 // (the doc rows are already tombstoned; a straggler run would only
                 // write into an orphaned session doc).
@@ -2782,6 +3175,13 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<(), zeron_harness::HarnessError>>,
 {
+    // A Cloud device registers only Codex + Claude Code; installing anything
+    // else would put a CLI on it that nothing may run (or probe).
+    if !registry.is_registered(harness) {
+        return Err(RpcError::Failed(format!(
+            "{harness:?} is not available on this device"
+        )));
+    }
     if !zeron_harness::install::can_install(harness) {
         return Err(RpcError::Failed(
             "No supported installer or required tools available on this device".into(),
@@ -2915,6 +3315,8 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_REPOS
             | methods::ADD_REPO
             | methods::CLONE_REPO
+            // Answered by the Cloud device, which holds the GitHub grant.
+            | methods::LIST_GITHUB_REPOS
             | methods::CREATE_REPO
             | methods::LIST_BRANCHES
             | methods::LIST_REFS
@@ -3006,6 +3408,7 @@ fn forwardable(method: &str) -> bool {
             | methods::COMPLETE_AGENT_LOGIN
             | methods::POLL_AGENT_LOGIN
             | methods::CANCEL_AGENT_LOGIN
+            | methods::RELAY_AGENT_LOGIN_CALLBACK
             // Uploads/attachments target the chat's host device (the agent reads
             // the committed file from that device's disk).
             | methods::UPLOAD_CHUNK
@@ -3303,6 +3706,24 @@ impl RpcService for EngineRpc {
             && target != self.doc_host.device_id()
         {
             let target = target.to_string();
+            // Settings → Providers' Cloud: its logins live in the vault.
+            if crate::cloud_accounts::is_cloud_accounts_target(&target)
+                && crate::cloud_accounts::handles(method)
+            {
+                return Box::pin(crate::cloud_accounts::dispatch(
+                    self.cloud(),
+                    self.agent_accounts.clone(),
+                    method,
+                    params,
+                ))
+                .await;
+            }
+            if (target.starts_with(zeron_proto::CLOUD_DEVICE_PREFIX)
+                || crate::cloud_accounts::is_cloud_accounts_target(&target))
+                && let Some(reply) = self.answer_for_cloud(&target, method, &params).await
+            {
+                return reply;
+            }
             if matches!(
                 method,
                 methods::START_AGENT_LOGIN
@@ -3332,8 +3753,21 @@ impl RpcService for EngineRpc {
                 .handle(method, params)
                 .await;
         }
+        // Cloud device + credential vault: IPC-only (never in `forwardable`),
+        // acting for this runtime's signed-in user against the edge. Boxed so
+        // its state stays out of this dispatcher's already-large frame.
+        if crate::cloud_client::handles(method) {
+            return Box::pin(crate::cloud_client::dispatch(
+                self.cloud(),
+                &self.agent_accounts,
+                method,
+                params,
+            ))
+            .await;
+        }
         match method {
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
+            methods::LIST_CLOUD_BRANCHES => Box::pin(self.cloud_branches(params)).await,
             methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
             methods::LIST_HARNESSES => RpcReply::value(&self.registry.descriptors()),
             methods::INSTALL_HARNESS => {
@@ -4126,6 +4560,17 @@ impl RpcService for EngineRpc {
                 self.workspace.import_chat_row(&chat).map_err(failed)?;
                 RpcReply::value(&chat)
             }
+            methods::SET_VIEWPORT_FOCUS => {
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    viewport_id: String,
+                    focused: bool,
+                }
+                let p: Params = parse_params(params)?;
+                self.viewport_focus.set(&p.viewport_id, p.focused);
+                RpcReply::value(&serde_json::json!({}))
+            }
             methods::FOCUS_CHAT => {
                 let p: ChatParams = parse_params(params)?;
                 self.doc_host
@@ -4670,6 +5115,55 @@ impl RpcService for EngineRpc {
                         "task": self.workspace.task(&task_id),
                         "steps": self.workspace.task_steps_of(&task_id),
                         "imagesMoved": images_moved,
+                    }));
+                }
+                if let MutateParams::CreateChat {
+                    chat_id,
+                    space_id,
+                    device_id,
+                    config,
+                    branch,
+                    cwd,
+                    created_by_chat_id,
+                    cloud,
+                } = &p
+                    && let Some(host) = Box::pin(self.cloud_chat_host(
+                        chat_id,
+                        space_id.as_deref(),
+                        created_by_chat_id.as_deref(),
+                        branch.as_deref().filter(|b| !b.is_empty()),
+                        *cloud,
+                        config.as_ref(),
+                    ))
+                    .await?
+                {
+                    if host.row_written {
+                        return RpcReply::value(&serde_json::json!({
+                            "ok": true, "deviceId": host.device_id, "cwd": host.cwd,
+                        }));
+                    }
+                    let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
+                    // The machine's checkout, not the project's folder on the
+                    // computer it lives on.
+                    let cwd = host.cwd.clone().or_else(|| cwd.clone());
+                    self.workspace
+                        .create_chat_hosted(
+                            chat_id,
+                            space_id.as_deref(),
+                            device_id.as_deref(),
+                            Some(&host.device_id),
+                            config.clone(),
+                            cwd.clone(),
+                            created_by_chat_id.as_deref(),
+                        )
+                        .map_err(failed)?;
+                    if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
+                        self.workspace
+                            .set_chat_branch(chat_id, branch)
+                            .map_err(failed)?;
+                    }
+                    return RpcReply::value(&serde_json::json!({
+                        "ok": true, "deviceId": host.device_id, "cwd": cwd,
                     }));
                 }
                 let sidebar_pins = matches!(&p, MutateParams::ChangeSidebarPin { .. });
@@ -5318,17 +5812,60 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&repo)
             }
+            methods::LIST_GITHUB_REPOS => {
+                #[derive(Deserialize, Default)]
+                #[serde(default)]
+                struct P {
+                    query: Option<String>,
+                }
+                let p: P = if params.is_null() {
+                    P::default()
+                } else {
+                    parse_params(params)?
+                };
+                // A session machine lists with its own grant; any other device
+                // asks the edge, whose vault calls GitHub without the token
+                // ever leaving it.
+                let repos = match &self.credentials {
+                    Some(broker) => broker
+                        .list_github_repos(p.query.as_deref())
+                        .await
+                        .map_err(RpcError::Failed)?,
+                    None => Box::pin(self.cloud().github_repos(p.query.as_deref()))
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?,
+                };
+                RpcReply::value(&serde_json::json!({ "repos": repos }))
+            }
             methods::CLONE_REPO => {
                 #[derive(Deserialize)]
                 struct P {
                     url: String,
+                    /// Clone into `<parent>/<name>`; default `{data_dir}/repos`.
+                    #[serde(default)]
+                    parent: Option<String>,
                 }
                 let p: P = parse_params(params)?;
-                let repo = self
-                    .repos
-                    .clone_repo(&p.url)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                // Cloud: wire the GitHub grant into git's credential helper
+                // first, so private repositories clone.
+                let no_credentials = match &self.credentials {
+                    Some(broker) => broker.ensure_git_credentials().await.err(),
+                    None => None,
+                };
+                let cloned = match p
+                    .parent
+                    .as_deref()
+                    .filter(|parent| !parent.trim().is_empty())
+                {
+                    Some(parent) => self.repos.clone_repo_in(&p.url, parent).await,
+                    None => self.repos.clone_repo(&p.url).await,
+                };
+                let repo = cloned.map_err(|e| {
+                    let github = no_credentials
+                        .map(|reason| format!(" (no GitHub access: {reason})"))
+                        .unwrap_or_default();
+                    RpcError::Failed(format!("{e}{github}"))
+                })?;
                 RpcReply::value(&repo)
             }
             methods::CREATE_REPO => {
@@ -6062,7 +6599,9 @@ impl RpcService for EngineRpc {
                     p.rows,
                 )
                 .map_err(|err| RpcError::Failed(err.to_string()))?;
-                let _ = self.terminals.assign_chat(&run.terminal.id, &p.chat_id);
+                self.terminals
+                    .associate_chat(&run.terminal.id, &p.chat_id)
+                    .map_err(|err| RpcError::Failed(err.to_string()))?;
                 RpcReply::value(&run)
             }
             methods::OPEN_TERMINAL => {
@@ -6102,7 +6641,7 @@ impl RpcService for EngineRpc {
                 }
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
                 self.terminals
-                    .assign_chat(&session.id, &p.chat_id)
+                    .associate_chat(&session.id, &p.chat_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 if p.agent {
                     self.terminals
@@ -6268,6 +6807,22 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&start)
+            }
+            methods::RELAY_AGENT_LOGIN_CALLBACK => {
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    login_id: String,
+                    requester_device_id: String,
+                    path: String,
+                }
+                let p: Params = parse_params(params)?;
+                let relayed = self
+                    .agent_accounts
+                    .relay_callback(&p.login_id, &p.requester_device_id, &p.path)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&relayed)
             }
             methods::COMPLETE_AGENT_LOGIN => {
                 let p: CompleteAgentLoginParams = parse_params(params)?;

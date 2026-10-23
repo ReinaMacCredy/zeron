@@ -119,6 +119,8 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     /// Following the tail: new content keeps the bottom in view.
     private(set) var following = true
     var onFollowChange: ((Bool) -> Void)?
+    /// A row's button was tapped (`sign-in` on an error card).
+    var onAction: ((String) -> Void)?
     var onDistanceFromBottom: ((CGFloat) -> Void)?
     var imageLoader: ((String, UIImageView) -> Void)?
     var onCardAction: ((CardAction) -> Void)?
@@ -237,7 +239,7 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
         guard ownTurn != nil, let frame = current else { return }
         let height = contentHeight(for: frame)
         if abs(contentSize.height - height) > 0.5 {
-            contentSize = CGSize(width: bounds.width, height: height)
+            contentSize = CGSize(width: layoutWidth, height: height)
             if following, !isTracking { startSpring() }
         }
     }
@@ -292,13 +294,25 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
 
     // MARK: Viewport
 
+    /// The width between the side insets. They needn't match (landscape,
+    /// the iPhone Duo's camera edge); the adjusted inset already shifts the
+    /// content past the leading one, so rows span only what's left.
+    private var layoutWidth: CGFloat {
+        max(0, bounds.width - adjustedContentInset.left - adjustedContentInset.right)
+    }
+
+    override func adjustedContentInsetDidChange() {
+        super.adjustedContentInsetDidChange()
+        setNeedsLayout()
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         let scale = UIFontMetrics(forTextStyle: .body).scaledValue(for: 17) / 17
-        if bounds.width != viewportWidth || scale != textScale {
-            viewportWidth = bounds.width
+        if layoutWidth != viewportWidth || scale != textScale {
+            viewportWidth = layoutWidth
             textScale = scale
-            engine.setViewport(width: Float(bounds.width), textScale: Float(scale))
+            engine.setViewport(width: Float(layoutWidth), textScale: Float(scale))
         }
         layoutRows()
         refreshRunway()
@@ -403,8 +417,8 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
         }
         let animation = rowAnimation(old: old, new: frame)
         let height = contentHeight(for: frame)
-        if contentSize.height != height || contentSize.width != bounds.width {
-            contentSize = CGSize(width: bounds.width, height: height)
+        if contentSize.height != height || contentSize.width != layoutWidth {
+            contentSize = CGSize(width: layoutWidth, height: height)
         }
         if first {
             for i in 0..<frame.rowCount() { if let p = frame.placement(index: i) { knownKeys.insert(p.key) } }
@@ -479,7 +493,7 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
                     UIView.animate(withDuration: 0.28, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) { view.alpha = 1 }
                 }
             }
-            let rect = CGRect(x: 0, y: CGFloat(p.y), width: bounds.width, height: CGFloat(p.height))
+            let rect = CGRect(x: 0, y: CGFloat(p.y), width: layoutWidth, height: CGFloat(p.height))
             if view.frame != rect {
                 // Existing rows tween with the animation; new ones just land.
                 if animation != nil, !view.frame.isEmpty, !stale || view.key == p.key {
@@ -659,6 +673,10 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     func rowView(_ view: RowView, toggleDetail detail: UInt64, open: Bool) {
         pendingFold = view.key
         engine.toggleDetail(row: view.key, detail: detail, open: open)
+    }
+
+    func rowView(_ view: RowView, perform action: String) {
+        onAction?(action)
     }
 
     func rowView(_ view: RowView, open url: URL) {

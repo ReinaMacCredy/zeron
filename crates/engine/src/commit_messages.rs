@@ -257,6 +257,7 @@ pub(crate) async fn generate(
     let staged = read_staged(root).await?;
     let choice = resolve(registry, request.harness, request.model.clone()).await?;
     let message = run_one_shot(
+        registry,
         choice.runner.as_ref(),
         choice.lease,
         OneShot {

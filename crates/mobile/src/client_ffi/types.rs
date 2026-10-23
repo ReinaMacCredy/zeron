@@ -480,6 +480,8 @@ pub struct SessionRow {
     pub device_id: String,
     pub device_name: Option<String>,
     pub device_online: bool,
+    /// Cloud: its own Cloud machine (sessions) or Cloud alone (projects).
+    pub is_cloud: bool,
     /// Wire harness id (`claude-code`).
     pub harness: Option<String>,
     pub harness_label: Option<String>,
@@ -527,6 +529,7 @@ impl From<&zc::SessionRow> for SessionRow {
             device_id: r.device_id.clone(),
             device_name: r.device_name.clone(),
             device_online: r.device_online,
+            is_cloud: r.is_cloud,
             harness: r.harness.clone(),
             harness_label: r.harness_label.clone(),
             model: r.model.clone(),
@@ -604,6 +607,10 @@ pub struct ProjectView {
     pub device_id: String,
     pub device_name: Option<String>,
     pub device_online: bool,
+    /// Cloud: its own Cloud machine (sessions) or Cloud alone (projects).
+    pub is_cloud: bool,
+    /// `owner/name`, when the project has a GitHub repository.
+    pub github_repo: Option<String>,
     pub git_detected: bool,
     pub created_at_ms: i64,
     /// Shared by every checkout of one repository, on any device.
@@ -627,6 +634,8 @@ impl From<&zc::ProjectView> for ProjectView {
             device_id: p.device_id.clone(),
             device_name: p.device_name.clone(),
             device_online: p.device_online,
+            is_cloud: p.is_cloud,
+            github_repo: p.github_repo.clone(),
             git_detected: p.git_detected,
             created_at_ms: p.created_at_ms,
             group_key: p.group_key.clone(),

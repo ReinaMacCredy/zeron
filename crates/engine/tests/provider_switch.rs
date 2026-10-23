@@ -190,6 +190,7 @@ fn run_payload(prompt: &str, message_id: &str, cwd: &str) -> SessionCommandPaylo
             computer_control: false,
             mcp: None,
             disabled_tools: Vec::new(),
+            env: Default::default(),
         },
         message_id: message_id.into(),
     }
@@ -882,7 +883,7 @@ async fn an_instance_whose_home_changes_or_goes_away_closes_its_chats_sessions()
 
     rig.core
         .workspace
-        .set_chat_harness_session(CHAT, "Old-sess", &rig.cwd);
+        .set_chat_harness_session(CHAT, "Old-sess", &rig.cwd, None);
     rig.client
         .call(
             zeron_rpc::methods::DELETE_PROVIDER_INSTANCE,

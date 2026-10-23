@@ -181,6 +181,7 @@ impl TitleGenerator {
             serde_json::to_string(prompt).ok()?
         );
         run_one_shot(
+            &self.inner.registry,
             target.harness.as_ref(),
             target.lease,
             OneShot {
@@ -276,6 +277,7 @@ pub(crate) struct OneShotReply {
 }
 
 pub(crate) async fn run_one_shot(
+    registry: &HarnessRegistry,
     harness: &dyn zeron_harness::Harness,
     execution_lease: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
     run: OneShot,
@@ -285,7 +287,7 @@ pub(crate) async fn run_one_shot(
     let scratch = tempfile::tempdir().map_err(|error| EngineError::Other(error.to_string()))?;
     let mut last_error = EngineError::Other("the model returned no text".into());
     for attempt in 0..=run.retry_delays_ms.len() {
-        let request = RunRequest {
+        let mut request = RunRequest {
             mcp: None,
             prompt: run.prompt.clone(),
             harness: Some(run.harness),
@@ -303,7 +305,13 @@ pub(crate) async fn run_one_shot(
             forked_at: None,
             computer_control: false,
             disabled_tools: Vec::new(),
+            env: Default::default(),
         };
+        // A Cloud device's credential broker supplies the CLI's login.
+        registry
+            .prepare_run(run.harness, &mut request)
+            .await
+            .map_err(EngineError::Other)?;
         match tokio::time::timeout(
             run.attempt_timeout,
             collect_text(
@@ -549,6 +557,7 @@ mod tests {
             forked_at: None,
             computer_control: false,
             disabled_tools: Vec::new(),
+            env: Default::default(),
         };
         let result = collect_text(&harness, request, None, zeron_harness::TITLE_INSTRUCTIONS).await;
         assert!(

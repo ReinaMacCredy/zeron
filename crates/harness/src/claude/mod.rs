@@ -376,6 +376,10 @@ impl ClaudeHarness {
             cmd.env_remove(var);
         }
         self.launch.apply(&mut cmd, Some("CLAUDE_CONFIG_DIR"));
+        // Host-resolved environment (a Cloud device's `ANTHROPIC_API_KEY`
+        // from the user's own key, `GH_TOKEN`, …). Never a Claude.ai
+        // subscription token: those stay inside the CLI's own login.
+        crate::apply_run_env(&mut cmd, &request.env);
         cmd.args(Self::launch_args(request, hook));
         cmd.args(&self.launch.args);
         // File checkpoints are only recorded for sessions that ran with this
@@ -1796,6 +1800,7 @@ mod tests {
             forked_at: None,
             computer_control: false,
             disabled_tools: Vec::new(),
+            env: Default::default(),
         };
         let line = |harness: &ClaudeHarness| {
             let cmd = harness.build_command(&exe, &request, None);
@@ -1866,6 +1871,7 @@ mod tests {
                 forked_at: None,
                 computer_control: false,
                 disabled_tools: Vec::new(),
+                env: Default::default(),
             };
             if let Some(choice) = choice {
                 request
@@ -1924,6 +1930,7 @@ mod tests {
                 forked_at: None,
                 computer_control: false,
                 disabled_tools: Vec::new(),
+                env: Default::default(),
             }
         };
         let settings = |request: &RunRequest| {
@@ -1991,6 +1998,7 @@ mod tests {
             forked_at: None,
             computer_control: false,
             disabled_tools: tools.iter().map(|t| t.to_string()).collect(),
+            env: Default::default(),
         };
         let disallowed = |request: &RunRequest| {
             let args = ClaudeHarness::launch_args(request, None);
@@ -2033,6 +2041,7 @@ mod tests {
                 forked_at: None,
                 computer_control: false,
                 disabled_tools: Vec::new(),
+                env: Default::default(),
             };
             harness
                 .build_command(&exe, &request, None)
@@ -2171,6 +2180,7 @@ mod tests {
             forked_at: None,
             computer_control: false,
             disabled_tools: Vec::new(),
+            env: Default::default(),
         };
         let args = |cmd: &Command| -> Vec<String> {
             cmd.as_std()
@@ -2254,6 +2264,7 @@ mod tests {
             forked_at: Some(at.into()),
             computer_control: false,
             disabled_tools: Vec::new(),
+            env: Default::default(),
         };
         let run = |request: &RunRequest| {
             let cmd = harness.build_command(&exe, request, None);

@@ -646,7 +646,7 @@ impl TaskCenter {
                             .child(approval.line()),
                     )
                     .children(approval.can_take_back().then(|| {
-                        widgets::text_action(theme, widgets::ActionTone::Outlined, "Take back")
+                        widgets::text_action(theme, widgets::ActionTone::Filled, "Take back")
                             .id("task-center-take-back")
                             .debug_selector(|| "task-center-take-back".into())
                             .role(gpui::Role::Button)

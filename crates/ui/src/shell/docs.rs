@@ -331,7 +331,7 @@ impl Shell {
             .actions()
             .enumerate()
             .map(|(ix, action)| {
-                widgets::action_button(theme, ActionTone::Outlined)
+                widgets::action_button(theme, ActionTone::Filled)
                     .id(("docs-action", ix))
                     .on_click(cx.listener(move |this, _, _, cx| this.run_docs_action(action, cx)))
                     .child(

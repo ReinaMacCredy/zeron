@@ -25,12 +25,16 @@ use portable_pty::{CommandBuilder, native_pty_system};
 mod screen;
 #[cfg(windows)]
 mod windows;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use zeron_doc::TERMINAL_OUTPUT_BATCH_MS;
 use zeron_proto::{
-    AgentTerminalOpened, TerminalEvent, TerminalInfo, TerminalScreen, TerminalSession,
+    AgentTerminalOpened, TerminalActivity, TerminalEvent, TerminalInfo, TerminalScreen,
+    TerminalSession,
 };
+
+mod program_status;
+use program_status::{ProgramTracker, SUPPORT_REPLY};
 
 use crate::{EngineError, new_id};
 
@@ -41,6 +45,9 @@ const EXITED_TTL: Duration = Duration::from_secs(30 * 60);
 const REAPER_INTERVAL: Duration = Duration::from_secs(60);
 
 struct LiveTerminal {
+    chat_id: Option<String>,
+    seen_at: Option<chrono::DateTime<chrono::Utc>>,
+    programs: ProgramTracker,
     // Keep the private action script alive until the shell exits or the tab is closed.
     initial_script: Option<tempfile::NamedTempFile>,
     #[cfg(all(test, windows))]
@@ -59,12 +66,21 @@ struct LiveTerminal {
     last_active_at: std::time::Instant,
     exited: bool,
     exit_code: Option<i32>,
-    chat_id: Option<String>,
     cwd: String,
     shell: String,
     screen: screen::Screen,
     selection: Option<String>,
+    /// Program-detection replies in the current window (rate-limited: see
+    /// `pump_output`).
+    support_replies: u32,
+    support_window: std::time::Instant,
 }
+
+/// Program-detection replies one terminal writes per [`SUPPORT_WINDOW`].
+/// Detection needs one per program launch; output that keeps asking faster
+/// is answered no further until the window turns over.
+const MAX_SUPPORT_REPLIES: u32 = 8;
+const SUPPORT_WINDOW: Duration = Duration::from_secs(10);
 
 impl LiveTerminal {
     /// Stamp a seq, append to the bounded replay window, and fan out to live
@@ -104,6 +120,48 @@ impl LiveTerminal {
 struct TerminalsInner {
     sessions: Mutex<HashMap<String, Arc<Mutex<LiveTerminal>>>>,
     agent_opened: broadcast::Sender<AgentTerminalOpened>,
+    activity_tx: watch::Sender<Vec<(String, TerminalActivity)>>,
+}
+
+impl TerminalsInner {
+    /// Called without a LiveTerminal lock; the graph's lock order is always
+    /// sessions → terminal. Only status transitions, never ordinary output,
+    /// rebuild this bounded projection.
+    fn publish_activity(&self) {
+        let mut chats = std::collections::BTreeMap::<String, TerminalActivity>::new();
+        for (id, session) in lock(&self.sessions).iter() {
+            let session = lock(session);
+            let Some(chat) = &session.chat_id else {
+                continue;
+            };
+            let Some((report, updated_at)) = session.programs.summary(session.seen_at) else {
+                continue;
+            };
+            let activity = TerminalActivity {
+                terminal_id: id.clone(),
+                report,
+                updated_at,
+            };
+            let replace = chats.get(chat).is_none_or(|old| {
+                activity.report.state.attention_rank() < old.report.state.attention_rank()
+                    || (activity.report.state.attention_rank() == old.report.state.attention_rank()
+                        && (activity.updated_at, &activity.terminal_id)
+                            > (old.updated_at, &old.terminal_id))
+            });
+            if replace {
+                chats.insert(chat.clone(), activity);
+            }
+        }
+        let snapshot: Vec<_> = chats.into_iter().collect();
+        self.activity_tx.send_if_modified(|current| {
+            if *current == snapshot {
+                false
+            } else {
+                *current = snapshot;
+                true
+            }
+        });
+    }
 }
 
 impl Drop for TerminalsInner {
@@ -165,14 +223,51 @@ fn selected_shell() -> String {
 impl Terminals {
     /// Requires a tokio runtime (spawns the exited-session reaper).
     pub fn new() -> Self {
+        let (activity_tx, _) = watch::channel(Vec::new());
         let terminals = Self {
             inner: Arc::new(TerminalsInner {
                 sessions: Mutex::new(HashMap::new()),
                 agent_opened: broadcast::channel(64).0,
+                activity_tx,
             }),
         };
         tokio::spawn(reaper_task(Arc::downgrade(&terminals.inner)));
         terminals
+    }
+
+    pub(crate) fn watch_activity(&self) -> watch::Receiver<Vec<(String, TerminalActivity)>> {
+        self.inner.activity_tx.subscribe()
+    }
+
+    /// Seen results no longer compete with new results in other program
+    /// records or terminals. Keep the records themselves for app inheritance.
+    pub(crate) fn refresh_seen(&self, chats: &[zeron_proto::Chat]) {
+        let mut changed = false;
+        for session in lock(&self.inner.sessions).values() {
+            let mut session = lock(session);
+            let seen = session.chat_id.as_deref().and_then(|id| {
+                chats
+                    .iter()
+                    .find(|chat| chat.id == id)
+                    .and_then(|chat| chat.last_seen_at)
+            });
+            if session.seen_at != seen {
+                session.seen_at = seen;
+                changed = true;
+            }
+        }
+        if changed {
+            self.inner.publish_activity();
+        }
+    }
+
+    /// Attach an engine-owned terminal to its chat after opening. Reports may
+    /// arrive before this call; publish the current projection immediately.
+    pub fn associate_chat(&self, terminal_id: &str, chat_id: &str) -> Result<(), EngineError> {
+        let session = self.session(terminal_id)?;
+        lock(&session).chat_id = Some(chat_id.to_owned());
+        self.inner.publish_activity();
+        Ok(())
     }
 
     /// Open a login shell in `cwd`. The PTY outlives every subscriber; it dies on
@@ -315,6 +410,9 @@ impl Terminals {
 
         let id = new_id();
         let session = Arc::new(Mutex::new(LiveTerminal {
+            chat_id: None,
+            seen_at: None,
+            programs: ProgramTracker::default(),
             initial_script,
             #[cfg(all(test, windows))]
             process_id: child.process_id().expect("ConPTY child has a process id"),
@@ -332,7 +430,6 @@ impl Terminals {
             last_active_at: std::time::Instant::now(),
             exited: false,
             exit_code: None,
-            chat_id: None,
             cwd: cwd.to_string(),
             shell: shell_name.clone(),
             screen: {
@@ -340,6 +437,8 @@ impl Terminals {
                 screen::Screen::new(size.cols, size.rows)
             },
             selection: None,
+            support_replies: 0,
+            support_window: std::time::Instant::now(),
         }));
         lock(&self.inner.sessions).insert(id.clone(), session.clone());
 
@@ -381,7 +480,12 @@ impl Terminals {
                 })?;
             tokio::spawn(async move { rx.await.map_err(std::io::Error::other)? })
         };
-        tokio::spawn(pump_output(Arc::downgrade(&session), raw_rx, wait));
+        tokio::spawn(pump_output(
+            Arc::downgrade(&session),
+            Arc::downgrade(&self.inner),
+            raw_rx,
+            wait,
+        ));
 
         if let Some(bootstrap) = bootstrap
             && let Err(err) = self.write_bytes(&id, bootstrap.as_bytes())
@@ -483,6 +587,7 @@ impl Terminals {
         let session = lock(&self.inner.sessions)
             .remove(terminal_id)
             .ok_or_else(|| EngineError::Other("Terminal not found".into()))?;
+        self.inner.publish_activity();
         if dispose(&session, true) {
             Ok(())
         } else {
@@ -490,12 +595,6 @@ impl Terminals {
                 "Windows terminal reader did not finish cleanup".into(),
             ))
         }
-    }
-
-    pub fn assign_chat(&self, terminal_id: &str, chat_id: &str) -> Result<(), EngineError> {
-        let session = self.session(terminal_id)?;
-        lock(&session).chat_id = Some(chat_id.to_string());
-        Ok(())
     }
 
     pub fn announce_agent_open(&self, chat_id: &str, terminal: TerminalSession) {
@@ -608,6 +707,7 @@ impl Terminals {
     /// Engine shutdown: kill every live shell.
     pub fn shutdown(&self) {
         let sessions: Vec<_> = lock(&self.inner.sessions).drain().map(|(_, s)| s).collect();
+        self.inner.publish_activity();
         for session in sessions {
             dispose(&session, true);
         }
@@ -673,6 +773,7 @@ fn read_pty(mut reader: Box<dyn Read + Send>, tx: mpsc::UnboundedSender<Vec<u8>>
 /// Holds only a weak session handle so a closed terminal tears this task down.
 async fn pump_output(
     session: Weak<Mutex<LiveTerminal>>,
+    terminals: Weak<TerminalsInner>,
     mut raw_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     mut wait: tokio::task::JoinHandle<Result<portable_pty::ExitStatus, std::io::Error>>,
 ) {
@@ -683,11 +784,35 @@ async fn pump_output(
         };
         let mut session = lock(&session);
         session.screen.feed(&buffer);
+        let update = session.programs.feed(&buffer);
+        // Answer from the PTY owner, not a viewport: detection must work while
+        // detached and must not be replayed when another viewer attaches.
+        // At most one per batch and a few per window: the write goes to the
+        // PTY's input, which a program that never reads stdin fills, and this
+        // runs under the session lock.
+        if update.queries > 0 && session.support_window.elapsed() >= SUPPORT_WINDOW {
+            session.support_window = std::time::Instant::now();
+            session.support_replies = 0;
+        }
+        if update.queries > 0 && session.support_replies < MAX_SUPPORT_REPLIES {
+            session.support_replies += 1;
+            if let Some(writer) = session.writer.as_mut()
+                && let Err(error) = writer.write_all(SUPPORT_REPLY).and_then(|_| writer.flush())
+            {
+                tracing::debug!(%error, "program status detection reply failed");
+            }
+        }
         let seq = session.next_seq();
         session.emit(TerminalEvent::Data {
             seq,
             data: BASE64.encode(&buffer),
         });
+        drop(session);
+        if update.changed
+            && let Some(terminals) = terminals.upgrade()
+        {
+            terminals.publish_activity();
+        }
         true
     };
 
@@ -757,12 +882,17 @@ async fn pump_output(
     }
     if let Some(session) = session.upgrade() {
         let mut session = lock(&session);
+        session.programs.end_command();
         let seq = session.next_seq();
         session.emit(TerminalEvent::Exit {
             seq,
             exit_code: exit_code.unwrap_or(-1),
             signal: None,
         });
+        drop(session);
+        if let Some(terminals) = terminals.upgrade() {
+            terminals.publish_activity();
+        }
     }
 }
 
@@ -781,6 +911,8 @@ async fn reaper_task(inner: Weak<TerminalsInner>) {
             let session = lock(session);
             !(session.exited && session.last_active_at.elapsed() > EXITED_TTL)
         });
+        drop(sessions);
+        inner.publish_activity();
     }
 }
 
@@ -1367,11 +1499,11 @@ mod agent_tests {
         let session = terminals
             .open_with_shell(root.path().to_str().unwrap(), 60, 10, Some("/bin/sh"))
             .unwrap();
-        terminals.assign_chat(&session.id, "chat-a").unwrap();
+        terminals.associate_chat(&session.id, "chat-a").unwrap();
         let other = terminals
             .open_with_shell(root.path().to_str().unwrap(), 60, 10, Some("/bin/sh"))
             .unwrap();
-        terminals.assign_chat(&other.id, "chat-b").unwrap();
+        terminals.associate_chat(&other.id, "chat-b").unwrap();
 
         let listed = terminals.list_for_chat("chat-a");
         assert_eq!(listed.len(), 1);

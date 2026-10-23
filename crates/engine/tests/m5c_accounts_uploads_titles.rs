@@ -984,6 +984,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         forked_at: None,
         computer_control: false,
         disabled_tools: Vec::new(),
+        env: Default::default(),
     };
     core.sessions
         .dispatch(chat_id, HarnessId::Mock, request, None)
@@ -1035,6 +1036,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         forked_at: None,
         computer_control: false,
         disabled_tools: Vec::new(),
+        env: Default::default(),
     };
     core.sessions
         .dispatch(chat_id, HarnessId::Mock, request, None)

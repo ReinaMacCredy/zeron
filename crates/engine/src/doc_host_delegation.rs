@@ -1809,6 +1809,8 @@ mod tests {
             running_subagents: 0,
             compact_plan: None,
             classifying: None,
+            last_turn_outcome: Default::default(),
+            terminal_activity: Default::default(),
         }
     }
 

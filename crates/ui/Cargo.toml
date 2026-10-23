@@ -39,6 +39,10 @@ name = "appshots-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "program-status-fixture"
+required-features = ["appshots-fixture", "resource-profile"]
+
+[[example]]
 name = "tool-images-fixture"
 required-features = ["appshots-fixture"]
 
@@ -89,6 +93,7 @@ zeron-harness.workspace = true
 zeron-rpc.workspace = true
 zeron-docs.workspace = true
 zeron-update.workspace = true
+zeron-notify.workspace = true
 zeron-syntax.workspace = true
 zeron-theme.workspace = true
 zeron-visual.workspace = true

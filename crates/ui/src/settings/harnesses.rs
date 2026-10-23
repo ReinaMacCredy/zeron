@@ -99,6 +99,15 @@ fn install_hint(harness: HarnessId, enabled: bool, can_install: bool) -> String 
     }
 }
 
+/// "1 account", "3 accounts".
+fn account_count_label(count: usize) -> String {
+    if count == 1 {
+        "1 account".into()
+    } else {
+        format!("{count} accounts")
+    }
+}
+
 fn install_label(name: &str) -> String {
     format!("Installing {name}…")
 }
@@ -190,14 +199,26 @@ pub struct HarnessesPage {
     install_task: Option<Task<()>>,
 
     expanded_harness: Option<HarnessId>,
+    /// A transcript's "Log in": open this provider and start its sign-in
+    /// once the rows land.
+    pending_sign_in: Option<HarnessId>,
     /// The expanded provider's Accounts section — one page, retargeted as
     /// providers expand, so every provider shares the same sign-in flow.
     accounts_page: Option<Entity<AccountsPage>>,
+    /// Repaints the rows' account counts as the open Accounts section adds
+    /// or forgets one.
+    _observe_accounts: Option<gpui::Subscription>,
     update_task: Option<Task<()>>,
     update_action_task: Option<Task<()>>,
     /// "Check now" is running: the button says so, since rows no longer
     /// show "Checking…" while a check is in flight.
     checking_updates: bool,
+    /// Just the rows, in a scroll of their own: first-run setup's agents
+    /// step shows this device's providers exactly as Settings does.
+    embedded: bool,
+    /// The device switcher moved on and its rows are on the way: the old
+    /// rows stay, dimmed and inert, so the block never blanks out.
+    switching: bool,
     instances: Loadable<Vec<ProviderInstance>>,
     instances_task: Option<Task<()>>,
     _instances_observe: Subscription,
@@ -226,10 +247,14 @@ impl HarnessesPage {
             install_task: None,
 
             expanded_harness: None,
+            pending_sign_in: None,
             accounts_page: None,
+            _observe_accounts: None,
             update_task: None,
             update_action_task: None,
             checking_updates: false,
+            embedded: false,
+            switching: false,
             instances: Loadable::Idle,
             instances_task: None,
             _instances_observe: cx.observe_global::<provider_instances::ProviderInstancesChanged>(
@@ -272,6 +297,92 @@ impl HarnessesPage {
             }
         }
         page
+    }
+
+    /// This device's rows alone, for a host that brings its own heading.
+    pub fn new_embedded(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let mut page = Self::new(state, cx);
+        page.embedded = true;
+        page
+    }
+
+    pub(crate) fn harnesses(&self) -> &Loadable<Vec<HarnessDescriptor>> {
+        &self.harnesses
+    }
+
+    /// The device the rows describe; `None` is this one.
+    pub(crate) fn target_device(&self) -> Option<&str> {
+        self.target_device.as_deref()
+    }
+
+    /// Re-probe the CLIs, keeping painted rows until the answer lands.
+    pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
+        let painted = matches!(self.harnesses, Loadable::Ready(_))
+            .then(|| std::mem::replace(&mut self.harnesses, Loadable::Idle));
+        let painted_updates = matches!(self.updates, Loadable::Ready(_))
+            .then(|| std::mem::replace(&mut self.updates, Loadable::Idle));
+        self.load(cx);
+        if let Some(painted) = painted {
+            self.harnesses = painted;
+        }
+        if let Some(painted) = painted_updates.filter(|_| matches!(self.updates, Loadable::Loading))
+        {
+            self.updates = painted;
+        }
+        cx.notify();
+    }
+
+    /// The refresh button: look for newly installed CLIs and check every
+    /// agent for updates, the rows staying painted meanwhile.
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.reload(cx);
+        self.check_updates(cx);
+    }
+
+    /// The page header's controls: refresh, then (when `devices`) the device
+    /// switcher — Cloud among the devices manages the accounts every Cloud
+    /// machine uses. First-run setup shows the same controls over its rows.
+    pub(crate) fn render_toolbar(
+        &mut self,
+        theme: &Theme,
+        devices: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let busy =
+            self.checking_updates || self.switching || matches!(self.harnesses, Loadable::Loading);
+        let refresh = div()
+            .id("harnesses-refresh")
+            .flex_none()
+            .size(px(28.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .tab_index(0)
+            .role(gpui::Role::Button)
+            .aria_label("Check for agents and updates")
+            .focus_visible(|s| s.border_2().border_color(theme.accent))
+            .cursor_pointer()
+            .hover(|style| style.bg(crate::theme::ink(0.05)))
+            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx)))
+            .child(if busy {
+                crate::loaders::ring_spinner("harnesses-refresh-spinner", 12.0, theme.text_muted)
+                    .into_any_element()
+            } else {
+                crate::icons::icon(crate::icons::REFRESH)
+                    .size(px(16.0))
+                    .text_color(theme.text_muted)
+                    .into_any_element()
+            });
+        let switcher = devices.then(|| self.render_device_switcher(theme, cx));
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(6.0))
+            .child(refresh)
+            .children(switcher)
+            .into_any_element()
     }
 
     fn device_name(&self, cx: &Context<Self>) -> SharedString {
@@ -453,7 +564,7 @@ impl HarnessesPage {
             None if matches!(instance.config, InstanceConfig::Acp { .. }) => {
                 let instance_id = id.clone();
                 Some(
-                    widgets::text_action(theme, widgets::ActionTone::Outlined, "Sign in")
+                    widgets::text_action(theme, widgets::ActionTone::Filled, "Sign in")
                         .id(SharedString::from(format!(
                             "provider-instance-sign-in-{id}"
                         )))
@@ -589,10 +700,12 @@ impl HarnessesPage {
     }
 
     fn toggle_agent_details(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        // Cloud's harnesses always open: that's where their accounts are added.
+        let cloud = self.targets_cloud();
         if !self.harnesses.ready().is_some_and(|items| {
             items
                 .iter()
-                .any(|item| item.id == harness && descriptor_enabled(item))
+                .any(|item| item.id == harness && (cloud || descriptor_enabled(item)))
         }) {
             return;
         }
@@ -606,12 +719,45 @@ impl HarnessesPage {
                 } else {
                     let state = self.state.clone();
                     let target = self.target_device.clone();
-                    self.accounts_page =
-                        Some(cx.new(|cx| AccountsPage::new_embedded(state, target, harness, cx)));
+                    let page = cx.new(|cx| AccountsPage::new_embedded(state, target, harness, cx));
+                    self._observe_accounts = Some(cx.observe(&page, |_, _, cx| cx.notify()));
+                    self.accounts_page = Some(page);
                 }
             }
         }
         cx.notify();
+    }
+
+    /// A failed run's "Log in": show `target`'s providers with `harness`
+    /// open, and start its first sign-in option.
+    pub(crate) fn sign_in(
+        &mut self,
+        target: Option<String>,
+        harness: HarnessId,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_sign_in = Some(harness);
+        self.set_target_device(target, cx);
+        self.run_pending_sign_in(cx);
+    }
+
+    fn run_pending_sign_in(&mut self, cx: &mut Context<Self>) {
+        let Some(harness) = self.pending_sign_in else {
+            return;
+        };
+        if self.switching || !matches!(self.harnesses, Loadable::Ready(_)) {
+            return;
+        }
+        self.pending_sign_in = None;
+        if self.expanded_harness != Some(harness) {
+            self.toggle_agent_details(harness, cx);
+        }
+        if self.expanded_harness != Some(harness) {
+            return;
+        }
+        if let Some(accounts) = &self.accounts_page {
+            accounts.update(cx, |page, cx| page.start_first_login(harness, cx));
+        }
     }
 
     fn render_agent_details(
@@ -788,11 +934,16 @@ impl HarnessesPage {
         self.instance_write_task = None;
         self.instance_accounts.clear();
         self.instances = Loadable::Idle;
-        self.harnesses = Loadable::Idle;
+        let painted = matches!(self.harnesses, Loadable::Ready(_))
+            .then(|| std::mem::replace(&mut self.harnesses, Loadable::Idle));
         self.updates = Loadable::Idle;
         self.update_task = None;
         self.update_action_task = None;
         self.load(cx);
+        if let Some(painted) = painted.filter(|_| matches!(self.harnesses, Loadable::Loading)) {
+            self.harnesses = painted;
+            self.switching = true;
+        }
         cx.notify();
     }
 
@@ -887,9 +1038,34 @@ impl HarnessesPage {
                     .ok();
             }));
         }
+        // Cloud's rows say how many accounts each provider has: the same
+        // list the Accounts section shows, shared through its cache.
+        let accounts_params = self
+            .targets_cloud()
+            .then(|| self.with_target(serde_json::json!({ "forceUsage": false })));
+        let accounts_key = self.target_device.clone();
         self.load_task = Some(cx.spawn(async move |this, cx| {
+            if let Some(params) = accounts_params
+                && let Ok(snapshot) = engine
+                    .client()
+                    .call(methods::LIST_AGENT_ACCOUNTS, params)
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|value| {
+                        serde_json::from_value::<zeron_proto::AgentAccountsSnapshot>(value)
+                            .map_err(|error| error.to_string())
+                    })
+            {
+                this.update(cx, |_, cx| {
+                    cx.default_global::<accounts::AccountsSnapshotCache>()
+                        .0
+                        .insert(accounts_key, snapshot);
+                })
+                .ok();
+            }
             let result = engine.client().call(methods::LIST_HARNESSES, params).await;
             this.update(cx, |page, cx| {
+                page.switching = false;
                 page.harnesses = match result {
                     Ok(value) => match serde_json::from_value::<Vec<HarnessDescriptor>>(value) {
                         Ok(list) => Loadable::Ready(list),
@@ -901,6 +1077,7 @@ impl HarnessesPage {
                     let list = list.clone();
                     wizard.update(cx, |wizard, cx| wizard.set_harnesses(list, cx));
                 }
+                page.run_pending_sign_in(cx);
                 cx.notify();
             })
             .ok();
@@ -1200,14 +1377,24 @@ impl HarnessesPage {
         }));
     }
 
+    /// Whether the page shows Cloud's providers: the accounts every Cloud
+    /// machine uses, kept by the vault rather than installed on a device.
+    fn targets_cloud(&self) -> bool {
+        self.target_device.as_deref() == Some(zeron_proto::CLOUD_ACCOUNTS_DEVICE)
+    }
+
     /// The page-header device switcher (the Accounts pattern): platform glyph
     /// · name · presence dot · sort glyph, opening a dropdown of every
-    /// registered device.
+    /// registered device, then Cloud as one entry (never its machines).
     fn render_device_switcher(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         use crate::icons::{self, icon};
-        let (mut devices, local_id) = {
+        let (mut devices, local_id, cloud) = {
             let s = self.state.read(cx);
-            (s.devices.clone(), s.local_device_id.clone())
+            (
+                s.provider_devices().cloned().collect::<Vec<_>>(),
+                s.local_device_id.clone(),
+                s.cloud_enabled(),
+            )
         };
         devices.sort_by(|a, b| {
             a.created_at
@@ -1215,17 +1402,13 @@ impl HarnessesPage {
                 .then_with(|| a.id.cmp(&b.id))
         });
         let effective = self.target_device.clone().or_else(|| local_id.clone());
-        let platform_glyph = |platform: &str| match platform {
-            "macos" | "darwin" => icons::LAPTOP,
-            "ios" | "android" => icons::SMARTPHONE,
-            _ => icons::MONITOR,
-        };
+        let now = chrono::Utc::now();
         // Local device = no passthrough (calls stay direct).
         let mut targets: Vec<Option<String>> = Vec::new();
         let mut options = Vec::new();
         for device in &devices {
             let is_local = local_id.as_deref() == Some(device.id.as_str());
-            let glyph = platform_glyph(&device.platform);
+            let glyph = crate::cloud::device_glyph(&device.id, &device.platform);
             let muted = theme.text_muted;
             let option = widgets::SelectOption::new(device.name.clone()).leading(move || {
                 icon(glyph)
@@ -1234,16 +1417,34 @@ impl HarnessesPage {
                     .text_color(muted)
                     .into_any_element()
             });
+            // A sleeping Cloud device says so; it wakes when asked.
+            let presence = self.state.read(cx).device_presence(&device.id, now);
             options.push(if is_local {
                 option.detail("You")
+            } else if matches!(
+                presence,
+                crate::cloud::Presence::Asleep | crate::cloud::Presence::Waking
+            ) {
+                option.detail(presence.label())
             } else {
                 option
             });
             targets.push((!is_local).then(|| device.id.clone()));
         }
-        let selected = match devices
+        if cloud || self.targets_cloud() {
+            let muted = theme.text_muted;
+            options.push(widgets::SelectOption::new("Cloud").leading(move || {
+                icon(icons::CLOUD)
+                    .size(px(16.0))
+                    .flex_none()
+                    .text_color(muted)
+                    .into_any_element()
+            }));
+            targets.push(Some(zeron_proto::CLOUD_ACCOUNTS_DEVICE.to_string()));
+        }
+        let selected = match targets
             .iter()
-            .position(|d| Some(d.id.as_str()) == effective.as_deref())
+            .position(|target| target.as_deref().or(local_id.as_deref()) == effective.as_deref())
         {
             Some(ix) => ix,
             // Not registered (yet): keep the current target reachable.
@@ -1284,6 +1485,9 @@ impl HarnessesPage {
             return Vec::new();
         };
         let descriptors = visible_harnesses(list);
+        // Cloud's providers are always on and installed on every machine:
+        // only their accounts are managed here.
+        let cloud = self.targets_cloud();
         let enabled_count = descriptors.iter().filter(|d| descriptor_enabled(d)).count();
         let instances = self.instances.ready().cloned().unwrap_or_default();
         let listed = |instance: &ProviderInstance| {
@@ -1302,10 +1506,14 @@ impl HarnessesPage {
             .map(|(ix, descriptor)| {
                 let harness = descriptor.id;
                 let installed = descriptor.installed;
-                let enabled = match self.pending_toggle {
-                    Some((pending, on)) if pending == harness => on,
-                    _ => descriptor_enabled(&descriptor),
-                };
+                // On Cloud, "enabled" means it has an account; every row
+                // still opens to add one.
+                let has_account = descriptor_enabled(&descriptor);
+                let enabled = cloud
+                    || match self.pending_toggle {
+                        Some((pending, on)) if pending == harness => on,
+                        _ => has_account,
+                    };
                 // The one enabled harness left can't be switched off — the
                 // composer needs something to run — but only when it could
                 // actually run: an uninstalled last harness stays togglable
@@ -1335,12 +1543,10 @@ impl HarnessesPage {
                             .flex()
                             .items_center()
                             .gap(px(6.0))
-                            .child(crate::loaders::mini_mono_spinner(
+                            .child(crate::loaders::ring_spinner(
                                 format!("harness-install-spinner-{harness:?}"),
-                                1.5,
+                                12.0,
                                 theme.text_muted,
-                                cx.entity_id(),
-                                cx,
                             ))
                             .child(SharedString::from(install_label(&descriptor.name)))
                             .into_any_element(),
@@ -1392,6 +1598,23 @@ impl HarnessesPage {
                         );
                     } else if !text.is_empty() {
                         meta.push(div().text_color(color).child(text).into_any_element());
+                    }
+                }
+                if cloud {
+                    let count = cx
+                        .try_global::<accounts::AccountsSnapshotCache>()
+                        .and_then(|cache| cache.0.get(&self.target_device))
+                        .map(|snapshot| accounts::provider_accounts(snapshot, harness).len());
+                    let label = match count {
+                        Some(0) => Some((theme.text_muted.opacity(0.65), "No account".to_string())),
+                        Some(count) => Some((theme.text_muted, account_count_label(count))),
+                        None if !has_account => {
+                            Some((theme.text_muted.opacity(0.65), "No account".to_string()))
+                        }
+                        None => None,
+                    };
+                    if let Some((color, label)) = label {
+                        meta.push(div().text_color(color).child(label).into_any_element());
                     }
                 }
                 // widgets::row_tile with the brand tint honored (the Claude
@@ -1523,7 +1746,8 @@ impl HarnessesPage {
                             // Install / Cancel sit with the row's other
                             // action, before the caret, so carets line up.
                             .when(
-                                offers_install(harness, installed, descriptor.can_install)
+                                !cloud
+                                    && offers_install(harness, installed, descriptor.can_install)
                                     && self.installing != Some(harness),
                                 |el| {
                                     el.child(
@@ -1574,45 +1798,48 @@ impl HarnessesPage {
                                 }),
                             ),
                     )
-                    .child(
-                        widgets::toggle_switch(
-                            &theme,
-                            enabled,
-                            format!("harness-switch-{harness:?}"),
+                    // Cloud's providers are always on: no switch.
+                    .when(!cloud, |el| {
+                        el.child(
+                            widgets::toggle_switch(
+                                &theme,
+                                enabled,
+                                format!("harness-switch-{harness:?}"),
+                            )
+                            .id(("harness-toggle", ix))
+                            .when(!interactive && !enabled, |el| el.opacity(0.55))
+                            .when(interactive, |el| {
+                                el.cursor_pointer()
+                                    .tab_index(0)
+                                    .role(gpui::Role::Switch)
+                                    .aria_label(descriptor.name.clone())
+                                    .aria_toggled(if enabled {
+                                        gpui::Toggled::True
+                                    } else {
+                                        gpui::Toggled::False
+                                    })
+                                    .focus_visible(|s| {
+                                        s.border_2().border_color(theme.accent).opacity(1.0)
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.toggle(harness, !enabled, cx);
+                                    }))
+                                    .on_key_down(cx.listener(
+                                        move |this, event: &gpui::KeyDownEvent, _, cx| {
+                                            if !event.is_held
+                                                && matches!(
+                                                    event.keystroke.key.as_str(),
+                                                    "enter" | "space"
+                                                )
+                                            {
+                                                this.toggle(harness, !enabled, cx);
+                                                cx.stop_propagation();
+                                            }
+                                        },
+                                    ))
+                            }),
                         )
-                        .id(("harness-toggle", ix))
-                        .when(!interactive && !enabled, |el| el.opacity(0.55))
-                        .when(interactive, |el| {
-                            el.cursor_pointer()
-                                .tab_index(0)
-                                .role(gpui::Role::Switch)
-                                .aria_label(descriptor.name.clone())
-                                .aria_toggled(if enabled {
-                                    gpui::Toggled::True
-                                } else {
-                                    gpui::Toggled::False
-                                })
-                                .focus_visible(|s| {
-                                    s.border_2().border_color(theme.accent).opacity(1.0)
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.toggle(harness, !enabled, cx);
-                                }))
-                                .on_key_down(cx.listener(
-                                    move |this, event: &gpui::KeyDownEvent, _, cx| {
-                                        if !event.is_held
-                                            && matches!(
-                                                event.keystroke.key.as_str(),
-                                                "enter" | "space"
-                                            )
-                                        {
-                                            this.toggle(harness, !enabled, cx);
-                                            cx.stop_propagation();
-                                        }
-                                    },
-                                ))
-                        }),
-                    );
+                    });
                 let instance_rows: Vec<AnyElement> = instances
                     .iter()
                     .filter(|instance| instance.driver == harness && listed(instance))
@@ -1652,7 +1879,7 @@ impl popover::ScrollRailHost for HarnessesPage {
 impl Render for HarnessesPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
-        let supports_updates = self.supports_updates(cx);
+        let embedded = self.embedded;
         if self.scroll_end_knob
             && self.harnesses.ready().is_some()
             && self.instances.ready().is_some()
@@ -1660,7 +1887,7 @@ impl Render for HarnessesPage {
             self.scroll_end_knob = false;
             self.scroll.scroll.scroll_to_bottom();
         }
-        let add_provider = widgets::action_button(&theme, widgets::ActionTone::Outlined)
+        let add_provider = widgets::action_button(&theme, widgets::ActionTone::Filled)
             .id("add-provider")
             .flex_none()
             .tab_index(0)
@@ -1684,13 +1911,14 @@ impl Render for HarnessesPage {
 
         let body: gpui::AnyElement = match &self.harnesses {
             Loadable::Idle | Loadable::Loading => widgets::section_card(&theme)
-                .p(px(16.0))
-                .child(popover::skeleton_rows(
-                    "harnesses-skeleton",
-                    &theme,
-                    4,
-                    cx.entity_id(),
-                    cx,
+                .when(embedded, |card| card.mt_0())
+                .h(px(240.0))
+                .items_center()
+                .justify_center()
+                .child(crate::loaders::ring_spinner(
+                    "harnesses-loading",
+                    20.0,
+                    theme.text_muted,
                 ))
                 .into_any_element(),
             Loadable::Error(message) => {
@@ -1715,11 +1943,41 @@ impl Render for HarnessesPage {
             Loadable::Ready(_) => {
                 let rows = self.rows(cx);
                 widgets::section_card(&theme)
+                    .when(embedded, |card| card.mt_0())
                     .children(rows)
+                    .when(self.switching, |card| {
+                        card.relative()
+                            .opacity(0.5)
+                            .child(div().absolute().inset_0().occlude())
+                    })
                     .into_any_element()
             }
         };
         crate::toast::take_error(&mut self.error, cx);
+        if embedded {
+            let scrollbar = popover::rail(self, "harnesses-embedded-scrollbar", &theme, cx);
+            return div()
+                .id("harnesses-embedded-host")
+                .relative()
+                .size_full()
+                .on_hover(cx.listener(Self::on_scroll_hovered))
+                .child(
+                    crate::edge_fade::edge_faded(
+                        16.0,
+                        true,
+                        true,
+                        div()
+                            .id("harnesses-embedded")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll.scroll)
+                            .child(body),
+                    )
+                    .fade_overflow_y(&self.scroll.scroll),
+                )
+                .children(scrollbar)
+                .into_any_element();
+        }
         let update_error = match &self.updates {
             Loadable::Error(message) => Some(
                 div()
@@ -1741,29 +1999,9 @@ impl Render for HarnessesPage {
             ),
             _ => None,
         };
+        let refresh = self.render_toolbar(&theme, false, cx);
         let switcher = self.render_device_switcher(&theme, cx);
         let limits = self.render_limit_resume_card(&theme, cx);
-
-        let can_control = self.can_control_updates(cx);
-        let check = div()
-            .id("check-harness-updates")
-            .flex_none()
-            .px(px(9.0))
-            .py(px(5.0))
-            .rounded(px(6.0))
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(theme.text_muted)
-            .cursor_pointer()
-            .hover(|style| style.bg(crate::theme::ink(0.05)))
-            .opacity(if can_control { 1.0 } else { 0.4 })
-            .when(can_control, |button| {
-                button.on_click(cx.listener(|this, _, _, cx| this.check_updates(cx)))
-            })
-            .child(if self.checking_updates {
-                "Checking…"
-            } else {
-                "Check now"
-            });
 
         let scrollbar = popover::rail(self, "harnesses-page-scrollbar", &theme, cx);
 
@@ -1796,7 +2034,7 @@ impl Render for HarnessesPage {
                                                 .flex()
                                                 .items_center()
                                                 .gap(px(6.0))
-                                                .when(supports_updates, |el| el.child(check))
+                                                .child(refresh)
                                                 .child(add_provider)
                                                 .child(switcher),
                                         ),
@@ -1811,11 +2049,58 @@ impl Render for HarnessesPage {
             )
             .children(scrollbar)
             .children(wizard)
+            .into_any_element()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    /// A failed run's "Log in" waits for the rows, then opens that agent's
+    /// Accounts section (where its sign-in starts).
+    #[gpui::test]
+    fn sign_in_opens_the_agent_once_its_rows_land(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            crate::settings::init(Default::default(), dir.path(), cx);
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            super::HarnessesPage::new(state, cx)
+        });
+        window
+            .update(cx, |page, _, cx| {
+                page.harnesses = super::Loadable::Loading;
+                page.sign_in(None, zeron_proto::HarnessId::Codex, cx);
+                assert_eq!(page.expanded_harness, None, "nothing to open yet");
+                page.harnesses =
+                    super::Loadable::Ready(vec![zeron_engine::registry::HarnessDescriptor {
+                        id: zeron_proto::HarnessId::Codex,
+                        name: "Codex".into(),
+                        supports_steering: false,
+                        steering_mode: zeron_proto::SteeringMode::TurnBoundary,
+                        reasoning_levels: Vec::new(),
+                        installed: true,
+                        can_install: false,
+                        enabled: Some(true),
+                    }]);
+                page.run_pending_sign_in(cx);
+                assert_eq!(page.expanded_harness, Some(zeron_proto::HarnessId::Codex));
+                assert_eq!(
+                    page.accounts_page
+                        .as_ref()
+                        .unwrap()
+                        .read(cx)
+                        .embedded_harness(),
+                    Some(zeron_proto::HarnessId::Codex)
+                );
+                assert_eq!(page.pending_sign_in, None, "started once");
+            })
+            .unwrap();
+    }
+
     #[gpui::test]
     fn expanded_agent_preferences_render_inside_the_agent_row(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext;
@@ -1899,6 +2184,88 @@ mod tests {
         cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
             .unwrap();
     }
+
+    /// Providers opened on Cloud: its two harnesses, no toggles or installs,
+    /// and the expanded card's accounts follow the Cloud target.
+    #[gpui::test]
+    fn cloud_target_shows_accounts_without_device_controls(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            crate::settings::init(Default::default(), dir.path(), cx);
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = crate::state::AppState::new();
+                state.cloud_status = Some(zeron_proto::CloudStatus {
+                    state: zeron_proto::CloudState::Ready,
+                    device_id: Some("cloud-1".into()),
+                    available: true,
+                    ..Default::default()
+                });
+                state
+            });
+            let mut page = super::HarnessesPage::new(state, cx);
+            page.set_target_device(Some(zeron_proto::CLOUD_ACCOUNTS_DEVICE.into()), cx);
+            page
+        });
+        let descriptor = |id, name: &str| zeron_engine::registry::HarnessDescriptor {
+            id,
+            name: name.into(),
+            supports_steering: false,
+            steering_mode: zeron_proto::SteeringMode::TurnBoundary,
+            reasoning_levels: Vec::new(),
+            installed: true,
+            can_install: true,
+            enabled: Some(true),
+        };
+        window
+            .update(cx, |page, _, cx| {
+                assert!(page.targets_cloud());
+                assert!(!page.supports_updates(cx), "Cloud has no harness updates");
+                page.harnesses = super::Loadable::Ready(vec![
+                    descriptor(zeron_proto::HarnessId::ClaudeCode, "Claude Code"),
+                    descriptor(zeron_proto::HarnessId::Codex, "Codex"),
+                ]);
+                page.toggle_agent_details(zeron_proto::HarnessId::Codex, cx);
+                assert!(page.accounts_page.is_some());
+                // Rows count each provider's accounts from the shared list
+                // (drawn below: "1 account" for Claude, "No account" for Codex).
+                let account: zeron_proto::AgentAccount =
+                    serde_json::from_value(serde_json::json!({
+                        "id": "a", "harness": "claude-code", "email": "a@example.com",
+                        "planLabel": null, "active": true
+                    }))
+                    .unwrap();
+                cx.default_global::<crate::settings::accounts::AccountsSnapshotCache>()
+                    .0
+                    .insert(
+                        Some(zeron_proto::CLOUD_ACCOUNTS_DEVICE.into()),
+                        zeron_proto::AgentAccountsSnapshot {
+                            accounts: vec![account],
+                            warnings: Vec::new(),
+                        },
+                    );
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        window
+            .update(cx, |page, _, cx| {
+                page.set_target_device(None, cx);
+                assert!(!page.targets_cloud());
+            })
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn account_counts_read_naturally() {
+    assert_eq!(account_count_label(1), "1 account");
+    assert_eq!(account_count_label(3), "3 accounts");
 }
 
 #[cfg(test)]

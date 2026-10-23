@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# macOS packaging: build the release binary for the host arch and produce
+# macOS packaging: build the release binaries for the host arch and produce
 #   target/package/zeron-<version>-macos-<arch>.dmg          (user download)
 #   target/package/zeron-<version>-macos-<arch>-app.tar.gz   (auto-updater)
 # containing Zeron.app, signed with CODESIGN_IDENTITY, else the first Developer
@@ -32,6 +32,9 @@ DRIVER="$APP/Contents/Resources/cua-driver/cua-driver"
 "$ROOT/scripts/build-cua-driver.sh" "$DRIVER" >/dev/null
 mkdir -p "$APP/Contents/Resources/licenses/cua-driver"
 cp "$ROOT/vendor/cua-driver/LICENSE.md" "$ROOT/vendor/cua-driver/NOTICE.md" "$APP/Contents/Resources/licenses/cua-driver/"
+# The background engine the app starts (sessions keep running with the app
+# closed); its own process, named for Activity Monitor.
+install -m 755 "$ROOT/target/release/zeron-engine" "$APP/Contents/MacOS/Zeron Engine"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
@@ -69,9 +72,10 @@ else
   SIGN=(--sign -)
   echo "warning: no signing identity found; ad-hoc builds lose their macOS privacy grants on every rebuild" >&2
 fi
-# No --deep (Apple deprecated it): the nested driver is signed first, then
-# the bundle seals it.
+# No --deep (Apple deprecated it): the nested driver and engine are signed
+# first, then the bundle seals them.
 codesign --force "${SIGN[@]}" --identifier sh.zeron.cua-driver "$DRIVER"
+codesign --force "${SIGN[@]}" --entitlements "$ROOT/dist/macos/Zeron.entitlements" --identifier sh.zeron.app.engine "$APP/Contents/MacOS/Zeron Engine"
 codesign --force "${SIGN[@]}" --entitlements "$ROOT/dist/macos/Zeron.entitlements" "$APP"
 
 # notarize <path>: submit to Apple and wait for the verdict. A rejection may

@@ -38,6 +38,7 @@ async fn live_run(cancel: bool) {
         forked_at: None,
         computer_control: false,
         disabled_tools: Vec::new(),
+        env: Default::default(),
     };
     let mut stream = zeron_harness::PiHarness::new()
         .run(request, controls)

@@ -349,6 +349,7 @@ fn queue_run_on(rig: &Rig, chat_id: &str, prompt: &str, cwd: &str, harness: Opti
                     computer_control: false,
                     mcp: None,
                     disabled_tools: Vec::new(),
+                    env: Default::default(),
                 },
                 message_id: format!("msg-{chat_id}-{prompt}"),
             },

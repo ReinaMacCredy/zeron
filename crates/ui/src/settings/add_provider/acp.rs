@@ -841,7 +841,7 @@ impl AddProviderDialog {
                     .child("Enter manually"),
             )
             .child(
-                Self::small_button(theme, widgets::ActionTone::Outlined, !busy)
+                Self::small_button(theme, widgets::ActionTone::Filled, !busy)
                     .id("acp-local-command")
                     .when(!busy, |el| {
                         el.on_click(cx.listener(|this, _, _, cx| this.enter_local(cx)))
@@ -1027,7 +1027,7 @@ impl AddProviderDialog {
             if preparing {
                 widgets::ActionTone::Filled
             } else {
-                widgets::ActionTone::Outlined
+                widgets::ActionTone::Filled
             },
         )
         .id(("acp-add", ix))
@@ -1247,7 +1247,7 @@ impl AddProviderDialog {
         };
         let retry = sign_in.error.is_some();
         let sign_in_button = |id: (&'static str, usize), method_id: Option<String>| {
-            Self::small_button(theme, widgets::ActionTone::Outlined, method_id.is_some())
+            Self::small_button(theme, widgets::ActionTone::Filled, method_id.is_some())
                 .id(id)
                 .when_some(method_id, |el, method_id| {
                     el.on_click(
@@ -1277,7 +1277,7 @@ impl AddProviderDialog {
             )
         } else if external {
             sign_in.docs.clone().map(|url| {
-                Self::small_button(theme, widgets::ActionTone::Outlined, true)
+                Self::small_button(theme, widgets::ActionTone::Filled, true)
                     .id("acp-open-docs")
                     .role(gpui::Role::Link)
                     .on_click(cx.listener(move |_, _, _, cx| open_login_url(&url, cx)))

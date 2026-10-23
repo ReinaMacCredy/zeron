@@ -103,6 +103,7 @@ icon_assets![
     (USAGE_CHART, "usage-chart"),
     (WORKTREE, "worktree"),
     (PLUS, "plus"),
+    (MINUS, "minus"),
     (ARROW_LEFT, "arrow-left"),
     (ARROW_RIGHT, "arrow-right"),
     (ALT_ARROW_DOWN, "alt-arrow-down"),
@@ -239,6 +240,11 @@ icon_assets![
     (HERMES_MARK, "hermes-mark"),
     (PI_MARK, "pi-mark"),
     (OPENCODE_MARK, "opencode-mark"),
+    // GitHub's mark (Octicons `mark-github`, MIT) for the Cloud page's
+    // GitHub connection.
+    (GITHUB_MARK, "github-mark"),
+    // Settings → Billing (drawn to the Solar linear set's 1.5 stroke).
+    (WALLET, "wallet"),
     (ANTIGRAVITY_MARK, "antigravity-mark"),
     // Astra's cursor-icons-16.woff2 glyphs as SVG: gpui draws the font's private-use codepoints as "?" boxes.
     (ASTRA_PLUS_MINUS, "astra-plus-minus"),

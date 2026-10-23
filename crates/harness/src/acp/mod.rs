@@ -1439,8 +1439,9 @@ impl AcpHarness {
     /// sign-in stored.
     pub async fn sign_out(&self) -> Result<(), HarnessError> {
         let home = std::env::var("HOME").ok();
-        let (_scratch, mut child, _stderr, sign_in_prompted) =
-            self.spawn_agent(home.as_deref(), false, None).await?;
+        let (_scratch, mut child, _stderr, sign_in_prompted) = self
+            .spawn_agent(home.as_deref(), false, None, &Default::default())
+            .await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
                 client_with_sign_in_prompt(stdin, stdout, self.spec.id, &sign_in_prompted)
@@ -1471,7 +1472,7 @@ impl AcpHarness {
     pub async fn auth_methods(&self) -> Result<Vec<AcpAuthMethod>, HarnessError> {
         let home = std::env::var("HOME").ok();
         let (_scratch, mut child, stderr_tail, _sign_in_prompted) =
-            self.spawn_agent(home.as_deref(), false, None).await?;
+            self.spawn_agent(home.as_deref(), false, None, &Default::default()).await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -1879,6 +1880,7 @@ impl AcpHarness {
         cwd: Option<&str>,
         block_on_install: bool,
         _mcp: Option<&zeron_proto::McpServer>,
+        run_env: &std::collections::BTreeMap<String, String>,
     ) -> Result<
         (
             Option<ScratchDir>,
@@ -1916,6 +1918,7 @@ impl AcpHarness {
         if let Some(dir) = &scratch {
             dir.apply(&mut cmd);
         }
+        crate::apply_run_env(&mut cmd, run_env);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1959,7 +1962,12 @@ impl AcpHarness {
         cwd: Option<&std::path::Path>,
     ) -> Result<Vec<SlashCommand>, HarnessError> {
         let (_scratch, mut child, _stderr, sign_in_prompted) = self
-            .spawn_agent(cwd.and_then(|p| p.to_str()), false, None)
+            .spawn_agent(
+                cwd.and_then(|p| p.to_str()),
+                false,
+                None,
+                &Default::default(),
+            )
             .await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
@@ -2031,8 +2039,9 @@ impl AcpHarness {
     /// wire is the source of truth — the spec's static catalog only enriches
     /// matching entries and names the pick when the agent advertises nothing.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
-        let (_scratch, mut child, stderr_tail, sign_in_prompted) =
-            self.spawn_agent(None, false, None).await?;
+        let (_scratch, mut child, stderr_tail, sign_in_prompted) = self
+            .spawn_agent(None, false, None, &Default::default())
+            .await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
                 client_with_sign_in_prompt(stdin, stdout, self.spec.id, &sign_in_prompted)
@@ -2157,7 +2166,7 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
         .map(|a| a.as_slice())
         .unwrap_or_default();
 
-    let ladder: Vec<ReasoningLevel> = config_options
+    let mut ladder: Vec<ReasoningLevel> = config_options
         .iter()
         .find(|o| o.get("category").and_then(Value::as_str) == Some("thought_level"))
         .and_then(|o| o.get("options").and_then(Value::as_array))
@@ -2168,6 +2177,8 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
                 .collect()
         })
         .unwrap_or_default();
+    ladder.sort_unstable();
+    ladder.dedup();
     let wire_options: Vec<ModelOption> = config_options
         .iter()
         .filter_map(trait_from_config_option)
@@ -2628,7 +2639,7 @@ impl Harness for AcpHarness {
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let (scratch, mut child, stderr_tail, sign_in_prompted) = self
-            .spawn_agent(Some(&request.cwd), true, request.mcp.as_ref())
+            .spawn_agent(Some(&request.cwd), true, request.mcp.as_ref(), &request.env)
             .await?;
         let stdin = child
             .stdin
@@ -6457,6 +6468,68 @@ mod tests {
             vec!["fast-mode"]
         );
         assert_eq!(models[0].options[0].default_choice, "off");
+    }
+
+    #[test]
+    fn grok_thought_levels_order_from_lowest_to_highest() {
+        let response = json!({
+            "sessionId": "s-1",
+            "configOptions": [
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "grok-4.7",
+                    "options": [
+                        { "value": "grok-4.7", "name": "Grok 4.7" },
+                        { "value": "grok-4.7-build-fast", "name": "Grok 4.7 Fast" },
+                        { "value": "grok-4.6", "name": "Grok 4.6" },
+                        { "value": "grok-4.5", "name": "Grok 4.5" },
+                    ],
+                },
+                {
+                    "id": "reasoning_effort",
+                    "name": "Reasoning Effort",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "xhigh",
+                    "options": [
+                        { "value": "xhigh", "name": "Extra High" },
+                        { "value": "high", "name": "High" },
+                        { "value": "medium", "name": "Medium" },
+                        { "value": "low", "name": "Low" },
+                    ],
+                },
+            ],
+        });
+        let models = models_from_session(&response, &(grok_spec().models)());
+        let ladders = models
+            .iter()
+            .map(|m| (m.id.as_str(), m.reasoning_levels.clone()))
+            .collect::<Vec<_>>();
+        let ascending = vec![
+            ReasoningLevel::Low,
+            ReasoningLevel::Medium,
+            ReasoningLevel::High,
+            ReasoningLevel::XHigh,
+        ];
+        assert_eq!(
+            ladders,
+            vec![
+                ("grok-4.7", ascending.clone()),
+                ("grok-4.7-build-fast", ascending.clone()),
+                ("grok-4.6", ascending),
+                (
+                    "grok-4.5",
+                    vec![
+                        ReasoningLevel::Low,
+                        ReasoningLevel::Medium,
+                        ReasoningLevel::High,
+                    ],
+                ),
+            ]
+        );
     }
 
     #[test]

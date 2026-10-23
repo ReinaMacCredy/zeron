@@ -400,6 +400,7 @@ impl CursorHarness {
         }
         crate::compose_child_path(&mut cmd, &exe);
         self.launch.apply(&mut cmd, None);
+        crate::apply_run_env(&mut cmd, &request.env);
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
         }

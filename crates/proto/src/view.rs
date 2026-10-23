@@ -40,21 +40,52 @@ pub enum Indicator {
 /// §1.12). Engines heartbeat sessions well inside this window.
 pub const SESSION_STALE_MS: i64 = 45_000;
 
+/// Only live activity expires. Completed/error records remain useful after
+/// process exit; a lost heartbeat is never evidence of successful completion.
+pub fn session_stale(session: &Session, now: DateTime<Utc>) -> bool {
+    matches!(
+        session.activity_status(),
+        SessionStatus::Working | SessionStatus::AwaitingInput
+    ) && now
+        .signed_duration_since(session.updated_at)
+        .num_milliseconds()
+        > SESSION_STALE_MS
+}
+
 /// Staleness-checked indicator for a session row. Pure.
 pub fn effective_indicator(session: Option<&Session>, now: DateTime<Utc>) -> Indicator {
+    indicator_for_status(session, now, true)
+}
+
+/// Native execution controls must not offer Stop/steer for a terminal report.
+pub fn native_indicator(session: Option<&Session>, now: DateTime<Utc>) -> Indicator {
+    indicator_for_status(session, now, false)
+}
+
+fn indicator_for_status(
+    session: Option<&Session>,
+    now: DateTime<Utc>,
+    terminal: bool,
+) -> Indicator {
     let Some(session) = session else {
         return Indicator::None;
     };
-    match session.status {
+    let status = if terminal {
+        session.activity_status()
+    } else {
+        session.status
+    };
+    match status {
         SessionStatus::Idle => Indicator::None,
         SessionStatus::Errored => Indicator::Errored,
         SessionStatus::Working | SessionStatus::AwaitingInput => {
-            let age_ms = now
+            if now
                 .signed_duration_since(session.updated_at)
-                .num_milliseconds();
-            if age_ms > SESSION_STALE_MS {
+                .num_milliseconds()
+                > SESSION_STALE_MS
+            {
                 Indicator::None
-            } else if session.status == SessionStatus::Working {
+            } else if status == SessionStatus::Working {
                 Indicator::Working
             } else {
                 Indicator::AwaitingInput
@@ -76,8 +107,42 @@ pub fn running_subagents(session: Option<&Session>, now: DateTime<Utc>) -> u32 {
 /// synced seen marker decides completed-vs-idle. Staleness gating rides on
 /// [`effective_indicator`]; the derivation itself is [`crate::chat_indicator`].
 pub fn display_status(chat: &Chat, session: Option<&Session>, now: DateTime<Utc>) -> ChatIndicator {
-    let live = session.filter(|s| effective_indicator(Some(s), now) != Indicator::None);
-    crate::chat_indicator(chat, live)
+    if session.is_some_and(|s| session_stale(s, now)) {
+        return ChatIndicator::Idle;
+    }
+    crate::chat_indicator(chat, session)
+}
+
+/// Same seen/outcome rules, restricted to native work for composer controls.
+pub fn native_display_status(
+    chat: &Chat,
+    session: Option<&Session>,
+    now: DateTime<Utc>,
+) -> ChatIndicator {
+    if session.is_some_and(|s| {
+        matches!(
+            s.status,
+            SessionStatus::Working | SessionStatus::AwaitingInput
+        ) && native_indicator(Some(s), now) == Indicator::None
+    }) {
+        return ChatIndicator::Idle;
+    }
+    crate::entities::chat_indicator_inner(chat, session, false)
+}
+
+/// Includes terminal-only results, which do not append an assistant message.
+pub fn has_unseen_activity(chat: &Chat, session: Option<&Session>) -> bool {
+    chat.unseen()
+        || session
+            .and_then(|s| s.terminal_activity.as_ref())
+            .is_some_and(|activity| {
+                matches!(
+                    activity.report.state,
+                    crate::ProgramState::Done | crate::ProgramState::Error
+                ) && chat
+                    .last_seen_at
+                    .is_none_or(|seen| activity.updated_at > seen)
+            })
 }
 
 /// Attention bucket for the sidebar's Active list — lower is more urgent.
@@ -139,6 +204,28 @@ pub fn project_key(space: &Space) -> String {
         Some(repository_id) => format!("repo:{repository_id}"),
         None => space.id.clone(),
     }
+}
+
+/// The repository identity for a Cloud project of `github_repo`. A Cloud
+/// project lives on the logical Cloud device, where no engine runs, so
+/// whoever creates it stamps it: with the identity a clone of the same
+/// repository already has (a full clone's `commit:<root>`), so the two read
+/// as one project, else the normalized remote form. Pure.
+pub fn cloud_repository_id(spaces: &[Space], github_repo: &str) -> String {
+    spaces
+        .iter()
+        .filter(|s| !s.device_id.starts_with(crate::CLOUD_DEVICE_PREFIX))
+        .filter(|s| {
+            s.github_repo
+                .as_deref()
+                .is_some_and(|repo| repo.eq_ignore_ascii_case(github_repo))
+        })
+        .filter_map(|s| s.repository_id.as_deref().map(|id| (s, id)))
+        // The repository itself, not a folder inside it (`<identity>:<path>`).
+        .filter(|(_, id)| !id.strip_prefix("commit:").unwrap_or(id).contains(':'))
+        .min_by_key(|(s, id)| (!id.starts_with("commit:"), s.created_at, s.id.as_str()))
+        .map(|(_, id)| id.to_string())
+        .unwrap_or_else(|| format!("github.com/{}", github_repo.to_lowercase()))
 }
 
 /// The space that speaks for `space`'s whole project: the oldest member, id
@@ -223,8 +310,39 @@ mod project_tests {
             git_checked_at: None,
             checkout_id: None,
             repository_id: repository.map(str::to_string),
+            github_repo: None,
             created_at: DateTime::<Utc>::UNIX_EPOCH + chrono::TimeDelta::minutes(minutes),
         }
+    }
+
+    #[test]
+    fn a_cloud_project_takes_the_identity_of_a_clone_of_its_repository() {
+        let github = |mut s: Space, repo: &str| {
+            s.github_repo = Some(repo.into());
+            s
+        };
+        // No clone yet: the remote form.
+        assert_eq!(cloud_repository_id(&[], "Acme/App"), "github.com/acme/app");
+        let spaces = vec![
+            github(
+                space("shallow", "vps", Some("github.com/acme/app"), 0),
+                "acme/app",
+            ),
+            github(space("full", "mac", Some("commit:abc"), 1), "Acme/App"),
+            github(space("sub", "mac", Some("commit:abc:web"), 0), "acme/app"),
+            github(
+                space("cloud", "cloud-1", Some("github.com/acme/app"), 0),
+                "acme/app",
+            ),
+            github(space("other", "mac", Some("commit:def"), 0), "acme/other"),
+        ];
+        // A full clone's commit identity wins over a shallow clone's remote
+        // form; a folder inside the repository and Cloud's own rows don't count.
+        assert_eq!(cloud_repository_id(&spaces, "acme/app"), "commit:abc");
+        assert_eq!(
+            cloud_repository_id(&spaces[..1], "acme/app"),
+            "github.com/acme/app"
+        );
     }
 
     #[test]
@@ -264,6 +382,8 @@ mod gate_tests {
             status: SessionStatus::Working,
             started_at: None,
             updated_at,
+            last_turn_outcome: None,
+            terminal_activity: None,
             running_subagents: running,
             compact_plan: None,
             classifying: None,
@@ -285,6 +405,112 @@ mod gate_tests {
         );
         assert_eq!(running_subagents(Some(&stale), now), 0);
         assert_eq!(running_subagents(None, now), 0);
+    }
+
+    #[test]
+    fn native_and_terminal_activity_share_attention_and_seen_rules() {
+        use crate::{DoneStatus, ProgramInputKind, ProgramState, ProgramStatus, TerminalActivity};
+        let now = Utc::now();
+        let mut chat: Chat = serde_json::from_value(serde_json::json!({
+            "id": "chat", "deviceId": "dev", "archived": false,
+            "createdAt": now, "lastMessageAt": now,
+        }))
+        .unwrap();
+        let mut session = running_session(0, now);
+        assert_eq!(
+            display_status(&chat, Some(&session), now),
+            ChatIndicator::Working
+        );
+        session.terminal_activity = Some(TerminalActivity {
+            terminal_id: "pty".into(),
+            updated_at: now,
+            report: ProgramStatus {
+                id: "child".into(),
+                state: ProgramState::Blocked,
+                kind: Some(ProgramInputKind::Question),
+                app: None,
+                title: None,
+                message: Some("Which branch?".into()),
+                progress: None,
+            },
+        });
+        assert_eq!(
+            display_status(&chat, Some(&session), now),
+            ChatIndicator::AwaitingInput
+        );
+        assert_eq!(
+            effective_indicator(Some(&session), now),
+            Indicator::AwaitingInput
+        );
+        let later = now + chrono::Duration::milliseconds(SESSION_STALE_MS + 1);
+        assert_eq!(
+            display_status(&chat, Some(&session), later),
+            ChatIndicator::Idle
+        );
+        assert!(session_stale(&session, later));
+        session.terminal_activity = None;
+        session.status = SessionStatus::Idle;
+        session.last_turn_outcome = Some(crate::NativeTurnOutcome {
+            status: DoneStatus::Interrupted,
+            finished_at: now,
+        });
+        assert_eq!(
+            display_status(&chat, Some(&session), now),
+            ChatIndicator::Idle
+        );
+        session.last_turn_outcome = Some(crate::NativeTurnOutcome {
+            status: DoneStatus::Completed,
+            finished_at: now,
+        });
+        assert_eq!(
+            display_status(&chat, Some(&session), now),
+            ChatIndicator::Completed
+        );
+        chat.last_seen_at = Some(now);
+        assert_eq!(
+            display_status(&chat, Some(&session), now),
+            ChatIndicator::Idle
+        );
+        session.terminal_activity = Some(TerminalActivity {
+            terminal_id: "pty".into(),
+            updated_at: later,
+            report: ProgramStatus {
+                id: "".into(),
+                state: ProgramState::Done,
+                kind: None,
+                app: None,
+                title: None,
+                message: None,
+                progress: None,
+            },
+        });
+        assert!(has_unseen_activity(&chat, Some(&session)));
+        assert_eq!(
+            display_status(&chat, Some(&session), later),
+            ChatIndicator::Completed
+        );
+        session.terminal_activity.as_mut().unwrap().report.state = ProgramState::Error;
+        assert_eq!(
+            display_status(&chat, Some(&session), later),
+            ChatIndicator::Errored
+        );
+        chat.last_seen_at = Some(later);
+        assert!(!has_unseen_activity(&chat, Some(&session)));
+        assert_eq!(
+            display_status(&chat, Some(&session), later),
+            ChatIndicator::Idle
+        );
+        session.terminal_activity.as_mut().unwrap().report.state = ProgramState::Blocked;
+        session.updated_at = later;
+        assert_eq!(
+            display_status(&chat, Some(&session), later),
+            ChatIndicator::AwaitingInput
+        );
+        assert_eq!(native_indicator(Some(&session), later), Indicator::None);
+        assert_eq!(
+            native_display_status(&chat, Some(&session), later),
+            ChatIndicator::Idle
+        );
     }
 
     #[test]
@@ -531,6 +757,10 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
         // (every native driver's convention): label them "Agent" with the
         // description as the detail — "Tool · Agent: scan repo" read as two
         // labels fighting.
+        // A Cloud machine's own setup ("Cloned acme/app").
+        call @ ToolCall::Unknown { name, .. } if crate::cloud_setup_step(call).is_some() => {
+            ("Cloud", name.clone())
+        }
         ToolCall::Unknown { name, .. } => match name.strip_prefix("Agent: ") {
             Some(description) => ("Agent", description.to_owned()),
             None if name == "Agent" => ("Agent", String::new()),
@@ -546,6 +776,25 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
 /// the summary itself is one implementation for both.
 pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
     use crate::ToolCall;
+    // A Cloud machine's setup steps read as what happened to the machine.
+    if !tools.is_empty() {
+        let steps: Option<Vec<&str>> = tools
+            .iter()
+            .map(|(call, _)| crate::cloud_setup_step(call))
+            .collect();
+        if let Some(steps) = steps {
+            let mut summary = if steps.contains(&"wake") {
+                "Woke the Cloud machine".to_string()
+            } else {
+                "Set up the Cloud machine".to_string()
+            };
+            let failed = tools.iter().filter(|(_, is_error)| *is_error).count();
+            if failed > 0 {
+                summary.push_str(&format!(" · {failed} failed"));
+            }
+            return summary;
+        }
+    }
     let mut commands = 0usize;
     let mut edited: Vec<&str> = Vec::new();
     let mut reads = 0usize;
@@ -778,5 +1027,56 @@ mod checkout_tests {
             checkout_label(CheckoutKind::NewWorktree, Some(&plain("main"))),
             "New worktree"
         );
+    }
+}
+
+#[cfg(test)]
+mod cloud_setup_tests {
+    use super::*;
+    use crate::ToolCall;
+
+    fn step(step: &str, name: &str) -> ToolCall {
+        ToolCall::Unknown {
+            name: name.into(),
+            input: Some(
+                serde_json::json!({ crate::CLOUD_SETUP_KEY: step, "command": "git clone x" }),
+            ),
+        }
+    }
+
+    #[test]
+    fn cloud_setup_steps_read_as_what_happened_to_the_machine() {
+        let start = step("start", "Started a machine");
+        let clone = step("clone", "Cloned acme/app");
+        assert_eq!(crate::cloud_setup_step(&clone), Some("clone"));
+        assert_eq!(
+            tool_chip_content(&clone),
+            ("Cloud", "Cloned acme/app".to_string())
+        );
+        assert_eq!(
+            tool_group_summary(&[(start.clone(), false), (clone.clone(), false)]),
+            "Set up the Cloud machine"
+        );
+        assert_eq!(
+            tool_group_summary(&[(step("wake", "Woke the machine"), false)]),
+            "Woke the Cloud machine"
+        );
+        assert_eq!(
+            tool_group_summary(&[(start, false), (clone.clone(), true)]),
+            "Set up the Cloud machine · 1 failed"
+        );
+        // Mixed with ordinary tools: the ordinary summary.
+        let exec = ToolCall::Exec {
+            command: "ls".into(),
+        };
+        assert_eq!(
+            tool_group_summary(&[(clone, false), (exec, false)]),
+            "Ran 1 command · called 1 tool"
+        );
+        let other = ToolCall::Unknown {
+            name: "x".into(),
+            input: Some(serde_json::json!({"a": 1})),
+        };
+        assert_eq!(crate::cloud_setup_step(&other), None);
     }
 }

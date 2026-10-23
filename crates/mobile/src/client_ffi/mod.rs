@@ -11,6 +11,9 @@
 //! through [`CoreClient::session_handle`] → [`zeron_client::SessionHandle`]
 //! (`snapshot()` / `subscribe()`), never over FFI.
 
+mod cloud;
+mod providers;
+pub use providers::UsageWindowInfo;
 mod session;
 mod voice;
 pub use voice::*;
@@ -20,6 +23,7 @@ use std::sync::Arc;
 
 use zeron_client as zc;
 
+pub use cloud::*;
 pub use session::*;
 pub use types::*;
 
@@ -375,6 +379,19 @@ impl CoreClient {
         let client = self.client.clone();
         let fallback = harness.clone();
         on_runtime(async move { Ok(client.list_models(&device_id, &harness).await) })
+            .await
+            .unwrap_or_else(|_| zc::catalog::fallback_models(&fallback))
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    /// Cloud's model catalog for `harness`: the edge's list, else the last
+    /// one read, else the static list.
+    pub async fn cloud_models(&self, harness: String) -> Vec<ModelInfo> {
+        let client = self.client.clone();
+        let fallback = harness.clone();
+        on_runtime(async move { Ok(client.cloud_models(&harness).await) })
             .await
             .unwrap_or_else(|_| zc::catalog::fallback_models(&fallback))
             .into_iter()

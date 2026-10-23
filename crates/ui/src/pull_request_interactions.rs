@@ -264,12 +264,10 @@ impl PullRequestDetailPage {
                     .gap(px(8.0))
                     .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_muted)
-                    .child(crate::loaders::mini_glyph_spinner(
+                    .child(crate::loaders::ring_spinner(
                         "pr-comment-pending-spinner",
-                        1.5,
-                        theme.glyph,
-                        cx.entity_id(),
-                        cx,
+                        12.0,
+                        theme.text_muted,
                     ))
                     .child(div().flex_none().child("Posting comment"))
                     .child(
@@ -408,12 +406,10 @@ impl PullRequestDetailPage {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .child(crate::loaders::mini_glyph_spinner(
+                                    .child(crate::loaders::ring_spinner(
                                         "pr-send-spinner",
-                                        1.5,
-                                        theme.glyph,
-                                        cx.entity_id(),
-                                        cx,
+                                        12.0,
+                                        theme.text_muted,
                                     ))
                             } else {
                                 crate::composer::send_circle("pr-send-comment", !can_send, theme)

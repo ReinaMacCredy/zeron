@@ -5329,12 +5329,10 @@ impl Render for Changes {
                     .items_center()
                     .justify_center()
                     .gap(px(Theme::SPACE_SM))
-                    .child(crate::loaders::gradient_spinner(
+                    .child(crate::loaders::ring_spinner(
                         "changes-preparing",
-                        &theme,
-                        3.0,
-                        cx.entity_id(),
-                        cx,
+                        20.0,
+                        theme.text_muted,
                     ))
                     .child(
                         div()
@@ -5382,12 +5380,10 @@ impl Render for Changes {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(crate::loaders::gradient_spinner(
+                            .child(crate::loaders::ring_spinner(
                                 "changes-parsing",
-                                &theme,
-                                3.0,
-                                cx.entity_id(),
-                                cx,
+                                20.0,
+                                theme.text_muted,
                             ))
                             .into_any_element()
                     }
@@ -6328,6 +6324,7 @@ rename to new_name.rs
             created_at: Utc::now(),
             harness_session_id: None,
             harness_session_cwd: None,
+            harness_session_harness: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

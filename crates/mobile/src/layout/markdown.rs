@@ -274,6 +274,9 @@ pub(crate) struct PText {
     /// Spans painted as mention chips (the desktop's file badge: a soft pill
     /// with an icon well at its start), with each one's icon.
     pub badges: Vec<(usize, String)>,
+    /// Spans with a bare icon before their text (a provider's logo), no
+    /// pill: the span's start padding holds it.
+    pub marks: Vec<(usize, String)>,
     /// Spans that are inline formulas (an inline box over one U+FFFC), with
     /// each one's layout.
     pub math: Vec<(usize, Arc<zatex::Formula>)>,
@@ -455,6 +458,7 @@ pub(crate) fn prepare_runs(ctx: &mut Ctx, runs: &[InlineRun], kind: TextKind, mu
         links,
         chip: ((lh - chip_h) / 2.0, chip_h),
         badges: Vec::new(),
+        marks: Vec::new(),
         math,
     }
 }
@@ -500,6 +504,7 @@ pub(crate) fn prepare_plain(
         links: Vec::new(),
         chip: (0.0, 0.0),
         badges: Vec::new(),
+        marks: Vec::new(),
         math: Vec::new(),
     }
 }
@@ -744,6 +749,7 @@ fn prepare_code(ctx: &mut Ctx, language: Option<&str>, code: &str) -> PCode {
         links: Vec::new(),
         chip: (0.0, 0.0),
         badges: Vec::new(),
+        marks: Vec::new(),
         math: Vec::new(),
     };
     let label = language.filter(|l| !l.is_empty()).map(|l| {
@@ -833,6 +839,16 @@ pub(crate) fn place_text(t: &PText, x: f32, y: f32, width: f32, out: Option<&mut
             }
             if paint.chip {
                 out.fill(x + f.x, text_top + t.chip.0, f.width, t.chip.1, 5.0, ColorRole::InlineCodeBackground);
+            }
+            if f.range.start == span.range.start
+                && let Some((_, icon)) = t.marks.iter().find(|(span, _)| *span == f.span)
+            {
+                let size = (span.pad_start - 4.0).max(0.0);
+                out.widget(
+                    WidgetKind::Icon { name: icon.clone(), color: ColorRole::TextSecondary },
+                    (x + f.x + 2.0, text_top + (t.lh - size) / 2.0, size, size),
+                    None,
+                );
             }
             if let Some((_, icon)) = t.badges.iter().find(|(span, _)| *span == f.span) {
                 let (chip_top, chip_h) = t.chip;

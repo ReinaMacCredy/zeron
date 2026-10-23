@@ -424,6 +424,14 @@ fn tabs(host: &str, now: i64) -> Vec<SessionMessageEntry> {
             host,
             now - 950_000,
             vec![
+                // The chat moved from Claude Code to Codex before this turn.
+                MessagePart::Switch {
+                    id: "s0".into(),
+                    from: "Claude Code".into(),
+                    to: "Codex".into(),
+                    from_harness: Some("claude-code".into()),
+                    to_harness: Some("codex".into()),
+                },
                 tool(
                     "k1",
                     ToolCall::Search {
@@ -473,12 +481,38 @@ fn errored(host: &str, now: i64) -> Vec<SessionMessageEntry> {
             ),
             MessagePart::Error {
                 id: "e0".into(),
-                message: "Harness exited with status 1: rate limited — retry in 2m".into(),
+                message: "Harness exited with status 1: wrangler crashed before the first request".into(),
             },
         ],
     );
     failed.status = Some(MessageStatus::Aborted);
+    // The error states, oldest first: signed out, a usage limit, then a plain
+    // failure (the first two offer "Log in").
+    let mut signed_out = assistant(
+        "m2a",
+        host,
+        now - 2_500_000,
+        vec![MessagePart::Error {
+            id: "e0".into(),
+            message: "Not logged in · Please run /login".into(),
+        }],
+    );
+    signed_out.status = Some(MessageStatus::Aborted);
+    let mut limited = assistant(
+        "m2b",
+        host,
+        now - 2_250_000,
+        vec![MessagePart::Error {
+            id: "e0".into(),
+            message: "Claude usage limit reached — try again after the limit resets.".into(),
+        }],
+    );
+    limited.status = Some(MessageStatus::Aborted);
     vec![
+        user("m1a", now - 2_600_000, "Look into the flush timer wakes."),
+        signed_out,
+        user("m1b", now - 2_300_000, "Signed in — try again."),
+        limited,
         user(
             "m1",
             now - 2_100_000,

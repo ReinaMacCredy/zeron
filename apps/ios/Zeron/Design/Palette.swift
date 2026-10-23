@@ -99,6 +99,9 @@ enum Palette {
         case .warningTile: warning.withAlphaComponent(0.12)
         case .buttonBorder: dual(UIColor(white: 0, alpha: 0.135), UIColor(white: 1, alpha: 0.1))
         case .onSolid: background
+        // Error cards: a red wash, and a lighter red that reads on it.
+        case .dangerWash: dual(UIColor(hex: 0xDC2626, alpha: 0.08), UIColor(hex: 0xF87171, alpha: 0.12))
+        case .dangerSoft: dynamic(0xB91C1C, 0xFCA5A5)
         }
     }
 }

@@ -145,6 +145,7 @@ mod tests {
             created_at: chrono::DateTime::UNIX_EPOCH,
             harness_session_id: Some("thread/one".into()),
             harness_session_cwd: None,
+            harness_session_harness: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

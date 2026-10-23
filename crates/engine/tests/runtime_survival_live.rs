@@ -101,6 +101,7 @@ fn run(
 ) -> RunRequest {
     RunRequest {
         mcp: None,
+        env: Default::default(),
         prompt: prompt.into(),
         harness: Some(harness),
         model: model.clone(),

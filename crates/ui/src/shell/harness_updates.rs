@@ -417,14 +417,8 @@ impl Shell {
             .any(|row| row.connected && active(&row.status))
         {
             Some(
-                loaders::mini_glyph_spinner(
-                    "home-agent-update-activity",
-                    2.0,
-                    theme.glyph,
-                    cx.entity_id(),
-                    cx,
-                )
-                .into_any_element(),
+                crate::loaders::ring_spinner("home-agent-update-activity", 14.0, theme.text_muted)
+                    .into_any_element(),
             )
         } else if all_updated {
             Some(

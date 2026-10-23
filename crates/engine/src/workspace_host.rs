@@ -155,6 +155,17 @@ fn new_projectless_cwd(
     }
 }
 
+/// This device's advertised capabilities: the binary's, plus
+/// `cloud-session` on a Cloud session machine (device lists hide those and
+/// show the account's one Cloud device instead).
+fn device_capabilities() -> Vec<String> {
+    let mut capabilities = zeron_proto::capabilities::current();
+    if crate::runner::session().is_some() {
+        capabilities.push(zeron_proto::CLOUD_SESSION_CAPABILITY.to_string());
+    }
+    capabilities
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkspaceHostConfig {
     pub device_id: String,
@@ -216,6 +227,18 @@ pub type PeerAliveHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A chat row's stored harness-native session (see
+/// [`WorkspaceHost::chat_harness_session`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredHarnessSession {
+    /// Empty = the "do not resume" tombstone.
+    pub session_id: String,
+    pub cwd: Option<String>,
+    /// The harness that minted `session_id`. `None` on rows that predate
+    /// the tag.
+    pub harness: Option<HarnessId>,
 }
 
 #[derive(Clone)]
@@ -307,7 +330,7 @@ impl WorkspaceHost {
             // on the Devices page; workspace version — same for every crate).
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
-            capabilities: zeron_proto::capabilities::current(),
+            capabilities: device_capabilities(),
         })?;
 
         let state = doc.read_all()?;
@@ -555,10 +578,16 @@ impl WorkspaceHost {
     /// down, relay fine: the 2026-08-18 03:45 incident shape) must never
     /// park the relay. Un-park is presence-driven: heartbeats resume → the
     /// verdict flips and the peer-alive hook clears any dial cooldown.
+    /// A deleted device row is positive evidence too: nothing answers there
+    /// (a deleted Cloud session's machine was still dialed every few seconds
+    /// by everything that targets its chat).
     pub fn peer_liveness(&self, device_id: &str) -> zeron_rpc::PeerLiveness {
         use zeron_rpc::PeerLiveness::{Dark, Live, Unknown};
         if device_id == self.inner.config.device_id {
             return Live;
+        }
+        if self.read(|doc| doc.device_deleted(device_id)) {
+            return Dark;
         }
         let now = now_ms();
         let (connected, live_beat) = {
@@ -661,6 +690,17 @@ impl WorkspaceHost {
     /// (`false` = local profile: connectivity is `Disabled`, hide the pill).
     pub fn edge_expected(&self) -> bool {
         self.inner.config.edge.is_some()
+    }
+
+    /// The edge this workspace syncs through (`None` = local/offline profile)
+    /// — also where account-scoped HTTP calls (Cloud, vault) go.
+    pub fn edge(&self) -> Option<&EdgeConfig> {
+        self.inner.config.edge.as_ref()
+    }
+
+    /// The workspace org (`ws3/{orgId}/…` rooms, `/cloud/{orgId}` routes).
+    pub fn org_id(&self) -> &str {
+        &self.inner.config.org_id
     }
 
     // ── registry access helpers ─────────────────────────────────────────────
@@ -862,6 +902,7 @@ impl WorkspaceHost {
             git_checked_at: None,
             checkout_id: None,
             repository_id: None,
+            github_repo: None,
             created_at: Utc::now(),
         };
         self.mutate(|doc| doc.upsert_space(&space))?;
@@ -906,8 +947,18 @@ impl WorkspaceHost {
     /// of its latest run and the cwd it was created under. An empty `session_id`
     /// tombstones the row ("do not resume" after a rejected resume). Best-effort:
     /// a missing chat row (claim happens on first command) just returns.
-    pub fn set_chat_harness_session(&self, chat_id: &str, session_id: &str, cwd: &str) {
-        match self.mutate(|doc| doc.set_chat_harness_session(chat_id, session_id, cwd)) {
+    ///
+    /// `harness` names the provider that minted `session_id`: an id is only
+    /// meaningful to that harness, and resume checks the tag.
+    pub fn set_chat_harness_session(
+        &self,
+        chat_id: &str,
+        session_id: &str,
+        cwd: &str,
+        harness: Option<HarnessId>,
+    ) {
+        let slug = harness.map(HarnessId::as_str);
+        match self.mutate(|doc| doc.set_chat_harness_session(chat_id, session_id, cwd, slug)) {
             Ok(_) => {}
             Err(err) => {
                 tracing::warn!(chat = %chat_id, error = %err, "registry harness-session write failed");
@@ -915,15 +966,22 @@ impl WorkspaceHost {
         }
     }
 
-    /// The chat row's stored harness session `(session_id, cwd)`, if stamped.
-    /// The empty-string tombstone passes through — callers must treat it as
-    /// "explicitly no resume" (and must NOT fall back to older sources).
-    pub fn chat_harness_session(&self, chat_id: &str) -> Option<(String, Option<String>)> {
+    /// The chat row's stored harness session, if stamped. The empty-string
+    /// tombstone passes through — callers must treat it as "explicitly no
+    /// resume" (and must NOT fall back to older sources).
+    pub fn chat_harness_session(&self, chat_id: &str) -> Option<StoredHarnessSession> {
         match self.read(|doc| doc.chat(chat_id)) {
             Ok(chat) => {
                 let chat = chat?;
                 let id = chat.harness_session_id?;
-                Some((id, chat.harness_session_cwd))
+                Some(StoredHarnessSession {
+                    session_id: id,
+                    cwd: chat.harness_session_cwd,
+                    harness: chat
+                        .harness_session_harness
+                        .as_deref()
+                        .and_then(HarnessId::from_slug),
+                })
             }
             Err(err) => {
                 tracing::warn!(chat = %chat_id, error = %err, "registry chat read failed");
@@ -955,7 +1013,7 @@ impl WorkspaceHost {
         config: Option<ChatConfig>,
         cwd: Option<String>,
     ) -> Result<(), EngineError> {
-        self.insert_chat(chat_id, space_id, device_id, config, cwd, None, None)
+        self.insert_chat(chat_id, space_id, device_id, None, config, cwd, None, None)
     }
 
     /// [`Self::create_chat`] stamped with the chat whose agent is opening it
@@ -980,6 +1038,7 @@ impl WorkspaceHost {
             chat_id,
             space_id,
             device_id,
+            None,
             config,
             cwd,
             created_by_chat_id,
@@ -1010,10 +1069,39 @@ impl WorkspaceHost {
             chat_id,
             space_id,
             device_id,
+            None,
             config,
             cwd,
             None,
             Some(delegation),
+        )
+    }
+
+    /// [`Self::create_chat_from`] with an explicit host: a chat run on Cloud
+    /// is hosted by its session device, not the device owning the project's
+    /// folder, nor (for a side chat of a Cloud chat with no project) the
+    /// device that asked. `host: None` keeps the project's owner, or the
+    /// named device.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_chat_hosted(
+        &self,
+        chat_id: &str,
+        space_id: Option<&str>,
+        device_id: Option<&str>,
+        host: Option<&str>,
+        config: Option<ChatConfig>,
+        cwd: Option<String>,
+        created_by_chat_id: Option<&str>,
+    ) -> Result<(), EngineError> {
+        self.insert_chat(
+            chat_id,
+            space_id,
+            device_id,
+            host,
+            config,
+            cwd,
+            created_by_chat_id,
+            None,
         )
     }
 
@@ -1023,6 +1111,7 @@ impl WorkspaceHost {
         chat_id: &str,
         space_id: Option<&str>,
         device_id: Option<&str>,
+        host: Option<&str>,
         config: Option<ChatConfig>,
         cwd: Option<String>,
         created_by_chat_id: Option<&str>,
@@ -1043,10 +1132,13 @@ impl WorkspaceHost {
             },
             None => None,
         };
-        let host_device = match (&space, device_id) {
-            (Some(space), _) => space.device_id.clone(),
-            (None, Some(device_id)) => device_id.to_string(),
-            (None, None) => {
+        let host_device = match (&space, device_id, host) {
+            // An explicit host always wins: a side chat of a Cloud chat runs
+            // on that machine, never on the computer that asked for it.
+            (_, _, Some(host)) => host.to_string(),
+            (Some(space), _, None) => space.device_id.clone(),
+            (None, Some(device_id), _) => device_id.to_string(),
+            (None, None, _) => {
                 return Err(EngineError::Other(
                     "createChat needs a spaceId or a deviceId".into(),
                 ));
@@ -1084,6 +1176,7 @@ impl WorkspaceHost {
                 // go through the seed+flip path (the host migration sweep).
                 room_gen: Some(2),
                 harness_session_cwd: None,
+                harness_session_harness: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 sidechat_source_chat_id: None,
@@ -1150,6 +1243,7 @@ impl WorkspaceHost {
             delegation: None,
             settle: None,
             unsettled_at: None,
+            harness_session_harness: Default::default(),
         };
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(chat)
@@ -1208,6 +1302,7 @@ impl WorkspaceHost {
             delegation: None,
             settle: None,
             unsettled_at: None,
+            harness_session_harness: Default::default(),
         };
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(chat)
@@ -1267,6 +1362,7 @@ impl WorkspaceHost {
             delegation: None,
             settle: None,
             unsettled_at: None,
+            harness_session_harness: Default::default(),
         };
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(chat)
@@ -1318,6 +1414,54 @@ impl WorkspaceHost {
                 git_checked_at: None,
                 checkout_id: None,
                 repository_id: None,
+                github_repo: None,
+                created_at: Utc::now(),
+            })
+        })?;
+        Ok(())
+    }
+
+    /// A project that lives only on Cloud: owned by the logical Cloud device
+    /// (which has no engine to stamp it), so its GitHub repository is set
+    /// here. Every session in it runs on a Cloud machine cloning that
+    /// repository. Idempotent like [`Self::create_space`]; also a no-op when
+    /// Cloud already has a project for the repository.
+    pub fn create_cloud_space(
+        &self,
+        space_id: &str,
+        device_id: &str,
+        path: &str,
+        name: Option<String>,
+        github_repo: &str,
+    ) -> Result<(), EngineError> {
+        if !device_id.starts_with(zeron_proto::CLOUD_DEVICE_PREFIX) {
+            return Err(EngineError::Other(
+                "Only Cloud projects name their repository.".into(),
+            ));
+        }
+        let spaces = self.read(|doc| doc.read_spaces())?;
+        if spaces.iter().any(|s| {
+            s.id == space_id
+                || (s.device_id == device_id
+                    && (s.path == path
+                        || s.github_repo
+                            .as_deref()
+                            .is_some_and(|repo| repo.eq_ignore_ascii_case(github_repo))))
+        }) {
+            return Ok(());
+        }
+        self.mutate(|doc| {
+            doc.upsert_space(&Space {
+                id: space_id.to_string(),
+                device_id: device_id.to_string(),
+                path: path.to_string(),
+                name,
+                git_detected: true,
+                git_checked_at: Some(Utc::now()),
+                checkout_id: None,
+                // Groups with the clones of the repository on other devices.
+                repository_id: Some(zeron_proto::view::cloud_repository_id(&spaces, github_repo)),
+                github_repo: Some(github_repo.to_string()),
                 created_at: Utc::now(),
             })
         })?;
@@ -1440,11 +1584,19 @@ impl WorkspaceHost {
         detected: bool,
         checkout_id: Option<&str>,
         repository_id: Option<&str>,
+        github_repo: Option<&str>,
     ) -> Result<bool, EngineError> {
         match self.read(|doc| doc.space(space_id))? {
             Some(space) if space.device_id == self.inner.config.device_id => {
                 Ok(self.mutate(|doc| {
-                    doc.set_space_git(space_id, detected, checkout_id, repository_id, Utc::now())
+                    doc.set_space_git(
+                        space_id,
+                        detected,
+                        checkout_id,
+                        repository_id,
+                        github_repo,
+                        Utc::now(),
+                    )
                 })?)
             }
             Some(space) => {
@@ -1456,6 +1608,55 @@ impl WorkspaceHost {
             }
             None => Ok(false),
         }
+    }
+
+    /// Cloud projects of `github_repo` that still carry another identity
+    /// than `repository_id` (a full clone's `commit:<root>`) take it, so they
+    /// group with this device's clone. Cloud projects have no engine of their
+    /// own to stamp them; only ever toward the commit form, so a shallow clone
+    /// elsewhere (remote form) can't flip them back. Returns how many moved.
+    pub fn align_cloud_spaces(
+        &self,
+        github_repo: &str,
+        repository_id: &str,
+    ) -> Result<usize, EngineError> {
+        if !repository_id.starts_with("commit:") || repository_id["commit:".len()..].contains(':') {
+            return Ok(0);
+        }
+        let stale: Vec<Space> = self
+            .read(|doc| doc.read_spaces())?
+            .into_iter()
+            .filter(|s| s.device_id.starts_with(zeron_proto::CLOUD_DEVICE_PREFIX))
+            .filter(|s| {
+                s.github_repo
+                    .as_deref()
+                    .is_some_and(|repo| repo.eq_ignore_ascii_case(github_repo))
+            })
+            .filter(|s| {
+                s.repository_id.as_deref() != Some(repository_id)
+                    && !s
+                        .repository_id
+                        .as_deref()
+                        .is_some_and(|id| id.starts_with("commit:"))
+            })
+            .collect();
+        if stale.is_empty() {
+            return Ok(0);
+        }
+        self.mutate(|doc| {
+            for space in &stale {
+                doc.set_space_git(
+                    &space.id,
+                    space.git_detected,
+                    space.checkout_id.as_deref(),
+                    Some(repository_id),
+                    space.github_repo.as_deref(),
+                    space.git_checked_at.unwrap_or_else(Utc::now),
+                )?;
+            }
+            Ok::<_, zeron_doc::DocError>(true)
+        })?;
+        Ok(stale.len())
     }
 
     pub fn read_spaces(&self) -> Result<Vec<Space>, EngineError> {
@@ -1633,9 +1834,13 @@ impl WorkspaceHostInner {
         let registry_synced = lock(&self.room)
             .as_ref()
             .is_some_and(|room| room.stats().synced);
+        // Sidebar pins are viewport state. A Cloud device has no viewport, and
+        // the edge refuses its writes to rows it doesn't own: reconciling here
+        // would rewrite the missing preferences row after every refused push.
+        let owns_sidebar = self.config.platform != zeron_proto::CLOUD_PLATFORM;
         let snapshot = {
             let mut doc = lock(&self.reg);
-            match doc.reconcile_sidebar_pins(registry_synced) {
+            match doc.reconcile_sidebar_pins(registry_synced && owns_sidebar) {
                 Ok(true) => {
                     // Persist and transmit cleanup just like a user mutation.
                     self.bump_changed();
@@ -2272,6 +2477,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_deleted_device_is_never_dialed() {
+        use super::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let host = WorkspaceHost::open(
+            Arc::new(DocsStore::open(dir.path()).unwrap()),
+            WorkspaceHostConfig {
+                device_id: "laptop".into(),
+                device_name: "Laptop".into(),
+                platform: "macos".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+                local_only: false,
+                settle_after_days: zeron_proto::SETTLE_AFTER_DAYS_DEFAULT,
+            },
+        )
+        .unwrap();
+        // Unknown and room-less: ambiguous, never parked.
+        assert_eq!(
+            host.peer_liveness("cloud-1"),
+            zeron_rpc::PeerLiveness::Unknown
+        );
+        // The edge tombstones a deleted Cloud session's device: positive
+        // evidence that nothing answers, whatever the room's state.
+        let _ = lock(&host.inner.reg).apply_rows(
+            1,
+            vec![zeron_doc::RegistryRow {
+                kind: zeron_doc::KIND_DEVICES.into(),
+                id: "cloud-1".into(),
+                seq: 1,
+                deleted: true,
+                del_hlc: Some("0000000005000-000000-cloud-edge".into()),
+                fields: Default::default(),
+                clocks: Default::default(),
+            }],
+        );
+        assert_eq!(host.peer_liveness("cloud-1"), zeron_rpc::PeerLiveness::Dark);
+        assert_eq!(host.peer_liveness("laptop"), zeron_rpc::PeerLiveness::Live);
+    }
+
+    #[tokio::test]
     async fn sidebar_preferences_watch_preserves_explicit_empty_state() {
         use super::*;
 
@@ -2377,6 +2624,8 @@ mod tests {
             background_tasks: Vec::new(),
             started_at: None,
             updated_at: at,
+            last_turn_outcome: None,
+            terminal_activity: None,
             running_subagents: 0,
             compact_plan: None,
             classifying: None,
