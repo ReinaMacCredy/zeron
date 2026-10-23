@@ -833,6 +833,10 @@ final class SessionFlowTests: XCTestCase {
         let veil = app.cells["session-chat-veil"].firstMatch
         scrollTo(veil, in: list)
         XCTAssertTrue(veil.isHittable)
+        if veil.frame.maxY > app.windows.firstMatch.frame.height * 0.6 {
+            list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
+                .press(forDuration: 0.05, thenDragTo: list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)))
+        }
         snapshot(app, "d11-stacked-marks")
         let acp = app.cells["session-chat-acp"].firstMatch
         scrollTo(acp, in: list)

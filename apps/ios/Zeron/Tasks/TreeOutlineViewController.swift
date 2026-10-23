@@ -12,6 +12,7 @@ final class TreeOutlineViewController: UIViewController, UICollectionViewDelegat
     struct Row: Hashable {
         var node: TreeNodeRow?
         var label: String?
+        var depth: UInt32 = 0
         var id: String { node?.id ?? "label-\(label ?? "")" }
 
         static func == (a: Row, b: Row) -> Bool { a.id == b.id }
@@ -55,6 +56,7 @@ final class TreeOutlineViewController: UIViewController, UICollectionViewDelegat
                 c.text = row.label
                 c.textProperties.font = Fonts.ui(.sansMedium, 12)
                 c.textProperties.color = Palette.secondary
+                c.directionalLayoutMargins.leading += CGFloat(row.depth) * Self.indent
                 cell.contentConfiguration = c
                 cell.accessories = []
                 cell.accessibilityIdentifier = "tree-group-\(row.label ?? "")"
@@ -73,12 +75,11 @@ final class TreeOutlineViewController: UIViewController, UICollectionViewDelegat
             case .agent, .native: c.text = node.title
             }
             c.secondaryText = [node.word, node.time, node.tokens].compactMap { $0 }.joined(separator: " · ")
-            var accessories = [TaskGlyph.leading(Self.kind(node.status))]
+            var accessories = [TaskGlyph.leading(Self.kind(node.status), indent: CGFloat(node.depth) * Self.indent)]
             if let brand = TaskGlyph.brands([node.brand].compactMap { $0 }) { accessories.append(brand) }
             if node.chatId != nil { accessories.append(.disclosureIndicator()) }
             cell.accessories = accessories
             cell.contentConfiguration = c
-            cell.indentationWidth = 14
             cell.accessibilityIdentifier = "tree-node-\(node.id)"
         }
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { cv, path, row in
@@ -107,6 +108,8 @@ final class TreeOutlineViewController: UIViewController, UICollectionViewDelegat
         statsTask = nil
     }
 
+    private static let indent: CGFloat = 14
+
     static func kind(_ status: TreeStatus) -> StatusGlyph.Kind {
         switch status {
         case .running: .spinner
@@ -121,22 +124,16 @@ final class TreeOutlineViewController: UIViewController, UICollectionViewDelegat
         guard let client = app.client else { return }
         try? client.watchOutlineDocs(rootChatId: rootChatId)
         let nodes = client.taskOutline(rootChatId: rootChatId)
-        let shown = Set(dataSource.snapshot().itemIdentifiers)
-        var section = NSDiffableDataSourceSectionSnapshot<Row>()
-        var parents: [Row] = []
+        var rows: [Row] = []
         for node in nodes {
-            let row = Row(node: node)
-            parents.removeLast(max(0, parents.count - Int(node.depth)))
-            if let group = node.group { section.append([Row(label: group)], to: parents.last) }
-            section.append([row], to: parents.last)
-            parents.append(row)
+            if let group = node.group { rows.append(Row(label: group, depth: node.depth)) }
+            rows.append(Row(node: node))
         }
-        section.expand(section.items)
-        let animate = view.window != nil
-        dataSource.apply(section, to: 0, animatingDifferences: animate)
-        var snap = dataSource.snapshot()
-        snap.reconfigureItems(snap.itemIdentifiers.filter(shown.contains))
-        dataSource.apply(snap, animatingDifferences: animate)
+        var snap = NSDiffableDataSourceSnapshot<Int, Row>()
+        snap.appendSections([0])
+        snap.appendItems(rows)
+        snap.reconfigureItems(rows.filter { row in dataSource.snapshot().itemIdentifiers.contains(row) })
+        dataSource.apply(snap, animatingDifferences: view.window != nil)
         let live = nodes.contains { $0.status == .running || $0.status == .waiting }
         if live, ticker == nil {
             ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.reload() }
