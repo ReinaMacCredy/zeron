@@ -125,6 +125,12 @@ final class SessionFlowTests: XCTestCase {
         app.scrollViews["transcript"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap()
         sleep(1)
         snapshot(app, "queued-resting")
+        let queued = app.buttons.matching(NSPredicate(format: "label == 'More queue actions'"))
+        app.buttons.matching(NSPredicate(format: "label == 'Steer'")).element(boundBy: 0).tap()
+        let oneLeft = NSPredicate(format: "count == 1")
+        XCTAssertEqual(XCTWaiter.wait(for: [expectation(for: oneLeft, evaluatedWith: queued)], timeout: 10), .completed)
+        XCTAssertTrue(app.scrollViews["transcript"].descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'Then add a TL;DR.'")).firstMatch.waitForExistence(timeout: 5))
+        snapshot(app, "steered")
     }
 
     func testJumpToLatestAfterScrollingUp() {
