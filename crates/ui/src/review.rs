@@ -8,18 +8,7 @@ pub fn brand(
     choice: &ReviewerChoice,
     chat: Option<HarnessId>,
 ) -> (&'static str, Option<gpui::Hsla>) {
-    let (harness, model) = match choice {
-        ReviewerChoice::Harness { harness, model, .. } => (Some(*harness), model.clone()),
-        ReviewerChoice::Profile { id }
-            if let Some(profile) = options.profiles.iter().find(|profile| &profile.id == id) =>
-        {
-            (Some(profile.harness), profile.model.clone())
-        }
-        _ => {
-            let reviewer = resolve_reviewer(choice, chat, options);
-            (reviewer.harness, reviewer.model)
-        }
-    };
+    let (harness, model) = choice_agent(options, choice, chat);
     crate::pickers::agent_brand_icon(harness, model.as_deref())
 }
 

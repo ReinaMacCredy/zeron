@@ -14,6 +14,7 @@ mod fixtures;
 mod git;
 mod missions;
 mod png;
+mod review;
 mod settings;
 mod terminals;
 mod transcripts;
@@ -575,6 +576,9 @@ impl DemoHost {
         if root.is_cancelled() {
             return;
         }
+        if let (Some((_, prompt, _)), Ok(client)) = (&user, self.client()) {
+            review::prompt_sent(&client, &chat_id, prompt);
+        }
         let token = root.child_token();
         let turn_id = self.turn_seq.fetch_add(1, Ordering::Relaxed);
         if let Some((_, previous)) =
@@ -943,6 +947,9 @@ impl DemoHost {
                 return Ok(limit_rpc(&client, method == m::SET_LIMIT_RESUME, &params));
             }
             _ => {}
+        }
+        if let Some(reply) = self.review_call(&client, device_id, method, &params) {
+            return reply;
         }
         if let Some(reply) = lock(&self.git).handle(method, &params) {
             return reply;

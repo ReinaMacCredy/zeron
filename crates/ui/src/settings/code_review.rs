@@ -229,7 +229,8 @@ impl CodeReviewPage {
                 let model_entry = model
                     .as_deref()
                     .and_then(|id| self.models.get(&harness)?.iter().find(|m| m.id == id));
-                let levels = options.reasoning_stops(harness, model_entry);
+                let levels = options
+                    .reasoning_stops(harness, model_entry.map(|m| m.reasoning_levels.as_slice()));
                 if !levels.is_empty() {
                     let labels: Vec<gpui::SharedString> =
                         std::iter::once(gpui::SharedString::from("Default"))

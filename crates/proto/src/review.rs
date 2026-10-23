@@ -6,7 +6,7 @@ use crate::comments::{CommentSide, ReviewComment};
 use crate::patch::{FileDiff, line_anchor};
 use crate::{
     AgentProfile, Chat, CheckoutDiff, Delegation, FindingOutcome, FindingOutcomeKind, HarnessId,
-    Model, ReasoningLevel,
+    ReasoningLevel,
 };
 
 pub const REQUEST_PREFIX: &str = "zeron-review:";
@@ -163,11 +163,11 @@ impl ReviewerOptions {
     pub fn reasoning_stops(
         &self,
         harness: HarnessId,
-        model: Option<&Model>,
+        model_levels: Option<&[ReasoningLevel]>,
     ) -> Vec<ReasoningLevel> {
-        model
-            .map(|model| model.reasoning_levels.clone())
+        model_levels
             .filter(|levels| !levels.is_empty())
+            .map(<[ReasoningLevel]>::to_vec)
             .or_else(|| self.levels.get(&harness).cloned())
             .unwrap_or_default()
     }
@@ -1232,6 +1232,169 @@ pub fn capitalize(text: &str) -> String {
         .unwrap_or_default()
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScopeRow {
+    pub scope: ReviewScope,
+    pub label: String,
+    pub counts: Option<(u32, u32)>,
+    pub note: Option<String>,
+    pub empty: bool,
+}
+
+impl ChatReview {
+    pub fn scope_rows(&self, branch: Option<&str>) -> Vec<ScopeRow> {
+        let on_base = branch.is_some() && branch == self.base.as_deref();
+        ReviewScope::ALL
+            .into_iter()
+            .filter(|scope| !(on_base && *scope == ReviewScope::Branch))
+            .map(|scope| {
+                let counts = self.changes(scope);
+                let note = self.unavailable(scope).map(capitalize);
+                ScopeRow {
+                    scope,
+                    label: scope.label(self.base.as_deref()),
+                    empty: counts.is_some_and(|(add, del)| add + del == 0) || note.is_some(),
+                    counts,
+                    note,
+                }
+            })
+            .collect()
+    }
+
+    pub fn effective_reviewer(&self, settings: Option<&ReviewSettings>) -> ReviewerChoice {
+        self.reviewer
+            .clone()
+            .or_else(|| settings.map(|settings| settings.reviewer.clone()))
+            .unwrap_or_default()
+    }
+
+    pub fn reviewer_changed(&self, effective: &ReviewerChoice) -> bool {
+        self.run
+            .as_ref()
+            .and_then(|run| run.choice.as_ref())
+            .is_some_and(|last| last != effective)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReviewerRow {
+    pub choice: ReviewerChoice,
+    pub harness: Option<HarnessId>,
+    pub label: String,
+    pub detail: Option<String>,
+    pub selected: bool,
+}
+
+fn same_slot(a: &ReviewerChoice, b: &ReviewerChoice) -> bool {
+    match (a, b) {
+        (
+            ReviewerChoice::Harness { harness: a, .. },
+            ReviewerChoice::Harness { harness: b, .. },
+        ) => a == b,
+        _ => a == b,
+    }
+}
+
+pub fn reviewer_rows(
+    options: Option<&ReviewerOptions>,
+    effective: &ReviewerChoice,
+    chat: Option<HarnessId>,
+    model_label: impl Fn(HarnessId, &str) -> String,
+) -> Vec<ReviewerRow> {
+    let fallback = ReviewerOptions::default();
+    let all = options.unwrap_or(&fallback);
+    let auto_name =
+        options.map(|options| resolve_reviewer(&ReviewerChoice::Auto, chat, options).name());
+    let mut choices = all.choices();
+    if !choices.iter().any(|choice| same_slot(choice, effective)) {
+        choices.insert(1, effective.clone());
+    }
+    choices
+        .into_iter()
+        .map(|choice| {
+            let harness = match &choice {
+                ReviewerChoice::Harness { harness, .. } => Some(*harness),
+                _ => None,
+            };
+            let selected = same_slot(&choice, effective);
+            let label = match harness {
+                Some(harness) => all.label(&ReviewerChoice::Harness {
+                    harness,
+                    model: None,
+                    reasoning: None,
+                }),
+                None => all.label(&choice),
+            };
+            let detail = match (&choice, effective) {
+                (ReviewerChoice::Auto, _) => auto_name.clone(),
+                (
+                    _,
+                    ReviewerChoice::Harness {
+                        harness: h,
+                        model,
+                        reasoning,
+                    },
+                ) if selected
+                    && harness == Some(*h)
+                    && (model.is_some() || reasoning.is_some()) =>
+                {
+                    let parts: Vec<String> = model
+                        .as_deref()
+                        .map(|model| model_label(*h, model))
+                        .into_iter()
+                        .chain(reasoning.map(|level| level.label().to_string()))
+                        .collect();
+                    Some(parts.join(" · "))
+                }
+                _ => None,
+            };
+            ReviewerRow {
+                choice,
+                harness,
+                label,
+                detail,
+                selected,
+            }
+        })
+        .collect()
+}
+
+pub fn choice_agent(
+    options: &ReviewerOptions,
+    choice: &ReviewerChoice,
+    chat: Option<HarnessId>,
+) -> (Option<HarnessId>, Option<String>) {
+    match choice {
+        ReviewerChoice::Harness { harness, model, .. } => (Some(*harness), model.clone()),
+        ReviewerChoice::Profile { id }
+            if let Some(profile) = options.profiles.iter().find(|profile| &profile.id == id) =>
+        {
+            (Some(profile.harness), profile.model.clone())
+        }
+        _ => {
+            let reviewer = resolve_reviewer(choice, chat, options);
+            (reviewer.harness, reviewer.model)
+        }
+    }
+}
+
+pub fn choice_name(
+    options: Option<&ReviewerOptions>,
+    choice: &ReviewerChoice,
+    chat: Option<HarnessId>,
+) -> String {
+    match (choice, options) {
+        (ReviewerChoice::Auto, Some(options)) => resolve_reviewer(choice, chat, options).name(),
+        (_, Some(options)) => options.label(choice),
+        (_, None) => ReviewerOptions::default().label(choice),
+    }
+}
+
+pub fn commit_matches(subject: &str, sha: &str, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    query.is_empty() || subject.to_lowercase().contains(&query) || sha.starts_with(&query)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1699,5 +1862,74 @@ mod tests {
         delegation.finding_outcomes.remove("F4");
         run.delegation = Some(delegation);
         assert_eq!(run.outcome_counts(), "2 fixed · 3 open");
+    }
+
+    #[test]
+    fn scope_rows_drop_branch_on_the_base_and_flag_empty_scopes() {
+        let mut review = ChatReview {
+            base: Some("main".into()),
+            ..ChatReview::default()
+        };
+        review.stats.insert(ReviewScope::Uncommitted, Ok((4, 1)));
+        review
+            .stats
+            .insert(ReviewScope::LatestTurn, Err("no turn yet".into()));
+        let scopes = |rows: Vec<ScopeRow>| rows.iter().map(|row| row.scope).collect::<Vec<_>>();
+        assert!(!scopes(review.scope_rows(Some("main"))).contains(&ReviewScope::Branch));
+        let rows = review.scope_rows(Some("fix/colors"));
+        assert_eq!(scopes(rows.clone()), ReviewScope::ALL.to_vec());
+        let row = |scope| rows.iter().find(|row| row.scope == scope).unwrap();
+        assert!(!row(ReviewScope::Uncommitted).empty);
+        assert_eq!(
+            row(ReviewScope::LatestTurn).note.as_deref(),
+            Some("No turn yet")
+        );
+        assert!(row(ReviewScope::LatestTurn).empty);
+        assert_eq!(row(ReviewScope::Branch).counts, None);
+        assert!(!row(ReviewScope::Branch).empty);
+        assert_eq!(row(ReviewScope::Branch).label, "Branch vs main");
+    }
+
+    #[test]
+    fn reviewer_rows_mark_the_effective_slot_and_name_auto() {
+        let options = ReviewerOptions {
+            offered: vec![HarnessId::ClaudeCode, HarnessId::Codex],
+            ..ReviewerOptions::default()
+        };
+        let effective = ReviewerChoice::Harness {
+            harness: HarnessId::ClaudeCode,
+            model: Some("opus".into()),
+            reasoning: Some(ReasoningLevel::High),
+        };
+        let rows = reviewer_rows(
+            Some(&options),
+            &effective,
+            Some(HarnessId::Codex),
+            |_, m| m.to_uppercase(),
+        );
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].detail.as_deref(), Some("Claude Code"));
+        let claude = &rows[1];
+        assert!(claude.selected && claude.harness == Some(HarnessId::ClaudeCode));
+        assert_eq!(claude.label, "Claude Code");
+        assert_eq!(
+            claude.detail,
+            Some(format!("OPUS · {}", ReasoningLevel::High.label()))
+        );
+        assert!(!rows[2].selected && rows[2].detail.is_none());
+
+        let missing = ReviewerChoice::Profile { id: "gone".into() };
+        let rows = reviewer_rows(Some(&options), &missing, None, |_, m| m.into());
+        assert_eq!(rows[1].choice, missing);
+        assert!(rows[1].selected);
+        assert_eq!(rows[1].label, "Missing profile");
+    }
+
+    #[test]
+    fn commit_matches_subject_words_or_sha_prefix() {
+        assert!(commit_matches("Fix the tab strip", "4e1c9a7", ""));
+        assert!(commit_matches("Fix the tab strip", "4e1c9a7", " TAB "));
+        assert!(commit_matches("Fix the tab strip", "4e1c9a7", "4e1c"));
+        assert!(!commit_matches("Fix the tab strip", "4e1c9a7", "c9a7"));
     }
 }

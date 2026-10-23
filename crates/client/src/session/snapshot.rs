@@ -312,4 +312,6 @@ pub struct ComposerState {
     pub compact_blocked: Option<String>,
     pub resume_compaction: Option<zeron_proto::compaction::ResumeCompaction>,
     pub prediction: Option<String>,
+    pub review: Option<super::ReviewChip>,
+    pub staged_comments: Vec<zeron_proto::comments::ReviewComment>,
 }

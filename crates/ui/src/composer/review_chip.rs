@@ -463,14 +463,9 @@ impl Composer {
             .read(cx)
             .reviews
             .get(chat_id)
-            .and_then(|review| review.reviewer.clone())
-            .or_else(|| {
-                self.review
-                    .settings
-                    .as_ref()
-                    .map(|settings| settings.reviewer.clone())
-            })
+            .cloned()
             .unwrap_or_default()
+            .effective_reviewer(self.review.settings.as_ref())
     }
 
     fn set_reviewer(&mut self, choice: ReviewerChoice, cx: &mut Context<Self>) {
@@ -808,26 +803,18 @@ impl Composer {
         target: &Target,
         cx: &App,
     ) -> Option<(String, &'static str, Option<gpui::Hsla>)> {
-        let last = self
+        let next = self.reviewer_choice(&target.chat_id, cx);
+        if !self
             .state
             .read(cx)
             .reviews
             .get(&target.chat_id)?
-            .run
-            .as_ref()?
-            .choice
-            .clone()?;
-        let next = self.reviewer_choice(&target.chat_id, cx);
-        if next == last {
+            .reviewer_changed(&next)
+        {
             return None;
         }
+        let name = review::choice_name(self.review.options.as_ref(), &next, target.harness);
         let options = self.review.options.clone().unwrap_or_default();
-        let name = match next {
-            ReviewerChoice::Auto if self.review.options.is_some() => {
-                review::resolve_reviewer(&next, target.harness, &options).name()
-            }
-            _ => options.label(&next),
-        };
         let (mark, tint) = review::brand(&options, &next, target.harness);
         Some((name, mark, tint))
     }
@@ -853,29 +840,25 @@ impl Composer {
             .cloned()
             .unwrap_or_default();
         let busy = review.run.as_ref().is_some_and(ReviewRun::busy);
-        let on_base = target.branch.is_some() && target.branch == review.base;
-        let rows = ReviewScope::ALL
+        let rows = review
+            .scope_rows(target.branch.as_deref())
             .into_iter()
-            .filter(|scope| !(on_base && *scope == ReviewScope::Branch))
-            .map(|scope| {
-                let counts = review.changes(scope);
-                let unavailable = review.unavailable(scope).map(review::capitalize);
-                let empty =
-                    counts.is_some_and(|(add, del)| add + del == 0) || unavailable.is_some();
+            .map(|row| {
+                let scope = row.scope;
                 let id = SharedString::from(format!("composer-review-scope-{}", scope.key()));
                 let selector = id.clone();
                 popover::menu_row(&popup, false, id.clone())
                     .id(id)
                     .debug_selector(move || selector.to_string())
                     .role(gpui::Role::MenuItemRadio)
-                    .aria_label(scope.label(review.base.as_deref()))
+                    .aria_label(row.label.clone())
                     .gap(px(8.0))
                     .child(crate::settings::widgets::select_check(
                         &popup,
                         scope == selected,
                     ))
-                    .child(div().flex_1().child(scope.label(review.base.as_deref())))
-                    .child(match counts {
+                    .child(div().flex_1().child(row.label.clone()))
+                    .child(match row.counts {
                         Some((add, del)) => div()
                             .flex()
                             .gap(px(4.0))
@@ -894,11 +877,11 @@ impl Composer {
                         None => div()
                             .text_size(crate::typography::ui_rems(11.0))
                             .text_color(popup.text_faint)
-                            .child(unavailable.clone().unwrap_or_else(|| "…".to_string()))
+                            .child(row.note.clone().unwrap_or_else(|| "…".to_string()))
                             .into_any_element(),
                     })
-                    .when(empty, |el| el.opacity(0.5))
-                    .when(unavailable.is_none(), |el| {
+                    .when(row.empty, |el| el.opacity(0.5))
+                    .when(row.note.is_none(), |el| {
                         el.on_click(
                             cx.listener(move |this, _, _, cx| this.set_review_scope(scope, cx)),
                         )
@@ -908,64 +891,26 @@ impl Composer {
         rows.push(self.render_commit_row(&review, selected, &popup, window, cx));
         let effective = self.reviewer_choice(&target.chat_id, cx);
         let options = self.review.options.clone().unwrap_or_default();
-        let auto_name = self.review.options.as_ref().map(|options| {
-            review::resolve_reviewer(&ReviewerChoice::Auto, target.harness, options).name()
-        });
-        let same_slot = |a: &ReviewerChoice, b: &ReviewerChoice| match (a, b) {
-            (
-                ReviewerChoice::Harness { harness: a, .. },
-                ReviewerChoice::Harness { harness: b, .. },
-            ) => a == b,
-            _ => a == b,
-        };
-        let mut choices = options.choices();
-        if !choices.iter().any(|choice| same_slot(choice, &effective)) {
-            choices.insert(1, effective.clone());
-        }
         let open_models = self.review.submenu;
-        let reviewer_rows: Vec<AnyElement> = choices
-            .into_iter()
-            .enumerate()
-            .map(|(ix, choice)| {
-                let harness = match &choice {
-                    ReviewerChoice::Harness { harness, .. } => Some(*harness),
-                    _ => None,
-                };
-                let selected = same_slot(&choice, &effective);
-                let label = match harness {
-                    Some(harness) => options.label(&ReviewerChoice::Harness {
-                        harness,
-                        model: None,
-                        reasoning: None,
-                    }),
-                    None => options.label(&choice),
-                };
-                let detail = match (&choice, &effective) {
-                    (ReviewerChoice::Auto, _) => auto_name.clone(),
-                    (
-                        _,
-                        ReviewerChoice::Harness {
-                            harness: h,
-                            model,
-                            reasoning,
-                        },
-                    ) if selected
-                        && harness == Some(*h)
-                        && (model.is_some() || reasoning.is_some()) =>
-                    {
-                        let parts: Vec<String> =
-                            model
-                                .as_deref()
-                                .map(|model| self.model_label(*h, model))
-                                .into_iter()
-                                .chain(reasoning.map(|level| {
-                                    crate::pickers::reasoning_label(level).to_string()
-                                }))
-                                .collect();
-                        Some(parts.join(" · "))
-                    }
-                    _ => None,
-                };
+        let reviewer_rows: Vec<AnyElement> = review::reviewer_rows(
+            self.review.options.as_ref(),
+            &effective,
+            target.harness,
+            |harness, model| self.model_label(harness, model),
+        )
+        .into_iter()
+        .enumerate()
+        .map(
+            |(
+                ix,
+                review::ReviewerRow {
+                    choice,
+                    harness,
+                    label,
+                    detail,
+                    selected,
+                },
+            )| {
                 let (mark, tint) = review::brand(&options, &choice, target.harness);
                 let id = SharedString::from(format!("composer-reviewer-{ix}"));
                 let open = harness.is_some() && open_models.map(|(key, _)| key) == Some(ix);
@@ -1041,8 +986,9 @@ impl Composer {
                     )
                     .child(row)
                     .into_any_element()
-            })
-            .collect();
+            },
+        )
+        .collect();
         let review_label = review.start_label(selected);
         let review_now = popover::menu_row(&popup, false, "composer-review-now")
             .id("composer-review-now")
@@ -1329,7 +1275,8 @@ impl Composer {
                 .get(&harness)
                 .and_then(|models| models.iter().find(|m| m.id == id))
         });
-        let levels = options.reasoning_stops(harness, model_entry);
+        let levels =
+            options.reasoning_stops(harness, model_entry.map(|m| m.reasoning_levels.as_slice()));
         if levels.is_empty() {
             return None;
         }
@@ -1533,7 +1480,7 @@ impl Composer {
             .review
             .commit_filter
             .as_ref()
-            .map(|input| input.read(cx).text().trim().to_lowercase())
+            .map(|input| input.read(cx).text().to_string())
             .unwrap_or_default();
         let current = review.commit.as_ref().map(|pick| pick.sha.clone());
         let now = chrono::Utc::now();
@@ -1549,11 +1496,7 @@ impl Composer {
             ],
             Some(commits) => commits
                 .iter()
-                .filter(|commit| {
-                    query.is_empty()
-                        || commit.subject.to_lowercase().contains(&query)
-                        || commit.sha.starts_with(&query)
-                })
+                .filter(|commit| review::commit_matches(&commit.subject, &commit.sha, &query))
                 .enumerate()
                 .map(|(ix, commit)| {
                     let pick = review::CommitPick {
