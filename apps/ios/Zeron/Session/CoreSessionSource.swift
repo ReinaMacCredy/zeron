@@ -326,7 +326,7 @@ final class CoreSessionSource: SessionSource {
         let harness = row.harness ?? "claude-code"
         switch id {
         case "model":
-            return UIMenu(title: "Model", children: [UIDeferredMenuElement.uncached { [weak self] done in
+            return UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
                 guard let self else { return done([]) }
                 Task { @MainActor in done(await self.modelMenu(row: row, harness: harness)) }
             }])
