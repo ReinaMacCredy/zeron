@@ -130,9 +130,12 @@ final class AttachmentPreview: UIViewController {
     private var fittedFrame: CGRect {
         let size = item.thumbnail.size
         let ratio = size.height > 0 ? size.width / size.height : 1
-        let h = min(view.bounds.width / ratio, 640)
+        let top = (controls.first?.frame.maxY ?? view.safeAreaInsets.top) + 12
+        let bottom = removeControl.frame.minY - 12
+        let h = min(view.bounds.width / ratio, 640, bottom - top)
         let w = h * ratio
-        return CGRect(x: (view.bounds.width - w) / 2, y: (view.bounds.height - h) / 2, width: w, height: h)
+        let y = min(max((view.bounds.height - h) / 2, top), bottom - h)
+        return CGRect(x: (view.bounds.width - w) / 2, y: y, width: w, height: h)
     }
 
     override func viewIsAppearing(_ animated: Bool) {
