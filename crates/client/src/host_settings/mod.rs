@@ -134,27 +134,31 @@ pub struct ActionResult {
 impl Client {
     pub async fn host_page(&self, device_id: &str, page: &str) -> Result<Page> {
         match page {
-            "mac" => mac::page(self, device_id).await,
-            "accounts" => accounts::page(self, device_id).await,
-            "tools" => tools::page(self, device_id).await,
-            "providers" => providers::page(self, device_id).await,
+            "mac" => Box::pin(mac::page(self, device_id)).await,
+            "accounts" => Box::pin(accounts::page(self, device_id)).await,
+            "tools" => Box::pin(tools::page(self, device_id)).await,
+            "providers" => Box::pin(providers::page(self, device_id)).await,
             usage if usage.starts_with("usage") => {
-                usage::page(self, device_id, usage::days_of(usage)).await
+                Box::pin(usage::page(self, device_id, usage::days_of(usage))).await
             }
             routing if routing.starts_with("routing") => {
-                routing::page(self, device_id, routing).await
+                Box::pin(routing::page(self, device_id, routing)).await
             }
-            review if review.starts_with("review") => review::page(self, device_id, review).await,
+            review if review.starts_with("review") => {
+                Box::pin(review::page(self, device_id, review)).await
+            }
             profiles if profiles.starts_with("profile") => {
-                profiles::page(self, device_id, profiles).await
+                Box::pin(profiles::page(self, device_id, profiles)).await
             }
-            signin if signin.starts_with("signin:") => signin::page(self, device_id, signin).await,
+            signin if signin.starts_with("signin:") => {
+                Box::pin(signin::page(self, device_id, signin)).await
+            }
             instance
                 if instance == "add-provider"
                     || instance.starts_with("acp-search")
                     || instance.starts_with("instance:") =>
             {
-                instances::page(self, device_id, instance).await
+                Box::pin(instances::page(self, device_id, instance)).await
             }
             other => Err(ClientError::NotFound(other.to_owned())),
         }
