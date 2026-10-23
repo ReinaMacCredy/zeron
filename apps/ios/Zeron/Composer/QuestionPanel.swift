@@ -348,7 +348,7 @@ final class QueuePanel: UIView {
             l.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             l.setContentHuggingPriority(.defaultLow, for: .horizontal)
         }
-        for b in [send, more] {
+        for b in [icon, send, more] {
             b.setContentCompressionResistancePriority(.required, for: .horizontal)
             b.setContentHuggingPriority(.required, for: .horizontal)
         }
