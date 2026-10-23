@@ -259,8 +259,19 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
         present(nav, animated: true)
     }
 
-    func presentNewTask() {
-        let sheet = NewTaskViewController(app: app) { [weak self] taskId, mission in
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard presentedViewController == nil, MissionIntroViewController.due(app: app) else { return }
+        let intro = MissionIntroViewController { [weak self] in self?.presentNewTask(planFirst: true) }
+        if let sheet = intro.sheetPresentationController {
+            sheet.detents = [.medium()]
+            sheet.prefersGrabberVisible = true
+        }
+        present(intro, animated: true)
+    }
+
+    func presentNewTask(planFirst: Bool = false) {
+        let sheet = NewTaskViewController(app: app, planFirst: planFirst) { [weak self] taskId, mission in
             self?.dismiss(animated: true) {
                 mission ? self?.openMission(taskId) : self?.presentTask(taskId)
             }

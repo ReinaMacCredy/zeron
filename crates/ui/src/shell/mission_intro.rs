@@ -1,37 +1,13 @@
 use super::*;
 use crate::tasks::{SampleRow, StripTree, TaskCenter, TreeStatus, tree_glyph};
 use std::time::Instant;
-use zeron_proto::TaskMode;
+use zeron_proto::mission::{INTRO_DISMISS, INTRO_NEXT, INTRO_PAGES as PAGES, INTRO_TRY};
 
 const PAGE_IN: motion::MotionSpec = motion::MotionSpec::new(250, motion::EASE_OUT);
 const PAGE_SHIFT: f32 = 8.0;
 const VISUAL_HEIGHT: f32 = 172.0;
 const TREE_PAGE: usize = 2;
 const TEXT_HEIGHT: f32 = 23.0 + 8.0 + 4.0 * 21.0;
-
-struct Page {
-    title: &'static str,
-    body: &'static str,
-}
-
-const PAGES: [Page; 4] = [
-    Page {
-        title: "Start with a goal",
-        body: "Press Shift+Tab in the composer, or turn on Plan first on a task\u{2019}s card, and describe what you want done. Add up to five chats for the lead to read before it plans.",
-    },
-    Page {
-        title: "Approve the plan",
-        body: "A lead agent turns your goal into steps you can edit, reorder and add images to. By default nothing runs until you click Approve and run.",
-    },
-    Page {
-        title: "Watch every step",
-        body: "Each step runs on its own thread, side by side when steps don\u{2019}t depend on each other. The tree on the lead\u{2019}s thread follows them live, and the mission page adds each step\u{2019}s token count.",
-    },
-    Page {
-        title: "A lead and a Supervisor watch",
-        body: "The lead reviews each step\u{2019}s work when it finishes and sends it back if something is missing. The Supervisor gathers what needs you into one sheet per mission, and one Send answers it all.",
-    },
-];
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum MissionIntro {
@@ -69,11 +45,11 @@ impl MissionIntro {
         if !state.tasks_synced {
             return None;
         }
-        let started = state
-            .tasks
-            .iter()
-            .any(|task| task.mode == TaskMode::Orchestrated);
-        Some(if started { Self::Closed } else { Self::open() })
+        Some(if zeron_proto::mission::intro_due(&state.tasks) {
+            Self::open()
+        } else {
+            Self::Closed
+        })
     }
 }
 
@@ -237,10 +213,10 @@ impl Shell {
                 })
             }));
         let next = if last {
-            popover::welcome_action(theme, "mission-intro-try", "Try Mission Control", true)
+            popover::welcome_action(theme, "mission-intro-try", INTRO_TRY, true)
                 .on_click(cx.listener(|this, _, _, cx| this.try_mission_control(cx)))
         } else {
-            popover::welcome_action(theme, "mission-intro-next", "Next", true)
+            popover::welcome_action(theme, "mission-intro-next", INTRO_NEXT, true)
                 .on_click(cx.listener(|this, _, _, cx| this.page_mission_intro(1, cx)))
         };
         let card = popover::welcome_sheet(theme, "mission-intro-card", PAGES[page].title)
@@ -254,8 +230,13 @@ impl Shell {
                     .gap(px(8.0))
                     .child(dots)
                     .child(
-                        popover::welcome_action(theme, "mission-intro-dismiss", "Not now", false)
-                            .on_click(cx.listener(|this, _, _, cx| this.close_mission_intro(cx))),
+                        popover::welcome_action(
+                            theme,
+                            "mission-intro-dismiss",
+                            INTRO_DISMISS,
+                            false,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.close_mission_intro(cx))),
                     )
                     .child(next),
             )

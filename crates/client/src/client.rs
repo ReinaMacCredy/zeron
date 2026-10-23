@@ -844,6 +844,11 @@ impl Client {
         self.workspace().search(query, limit)
     }
 
+    pub fn mission_intro_due(&self) -> bool {
+        let (state, _) = self.inner.workspace.state();
+        self.workspace().synced && zeron_proto::mission::intro_due(&state.tasks)
+    }
+
     pub fn task_detail(&self, task_id: &str) -> Option<TaskDetail> {
         let (state, _) = self.inner.workspace.state();
         crate::workspace::task_detail(

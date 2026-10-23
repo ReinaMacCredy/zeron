@@ -644,6 +644,10 @@ impl CoreClient {
         (&self.client.workspace().tasks).into()
     }
 
+    pub fn mission_intro_due(&self) -> bool {
+        self.client.mission_intro_due()
+    }
+
     pub fn supervisor_page(&self) -> SupervisorPage {
         (&self.client.workspace().supervisor).into()
     }

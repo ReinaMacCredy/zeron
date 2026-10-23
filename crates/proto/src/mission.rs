@@ -356,6 +356,41 @@ pub const CHAT_MISSION_DETAIL: &str =
 pub const CHAT_MISSION_LEAD: &str = "This chat leads";
 pub const CHAT_MISSION_NEW: &str = "New mission reads this chat";
 
+pub struct IntroPage {
+    pub title: &'static str,
+    pub body: &'static str,
+}
+
+pub const INTRO_PAGES: [IntroPage; 4] = [
+    IntroPage {
+        title: "Start with a goal",
+        body: "Press Shift+Tab in the composer, or turn on Plan first on a task\u{2019}s card, and describe what you want done. Add up to five chats for the lead to read before it plans.",
+    },
+    IntroPage {
+        title: "Approve the plan",
+        body: "A lead agent turns your goal into steps you can edit, reorder and add images to. By default nothing runs until you click Approve and run.",
+    },
+    IntroPage {
+        title: "Watch every step",
+        body: "Each step runs on its own thread, side by side when steps don\u{2019}t depend on each other. The tree on the lead\u{2019}s thread follows them live, and the mission page adds each step\u{2019}s token count.",
+    },
+    IntroPage {
+        title: "A lead and a Supervisor watch",
+        body: "The lead reviews each step\u{2019}s work when it finishes and sends it back if something is missing. The Supervisor gathers what needs you into one sheet per mission, and one Send answers it all.",
+    },
+];
+
+pub const INTRO_START_TOUCH: &str = "Tap Start mission in the composer, or Plan first on a task\u{2019}s sheet, and describe what you want done. Add up to five chats for the lead to read before it plans.";
+pub const INTRO_NEXT: &str = "Next";
+pub const INTRO_DISMISS: &str = "Not now";
+pub const INTRO_TRY: &str = "Try Mission Control";
+
+pub fn intro_due(tasks: &[Task]) -> bool {
+    !tasks
+        .iter()
+        .any(|task| task.mode == crate::TaskMode::Orchestrated)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MissionReads {
     pub context: Vec<String>,
