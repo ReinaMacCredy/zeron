@@ -57,7 +57,6 @@ final class TreeOutlineViewController: UIViewController, UICollectionViewDelegat
                 c.textProperties.color = Palette.secondary
                 cell.contentConfiguration = c
                 cell.accessories = []
-                cell.indentationLevel = 0
                 cell.accessibilityIdentifier = "tree-group-\(row.label ?? "")"
                 return
             }
@@ -79,7 +78,6 @@ final class TreeOutlineViewController: UIViewController, UICollectionViewDelegat
             if node.chatId != nil { accessories.append(.disclosureIndicator()) }
             cell.accessories = accessories
             cell.contentConfiguration = c
-            cell.indentationLevel = Int(node.depth)
             cell.indentationWidth = 14
             cell.accessibilityIdentifier = "tree-node-\(node.id)"
         }
@@ -123,16 +121,22 @@ final class TreeOutlineViewController: UIViewController, UICollectionViewDelegat
         guard let client = app.client else { return }
         try? client.watchOutlineDocs(rootChatId: rootChatId)
         let nodes = client.taskOutline(rootChatId: rootChatId)
-        var rows: [Row] = []
+        let shown = Set(dataSource.snapshot().itemIdentifiers)
+        var section = NSDiffableDataSourceSectionSnapshot<Row>()
+        var parents: [Row] = []
         for node in nodes {
-            if let group = node.group { rows.append(Row(label: group)) }
-            rows.append(Row(node: node))
+            let row = Row(node: node)
+            parents.removeLast(max(0, parents.count - Int(node.depth)))
+            if let group = node.group { section.append([Row(label: group)], to: parents.last) }
+            section.append([row], to: parents.last)
+            parents.append(row)
         }
-        var snap = NSDiffableDataSourceSnapshot<Int, Row>()
-        snap.appendSections([0])
-        snap.appendItems(rows)
-        snap.reconfigureItems(rows.filter { row in dataSource.snapshot().itemIdentifiers.contains(row) })
-        dataSource.apply(snap, animatingDifferences: view.window != nil)
+        section.expand(section.items)
+        let animate = view.window != nil
+        dataSource.apply(section, to: 0, animatingDifferences: animate)
+        var snap = dataSource.snapshot()
+        snap.reconfigureItems(snap.itemIdentifiers.filter(shown.contains))
+        dataSource.apply(snap, animatingDifferences: animate)
         let live = nodes.contains { $0.status == .running || $0.status == .waiting }
         if live, ticker == nil {
             ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.reload() }
