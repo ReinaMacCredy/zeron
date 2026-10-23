@@ -25,6 +25,14 @@ pub struct Rollup<B> {
 }
 
 impl<B> Rollup<B> {
+    pub fn step_bar(&self) -> Vec<StepStatus> {
+        self.steps
+            .iter()
+            .map(|row| row.status)
+            .filter(|status| *status != StepStatus::Skipped)
+            .collect()
+    }
+
     pub fn count(&self, status: StepStatus) -> usize {
         self.steps.iter().filter(|row| row.status == status).count()
     }
@@ -83,6 +91,24 @@ pub enum PlanPhase {
     Planning,
     Status(TaskStatus),
 }
+
+pub const COLUMNS: [TaskStatus; 4] = [
+    TaskStatus::ToDo,
+    TaskStatus::Working,
+    TaskStatus::NeedsYou,
+    TaskStatus::Done,
+];
+
+/// Only Done is a drop target that writes; the other columns follow the linked chat.
+pub fn drop_completes(from: TaskStatus, to: TaskStatus) -> Option<bool> {
+    match (from, to) {
+        (TaskStatus::Done, TaskStatus::ToDo) => Some(false),
+        (from, TaskStatus::Done) if from != TaskStatus::Done => Some(true),
+        _ => None,
+    }
+}
+
+pub const TASKS_VIEWS: [&str; 2] = ["List", "Kanban"];
 
 pub fn column_title(status: TaskStatus) -> &'static str {
     match status {
@@ -596,6 +622,22 @@ impl<'a, B, F: Fn(&Task) -> Rollup<B>> Names<'a, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_done_and_back_to_to_do_are_writing_drops() {
+        use TaskStatus::*;
+        for from in [ToDo, Working, NeedsYou] {
+            assert_eq!(drop_completes(from, Done), Some(true), "{from:?}");
+            assert_eq!(drop_completes(from, ToDo), None, "{from:?}");
+        }
+        assert_eq!(drop_completes(Done, ToDo), Some(false));
+        assert_eq!(drop_completes(Done, Done), None);
+        for to in [Working, NeedsYou] {
+            for from in COLUMNS {
+                assert_eq!(drop_completes(from, to), None, "{from:?} -> {to:?}");
+            }
+        }
+    }
 
     #[test]
     fn a_mission_names_the_file_it_cannot_take_before_the_image_cap() {

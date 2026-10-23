@@ -64,6 +64,9 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
     private var dataSource: UICollectionViewDiffableDataSource<String, Row>!
     private var appToken: AnyObject?
     private let empty = UILabel()
+    private let board = KanbanBoardView()
+    private static let viewKey = "tasksView"
+    private var kanban: Bool { UserDefaults.standard.string(forKey: Self.viewKey) == "kanban" }
 
     enum Row: Hashable {
         case supervisor(title: String, subtitle: String)
@@ -86,6 +89,14 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
         let add = UIBarButtonItem(systemItem: .add, primaryAction: UIAction { [weak self] _ in self?.presentNewTask() })
         add.accessibilityIdentifier = "tasks-add"
         navigationItem.rightBarButtonItem = add
+        let views = UISegmentedControl(items: tasksViewLabels())
+        views.selectedSegmentIndex = kanban ? 1 : 0
+        views.accessibilityIdentifier = "tasks-view"
+        views.addAction(UIAction { [weak self, weak views] _ in
+            UserDefaults.standard.set(views?.selectedSegmentIndex == 1 ? "kanban" : "list", forKey: Self.viewKey)
+            self?.reload()
+        }, for: .valueChanged)
+        navigationItem.leftBarButtonItem = UIBarButtonItem(customView: views)
         var config = UICollectionLayoutListConfiguration(appearance: .insetGrouped)
         config.backgroundColor = .clear
         config.headerMode = .supplementary
@@ -95,6 +106,16 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
         collectionView.delegate = self
         collectionView.accessibilityIdentifier = "tasks-list"
         view.addSubview(collectionView)
+        board.frame = view.bounds
+        board.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        board.onOpen = { [weak self] row in row.mission ? self?.openMission(row.id) : self?.presentTask(row.id) }
+        board.onMove = { [weak self] row, completed in
+            guard let self, let client = self.app.client else { return }
+            Task { @MainActor in
+                do { try await client.setTaskCompleted(taskId: row.id, completed: completed) } catch { Toast.show(TasksErrors.message(error), in: self.view.window) }
+            }
+        }
+        view.addSubview(board)
 
         let cell = UICollectionView.CellRegistration<UICollectionViewListCell, Row> { cell, _, row in
             var c = UIListContentConfiguration.subtitleCell()
@@ -216,13 +237,20 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
             snap.appendSections(["Missions"])
             snap.appendItems(page.missions.map(Row.mission))
         }
-        for (name, rows) in [("Needs you", page.needsYou), ("Working", page.working), ("To do", page.toDo), ("Done", page.done)] where !rows.isEmpty {
-            let section = "\(name) · \(rows.count)"
+        let title = { (status: TaskStatus) in page.board.first { $0.status == status }?.title ?? "" }
+        for (status, rows) in [(TaskStatus.needsYou, page.needsYou), (.working, page.working), (.toDo, page.toDo), (.done, page.done)] where !rows.isEmpty {
+            let section = "\(title(status)) · \(rows.count)"
             snap.appendSections([section])
             snap.appendItems(rows.map(Row.task))
         }
         empty.isHidden = snap.numberOfItems > 0
         dataSource.apply(snap, animatingDifferences: view.window != nil)
+        collectionView.isHidden = kanban
+        board.isHidden = !kanban
+        if kanban {
+            board.show(page.board)
+            empty.isHidden = true
+        }
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {

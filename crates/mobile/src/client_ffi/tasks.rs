@@ -22,6 +22,17 @@ impl From<zeron_proto::TaskStatus> for TaskStatus {
     }
 }
 
+impl From<TaskStatus> for zeron_proto::TaskStatus {
+    fn from(s: TaskStatus) -> Self {
+        match s {
+            TaskStatus::ToDo => Self::ToDo,
+            TaskStatus::Working => Self::Working,
+            TaskStatus::NeedsYou => Self::NeedsYou,
+            TaskStatus::Done => Self::Done,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum StepStatus {
     Planned,
@@ -115,6 +126,7 @@ pub struct TaskRow {
     pub host: Option<HostRef>,
     pub progress_done: u32,
     pub progress_total: u32,
+    pub step_bar: Vec<StepStatus>,
     pub mission_label: Option<String>,
     pub current: Option<String>,
     pub questions: u32,
@@ -144,6 +156,7 @@ impl From<&zc::TaskRow> for TaskRow {
             host: r.host.as_ref().map(Into::into),
             progress_done: r.progress_done,
             progress_total: r.progress_total,
+            step_bar: r.step_bar.iter().copied().map(Into::into).collect(),
             mission_label: r.mission_label.clone(),
             current: r.current.clone(),
             questions: r.questions,
@@ -166,7 +179,27 @@ pub struct TasksPage {
     pub working: Vec<TaskRow>,
     pub to_do: Vec<TaskRow>,
     pub done: Vec<TaskRow>,
+    pub board: Vec<KanbanColumn>,
     pub needs_you_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct KanbanColumn {
+    pub status: TaskStatus,
+    pub title: String,
+    pub rows: Vec<TaskRow>,
+}
+
+#[uniffi::export]
+pub fn tasks_view_labels() -> Vec<String> {
+    zeron_proto::mission::TASKS_VIEWS
+        .map(str::to_owned)
+        .to_vec()
+}
+
+#[uniffi::export]
+pub fn task_drop_completes(from: TaskStatus, to: TaskStatus) -> Option<bool> {
+    zeron_proto::mission::drop_completes(from.into(), to.into())
 }
 
 impl From<&zc::TasksPage> for TasksPage {
@@ -177,6 +210,15 @@ impl From<&zc::TasksPage> for TasksPage {
             working: task_rows(&p.working),
             to_do: task_rows(&p.to_do),
             done: task_rows(&p.done),
+            board: p
+                .board
+                .iter()
+                .map(|(status, rows)| KanbanColumn {
+                    status: (*status).into(),
+                    title: zeron_proto::mission::column_title(*status).into(),
+                    rows: task_rows(rows),
+                })
+                .collect(),
             needs_you_count: p.needs_you_count,
         }
     }

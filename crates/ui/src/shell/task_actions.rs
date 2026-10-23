@@ -1306,7 +1306,7 @@ impl Shell {
         let current = crate::tasks::tasks_view(cx);
         self.view_switch(
             "tasks-view",
-            ["List", "Kanban"],
+            zeron_proto::mission::TASKS_VIEWS,
             views.iter().position(|view| *view == current).unwrap_or(0),
             TASKS_VIEW_SEGMENT,
             theme,

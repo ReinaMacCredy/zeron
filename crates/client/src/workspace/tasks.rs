@@ -37,6 +37,7 @@ pub struct TaskRow {
     pub host: Option<HostRef>,
     pub progress_done: u32,
     pub progress_total: u32,
+    pub step_bar: Vec<StepStatus>,
     pub mission_label: Option<String>,
     pub current: Option<String>,
     pub questions: u32,
@@ -53,6 +54,7 @@ pub struct TasksPage {
     pub working: Vec<TaskRow>,
     pub to_do: Vec<TaskRow>,
     pub done: Vec<TaskRow>,
+    pub board: Vec<(TaskStatus, Vec<TaskRow>)>,
     pub needs_you_count: u32,
 }
 
@@ -335,6 +337,7 @@ impl Ctx<'_> {
             host: self.task_device(task).map(|device| self.host(&device)),
             progress_done: plan.progress.done as u32,
             progress_total: plan.progress.total as u32,
+            step_bar: plan.step_bar(),
             mission_label: mission_row.as_ref().map(|row| row.label.clone()),
             current: mission_row.and_then(|row| row.current),
             questions: plan.questions as u32,
@@ -426,10 +429,14 @@ fn tasks_page(ctx: &Ctx<'_>) -> TasksPage {
     missions.sort_by_key(|row| row.status != TaskStatus::NeedsYou);
     page.missions = missions;
     let (open, done) = mission::split_tasks(&ctx.state.tasks);
+    page.board = mission::COLUMNS.map(|column| (column, Vec::new())).to_vec();
     for task in open {
         let row = ctx.task_row(task);
         if row.status == TaskStatus::NeedsYou {
             page.needs_you_count += 1;
+        }
+        if let Some((_, rows)) = page.board.iter_mut().find(|(c, _)| *c == row.status) {
+            rows.push(row.clone());
         }
         if task.has_plan() {
             continue;
@@ -441,8 +448,11 @@ fn tasks_page(ctx: &Ctx<'_>) -> TasksPage {
             TaskStatus::Done => page.done.push(row),
         }
     }
-    page.done
-        .extend(done.into_iter().map(|task| ctx.task_row(task)));
+    let done: Vec<TaskRow> = done.into_iter().map(|task| ctx.task_row(task)).collect();
+    if let Some((_, rows)) = page.board.last_mut() {
+        rows.extend(done.iter().cloned());
+    }
+    page.done.extend(done);
     page
 }
 
