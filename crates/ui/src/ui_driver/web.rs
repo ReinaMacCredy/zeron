@@ -18,11 +18,13 @@ const MAX_RESULT: usize = 1024 * 1024;
 pub(crate) struct Page {
     pub(crate) view: Retained<WKWebView>,
     pub(crate) bounds: Bounds<Pixels>,
+    #[cfg(debug_assertions)]
     pub(crate) visible: Bounds<Pixels>,
 }
 
 pub(crate) trait Hosted {
     fn page(&self) -> Option<Page>;
+    #[cfg(debug_assertions)]
     fn pressing(&self) {}
 }
 

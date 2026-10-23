@@ -557,14 +557,16 @@ impl crate::ui_driver::web::Hosted for RefCell<Host> {
         if !host.painted() {
             return None;
         }
-        let (bounds, visible) = host.placed.get()?;
+        let (bounds, _visible) = host.placed.get()?;
         Some(crate::ui_driver::web::Page {
             view: host.view.clone(),
             bounds,
-            visible,
+            #[cfg(debug_assertions)]
+            visible: _visible,
         })
     }
 
+    #[cfg(debug_assertions)]
     fn pressing(&self) {
         if let Ok(host) = self.try_borrow() {
             set_armed(&host.input, &host.key, true, "driver");

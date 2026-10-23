@@ -805,6 +805,7 @@ impl crate::ui_driver::web::Hosted for RefCell<Host> {
         Some(crate::ui_driver::web::Page {
             view: host.view.clone(),
             bounds: host.bounds?,
+            #[cfg(debug_assertions)]
             visible: host.visible_bounds?,
         })
     }
