@@ -98,11 +98,15 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
     private var liveToken: AnyObject?
     private var voiceToken: AnyObject?
 
-    /// Accessory state from what's on screen: hidden over a session (it has
-    /// its own composer).
+    /// Accessory state from what's on screen: hidden over a session or a PR
+    /// page (each has its own composer).
     func syncAccessory(animated: Bool = false) {
+        setAccessoryVisible(accessoryWanted, animated: animated)
+    }
+
+    private var accessoryWanted: Bool {
         let top = (selectedTab?.viewController as? UINavigationController)?.topViewController
-        setAccessoryVisible(!(top is SessionViewController), animated: animated)
+        return !(top is SessionViewController || top is PullRequestViewController)
     }
 
     /// Pushed sessions carry their own composer; the accessory steps aside.
@@ -128,6 +132,31 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
 
     func setAccessoryContentAlpha(_ alpha: CGFloat) {
         accessoryContent.alpha = alpha
+    }
+
+    /// Swap the accessory *inside* a push/pop animation so it travels with
+    /// the tab bar instead of snapping ahead of it (no empty glass pill, no
+    /// composer ghosting over the tab bar). `alongside` and `completion`
+    /// let the page fade its own bottom glass opposite to it.
+    func transitionAccessory(visible: Bool, with coordinator: UIViewControllerTransitionCoordinator?,
+                             alongside: @escaping () -> Void = {}, completion: @escaping (_ cancelled: Bool) -> Void = { _ in }) {
+        let visible = visible && accessoryWanted
+        guard let coordinator else { return setAccessoryVisible(visible, animated: false) }
+        if visible { prepareAccessoryForReveal() }
+        coordinator.animate(alongsideTransition: { _ in
+            if visible {
+                self.setAccessoryContentAlpha(1)
+            } else {
+                self.setAccessoryVisible(false, animated: false)
+            }
+            alongside()
+        }, completion: { context in
+            completion(context.isCancelled)
+            // A cancelled interactive pop also re-runs viewWillAppear; two
+            // flips left "New session" showing over the page, so re-derive.
+            self.syncAccessory()
+            self.setAccessoryContentAlpha(1)
+        })
     }
 
     func setAccessoryVisible(_ visible: Bool, animated: Bool) {

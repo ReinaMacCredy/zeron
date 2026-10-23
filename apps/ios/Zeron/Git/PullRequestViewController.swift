@@ -106,6 +106,16 @@ final class PullRequestViewController: UIViewController, UITableViewDataSource, 
         reload(refresh: false)
     }
 
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        (tabBarController as? MainTabController)?.transitionAccessory(visible: false, with: transitionCoordinator)
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        if isMovingFromParent { (tabBarController as? MainTabController)?.transitionAccessory(visible: true, with: transitionCoordinator) }
+    }
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         guard let head = table.tableHeaderView else { return }
@@ -422,10 +432,11 @@ final class PullRequestViewController: UIViewController, UITableViewDataSource, 
         resolve.configuration?.title = thread.resolved ? "Unresolve" : "Resolve"
         resolve.accessibilityIdentifier = "pr-resolve-\(thread.id)"
         resolve.addAction(UIAction { [weak self] _ in self?.resolve(thread) }, for: .touchUpInside)
+        for button in [reply, resolve] { button.configuration?.titleLineBreakMode = .byClipping }
         let stack = UIStackView(arrangedSubviews: [reply, resolve])
         stack.axis = .vertical
         stack.spacing = 0
-        stack.frame = CGRect(x: 0, y: 0, width: 96, height: 72)
+        stack.frame.size = stack.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
         return stack
     }
 

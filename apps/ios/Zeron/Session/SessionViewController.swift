@@ -235,41 +235,19 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }
     }
 
-    /// Swap the tab accessory *inside* the push/pop animation so it travels
-    /// with the tab bar instead of snapping ahead of it (no empty glass pill,
-    /// no composer ghosting over the tab bar).
     private func setAccessory(visible: Bool) {
         guard let tabs = tabBarController as? MainTabController else { return }
-        guard let coordinator = transitionCoordinator else {
-            return tabs.setAccessoryVisible(visible, animated: false)
-        }
         // Our bottom glass (composer stack) and the tab bar's glass never
         // overlap: the stack fades opposite to the tab bar, tracking an
         // interactive swipe-back too.
         let bottomStack = bottom
         let jumpButton = jump
-        if visible {
-            bottomStack.alpha = 1
-            tabs.prepareAccessoryForReveal()
-        } else {
-            bottomStack.alpha = 0
-        }
-        coordinator.animate(alongsideTransition: { _ in
-            if visible {
-                tabs.setAccessoryContentAlpha(1)
-                jumpButton.alpha = 0
-            } else {
-                tabs.setAccessoryVisible(false, animated: false)
-            }
+        if transitionCoordinator != nil { bottomStack.alpha = visible ? 1 : 0 }
+        tabs.transitionAccessory(visible: visible, with: transitionCoordinator, alongside: {
+            if visible { jumpButton.alpha = 0 }
             bottomStack.alpha = visible ? 0 : 1
-        }, completion: { context in
-            // An interactive pop that's cancelled keeps the session on screen.
-            // Re-derive the accessory from what's actually on top rather than
-            // flipping: a cancelled pop also re-runs viewWillAppear, and two
-            // flips left "New session" showing over the session.
-            if context.isCancelled { bottomStack.alpha = 1 }
-            tabs.syncAccessory()
-            tabs.setAccessoryContentAlpha(1)
+        }, completion: { cancelled in
+            if cancelled { bottomStack.alpha = 1 }
         })
     }
 
