@@ -10,6 +10,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         case header(String)
         case today
         case pullRequests
+        case more(String)
     }
 
     let app: AppModel
@@ -119,10 +120,24 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             cell.backgroundConfiguration = .clear()
             cell.accessibilityIdentifier = "needs-you-prs"
         }
+        let moreReg = UICollectionView.CellRegistration<UICollectionViewListCell, String> { cell, _, id in
+            var c = UIListContentConfiguration.cell()
+            c.text = "Show more"
+            c.textProperties.font = Fonts.ui(.sansMedium, 14)
+            c.textProperties.color = Palette.accent
+            c.textProperties.alignment = .center
+            cell.contentConfiguration = c
+            var bg = UIBackgroundConfiguration.clear()
+            bg.backgroundColor = .clear
+            cell.backgroundConfiguration = bg
+            cell.accessibilityIdentifier = "show-more-\(id)"
+            cell.accessibilityTraits = .button
+        }
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { [weak self] cv, path, item in
             switch item {
             case .today: cv.dequeueConfiguredReusableCell(using: todayReg, for: path, item: item)
             case .pullRequests: cv.dequeueConfiguredReusableCell(using: pullsReg, for: path, item: item)
+            case let .more(id): cv.dequeueConfiguredReusableCell(using: moreReg, for: path, item: id)
             case let .session(id): cv.dequeueConfiguredReusableCell(using: sessionReg, for: path, item: id)
             case let .folder(id): cv.dequeueConfiguredReusableCell(using: folderReg, for: path, item: id)
             case let .header(id) where self?.collapsible == true: cv.dequeueConfiguredReusableCell(using: sectionReg, for: path, item: id)
@@ -162,6 +177,10 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
 
     func openPullRequestAttention(_ pulls: TodayPullRequests) {}
 
+    func hiddenRows(_ id: String) -> Int { 0 }
+
+    func showMore(_ id: String) {}
+
     func reload(animated: Bool) {
         let sections = buildSections()
         var snapshot = NSDiffableDataSourceSnapshot<String, Item>()
@@ -189,7 +208,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
                     let state = SectionHeaderCell.State(
                         id: s.id,
                         title: header,
-                        count: s.sessions.count + Int(attention?.count ?? 0),
+                        count: s.sessions.count + Int(attention?.count ?? 0) + hiddenRows(s.id),
                         collapsed: isCollapsed(s.id),
                         live: s.sessions.contains { $0.status == .working } ? .spinner : s.sessions.contains { $0.status == .awaiting } ? .dot(StatusTone.input) : nil
                     )
@@ -212,6 +231,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
                 items.append(.session(r.id))
             }
             if attention != nil { items.append(.pullRequests) }
+            if hiddenRows(s.id) > 0 { items.append(.more(s.id)) }
             snapshot.appendItems(items, toSection: s.id)
         }
         sessions = nextSessions
@@ -241,6 +261,8 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             openToday()
         case .pullRequests:
             if let shownPulls { openPullRequestAttention(shownPulls) }
+        case let .more(id):
+            showMore(id)
         case let .header(id) where collapsible:
             toggleSection(id)
         default:
@@ -336,7 +358,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         }
         settle.image = UIImage(systemName: vm.settled ? "tray.and.arrow.up.fill" : "checkmark.circle.fill")
         settle.backgroundColor = StatusTone.done
-        return UISwipeActionsConfiguration(actions: [pin, settle])
+        return UISwipeActionsConfiguration(actions: app.organization == .inbox ? [pin, settle] : [pin])
     }
 
     private func trailingSwipe(_ path: IndexPath) -> UISwipeActionsConfiguration? {
@@ -379,9 +401,10 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
                     UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { _ in self.rename(id) },
                 ])
             }
+            let settle = UIAction(title: vm.settled ? "Unsettle" : "Settle", image: UIImage(systemName: vm.settled ? "tray.and.arrow.up" : "checkmark.circle")) { _ in self.app.setSettled(id, !vm.settled) }
             return UIMenu(children: [
                 UIAction(title: vm.pinned ? "Unpin" : "Pin", image: UIImage(systemName: vm.pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(id, !vm.pinned) },
-                UIAction(title: vm.settled ? "Unsettle" : "Settle", image: UIImage(systemName: vm.settled ? "tray.and.arrow.up" : "checkmark.circle")) { _ in self.app.setSettled(id, !vm.settled) },
+            ] + (self.app.organization == .inbox ? [settle] : []) + [
                 self.moveMenu(id),
                 UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { _ in self.rename(id) },
                 UIAction(title: "Archive", image: UIImage(systemName: "archivebox"), attributes: .destructive) { _ in self.app.archive(id) },
@@ -610,17 +633,34 @@ class SessionsViewController: SessionListController {
         for f in app.frontPage.folders {
             out.append((f.id, f.name, [], withChildren(app.sessions(inFolder: f.id))))
         }
-        if app.groupByProject {
-            for g in app.frontPage.projectGroups {
+        switch app.organization {
+        case .byProject, .byDevice:
+            for g in app.frontPage.groups {
                 out.append((g.id, g.name, [], withChildren(g.sessions)))
             }
-        } else {
+        case .inOneList, .inbox:
             out.append(("recent", out.isEmpty ? nil : "Recent", [], withChildren(app.frontPage.sessions)))
         }
-        if !app.frontPage.settled.isEmpty {
-            out.append(("settled", "Settled", [], withChildren(app.frontPage.settled)))
+        let settled = app.frontPage.settled
+        if !settled.isEmpty {
+            let shown = Int(shelfVisible(shown: settledShown, total: UInt32(settled.count)))
+            out.append(("settled", "Settled", [], withChildren(Array(settled.prefix(shown)))))
         }
         return out
+    }
+
+    private var settledShown: UInt32 = 0
+
+    override func hiddenRows(_ id: String) -> Int {
+        guard id == "settled" else { return 0 }
+        let total = app.frontPage.settled.count
+        return total - Int(shelfVisible(shown: settledShown, total: UInt32(total)))
+    }
+
+    override func showMore(_ id: String) {
+        guard id == "settled" else { return }
+        settledShown = shelfNext(shown: settledShown)
+        reload(animated: true)
     }
 
     override func viewDidLayoutSubviews() {
@@ -696,33 +736,47 @@ class SessionsViewController: SessionListController {
         present(alert, animated: true)
     }
 
+    /// Rebuilt on each open: Settings flips By project too. Sort is inert under Inbox, as on the desktop.
     func optionsMenu() -> UIMenu {
         UIMenu(children: [
-            UIAction(title: "New Section…", image: UIImage(systemName: "folder.badge.plus")) { [weak self] _ in
-                self?.promptForSection { name in self?.app.createSection(name) }
-            },
-            UIAction(title: "Collapse All", image: UIImage(systemName: "rectangle.compress.vertical")) { [weak self] _ in
-                guard let self else { return }
-                var ids = self.app.frontPage.folders.map(\.id)
-                if self.app.groupByProject { ids += self.app.frontPage.projectGroups.map(\.id) }
-                for id in ids where !self.collapsed.contains(id) { self.toggleSection(id) }
-            },
-            // Rebuilt on each open: Settings flips it too.
             UIDeferredMenuElement.uncached { [weak self] done in
                 guard let app = self?.app else { return done([]) }
+                let organize: [(String, String, SidebarOrganization)] = [
+                    ("By device", "laptopcomputer", .byDevice),
+                    ("By project", "folder", .byProject),
+                    ("None", "list.bullet", .inOneList),
+                    ("Inbox", "bell", .inbox),
+                ]
+                let sorts: [(String, String, SidebarSort)] = [
+                    ("Last updated", "clock", .lastUpdated),
+                    ("Created", "doc", .created),
+                ]
+                let inert: UIMenuElement.Attributes = app.organization == .inbox ? .disabled : []
                 done([
-                    UIAction(title: "Group by Project", image: UIImage(systemName: "square.stack.3d.up"), state: app.groupByProject ? .on : .off) { _ in
-                        app.groupByProject.toggle()
-                    },
-                    UIAction(title: "Active First", image: UIImage(systemName: "bolt"), state: app.activeFirst ? .on : .off) { _ in
-                        app.activeFirst.toggle()
-                    },
+                    UIMenu(title: "Organize", options: .displayInline, children: organize.map { title, symbol, value in
+                        UIAction(title: title, image: UIImage(systemName: symbol), state: app.organization == value ? .on : .off) { _ in app.organization = value }
+                    }),
+                    UIMenu(title: "Sort", options: .displayInline, children: sorts.map { title, symbol, value in
+                        UIAction(title: title, image: UIImage(systemName: symbol), attributes: inert, state: app.sort == value ? .on : .off) { _ in app.sort = value }
+                    } + [
+                        UIAction(title: "Active first", image: UIImage(systemName: "bolt"), attributes: inert, state: app.activeFirst ? .on : .off) { _ in app.activeFirst.toggle() },
+                    ]),
                 ])
             },
-            UIAction(title: "Archived", image: UIImage(systemName: "archivebox")) { [weak self] _ in
-                guard let self else { return }
-                self.navigationController?.pushViewController(FolderViewController(app: self.app, folder: FolderRowVM(id: "archived", name: "Archived", count: 0, symbol: "archivebox")), animated: true)
-            },
+            UIMenu(options: .displayInline, children: [
+                UIAction(title: "New Section…", image: UIImage(systemName: "folder.badge.plus")) { [weak self] _ in
+                    self?.promptForSection { name in self?.app.createSection(name) }
+                },
+                UIAction(title: "Collapse All", image: UIImage(systemName: "rectangle.compress.vertical")) { [weak self] _ in
+                    guard let self else { return }
+                    let ids = self.app.frontPage.folders.map(\.id) + self.app.frontPage.groups.map(\.id)
+                    for id in ids where !self.collapsed.contains(id) { self.toggleSection(id) }
+                },
+                UIAction(title: "Archived", image: UIImage(systemName: "archivebox")) { [weak self] _ in
+                    guard let self else { return }
+                    self.navigationController?.pushViewController(FolderViewController(app: self.app, folder: FolderRowVM(id: "archived", name: "Archived", count: 0, symbol: "archivebox")), animated: true)
+                },
+            ]),
         ])
     }
 }

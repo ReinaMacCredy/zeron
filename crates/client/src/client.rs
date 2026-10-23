@@ -27,8 +27,8 @@ use crate::live::LiveBackend;
 use crate::rpc::{FolderListing, ProgressFn, QUEUED_ATTACHMENTS_MIN, RepoRef, capability};
 use crate::session::{HostCapabilities, OutgoingAttachment, RoomState, SessionCore, SessionHandle};
 use crate::workspace::{
-    ItemSend, MissionOptions, NeedsYouEntry, SearchHit, TaskDetail, TaskDraft, WorkspaceSnapshot,
-    WorkspaceStore,
+    ItemSend, MissionOptions, NeedsYouEntry, SearchHit, SidebarView, TaskDetail, TaskDraft,
+    WorkspaceSnapshot, WorkspaceStore,
 };
 use crate::{lock, now_ms, read, write};
 
@@ -1073,6 +1073,39 @@ impl Client {
     }
 
     pub async fn create_task(&self, device_id: &str, draft: TaskDraft) -> Result<String> {
+        self.create_task_due(device_id, draft, None).await
+    }
+
+    /// The Today sheet's add-task row: due on today's work day, on the first
+    /// online Mac (the host a new mission picks).
+    pub async fn add_today_task(&self, title: &str) -> Result<String> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(ClientError::InvalidArgument("empty task title".into()));
+        }
+        let devices = self.workspace().devices.clone();
+        let host = devices
+            .iter()
+            .filter(|d| d.is_execution_host)
+            .find(|d| d.online)
+            .or_else(|| devices.iter().find(|d| d.is_execution_host))
+            .ok_or_else(|| ClientError::HostUnavailable("no Mac to hold the task".into()))?;
+        let due_on = zeron_proto::today::work_day(chrono::Local::now())
+            .format("%Y-%m-%d")
+            .to_string();
+        let draft = TaskDraft {
+            title: title.to_owned(),
+            ..TaskDraft::default()
+        };
+        self.create_task_due(&host.id, draft, Some(due_on)).await
+    }
+
+    async fn create_task_due(
+        &self,
+        device_id: &str,
+        draft: TaskDraft,
+        due_on: Option<String>,
+    ) -> Result<String> {
         let task_id = crate::new_id();
         let mut params = serde_json::json!({
             "op": "createTask",
@@ -1080,7 +1113,7 @@ impl Client {
             "title": draft.title,
             "notes": draft.notes,
             "spaceId": draft.space_id,
-            "dueOn": null,
+            "dueOn": due_on,
         });
         if !draft.images.is_empty() {
             params["images"] = draft.images.into();
@@ -1408,11 +1441,16 @@ impl Client {
             } else {
                 None
             };
+            let loaded = runs.is_some();
             self.inner
                 .workspace
                 .put_today(device_id, runs, accounts, prs);
+            loaded
         });
-        futures::future::join_all(fetches).await;
+        let loaded = futures::future::join_all(fetches).await;
+        self.inner
+            .workspace
+            .set_today_refresh(loaded.into_iter().any(|ok| ok));
         self.inner.recompute_workspace();
     }
 
@@ -1551,9 +1589,9 @@ impl Client {
         self.chat_write(chat_id, |doc| doc.set_chat_settle(chat_id, settle))
     }
 
-    /// The front page's "Active first" sort (a local preference, as on the desktop).
-    pub fn set_active_first(&self, on: bool) {
-        self.inner.workspace.set_active_first(on);
+    /// The front page's Organize and Sort choice (a local preference, as on the desktop).
+    pub fn set_sidebar_view(&self, view: SidebarView) {
+        self.inner.workspace.set_sidebar_view(view);
         self.inner.recompute_workspace();
     }
 

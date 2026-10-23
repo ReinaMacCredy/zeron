@@ -119,17 +119,20 @@ final class TodayCardCell: UICollectionViewListCell {
     }
 }
 
-final class TodaySheetController: UITableViewController {
+final class TodaySheetController: UITableViewController, UITextFieldDelegate {
     private enum Section { case tasks, day, usage }
 
     private let app: AppModel
+    private weak var host: UIViewController?
     private var page: TodayPage
     private var sections: [Section] = []
     private var token: AnyObject?
     private var pending: [String: Bool] = [:]
 
     static func present(app: AppModel, from host: UIViewController) {
-        let nav = UINavigationController(rootViewController: TodaySheetController(app: app))
+        let sheet = TodaySheetController(app: app)
+        sheet.host = host
+        let nav = UINavigationController(rootViewController: sheet)
         nav.navigationBar.titleTextAttributes = [.font: Fonts.ui(.sansSemibold, 16), .foregroundColor: Palette.text]
         nav.navigationBar.tintColor = Palette.text
         if let sheet = nav.sheetPresentationController {
@@ -161,7 +164,15 @@ final class TodaySheetController: UITableViewController {
         reload()
     }
 
+    private var reloadAfterEditing = false
+
     private func reload() {
+        // Rebuilding the rows would take the add field's keyboard away mid-word.
+        if addField.isFirstResponder {
+            reloadAfterEditing = true
+            return
+        }
+        reloadAfterEditing = false
         page = app.today
         pending = pending.filter { id, done in page.tasks.first { $0.id == id }?.done != done }
         sections = [.tasks, .day] + (page.usage == nil ? [] : [.usage])
@@ -171,15 +182,84 @@ final class TodaySheetController: UITableViewController {
     override func numberOfSections(in tableView: UITableView) -> Int { sections.count }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        sections[section] == .tasks ? max(1, page.tasks.count) : 1
+        sections[section] == .tasks ? max(1, page.tasks.count) + 1 : 1
     }
 
-    override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
+    override func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
+        let title = UILabel()
+        title.font = Fonts.ui(.sansSemibold, 13)
+        title.textColor = Palette.secondary
+        let row = UIStackView(arrangedSubviews: [title])
+        row.alignment = .firstBaseline
         switch sections[section] {
-        case .tasks: "Today's tasks · \(page.openTasks)"
-        case .day: "Your day so far"
-        case .usage: "Left on usage"
+        case .tasks:
+            title.text = "Today's tasks · \(page.openTasks)"
+            let all = UIButton(type: .system, primaryAction: UIAction(title: "All tasks") { [weak self] _ in self?.openAllTasks() })
+            all.titleLabel?.font = Fonts.ui(.sansMedium, 13)
+            all.tintColor = Palette.accent
+            all.accessibilityIdentifier = "today-all-tasks"
+            row.addArrangedSubview(all)
+        case .day:
+            title.text = "Your day so far"
+            if let updated = page.updated {
+                let stamp = UILabel()
+                stamp.text = updated
+                stamp.font = Fonts.ui(.sansMedium, 12)
+                stamp.textColor = Palette.tertiary
+                stamp.accessibilityIdentifier = "today-updated"
+                row.addArrangedSubview(stamp)
+            }
+        case .usage:
+            title.text = "Left on usage"
         }
+        let header = UIView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+        header.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.topAnchor.constraint(equalTo: header.topAnchor, constant: 14),
+            row.bottomAnchor.constraint(equalTo: header.bottomAnchor, constant: -6),
+            row.leadingAnchor.constraint(equalTo: header.layoutMarginsGuide.leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: header.layoutMarginsGuide.trailingAnchor),
+        ])
+        return header
+    }
+
+    private func openAllTasks() {
+        let tabs = host?.tabBarController as? MainTabController
+        dismiss(animated: true) { tabs?.showTasks("") }
+    }
+
+    private lazy var addField: UITextField = {
+        let field = UITextField()
+        field.placeholder = "Add a task for today"
+        field.font = Fonts.ui(.sans, 15)
+        field.textColor = Palette.text
+        field.returnKeyType = .done
+        field.delegate = self
+        field.accessibilityIdentifier = "today-add-task"
+        return field
+    }()
+
+    func textFieldDidEndEditing(_ textField: UITextField) {
+        if reloadAfterEditing { reload() }
+    }
+
+    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+        let title = textField.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !title.isEmpty else {
+            textField.resignFirstResponder()
+            return false
+        }
+        textField.text = ""
+        textField.resignFirstResponder()
+        Task { @MainActor [weak self] in
+            do {
+                try await self?.app.addTodayTask(title)
+            } catch {
+                if self?.addField.text?.isEmpty == true { self?.addField.text = title }
+            }
+        }
+        return false
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
@@ -187,12 +267,24 @@ final class TodaySheetController: UITableViewController {
         cell.accessoryView = nil
         cell.selectionStyle = .none
         cell.accessibilityIdentifier = nil
+        cell.accessibilityValue = nil
         var c = UIListContentConfiguration.subtitleCell()
         c.textProperties.font = Fonts.ui(.sans, 15)
         c.textProperties.color = Palette.text
         c.secondaryTextProperties.font = Fonts.ui(.sans, 12)
         c.secondaryTextProperties.color = Palette.secondary
         switch sections[indexPath.section] {
+        case .tasks where indexPath.row == tableView.numberOfRows(inSection: indexPath.section) - 1:
+            cell.contentConfiguration = nil
+            cell.contentView.subviews.forEach { $0.removeFromSuperview() }
+            let mark = UIImageView(image: UIImage(systemName: "circle.dashed"))
+            mark.tintColor = Palette.tertiary
+            mark.setContentHuggingPriority(.required, for: .horizontal)
+            let row = UIStackView(arrangedSubviews: [mark, addField])
+            row.spacing = 12
+            row.alignment = .center
+            embed(row, in: cell)
+            return cell
         case .tasks:
             guard indexPath.row < page.tasks.count else {
                 c.text = "Nothing due today"

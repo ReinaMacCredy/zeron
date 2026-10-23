@@ -612,6 +612,105 @@ pub(crate) fn chats() -> Vec<DemoChat> {
                 "Resumed after the restart.",
             )
         },
+        DemoChat {
+            last_ago_ms: 8 * DAY,
+            created_ago_ms: 9 * DAY,
+            ..chat(
+                "chat-old-1",
+                Some("space-blog"),
+                STUDIO,
+                "Old relay spike",
+                "Dropped it; the relay keeps its queue.",
+            )
+        },
+        DemoChat {
+            last_ago_ms: 9 * DAY,
+            created_ago_ms: 10 * DAY,
+            ..chat(
+                "chat-old-2",
+                Some("space-blog"),
+                STUDIO,
+                "Docs pass",
+                "Every page builds without warnings.",
+            )
+        },
+        DemoChat {
+            last_ago_ms: 10 * DAY,
+            created_ago_ms: 11 * DAY,
+            ..chat(
+                "chat-old-3",
+                Some("space-blog"),
+                STUDIO,
+                "Tidy the theme tokens",
+                "Removed the six unused colors.",
+            )
+        },
+        DemoChat {
+            last_ago_ms: 11 * DAY,
+            created_ago_ms: 12 * DAY,
+            ..chat(
+                "chat-old-4",
+                Some("space-blog"),
+                STUDIO,
+                "Crash on empty project",
+                "Guarded the empty path and added a test.",
+            )
+        },
+        DemoChat {
+            last_ago_ms: 12 * DAY,
+            created_ago_ms: 13 * DAY,
+            ..chat(
+                "chat-old-5",
+                Some("space-blog"),
+                STUDIO,
+                "Bump the toolchain",
+                "Builds on the new compiler.",
+            )
+        },
+        DemoChat {
+            last_ago_ms: 13 * DAY,
+            created_ago_ms: 14 * DAY,
+            ..chat(
+                "chat-old-6",
+                Some("space-blog"),
+                STUDIO,
+                "Retry budget for uploads",
+                "Three tries, then the row shows the error.",
+            )
+        },
+        DemoChat {
+            last_ago_ms: 14 * DAY,
+            created_ago_ms: 15 * DAY,
+            ..chat(
+                "chat-old-7",
+                Some("space-blog"),
+                STUDIO,
+                "Trim the changelog script",
+                "Down to one pass over the commits.",
+            )
+        },
+        DemoChat {
+            last_ago_ms: 15 * DAY,
+            created_ago_ms: 16 * DAY,
+            ..chat(
+                "chat-old-8",
+                Some("space-blog"),
+                STUDIO,
+                "Window restore on launch",
+                "Restores size and position per display.",
+            )
+        },
+        DemoChat {
+            last_ago_ms: 16 * DAY,
+            created_ago_ms: 17 * DAY,
+            ..chat(
+                "chat-old-9",
+                Some("space-blog"),
+                STUDIO,
+                "Icon cache warmup",
+                "Warm cache cuts first paint by 80 ms.",
+            )
+        },
     ]
 }
 

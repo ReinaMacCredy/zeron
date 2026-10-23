@@ -20,6 +20,7 @@ pub struct TodayPage {
     pub usage: Option<TodayUsage>,
     pub pull_requests: Option<TodayPullRequests>,
     pub runs_loaded: bool,
+    pub updated: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -214,5 +215,6 @@ pub(crate) fn derive(
         usage,
         pull_requests,
         runs_loaded: !cx.today_runs.is_empty(),
+        updated: today::updated_label(cx.today_refresh.updated, cx.today_refresh.failed),
     }
 }

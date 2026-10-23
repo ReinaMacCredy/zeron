@@ -59,14 +59,15 @@ pub use workspace::{
     ApprovalView, Brief, BriefMessage, ContextChat, DeviceView, EstimateLine, FrontGroup, FrontPage,
     HostRef, ItemSend, MissionOptions, MissionStrip, NeedsYouEntry, NeedsYouKind, PlanEstimate,
     ProjectRef, ProjectView, PullRequestGroups, SearchField, SearchHit, SectionView, SessionRow,
-    StepView, SupervisorHost, SupervisorPage, TaskDetail, TaskDraft, TaskRow, TasksPage, TodayPage,
-    TodayPart, TodayPullRequests, TodaySlot, TodayTask, TodayUsage, WakeEntry, WatchState,
-    WorkspaceSnapshot, project_color_index, relative_time_label,
+    SidebarView, StepView, SupervisorHost, SupervisorPage, TaskDetail, TaskDraft, TaskRow,
+    TasksPage, TodayPage, TodayPart, TodayPullRequests, TodaySlot, TodayTask, TodayUsage,
+    WakeEntry, WatchState, WorkspaceSnapshot, project_color_index, relative_time_label,
 };
 
 /// Re-exported so consumers (the layout engine) name the exact doc types the
 /// transcript carries without a direct `zeron-doc` dependency.
 pub use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+pub use zeron_proto::sidebar_view::{SidebarOrganization, SidebarSort};
 pub use zeron_proto::{
     ChangeRequestState, ChangeRequestSummary, ChatConfig, ChatIndicator, ContextUsage,
     UserInputAnswer, UserInputQuestion, WorktreeSpec,

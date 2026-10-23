@@ -14,8 +14,11 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use zeron_doc::WorkspaceState;
+use zeron_proto::sidebar_view::{
+    SidebarOrganization, SidebarSort, compare_sidebar_rows, promote_group,
+};
 use zeron_proto::view::{attention_rank, display_status, project_key, representative_space};
 use zeron_proto::{
     ChangeRequestState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus,
@@ -117,7 +120,32 @@ pub struct SectionView {
     pub sessions: Vec<Arc<SessionRow>>,
 }
 
-/// One "By project" group of [`FrontPage::recent`].
+/// How the front page is organized and sorted, as the desktop sidebar's
+/// Organize and Sort menus. The phone defaults to Inbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidebarView {
+    pub organization: SidebarOrganization,
+    pub sort: SidebarSort,
+    pub active_first: bool,
+}
+
+impl Default for SidebarView {
+    fn default() -> Self {
+        Self {
+            organization: SidebarOrganization::Inbox,
+            sort: SidebarSort::LastUpdated,
+            active_first: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TodayRefresh {
+    pub updated: Option<DateTime<Local>>,
+    pub failed: bool,
+}
+
+/// One "By project" or "By device" group of [`FrontPage::recent`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrontGroup {
     pub id: String,
@@ -130,11 +158,13 @@ pub struct FrontGroup {
 pub struct FrontPage {
     pub pinned: Vec<Arc<SessionRow>>,
     pub sections: Vec<SectionView>,
-    /// Unsettled rows in Inbox order (Active first when asked).
+    /// Unsettled rows in the view's order: Inbox order under Inbox, else the
+    /// chosen sort (Active first when asked).
     pub recent: Vec<Arc<SessionRow>>,
-    /// `recent` by project, the projectless Chats group first.
+    /// `recent` by project (the projectless Chats group first) or by device;
+    /// empty when the view draws one list.
     pub groups: Vec<FrontGroup>,
-    /// Newest settle first.
+    /// Newest settle first; only Inbox has the shelf.
     pub settled: Vec<Arc<SessionRow>>,
     /// Rows drawn under their lead or creator instead of in the lists above.
     pub nested: HashMap<String, Vec<Arc<SessionRow>>>,
@@ -353,7 +383,8 @@ pub(crate) struct DeriveContext<'a> {
     pub synced: bool,
     /// Each host's `settle_after_days`, where fetched.
     pub settle_days: &'a HashMap<String, u32>,
-    pub active_first: bool,
+    pub sidebar: SidebarView,
+    pub today_refresh: TodayRefresh,
     pub today_runs: &'a HashMap<String, zeron_proto::TodayRuns>,
     pub accounts: &'a HashMap<String, zeron_proto::AgentAccountsSnapshot>,
     pub today_prs: &'a HashMap<String, Vec<zeron_proto::ChangeRequestListItem>>,
@@ -680,13 +711,22 @@ pub(crate) fn derive(
         .copied()
         .filter(|id| !parent_of.contains_key(id))
         .collect();
+    let view = cx.sidebar;
+    let inbox = view.organization == SidebarOrganization::Inbox;
     let mut front_order: Vec<&Chat> = active.clone();
     front_order.sort_by(|a, b| {
-        let live = |c: &Chat| cx.active_first && rows[&c.id].indicator != ChatIndicator::Idle;
-        live(b)
-            .cmp(&live(a))
-            .then_with(|| inbox_key(b).cmp(&inbox_key(a)))
-            .then_with(|| a.id.cmp(&b.id))
+        if inbox {
+            inbox_key(b)
+                .cmp(&inbox_key(a))
+                .then_with(|| a.id.cmp(&b.id))
+        } else {
+            compare_sidebar_rows(
+                view.sort,
+                view.active_first,
+                (rows[&a.id].indicator, a),
+                (rows[&b.id].indicator, b),
+            )
+        }
     });
     let mut nested: HashMap<String, Vec<Arc<SessionRow>>> = HashMap::new();
     for chat in &front_order {
@@ -728,21 +768,33 @@ pub(crate) fn derive(
                 && !rc.pinned.contains(c.id.as_str())
                 && !rc.section_of.contains_key(c.id.as_str())
         })
-        .partition(|c| rows[&c.id].settled);
+        .partition(|c| inbox && rows[&c.id].settled);
     let recent: Vec<Arc<SessionRow>> = unsettled.iter().map(|c| row(c)).collect();
     settled_chats
         .sort_by_cached_key(|c| std::cmp::Reverse(cx.settled_at(c, rows[&c.id].indicator)));
     let settled: Vec<Arc<SessionRow>> = settled_chats.iter().map(|c| row(c)).collect();
     let mut groups: Vec<FrontGroup> = Vec::new();
     for chat in &unsettled {
-        let (id, name) = match chat.space_id.as_deref().and_then(|id| rc.spaces.get(id)) {
-            Some(space) => (
-                project_key(space),
-                representative_space(&state.spaces, space)
-                    .display_name()
-                    .to_owned(),
+        let (id, name) = match view.organization {
+            SidebarOrganization::ByProject => {
+                match chat.space_id.as_deref().and_then(|id| rc.spaces.get(id)) {
+                    Some(space) => (
+                        project_key(space),
+                        representative_space(&state.spaces, space)
+                            .display_name()
+                            .to_owned(),
+                    ),
+                    None => ("chats".to_owned(), "Chats".to_owned()),
+                }
+            }
+            SidebarOrganization::ByDevice => (
+                chat.device_id.clone(),
+                rc.devices
+                    .get(chat.device_id.as_str())
+                    .and_then(|d| device_display_name(d))
+                    .unwrap_or_else(|| "Unknown device".to_owned()),
             ),
-            None => ("chats".to_owned(), "Chats".to_owned()),
+            SidebarOrganization::InOneList | SidebarOrganization::Inbox => break,
         };
         match groups.iter_mut().find(|g| g.id == id) {
             Some(group) => group.sessions.push(row(chat)),
@@ -753,10 +805,12 @@ pub(crate) fn derive(
             }),
         }
     }
-    if let Some(at) = groups.iter().position(|g| g.id == "chats") {
-        let chats = groups.remove(at);
-        groups.insert(0, chats);
-    }
+    let first = match view.organization {
+        SidebarOrganization::ByDevice => Some(cx.self_device_id),
+        SidebarOrganization::ByProject => Some("chats"),
+        SidebarOrganization::InOneList | SidebarOrganization::Inbox => None,
+    };
+    promote_group(&mut groups, first, |g| Some(g.id.as_str()));
 
     // Projects (creation order), sessions by recency.
     let mut spaces: Vec<&Space> = state.spaces.iter().collect();

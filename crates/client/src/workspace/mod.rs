@@ -11,7 +11,7 @@ mod today;
 mod view;
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use zeron_doc::{RegistryDoc, WorkspaceState};
@@ -32,11 +32,11 @@ pub(crate) use tasks::{
     watch as watch_state,
 };
 pub use today::{TodayPage, TodayPart, TodayPullRequests, TodaySlot, TodayTask, TodayUsage};
-pub(crate) use view::{DeriveContext, device_online};
+pub(crate) use view::{DeriveContext, TodayRefresh, device_online};
 pub use view::{
     DeviceView, FrontGroup, FrontPage, PROJECT_COLOR_COUNT, ProjectRef, ProjectView, PullRequestGroups,
-    SearchField, SearchHit, SectionView, SessionRow, WorkspaceSnapshot, project_color_index,
-    relative_time_label,
+    SearchField, SearchHit, SectionView, SessionRow, SidebarView, WorkspaceSnapshot,
+    project_color_index, relative_time_label,
 };
 
 use crate::{lock, read, write};
@@ -57,7 +57,8 @@ pub(crate) struct WorkspaceStore {
     supervisors: Mutex<BTreeMap<String, SupervisorSnapshot>>,
     item_sends: Mutex<HashMap<String, ItemSend>>,
     settle_days: Mutex<HashMap<String, u32>>,
-    active_first: AtomicBool,
+    sidebar: Mutex<SidebarView>,
+    today_refresh: Mutex<TodayRefresh>,
     today_runs: Mutex<HashMap<String, TodayRuns>>,
     accounts: Mutex<HashMap<String, AgentAccountsSnapshot>>,
     today_prs: Mutex<HashMap<String, Vec<ChangeRequestListItem>>>,
@@ -78,7 +79,8 @@ impl WorkspaceStore {
             supervisors: Mutex::new(BTreeMap::new()),
             item_sends: Mutex::new(HashMap::new()),
             settle_days: Mutex::new(HashMap::new()),
-            active_first: AtomicBool::new(false),
+            sidebar: Mutex::new(SidebarView::default()),
+            today_refresh: Mutex::new(TodayRefresh::default()),
             today_runs: Mutex::new(HashMap::new()),
             accounts: Mutex::new(HashMap::new()),
             today_prs: Mutex::new(HashMap::new()),
@@ -254,8 +256,16 @@ impl WorkspaceStore {
         }
     }
 
-    pub(crate) fn set_active_first(&self, on: bool) {
-        self.active_first.store(on, Ordering::Release);
+    pub(crate) fn set_sidebar_view(&self, view: SidebarView) {
+        *lock(&self.sidebar) = view;
+    }
+
+    pub(crate) fn set_today_refresh(&self, loaded: bool) {
+        let mut refresh = lock(&self.today_refresh);
+        if loaded {
+            refresh.updated = Some(chrono::Local::now());
+        }
+        refresh.failed = !loaded;
     }
 
     pub(crate) fn drop_supervisor(&self, device_id: &str) -> bool {
@@ -296,6 +306,8 @@ impl WorkspaceStore {
         let today_runs = lock(&self.today_runs).clone();
         let accounts = lock(&self.accounts).clone();
         let today_prs = lock(&self.today_prs).clone();
+        let sidebar = *lock(&self.sidebar);
+        let today_refresh = *lock(&self.today_refresh);
         let previous = self.snapshot();
         let mut next = view::derive(
             &state,
@@ -312,7 +324,8 @@ impl WorkspaceStore {
                 asks,
                 synced,
                 settle_days: &settle_days,
-                active_first: self.active_first.load(Ordering::Acquire),
+                sidebar,
+                today_refresh,
                 today_runs: &today_runs,
                 accounts: &accounts,
                 today_prs: &today_prs,
