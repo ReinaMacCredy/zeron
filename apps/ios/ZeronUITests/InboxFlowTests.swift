@@ -5,9 +5,11 @@ final class InboxFlowTests: XCTestCase {
         continueAfterFailure = false
     }
 
-    private func launch() -> (XCUIApplication, XCUIElement) {
+    private func launch(pinnedView: Bool = true) -> (XCUIApplication, XCUIElement) {
         let app = XCUIApplication()
         app.launchArguments = ["-demo", "-fast"]
+        // The argument domain pins the persisted list menu so one test's choice can't leak into the next.
+        if pinnedView { app.launchArguments += ["-sidebarOrganization", "inbox", "-sidebarSort", "lastUpdated", "-activeFirst", "NO"] }
         app.launch()
         let list = app.collectionViews.firstMatch
         XCTAssertTrue(app.cells["section-needs-you"].waitForExistence(timeout: 20))
@@ -22,10 +24,23 @@ final class InboxFlowTests: XCTestCase {
     }
 
     private func scrollTo(_ element: XCUIElement, in list: XCUIElement) {
-        for _ in 0..<12 where !(element.exists && element.isHittable) {
+        for _ in 0..<20 where !(element.exists && element.isHittable) {
             list.swipeUp()
         }
         XCTAssertTrue(element.isHittable)
+    }
+
+    private func drag(_ list: XCUIElement, from: CGFloat, to: CGFloat) {
+        list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: from))
+            .press(forDuration: 0.05, thenDragTo: list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: to)))
+    }
+
+    private func rows(under header: XCUIElement, in app: XCUIApplication) -> [String] {
+        let below = header.frame.maxY - 1
+        return app.cells.matching(NSPredicate(format: "identifier BEGINSWITH 'session-'")).allElementsBoundByIndex
+            .filter { $0.frame.minY >= below }
+            .sorted { $0.frame.minY < $1.frame.minY }
+            .prefix(8).map(\.identifier)
     }
 
     private func setFold(_ header: XCUIElement, collapsed: Bool) {
@@ -148,17 +163,97 @@ final class InboxFlowTests: XCTestCase {
         waitForExpectations(timeout: 10)
     }
 
-    func testActiveFirstAndGroupByProject() {
-        let (app, list) = launch()
-        option(app, "Active First")
-        let veil = app.cells["session-chat-veil"]
-        scrollTo(veil, in: list)
-        snapshot(app, "active-first")
-        option(app, "Active First")
-        option(app, "Group by Project")
+    func testOrganizeAndSortFollowTheListMenu() {
+        let (app, list) = launch(pinnedView: false)
+        option(app, "None")
+        option(app, "Last updated")
+        option(app, "Inbox")
+        app.buttons["sessions-options"].tap()
+        XCTAssertTrue(app.buttons["By device"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Last updated"].isEnabled)
+        snapshot(app, "list-menu")
+        app.buttons["By project"].tap()
         let chats = app.cells["section-group:chats"]
         scrollTo(chats, in: list)
         snapshot(app, "by-project")
-        option(app, "Group by Project")
+        for _ in 0..<10 { list.swipeUp() }
+        XCTAssertFalse(app.cells["section-settled"].exists)
+        for _ in 0..<20 { list.swipeDown() }
+        option(app, "Active first")
+        let veil = app.cells["session-chat-veil"]
+        scrollTo(veil, in: list)
+        snapshot(app, "active-first")
+        option(app, "Active first")
+
+        option(app, "By device")
+        let mac = app.cells["section-group:dev-mac"]
+        for _ in 0..<20 { list.swipeDown() }
+        scrollTo(mac, in: list)
+        XCTAssertTrue(mac.label.hasPrefix("MacBook Pro"))
+        snapshot(app, "by-device")
+
+        option(app, "None")
+        let recent = app.cells["section-recent"]
+        for _ in 0..<20 { list.swipeDown() }
+        scrollTo(recent, in: list)
+        drag(list, from: recent.frame.midY / list.frame.height, to: 0.25)
+        let updated = rows(under: recent, in: app)
+        XCTAssertGreaterThan(updated.count, 3)
+        option(app, "Created")
+        let resorted = NSPredicate { _, _ in self.rows(under: recent, in: app) != updated }
+        expectation(for: resorted, evaluatedWith: nil)
+        waitForExpectations(timeout: 10)
+        snapshot(app, "sort-created")
+        option(app, "Last updated")
+        option(app, "Inbox")
+        scrollTo(app.cells["section-settled"], in: list)
+    }
+
+    func testTheSettledShelfShowsMore() {
+        let (app, list) = launch()
+        let shelf = app.cells["section-settled"]
+        scrollTo(shelf, in: list)
+        setFold(shelf, collapsed: false)
+        let more = app.cells["show-more-settled"]
+        scrollTo(more, in: list)
+        XCTAssertTrue(app.cells["session-chat-old-7"].exists)
+        XCTAssertFalse(app.cells["session-chat-old-9"].exists)
+        snapshot(app, "settled-show-more")
+        more.tap()
+        let last = app.cells["session-chat-old-9"]
+        XCTAssertTrue(last.waitForExistence(timeout: 5))
+        XCTAssertFalse(more.exists)
+        scrollTo(last, in: list)
+        snapshot(app, "settled-shown")
+        for _ in 0..<20 { list.swipeDown() }
+        scrollTo(shelf, in: list)
+        setFold(shelf, collapsed: true)
+    }
+
+    func testTheTodaySheetAddsATaskAndOpensAllTasks() {
+        let (app, _) = launch()
+        let card = app.cells["today-card"]
+        XCTAssertTrue(card.waitForExistence(timeout: 10))
+        card.tap()
+        let updated = app.staticTexts["today-updated"].firstMatch
+        XCTAssertTrue(updated.waitForExistence(timeout: 10))
+        XCTAssertTrue(updated.label.hasPrefix("Updated "))
+        snapshot(app, "today-updated")
+        let field = app.textFields["today-add-task"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("Ship the Today sheet")
+        snapshot(app, "today-add-typing")
+        field.typeText("\n")
+        let added = app.tables["today-sheet"].staticTexts["Ship the Today sheet"]
+        XCTAssertTrue(added.waitForExistence(timeout: 10))
+        snapshot(app, "today-add-done")
+        let all = app.buttons["today-all-tasks"]
+        let sheet = app.tables["today-sheet"]
+        for _ in 0..<6 where !(all.exists && all.isHittable) { drag(sheet, from: 0.4, to: 0.8) }
+        all.tap()
+        XCTAssertTrue(app.collectionViews["tasks-list"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.tables["today-sheet"].waitForNonExistence(timeout: 5))
+        snapshot(app, "today-all-tasks")
     }
 }

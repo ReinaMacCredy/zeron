@@ -10,39 +10,66 @@ final class AppModel {
         var folders: [FolderRowVM] = []
         var sessions: [SessionRowVM] = []
         var sectionSessions: [String: [SessionRowVM]] = [:]
-        /// `sessions` grouped by repository project, the Chats group first.
-        var projectGroups: [ProjectGroupVM] = []
+        /// `sessions` by project (the Chats group first) or by device.
+        var groups: [GroupVM] = []
         var settled: [SessionRowVM] = []
         /// Step threads and agent-opened chats, by the lead they draw under.
         var nested: [String: [SessionRowVM]] = [:]
     }
 
-    struct ProjectGroupVM: Equatable {
-        /// Section id: `group:<project key>` (`group:chats` without a project).
+    struct GroupVM: Equatable {
+        /// Section id: `group:<project key or device id>` (`group:chats` without a project).
         let id: String
         var name: String
         var sessions: [SessionRowVM]
     }
 
-    /// The Sessions page groups its unsectioned sessions by project
-    /// (the desktop sidebar's "By project"). Local to this phone.
-    var groupByProject: Bool {
-        get { UserDefaults.standard.bool(forKey: "groupByProject") }
+    private static let organizations: [(String, SidebarOrganization)] = [("byDevice", .byDevice), ("byProject", .byProject), ("inOneList", .inOneList), ("inbox", .inbox)]
+    private static let sorts: [(String, SidebarSort)] = [("lastUpdated", .lastUpdated), ("created", .created)]
+
+    /// The Sessions page's Organize choice (the desktop sidebar's). Local to this phone.
+    var organization: SidebarOrganization {
+        get {
+            let saved = UserDefaults.standard.string(forKey: "sidebarOrganization")
+            if let match = Self.organizations.first(where: { $0.0 == saved }) { return match.1 }
+            return UserDefaults.standard.bool(forKey: "groupByProject") ? .byProject : .inbox
+        }
         set {
-            guard newValue != groupByProject else { return }
-            UserDefaults.standard.set(newValue, forKey: "groupByProject")
-            observers.values.forEach { $0() }
+            guard newValue != organization else { return }
+            UserDefaults.standard.set(Self.organizations.first { $0.1 == newValue }?.0, forKey: "sidebarOrganization")
+            applySidebarView()
         }
     }
 
-    /// Live sessions lead the Inbox (the desktop's "Active first"). Local to this phone.
+    var sort: SidebarSort {
+        get {
+            let saved = UserDefaults.standard.string(forKey: "sidebarSort")
+            return Self.sorts.first { $0.0 == saved }?.1 ?? .lastUpdated
+        }
+        set {
+            guard newValue != sort else { return }
+            UserDefaults.standard.set(Self.sorts.first { $0.1 == newValue }?.0, forKey: "sidebarSort")
+            applySidebarView()
+        }
+    }
+
+    /// Live sessions lead each list (the desktop's "Active first"). Local to this phone.
     var activeFirst: Bool {
         get { UserDefaults.standard.bool(forKey: "activeFirst") }
         set {
             guard newValue != activeFirst else { return }
             UserDefaults.standard.set(newValue, forKey: "activeFirst")
-            client?.setActiveFirst(on: newValue)
+            applySidebarView()
         }
+    }
+
+    var groupByProject: Bool {
+        get { organization == .byProject }
+        set { organization = newValue ? .byProject : .inbox }
+    }
+
+    private func applySidebarView() {
+        client?.setSidebarView(organization: organization, sort: sort, activeFirst: activeFirst)
     }
 
     struct LiveCounts: Equatable {
@@ -60,7 +87,7 @@ final class AppModel {
     private(set) var tasks = TasksPage(missions: [], needsYou: [], working: [], toDo: [], done: [], needsYouCount: 0)
     private(set) var supervisor = SupervisorPage(hosts: [], doneToday: [], wakes: [])
     private(set) var needsYou: [NeedsYouEntry] = []
-    private(set) var today = TodayPage(greeting: "", summary: "", tasks: [], openTasks: 0, prompts: 0, digest: [], slots: [], usage: nil, runsLoaded: false)
+    private(set) var today = TodayPage(greeting: "", summary: "", tasks: [], openTasks: 0, prompts: 0, digest: [], slots: [], usage: nil, runsLoaded: false, updated: nil)
     private var needsYouObservers: [UUID: () -> Void] = [:]
     private var rows: [String: SessionRow] = [:]
     private var rawProjects: [ProjectView] = []
@@ -186,7 +213,7 @@ final class AppModel {
         )
         do {
             client = try CoreClient(config: config, credentials: credentials, listener: bridge)
-            client?.setActiveFirst(on: activeFirst)
+            applySidebarView()
             // Only real accounts persist; dev bearers come from launch args
             // (and would be rejected by the production edge next launch).
             if case .workOs = credentials { Credentials.store(credentials) }
@@ -343,6 +370,11 @@ final class AppModel {
         Task { await client.refreshToday() }
     }
 
+    func addTodayTask(_ title: String) async throws {
+        guard let client else { return }
+        _ = try await client.addTodayTask(title: title)
+    }
+
     // MARK: Observation
 
     @discardableResult
@@ -417,7 +449,7 @@ final class AppModel {
             page.sectionSessions[s.id] = list
         }
         page.sessions = ws.front.recent.map(vm)
-        page.projectGroups = ws.front.groups.map { ProjectGroupVM(id: "group:" + $0.id, name: $0.name, sessions: $0.sessions.map(vm)) }
+        page.groups = ws.front.groups.map { GroupVM(id: "group:" + $0.id, name: $0.name, sessions: $0.sessions.map(vm)) }
         page.settled = ws.front.settled.map(vm)
         page.nested = ws.front.nested.mapValues { $0.map(vm) }
         rawProjects = ws.projects
