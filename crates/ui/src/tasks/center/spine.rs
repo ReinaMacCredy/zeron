@@ -101,7 +101,7 @@ enum Side {
     Right,
 }
 
-fn spine_tops(heights: &[f32]) -> (Vec<(Side, f32)>, f32) {
+fn spine_tops(heights: &[f32], wides: &[f32]) -> (Vec<(Side, f32)>, f32) {
     let pitch = ROW + ROW_GAP;
     let (mut top, mut bottom) = (0.0_f32, 0.0_f32);
     let tops = heights
@@ -109,10 +109,20 @@ fn spine_tops(heights: &[f32]) -> (Vec<(Side, f32)>, f32) {
         .enumerate()
         .map(|(i, height)| {
             let side = if i % 2 == 0 { Side::Left } else { Side::Right };
-            let at = (side, top);
-            bottom = bottom.max(top + height);
-            top += pitch.max(height + ROW_GAP - pitch);
-            at
+            let wide = wides.get(i).copied().unwrap_or(0.0);
+            let clear = if i == 0 {
+                top
+            } else {
+                top.max(bottom + ROW_GAP)
+            };
+            let at = motion::lerp(top, clear, wide);
+            bottom = bottom.max(at + height);
+            top = motion::lerp(
+                at + pitch.max(height + ROW_GAP - pitch),
+                at + height + ROW_GAP,
+                wide,
+            );
+            (side, at)
         })
         .collect();
     let end = if heights.is_empty() {
@@ -239,6 +249,20 @@ impl TaskCenter {
             (Body::Read, None) => spec.fold.height.get(),
             (Body::Editor, None) => spec.edit.get(),
             (Body::None, None) => 0.0,
+        }
+    }
+
+    fn widen(&self, id: &str, now: Instant) -> f32 {
+        let Some(spec) = self.expanded.get(id) else {
+            return 0.0;
+        };
+        match self
+            .editor
+            .as_ref()
+            .filter(|editor| matches!(&editor.target, EditTarget::Step(step) if step == id))
+        {
+            Some(editor) if editor.from <= 0.0 => editor.grow.value_at(now),
+            _ => spec.fold.value(now),
         }
     }
 
@@ -2448,13 +2472,24 @@ impl TaskCenter {
         let width = width.unwrap_or(LEAD_WIDTH + 2.0 * COLUMN);
         let center = width / 2.0;
         let column = COLUMN.min(((width - SPINE) / 2.0).max(0.0));
+        let lane = 2.0 * column + SPINE;
+        let side_x = |side: Side| match side {
+            Side::Left => center - lane / 2.0,
+            Side::Right => center + SPINE / 2.0,
+        };
         let height_of = |key: &Key, fallback: f32| {
             self.painted
                 .borrow()
                 .get(key)
                 .map_or(fallback, |rect| f32::from(rect.size.height))
         };
-        let lead_width = LEAD_WIDTH.min(width);
+        let lead_wide = if mission.as_ref().is_some_and(|m| m.task.plan_doc) {
+            1.0 - self.overview_turn.value_at(now)
+        } else {
+            0.0
+        };
+        let turning = !self.overview_turn.settled_at(now);
+        let lead_width = motion::lerp(LEAD_WIDTH.min(width), lane, lead_wide);
         let lead_height = height_of(&Key::Lead, LEAD_HEIGHT);
         let body = lead_height + BODY_GAP;
         let visible: Vec<usize> = (0..shown.len())
@@ -2477,13 +2512,17 @@ impl TaskCenter {
                 }
             })
             .collect();
+        let wides: Vec<f32> = visible
+            .iter()
+            .map(|ix| self.widen(&shown[*ix].0.step.id, now))
+            .collect();
         let ghost = self.tree.shown(GHOST);
         let ghost_height = height_of(&Key::Add, 44.0);
         let mut slots_h = heights.clone();
         if ghost {
             slots_h.push(ghost_height);
         }
-        let (tops, end) = spine_tops(&slots_h);
+        let (tops, end) = spine_tops(&slots_h, &wides);
         let shown_agents: Vec<usize> = agents
             .iter()
             .copied()
@@ -2493,7 +2532,7 @@ impl TaskCenter {
             .iter()
             .map(|ix| height_of(&Key::Task(tree_nodes[*ix].id.clone()), AGENT_HEIGHT))
             .collect();
-        let (agent_tops, _) = spine_tops(&agent_heights);
+        let (agent_tops, _) = spine_tops(&agent_heights, &[]);
         let snap = reduced || !known || self.sliding(now);
         let lifted = self.drag.as_ref().map(|drag| (drag.id.clone(), drag.dy));
         let mut placed: Vec<Placed> = Vec::new();
@@ -2508,7 +2547,7 @@ impl TaskCenter {
                 .as_ref()
                 .filter(|(lifted, _)| lifted == id)
                 .map_or((0.0, 0.0), |(_, dy)| (0.0, *dy));
-            let (gx, gy) = tree.place(id, (x, y), extra, snap, now);
+            let (gx, gy) = tree.place(id, (x, y), extra, snap || (turning && id == LEAD), now);
             let frame = tree.frame(id, now);
             placed.push(Placed {
                 id: id.to_string(),
@@ -2531,16 +2570,12 @@ impl TaskCenter {
         );
         for (k, ix) in visible.iter().enumerate() {
             let (side, top) = tops[k];
-            let x = match side {
-                Side::Left => center - SPINE / 2.0 - column,
-                Side::Right => center + SPINE / 2.0,
-            };
             place(
                 &mut self.tree,
                 &shown[*ix].0.step.id,
-                x,
+                motion::lerp(side_x(side), side_x(Side::Left), wides[k]),
                 body + top,
-                column,
+                motion::lerp(column, lane, wides[k]),
                 heights[k],
                 Some(side),
             );
@@ -2548,14 +2583,10 @@ impl TaskCenter {
         let mut next = body + end;
         if ghost {
             let (side, top) = tops[visible.len()];
-            let x = match side {
-                Side::Left => center - SPINE / 2.0 - column,
-                Side::Right => center + SPINE / 2.0,
-            };
             place(
                 &mut self.tree,
                 GHOST,
-                x,
+                side_x(side),
                 body + top,
                 column,
                 ghost_height,
@@ -2580,14 +2611,10 @@ impl TaskCenter {
         }
         for (k, ix) in shown_agents.iter().enumerate() {
             let (side, top) = agent_tops[k];
-            let x = match side {
-                Side::Left => center - SPINE / 2.0 - column,
-                Side::Right => center + SPINE / 2.0,
-            };
             place(
                 &mut self.tree,
                 &tree_nodes[*ix].id,
-                x,
+                side_x(side),
                 next + top,
                 column,
                 agent_heights[k],
@@ -2659,6 +2686,12 @@ impl TaskCenter {
             .into_iter()
             .collect();
 
+        placed.sort_by_key(|node| {
+            visible
+                .iter()
+                .zip(&wides)
+                .any(|(ix, wide)| *wide > 0.0 && shown[*ix].0.step.id == node.id)
+        });
         let mut cards: Vec<AnyElement> = Vec::new();
         for node in &placed {
             let element = if node.id == LEAD {
@@ -3361,7 +3394,7 @@ mod tests {
     #[test]
     fn cards_alternate_sides_one_row_apart_and_a_tall_card_pushes_the_rest() {
         let heights = [96.0, 96.0, 300.0, 96.0, 150.5];
-        let (tops, end) = spine_tops(&heights);
+        let (tops, end) = spine_tops(&heights, &[]);
         assert_eq!(
             tops,
             [
@@ -3383,12 +3416,22 @@ mod tests {
             440.0 + 150.5 + ROW_GAP + 16.0,
             "the ghost sits under the lowest card"
         );
-        let (_, grown) = spine_tops(&[96.0, 96.0, 96.4, 96.0]);
-        let (_, more) = spine_tops(&[96.0, 96.0, 140.0, 96.0]);
+        let (_, grown) = spine_tops(&[96.0, 96.0, 96.4, 96.0], &[]);
+        let (_, more) = spine_tops(&[96.0, 96.0, 140.0, 96.0], &[]);
         assert!(
             more > grown,
             "a growing card moves what follows without row steps"
         );
+    }
+
+    #[test]
+    fn a_wide_card_takes_a_row_of_its_own() {
+        let heights = [96.0, 96.0, 300.0, 96.0];
+        let (tops, _) = spine_tops(&heights, &[0.0, 0.0, 1.0]);
+        assert_eq!(tops[2], (Side::Left, 64.0 + 96.0 + ROW_GAP));
+        assert_eq!(tops[3], (Side::Right, tops[2].1 + 300.0 + ROW_GAP));
+        let (closed, _) = spine_tops(&heights, &[0.0, 0.0, 0.0]);
+        assert_eq!(closed, spine_tops(&heights, &[]).0);
     }
 
     struct Quiet;
