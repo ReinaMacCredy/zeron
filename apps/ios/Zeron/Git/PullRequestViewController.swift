@@ -25,12 +25,15 @@ final class PullRequestViewController: UIViewController, UITableViewDataSource, 
     private let reviewButton = UIButton(configuration: .gray())
     private let sendButton = UIButton(configuration: .filled())
     private var composerBottom: NSLayoutConstraint!
+    private var tableAboveComposer: NSLayoutConstraint!
+    private var tableToBottom: NSLayoutConstraint!
 
     init(app: AppModel, deviceId: String, url: String) {
         self.app = app
         self.deviceId = deviceId
         self.page = app.client?.pullRequestPage(deviceId: deviceId, url: url)
         super.init(nibName: nil, bundle: nil)
+        hidesBottomBarWhenPushed = true
         title = pullRequestLink(url: url).map { "#\($0.number)" } ?? "Pull request"
     }
 
@@ -63,7 +66,7 @@ final class PullRequestViewController: UIViewController, UITableViewDataSource, 
         head.alignment = .leading
         head.spacing = 8
         head.setCustomSpacing(12, after: askButton)
-        tabs.widthAnchor.constraint(equalTo: head.widthAnchor).isActive = true
+        tabs.widthAnchor.constraint(equalTo: head.layoutMarginsGuide.widthAnchor).isActive = true
         head.isLayoutMarginsRelativeArrangement = true
         head.directionalLayoutMargins = .init(top: 12, leading: 20, bottom: 8, trailing: 20)
         let headHost = UIView()
@@ -90,14 +93,14 @@ final class PullRequestViewController: UIViewController, UITableViewDataSource, 
             view.addSubview(v)
         }
         composerBottom = composer.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor)
+        tableAboveComposer = table.bottomAnchor.constraint(equalTo: composer.topAnchor)
+        tableToBottom = table.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         NSLayoutConstraint.activate([
             table.topAnchor.constraint(equalTo: view.topAnchor),
             table.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             table.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            table.bottomAnchor.constraint(equalTo: composer.topAnchor),
             composer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             composer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            composerBottom,
         ])
         switchTab()
         reload(refresh: false)
@@ -209,8 +212,10 @@ final class PullRequestViewController: UIViewController, UITableViewDataSource, 
 
     private func switchTab() {
         selected = Tab(rawValue: tabs.selectedSegmentIndex) ?? .summary
-        composer.isHidden = selected != .activity
-        composerBottom.isActive = selected == .activity
+        let commenting = selected == .activity
+        composer.isHidden = !commenting
+        NSLayoutConstraint.deactivate(commenting ? [tableToBottom] : [composerBottom, tableAboveComposer])
+        NSLayoutConstraint.activate(commenting ? [composerBottom, tableAboveComposer] : [tableToBottom])
         table.separatorStyle = selected == .code ? .none : .singleLine
         if selected == .code, !codeLoaded, detail != nil {
             Task { @MainActor in await self.loadCode(refresh: false) }
