@@ -133,6 +133,7 @@ impl TaskCenter {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let crumb = self.back_crumb(theme, cx);
         let settled = Self::root_settled(root);
         let kids = &nodes[1..];
         let count = |status: Status| kids.iter().filter(|node| node.status == status).count();
@@ -321,6 +322,7 @@ impl TaskCenter {
             .flex()
             .flex_col()
             .gap(px(6.0))
+            .child(div().flex().child(crumb))
             .child(
                 div()
                     .flex()
@@ -528,11 +530,10 @@ impl TaskCenter {
                 parent => format!("Started by {}", nodes[parent].title),
             });
         }
-        if let Some(at) = chat.as_ref().map(|chat| chat.created_at).or(node.since) {
-            from.push(match node.parent {
-                Some(_) => format!("at {}", clock(at)),
-                None => format!("Started at {}", clock(at)),
-            });
+        if node.parent.is_some()
+            && let Some(at) = chat.as_ref().map(|chat| chat.created_at).or(node.since)
+        {
+            from.push(format!("at {}", clock(at)));
         }
         if let NodeKind::Step(n) = node.kind {
             from.push(format!("\u{b7} fills step {n}"));
@@ -553,40 +554,6 @@ impl TaskCenter {
                         .child(step.notes.clone()),
                 )
             });
-        let kids: Vec<&TreeNode> = nodes.iter().filter(|kid| kid.parent == Some(ix)).collect();
-        let started = (!kids.is_empty()).then(|| {
-            Self::detail_box(format!("STARTED {}", kids.len()), theme).children(kids.iter().map(
-                |kid| {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .h(px(26.0))
-                        .text_size(ui_rems(13.0))
-                        .child(tree::glyph(
-                            kid.status,
-                            13.0,
-                            kid.status.tone(theme),
-                            reduced,
-                        ))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .child(kid.title.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_size(ui_rems(12.0))
-                                .text_color(kid.status.tone(theme))
-                                .child(kid.word),
-                        )
-                },
-            ))
-        });
         let live = self
             .live
             .as_ref()
@@ -706,7 +673,6 @@ impl TaskCenter {
             .child(title)
             .children(from)
             .children(spec)
-            .children(started)
             .child(body)
             .child(footer)
             .children(composer)

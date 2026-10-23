@@ -41,7 +41,7 @@ mod tree;
 
 pub use card::{CardFocus, Orchestrate, TaskCard, TaskCardEvent};
 pub use center::{LiveThread, PlanEdit, Selection, TaskCenter, TaskCenterEvent};
-pub(crate) use index::{Kind as IndexKind, MissionIndex, MissionIndexEvent, index_rows};
+pub(crate) use index::tree_index;
 use logic::COLUMNS;
 use morph::{Key, Morph, Painted, Rects};
 pub(crate) use strip_tree::{SampleRow, StripTree, StripTreeEvent, TreeHost};
@@ -148,7 +148,14 @@ impl Rollup {
             && !lead_working
         {
             PlanPhase::PlanReady
-        } else if task.completed_at.is_none() && lead_working && self.steps.is_empty() {
+        } else if task.completed_at.is_none()
+            && self.steps.is_empty()
+            && is_mission(task, self)
+            && matches!(
+                self.lead,
+                Some(ChatIndicator::Working | ChatIndicator::Idle | ChatIndicator::Completed)
+            )
+        {
             PlanPhase::Planning
         } else {
             PlanPhase::Status(self.status)
@@ -177,6 +184,46 @@ struct Row {
     project: Option<SharedString>,
     linked: Option<Linked>,
     plan: Rollup,
+}
+
+pub(crate) fn is_mission(task: &zeron_proto::Task, plan: &Rollup) -> bool {
+    task.has_plan() || task.plan_pending || !plan.steps.is_empty()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TasksFilter {
+    All,
+    Missions,
+    Trees,
+    NeedsYou,
+}
+
+impl TasksFilter {
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Missions => "Missions",
+            Self::Trees => "Trees",
+            Self::NeedsYou => "Needs you",
+        }
+    }
+
+    fn keeps(self, row: &Row) -> bool {
+        match self {
+            Self::All => true,
+            Self::Missions => is_mission(&row.task, &row.plan),
+            Self::Trees => false,
+            Self::NeedsYou => row.status == TaskStatus::NeedsYou,
+        }
+    }
+
+    fn keeps_tree(self, row: &index::IndexRow) -> bool {
+        match self {
+            Self::All | Self::Trees => true,
+            Self::Missions => false,
+            Self::NeedsYou => row.asks,
+        }
+    }
 }
 
 impl Row {
@@ -208,6 +255,7 @@ pub struct TasksPage {
     gallery: Entity<ImageGallery>,
     card: Entity<TaskCard>,
     done_open: bool,
+    filter: TasksFilter,
     open_first_card: bool,
     focus: FocusHandle,
     view_now: Option<TasksView>,
@@ -267,6 +315,11 @@ impl TasksPage {
             gallery,
             card,
             done_open: true,
+            filter: if std::env::var("ZERON_OPEN_ROUTE").as_deref() == Ok("mission-control") {
+                TasksFilter::Missions
+            } else {
+                TasksFilter::All
+            },
             open_first_card: std::env::var("ZERON_OPEN_DIALOG").as_deref() == Ok("task-card"),
             focus: cx.focus_handle(),
             view_now: None,
@@ -288,6 +341,11 @@ impl TasksPage {
 
     pub fn card(&self) -> &Entity<TaskCard> {
         &self.card
+    }
+
+    pub(crate) fn set_filter(&mut self, filter: TasksFilter, cx: &mut Context<Self>) {
+        self.filter = filter;
+        cx.notify();
     }
 
     fn open_knob_card(&mut self, cx: &mut Context<Self>) {
@@ -378,11 +436,11 @@ impl TasksPage {
     fn open_row(
         &mut self,
         task_id: &str,
-        orchestrated: bool,
+        paged: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if orchestrated {
+        if paged {
             cx.emit(TasksEvent::OpenCenter(task_id.to_string()));
             return;
         }
@@ -612,7 +670,7 @@ impl TasksPage {
             .into_any_element()
     }
 
-    fn linked_label(indicator: ChatIndicator) -> &'static str {
+    pub(crate) fn linked_label(indicator: ChatIndicator) -> &'static str {
         match indicator {
             ChatIndicator::Working => "Working",
             ChatIndicator::AwaitingInput => "Asked you a question",
@@ -669,19 +727,7 @@ impl TasksPage {
     }
 
     fn plan_meta(row: &Row, theme: &Theme, fragments: &mut Vec<AnyElement>) {
-        fragments.push(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .child(
-                    icon(icons::MISSION_CONTROL)
-                        .size(px(11.0))
-                        .text_color(theme.text_muted),
-                )
-                .child("Mission Control")
-                .into_any_element(),
-        );
+        fragments.push(tree::kind_badge(true, theme));
         let marks = row.marks();
         if !marks.is_empty() {
             fragments.push(Self::marks(&marks, theme));
@@ -815,7 +861,7 @@ impl TasksPage {
         let accent = theme.accent;
         let open_id = task_id.clone();
         let menu_id = task_id.clone();
-        let orchestrated = row.orchestrated();
+        let paged = row.linked.is_some();
         let drop_before = task_id.clone();
         let drag = TaskDrag {
             task_id: task_id.clone(),
@@ -838,7 +884,7 @@ impl TasksPage {
                 ROW_BORDER,
             ))
             .on_click(cx.listener(move |page, _: &ClickEvent, window, cx| {
-                page.open_row(&open_id, orchestrated, window, cx)
+                page.open_row(&open_id, paged, window, cx)
             }))
             .on_mouse_down(MouseButton::Right, Self::row_menu_listener(menu_id, cx))
             .when(!done, |el| {
@@ -1046,20 +1092,157 @@ impl TasksPage {
             )
     }
 
+    fn tree_row(
+        &self,
+        row: &index::IndexRow,
+        reduced: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let root = row.root.clone();
+        let finished = row
+            .segments
+            .iter()
+            .filter(|status| **status == TreeStatus::Done)
+            .count();
+        let mut meta = vec![
+            tree::kind_badge(false, theme),
+            div()
+                .when(row.asks, |el| el.text_color(theme.warning))
+                .child(row.line.clone())
+                .into_any_element(),
+        ];
+        if !row.segments.is_empty() {
+            meta.push(
+                div()
+                    .child(format!("{finished}/{} agents", row.segments.len()))
+                    .into_any_element(),
+            );
+        }
+        let hover = theme.glass_hover();
+        div()
+            .id(SharedString::from(format!("task-tree-row-{root}")))
+            .debug_selector(|| format!("task-tree-row-{}", row.root))
+            .role(gpui::Role::ListItem)
+            .aria_label(format!("{}: {}", row.title, row.line))
+            .min_h(px(ROW_HEIGHT))
+            .px(px(12.0))
+            .py(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .rounded(px(12.0))
+            .border_t_2()
+            .border_color(gpui::transparent_black())
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(CHECK_SIZE))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(tree::glyph(
+                        row.status,
+                        15.0,
+                        row.status.tone(theme),
+                        reduced,
+                    )),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(ui_rems(13.5))
+                            .line_height(ui_rems(18.0))
+                            .text_color(theme.text)
+                            .child(row.title.clone()),
+                    )
+                    .child(widgets::meta_line(theme, meta)),
+            )
+            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                cx.emit(TasksEvent::OpenCenter(root.clone()))
+            }))
+            .into_any_element()
+    }
+
+    fn filter_chips(
+        &self,
+        counts: Vec<(TasksFilter, usize)>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let chips = counts.into_iter().map(|(filter, n)| {
+            let on = self.filter == filter;
+            let label = filter.label();
+            let selector = format!("tasks-filter-{label}");
+            div()
+                .id(SharedString::from(selector.clone()))
+                .debug_selector(move || selector.clone())
+                .role(gpui::Role::Button)
+                .aria_label(format!("{label} {n}"))
+                .aria_selected(on)
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .h(px(26.0))
+                .px(px(10.0))
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(if on {
+                    theme.border_strong
+                } else {
+                    theme.border
+                })
+                .when(on, |el| el.bg(theme.wash(0.06)))
+                .cursor_pointer()
+                .text_size(ui_rems(12.0))
+                .text_color(if on { theme.text } else { theme.text_muted })
+                .child(label)
+                .child(
+                    div()
+                        .text_color(if filter == TasksFilter::NeedsYou && n > 0 {
+                            theme.warning
+                        } else {
+                            theme.text_faint
+                        })
+                        .child(n.to_string()),
+                )
+                .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
+                    page.set_filter(filter, cx);
+                }))
+        });
+        div()
+            .debug_selector(|| "tasks-filters".into())
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(12.0))
+            .children(chips)
+            .into_any_element()
+    }
+
     fn done_group(
         &self,
         done: &[Row],
+        trees: Vec<AnyElement>,
         today: NaiveDate,
         morph: Option<f32>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if done.is_empty() {
+        if done.is_empty() && trees.is_empty() {
             return None;
         }
         let open = self.done_open;
         let text = theme.text;
-        let toggle = Self::done_toggle(open, done.len(), theme)
+        let toggle = Self::done_toggle(open, done.len() + trees.len(), theme)
             .id("tasks-done-toggle")
             .debug_selector(|| "tasks-done-toggle".into())
             .role(gpui::Role::Button)
@@ -1077,6 +1260,7 @@ impl TasksPage {
         let rows: Vec<AnyElement> = if open {
             done.iter()
                 .map(|row| self.list_row(row, today, morph.is_some(), theme, cx))
+                .chain(trees)
                 .collect()
         } else {
             Vec::new()
@@ -1092,19 +1276,35 @@ impl TasksPage {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_list(
         &self,
         open: &[Row],
         done: &[Row],
+        trees: &index::IndexRows,
+        chips: AnyElement,
         morph: Option<f32>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let today = Self::today();
+        let reduced = motion::reduced_motion(cx);
         let rows: Vec<AnyElement> = open
             .iter()
             .map(|row| self.list_row(row, today, morph.is_some(), theme, cx))
             .collect();
+        let tree_rows: Vec<AnyElement> = trees
+            .running
+            .iter()
+            .map(|row| self.tree_row(row, reduced, theme, cx))
+            .collect();
+        let done_trees: Vec<AnyElement> = trees
+            .done_today
+            .iter()
+            .map(|row| self.tree_row(row, reduced, theme, cx))
+            .collect();
+        let adding = self.filter == TasksFilter::All;
+        let empty = !adding && rows.is_empty() && tree_rows.is_empty();
         let column = div()
             .w_full()
             .max_w(px(LIST_MAX_WIDTH))
@@ -1115,21 +1315,42 @@ impl TasksPage {
             .flex()
             .flex_col()
             .gap(px(24.0))
-            .child(self.measured_header(open.len(), morph.is_some(), theme))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(16.0))
+                    .child(self.measured_header(open.len(), morph.is_some(), theme))
+                    .child(chips),
+            )
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
                     .children(rows)
-                    .child(self.add_row(
-                        morph.map(|elapsed| morph::extra_t(elapsed, true)),
-                        theme,
-                        cx,
-                    ))
-                    .children(self.add_tray(theme, cx)),
+                    .when(adding, |el| {
+                        el.child(self.add_row(
+                            morph.map(|elapsed| morph::extra_t(elapsed, true)),
+                            theme,
+                            cx,
+                        ))
+                        .children(self.add_tray(theme, cx))
+                    })
+                    .children(tree_rows)
+                    .when(empty, |el| {
+                        el.child(
+                            div()
+                                .debug_selector(|| "tasks-filter-empty".into())
+                                .px(px(12.0))
+                                .py(px(10.0))
+                                .text_size(ui_rems(13.0))
+                                .text_color(theme.text_muted)
+                                .child("Nothing matches this filter."),
+                        )
+                    }),
             )
-            .children(self.done_group(done, today, morph, theme, cx));
+            .children(self.done_group(done, done_trees, today, morph, theme, cx));
         widgets::scroll_faded(
             "tasks-list-scroll",
             div()
@@ -1158,7 +1379,7 @@ impl TasksPage {
         };
         let open_id = task_id.clone();
         let menu_id = task_id.clone();
-        let orchestrated = row.orchestrated();
+        let paged = row.linked.is_some();
         let thumbs = self.row_images("task-kanban", row, theme, cx);
         Self::card_visual(row, selected, theme)
             .children(thumbs)
@@ -1173,7 +1394,7 @@ impl TasksPage {
                 Edges::all(1.0),
             ))
             .on_click(cx.listener(move |page, _: &ClickEvent, window, cx| {
-                page.open_row(&open_id, orchestrated, window, cx)
+                page.open_row(&open_id, paged, window, cx)
             }))
             .on_mouse_down(MouseButton::Right, Self::row_menu_listener(menu_id, cx))
             .on_drag(drag, |drag, _, _, cx| {
@@ -1322,6 +1543,7 @@ impl TasksPage {
         &self,
         open: &[Row],
         done: &[Row],
+        chips: AnyElement,
         morph: Option<f32>,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -1424,7 +1646,14 @@ impl TasksPage {
             .flex()
             .flex_col()
             .gap(px(20.0))
-            .child(self.measured_header(open.len(), morph.is_some(), theme))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(16.0))
+                    .child(self.measured_header(open.len(), morph.is_some(), theme))
+                    .child(chips),
+            )
             .child(
                 div()
                     .flex_1()
@@ -1577,6 +1806,44 @@ pub(crate) fn mission_thread(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TabMember {
+    pub task_id: String,
+    pub lead: String,
+    pub step: Option<usize>,
+}
+
+pub(crate) fn tab_members(state: &AppState) -> std::collections::HashMap<String, TabMember> {
+    let mut tasks: Vec<&zeron_proto::Task> = state
+        .tasks
+        .iter()
+        .filter(|task| !task.deleted && task.has_plan())
+        .collect();
+    tasks.sort_by_key(|task| task.completed_at.is_none());
+    let mut members = std::collections::HashMap::new();
+    for task in tasks {
+        let Some(lead) = task.chat_id.clone() else {
+            continue;
+        };
+        let member = |step| TabMember {
+            task_id: task.id.clone(),
+            lead: lead.clone(),
+            step,
+        };
+        members.insert(lead.clone(), member(None));
+        let steps = state
+            .task_steps
+            .iter()
+            .filter(|step| step.task_id == task.id && !step.deleted);
+        for (ix, step) in steps.enumerate() {
+            if let Some(chat_id) = &step.chat_id {
+                members.insert(chat_id.clone(), member(Some(ix)));
+            }
+        }
+    }
+    members
+}
+
 pub(crate) fn can_add_plan(state: &AppState, chat: &zeron_proto::Chat) -> bool {
     state.local_device_id.as_deref() == Some(chat.device_id.as_str())
         && !chat.archived
@@ -1599,6 +1866,19 @@ pub(crate) fn plan_led_by<'a>(
                 !task.deleted && task.has_plan() && task.chat_id.as_deref() == Some(chat_id)
             })
             .max_by_key(|task| task.completed_at)
+    })
+}
+
+/// A plan first, else the task handed to this chat, open before done.
+pub(crate) fn task_led_by<'a>(
+    tasks: &'a [zeron_proto::Task],
+    chat_id: &str,
+) -> Option<&'a zeron_proto::Task> {
+    plan_led_by(tasks, chat_id).or_else(|| {
+        tasks
+            .iter()
+            .filter(|task| !task.deleted && task.chat_id.as_deref() == Some(chat_id))
+            .max_by_key(|task| (task.completed_at.is_none(), task.completed_at))
     })
 }
 
@@ -1938,18 +2218,53 @@ pub(crate) fn tasks_view(cx: &gpui::App) -> TasksView {
 impl Render for TasksPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        let (open, done) = self.rows(cx);
+        let (mut open, mut done) = self.rows(cx);
         let view = tasks_view(cx);
         let now = Instant::now();
         let reduced = motion::reduced_motion(cx);
+        let mut trees = match view {
+            TasksView::List => tree_index(self.state.read(cx), Utc::now()),
+            TasksView::Kanban => index::IndexRows::default(),
+        };
+        if view == TasksView::Kanban && self.filter == TasksFilter::Trees {
+            self.filter = TasksFilter::All;
+        }
+        let counts = [
+            TasksFilter::All,
+            TasksFilter::Missions,
+            TasksFilter::Trees,
+            TasksFilter::NeedsYou,
+        ]
+        .map(|filter| {
+            let tasks = open.iter().chain(&done).filter(|row| filter.keeps(row));
+            let trees = trees
+                .running
+                .iter()
+                .chain(&trees.done_today)
+                .filter(|row| filter.keeps_tree(row));
+            (filter, tasks.count() + trees.count())
+        });
+        let counts: Vec<(TasksFilter, usize)> = counts
+            .into_iter()
+            .filter(|(filter, _)| view == TasksView::List || *filter != TasksFilter::Trees)
+            .collect();
+        let chips = self.filter_chips(counts, &theme, cx);
+        let filter = self.filter;
+        open.retain(|row| filter.keeps(row));
+        done.retain(|row| filter.keeps(row));
+        trees.running.retain(|row| filter.keeps_tree(row));
+        trees.done_today.retain(|row| filter.keeps_tree(row));
+        if trees.running.iter().any(|row| row.status.live()) && !reduced {
+            motion::pulse_lease(cx.entity_id(), cx);
+        }
         let mut targets = std::mem::take(&mut *self.painted.borrow_mut());
         let elapsed = self.advance_morph(view, &open, &done, &mut targets, reduced, now);
         if elapsed.is_some() {
             window.request_animation_frame();
         }
         let body = match view {
-            TasksView::List => self.render_list(&open, &done, elapsed, &theme, cx),
-            TasksView::Kanban => self.render_kanban(&open, &done, elapsed, &theme, cx),
+            TasksView::List => self.render_list(&open, &done, &trees, chips, elapsed, &theme, cx),
+            TasksView::Kanban => self.render_kanban(&open, &done, chips, elapsed, &theme, cx),
         };
         let ghosts = elapsed.and_then(|elapsed| {
             self.render_morph(

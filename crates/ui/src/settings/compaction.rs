@@ -14,7 +14,7 @@ use crate::theme::Theme;
 
 const IDLE_TITLE: &str = "Compact idle chats before the cache expires";
 const AGENT_TITLE: &str = "Let agents compact themselves";
-const MISSIONS_TITLE: &str = "In Mission Control";
+const MISSIONS_TITLE: &str = "In missions";
 const COMPACT_TOOL: &str = "compact";
 
 pub struct CompactionCard {

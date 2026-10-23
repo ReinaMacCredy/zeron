@@ -54,7 +54,6 @@ pub(crate) enum TreeHost {
     Strip,
     Supervisor,
     Intro,
-    Index,
     Center,
 }
 
@@ -182,10 +181,6 @@ impl StripTree {
         }
     }
 
-    pub fn openness(&self) -> f32 {
-        self.open.value_at(Instant::now())
-    }
-
     pub fn is_open(&self) -> bool {
         self.open.target() > 0.5
     }
@@ -244,7 +239,7 @@ impl StripTree {
             if let Some(group) = node.group {
                 let label = match group {
                     Group::Steps(n) => format!("Steps \u{a0}{n}"),
-                    Group::Agents(n) => format!("Agents \u{a0}{n} \u{b7} not in the plan"),
+                    Group::Agents(n) => format!("Outside the plan \u{a0}{n}"),
                 };
                 rows.push(Row {
                     id: format!("label-{}", node.id),
@@ -328,11 +323,10 @@ impl StripTree {
         self.motion.sync(&nodes, reduced, now);
     }
 
-    fn content_height(&self, rows: &[Row]) -> f32 {
+    fn content_height(&self, rows: &[Row], now: Instant) -> f32 {
         let shown: f32 = rows
             .iter()
-            .filter(|row| self.motion.shown(&row.id))
-            .map(|row| row.height() + GAP)
+            .map(|row| (row.height() + GAP) * self.motion.presence(&row.id, now))
             .sum();
         (shown - GAP).max(ROW) + PAD_BOTTOM
     }
@@ -345,8 +339,8 @@ impl StripTree {
         self.fold_deep(&rows);
         self.sync(&rows, motion::reduced_motion(cx), now);
         (
-            self.content_height(&rows) * self.open.value_at(now),
-            !self.open.settled_at(now),
+            self.content_height(&rows, now) * self.open.value_at(now),
+            !self.open.settled_at(now) || self.motion.animating(now),
         )
     }
 
@@ -421,7 +415,7 @@ impl StripTree {
                 } else {
                     item(
                         "strip-tree-menu-open",
-                        "Open in Mission Control",
+                        "Open mission page",
                         icons::LUCIDE_CHEVRON_RIGHT,
                     )
                 }
@@ -468,7 +462,7 @@ impl Render for StripTree {
         let reduced = motion::reduced_motion(cx);
         let theme = match self.host {
             TreeHost::Strip | TreeHost::Intro => Theme::of(cx).for_popup(),
-            TreeHost::Supervisor | TreeHost::Index | TreeHost::Center => Theme::of(cx).clone(),
+            TreeHost::Supervisor | TreeHost::Center => Theme::of(cx).clone(),
         };
         let Some(rows) = self.rows(cx) else {
             return div().into_any_element();
@@ -875,7 +869,7 @@ impl Render for StripTree {
             .debug_selector(|| "strip-tree".into())
             .relative()
             .w_full()
-            .h(px(self.content_height(&rows)))
+            .h(px(self.content_height(&rows, now)))
             .children(elements)
             .child(tree::links(
                 links,

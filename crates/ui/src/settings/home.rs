@@ -18,7 +18,7 @@ pub(crate) const WIDGETS: [(&str, &str, &str, Field); 8] = [
     (
         "home-toggle-missions",
         "Missions",
-        "Running Mission Control tasks, their progress and what needs you.",
+        "Running missions, their progress and what needs you.",
         |w| &mut w.missions,
     ),
     (

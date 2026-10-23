@@ -1656,6 +1656,8 @@ pub struct UiSettings {
     /// showed; tabs no longer hide when idle, so the ids it kept hidden
     /// would otherwise all surface at once.
     pub open_tabs_stable: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub collapsed_tab_groups: Vec<String>,
     /// Sidebar session filter: a space id, or `None` for "All spaces".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_filter: Option<String>,
@@ -1880,6 +1882,7 @@ impl Default for UiSettings {
             last_project_action_by_space_id: std::collections::HashMap::new(),
             open_tabs: None,
             open_tabs_stable: false,
+            collapsed_tab_groups: Vec::new(),
             space_filter: None,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
             sidebar_sections_by_profile: HashMap::new(),
@@ -2662,6 +2665,7 @@ impl UiSettings {
             compact_effort_slider,
             computer_click_sounds,
             open_tabs_stable,
+            collapsed_tab_groups,
             split_ratio,
             appshot_welcome_acknowledged,
             mission_intro_acknowledged,
@@ -4060,6 +4064,7 @@ mod tests {
             )]),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             open_tabs_stable: true,
+            collapsed_tab_groups: vec!["task-1".into()],
             space_filter: Some("space-1".into()),
             sidebar_sections_by_profile: HashMap::new(),
             sidebar_pinned_session_ids_by_profile: HashMap::from([

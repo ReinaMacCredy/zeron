@@ -101,7 +101,7 @@ enum Side {
     Right,
 }
 
-fn spine_tops(heights: &[f32]) -> (Vec<(Side, f32)>, f32) {
+fn spine_tops(heights: &[f32], wides: &[f32]) -> (Vec<(Side, f32)>, f32) {
     let pitch = ROW + ROW_GAP;
     let (mut top, mut bottom) = (0.0_f32, 0.0_f32);
     let tops = heights
@@ -109,10 +109,20 @@ fn spine_tops(heights: &[f32]) -> (Vec<(Side, f32)>, f32) {
         .enumerate()
         .map(|(i, height)| {
             let side = if i % 2 == 0 { Side::Left } else { Side::Right };
-            let at = (side, top);
-            bottom = bottom.max(top + height);
-            top += pitch.max(height + ROW_GAP - pitch);
-            at
+            let wide = wides.get(i).copied().unwrap_or(0.0);
+            let clear = if i == 0 {
+                top
+            } else {
+                top.max(bottom + ROW_GAP)
+            };
+            let at = motion::lerp(top, clear, wide);
+            bottom = bottom.max(at + height);
+            top = motion::lerp(
+                at + pitch.max(height + ROW_GAP - pitch),
+                at + height + ROW_GAP,
+                wide,
+            );
+            (side, at)
         })
         .collect();
     let end = if heights.is_empty() {
@@ -239,6 +249,20 @@ impl TaskCenter {
             (Body::Read, None) => spec.fold.height.get(),
             (Body::Editor, None) => spec.edit.get(),
             (Body::None, None) => 0.0,
+        }
+    }
+
+    fn widen(&self, id: &str, now: Instant) -> f32 {
+        let Some(spec) = self.expanded.get(id) else {
+            return 0.0;
+        };
+        match self
+            .editor
+            .as_ref()
+            .filter(|editor| matches!(&editor.target, EditTarget::Step(step) if step == id))
+        {
+            Some(editor) if editor.from <= 0.0 => editor.grow.value_at(now),
+            _ => spec.fold.value(now),
         }
     }
 
@@ -1611,7 +1635,9 @@ impl TaskCenter {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let crumb = self.back_crumb(theme, cx);
         let done = task.completed_at.is_some();
+        let mission = crate::tasks::is_mission(task, plan);
         let steps: Vec<&BarRow> = facts.rows.iter().filter(|row| row.id != LEAD).collect();
         let count = |kind: Status| facts.rows.iter().filter(|row| row.status == kind).count();
         let (waiting, failed) = (count(Status::Waiting), count(Status::Failed));
@@ -1704,6 +1730,9 @@ impl TaskCenter {
                 ));
             }
         }
+        if !mission {
+            pills.clear();
+        }
         let button = |label: SharedString, selector: &'static str, tone: widgets::ActionTone| {
             widgets::text_action(theme, tone, label.clone())
                 .id(selector)
@@ -1714,7 +1743,7 @@ impl TaskCenter {
                 .min_h(px(28.0))
                 .rounded_full()
         };
-        let primary = if done {
+        let primary = if done || (!mission && plan.lead != Some(ChatIndicator::AwaitingInput)) {
             None
         } else if let Some(row) = facts.rows.iter().find(|row| row.status == Status::Waiting) {
             if row.id == LEAD && row.text.is_some() {
@@ -1766,17 +1795,43 @@ impl TaskCenter {
                     }))
                 })
         };
-        let watch = facts.lead_chat.as_deref().and_then(|root| {
-            self.render_watch_button(
-                super::watch_sheet::WatchTarget {
-                    root,
-                    task: Some(task).filter(|task| task.completed_at.is_none()),
-                    title: &task.title,
-                },
-                theme,
-                cx,
-            )
-        });
+        let watch = facts
+            .lead_chat
+            .as_deref()
+            .filter(|_| mission)
+            .and_then(|root| {
+                self.render_watch_button(
+                    super::watch_sheet::WatchTarget {
+                        root,
+                        task: Some(task).filter(|task| task.completed_at.is_none()),
+                        title: &task.title,
+                    },
+                    theme,
+                    cx,
+                )
+            });
+        let add_plan = facts
+            .lead_chat
+            .clone()
+            .filter(|lead| {
+                let state = self.state.read(cx);
+                !mission
+                    && state
+                        .chats
+                        .iter()
+                        .any(|chat| &chat.id == lead && crate::tasks::can_add_plan(state, chat))
+            })
+            .map(|lead| {
+                button(
+                    "Add plan".into(),
+                    "task-center-add-plan",
+                    widgets::ActionTone::Filled,
+                )
+                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    cx.emit(TaskCenterEvent::AddPlan(lead.clone()))
+                }))
+            });
         let task_id = task.id.clone();
         let toggle_label = if done { "Reopen" } else { "Mark as done" };
         let toggle = button(
@@ -1830,11 +1885,22 @@ impl TaskCenter {
                 at.format("%b %-d %H:%M").to_string()
             }
         };
-        let mut sub = vec!["Lead".to_string()];
+        let mut sub: Vec<String> = mission.then(|| "Lead".to_string()).into_iter().collect();
         sub.extend(facts.lead_agent.clone());
-        sub.push(match task.completed_at {
-            Some(at) => format!("finished {}", local(at)),
-            None => format!("started {}", local(task.created_at)),
+        if mission {
+            sub.push(match task.completed_at {
+                Some(at) => format!("finished {}", local(at)),
+                None => format!("started {}", local(task.created_at)),
+            });
+        }
+        let status_word = (!mission).then(|| {
+            let (status, word) = tree::lead_status(task, plan);
+            let tone = status.tone(theme);
+            div()
+                .debug_selector(|| "task-center-status".into())
+                .flex_none()
+                .text_color(tone)
+                .child(word)
         });
         let elapsed = tree::fmt_time(
             (task.completed_at.unwrap_or_else(Utc::now) - task.created_at)
@@ -1960,27 +2026,30 @@ impl TaskCenter {
             .flex()
             .flex_col()
             .gap(px(6.0))
+            .child(div().flex().child(crumb))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(10.0))
-                    .child(
-                        div()
-                            .flex_none()
-                            .size(px(28.0))
-                            .rounded(px(8.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                icon(icons::MISSION_CONTROL)
-                                    .size(px(14.0))
-                                    .text_color(theme.text_muted),
-                            ),
-                    )
+                    .when(mission, |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .size(px(28.0))
+                                .rounded(px(8.0))
+                                .border_1()
+                                .border_color(theme.border)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    icon(icons::MISSION_CONTROL)
+                                        .size(px(14.0))
+                                        .text_color(theme.text_muted),
+                                ),
+                        )
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -2002,38 +2071,45 @@ impl TaskCenter {
                                             .text_color(theme.text)
                                             .child(SharedString::from(task.title.clone())),
                                     )
-                                    .child(self.kind_badge(theme, now)),
+                                    .when(mission, |el| el.child(self.kind_badge(theme, now))),
                             )
                             .child(
                                 div()
-                                    .truncate()
+                                    .flex()
+                                    .min_w_0()
+                                    .gap(px(4.0))
                                     .text_size(ui_rems(12.0))
                                     .text_color(theme.text_muted)
-                                    .child(sub.join(" · ")),
+                                    .children(status_word)
+                                    .when(!mission && !sub.is_empty(), |el| el.child("·"))
+                                    .child(div().min_w_0().truncate().child(sub.join(" · "))),
                             ),
                     )
                     .children(watch)
                     .children(pills)
                     .children(primary)
+                    .children(add_plan)
                     .child(toggle)
                     .child(more),
             )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .child(
-                        div()
-                            .debug_selector(|| "task-center-progress".into())
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .gap(px(3.0))
-                            .children(segments),
-                    )
-                    .child(totals),
-            )
+            .when(mission, |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .debug_selector(|| "task-center-progress".into())
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .gap(px(3.0))
+                                .children(segments),
+                        )
+                        .child(totals),
+                )
+            })
             .into_any_element()
     }
 
@@ -2396,13 +2472,24 @@ impl TaskCenter {
         let width = width.unwrap_or(LEAD_WIDTH + 2.0 * COLUMN);
         let center = width / 2.0;
         let column = COLUMN.min(((width - SPINE) / 2.0).max(0.0));
+        let lane = 2.0 * column + SPINE;
+        let side_x = |side: Side| match side {
+            Side::Left => center - lane / 2.0,
+            Side::Right => center + SPINE / 2.0,
+        };
         let height_of = |key: &Key, fallback: f32| {
             self.painted
                 .borrow()
                 .get(key)
                 .map_or(fallback, |rect| f32::from(rect.size.height))
         };
-        let lead_width = LEAD_WIDTH.min(width);
+        let lead_wide = if mission.as_ref().is_some_and(|m| m.task.plan_doc) {
+            1.0 - self.overview_turn.value_at(now)
+        } else {
+            0.0
+        };
+        let turning = !self.overview_turn.settled_at(now);
+        let lead_width = motion::lerp(LEAD_WIDTH.min(width), lane, lead_wide);
         let lead_height = height_of(&Key::Lead, LEAD_HEIGHT);
         let body = lead_height + BODY_GAP;
         let visible: Vec<usize> = (0..shown.len())
@@ -2425,13 +2512,17 @@ impl TaskCenter {
                 }
             })
             .collect();
+        let wides: Vec<f32> = visible
+            .iter()
+            .map(|ix| self.widen(&shown[*ix].0.step.id, now))
+            .collect();
         let ghost = self.tree.shown(GHOST);
         let ghost_height = height_of(&Key::Add, 44.0);
         let mut slots_h = heights.clone();
         if ghost {
             slots_h.push(ghost_height);
         }
-        let (tops, end) = spine_tops(&slots_h);
+        let (tops, end) = spine_tops(&slots_h, &wides);
         let shown_agents: Vec<usize> = agents
             .iter()
             .copied()
@@ -2441,7 +2532,7 @@ impl TaskCenter {
             .iter()
             .map(|ix| height_of(&Key::Task(tree_nodes[*ix].id.clone()), AGENT_HEIGHT))
             .collect();
-        let (agent_tops, _) = spine_tops(&agent_heights);
+        let (agent_tops, _) = spine_tops(&agent_heights, &[]);
         let snap = reduced || !known || self.sliding(now);
         let lifted = self.drag.as_ref().map(|drag| (drag.id.clone(), drag.dy));
         let mut placed: Vec<Placed> = Vec::new();
@@ -2456,7 +2547,7 @@ impl TaskCenter {
                 .as_ref()
                 .filter(|(lifted, _)| lifted == id)
                 .map_or((0.0, 0.0), |(_, dy)| (0.0, *dy));
-            let (gx, gy) = tree.place(id, (x, y), extra, snap, now);
+            let (gx, gy) = tree.place(id, (x, y), extra, snap || (turning && id == LEAD), now);
             let frame = tree.frame(id, now);
             placed.push(Placed {
                 id: id.to_string(),
@@ -2479,16 +2570,12 @@ impl TaskCenter {
         );
         for (k, ix) in visible.iter().enumerate() {
             let (side, top) = tops[k];
-            let x = match side {
-                Side::Left => center - SPINE / 2.0 - column,
-                Side::Right => center + SPINE / 2.0,
-            };
             place(
                 &mut self.tree,
                 &shown[*ix].0.step.id,
-                x,
+                motion::lerp(side_x(side), side_x(Side::Left), wides[k]),
                 body + top,
-                column,
+                motion::lerp(column, lane, wides[k]),
                 heights[k],
                 Some(side),
             );
@@ -2496,14 +2583,10 @@ impl TaskCenter {
         let mut next = body + end;
         if ghost {
             let (side, top) = tops[visible.len()];
-            let x = match side {
-                Side::Left => center - SPINE / 2.0 - column,
-                Side::Right => center + SPINE / 2.0,
-            };
             place(
                 &mut self.tree,
                 GHOST,
-                x,
+                side_x(side),
                 body + top,
                 column,
                 ghost_height,
@@ -2528,14 +2611,10 @@ impl TaskCenter {
         }
         for (k, ix) in shown_agents.iter().enumerate() {
             let (side, top) = agent_tops[k];
-            let x = match side {
-                Side::Left => center - SPINE / 2.0 - column,
-                Side::Right => center + SPINE / 2.0,
-            };
             place(
                 &mut self.tree,
                 &tree_nodes[*ix].id,
-                x,
+                side_x(side),
                 next + top,
                 column,
                 agent_heights[k],
@@ -2607,6 +2686,12 @@ impl TaskCenter {
             .into_iter()
             .collect();
 
+        placed.sort_by_key(|node| {
+            visible
+                .iter()
+                .zip(&wides)
+                .any(|(ix, wide)| *wide > 0.0 && shown[*ix].0.step.id == node.id)
+        });
         let mut cards: Vec<AnyElement> = Vec::new();
         for node in &placed {
             let element = if node.id == LEAD {
@@ -2862,11 +2947,9 @@ impl TaskCenter {
                         div()
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child("Agents"),
+                            .child("Outside the plan"),
                     )
-                    .child(format!(
-                        "{count} \u{b7} started by the Lead, not in the plan"
-                    )),
+                    .child(format!("{count} \u{b7} started by the Lead")),
             )
             .into_any_element()
     }
@@ -3311,7 +3394,7 @@ mod tests {
     #[test]
     fn cards_alternate_sides_one_row_apart_and_a_tall_card_pushes_the_rest() {
         let heights = [96.0, 96.0, 300.0, 96.0, 150.5];
-        let (tops, end) = spine_tops(&heights);
+        let (tops, end) = spine_tops(&heights, &[]);
         assert_eq!(
             tops,
             [
@@ -3333,12 +3416,22 @@ mod tests {
             440.0 + 150.5 + ROW_GAP + 16.0,
             "the ghost sits under the lowest card"
         );
-        let (_, grown) = spine_tops(&[96.0, 96.0, 96.4, 96.0]);
-        let (_, more) = spine_tops(&[96.0, 96.0, 140.0, 96.0]);
+        let (_, grown) = spine_tops(&[96.0, 96.0, 96.4, 96.0], &[]);
+        let (_, more) = spine_tops(&[96.0, 96.0, 140.0, 96.0], &[]);
         assert!(
             more > grown,
             "a growing card moves what follows without row steps"
         );
+    }
+
+    #[test]
+    fn a_wide_card_takes_a_row_of_its_own() {
+        let heights = [96.0, 96.0, 300.0, 96.0];
+        let (tops, _) = spine_tops(&heights, &[0.0, 0.0, 1.0]);
+        assert_eq!(tops[2], (Side::Left, 64.0 + 96.0 + ROW_GAP));
+        assert_eq!(tops[3], (Side::Right, tops[2].1 + 300.0 + ROW_GAP));
+        let (closed, _) = spine_tops(&heights, &[0.0, 0.0, 0.0]);
+        assert_eq!(closed, spine_tops(&heights, &[]).0);
     }
 
     struct Quiet;

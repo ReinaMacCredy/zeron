@@ -102,9 +102,9 @@ In Classifier mode, the **Classifier** row picks who reads your messages.
 
 What leaves your Mac for each check: your last four messages, each with the agent's last written reply, every piece clipped to its last 800 characters, plus your new message. With Jev, that text is sent to TypeSafe or OpenRouter, clipped to its last 10,000 characters. Tool output and files are never sent.
 
-## In Mission Control
+## In missions
 
-**In Mission Control** decides whether a mission's lead and step threads are compacted automatically. On (the default), they follow the same rules as any chat. Off leaves them alone: no idle compaction, no reminders, and no classifier check. A lead stays a mission thread after its mission is complete. The agent's own compact tool still follows **Let agents compact themselves**, and you can still compact by hand. See [Mission Control](zeron://docs/mission-control) for missions.
+**In missions** decides whether a mission's lead and step threads are compacted automatically. On (the default), they follow the same rules as any chat. Off leaves them alone: no idle compaction, no reminders, and no classifier check. A lead stays a mission thread after its mission is complete. The agent's own compact tool still follows **Let agents compact themselves**, and you can still compact by hand. See [Mission Control](zeron://docs/mission-control) for missions.
 
 ## What you see in the transcript
 
@@ -136,7 +136,7 @@ In [Settings > General](zeron://settings/general):
 | **Idle threshold** (100K, 150K, 200K) | 100K |
 | **Let agents compact themselves** | On |
 | **Compact new tasks** (Reminder, Classifier) | Classifier |
-| **In Mission Control** | On |
+| **In missions** | On |
 | **Check from** or **Remind at** (Off, 100K, 150K, 200K) | 150K |
 | **Classifier** (Agent model, Jev · TypeSafe, Jev · OpenRouter), Classifier mode only | Agent model |
 | **Classifier model**, with Agent model | Sonnet-class |

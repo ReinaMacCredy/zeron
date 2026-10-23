@@ -9,17 +9,10 @@ pub(super) struct WatchTarget<'a> {
     pub title: &'a str,
 }
 
-fn live_dot(theme: &Theme) -> AnyElement {
-    let tone = ok_tone(theme);
-    div()
-        .flex_none()
-        .size(px(14.0))
-        .rounded_full()
-        .bg(tone.opacity(0.22))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(div().size(px(7.0)).rounded_full().bg(tone))
+fn watched_eye(theme: &Theme, size: f32) -> AnyElement {
+    icon(icons::LUCIDE_EYE)
+        .size(px(size))
+        .text_color(ok_tone(theme))
         .into_any_element()
 }
 
@@ -157,7 +150,7 @@ impl TaskCenter {
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(theme.text)
             .child(if on {
-                live_dot(theme)
+                watched_eye(theme, 13.0)
             } else {
                 icon(icons::LUCIDE_SHIELD)
                     .size(px(13.0))
@@ -237,7 +230,7 @@ impl TaskCenter {
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(popup.text)
             .child(if on {
-                live_dot(&popup)
+                watched_eye(&popup, 14.0)
             } else {
                 icon(icons::LUCIDE_SHIELD)
                     .size(px(14.0))

@@ -321,13 +321,13 @@ impl SupervisorPage {
             .id(SharedString::from(open_key.clone()))
             .debug_selector(move || open_key.clone())
             .role(gpui::Role::Button)
-            .aria_label("Open Mission Control")
+            .aria_label("Open mission page")
             .flex_none()
             .cursor_pointer()
             .text_size(ui_rems(11.5))
             .text_color(theme.text_muted)
             .hover(|s| s.text_color(theme.text))
-            .child("Open Mission Control ›")
+            .child("Open mission page ›")
             .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
                 cx.emit(SupervisorEvent::OpenTaskCenter(open_id.clone()))
             }));

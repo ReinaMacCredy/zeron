@@ -92,7 +92,6 @@ mod file_mutations;
 mod files_panel;
 mod handoff;
 mod harness_updates;
-mod mission_control;
 mod mission_intro;
 mod mission_strip;
 mod navigation_focus;
@@ -392,10 +391,16 @@ fn composer_target_width(panel_width: f32, content_width: f32, docked: bool) -> 
 }
 
 fn titlebar_new_session_alpha(route: &Route, has_selected_chat: bool) -> f32 {
-    if matches!(route, Route::PullRequests) || (matches!(route, Route::Chat) && has_selected_chat) {
-        1.0
-    } else {
-        0.0
+    match route {
+        Route::Chat => {
+            if has_selected_chat {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        Route::Settings(_) => 0.0,
+        _ => 1.0,
     }
 }
 
@@ -1005,7 +1010,6 @@ pub enum Route {
     Settings(SettingsSection),
     Terminal,
     Tasks,
-    MissionControl,
     TaskCenter,
     Supervisor,
     Docs,
@@ -1179,7 +1183,6 @@ pub enum NavEntry {
     Usage,
     Inbox,
     Tasks,
-    MissionControl,
     TaskCenter(String),
     Supervisor,
     Docs(Option<&'static str>),
@@ -2638,6 +2641,8 @@ pub struct Shell {
     right_tab_scroll: gpui::ScrollHandle,
     /// Session tab currently hovered (close button appears on hover).
     tab_hover: Option<String>,
+    tab_group_hover: Option<String>,
+    tab_group_menu_hover: Option<String>,
     /// Session-tab context menu: (chat id, window position).
     tab_menu: popover::Popup<(String, Point<Pixels>)>,
     /// Session-tab drag-reorder in flight (see `tabs::TabDragState`).
@@ -2687,15 +2692,13 @@ pub struct Shell {
     _docs_search_sub: Subscription,
     inbox_page: Option<(Entity<crate::inbox::InboxPage>, Subscription)>,
     tasks_page: Option<Entity<crate::tasks::TasksPage>>,
-    mission_index: Option<(Entity<crate::tasks::MissionIndex>, Subscription)>,
     _tasks_events: Option<gpui::Subscription>,
     task_center_task: Option<String>,
     task_center: Option<(Entity<crate::tasks::TaskCenter>, Subscription)>,
     task_center_pane: Option<task_actions::DocPane>,
     task_center_docs: Vec<String>,
     task_slide: task_actions::TaskSlide,
-    mission_tree: Option<(Entity<crate::tasks::StripTree>, Subscription)>,
-    closed_mission_trees: std::collections::HashSet<String>,
+    mission_trees: std::collections::HashMap<String, (Entity<crate::tasks::StripTree>, Subscription)>,
     supervisor: supervisor_actions::SupervisorShell,
     pull_request_detail: Option<Entity<crate::pull_request_detail::PullRequestDetailPage>>,
     pull_request_detail_subscription: Option<Subscription>,
@@ -3224,7 +3227,7 @@ impl Shell {
             Some("usage") => Route::Usage,
             Some("inbox") => Route::Inbox,
             Some("tasks") => Route::Tasks,
-            Some("mission-control") => Route::MissionControl,
+            Some("mission-control") => Route::Tasks,
             Some("supervisor") => Route::Supervisor,
             Some(_) if open_task.is_some() => Route::TaskCenter,
             Some(route) if route == "settings" || route.starts_with("settings/") => {
@@ -3273,7 +3276,6 @@ impl Shell {
             Route::Inbox => NavEntry::Inbox,
             Route::Settings(section) => NavEntry::Settings(section),
             Route::Tasks => NavEntry::Tasks,
-            Route::MissionControl => NavEntry::MissionControl,
             Route::TaskCenter => NavEntry::TaskCenter(open_task.clone().unwrap_or_default()),
             Route::Supervisor => NavEntry::Supervisor,
             Route::Docs => NavEntry::Docs(None),
@@ -3393,6 +3395,8 @@ impl Shell {
             right_tab_drag: None,
             right_tab_scroll: gpui::ScrollHandle::new(),
             tab_hover: None,
+            tab_group_hover: None,
+            tab_group_menu_hover: None,
             tab_menu: popover::Popup::default(),
             tab_drag: None,
             split_drop_hot: None,
@@ -3426,15 +3430,13 @@ impl Shell {
             _docs_search_sub: docs_search_sub,
             inbox_page: None,
             tasks_page: None,
-            mission_index: None,
             _tasks_events: None,
             task_center_task: open_task.clone(),
             task_center: None,
             task_center_pane: None,
             task_center_docs: Vec::new(),
             task_slide: task_actions::TaskSlide::resting(route),
-            mission_tree: None,
-            closed_mission_trees: std::collections::HashSet::new(),
+            mission_trees: std::collections::HashMap::new(),
             supervisor: Default::default(),
             pull_request_detail: None,
             pull_request_detail_subscription: None,
@@ -8775,7 +8777,6 @@ impl Shell {
             NavEntry::Usage => self.enter_usage_route(cx),
             NavEntry::Inbox => self.enter_inbox_route(cx),
             NavEntry::Tasks => self.enter_tasks_route(cx),
-            NavEntry::MissionControl => self.enter_mission_control_route(cx),
             NavEntry::TaskCenter(task_id) => self.enter_task_center_route(task_id, cx),
             NavEntry::Supervisor => self.enter_supervisor_route(cx),
             NavEntry::Docs(article) => self.enter_docs_route(article, cx),
@@ -10576,32 +10577,11 @@ impl Shell {
 
     /// The session titlebar, or on the Pull requests route the open pull
     /// request's own bar.
-    fn render_title_bar(
-        &mut self,
-        column: f32,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        if let Some(bar) = self.render_task_slide_title_bar(column, window, cx) {
-            self.drop_hidden_chat_action_menus(cx);
-            return bar;
-        }
-        if !matches!(
-            self.route,
-            Route::Tasks | Route::MissionControl | Route::TaskCenter | Route::PullRequests
-        ) {
+    fn render_title_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if !matches!(self.route, Route::PullRequests) {
             return self.render_session_title_bar(window, cx);
         }
         self.drop_hidden_chat_action_menus(cx);
-        if matches!(self.route, Route::Tasks) {
-            return self.render_tasks_title_bar(cx);
-        }
-        if matches!(self.route, Route::MissionControl) {
-            return self.render_mission_control_title_bar(cx);
-        }
-        if matches!(self.route, Route::TaskCenter) {
-            return self.render_task_center_title_bar(cx);
-        }
         let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
         let inner = div()
             .size_full()
@@ -14471,10 +14451,7 @@ impl Shell {
         match item {
             RailItem::Home => matches!(self.route, Route::Chat | Route::Terminal),
             RailItem::Inbox => matches!(self.route, Route::Inbox),
-            RailItem::Tasks => matches!(self.route, Route::Tasks),
-            RailItem::MissionControl => {
-                matches!(self.route, Route::MissionControl | Route::TaskCenter)
-            }
+            RailItem::Tasks => matches!(self.route, Route::Tasks | Route::TaskCenter),
             RailItem::Supervisor => matches!(self.route, Route::Supervisor),
             RailItem::PullRequests => matches!(self.route, Route::PullRequests),
             RailItem::Usage => matches!(self.route, Route::Usage),
@@ -14502,10 +14479,6 @@ impl Shell {
             RailItem::Tasks => {
                 self.settings_focus_pending = false;
                 self.open_tasks(cx);
-            }
-            RailItem::MissionControl => {
-                self.settings_focus_pending = false;
-                self.open_mission_control(cx);
             }
             RailItem::Supervisor => {
                 self.settings_focus_pending = false;
@@ -16677,10 +16650,6 @@ impl Shell {
 
         if matches!(self.route, Route::Tasks) {
             return self.render_tasks_page(window, cx);
-        }
-
-        if matches!(self.route, Route::MissionControl) {
-            return self.render_mission_control_page(cx);
         }
 
         if matches!(self.route, Route::TaskCenter)
@@ -19731,7 +19700,6 @@ impl Render for Shell {
                     | Route::Usage
                     | Route::Inbox
                     | Route::Tasks
-                    | Route::MissionControl
                     | Route::Supervisor
                     | Route::Docs => {}
                 }),
@@ -20286,7 +20254,6 @@ impl Render for Shell {
                             | Route::Usage
                             | Route::Inbox
                             | Route::Tasks
-                            | Route::MissionControl
                             | Route::Supervisor
                             | Route::Docs
                     )
@@ -20597,7 +20564,7 @@ impl Render for Shell {
                 } else {
                     Empty.into_any_element()
                 };
-                let title_bar = self.render_title_bar(column, window, cx);
+                let title_bar = self.render_title_bar(window, cx);
                 // Sidebar tone: a slightly lighter column behind the sidebar.
                 // Its width rides the same tween as the sidebar, so the tone
                 // melts away with the collapse instead of vanishing in a frame.
@@ -21420,6 +21387,8 @@ mod tests {
         assert_eq!(titlebar_new_session_alpha(&Route::Chat, false), 0.0);
         assert_eq!(titlebar_new_session_alpha(&Route::PullRequests, false), 1.0);
         assert_eq!(titlebar_new_session_alpha(&Route::PullRequests, true), 1.0);
+        assert_eq!(titlebar_new_session_alpha(&Route::Tasks, false), 1.0);
+        assert_eq!(titlebar_new_session_alpha(&Route::TaskCenter, false), 1.0);
         assert_eq!(
             titlebar_new_session_alpha(&Route::Settings(SettingsSection::Devices), true),
             0.0

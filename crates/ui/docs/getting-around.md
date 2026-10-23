@@ -36,7 +36,7 @@ With the sidebar hidden, move the pointer just right of the app rail and it slid
 
 ## Going back and forward
 
-Zeron keeps a history of where you have been: chats, drafts, Settings pages, Inbox, Tasks, a task's Mission Control page, Supervisor, Usage, pull requests, and these docs. To walk it:
+Zeron keeps a history of where you have been: chats, drafts, Settings pages, Inbox, Tasks, a task's page, Supervisor, Usage, pull requests, and these docs. To walk it:
 
 - Click the **Back** and **Forward** arrows in the titlebar.
 - Press the back and forward buttons on your mouse.

@@ -20,14 +20,15 @@ pub(crate) const RISE_Y: f32 = 6.0;
 pub(crate) const DRAW: MotionSpec = MotionSpec::new(420, EASE);
 pub(crate) const DRAW_LEAD_MS: u64 = 160;
 pub(crate) const FIRST_ENTER_MS: u64 = 200;
-pub(crate) const LATER_ENTER_MS: u64 = 160;
 pub(crate) const STAGGER_MS: u64 = 60;
 const STAGGER_SPAN_MS: u64 = 180;
+const QUICK_STAGGER_MS: u64 = 15;
+const QUICK_SPAN_MS: u64 = 45;
+const QUICK_RISE: MotionSpec = MotionSpec::new(200, EASE);
 pub(crate) const GLIDE: MotionSpec = MotionSpec::new(420, EASE);
-pub(crate) const LEAVE: MotionSpec = MotionSpec::new(280, EASE);
+pub(crate) const LEAVE: MotionSpec = MotionSpec::new(160, EASE);
 pub(crate) const LEAVE_Y: f32 = 4.0;
 pub(crate) const STATUS: MotionSpec = MotionSpec::new(240, motion::EASE);
-pub(crate) const FADE: MotionSpec = MotionSpec::new(280, motion::EASE);
 pub(crate) const FOLD: MotionSpec = MotionSpec::new(280, EASE);
 pub(crate) const POP: MotionSpec = MotionSpec::new(200, EASE);
 pub(crate) const CHEVRON: MotionSpec = MotionSpec::new(220, EASE);
@@ -108,6 +109,16 @@ pub(crate) fn lead_status(
     if task.completed_at.is_some() {
         return (Status::Done, "Done");
     }
+    if let Some(indicator) = plan.lead.filter(|_| !super::is_mission(task, plan)) {
+        let status = match indicator {
+            ChatIndicator::Working => Status::Running,
+            ChatIndicator::Errored => Status::Failed,
+            ChatIndicator::AwaitingInput | ChatIndicator::Completed | ChatIndicator::Idle => {
+                Status::Waiting
+            }
+        };
+        return (status, super::TasksPage::linked_label(indicator));
+    }
     match plan.lead {
         None => (Status::Queued, "Not started"),
         _ if plan.phase(task) == super::PlanPhase::Planning => (Status::Running, "Planning"),
@@ -151,15 +162,18 @@ struct Node {
 }
 
 impl Node {
-    fn entering(delay_ms: u64, status: Status, reduced: bool, now: Instant) -> Self {
+    fn entering(delay_ms: u64, quick: bool, status: Status, reduced: bool, now: Instant) -> Self {
         let rise = |spec: MotionSpec| {
             let mut tween = Tween::at(0.0, now);
             tween.retarget(1.0, spec, reduced, now);
             tween
         };
         Self {
-            rise: rise(RISE.with_delay(delay_ms)),
-            draw: rise(DRAW.with_delay(delay_ms.saturating_sub(DRAW_LEAD_MS))),
+            rise: rise(if quick { QUICK_RISE } else { RISE }.with_delay(delay_ms)),
+            draw: rise(
+                if quick { QUICK_RISE } else { DRAW }
+                    .with_delay(delay_ms.saturating_sub(DRAW_LEAD_MS)),
+            ),
             leave: None,
             fade: None,
             at: None,
@@ -195,10 +209,15 @@ pub(crate) struct TreeMotion {
     solid: bool,
 }
 
-fn stagger_step(count: usize) -> u64 {
+fn stagger_step(count: usize, quick: bool) -> u64 {
+    let (step, span) = if quick {
+        (QUICK_STAGGER_MS, QUICK_SPAN_MS)
+    } else {
+        (STAGGER_MS, STAGGER_SPAN_MS)
+    };
     match count {
-        0 | 1 => STAGGER_MS,
-        n => STAGGER_MS.min(STAGGER_SPAN_MS / (n as u64 - 1)),
+        0 | 1 => step,
+        n => step.min(span / (n as u64 - 1)),
     }
 }
 
@@ -230,7 +249,7 @@ impl TreeMotion {
                         .is_none_or(|current| current.leave.is_some())
             })
             .count();
-        let enter_step = stagger_step(entering);
+        let enter_step = stagger_step(entering, self.built);
         let mut fresh = 0;
         let mut leaving = Vec::new();
         for node in nodes {
@@ -254,22 +273,18 @@ impl TreeMotion {
                     let delay = if node.root {
                         0
                     } else {
-                        let base = if self.built {
-                            LATER_ENTER_MS
-                        } else {
-                            FIRST_ENTER_MS
-                        };
+                        let base = if self.built { 0 } else { FIRST_ENTER_MS };
                         fresh += 1;
                         base + (fresh - 1) * enter_step
                     };
                     let at = self.nodes.get(node.id).and_then(|old| old.at);
-                    let mut entering = Node::entering(delay, node.status, reduced, now);
+                    let mut entering = Node::entering(delay, self.built, node.status, reduced, now);
                     entering.at = at;
                     self.nodes.insert(node.id.to_string(), entering);
                 }
             }
         }
-        let leave_step = stagger_step(leaving.len());
+        let leave_step = stagger_step(leaving.len(), true);
         for (i, id) in leaving.iter().rev().enumerate() {
             if let Some(node) = self.nodes.get_mut(*id) {
                 let delay = i as u64 * leave_step;
@@ -279,7 +294,7 @@ impl TreeMotion {
                     tween
                 };
                 node.leave = Some(out(LEAVE));
-                node.fade = Some(out(FADE));
+                node.fade = Some(out(LEAVE));
             }
         }
         let listed: HashSet<&str> = nodes.iter().map(|node| node.id).collect();
@@ -296,6 +311,13 @@ impl TreeMotion {
 
     pub fn shown(&self, id: &str) -> bool {
         self.nodes.contains_key(id)
+    }
+
+    pub fn presence(&self, id: &str, now: Instant) -> f32 {
+        self.nodes.get(id).map_or(0.0, |node| match node.leave {
+            Some(leave) => leave.value_at(now),
+            None => node.rise.value_at(now),
+        })
     }
 
     pub fn frame(&self, id: &str, now: Instant) -> Frame {
@@ -840,7 +862,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_first_build_staggers_from_200_and_a_later_one_from_160() {
+    fn a_first_build_staggers_from_200_and_a_later_one_starts_at_once() {
         let now = Instant::now();
         let mut tree = TreeMotion::default();
         let node = |id, root| NodeIn {
@@ -872,8 +894,7 @@ mod tests {
             false,
             now,
         );
-        assert_eq!(at(&tree, "c", 160), 0.0);
-        assert!(at(&tree, "c", 161) > 0.0);
+        assert!(at(&tree, "c", 1) > 0.0);
     }
 
     #[test]
@@ -898,7 +919,7 @@ mod tests {
         let mut tree = TreeMotion::default();
         tree.sync(&nodes(true), false, now - Duration::from_secs(5));
         tree.sync(&nodes(false), false, now);
-        let span = now + Duration::from_millis(STAGGER_SPAN_MS + 20);
+        let span = now + Duration::from_millis(QUICK_SPAN_MS + 20);
         assert!(tree.frame("s0", span).opacity < 1.0, "the top row has left");
     }
 
@@ -922,14 +943,14 @@ mod tests {
             false,
             now,
         );
-        let mid = now + Duration::from_millis(30);
+        let mid = now + Duration::from_millis(10);
         assert!(tree.frame("b", mid).opacity < 1.0);
         assert_eq!(
             tree.frame("a", mid).opacity,
             1.0,
-            "the upper node waits 60 ms"
+            "the upper node waits 15 ms"
         );
-        let first_gone = now + Duration::from_millis(300);
+        let first_gone = now + Duration::from_millis(168);
         tree.sync(
             &[node("lead", true), node("a", false), node("b", false)],
             false,

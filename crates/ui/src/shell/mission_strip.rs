@@ -23,20 +23,6 @@ impl Shell {
             .as_ref()
             .filter(|mission| mission.role == crate::tasks::MissionRole::Lead)
             .map(|_| self.mission_tree_for(&chat_id, cx));
-        if tree.is_none() {
-            let lead = mission.as_ref().and_then(|mission| {
-                let state = self.state.read(cx);
-                let task = state.tasks.iter().find(|task| task.id == mission.task_id)?;
-                task.chat_id.clone()
-            });
-            let same_mission = self
-                .mission_tree
-                .as_ref()
-                .is_some_and(|(tree, _)| Some(tree.read(cx).root_id()) == lead.as_deref());
-            if !same_mission {
-                self.mission_tree = None;
-            }
-        }
         let mission = mission?;
         let theme = Theme::of(cx).for_popup();
         let (_, _, complete) = chat_status_tone(zeron_proto::ChatIndicator::Completed, &theme);
@@ -61,7 +47,7 @@ impl Shell {
                 .id("mission-strip-open")
                 .debug_selector(|| "mission-strip-open".into())
                 .role(gpui::Role::Button)
-                .aria_label(format!("Open Mission Control: {}", mission.title))
+                .aria_label(format!("Open mission page: {}", mission.title))
                 .flex_none()
                 .flex()
                 .items_center()
@@ -69,7 +55,7 @@ impl Shell {
                 .whitespace_nowrap()
                 .text_color(theme.text)
                 .cursor_pointer()
-                .child("Mission Control")
+                .child("Mission page")
                 .child(
                     icon(icons::LUCIDE_CHEVRON_RIGHT)
                         .size(px(12.0))
@@ -88,7 +74,7 @@ impl Shell {
             .aria_label(match open {
                 Some(true) => format!("Fold the steps of {}", mission.title),
                 Some(false) => format!("Show the steps of {}", mission.title),
-                None => format!("Open Mission Control: {}", mission.title),
+                None => format!("Open mission page: {}", mission.title),
             })
             .when_some(open, |el, open| el.aria_expanded(open))
             .flex_none()
@@ -137,12 +123,13 @@ impl Shell {
                     ),
             )
             .child(open_mission)
-            .on_click(cx.listener(move |shell, _: &gpui::ClickEvent, _, cx| {
-                match shell.mission_tree.as_ref().map(|(tree, _)| tree.clone()) {
-                    Some(tree) => shell.toggle_mission_tree(tree, cx),
+            .on_click({
+                let tree = tree.clone();
+                cx.listener(move |shell, _: &gpui::ClickEvent, _, cx| match &tree {
+                    Some(tree) => tree.update(cx, |tree, cx| tree.set_open(!tree.is_open(), cx)),
                     None => shell.open_mission(task_id.clone(), selection.clone(), cx),
-                }
-            }));
+                })
+            });
         let card = div()
             .flex()
             .flex_col()
@@ -184,16 +171,13 @@ impl Shell {
         lead_chat_id: &str,
         cx: &mut Context<Self>,
     ) -> Entity<crate::tasks::StripTree> {
-        if let Some((tree, _)) = &self.mission_tree
-            && tree.read(cx).root_id() == lead_chat_id
-        {
+        if let Some((tree, _)) = self.mission_trees.get(lead_chat_id) {
             return tree.clone();
         }
-        let open = !self.closed_mission_trees.contains(lead_chat_id);
         let state = self.state.clone();
         let root = lead_chat_id.to_string();
         let tree = cx.new(|cx| {
-            crate::tasks::StripTree::new(state, root, true, open, crate::tasks::TreeHost::Strip, cx)
+            crate::tasks::StripTree::new(state, root, true, true, crate::tasks::TreeHost::Strip, cx)
         });
         let lead = lead_chat_id.to_string();
         let events = cx.subscribe(
@@ -218,7 +202,8 @@ impl Shell {
                 crate::tasks::StripTreeEvent::Brief(_) => {}
             },
         );
-        self.mission_tree = Some((tree.clone(), events));
+        self.mission_trees
+            .insert(lead_chat_id.to_string(), (tree.clone(), events));
         tree
     }
 
@@ -232,23 +217,6 @@ impl Shell {
     ) {
         self.open_chat(parent_chat_id.clone(), cx);
         self.add_subagent_surface(parent_chat_id, doc_id, title, frozen, cx);
-    }
-
-    fn toggle_mission_tree(
-        &mut self,
-        tree: Entity<crate::tasks::StripTree>,
-        cx: &mut Context<Self>,
-    ) {
-        tree.update(cx, |tree, cx| {
-            let open = !tree.is_open();
-            tree.set_open(open, cx);
-            if open {
-                self.closed_mission_trees.remove(tree.root_id());
-            } else {
-                self.closed_mission_trees.insert(tree.root_id().to_string());
-            }
-        });
-        cx.notify();
     }
 
     fn strip_reveal(&mut self, chat_id: String, shown: bool) -> f32 {
@@ -279,25 +247,6 @@ impl Shell {
         let center = self.task_center_for(key.clone(), cx);
         center.update(cx, |center, cx| center.select(selection, cx));
         self.open_task_center(key, cx);
-    }
-
-    pub(super) fn center_back_chat(&self, cx: &App) -> Option<String> {
-        let state = self.state.read(cx);
-        let id = match (self.route, self.nav.previous()) {
-            (Route::Chat, _) => state.selected_chat.as_ref()?,
-            (_, Some(NavEntry::Chat(id))) => id,
-            _ => return None,
-        };
-        let chat = state.chats.iter().find(|chat| &chat.id == id)?;
-        Some(transcript::single_line(&crate::home::chat_title(chat)))
-    }
-
-    pub(super) fn center_back(&mut self, cx: &mut Context<Self>) {
-        if self.center_back_chat(cx).is_some() {
-            self.navigate_back(cx);
-        } else {
-            self.back_to_mission_control(cx);
-        }
     }
 
     fn strip_now(&self) -> std::time::Instant {

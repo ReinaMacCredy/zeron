@@ -46,7 +46,7 @@ Above the composer, **New task**, **Mission Control** and **Running agents** are
 
 ![Starting a mission from the new chat canvas](new-chat-mission.jpg)
 
-Type the mission and click **Start mission**, or press the send key. The first line becomes the task's title and the rest its notes. Zeron creates the task in the project you picked, starts its lead with the agent, model, effort and permissions shown in the composer, and opens the task's Mission Control page. Press Shift+Tab again (**⇧Tab: back to New task** under the composer) or click **New task** to go back to a chat.
+Type the mission and click **Start mission**, or press the send key. The first line becomes the task's title and the rest its notes. Zeron creates the task in the project you picked, starts its lead with the agent, model, effort and permissions shown in the composer, and opens the task's page. Press Shift+Tab again (**⇧Tab: back to New task** under the composer) or click **New task** to go back to a chat.
 
 The **Running agents** tab, with the number of working chats beside it, swaps the composer for a list of those chats: each row shows the title and how long it has been running. Click a row to open that chat. With nothing running it says **No agents running**.
 

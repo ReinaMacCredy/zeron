@@ -5,7 +5,7 @@ use zeron_doc::{MessagePart, SessionMessageEntry, SubagentStatus};
 use zeron_proto::{Chat, ChatIndicator, DelegationStatus, LinkKind};
 
 use super::tree::Status;
-use super::{Brand, chat_brand, plan_led_by, rollup};
+use super::{Brand, chat_brand, rollup, task_led_by};
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,7 +64,7 @@ pub(crate) fn tree_rows(
         now,
         out: Vec::new(),
     };
-    let plan = plan_led_by(&state.tasks, &root.id);
+    let plan = task_led_by(&state.tasks, &root.id);
     let rollup = plan.map(|task| (task, rollup(state, task, now)));
     let (status, word) = match &rollup {
         Some((task, plan)) => super::tree::lead_status(task, plan),
@@ -136,7 +136,11 @@ pub(crate) fn tree_rows(
         .iter()
         .filter(|node| node.parent == Some(0))
         .count();
-    if rollup.is_some() && count > 0 {
+    if count > 0
+        && rollup
+            .as_ref()
+            .is_some_and(|(task, plan)| super::is_mission(task, plan))
+    {
         walk.out[first].group = Some(Group::Agents(count));
     }
     if rollup.is_none() {

@@ -30,7 +30,6 @@ pub(crate) enum RailItem {
     Home,
     Inbox,
     Tasks,
-    MissionControl,
     Supervisor,
     PullRequests,
     Usage,
@@ -44,7 +43,7 @@ pub(crate) struct RailEntry {
     pub icon: &'static str,
 }
 
-pub(crate) const TOP: [RailEntry; 7] = [
+pub(crate) const TOP: [RailEntry; 6] = [
     RailEntry {
         item: RailItem::Home,
         id: "rail-home",
@@ -62,12 +61,6 @@ pub(crate) const TOP: [RailEntry; 7] = [
         id: "open-tasks",
         label: "Tasks",
         icon: icons::TASKS,
-    },
-    RailEntry {
-        item: RailItem::MissionControl,
-        id: "open-mission-control",
-        label: "Mission Control",
-        icon: icons::MISSION_CONTROL,
     },
     RailEntry {
         item: RailItem::Supervisor,

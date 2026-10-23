@@ -54,7 +54,7 @@ pub(super) fn handoff_lift(t: f32) -> f32 {
 }
 
 fn slides_under_center(route: Route) -> bool {
-    matches!(route, Route::Tasks | Route::MissionControl | Route::Inbox)
+    matches!(route, Route::Tasks | Route::Inbox)
 }
 
 pub(super) struct DocPane {
@@ -81,7 +81,7 @@ enum TaskOrigin {
         create: serde_json::Value,
     },
     Plan {
-        create: serde_json::Value,
+        create: Option<serde_json::Value>,
     },
 }
 
@@ -91,7 +91,8 @@ impl TaskOrigin {
             Self::Card { patch, .. } => patch.as_ref().map(
                 |patch| serde_json::json!({ "op": "updateTask", "taskId": task_id, "patch": patch }),
             ),
-            Self::Mission { create, .. } | Self::Plan { create } => Some(create.clone()),
+            Self::Mission { create, .. } => Some(create.clone()),
+            Self::Plan { create } => create.clone(),
         }
     }
 }
@@ -254,9 +255,18 @@ impl Shell {
         else {
             return;
         };
-        let task_id = uuid::Uuid::new_v4().to_string();
-        let title = crate::home::chat_title(chat);
-        let create = Self::create_task_params(&task_id, &title, "", chat.space_id.clone(), None);
+        let (task_id, create) = match crate::tasks::task_led_by(&state.tasks, chat_id)
+            .filter(|task| task.completed_at.is_none())
+        {
+            Some(task) => (task.id.clone(), None),
+            None => {
+                let task_id = uuid::Uuid::new_v4().to_string();
+                let title = crate::home::chat_title(chat);
+                let create =
+                    Self::create_task_params(&task_id, &title, "", chat.space_id.clone(), None);
+                (task_id, Some(create))
+            }
+        };
         let lead = crate::tasks::Orchestrate::default();
         self.assign_task(
             TaskOrigin::Plan { create },
@@ -292,8 +302,8 @@ impl Shell {
                 self.composer
                     .update(cx, |composer, cx| composer.mission_failed(start, cx));
             }
-            TaskOrigin::Plan { .. } => {
-                if !save_failed {
+            TaskOrigin::Plan { create } => {
+                if create.is_some() && !save_failed {
                     self.delete_task(task_id, cx);
                 }
             }
@@ -597,11 +607,11 @@ impl Shell {
         cx.notify();
     }
 
-    pub(super) fn back_to_mission_control(&mut self, cx: &mut Context<Self>) {
-        if self.nav.previous() == Some(&NavEntry::MissionControl) {
+    fn back_to_tasks(&mut self, cx: &mut Context<Self>) {
+        if self.nav.previous() == Some(&NavEntry::Tasks) {
             self.navigate_back(cx);
         } else {
-            self.open_mission_control(cx);
+            self.open_tasks(cx);
         }
     }
 
@@ -669,10 +679,7 @@ impl Shell {
     fn task_slide_t(&self) -> Option<f32> {
         if self.task_slide.handoff
             || self.task_slide.chat
-            || !matches!(
-                self.route,
-                Route::Tasks | Route::MissionControl | Route::TaskCenter | Route::Inbox
-            )
+            || !matches!(self.route, Route::Tasks | Route::TaskCenter | Route::Inbox)
         {
             return None;
         }
@@ -848,7 +855,6 @@ impl Shell {
         };
         let under = match self.task_slide.under {
             Route::Inbox => self.render_inbox_page(cx),
-            Route::MissionControl => self.render_mission_control_page(cx),
             _ => self.render_tasks_page(window, cx),
         };
         let center = self.render_task_center_page(window, cx);
@@ -911,116 +917,6 @@ impl Shell {
                 .child(under)
                 .children(scrim)
                 .child(center)
-                .into_any_element(),
-        )
-    }
-
-    pub(super) fn render_task_slide_title_bar(
-        &mut self,
-        column: f32,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if let Some(t) = self.task_chat_slide_t() {
-            let chat = self.render_session_title_bar(window, cx);
-            let center = self.render_task_center_title_bar(cx);
-            let entering = self.route == Route::TaskCenter;
-            let layer = |bar: AnyElement, alpha: f32, live: bool| {
-                div()
-                    .absolute()
-                    .inset_0()
-                    .opacity(alpha)
-                    .child(bar)
-                    .when(!live, |el| el.child(div().absolute().inset_0().occlude()))
-            };
-            return Some(
-                div()
-                    .relative()
-                    .w_full()
-                    .h(px(Theme::TITLEBAR_HEIGHT))
-                    .child(layer(chat, 1.0 - t, !entering))
-                    .child(layer(center, t, entering))
-                    .into_any_element(),
-            );
-        }
-        let handoff = self.task_handoff_t().map(|t| HANDOFF_ARRIVE.progress(t));
-        let t = match handoff {
-            Some(arrive) => arrive,
-            None => self.task_slide_t()?,
-        };
-        let under = match (handoff, self.task_slide.under) {
-            (Some(_), _) | (None, Route::Inbox) => self.render_session_title_bar(window, cx),
-            (None, Route::MissionControl) => self.render_mission_control_title_bar(cx),
-            _ => self.render_tasks_title_bar(cx),
-        };
-        let center = self.render_task_center_title_bar(cx);
-        let entering = self.route == Route::TaskCenter;
-        let reduced = self.reduced_motion;
-        let width = self.viewport_width - self.content_inset();
-        let edge = self.sidebar_edge() + 1.0;
-        let split = edge + column * (1.0 - t);
-        let layer =
-            |bar: AnyElement, clip: Option<(f32, f32)>, shift: f32, alpha: f32, live: bool| {
-                let (left, right) = clip.unwrap_or((0.0, width));
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left(px(left))
-                    .w(px((right - left).max(0.0)))
-                    .overflow_hidden()
-                    .opacity(alpha)
-                    .child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left(px(shift - left))
-                            .w(px(width))
-                            .child(bar),
-                    )
-                    .when(!live, |el| el.child(div().absolute().inset_0().occlude()))
-            };
-        let (under, center) = if reduced || handoff.is_some() {
-            let shift = if handoff.is_some() {
-                HANDOFF_SHIFT * (1.0 - t)
-            } else {
-                0.0
-            };
-            (
-                layer(under, None, 0.0, 1.0 - t, !entering),
-                layer(center, None, shift, t, entering),
-            )
-        } else {
-            (
-                layer(
-                    under,
-                    Some((edge.max(self.title_bar_content_start()), split)),
-                    -UNDER_SHIFT * column * t,
-                    1.0 - UNDER_DIM * t,
-                    !entering,
-                ),
-                layer(
-                    center,
-                    Some((split, width)),
-                    column * (1.0 - t),
-                    1.0,
-                    entering,
-                ),
-            )
-        };
-        let (back, front) = if entering {
-            (under, center)
-        } else {
-            (center, under)
-        };
-        Some(
-            div()
-                .relative()
-                .w_full()
-                .h(px(Theme::TITLEBAR_HEIGHT))
-                .when(!reduced, |el| el.children(self.titlebar_seam_divider(cx)))
-                .child(back)
-                .child(front)
                 .into_any_element(),
         )
     }
@@ -1352,7 +1248,7 @@ impl Shell {
             TaskCenterEvent::Settle { chat_id, settled } => {
                 return self.set_chat_settled(chat_id.clone(), *settled, cx);
             }
-            TaskCenterEvent::Back => return self.back_to_mission_control(cx),
+            TaskCenterEvent::Back => return self.back_to_tasks(cx),
             TaskCenterEvent::Selected => return cx.notify(),
         };
         self.mutate_task_row(params, cx);
@@ -1406,109 +1302,59 @@ impl Shell {
         .detach();
     }
 
-    pub(super) fn render_task_center_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::of(cx).clone();
-        let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
-        let back_chat = self.center_back_chat(cx);
-        let crumb = back_chat.is_none().then(|| {
-            let title = self
-                .task_center
-                .as_ref()
-                .and_then(|(center, _)| center.read(cx).title(cx));
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .min_w_0()
-                .text_size(crate::typography::ui_rems(12.5))
-                .child(
-                    icon(icons::LUCIDE_CHEVRON_RIGHT)
-                        .size(px(12.0))
-                        .text_color(theme.text_faint),
-                )
-                .children(title.map(|title| {
-                    div()
-                        .min_w_0()
-                        .max_w(px(360.0))
-                        .truncate()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child(title)
-                }))
-        });
-        let back = div()
-            .id("task-center-back")
-            .debug_selector(|| "task-center-back".into())
-            .role(gpui::Role::Button)
-            .aria_label(match &back_chat {
-                Some(title) => format!("Back to {title}"),
-                None => "Back to Mission Control".into(),
-            })
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(8.0))
-            .py(px(4.0))
-            .rounded(px(8.0))
-            .cursor_pointer()
-            .text_size(crate::typography::ui_rems(12.5))
-            .text_color(theme.text_muted)
-            .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
-            .child(
-                icon(if back_chat.is_some() {
-                    icons::LUCIDE_ARROW_LEFT
-                } else {
-                    icons::MISSION_CONTROL
-                })
-                .size(px(14.0))
-                .text_color(theme.text_muted),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .max_w(px(260.0))
-                    .truncate()
-                    .child(back_chat.unwrap_or_else(|| "Mission Control".into())),
-            )
-            .on_click(cx.listener(|shell, _: &gpui::ClickEvent, _, cx| shell.center_back(cx)));
-        let inner = div()
-            .size_full()
-            .flex()
-            .items_center()
-            .pl(px((self.sidebar_edge() + Theme::SPACE_LG)
-                .max(self.title_bar_content_start() + plus_inset)))
-            .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
-            .child(back)
-            .children(crumb)
-            .child(div().flex_1())
-            .child(self.tree_view_switch(&theme, cx));
-        let bar = div()
-            .relative()
-            .h(px(Theme::TITLEBAR_HEIGHT))
-            .flex_none()
-            .children(self.titlebar_seam_divider(cx))
-            .child(inner);
-        self.titlebar_drag_region("task-center-titlebar", bar, cx)
-            .into_any_element()
+    pub(super) fn tree_view_switch(&self, theme: &Theme, cx: &App) -> gpui::Stateful<gpui::Div> {
+        let views = [
+            settings::TreeView::Spine,
+            settings::TreeView::Outline,
+            settings::TreeView::Timeline,
+        ];
+        let current = settings::current(cx).tree_view;
+        self.view_switch(
+            "tree-view",
+            ["Spine", "Outline", "Timeline"],
+            views.iter().position(|view| *view == current).unwrap_or(0),
+            TREE_VIEW_SEGMENT,
+            theme,
+            move |ix, s| s.tree_view = views[ix],
+        )
     }
 
-    fn tree_view_switch(&self, theme: &Theme, cx: &App) -> gpui::Stateful<gpui::Div> {
-        let current = settings::current(cx).tree_view;
-        let thumb = motion::state_t(
-            "tree-view-past-spine",
-            current != settings::TreeView::Spine,
-            TASKS_VIEW_THUMB,
-            self.reduced_motion,
-        ) + motion::state_t(
-            "tree-view-past-outline",
-            current == settings::TreeView::Timeline,
-            TASKS_VIEW_THUMB,
-            self.reduced_motion,
-        );
+    pub(super) fn tasks_view_switch(&self, theme: &Theme, cx: &App) -> gpui::Stateful<gpui::Div> {
+        let views = [settings::TasksView::List, settings::TasksView::Kanban];
+        let current = crate::tasks::tasks_view(cx);
+        self.view_switch(
+            "tasks-view",
+            ["List", "Kanban"],
+            views.iter().position(|view| *view == current).unwrap_or(0),
+            TASKS_VIEW_SEGMENT,
+            theme,
+            move |ix, s| s.tasks_view = views[ix],
+        )
+    }
+
+    fn view_switch<const N: usize>(
+        &self,
+        id: &'static str,
+        labels: [&'static str; N],
+        chosen: usize,
+        segment: f32,
+        theme: &Theme,
+        pick: impl Fn(usize, &mut settings::UiSettings) + Copy + 'static,
+    ) -> gpui::Stateful<gpui::Div> {
+        let thumb: f32 = (1..N)
+            .map(|k| {
+                motion::state_t(
+                    &format!("{id}-past-{k}"),
+                    chosen >= k,
+                    TASKS_VIEW_THUMB,
+                    self.reduced_motion,
+                )
+            })
+            .sum();
         let text = theme.text;
         div()
-            .id("tree-view-toggle")
-            .debug_selector(|| "tree-view-toggle".into())
+            .id(SharedString::from(format!("{id}-toggle")))
+            .debug_selector(move || format!("{id}-toggle"))
             .relative()
             .flex_none()
             .flex()
@@ -1521,126 +1367,39 @@ impl Shell {
                     .absolute()
                     .top(px(2.0))
                     .bottom(px(2.0))
-                    .left(px(2.0 + TREE_VIEW_SEGMENT * thumb))
-                    .w(px(TREE_VIEW_SEGMENT))
+                    .left(px(2.0 + segment * thumb))
+                    .w(px(segment))
                     .rounded(px(7.0))
                     .bg(theme.bg)
                     .border_1()
                     .border_color(theme.border.opacity(0.8)),
             )
-            .children(
-                [
-                    (settings::TreeView::Spine, "Spine"),
-                    (settings::TreeView::Outline, "Outline"),
-                    (settings::TreeView::Timeline, "Timeline"),
-                ]
-                .into_iter()
-                .enumerate()
-                .map(|(ix, (value, label))| {
-                    let chosen = value == current;
-                    div()
-                        .id(("tree-view-toggle", ix))
-                        .debug_selector(move || format!("tree-view-{label}"))
-                        .role(gpui::Role::Button)
-                        .aria_label(label)
-                        .aria_selected(chosen)
-                        .w(px(TREE_VIEW_SEGMENT))
-                        .py(px(6.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(12.0))
-                        .text_color(if chosen { theme.text } else { theme.text_muted })
-                        .when(!chosen, |el| {
-                            el.cursor_pointer()
-                                .hover(move |s| s.text_color(text))
-                                .on_click(move |_, _, cx| {
-                                    settings::update(settings::SavePolicy::Debounced, cx, |s| {
-                                        s.tree_view = value
-                                    });
-                                })
-                        })
-                        .child(label)
-                }),
-            )
-    }
-
-    pub(super) fn render_tasks_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::of(cx).clone();
-        let view = crate::tasks::tasks_view(cx);
-        let thumb = motion::state_t(
-            "tasks-view-thumb",
-            view == settings::TasksView::Kanban,
-            TASKS_VIEW_THUMB,
-            self.reduced_motion,
-        );
-        let text = theme.text;
-        let toggle = div()
-            .id("tasks-view-toggle")
-            .relative()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .rounded(px(9.0))
-            .p(px(2.0))
-            .bg(crate::theme::ink(0.04))
-            .child(
+            .children(labels.into_iter().enumerate().map(|(ix, label)| {
+                let on = ix == chosen;
                 div()
-                    .absolute()
-                    .top(px(2.0))
-                    .bottom(px(2.0))
-                    .left(px(2.0 + TASKS_VIEW_SEGMENT * thumb))
-                    .w(px(TASKS_VIEW_SEGMENT))
-                    .rounded(px(7.0))
-                    .bg(theme.bg)
-                    .border_1()
-                    .border_color(theme.border.opacity(0.8)),
-            )
-            .children(
-                [
-                    (settings::TasksView::List, "List"),
-                    (settings::TasksView::Kanban, "Kanban"),
-                ]
-                .into_iter()
-                .enumerate()
-                .map(|(ix, (value, label))| {
-                    let chosen = value == view;
-                    div()
-                        .id(("tasks-view-toggle", ix))
-                        .w(px(TASKS_VIEW_SEGMENT))
-                        .py(px(6.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(12.0))
-                        .text_color(if chosen { theme.text } else { theme.text_muted })
-                        .when(!chosen, |el| {
-                            el.cursor_pointer()
-                                .hover(move |s| s.text_color(text))
-                                .on_click(move |_, _, cx| {
-                                    settings::update(settings::SavePolicy::Debounced, cx, |s| {
-                                        s.tasks_view = value
-                                    });
-                                })
-                        })
-                        .child(label)
-                }),
-            );
-        let inner = div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_end()
-            .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
-            .child(toggle);
-        let bar = div()
-            .relative()
-            .h(px(Theme::TITLEBAR_HEIGHT))
-            .flex_none()
-            .children(self.titlebar_seam_divider(cx))
-            .child(inner);
-        self.titlebar_drag_region("tasks-titlebar", bar, cx)
-            .into_any_element()
+                    .id((SharedString::from(format!("{id}-toggle")), ix))
+                    .debug_selector(move || format!("{id}-{label}"))
+                    .role(gpui::Role::Button)
+                    .aria_label(label)
+                    .aria_selected(on)
+                    .w(px(segment))
+                    .py(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12.0))
+                    .text_color(if on { theme.text } else { theme.text_muted })
+                    .when(!on, |el| {
+                        el.cursor_pointer()
+                            .hover(move |s| s.text_color(text))
+                            .on_click(move |_, _, cx| {
+                                settings::update(settings::SavePolicy::Debounced, cx, |s| {
+                                    pick(ix, s)
+                                });
+                            })
+                    })
+                    .child(label)
+            }))
     }
 }
 

@@ -946,7 +946,10 @@ pub fn task_status(task: &Task, linked: Option<ChatIndicator>, steps: &[StepStat
     {
         return TaskStatus::NeedsYou;
     }
-    if lead_working || steps.contains(&StepStatus::Working) {
+    let planning = (task.mode == TaskMode::Orchestrated || task.plan_pending)
+        && steps.is_empty()
+        && linked.is_some();
+    if lead_working || planning || steps.contains(&StepStatus::Working) {
         return TaskStatus::Working;
     }
     match linked {
@@ -2489,6 +2492,15 @@ mod tests {
             task_status(&task, None, &[]),
             TaskStatus::ToDo,
             "no plan yet means nothing to approve"
+        );
+        assert_eq!(
+            task_status(&task, lead, &[]),
+            TaskStatus::Working,
+            "a mission without steps is planning even between the lead's turns"
+        );
+        assert_eq!(
+            task_status(&task, Some(ChatIndicator::AwaitingInput), &[]),
+            TaskStatus::NeedsYou
         );
     }
 

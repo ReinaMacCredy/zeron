@@ -8,10 +8,10 @@ hero = "mission-control.jpg"
 
 [[entry.features]]
 id = "mission-control"
-title = "Mission Control follows every agent tree"
-description = "Mission Control in the rail lists every chat that started other agents, and every mission, with who asks you at any depth. Add a plan to any chat and its lead breaks the work into steps you approve, edit and follow, each on its own thread."
+title = "Tasks follow every mission and agent tree"
+description = "Tasks lists every chat that started other agents beside your tasks, with Missions, Trees and Needs you chips and who asks you at any depth. Add a plan to any task or chat and its lead breaks the work into steps you approve, edit and follow, each on its own thread."
 image = "mission-control.jpg"
-details = "Press Shift+Tab in the composer to start a mission, or click Add plan on a chat you already have; the threads it started become its agents. The Missions widget on Home tracks every mission."
+details = "Turn on Plan first on a task's card, press Shift+Tab in the composer, or click Add plan on a chat you already have; the threads it started show as Outside the plan. A mission's tabs gather into one group in the titlebar, and the Missions widget on Home tracks every mission."
 
 [[entry.features]]
 id = "supervisor"

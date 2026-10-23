@@ -577,21 +577,8 @@ impl TaskCenter {
                     .iter()
                     .find(|chat| chat.id == self.key)
                     .map(|chat| chat.id.as_str()),
-                super::plan_led_by(&state.tasks, &self.key),
+                super::task_led_by(&state.tasks, &self.key),
             ),
-        }
-    }
-
-    pub fn title(&self, cx: &App) -> Option<String> {
-        let state = self.state.read(cx);
-        match self.resolve(state) {
-            (_, Some(task)) => Some(task.title.clone()),
-            (Some(root), None) => state
-                .chats
-                .iter()
-                .find(|chat| chat.id == root)
-                .map(|chat| crate::transcript::single_line(&crate::home::chat_title(chat))),
-            (None, None) => None,
         }
     }
 
@@ -1419,18 +1406,42 @@ impl TaskCenter {
             .text_color(theme.text_muted)
             .child("This tree is gone. It was deleted, or it has not synced yet.")
             .child(
-                widgets::text_action(
-                    theme,
-                    widgets::ActionTone::Filled,
-                    "Back to Mission Control",
-                )
-                .id("task-center-missing-back")
-                .debug_selector(|| "task-center-missing-back".into())
-                .role(gpui::Role::Button)
-                .aria_label("Back to Mission Control")
-                .rounded_full()
-                .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(TaskCenterEvent::Back))),
+                widgets::text_action(theme, widgets::ActionTone::Filled, "Back to Tasks")
+                    .id("task-center-missing-back")
+                    .debug_selector(|| "task-center-missing-back".into())
+                    .role(gpui::Role::Button)
+                    .aria_label("Back to Tasks")
+                    .rounded_full()
+                    .on_click(
+                        cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(TaskCenterEvent::Back)),
+                    ),
             )
+            .into_any_element()
+    }
+
+    pub(super) fn back_crumb(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let hover = theme.text;
+        div()
+            .id("task-center-back")
+            .debug_selector(|| "task-center-back".into())
+            .role(gpui::Role::Button)
+            .aria_label("Back to Tasks")
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .w_auto()
+            .text_size(ui_rems(12.0))
+            .text_color(theme.text_muted)
+            .cursor_pointer()
+            .hover(move |s| s.text_color(hover))
+            .child("Tasks")
+            .child(
+                icon(icons::LUCIDE_CHEVRON_RIGHT)
+                    .size(px(11.0))
+                    .text_color(theme.text_faint),
+            )
+            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(TaskCenterEvent::Back)))
             .into_any_element()
     }
 
@@ -1481,7 +1492,9 @@ impl TaskCenter {
             "Done".into()
         } else if plan.lead.is_none() {
             "Not started".into()
-        } else if working && plan.steps.is_empty() {
+        } else if let Some(lead) = plan.lead.filter(|_| !super::is_mission(task, plan)) {
+            super::TasksPage::linked_label(lead).into()
+        } else if plan.phase(task) == super::PlanPhase::Planning {
             "Planning".into()
         } else if plan.lead == Some(ChatIndicator::Errored) {
             "Failed".into()
@@ -2219,7 +2232,8 @@ impl Render for TaskCenter {
             };
         };
         self.draft.retain_live(&plan);
-        let editable = task.completed_at.is_none() && plan.lead.is_some();
+        let editable =
+            task.completed_at.is_none() && plan.lead.is_some() && super::is_mission(&task, &plan);
         let shown = self.shown(&task, &plan, cx);
         let reduced = motion::reduced_motion(cx);
         let now = Instant::now();
