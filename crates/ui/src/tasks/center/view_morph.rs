@@ -69,7 +69,7 @@ impl TaskCenter {
     pub(super) fn slide_from(&self, from: TreeView) -> f32 {
         match (&self.views.morph, self.views.from_view) {
             (Some(morph), Some(view)) if view == from => {
-                morph::header_t(morph.elapsed_ms(Instant::now()))
+                morph::header_t(morph.elapsed_ms(motion::now()))
             }
             (None, Some(view)) if view == from => 0.0,
             _ => 1.0,
@@ -84,7 +84,7 @@ impl TaskCenter {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let now = Instant::now();
+        let now = motion::now();
         let view = self.views.shown.unwrap_or_default();
         if nodes.is_empty() {
             self.views.morph = None;

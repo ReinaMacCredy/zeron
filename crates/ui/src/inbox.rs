@@ -1326,7 +1326,7 @@ impl Render for InboxPage {
             );
         let frame = {
             let card = self.card.read(cx);
-            card.frame(Instant::now())
+            card.frame(crate::motion::now())
                 .filter(|frame| card.is_open() || frame.panel > 0.0)
         };
         let card = frame.map(|frame| {

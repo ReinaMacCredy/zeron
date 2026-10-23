@@ -122,7 +122,7 @@ impl PermissionGuide {
 
     pub fn open<V: 'static>(&mut self, pane: PermissionPane, cx: &mut Context<V>) {
         self.open = Some(pane);
-        self.tween = Some((pane, Instant::now(), true));
+        self.tween = Some((pane, motion::now(), true));
         self.poll = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(GUIDE_POLL_INTERVAL).await;
@@ -140,7 +140,7 @@ impl PermissionGuide {
 
     pub fn close<V: 'static>(&mut self, cx: &mut Context<V>) {
         if let Some(pane) = self.open.take() {
-            self.tween = Some((pane, Instant::now(), false));
+            self.tween = Some((pane, motion::now(), false));
         }
         self.poll = None;
         cx.notify();
@@ -599,7 +599,7 @@ fn render_guide<V: 'static>(
     };
     let mut progress = 1.0;
     if let Some((_, start, opening)) = guide.tween {
-        let raw = (start.elapsed().as_secs_f32()
+        let raw = (motion::since(start).as_secs_f32()
             / (GUIDE_MOTION.total().as_secs_f32() * motion::speed_scale()))
         .clamp(0.0, 1.0);
         if raw >= 1.0 || motion::reduced_motion(cx) {

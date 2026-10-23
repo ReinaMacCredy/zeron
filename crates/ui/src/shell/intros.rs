@@ -119,7 +119,7 @@ impl Intro {
             page: 0,
             forward: true,
             since: None,
-            shown: Instant::now(),
+            shown: motion::now(),
             tree: None,
         }
     }
@@ -251,8 +251,8 @@ impl Shell {
             return;
         }
         *forward = next > *page;
-        *since = (!reduced).then(Instant::now);
-        *shown = Instant::now();
+        *since = (!reduced).then(motion::now);
+        *shown = motion::now();
         *page = next;
         *tree = None;
         cx.notify();
@@ -326,7 +326,7 @@ impl Shell {
         };
         let progress = since.map_or(1.0, |since| {
             let total = PAGE_IN.total().as_secs_f32() * motion::speed_scale();
-            let raw = since.elapsed().as_secs_f32() / total.max(f32::EPSILON);
+            let raw = motion::since(since).as_secs_f32() / total.max(f32::EPSILON);
             if raw < 1.0 {
                 window.request_animation_frame();
             }
@@ -1249,7 +1249,7 @@ fn supervisor_conversation_visual(theme: &Theme, t: f32) -> AnyElement {
 
 pub(super) fn loop_clock(shown: Instant, cx: &App) -> Option<f32> {
     (!motion::reduced_motion(cx))
-        .then(|| shown.elapsed().as_secs_f32() / motion::speed_scale().max(f32::EPSILON))
+        .then(|| motion::since(shown).as_secs_f32() / motion::speed_scale().max(f32::EPSILON))
 }
 
 pub(super) fn is_since_visual(id: &str) -> bool {

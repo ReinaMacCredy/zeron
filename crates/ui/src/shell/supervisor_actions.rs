@@ -180,7 +180,7 @@ impl Shell {
     }
 
     pub(super) fn supervisor_badge_pop(&mut self, count: usize, cx: &App) -> Option<f32> {
-        let now = std::time::Instant::now();
+        let now = crate::motion::now();
         let reduced = crate::motion::reduced_motion(cx);
         let (seen, pop) = self
             .supervisor

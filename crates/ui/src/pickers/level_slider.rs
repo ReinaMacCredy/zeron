@@ -57,7 +57,7 @@ impl LevelSlider {
         }
         let from = self
             .press
-            .map(|press| press.eval(motion::PRESS, std::time::Instant::now()).0)
+            .map(|press| press.eval(motion::PRESS, motion::now()).0)
             .unwrap_or(0.0);
         self.dragging = pressed;
         self.press = Some(EffortTween::new(from, if pressed { 1.0 } else { 0.0 }));
@@ -82,7 +82,7 @@ impl LevelSlider {
         let (fraction, gliding) = EffortTween::glide(self.snap, fraction_of(selected, len), cx);
         let (press, pressing) = self
             .press
-            .map(|press| press.eval(motion::PRESS, std::time::Instant::now()))
+            .map(|press| press.eval(motion::PRESS, motion::now()))
             .unwrap_or((0.0, false));
         if gliding || pressing {
             window.request_animation_frame();

@@ -115,7 +115,7 @@ pub fn tool(tool: Tool) -> Value {
         (drive, "to", end("end")),
         (drive, "steps", field("integer", "For `drag`: pointer moves between `from` and `to`. Defaults to 12.")),
         (drive, "holdMs", field("integer", "For `drag`: how long to hold the button at `to` before releasing.")),
-        (drive, "do", field("string", "For `press`: the accessibility action to perform, such as click (default), focus, setValue, increment, decrement, expand, collapse, showContextMenu or scrollIntoView.")),
+        (drive, "do", field("string", "For `press`: the accessibility action to perform, such as click (default), focus, setValue, increment, decrement, expand, collapse, showContextMenu or scrollIntoView. For `clock`: pause, resume or advance.")),
         (drive, "value", field("string", "For `press` with `do: setValue`: the new value.")),
         (observe, "do", json!({ "type": "string", "enum": ["start", "stop"], "description": "For `record`: start taps the window's real clicks, keys, typing and scrolls; stop writes them as a `zeron ui scenario` file under ~/.zeron/run/recordings and returns {path, steps, fallbacks, redacted}. Text typed into a key, token, secret, password or API field is written as `<redacted>`. Never records the app serving this chat; ask the user to run `zeron ui record` there." })),
         (observe, "includeDriven", field("boolean", "For `record` start, debug builds only: also record input that `ui_driver_drive` injects.")),
@@ -132,7 +132,7 @@ pub fn tool(tool: Tool) -> Value {
         (observe, "quietMs", field("integer", "For `wait` idle: how long no frame may draw.")),
         (observe, "timeoutMs", field("integer", "Longest wait.")),
         (observe, "ms", field("integer", "Duration of `wait` ms; the window of `frames` (default 1000, max 10000) and `track` (default 800, max 5000).")),
-        (drive, "ms", field("integer", "The window of `frames` (default 1000, max 10000) and `track` (default 800, max 5000).")),
+        (drive, "ms", field("integer", "The window of `frames` (default 1000, max 10000) and `track` (default 800, max 5000). For `clock` with `do: advance`: how far to step animation time (max 60000).")),
         (observe, "query", field("string", "Keep only `tree` lines that match this text.")),
         (observe, "root", field("string", "Ref the `tree` starts from.")),
         (observe, "depth", field("integer", "Levels of `tree` to print.")),
@@ -155,7 +155,7 @@ pub fn tool(tool: Tool) -> Value {
         Tool::Drive => (
             DRIVE_TOOL,
             "Drive the Zeron UI",
-            "Drive a Zeron Dev bundle's UI as a person would: click, move, drag, scroll, press keys, type, perform an accessibility action, dispatch a gpui action, or `set` theme, window size and motion scale. Only debug builds (Zeron Dev bundles) take input, and this tool refuses the app serving this chat, so pass a Dev bundle's label or pid from `ui_driver` `list` as `target`. Act on an element by `ref` from `ui_driver` `tree`, or by `select` (`Button \"New chat\"`, or a bare `\"label substring\"`, plus `nth`); fall back to `x`,`y` window points. Each action replies after the next frame is drawn; an action addressed by `ref` or `select` first waits up to 1 s for the element to hold still across two frames, and replies `unsettled: true` if it never did. `press` performs an accessibility action given in `do` (click, focus, setValue with `value`, expand, ...) without moving the pointer. `frames` or `track` with a `during` drive request measures the transition it starts. Check the result with `ui_driver` (`tree`, `wait`, `snapshot`).",
+            "Drive a Zeron Dev bundle's UI as a person would: click, move, drag, scroll, press keys, type, perform an accessibility action, dispatch a gpui action, `set` theme, window size and motion scale, or pause and step animation time with `clock`. Only debug builds (Zeron Dev bundles) take input, and this tool refuses the app serving this chat, so pass a Dev bundle's label or pid from `ui_driver` `list` as `target`. Act on an element by `ref` from `ui_driver` `tree`, or by `select` (`Button \"New chat\"`, or a bare `\"label substring\"`, plus `nth`); fall back to `x`,`y` window points. Each action replies after the next frame is drawn; an action addressed by `ref` or `select` first waits up to 1 s for the element to hold still across two frames, and replies `unsettled: true` if it never did. `press` performs an accessibility action given in `do` (click, focus, setValue with `value`, expand, ...) without moving the pointer. `frames` or `track` with a `during` drive request measures the transition it starts. Check the result with `ui_driver` (`tree`, `wait`, `snapshot`).",
         ),
     };
     json!({

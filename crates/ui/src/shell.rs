@@ -1541,7 +1541,7 @@ struct SidebarSessionSlide {
 impl SidebarSessionSlide {
     fn current(&self) -> f32 {
         let progress = TAB_SLIDE
-            .progress(self.started.elapsed().as_secs_f32() / TAB_SLIDE.total().as_secs_f32());
+            .progress(motion::since(self.started).as_secs_f32() / TAB_SLIDE.total().as_secs_f32());
         motion::lerp(self.from, self.to, progress)
     }
 
@@ -1552,7 +1552,7 @@ impl SidebarSessionSlide {
         self.from = self.current();
         self.to = target;
         self.epoch = self.epoch.wrapping_add(1);
-        self.started = std::time::Instant::now();
+        self.started = motion::now();
     }
 }
 
@@ -1724,7 +1724,7 @@ impl WidthTween {
         Self {
             from,
             to,
-            started: std::time::Instant::now(),
+            started: motion::now(),
             duration: RESIZE.total().mul_f32(motion::speed_scale()),
             curve: RESIZE.curve,
         }
@@ -3461,10 +3461,7 @@ impl Shell {
             home_view: None,
             home_raise: None,
             chat_work_focus: [cx.focus_handle(), cx.focus_handle()],
-            chat_work_slide: (
-                1,
-                motion::IndicatorSlide::at(1.0, std::time::Instant::now()),
-            ),
+            chat_work_slide: (1, motion::IndicatorSlide::at(1.0, motion::now())),
             _home_events: None,
             appearance_page: None,
             files_settings_page: None,
@@ -9261,9 +9258,7 @@ impl Shell {
             surface,
             input,
             focus_pending: true,
-            reveal_until: Some(
-                std::time::Instant::now() + motion::COLLAPSE.total() + CHAT_RENAME_REVEAL_GRACE,
-            ),
+            reveal_until: Some(motion::now() + motion::COLLAPSE.total() + CHAT_RENAME_REVEAL_GRACE),
             _events: events,
             _blur: None,
         });
@@ -9350,7 +9345,7 @@ impl Shell {
         self.chat_rename
             .as_ref()
             .and_then(|rename| rename.reveal_until)
-            .is_some_and(|until| std::time::Instant::now() < until)
+            .is_some_and(|until| motion::now() < until)
     }
 
     /// The inline title editor for `chat_id`'s row on `surface`, if one is open.
@@ -10344,7 +10339,7 @@ impl Shell {
         if let Some(now) = self.test_time {
             return now;
         }
-        std::time::Instant::now()
+        motion::now()
     }
 
     fn panel_tween(&self, from: f32, to: f32) -> WidthTween {
@@ -16744,7 +16739,7 @@ impl Shell {
             .as_ref()
             .map(|background| background.adjustment)
             .unwrap_or_default();
-        let frame_time = self.render_time.unwrap_or_else(std::time::Instant::now);
+        let frame_time = self.render_time.unwrap_or_else(motion::now);
         // Prewarm even in an established thread. Decode/effect work is not
         // contingent on a hero measurement or a navigation gesture.
         let artwork = new_thread_background_setting
@@ -20335,7 +20330,7 @@ impl Render for Shell {
                     self.state.read(cx).selected_chat.is_some(),
                     (self.sidebar_now(), main_target_width),
                     on_chat && !self.reduced_motion,
-                    self.render_time.unwrap_or_else(std::time::Instant::now),
+                    self.render_time.unwrap_or_else(motion::now),
                 );
                 if panel_handoff {
                     self.motion_active.set(true);

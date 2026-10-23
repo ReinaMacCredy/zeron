@@ -101,7 +101,7 @@ impl DisclosureMotion {
     fn current(self) -> f32 {
         let total = motion::COLLAPSE.total().as_secs_f32();
         let raw = if total > 0.0 {
-            self.started.elapsed().as_secs_f32() / total
+            motion::since(self.started).as_secs_f32() / total
         } else {
             1.0
         };
@@ -109,7 +109,7 @@ impl DisclosureMotion {
     }
 
     fn animating(self) -> bool {
-        self.started.elapsed() < motion::COLLAPSE.total() + TWEEN_GRACE
+        motion::since(self.started) < motion::COLLAPSE.total() + TWEEN_GRACE
     }
 }
 
@@ -185,7 +185,7 @@ impl ExplorerSections {
                 epoch,
                 from,
                 to: target,
-                started: std::time::Instant::now(),
+                started: motion::now(),
             },
         );
         let open = self.is_open(section);
@@ -205,7 +205,7 @@ impl ExplorerSections {
                 epoch,
                 from: 0.0,
                 to: height,
-                started: std::time::Instant::now(),
+                started: motion::now(),
             },
         );
     }

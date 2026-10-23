@@ -234,7 +234,7 @@ impl Composer {
         self.stash_ask_typed(cx);
         self.ask.advance_task = None;
         if self.ask.open.is_none() {
-            self.ask.opened_at = Some(Instant::now());
+            self.ask.opened_at = Some(crate::motion::now());
         }
         self.ask.leaving = None;
         self.ask.open = Some(chat_id);
@@ -250,7 +250,7 @@ impl Composer {
             return;
         };
         self.stash_ask_typed(cx);
-        self.ask.leaving = Some((chat_id, Instant::now()));
+        self.ask.leaving = Some((chat_id, crate::motion::now()));
         self.ask.advance_task = None;
         self.focus_pending = true;
         cx.notify();
@@ -327,7 +327,7 @@ impl Composer {
                 self.ask.focus_pending = true;
             }
             None => {
-                self.ask.leaving = Some((chat_id.clone(), Instant::now()));
+                self.ask.leaving = Some((chat_id.clone(), crate::motion::now()));
                 self.ask_input
                     .update(cx, |input, cx| input.set_text(String::new(), cx));
                 self.focus_pending = true;
@@ -368,7 +368,7 @@ impl Composer {
         {
             self.ask.open = None;
             self.ask.advance_task = None;
-            self.ask.leaving = Some((chat_id, Instant::now()));
+            self.ask.leaving = Some((chat_id, crate::motion::now()));
         }
         let (pills, roster) = self
             .render_background_corner(window, cx)
@@ -377,7 +377,7 @@ impl Composer {
         let limit = (!self.side_chat)
             .then(|| self.render_limit_pill(&theme, cx))
             .flatten();
-        let now = Instant::now();
+        let now = crate::motion::now();
         let reduced = crate::motion::reduced_motion(cx);
 
         let tray_motion = match (&self.ask.open, &self.ask.leaving) {

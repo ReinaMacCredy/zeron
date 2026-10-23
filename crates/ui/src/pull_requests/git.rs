@@ -4883,7 +4883,7 @@ impl super::PullRequestsPage {
         self.tab_slide.retarget(
             tab_slot(tab),
             crate::motion::reduced_motion(cx),
-            std::time::Instant::now(),
+            crate::motion::now(),
         );
         self.tab = tab;
         if let Some((view, _)) = &self.git_view {
@@ -4971,7 +4971,7 @@ impl super::PullRequestsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let now = std::time::Instant::now();
+        let now = crate::motion::now();
         if self.tab_slide.animating_at(now) {
             window.request_animation_frame();
         }

@@ -91,7 +91,7 @@ pub fn rolling(
     reduced: bool,
 ) -> Option<gpui::AnyElement> {
     let key = key.into();
-    let now = Instant::now();
+    let now = crate::motion::now();
     let roll = ROLLS.with(|rolls| {
         let mut rolls = rolls.borrow_mut();
         // Keys can be per-turn (the working trailer), so bound the map: past
@@ -182,7 +182,7 @@ impl IntoElement for RollText {
 
 impl RollText {
     fn elapsed(&self) -> f32 {
-        Instant::now()
+        crate::motion::now()
             .saturating_duration_since(self.roll.started)
             .as_secs_f32()
             / speed_scale()
@@ -469,7 +469,7 @@ impl Element for RollText {
         // full-rate frames for most of every agent turn were exactly the
         // battery drain the pulse clock exists to prevent. The lease lapses
         // on its own once the roll stops painting.
-        if Instant::now().saturating_duration_since(self.roll.started) < total() {
+        if crate::motion::now().saturating_duration_since(self.roll.started) < total() {
             crate::motion::pulse_lease(window.current_view(), cx);
         }
     }

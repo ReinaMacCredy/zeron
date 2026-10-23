@@ -1267,7 +1267,7 @@ impl SupervisorPage {
                 page.load_profiles(false, cx)
             }),
         ];
-        let now = Instant::now();
+        let now = motion::now();
         let mut page = Self {
             state,
             pickers,
@@ -1345,7 +1345,7 @@ impl SupervisorPage {
         if self.ensure != Ensure::Running {
             self.ensure = Ensure::Wanted;
         }
-        self.entered_at = (!motion::reduced_motion(cx)).then(Instant::now);
+        self.entered_at = (!motion::reduced_motion(cx)).then(motion::now);
         self.fresh = true;
         self.view = None;
         self.rows.clear();
@@ -1388,7 +1388,7 @@ impl SupervisorPage {
         self.drawer = None;
         self.drawer_doc = None;
         self.drawer_open = false;
-        self.drawer_slide = Tween::at(0.0, Instant::now());
+        self.drawer_slide = Tween::at(0.0, motion::now());
         self.gear = Popup::default();
         cx.notify();
     }
@@ -1450,10 +1450,10 @@ impl SupervisorPage {
         }
         if woke || !arrived.is_empty() {
             let reduced = motion::reduced_motion(cx);
-            self.flash = run(0.0, 1.0, DOT_FLASH, reduced, Instant::now());
+            self.flash = run(0.0, 1.0, DOT_FLASH, reduced, motion::now());
         }
         if !arrived.is_empty() {
-            let (reduced, now) = (motion::reduced_motion(cx), Instant::now());
+            let (reduced, now) = (motion::reduced_motion(cx), motion::now());
             let state = self.state.read(cx);
             let tasks: Vec<String> = state
                 .supervisor
@@ -1596,7 +1596,7 @@ impl SupervisorPage {
     }
 
     fn send_sheet(&mut self, group: &str, cx: &mut Context<Self>) {
-        let now = Instant::now();
+        let now = motion::now();
         let ready: Vec<(String, String)> = self
             .rows
             .values()
@@ -1726,7 +1726,7 @@ impl SupervisorPage {
                 results.push((key, sent));
             }
             page.update(cx, |page, cx| {
-                let now = Instant::now();
+                let now = motion::now();
                 for (key, result) in results {
                     if let Some(reply) = page.replies.get_mut(&key) {
                         reply.stage = match result {
@@ -2065,12 +2065,8 @@ impl SupervisorPage {
         self.drawer = Some(owner);
         self.drawer_doc = thread.clone();
         self.drawer_open = true;
-        self.drawer_slide.retarget(
-            1.0,
-            DRAWER_SLIDE,
-            motion::reduced_motion(cx),
-            Instant::now(),
-        );
+        self.drawer_slide
+            .retarget(1.0, DRAWER_SLIDE, motion::reduced_motion(cx), motion::now());
         cx.emit(SupervisorEvent::WatchDoc(thread));
         cx.notify();
     }
@@ -2079,22 +2075,28 @@ impl SupervisorPage {
         self.drawer_open = false;
         let reduced = motion::reduced_motion(cx);
         self.drawer_slide
-            .retarget(0.0, DRAWER_SLIDE, reduced, Instant::now());
+            .retarget(0.0, DRAWER_SLIDE, reduced, motion::now());
         let wait = if reduced {
             Duration::ZERO
         } else {
             DRAWER_SLIDE.total().mul_f32(motion::speed_scale())
         };
         cx.spawn(async move |page, cx| {
-            cx.background_executor().timer(wait).await;
-            page.update(cx, |page, cx| {
-                if !page.drawer_open && page.drawer.take().is_some() {
-                    page.drawer_doc = None;
-                    cx.emit(SupervisorEvent::WatchDoc(None));
+            loop {
+                cx.background_executor().timer(wait).await;
+                let sliding = page.update(cx, |page, cx| {
+                    let sliding = !page.drawer_open && !page.drawer_slide.settled_at(motion::now());
+                    if !sliding && !page.drawer_open && page.drawer.take().is_some() {
+                        page.drawer_doc = None;
+                        cx.emit(SupervisorEvent::WatchDoc(None));
+                    }
+                    cx.notify();
+                    sliding
+                });
+                if wait.is_zero() || !sliding.unwrap_or(false) {
+                    break;
                 }
-                cx.notify();
-            })
-            .ok();
+            }
         })
         .detach();
         cx.notify();
@@ -2124,7 +2126,7 @@ impl SupervisorPage {
         }
         self.filter = filter;
         if self.list_switch.is_none() {
-            self.list_switch = Some(Instant::now());
+            self.list_switch = Some(motion::now());
         }
         cx.notify();
     }
@@ -2167,7 +2169,7 @@ impl SupervisorPage {
 
     fn toggle_earlier(&mut self, cx: &mut Context<Self>) {
         self.earlier_open = !self.earlier_open;
-        let (reduced, now) = (motion::reduced_motion(cx), Instant::now());
+        let (reduced, now) = (motion::reduced_motion(cx), motion::now());
         self.earlier.set(self.earlier_open, FOLD, reduced, now);
         self.earlier_chevron.retarget(
             if self.earlier_open { 1.0 } else { 0.0 },
@@ -2187,7 +2189,7 @@ impl SupervisorPage {
             if self.conversation_open { 1.0 } else { 0.0 },
             FOLD,
             motion::reduced_motion(cx),
-            Instant::now(),
+            motion::now(),
         );
         cx.notify();
     }
@@ -4141,14 +4143,14 @@ fn step_labels(plan: &Rollup) -> Vec<(String, String)> {
 impl Render for SupervisorPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        let (now, utc) = (Instant::now(), Utc::now());
+        let (wall, now, utc) = (Instant::now(), motion::now(), Utc::now());
         let reduced = motion::reduced_motion(cx);
         let view = match self.view.take() {
-            Some(view) if now < view.built + VIEW_FRESH => view,
+            Some(view) if wall < view.built + VIEW_FRESH => view,
             _ => {
                 let state = self.state.read(cx);
                 let view = View {
-                    built: now,
+                    built: wall,
                     missions: missions(state, utc),
                     feed: state
                         .supervisor

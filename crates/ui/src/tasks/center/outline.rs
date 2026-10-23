@@ -717,7 +717,7 @@ impl TaskCenter {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let now = Instant::now();
+        let now = motion::now();
         let reduced = motion::reduced_motion(cx);
         let (chat, nodes) = {
             let state = self.state.read(cx);
