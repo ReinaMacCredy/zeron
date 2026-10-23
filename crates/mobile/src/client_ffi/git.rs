@@ -64,6 +64,7 @@ pub struct DiffLineView {
     pub new_no: Option<u32>,
     pub text: String,
     pub threads: Vec<PrThread>,
+    pub findings: Vec<super::review::DiffFindingCard>,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -131,13 +132,17 @@ fn changes(additions: u64, deletions: u64) -> String {
     )
 }
 
-fn ago(stamp: &str) -> String {
+pub(super) fn ago(stamp: &str) -> String {
     DateTime::parse_from_rfc3339(stamp)
         .map(|at| board::compact_relative_time(at.with_timezone(&Utc), Utc::now()))
         .unwrap_or_default()
 }
 
-fn diff_files(text: &str, threads: &[zp::ChangeRequestReviewThread]) -> Vec<DiffFileView> {
+pub(super) fn diff_files(
+    text: &str,
+    threads: &[zp::ChangeRequestReviewThread],
+    cards: &[zp::comments::ReviewComment],
+) -> Vec<DiffFileView> {
     patch::parse_patch(text)
         .into_iter()
         .map(|mut file| {
@@ -154,6 +159,15 @@ fn diff_files(text: &str, threads: &[zp::ChangeRequestReviewThread]) -> Vec<Diff
                         }
                     })
                     .map(thread_view)
+                    .collect()
+            };
+            let placed = |line: &patch::DiffLine| -> Vec<super::review::DiffFindingCard> {
+                let anchor = patch::line_anchor(line);
+                cards
+                    .iter()
+                    .filter(|card| card.path == file.path && anchor.is_some())
+                    .filter(|card| card.diff_anchor() == anchor)
+                    .filter_map(super::review::DiffFindingCard::of)
                     .collect()
             };
             DiffFileView {
@@ -184,6 +198,7 @@ fn diff_files(text: &str, threads: &[zp::ChangeRequestReviewThread]) -> Vec<Diff
                                 new_no: line.new_no,
                                 text: line.text.clone(),
                                 threads: anchored(line),
+                                findings: placed(line),
                             })
                             .collect(),
                     })
@@ -973,7 +988,7 @@ impl PullRequestPage {
         };
         let threads = pr.review_threads.unwrap_or_default();
         Ok(PrCodeView {
-            files: diff_files(&text, &threads),
+            files: diff_files(&text, &threads, &[]),
         })
     }
 
@@ -1571,7 +1586,7 @@ impl GitCheckout {
                 .await
         })
         .await?;
-        Ok(diff_files(&diff.patch, &[]))
+        Ok(diff_files(&diff.patch, &[], &[]))
     }
 
     pub async fn pull(&self) -> CoreResult<GitTreeView> {
@@ -1643,7 +1658,7 @@ impl GitCheckout {
                 .map(|c| ago(&c.authored_at))
                 .unwrap_or_default(),
             sha,
-            files: diff_files(&diff.patch, &[]),
+            files: diff_files(&diff.patch, &[], &[]),
         })
     }
 }

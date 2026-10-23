@@ -12,6 +12,7 @@
 //! (`snapshot()` / `subscribe()`), never over FFI.
 
 mod git;
+mod review;
 mod composer;
 mod session;
 mod settings;

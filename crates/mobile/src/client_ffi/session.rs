@@ -287,6 +287,8 @@ pub struct ComposerState {
     pub compact_blocked: Option<String>,
     pub resume_compaction: Option<super::composer::ResumeOffer>,
     pub prediction: Option<String>,
+    pub review: Option<super::review::ReviewChipView>,
+    pub staged_comments: Vec<super::review::StagedCommentChip>,
 }
 
 impl From<&zc::ComposerState> for ComposerState {
@@ -377,6 +379,8 @@ impl From<&zc::ComposerState> for ComposerState {
                     body: offer.body(),
                 }),
             prediction: c.prediction.clone(),
+            review: c.review.as_ref().map(Into::into),
+            staged_comments: super::review::staged_chips(&c.staged_comments),
         }
     }
 }

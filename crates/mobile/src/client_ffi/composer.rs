@@ -666,6 +666,7 @@ pub struct AgentRunRow {
     pub working: bool,
     pub can_stop: bool,
     pub delegated: bool,
+    pub review: Option<String>,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -694,9 +695,26 @@ impl SessionHandle {
         };
         let roster = self.inner.background_roster();
         let stoppable = stoppable(roster.harness);
+        let review_of = |task_id: &str| {
+            self.inner
+                .review_snapshot()?
+                .review
+                .run
+                .filter(|run| run.task_id.as_deref() == Some(task_id))?
+                .pill_suffix()
+        };
+        let summary = match roster.agents.as_slice() {
+            [one] => review_of(&one.part_id).map(|suffix| {
+                std::iter::once(format!("{} · {suffix}", one.title))
+                    .chain(roster_summary(&[], roster.shells.len()))
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            }),
+            _ => None,
+        };
         BackgroundRosterView {
             title: "Agents".into(),
-            summary: roster_summary(&roster.agents, roster.shells.len()),
+            summary: summary.or_else(|| roster_summary(&roster.agents, roster.shells.len())),
             agents_section: subagents_section(&roster.agents),
             agents: roster
                 .agents
@@ -708,6 +726,7 @@ impl SessionHandle {
                     working: run.state == zeron_proto::background::RunState::Working,
                     can_stop: run.can_stop(stoppable),
                     delegated: run.delegated,
+                    review: review_of(&run.part_id),
                 })
                 .collect(),
             shells_section: shells_section(roster.shells.len()),
