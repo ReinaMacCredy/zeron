@@ -67,6 +67,7 @@ enum DiffItem: Hashable {
     case hunk(file: String, index: Int, header: String)
     case line(file: String, hunk: Int, index: Int, line: DiffLineView)
     case thread(PrThread)
+    case finding(file: String, card: DiffFindingCard)
 
     static func rows(_ files: [DiffFileView]) -> [DiffItem] {
         var out: [DiffItem] = []
@@ -78,6 +79,7 @@ enum DiffItem: Hashable {
                 for (i, line) in hunk.lines.enumerated() {
                     out.append(.line(file: file.path, hunk: h, index: i, line: line))
                     out += line.threads.map { .thread($0) }
+                    out += line.findings.map { .finding(file: file.path, card: $0) }
                 }
             }
         }
@@ -150,10 +152,11 @@ final class DiffLineCell: UITableViewCell {
 struct DiffPainter {
     static func register(_ table: UITableView) {
         table.register(DiffLineCell.self, forCellReuseIdentifier: DiffLineCell.id)
+        table.register(FindingCardCell.self, forCellReuseIdentifier: FindingCardCell.id)
         table.register(UITableViewCell.self, forCellReuseIdentifier: "diff-plain")
     }
 
-    static func cell(_ table: UITableView, _ path: IndexPath, _ item: DiffItem, thread: (UITableViewCell, PrThread) -> Void = { _, _ in }) -> UITableViewCell {
+    static func cell(_ table: UITableView, _ path: IndexPath, _ item: DiffItem, thread: (UITableViewCell, PrThread) -> Void = { _, _ in }, finding: FindingCardCell.Act? = nil) -> UITableViewCell {
         switch item {
         case let .line(_, _, _, line):
             let cell = table.dequeueReusableCell(withIdentifier: DiffLineCell.id, for: path) as! DiffLineCell
@@ -201,6 +204,10 @@ struct DiffPainter {
             let cell = plain(table, path)
             thread(cell, t)
             return cell
+        case let .finding(_, card):
+            let cell = table.dequeueReusableCell(withIdentifier: FindingCardCell.id, for: path) as! FindingCardCell
+            cell.show(card, act: finding)
+            return cell
         }
     }
 
@@ -219,10 +226,14 @@ final class DiffSheetViewController: UITableViewController {
     private var items: [DiffItem] = []
     private let subtitle: String?
     private let load: () async throws -> [DiffFileView]
+    private let focus: String?
+    private let finding: FindingCardCell.Act?
 
-    init(title: String, subtitle: String?, load: @escaping () async throws -> [DiffFileView]) {
+    init(title: String, subtitle: String?, focus: String? = nil, finding: FindingCardCell.Act? = nil, load: @escaping () async throws -> [DiffFileView]) {
         self.subtitle = subtitle
         self.load = load
+        self.focus = focus
+        self.finding = finding
         super.init(style: .plain)
         self.title = title
     }
@@ -245,6 +256,10 @@ final class DiffSheetViewController: UITableViewController {
             label.frame = CGRect(x: 0, y: 0, width: 0, height: 28)
             tableView.tableHeaderView = label
         }
+        reload(scroll: true)
+    }
+
+    func reload(scroll: Bool = false) {
         Task { @MainActor in
             do {
                 let files = try await load()
@@ -253,21 +268,30 @@ final class DiffSheetViewController: UITableViewController {
                 items = [.notice(file: "", text: GitText.failure(error, fallback: "Couldn't load the diff. Try again."))]
             }
             tableView.reloadData()
+            guard scroll, let focus, let row = items.firstIndex(where: { if case let .finding(_, card) = $0 { card.id == focus } else { false } }) else { return }
+            tableView.layoutIfNeeded()
+            tableView.scrollToRow(at: IndexPath(row: row, section: 0), at: .middle, animated: false)
         }
     }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { items.count }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        DiffPainter.cell(tableView, indexPath, items[indexPath.row])
+        DiffPainter.cell(tableView, indexPath, items[indexPath.row], finding: finding == nil ? nil : { [weak self] card, action in
+            self?.finding?(card, action)
+            self?.reload()
+        })
     }
 
-    static func present(from host: UIViewController, title: String, subtitle: String?, load: @escaping () async throws -> [DiffFileView]) {
-        let nav = UINavigationController(rootViewController: DiffSheetViewController(title: title, subtitle: subtitle, load: load))
+    @discardableResult
+    static func present(from host: UIViewController, title: String, subtitle: String?, focus: String? = nil, finding: FindingCardCell.Act? = nil, load: @escaping () async throws -> [DiffFileView]) -> DiffSheetViewController {
+        let sheet = DiffSheetViewController(title: title, subtitle: subtitle, focus: focus, finding: finding, load: load)
+        let nav = UINavigationController(rootViewController: sheet)
         if let sheet = nav.sheetPresentationController {
             sheet.detents = [.medium(), .large()]
             sheet.prefersGrabberVisible = true
         }
         host.present(nav, animated: true)
+        return sheet
     }
 }
