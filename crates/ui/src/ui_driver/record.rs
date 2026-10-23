@@ -15,6 +15,8 @@ use std::time::Duration;
 const DRAG_PT: f32 = 4.0;
 const LINE_PX: f32 = 20.0;
 const HOLD_EVERY: Duration = Duration::from_secs(5);
+const REDACTED: &str = "<redacted>";
+const SECRET_WORDS: [&str; 5] = ["key", "token", "secret", "password", "api"];
 
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "do", rename_all = "camelCase", rename_all_fields = "camelCase")]
@@ -156,7 +158,7 @@ async fn start(
         }
         let keys = cx.intercept_keystrokes(|event, window, _| {
             let keystroke = event.keystroke.clone();
-            feed(window, |recorder, _| recorder.stroke(&keystroke));
+            feed(window, |recorder, tree| recorder.stroke(tree, &keystroke));
         });
         ACTIVE.set(Some(Active {
             window: id,
@@ -201,7 +203,7 @@ fn stop(path: Option<PathBuf>, cx: &mut AsyncApp) -> Result<Value, String> {
         .and_then(|stem| stem.to_str())
         .unwrap_or("recording")
         .to_owned();
-    let (scenario, steps, fallbacks) = ACTIVE
+    let (scenario, steps, fallbacks, redacted) = ACTIVE
         .with_borrow(|active| {
             active
                 .as_ref()
@@ -232,7 +234,7 @@ fn stop(path: Option<PathBuf>, cx: &mut AsyncApp) -> Result<Value, String> {
             }
         });
     }
-    Ok(json!({ "path": path, "steps": steps, "fallbacks": fallbacks }))
+    Ok(json!({ "path": path, "steps": steps, "fallbacks": fallbacks, "redacted": redacted }))
 }
 
 fn check_path(path: &Path) -> Result<(), String> {
@@ -331,7 +333,10 @@ enum Step {
         trackpad: bool,
     },
     Keys(Vec<String>),
-    Text(String),
+    Text {
+        text: String,
+        redacted: bool,
+    },
 }
 
 #[derive(Default)]
@@ -427,11 +432,26 @@ impl Recorder {
         });
     }
 
-    fn stroke(&mut self, keystroke: &Keystroke) {
+    fn stroke(&mut self, tree: &dyn Fn() -> Option<Tree>, keystroke: &Keystroke) {
         if let Some(text) = typed(keystroke) {
+            let secret = tree().is_none_or(|tree| tree.focus().is_some_and(secret_field));
             match self.steps.last_mut() {
-                Some(Step::Text(typed)) => typed.push_str(text),
-                _ => self.steps.push(Step::Text(text.to_owned())),
+                Some(Step::Text {
+                    text: typed,
+                    redacted,
+                }) if *redacted == secret => {
+                    if !secret {
+                        typed.push_str(text);
+                    }
+                }
+                _ => self.steps.push(Step::Text {
+                    text: if secret {
+                        String::new()
+                    } else {
+                        text.to_owned()
+                    },
+                    redacted: secret,
+                }),
             }
             return;
         }
@@ -461,8 +481,9 @@ impl Recorder {
         target
     }
 
-    fn scenario(&self, name: &str) -> (Value, usize, usize) {
+    fn scenario(&self, name: &str) -> (Value, usize, usize, usize) {
         let mut fallbacks = 0;
+        let mut redacted = 0;
         let steps: Vec<Value> = self
             .steps
             .iter()
@@ -473,11 +494,19 @@ impl Recorder {
                     fallbacks += 1;
                     fields.insert("name".into(), json!(format!("x,y fallback: {why}")));
                 }
+                if matches!(step, Step::Text { redacted: true, .. }) {
+                    redacted += 1;
+                }
                 Value::Object(fields)
             })
             .collect();
         let count = steps.len();
-        (json!({ "name": name, "steps": steps }), count, fallbacks)
+        (
+            json!({ "name": name, "steps": steps }),
+            count,
+            fallbacks,
+            redacted,
+        )
     }
 }
 
@@ -543,9 +572,12 @@ fn encode(step: &Step) -> (&'static str, Map<String, Value>, Option<&str>) {
             fields.insert("keys".into(), json!(keys));
             ("key", fields, None)
         }
-        Step::Text(text) => {
+        Step::Text { text, redacted } => {
             let mut fields = Map::new();
-            fields.insert("text".into(), json!(text));
+            fields.insert(
+                "text".into(),
+                json!(if *redacted { REDACTED } else { text.as_str() }),
+            );
             ("type", fields, None)
         }
     }
@@ -560,6 +592,17 @@ fn typed(keystroke: &Keystroke) -> Option<&str> {
         .key_char
         .as_deref()
         .filter(|text| !text.is_empty() && !text.chars().any(char::is_control))
+}
+
+fn secret_field(node: &Node) -> bool {
+    node.role.to_lowercase().contains("password")
+        || [&node.label, &node.placeholder, &node.description]
+            .into_iter()
+            .flatten()
+            .any(|text| {
+                let text = text.to_lowercase();
+                SECRET_WORDS.iter().any(|word| text.contains(word))
+            })
 }
 
 fn point(x: f32, y: f32, why: &str) -> Target {
@@ -776,14 +819,14 @@ mod tests {
             ("escape", None),
             ("x", Some("x")),
         ] {
-            recorder.stroke(&keystroke(raw, key_char));
+            recorder.stroke(&|| Some(opened.clone()), &keystroke(raw, key_char));
         }
         let wheel = || Some(opened.clone());
         recorder.scroll(&wheel, 310.0, 150.0, 0.0, -40.0, true);
         recorder.scroll(&wheel, 310.0, 160.0, 0.0, -60.5, false);
         recorder.press(Some(opened.clone()), 310.0, 110.0, "left", 1, vec![]);
         recorder.release(380.0, 110.0);
-        let (scenario, steps, fallbacks) = recorder.scenario("compact");
+        let (scenario, steps, fallbacks, redacted) = recorder.scenario("compact");
         assert_eq!(
             scenario,
             json!({ "name": "compact", "steps": [
@@ -802,7 +845,49 @@ mod tests {
                 { "ui": "drag", "from": { "select": "Switch \"Compact mode\"" }, "to": { "x": 380.0, "y": 110.0 } },
             ] })
         );
-        assert_eq!((steps, fallbacks), (13, 3));
+        assert_eq!((steps, fallbacks, redacted), (13, 3, 0));
+    }
+
+    #[test]
+    fn typing_into_a_key_token_or_password_field_records_redacted_text() {
+        let focused_on = |mut field: Node| {
+            field.focused = true;
+            let tree = tree_of(&[(0, node("e1", "Window", Some("Zeron Dev 67"))), (1, field)]);
+            move || Some(tree.clone())
+        };
+        let mut api = node("e2", "MultilineTextInput", None);
+        api.placeholder = Some("OpenAI API Key".into());
+        let password = node("e3", "PasswordInput", None);
+        let draft = node("e4", "MultilineTextInput", Some("Draft"));
+        let mut notes = node("e5", "TextInput", Some("Notes"));
+        notes.description = Some("Personal access Token".into());
+        let mut recorder = Recorder::default();
+        let type_into = |recorder: &mut Recorder, tree: &dyn Fn() -> Option<Tree>, text: &str| {
+            for c in text.chars() {
+                let raw = c.to_string();
+                recorder.stroke(tree, &keystroke(&raw, Some(&raw)));
+            }
+        };
+        type_into(&mut recorder, &focused_on(api), "sk-1");
+        type_into(&mut recorder, &focused_on(password), "pw");
+        type_into(&mut recorder, &focused_on(draft.clone()), "hi");
+        type_into(&mut recorder, &|| None, "x");
+        type_into(&mut recorder, &focused_on(draft), "y");
+        recorder.stroke(&|| None, &keystroke("tab", None));
+        type_into(&mut recorder, &focused_on(notes), "t");
+        let (scenario, steps, _, redacted) = recorder.scenario("secrets");
+        assert_eq!(
+            scenario["steps"],
+            json!([
+                { "ui": "type", "text": "<redacted>" },
+                { "ui": "type", "text": "hi" },
+                { "ui": "type", "text": "<redacted>" },
+                { "ui": "type", "text": "y" },
+                { "ui": "key", "keys": ["tab"] },
+                { "ui": "type", "text": "<redacted>" },
+            ])
+        );
+        assert_eq!((steps, redacted), (6, 3));
     }
 
     #[test]
