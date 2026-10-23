@@ -55,6 +55,14 @@ pub struct HtmlPreviewParams {
     pub inspect: PreviewInspect,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadWorkspacePageParams {
+    pub chat_id: String,
+    pub run_secret: String,
+    pub path: String,
+}
+
 pub const MAX_PREVIEW_STEPS: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -205,24 +213,29 @@ pub const GUIDANCE: &str = "When a visual answer would be clearer than prose, sh
 /// What `html_render` tells the agent once the page is shown.
 pub const RENDERED_MESSAGE: &str = "Shown to the reader above your reply. Don't mention or describe the page; reply with only what it doesn't already say.";
 
-pub fn workspace_page(root: &Path, home: Option<&Path>, path: &str) -> Result<String, String> {
-    let root = root.canonicalize().map_err(|e| {
-        format!(
-            "this chat's folder {} could not be read: {e}",
-            root.display()
-        )
-    })?;
+pub const CHAT_FOLDER: &str = "this chat's folder";
+pub const CURRENT_FOLDER: &str = "the current folder";
+
+pub fn workspace_page(
+    root: &Path,
+    home: Option<&Path>,
+    folder: &str,
+    path: &str,
+) -> Result<String, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("{folder} {} could not be read: {e}", root.display()))?;
     if home.and_then(|home| home.canonicalize().ok()).as_deref() == Some(root.as_path()) {
-        return Err("`path` reads from a project folder, and this chat runs in your home folder. Pass `html` instead.".into());
+        return Err(format!(
+            "`path` reads from a project folder, and {folder} is your home folder. Pass `html` instead."
+        ));
     }
     let file = root
         .join(path)
         .canonicalize()
-        .map_err(|_| format!("`{path}` is not a file in this chat's folder"))?;
+        .map_err(|_| format!("`{path}` is not a file in {folder}"))?;
     if !file.starts_with(&root) {
-        return Err(format!(
-            "`{path}` is outside this chat's folder, so it was not read"
-        ));
+        return Err(format!("`{path}` is outside {folder}, so it was not read"));
     }
     let html_file = file
         .extension()

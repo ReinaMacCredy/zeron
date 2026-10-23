@@ -676,6 +676,7 @@ mod tests {
 
     #[test]
     fn a_workspace_page_never_reads_past_the_chat_folder() {
+        use zeron_proto::html_render::{CHAT_FOLDER, CURRENT_FOLDER};
         let outer = tempfile::tempdir().unwrap();
         let root = outer.path().join("repo");
         std::fs::create_dir_all(root.join("mock")).unwrap();
@@ -684,36 +685,36 @@ mod tests {
         std::fs::write(outer.path().join("b.html"), "<p>b</p>").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(outer.path().join("b.html"), root.join("link.html")).unwrap();
-        assert_eq!(
-            workspace_page(&root, None, "mock/a.html").unwrap(),
-            "<p>a</p>"
-        );
+        let page = |home: Option<&std::path::Path>, path: &str| {
+            workspace_page(&root, home, CHAT_FOLDER, path)
+        };
+        assert_eq!(page(None, "mock/a.html").unwrap(), "<p>a</p>");
         let abs = root.join("mock/a.html");
-        assert_eq!(
-            workspace_page(&root, None, abs.to_str().unwrap()).unwrap(),
-            "<p>a</p>"
-        );
+        assert_eq!(page(None, abs.to_str().unwrap()).unwrap(), "<p>a</p>");
         for outside in ["../b.html", outer.path().join("b.html").to_str().unwrap()] {
             assert!(
-                workspace_page(&root, None, outside)
+                page(None, outside)
                     .unwrap_err()
-                    .contains("outside")
+                    .contains("outside this chat's folder")
             );
         }
+        assert!(
+            workspace_page(&root, None, CURRENT_FOLDER, "../b.html")
+                .unwrap_err()
+                .contains("outside the current folder")
+        );
         #[cfg(unix)]
         assert!(
-            workspace_page(&root, None, "link.html")
-                .unwrap_err()
-                .contains("outside"),
+            page(None, "link.html").unwrap_err().contains("outside"),
             "a link out of the folder is outside it"
         );
-        assert!(workspace_page(&root, None, "notes.txt").is_err());
-        assert!(workspace_page(&root, None, "mock").is_err());
-        assert!(workspace_page(&root, None, "nope.html").is_err());
+        assert!(page(None, "notes.txt").is_err());
+        assert!(page(None, "mock").is_err());
+        assert!(page(None, "nope.html").is_err());
         assert!(
-            workspace_page(&root, Some(&root), "mock/a.html")
+            page(Some(&root), "mock/a.html")
                 .unwrap_err()
-                .contains("home folder")
+                .contains("this chat's folder is your home folder")
         );
     }
 

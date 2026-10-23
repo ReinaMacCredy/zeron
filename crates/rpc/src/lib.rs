@@ -364,6 +364,7 @@ pub mod methods {
     /// `html_preview`: lay a page out in the desktop app and return a
     /// screenshot (run-secret gated, never relay-forwarded).
     pub const HTML_PREVIEW: &str = "HtmlPreview";
+    pub const READ_WORKSPACE_PAGE: &str = "ReadWorkspacePage";
     /// The desktop app's stream of pages to preview, and its answers.
     pub const WATCH_HTML_PREVIEW_HOST: &str = "WatchHtmlPreviewHost";
     pub const RESPOND_HTML_PREVIEW: &str = "RespondHtmlPreview";

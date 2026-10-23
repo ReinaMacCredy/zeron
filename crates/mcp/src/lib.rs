@@ -731,12 +731,49 @@ impl ThreadTools {
             .lock()
             .unwrap()
             .insert(key.clone(), cancel);
+        let call = async {
+            match self.compare_page(tool, args).await {
+                Ok(args) => ui_driver::mcp_result(tool, &args, self.ipc_port).await,
+                Err(text) => {
+                    json!({ "content": [{ "type": "text", "text": text }], "isError": true })
+                }
+            }
+        };
         let result = tokio::select! {
-            result = ui_driver::mcp_result(tool, args, self.ipc_port) => Some(result),
+            result = call => Some(result),
             _ = cancelled => None,
         };
         self.ui_driver_calls.lock().unwrap().remove(&key);
         result
+    }
+
+    async fn compare_page(&self, tool: ui_driver::Tool, args: &Value) -> Result<Value, String> {
+        let Some(map) = args
+            .as_object()
+            .filter(|_| tool == ui_driver::Tool::Observe)
+        else {
+            return Ok(args.clone());
+        };
+        let Some(path) = ui_driver::compare_path(map)? else {
+            return Ok(args.clone());
+        };
+        let secret = self
+            .run_secret
+            .as_deref()
+            .ok_or("ui_driver `compare` reads `path` only in a live Zeron run; pass `html`")?;
+        let page = self
+            .call_engine(
+                methods::READ_WORKSPACE_PAGE,
+                json!({ "chatId": self.chat_id, "runSecret": secret, "path": path }),
+            )
+            .await?;
+        let html = page["html"]
+            .as_str()
+            .ok_or_else(|| format!("{}: no `html` in {page}", methods::READ_WORKSPACE_PAGE))?;
+        let mut map = map.clone();
+        map.remove("path");
+        map.insert("html".into(), json!(html));
+        Ok(Value::Object(map))
     }
 
     async fn tools(&self) -> Value {
