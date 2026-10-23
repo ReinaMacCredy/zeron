@@ -33,7 +33,7 @@ mod logic;
 mod morph;
 mod strip_tree;
 mod thread_tree;
-pub(crate) use thread_tree::tree_rows;
+pub(crate) use thread_tree::{tree_rows, watched_docs};
 mod tree;
 
 pub use card::{CardFocus, Orchestrate, TaskCard, TaskCardEvent};
@@ -114,6 +114,7 @@ type Brand = (&'static str, Option<Hsla>);
 
 pub(crate) type StepRow = zeron_proto::mission::StepRow<Brand>;
 pub(crate) type Rollup = zeron_proto::mission::Rollup<Brand>;
+pub(crate) use zeron_doc::tree::{linked_label, task_led_by};
 pub(crate) use zeron_proto::mission::{
     MissionRole, MissionThread, PlanPhase, is_mission, linked_chat, plan_led_by, step_chat,
 };

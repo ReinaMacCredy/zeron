@@ -1119,19 +1119,7 @@ impl Shell {
                 .read(cx)
                 .resolve(state)
                 .0
-                .map(|root| {
-                    let held = &self.task_center_docs;
-                    let busy = crate::tasks::tree_rows(state, root, false, now)
-                        .into_iter()
-                        .skip(1)
-                        .filter_map(|node| node.chat_id)
-                        .filter(|id| held.contains(id) || state.running_subagents_for(id, now) > 0);
-                    let selected = state.selected_chat.as_deref() == Some(root);
-                    std::iter::once(root.to_owned())
-                        .filter(|_| !selected)
-                        .chain(busy)
-                        .collect()
-                })
+                .map(|root| crate::tasks::watched_docs(state, root, &self.task_center_docs, now))
                 .unwrap_or_default()
         };
         self.watch_task_center_docs(docs, cx);
