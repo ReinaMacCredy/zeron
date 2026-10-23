@@ -660,9 +660,14 @@ impl Shell {
         let mut on = Vec::new();
         if git {
             on.push(
-                SidecarEntry::new("changes", 0, icons::ASTRA_PLUS_MINUS, "Changes")
-                    .value(counts.map(|(files, add, del)| SidecarValue::Counts(files, add, del)))
-                    .action(|this, window, cx| this.focus_changes(window, cx)),
+                SidecarEntry::new(
+                    "changes",
+                    0,
+                    icons::ASTRA_PLUS_MINUS,
+                    zeron_proto::badges::CHANGES_TITLE,
+                )
+                .value(counts.map(|(files, add, del)| SidecarValue::Counts(files, add, del)))
+                .action(|this, window, cx| this.focus_changes(window, cx)),
             );
         }
         on.push(
@@ -1651,11 +1656,7 @@ fn sidecar_value(theme: &Theme, value: &SidecarValue) -> AnyElement {
             )))
             .into_any_element(),
         SidecarValue::Counts(files, add, del) => {
-            let files = if *files == 1 {
-                "1 file".to_string()
-            } else {
-                format!("{files} files")
-            };
+            let files = zeron_proto::badges::files_label(*files);
             div()
                 .flex_none()
                 .flex()

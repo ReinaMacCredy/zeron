@@ -34,11 +34,11 @@ async fn save(client: &Client, device_id: &str, settings: &RoutingSettings) -> R
     Ok(())
 }
 
-fn harness_of(id: &str) -> Option<HarnessId> {
+pub(super) fn harness_of(id: &str) -> Option<HarnessId> {
     serde_json::from_value(serde_json::Value::String(id.to_owned())).ok()
 }
 
-fn wire<T: serde::Serialize>(value: T) -> String {
+pub(super) fn wire<T: serde::Serialize>(value: T) -> String {
     serde_json::to_value(value)
         .ok()
         .and_then(|v| v.as_str().map(str::to_owned))

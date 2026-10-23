@@ -3,7 +3,7 @@ use zeron_proto::computer::host_runs_computer_use;
 use zeron_proto::{AgentAccountsSnapshot, LimitResumes};
 use zeron_rpc::methods;
 
-use super::{Page, Row, RowAction, RowKind, Section, profiles, providers, routing, tools};
+use super::{Page, Row, RowAction, RowKind, Section, profiles, providers, review, routing, tools};
 use crate::client::Client;
 use crate::error::{ClientError, Result};
 
@@ -20,7 +20,17 @@ async fn limits(client: &Client, device_id: &str) -> Result<LimitResumes> {
 }
 
 pub(super) async fn page(client: &Client, device_id: &str) -> Result<Page> {
-    let (accounts, tools, limits, routing, profiles, harnesses, updates) = futures::join!(
+    let (
+        accounts,
+        tools,
+        limits,
+        routing,
+        profiles,
+        harnesses,
+        updates,
+        review_settings,
+        reviewers,
+    ) = futures::join!(
         client.host_call::<AgentAccountsSnapshot>(
             device_id,
             methods::LIST_AGENT_ACCOUNTS,
@@ -40,6 +50,8 @@ pub(super) async fn page(client: &Client, device_id: &str) -> Result<Page> {
         ),
         client.list_harnesses(device_id),
         providers::updates(client, device_id),
+        client.review_settings(device_id),
+        client.reviewer_options(device_id),
     );
     let device = client
         .workspace()
@@ -75,6 +87,13 @@ pub(super) async fn page(client: &Client, device_id: &str) -> Result<Page> {
             "routing",
             "Routing",
             routing.ok().map(|s| routing::summary(&s)),
+        ),
+        Row::link(
+            "review",
+            "Code review",
+            review_settings
+                .ok()
+                .map(|settings| review::summary(&settings, &reviewers)),
         ),
         Row::link(
             "tools",

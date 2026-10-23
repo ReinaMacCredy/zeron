@@ -94,6 +94,18 @@ fn comment(id: &str, login: &str, body: &str, at: DateTime<Utc>) -> ChangeReques
     }
 }
 
+fn delta_patch(path: &str, delta: LineDelta) -> String {
+    let removed: Vec<String> = (0..delta.deletions)
+        .map(|i| format!("    let before_{i} = old_value({i});"))
+        .collect();
+    let added: Vec<String> = (0..delta.additions)
+        .map(|i| format!("    let after_{i} = new_value({i});"))
+        .collect();
+    let removed: Vec<&str> = removed.iter().map(String::as_str).collect();
+    let added: Vec<&str> = added.iter().map(String::as_str).collect();
+    file_patch(path, 18, &removed, &added)
+}
+
 fn file_patch(path: &str, start: u32, removed: &[&str], added: &[&str]) -> String {
     let mut out = format!(
         "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -{start},{} +{start},{} @@\n",
@@ -718,7 +730,7 @@ impl GitDemo {
                 "model": "haiku",
             })),
             m::LIST_GIT_HISTORY => self.history_page(params),
-            m::GET_CHECKOUT_DIFF => self.commit_diff(params),
+            m::GET_CHECKOUT_DIFF => self.checkout_diff(params).and_then(reply),
             _ => return None,
         })
     }
@@ -891,22 +903,62 @@ impl GitDemo {
             .find(|file| file.path == path)
             .ok_or_else(|| ClientError::NotFound(path.to_owned()))?;
         let delta = if staged { &file.staged } else { &file.unstaged };
-        let delta = delta.unwrap_or_default();
-        let removed: Vec<String> = (0..delta.deletions)
-            .map(|i| format!("    let before_{i} = old_value({i});"))
-            .collect();
-        let added: Vec<String> = (0..delta.additions)
-            .map(|i| format!("    let after_{i} = new_value({i});"))
-            .collect();
-        let removed: Vec<&str> = removed.iter().map(String::as_str).collect();
-        let added: Vec<&str> = added.iter().map(String::as_str).collect();
         reply(WorkingTreeFileDiff {
             checkout_id: self.tree.checkout_id.clone(),
             path: path.into(),
             staged,
-            patch: file_patch(path, 18, &removed, &added),
+            patch: delta_patch(path, delta.unwrap_or_default()),
             binary: false,
             truncated: false,
+        })
+    }
+
+    pub(crate) fn checkout_diff(&self, params: &Value) -> Result<CheckoutDiff> {
+        if text(params, "mode") == "commit" {
+            return self.commit_diff(params);
+        }
+        let files: Vec<(String, LineDelta)> = self
+            .tree
+            .files
+            .iter()
+            .map(|file| {
+                let (staged, unstaged) = (
+                    file.staged.unwrap_or_default(),
+                    file.unstaged.unwrap_or_default(),
+                );
+                let delta = LineDelta {
+                    additions: staged.additions + unstaged.additions,
+                    deletions: staged.deletions + unstaged.deletions,
+                    binary: false,
+                };
+                (file.path.clone(), delta)
+            })
+            .filter(|(_, delta)| delta.additions + delta.deletions > 0)
+            .collect();
+        Ok(CheckoutDiff {
+            checkout_id: self.tree.checkout_id.clone(),
+            device_id: MAC.into(),
+            cwd: CHECKOUT.into(),
+            patch: files
+                .iter()
+                .map(|(path, delta)| delta_patch(path, *delta))
+                .collect(),
+            files: files
+                .iter()
+                .map(|(path, delta)| DiffFileSummary {
+                    path: path.clone(),
+                    old_path: None,
+                    status: "modified".into(),
+                    additions: delta.additions,
+                    deletions: delta.deletions,
+                    binary: false,
+                })
+                .collect(),
+            additions: files.iter().map(|(_, delta)| delta.additions).sum(),
+            deletions: files.iter().map(|(_, delta)| delta.deletions).sum(),
+            truncated: false,
+            checksum: self.tree.revision.clone(),
+            updated_at: Utc::now(),
         })
     }
 
@@ -1100,7 +1152,7 @@ impl GitDemo {
         })
     }
 
-    fn commit_diff(&self, params: &Value) -> Result<Value> {
+    fn commit_diff(&self, params: &Value) -> Result<CheckoutDiff> {
         let wanted = text(params, "commitSha");
         let commit = self
             .history
@@ -1122,7 +1174,7 @@ impl GitDemo {
             "    Ok(value)".to_owned(),
         ];
         let added: Vec<&str> = added.iter().map(String::as_str).collect();
-        reply(CheckoutDiff {
+        Ok(CheckoutDiff {
             checkout_id: self.tree.checkout_id.clone(),
             device_id: MAC.into(),
             cwd: CHECKOUT.into(),

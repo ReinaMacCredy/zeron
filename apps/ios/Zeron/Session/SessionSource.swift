@@ -54,11 +54,20 @@ struct SessionChrome: Equatable {
     var limitPill: LimitPill?
     var prediction: String?
 
+    struct Comments: Equatable {
+        let title: String
+        let clear: String
+        let items: [StagedCommentChip]
+    }
+
+    var comments: Comments?
+
     static func == (a: SessionChrome, b: SessionChrome) -> Bool {
         a.title == b.title && a.subtitle == b.subtitle && a.hostName == b.hostName && a.running == b.running && a.canSteer == b.canSteer
             && a.placeholder == b.placeholder && a.chips == b.chips && a.banner == b.banner
             && a.questions?.requestId == b.questions?.requestId && a.questions?.items == b.questions?.items
             && a.queue == b.queue && a.error == b.error && a.limitPill == b.limitPill && a.prediction == b.prediction
+            && a.comments == b.comments
     }
 }
 
@@ -115,6 +124,11 @@ protocol SessionSource: AnyObject {
     func keepFullHistory()
     func handoffMenu(open: @escaping (String) -> Void) -> UIMenuElement?
     func agentsAction(open: @escaping (String) -> Void) -> UIAction?
+    func reviewAction() -> UIAction?
+    func chatChanges() async -> ChatChangesView?
+    func openChanges(from host: UIViewController, title: String)
+    func removeStagedComment(_ id: String)
+    func clearStagedComments()
 }
 
 extension SessionSource {
@@ -125,6 +139,11 @@ extension SessionSource {
     func keepFullHistory() {}
     func handoffMenu(open: @escaping (String) -> Void) -> UIMenuElement? { nil }
     func agentsAction(open: @escaping (String) -> Void) -> UIAction? { nil }
+    func reviewAction() -> UIAction? { nil }
+    func chatChanges() async -> ChatChangesView? { nil }
+    func openChanges(from host: UIViewController, title: String) {}
+    func removeStagedComment(_ id: String) {}
+    func clearStagedComments() {}
 }
 
 enum QueueAction {

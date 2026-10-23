@@ -12,6 +12,7 @@
 mod background;
 mod compaction;
 mod prediction;
+mod review;
 mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -34,6 +35,7 @@ use zeron_proto::{
 };
 
 pub use background::BackgroundRoster;
+pub use review::{NextReviewer, ReviewChip, ReviewSnapshot, model_levels};
 pub use snapshot::{
     AppendHint, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest, LiveStatus,
     LocalEcho, PendingKind, PendingSend, QueueGate, QueueItem, RoomState, SessionSnapshot,
@@ -199,6 +201,7 @@ struct CoreState {
     prediction: Option<zeron_proto::prediction::ComposerPrediction>,
     session: Option<zeron_proto::Session>,
     shell_output: Option<(String, Vec<String>)>,
+    review: review::ReviewState,
 }
 
 pub(crate) struct SessionCore {
@@ -282,6 +285,7 @@ impl SessionCore {
                 prediction: None,
                 session: None,
                 shell_output: None,
+                review: review::ReviewState::default(),
             }),
             transcript_tx,
             composer: RwLock::new(composer),
@@ -573,6 +577,9 @@ impl SessionCore {
         if send_before != send_after || ask_before != self.ask() {
             client.recompute_workspace();
         }
+        if self.view_attached() {
+            self.sync_review(&client);
+        }
     }
 
     /// Rebuild the composer view (also after workspace/connectivity changes).
@@ -671,6 +678,9 @@ impl SessionCore {
             compact_blocked,
             resume_compaction,
             prediction: st.prediction.as_ref().map(|p| p.text.clone()),
+            review: review::chip(&st, review::target(client, &self.chat_id).as_ref()),
+            staged_comments: review::staged(&st),
+            review_revision: review::revision(&st),
         };
         let current = self.composer();
         next.revision = current.revision;
@@ -832,6 +842,9 @@ fn empty_composer(chat_id: &str) -> ComposerState {
         compact_blocked: None,
         resume_compaction: None,
         prediction: None,
+        review: None,
+        staged_comments: Vec::new(),
+        review_revision: 0,
     }
 }
 
@@ -1196,6 +1209,9 @@ impl SessionHandle {
         }
         if attached && !was {
             self.mark_seen();
+            if let Ok(client) = self.core.client() {
+                self.core.sync_review(&client);
+            }
             *lock(&self.core.prediction_watch) = prediction::start(&self.core);
             *lock(&self.core.session_watch) = background::start(&self.core);
         }
@@ -1235,10 +1251,11 @@ impl SessionHandle {
             .workspace
             .chat(&self.core.chat_id)
             .ok_or_else(|| ClientError::NotFound(self.core.chat_id.clone()))?;
-        if request.text.trim().is_empty() && request.attachments.is_empty() {
+        let composer = self.composer();
+        let staged = composer.staged_comments.clone();
+        if request.text.trim().is_empty() && request.attachments.is_empty() && staged.is_empty() {
             return Err(ClientError::InvalidArgument("empty message".into()));
         }
-        let composer = self.composer();
         // A turn is running, or a Run of ours is about to start one on a
         // reachable host (don't double-start in that ~RTT window).
         let starting = composer
@@ -1257,7 +1274,7 @@ impl SessionHandle {
         }
         let refs =
             client.stage_attachments(&self.core.chat_id, &chat.device_id, &request.attachments)?;
-        let prompt_text = request.text.trim_end().to_owned();
+        let prompt_text = zeron_proto::comments::with_comments(request.text.trim_end(), &staged);
         let device_id = client.config.device_id.clone();
 
         // Steering is a Steer command, never a queue row: the host no longer
@@ -1337,6 +1354,7 @@ impl SessionHandle {
             let id = message_id.clone();
             self.core.update_state(|st| st.last_submitted = Some(id));
         }
+        self.core.take_staged_comments(&staged);
         self.core.update_state(|st| st.prediction = None);
         client.after_command(&self.core, !refs.is_empty());
         Ok(outcome)

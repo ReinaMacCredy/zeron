@@ -304,6 +304,16 @@ pub fn truncate_file_lines(file: &mut FileDiff, max_lines: usize) {
         .unwrap_or(0);
 }
 
+/// A deletion only exists in the pre-change file; everything else is cited against the file the agent edits.
+pub fn line_anchor(line: &DiffLine) -> Option<(crate::comments::CommentSide, u32)> {
+    use crate::comments::CommentSide;
+    match line.kind {
+        LineKind::Meta => None,
+        LineKind::Del => line.old_no.map(|no| (CommentSide::Old, no)),
+        _ => line.new_no.map(|no| (CommentSide::New, no)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

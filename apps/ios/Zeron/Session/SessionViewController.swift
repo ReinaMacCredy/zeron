@@ -161,6 +161,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             return .sent
         }
         composer.onStop = { [weak self] in self?.source.stop() }
+        composer.onCommentRemove = { [weak self] id in self?.source.removeStagedComment(id) }
+        composer.onCommentsClear = { [weak self] in self?.source.clearStagedComments() }
         composer.text = Drafts.load(chatId)
         composer.mentionSearch = { [weak self] q in await self?.source.searchFiles(q) ?? [] }
         composer.threadSearch = { [weak self] q in self?.source.threadMentions(q) ?? [] }
@@ -472,6 +474,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private func openInfo() {
         let info = SessionInfoViewController(sources: engine.frame().sources())
         info.loadUsage = { [weak self] in await self?.source.chatUsage() }
+        info.loadChanges = { [weak self] in await self?.source.chatChanges() }
+        info.openChanges = { [weak self, weak info] title in
+            guard let self, let info else { return }
+            self.source.openChanges(from: info, title: title)
+        }
         info.openSource = { [weak self, weak info] item in
             Task { @MainActor in
                 guard let self, let info, let image = await self.source.image(item.reference) else {
@@ -766,6 +773,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         composer.placeholder = mission ? labels.placeholder : c.placeholder
         composer.prediction = editingQueueId == nil && !mission ? c.prediction : nil
         composer.chips = chips
+        composer.comments = c.comments
         var menus = Dictionary(uniqueKeysWithValues: c.chips.map { chip in
             (chip.id, { [weak self] in self?.source.chipMenu(chip.id) })
         })
@@ -964,6 +972,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                     UIPasteboard.general.string = self.engine.frame().plainText()
                 },
                 self.source.agentsAction { [weak self] id in self?.router?.openSession(id) },
+                self.source.reviewAction(),
                 self.sidechatAction(),
                 self.source.handoffMenu { [weak self] id in self?.router?.openSession(id) },
                 self.compactAction(),

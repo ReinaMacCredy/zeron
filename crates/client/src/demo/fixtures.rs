@@ -996,6 +996,9 @@ pub(crate) fn seed(
                 .map(|(_, ago)| ms(now - ago)),
         };
         doc.upsert_chat(&chat)?;
+        if chat.id == super::review::OWNER {
+            doc.upsert_chat(&super::review::seeded_child(&chat))?;
+        }
         if let Some(status) = demo.status {
             doc.upsert_session(&Session {
                 last_completed_turn: None,

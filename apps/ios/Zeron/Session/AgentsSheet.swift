@@ -3,6 +3,7 @@ import UIKit
 final class AgentsSheetViewController: UITableViewController {
     private let handle: SessionHandle
     private let open: (String) -> Void
+    private let findings: (String) -> UIViewController?
     private var roster: BackgroundRosterView
     private var timer: Timer?
 
@@ -11,9 +12,10 @@ final class AgentsSheetViewController: UITableViewController {
         [roster.agents.isEmpty ? nil : .agents, roster.shells.isEmpty ? nil : .shells].compactMap { $0 }
     }
 
-    init(handle: SessionHandle, open: @escaping (String) -> Void) {
+    init(handle: SessionHandle, open: @escaping (String) -> Void, findings: @escaping (String) -> UIViewController? = { _ in nil }) {
         self.handle = handle
         self.open = open
+        self.findings = findings
         roster = handle.backgroundRoster(nowMs: nowMs())
         super.init(style: .insetGrouped)
     }
@@ -104,14 +106,14 @@ final class AgentsSheetViewController: UITableViewController {
         case .agents:
             let run = roster.agents[indexPath.row]
             content.text = run.title
-            content.secondaryText = run.line
+            content.secondaryText = [run.line, run.review].compactMap { $0 }.joined(separator: "\n")
             content.image = UIImage(systemName: run.delegated ? "arrow.triangle.branch" : "person.2")
             cell.accessibilityIdentifier = "agents-row-\(indexPath.row)"
             if run.canStop {
                 cell.accessoryView = stopButton(id: "agents-stop-\(indexPath.row)") { [weak self] in
                     self?.stop(run.taskId, delegated: run.delegated)
                 }
-            } else if run.delegated {
+            } else if run.delegated || run.review != nil {
                 cell.accessoryType = .disclosureIndicator
             }
         case .shells:
@@ -132,6 +134,10 @@ final class AgentsSheetViewController: UITableViewController {
         switch sections[indexPath.section] {
         case .agents:
             let run = roster.agents[indexPath.row]
+            if run.review != nil, let sheet = findings(run.taskId) {
+                navigationController?.pushViewController(sheet, animated: true)
+                return
+            }
             guard run.delegated else { return }
             dismiss(animated: true) { [open] in open(run.taskId) }
         case .shells:

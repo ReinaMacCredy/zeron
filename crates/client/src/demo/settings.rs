@@ -21,6 +21,7 @@ pub(super) struct HostSettings {
     instances: Value,
     updates: Value,
     login: Option<(String, u32)>,
+    review: zeron_proto::review::ReviewSettings,
 }
 
 impl HostSettings {
@@ -80,6 +81,10 @@ impl HostSettings {
                 { "harness": "pi", "installedVersion": "0.9.0", "phase": "current" }
             ]),
             login: None,
+            review: zeron_proto::review::ReviewSettings {
+                instructions: "Flag anything that could drop a draft or a queued message.".into(),
+                ..Default::default()
+            },
         }
     }
 
@@ -136,6 +141,8 @@ impl HostSettings {
                 | m::POLL_AGENT_LOGIN
                 | m::COMPLETE_AGENT_LOGIN
                 | m::CANCEL_AGENT_LOGIN
+                | m::GET_REVIEW_SETTINGS
+                | m::SET_REVIEW_SETTINGS
         )
     }
 
@@ -169,6 +176,12 @@ impl HostSettings {
                 to_json(&self.tools.state(&[ToolGroup::Computer]))
             }
             m::GET_ROUTING_SETTINGS => to_json(&self.routing),
+            m::GET_REVIEW_SETTINGS => to_json(&self.review),
+            m::SET_REVIEW_SETTINGS => {
+                self.review = serde_json::from_value(params.clone())
+                    .map_err(|e| ClientError::InvalidArgument(e.to_string()))?;
+                to_json(&self.review)
+            }
             m::SET_ROUTING_SETTINGS => {
                 self.routing = serde_json::from_value(params.clone())
                     .map_err(|e| ClientError::InvalidArgument(e.to_string()))?;

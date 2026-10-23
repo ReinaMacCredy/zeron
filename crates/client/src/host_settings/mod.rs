@@ -4,6 +4,7 @@ mod mac;
 mod profile_tools;
 mod profiles;
 mod providers;
+mod review;
 mod routing;
 mod signin;
 mod tools;
@@ -143,6 +144,7 @@ impl Client {
             routing if routing.starts_with("routing") => {
                 routing::page(self, device_id, routing).await
             }
+            review if review.starts_with("review") => review::page(self, device_id, review).await,
             profiles if profiles.starts_with("profile") => {
                 profiles::page(self, device_id, profiles).await
             }
@@ -191,6 +193,9 @@ impl Client {
             "providers" => providers::act(self, device_id, action, on).await?,
             routing if routing.starts_with("routing") => {
                 routing::act(self, device_id, routing, action).await?
+            }
+            review if review.starts_with("review") => {
+                review::act(self, device_id, action, value).await?
             }
             profiles if profiles.starts_with("profile") => {
                 gone = profiles::act(self, device_id, profiles, action, value).await?
