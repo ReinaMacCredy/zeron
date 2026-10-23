@@ -7,13 +7,11 @@ mod frames;
 mod input;
 mod record;
 mod selector;
-#[cfg(unix)]
 mod server;
 mod tree;
 #[cfg(target_os = "macos")]
 pub(crate) mod web;
 
-#[cfg(unix)]
 pub(crate) use server::start;
 
 pub(crate) use record::tap as record_tap;

@@ -3,20 +3,26 @@ use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::App;
 use serde_json::{Value, json};
 use std::fs;
-use std::io::{BufRead, BufReader, Read as _, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
+#[cfg(unix)]
+use zeron_proto::ui_driver::socket_path;
 use zeron_proto::ui_driver::{
-    UiDriverBuild, UiDriverDescriptor, descriptor_path, run_dir, socket_path,
+    UiDriverBuild, UiDriverDescriptor, UiDriverEndpoint, descriptor_path, run_dir,
 };
 
 const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
 const HANGUP_POLL: Duration = Duration::from_millis(50);
+const MAX_TOKEN_BYTES: u64 = 256;
 
 struct Job {
     request: Value,
@@ -24,14 +30,77 @@ struct Job {
     cancel: Arc<AtomicBool>,
 }
 
+enum Listener {
+    #[cfg(unix)]
+    Unix(UnixListener),
+    #[cfg_attr(unix, allow(dead_code))]
+    Loopback(TcpListener, Arc<str>),
+}
+
+trait Conn: Read + Write + Send + Sized + 'static {
+    fn try_clone(&self) -> std::io::Result<Self>;
+    fn hung_up(&self) -> bool;
+}
+
+#[cfg(unix)]
+impl Conn for UnixStream {
+    fn try_clone(&self) -> std::io::Result<Self> {
+        UnixStream::try_clone(self)
+    }
+
+    fn hung_up(&self) -> bool {
+        use std::os::fd::AsRawFd as _;
+        let mut byte = 0u8;
+        // SAFETY: a one-byte peek into a live local buffer on a socket this function borrows.
+        let read = unsafe {
+            libc::recv(
+                self.as_raw_fd(),
+                (&raw mut byte).cast(),
+                1,
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
+            )
+        };
+        gone(if read < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(read as usize)
+        })
+    }
+}
+
+impl Conn for TcpStream {
+    fn try_clone(&self) -> std::io::Result<Self> {
+        TcpStream::try_clone(self)
+    }
+
+    fn hung_up(&self) -> bool {
+        if self.set_nonblocking(true).is_err() {
+            return true;
+        }
+        let peeked = self.peek(&mut [0u8]);
+        let _ = self.set_nonblocking(false);
+        gone(peeked)
+    }
+}
+
+fn gone(peeked: std::io::Result<usize>) -> bool {
+    match peeked {
+        Ok(read) => read == 0,
+        Err(error) => !matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+        ),
+    }
+}
+
 pub(crate) fn start(data_dir: PathBuf, ipc_port: u16, cx: &mut App) {
     super::epoch();
     let (dir, pid) = (run_dir(), std::process::id());
-    let (socket, descriptor) = (socket_path(&dir, pid), descriptor_path(&dir, pid));
-    let listener = match listen(&dir, pid, data_dir, ipc_port) {
-        Ok(listener) => listener,
+    let descriptor = descriptor_path(&dir, pid);
+    let (listener, endpoint) = match listen(&dir, pid, data_dir, ipc_port) {
+        Ok(listening) => listening,
         Err(error) => {
-            tracing::warn!(%error, socket = %socket.display(), "ui driver disabled");
+            tracing::warn!(%error, dir = %dir.display(), "ui driver disabled");
             return;
         }
     };
@@ -46,43 +115,64 @@ pub(crate) fn start(data_dir: PathBuf, ipc_port: u16, cx: &mut App) {
         }
     })
     .detach();
-    let accept = std::thread::Builder::new()
+    let accepting = std::thread::Builder::new()
         .name("zeron-ui-driver".into())
-        .spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else {
-                    std::thread::sleep(Duration::from_millis(100));
-                    continue;
-                };
-                let jobs = jobs.clone();
-                let _ = std::thread::Builder::new()
-                    .name("zeron-ui-driver-conn".into())
-                    .spawn(move || serve(stream, jobs));
-            }
+        .spawn(move || match listener {
+            #[cfg(unix)]
+            Listener::Unix(listener) => accept(listener.incoming(), None, jobs),
+            Listener::Loopback(listener, token) => accept(listener.incoming(), Some(token), jobs),
         });
-    if let Err(error) = accept {
+    if let Err(error) = accepting {
         tracing::warn!(%error, "ui driver accept thread failed to start");
-        remove(&socket, &descriptor);
+        remove(&endpoint, &descriptor);
         return;
     }
+    tracing::info!(%endpoint, "ui driver listening");
     cx.on_app_quit(move |_| {
-        remove(&socket, &descriptor);
+        remove(&endpoint, &descriptor);
         async {}
     })
     .detach();
-    tracing::info!(socket = %socket_path(&dir, pid).display(), "ui driver listening");
 }
 
-fn listen(dir: &Path, pid: u32, data_dir: PathBuf, ipc_port: u16) -> std::io::Result<UnixListener> {
-    let (socket, descriptor) = (socket_path(dir, pid), descriptor_path(dir, pid));
-    fs::create_dir_all(dir)?;
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
-    match fs::remove_file(&socket) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
-        _ => {}
+fn accept<C: Conn>(
+    incoming: impl Iterator<Item = std::io::Result<C>>,
+    token: Option<Arc<str>>,
+    jobs: UnboundedSender<Job>,
+) {
+    for stream in incoming {
+        let Ok(stream) = stream else {
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        };
+        let (jobs, token) = (jobs.clone(), token.clone());
+        let _ = std::thread::Builder::new()
+            .name("zeron-ui-driver-conn".into())
+            .spawn(move || serve(stream, token.as_deref(), jobs));
     }
-    let listener = UnixListener::bind(&socket)?;
-    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
+}
+
+fn listen(
+    dir: &Path,
+    pid: u32,
+    data_dir: PathBuf,
+    ipc_port: u16,
+) -> std::io::Result<(Listener, UiDriverEndpoint)> {
+    fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    let (listener, endpoint) = {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        let socket = socket_path(dir, pid);
+        match fs::remove_file(&socket) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+        let listener = UnixListener::bind(&socket)?;
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
+        (Listener::Unix(listener), UiDriverEndpoint::Unix { socket })
+    };
+    #[cfg(not(unix))]
+    let (listener, endpoint) = bind_loopback()?;
     let bundle_path = std::env::current_exe().ok().and_then(|exe| {
         exe.ancestors()
             .find(|dir| dir.extension().is_some_and(|ext| ext == "app"))
@@ -90,7 +180,7 @@ fn listen(dir: &Path, pid: u32, data_dir: PathBuf, ipc_port: u16) -> std::io::Re
     });
     let record = UiDriverDescriptor {
         pid,
-        socket,
+        endpoint: endpoint.clone(),
         label: crate::window_title(),
         bundle_path,
         data_dir,
@@ -104,23 +194,49 @@ fn listen(dir: &Path, pid: u32, data_dir: PathBuf, ipc_port: u16) -> std::io::Re
         version: env!("CARGO_PKG_VERSION").to_owned(),
         started_at: chrono::Utc::now(),
     };
+    let descriptor = descriptor_path(dir, pid);
     let tmp = descriptor.with_extension("json.tmp");
     fs::write(&tmp, serde_json::to_vec_pretty(&record)?)?;
     fs::rename(&tmp, &descriptor)?;
-    Ok(listener)
+    Ok((listener, endpoint))
 }
 
-fn remove(socket: &Path, descriptor: &Path) {
+#[cfg_attr(unix, allow(dead_code))]
+fn bind_loopback() -> std::io::Result<(Listener, UiDriverEndpoint)> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    let port = listener.local_addr()?.port();
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    Ok((
+        Listener::Loopback(listener, token.as_str().into()),
+        UiDriverEndpoint::Loopback { port, token },
+    ))
+}
+
+fn remove(endpoint: &UiDriverEndpoint, descriptor: &Path) {
     let _ = fs::remove_file(descriptor);
-    let _ = fs::remove_file(socket);
+    if let UiDriverEndpoint::Unix { socket } = endpoint {
+        let _ = fs::remove_file(socket);
+    }
 }
 
-fn serve(stream: UnixStream, jobs: UnboundedSender<Job>) {
+fn serve<C: Conn>(stream: C, token: Option<&str>, jobs: UnboundedSender<Job>) {
     let Ok(reader) = stream.try_clone() else {
         return;
     };
     let mut reader = BufReader::new(reader);
     let mut writer = stream;
+    if let Some(token) = token {
+        let mut line = String::new();
+        let _ = (&mut reader).take(MAX_TOKEN_BYTES).read_line(&mut line);
+        if !same(
+            line.trim_end_matches(['\r', '\n']).as_bytes(),
+            token.as_bytes(),
+        ) {
+            let error = "the UI driver refused this connection: its first line must be the token from the app's ui-<pid>.json";
+            let _ = writeln!(writer, "{}", json!({ "id": null, "error": error }));
+            return;
+        }
+    }
     loop {
         let mut line = String::new();
         match (&mut reader).take(MAX_REQUEST_BYTES).read_line(&mut line) {
@@ -150,7 +266,7 @@ fn serve(stream: UnixStream, jobs: UnboundedSender<Job>) {
                 loop {
                     match answer.recv_timeout(HANGUP_POLL) {
                         Ok(reply) => break reply,
-                        Err(RecvTimeoutError::Timeout) if hung_up(&writer) => {
+                        Err(RecvTimeoutError::Timeout) if writer.hung_up() => {
                             cancel.store(true, Ordering::SeqCst);
                             return;
                         }
@@ -167,31 +283,22 @@ fn serve(stream: UnixStream, jobs: UnboundedSender<Job>) {
     }
 }
 
-fn hung_up(stream: &UnixStream) -> bool {
-    use std::os::fd::AsRawFd as _;
-    let mut byte = 0u8;
-    // SAFETY: a one-byte peek into a live local buffer on a socket this function borrows.
-    let read = unsafe {
-        libc::recv(
-            stream.as_raw_fd(),
-            (&raw mut byte).cast(),
-            1,
-            libc::MSG_PEEK | libc::MSG_DONTWAIT,
-        )
-    };
-    read == 0
-        || (read < 0
-            && !matches!(
-                std::io::Error::last_os_error().kind(),
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-            ))
+fn same(sent: &[u8], token: &[u8]) -> bool {
+    sent.len() == token.len()
+        && sent
+            .iter()
+            .zip(token)
+            .fold(0, |diff, (a, b)| diff | (a ^ b))
+            == 0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::FileTypeExt;
 
+    #[cfg(unix)]
     #[test]
     fn listen_locks_the_run_dir_replaces_a_stale_socket_and_renames_the_descriptor_in() {
         let root = tempfile::tempdir().unwrap();
@@ -211,17 +318,18 @@ mod tests {
         let record: UiDriverDescriptor =
             serde_json::from_slice(&fs::read(&descriptor).unwrap()).unwrap();
         assert_eq!(record.pid, 1);
-        assert_eq!(record.socket, socket);
+        assert_eq!(record.endpoint, UiDriverEndpoint::Unix { socket });
         assert_eq!(record.ipc_port, 49880);
         assert_eq!(record.data_dir, Path::new("/data"));
         assert!(!descriptor.with_extension("json.tmp").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn serve_answers_line_by_line_and_flags_a_line_that_is_not_json() {
         let (client, server) = UnixStream::pair().unwrap();
         let (jobs, mut queue) = unbounded::<Job>();
-        let served = std::thread::spawn(move || serve(server, jobs));
+        let served = std::thread::spawn(move || serve(server, None, jobs));
         let mut writer = client.try_clone().unwrap();
         let mut lines = BufReader::new(client).lines();
         let mut reply =
@@ -242,16 +350,71 @@ mod tests {
         served.join().unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_client_that_hangs_up_mid_request_cancels_its_job() {
         let (client, server) = UnixStream::pair().unwrap();
         let (jobs, mut queue) = unbounded::<Job>();
-        let served = std::thread::spawn(move || serve(server, jobs));
+        let served = std::thread::spawn(move || serve(server, None, jobs));
         writeln!(&client, "{{\"id\":1,\"action\":\"click\",\"x\":1,\"y\":2}}").unwrap();
         let job = futures::executor::block_on(queue.next()).unwrap();
         assert!(!job.cancel.load(Ordering::SeqCst));
         drop(client);
         served.join().unwrap();
+        assert!(job.cancel.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_loopback_connection_opens_with_the_token_and_a_hangup_cancels_its_job() {
+        let (
+            Listener::Loopback(listener, token),
+            UiDriverEndpoint::Loopback {
+                port,
+                token: written,
+            },
+        ) = bind_loopback().unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!((&*token, written.len()), (written.as_str(), 32));
+        let (jobs, mut queue) = unbounded::<Job>();
+        std::thread::spawn(move || accept(listener.incoming(), Some(token), jobs));
+        let connect = || TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+        let line = |stream: &TcpStream| -> String {
+            let mut line = String::new();
+            BufReader::new(stream).read_line(&mut line).unwrap();
+            line
+        };
+
+        let refused = connect();
+        writeln!(
+            &refused,
+            "{}x\n{{\"id\":1,\"action\":\"state\"}}",
+            &written[1..]
+        )
+        .unwrap();
+        let error = line(&refused);
+        assert!(error.contains("refused this connection"), "{error}");
+        assert!(!error.contains(&written[1..]), "{error}");
+
+        let client = connect();
+        writeln!(&client, "{written}\n{{\"id\":2,\"action\":\"state\"}}").unwrap();
+        let job = futures::executor::block_on(queue.next()).unwrap();
+        assert_eq!(job.request, json!({ "id": 2, "action": "state" }));
+        job.reply.send(json!({ "id": 2, "ok": "drawn" })).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&line(&client)).unwrap(),
+            json!({ "id": 2, "ok": "drawn" })
+        );
+
+        writeln!(&client, "{{\"id\":3,\"action\":\"click\",\"x\":1,\"y\":2}}").unwrap();
+        let job = futures::executor::block_on(queue.next()).unwrap();
+        assert!(!job.cancel.load(Ordering::SeqCst));
+        drop(client);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !job.cancel.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert!(job.cancel.load(Ordering::SeqCst));
     }
 }

@@ -367,7 +367,9 @@ mod tests {
         let target = Path::new("/nonexistent/target");
         let live = vec![UiDriverDescriptor {
             pid: 7,
-            socket: PathBuf::from("/run/ui-7.sock"),
+            endpoint: zeron_proto::ui_driver::UiDriverEndpoint::Unix {
+                socket: PathBuf::from("/run/ui-7.sock"),
+            },
             label: "Zeron Dev 61".into(),
             bundle_path: Some(PathBuf::from("/elsewhere/Zeron Dev 61.app")),
             data_dir: PathBuf::from("/data"),
