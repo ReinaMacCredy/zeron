@@ -970,7 +970,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private func startMission(text: String, images: [StagedImage]) {
         let pictures = images.filter(\.isImage)
         if let error = missionStagedError(images: UInt32(pictures.count), otherFile: nil) {
-            return Toast.show(error, in: view.window)
+            return Toast.show(error, in: view.window, above: bottom)
         }
         guard let client = app.client, let host = app.row(chatId)?.deviceId else { return }
         let brief = missionText(text: text, pasted: images.filter { !$0.isImage }.map { String(decoding: $0.data, as: UTF8.self) })
@@ -981,14 +981,14 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 let paths = try await MissionStart.upload(pictures, to: host, client: client)
                 let started = try await client.startMissionFromChat(chatId: chat, draft: MissionStart.draft(text: brief, spaceId: nil, images: paths), options: options, lead: ChatMission.lead)
                 guard let self else { return }
-                if let notice = started.notice { Toast.show(notice, in: self.view.window) }
+                if let notice = started.notice { Toast.show(notice, in: self.view.window, above: self.bottom) }
                 self.composer.text = ""
                 self.composer.images = []
                 self.mission = false
                 self.render(animated: true)
                 (self.tabBarController as? MainTabController)?.showTasks("mission:\(started.taskId)")
             } catch {
-                Toast.show(TasksErrors.message(error), in: self?.view.window)
+                Toast.show(TasksErrors.message(error), in: self?.view.window, above: self?.bottom)
             }
         }
     }

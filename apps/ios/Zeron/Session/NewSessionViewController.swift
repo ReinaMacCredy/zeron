@@ -645,7 +645,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         let device = deviceId
         let pictures = images.filter(\.isImage)
         if let error = missionStagedError(images: UInt32(pictures.count), otherFile: nil) {
-            return Toast.show(error, in: view.window)
+            return Toast.show(error, in: view.window, above: composer)
         }
         guard !device.isEmpty else { return showCreateFailed() }
         app.lastDraft = draft
@@ -653,7 +653,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         let options = MissionOptions(approvePlan: missionReview, sameAgents: false, planDoc: missionPlanDoc)
         let host = (presentingViewController as? UITabBarController)?.selectedViewController ?? self
         Task { @MainActor [weak self] in
-            guard let self, await MissionStart.run(app: self.app, deviceId: device, text: brief, spaceId: self.project?.id, images: pictures, config: self.draft.config, options: options, from: host) != nil else { return }
+            guard let self, await MissionStart.run(app: self.app, deviceId: device, text: brief, spaceId: self.project?.id, images: pictures, config: self.draft.config, options: options, from: host, above: self.composer) != nil else { return }
             self.created = true
             self.app.newSessionText = ""
             self.app.newSessionImages = []
