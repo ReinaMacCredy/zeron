@@ -517,8 +517,8 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "attach-menu")
         XCTAssertTrue(app.buttons["attach-files"].isHittable, "card rows reachable")
         XCTAssertTrue(keyboard.exists, "the keys stay up under the menu")
-        attach.tap()
-        XCTAssertTrue(photos.waitForNonExistence(timeout: 5), "\"+\" again closes the card")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
+        XCTAssertTrue(photos.waitForNonExistence(timeout: 5), "the scrim closes the card")
         XCTAssertTrue(keyboard.exists, "keyboard stays")
 
         attach.tap()
