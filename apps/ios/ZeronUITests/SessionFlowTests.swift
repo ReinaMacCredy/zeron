@@ -386,9 +386,17 @@ final class SessionFlowTests: XCTestCase {
 
     func testToolGroupExpandsAndShowsDetail() {
         let app = launch(["-route", "chat:chat-veil"])
-        let expand = app.buttons["Expand"].firstMatch
-        XCTAssertTrue(expand.waitForExistence(timeout: 10))
-        expand.tap()
+        let rows = app.descendants(matching: .any).matching(identifier: "row-tools")
+        let group = rows.matching(NSPredicate(format: "NOT (label BEGINSWITH 'Worked for')")).firstMatch
+        if !group.waitForExistence(timeout: 10) {
+            let fold = rows.matching(NSPredicate(format: "label BEGINSWITH 'Worked for'")).firstMatch
+            XCTAssertTrue(fold.waitForExistence(timeout: 5))
+            expandButton(on: fold, in: app)?.tap()
+            XCTAssertTrue(group.waitForExistence(timeout: 5))
+        }
+        let expand = expandButton(on: group, in: app)
+        XCTAssertNotNil(expand, "the tool group has its own Expand")
+        expand?.tap()
         let detail = app.buttons["Show details"].firstMatch
         XCTAssertTrue(detail.waitForExistence(timeout: 5))
         snapshot(app, "tools-expanded")
@@ -689,7 +697,9 @@ final class SessionFlowTests: XCTestCase {
         let accessory = app.buttons["new-session"]
         XCTAssertTrue(accessory.waitForExistence(timeout: 5))
         XCTAssertGreaterThan(accessory.frame.minY, app.windows.firstMatch.frame.height * 0.6, "accessory sits above the tab bar")
-        app.cells["session-chat-home"].firstMatch.tap()
+        let home = app.cells["session-chat-home"].firstMatch
+        scrollTo(home, in: app.collectionViews.firstMatch)
+        home.tap()
         let more = app.buttons["More queue actions"]
         XCTAssertTrue(more.waitForExistence(timeout: 5))
         XCTAssertTrue(more.isHittable, "queue shows again after coming back")
@@ -787,5 +797,10 @@ final class SessionFlowTests: XCTestCase {
         start.press(forDuration: 0.05, thenDragTo: list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)))
         sleep(4)
         XCTAssertEqual(first.frame.minY, restingY, accuracy: 4, "refresh ended and the list settled back")
+    }
+
+    private func expandButton(on row: XCUIElement, in app: XCUIApplication) -> XCUIElement? {
+        app.buttons.matching(NSPredicate(format: "label == 'Expand'")).allElementsBoundByIndex
+            .first { row.frame.intersects($0.frame) }
     }
 }
