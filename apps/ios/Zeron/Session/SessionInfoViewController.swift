@@ -3,7 +3,15 @@ import UIKit
 final class SessionInfoViewController: UITableViewController {
     var openSource: ((InfoSource) -> Void)?
     var loadUsage: (() async -> UsageMeter?)?
+    var loadChanges: (() async -> ChatChangesView?)?
+    var openChanges: ((String) -> Void)?
     private let sources: [InfoSource]
+    private var changes: ChatChangesView?
+
+    private enum Section { case changes, sources, usage }
+    private var sections: [Section] {
+        [changes == nil ? nil : .changes, sources.isEmpty ? nil : .sources, .usage].compactMap { $0 }
+    }
     private var usage: UsageMeter?
     private var usageLoaded = false
 
@@ -26,20 +34,27 @@ final class SessionInfoViewController: UITableViewController {
             guard let self else { return }
             self.usage = usage
             self.usageLoaded = true
-            self.tableView.reloadSections(IndexSet(integer: self.usageSection), with: .none)
+            self.tableView.reloadData()
+        }
+        Task { @MainActor [weak self] in
+            guard let changes = await self?.loadChanges?(), let self else { return }
+            self.changes = changes
+            self.tableView.reloadData()
         }
     }
 
-    private var usageSection: Int { sources.isEmpty ? 0 : 1 }
-
-    override func numberOfSections(in tableView: UITableView) -> Int { sources.isEmpty ? 1 : 2 }
+    override func numberOfSections(in tableView: UITableView) -> Int { sections.count }
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        section == usageSection ? "Usage" : "Sources"
+        switch sections[section] {
+        case .changes: nil
+        case .sources: "Sources"
+        case .usage: "Usage"
+        }
     }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        section == usageSection ? 1 : sources.count
+        sections[section] == .sources ? sources.count : 1
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
@@ -47,7 +62,19 @@ final class SessionInfoViewController: UITableViewController {
         var content = cell.defaultContentConfiguration()
         content.textProperties.font = Fonts.ui(.sans, 15)
         content.textProperties.color = Palette.text
-        if indexPath.section == usageSection {
+        switch sections[indexPath.section] {
+        case .changes:
+            guard let changes else { break }
+            content.image = UIImage(systemName: "plusminus")
+            content.text = changes.title
+            let counts = NSMutableAttributedString(string: "\(changes.files) ", attributes: [.font: Fonts.ui(.mono, 12), .foregroundColor: Palette.secondary])
+            counts.append(GitText.delta(changes.additions, changes.deletions))
+            let label = UILabel()
+            label.attributedText = counts
+            label.sizeToFit()
+            cell.accessoryView = label
+            cell.accessibilityIdentifier = "info-changes"
+        case .usage:
             content.image = UIImage(systemName: "chart.bar")
             cell.selectionStyle = .none
             if let usage {
@@ -57,7 +84,7 @@ final class SessionInfoViewController: UITableViewController {
                 content.text = usageLoaded ? "Usage unavailable" : "Loading usage…"
                 content.textProperties.color = Palette.secondary
             }
-        } else {
+        case .sources:
             let source = sources[indexPath.row]
             content.image = UIImage(systemName: "doc")
             content.text = source.name
@@ -71,8 +98,11 @@ final class SessionInfoViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        guard indexPath.section != usageSection else { return }
-        openSource?(sources[indexPath.row])
+        switch sections[indexPath.section] {
+        case .changes: if let changes { openChanges?(changes.title) }
+        case .sources: openSource?(sources[indexPath.row])
+        case .usage: break
+        }
     }
 
     private static func meter(_ usage: UsageMeter) -> UIView {

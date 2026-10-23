@@ -68,6 +68,8 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     var onSend: ((String, [StagedImage], DeliveryMode) -> SendResult)?
     var onStop: (() -> Void)?
     var onChipTap: ((String, UIView) -> Void)?
+    var onCommentRemove: ((String) -> Void)?
+    var onCommentsClear: (() -> Void)?
     var onHeightChange: (() -> Void)?
     var onFocusChange: ((Bool) -> Void)?
     var onActionChange: (() -> Void)?
@@ -90,6 +92,8 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     var chipsAlwaysVisible = false { didSet { updateMode(animated: false) } }
     var images: [StagedImage] = [] { didSet { rebuildThumbs(); refreshAction(animated: true); updateMode(animated: true) } }
     var quotes: [String] = [] { didSet { rebuildThumbs(); refreshAction(animated: true); updateMode(animated: true) } }
+    var comments: SessionChrome.Comments? { didSet { if comments != oldValue { rebuildThumbs(); refreshAction(animated: true); updateMode(animated: true) } } }
+    private var hasComments: Bool { comments?.items.isEmpty == false }
 
     var text: String {
         get { textView.text }
@@ -353,7 +357,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     /// The card is for composing: focused, holding photos, or pinned open
     /// (new-session canvas). An unfocused draft rests as the capsule.
     private var wantsCard: Bool {
-        chipsAlwaysVisible || textView.isFirstResponder || !images.isEmpty || !quotes.isEmpty
+        chipsAlwaysVisible || textView.isFirstResponder || !images.isEmpty || !quotes.isEmpty || hasComments
     }
 
     private func updateMode(animated: Bool) {
@@ -571,6 +575,35 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
 
     func clearImages() { images.removeAll() }
 
+    private func commentsChip(_ comments: SessionChrome.Comments) -> UIButton {
+        var c = UIButton.Configuration.filled()
+        c.title = comments.title
+        c.image = UIImage(systemName: "text.bubble", withConfiguration: UIImage.SymbolConfiguration(pointSize: 11.5, weight: .semibold))
+        c.imagePadding = 6
+        c.baseForegroundColor = Palette.text
+        c.baseBackgroundColor = Palette.controlFill
+        c.cornerStyle = .capsule
+        c.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 11, bottom: 7, trailing: 11)
+        c.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attrs in
+            var a = attrs
+            a.font = Fonts.ui(.sansMedium, 13.5)
+            return a
+        }
+        let chip = UIButton(configuration: c)
+        chip.accessibilityIdentifier = "composer-comments"
+        let rows = comments.items.map { item in
+            let remove = UIImage(systemName: "xmark.circle.fill")?
+                .withTintColor(item.severity?.ink ?? Palette.secondary, renderingMode: .alwaysOriginal)
+            return UIAction(title: item.text, subtitle: item.location, image: remove) { [weak self] _ in self?.onCommentRemove?(item.id) }
+        }
+        let clear = UIAction(title: comments.clear, image: UIImage(systemName: "xmark"), attributes: .destructive) { [weak self] _ in
+            self?.onCommentsClear?()
+        }
+        chip.menu = UIMenu(children: [UIMenu(options: .displayInline, children: rows), clear])
+        chip.showsMenuAsPrimaryAction = true
+        return chip
+    }
+
     private func rebuildThumbs() {
         thumbs.arrangedSubviews.forEach { $0.removeFromSuperview() }
         thumbs.alignment = .center
@@ -597,6 +630,9 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             chip.menu = UIMenu(children: [UIMenu(options: .displayInline, children: previews), remove])
             chip.showsMenuAsPrimaryAction = true
             thumbs.addArrangedSubview(chip)
+        }
+        if let comments, !comments.items.isEmpty {
+            thumbs.addArrangedSubview(commentsChip(comments))
         }
         for img in images {
             let iv = img.isImage ? UIImageView(image: img.thumbnail) : pastedTextTile(img)
@@ -631,7 +667,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             ])
             thumbs.addArrangedSubview(iv)
         }
-        thumbsHeight.constant = !images.isEmpty ? 68 : quotes.isEmpty ? 0 : 46
+        thumbsHeight.constant = !images.isEmpty ? 68 : quotes.isEmpty && !hasComments ? 0 : 46
         thumbs.layoutMargins = UIEdgeInsets(top: 12, left: 0, bottom: 0, right: 0)
         thumbs.isLayoutMarginsRelativeArrangement = true
         onHeightChange?()
@@ -755,7 +791,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     // MARK: Action button
 
     private var hasContent: Bool {
-        !textView.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty || !quotes.isEmpty
+        !textView.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty || !quotes.isEmpty || hasComments
     }
 
     private func refreshAction(animated: Bool) {

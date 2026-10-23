@@ -22,6 +22,7 @@ final class CoreSessionSource: SessionSource {
     private var profilesFor: ChatConfig?
     private var invocationCatalogs: [String: InvocationCatalog] = [:]
     private weak var contextSheet: ContextSheetViewController?
+    private let reviewSheets = NSHashTable<AnyObject>.weakObjects()
 
     init(app: AppModel, client: CoreClient, handle: SessionHandle, chatId: String) {
         self.app = app
@@ -101,7 +102,14 @@ final class CoreSessionSource: SessionSource {
         } else if contextContent() != .init() {
             chips.append(ComposerChip(id: "context", title: "Context", symbol: "circle.lefthalf.filled"))
         }
+        if let review = c.review {
+            chips.append(ReviewUI.chip(review))
+        }
         next.chips = chips
+        if !c.stagedComments.isEmpty {
+            let labels = handle.stagedCommentsLabels()
+            next.comments = .init(title: labels.title, clear: labels.clear, items: c.stagedComments)
+        }
         if let sendFailure {
             next.banner = .failed(sendFailure)
         } else if let compactNotice {
@@ -147,6 +155,7 @@ final class CoreSessionSource: SessionSource {
             onChange?()
         }
         contextSheet?.reload()
+        for case let sheet as ReviewReloading in reviewSheets.allObjects { sheet.reload() }
     }
 
     private func loadModels(harness: String) {
@@ -189,6 +198,7 @@ final class CoreSessionSource: SessionSource {
     }
 
     func chipSheet(_ id: String) -> UIViewController? {
+        if id == "review" { return reviewChipSheet() }
         guard id == "context" else { return nil }
         let sheet = ContextSheetViewController(
             content: { [weak self] in self?.contextContent() ?? .init() },
@@ -333,6 +343,16 @@ final class CoreSessionSource: SessionSource {
     }
 
     func chipMenu(_ id: String) -> UIMenu? {
+        if id == "review" {
+            guard let review = handle.composer().review, review.busy, review.stoppable else { return nil }
+            return UIMenu(title: review.tip, children: [
+                UIAction(title: review.stopLabel, subtitle: review.stopTip, image: UIImage(systemName: "stop.circle"), attributes: .destructive) { [weak self, handle] _ in
+                    Task { @MainActor in
+                        do { try await handle.stopReview() } catch { self?.reviewFailed(error) }
+                    }
+                },
+            ])
+        }
         guard let row = app?.row(chatId) else { return nil }
         let harness = row.harness ?? "claude-code"
         switch id {
@@ -589,8 +609,65 @@ final class CoreSessionSource: SessionSource {
         guard let summary = roster.summary else { return nil }
         return UIAction(title: roster.title, subtitle: summary, image: UIImage(systemName: "person.2")) { [weak self] _ in
             guard let self else { return }
-            self.onPresent?(AgentsSheetViewController(handle: self.handle, open: open).wrapped)
+            self.onPresent?(AgentsSheetViewController(handle: self.handle, open: open, findings: { [weak self] taskId in
+                self?.findingsSheet(taskId: taskId)
+            }).wrapped)
         }
+    }
+
+    func reviewAction() -> UIAction? {
+        guard let review = handle.composer().review else { return nil }
+        return UIAction(title: review.menuLabel, image: UIImage(systemName: "checklist")) { [weak self] _ in
+            guard let self else { return }
+            let sheet = ReviewOptionsViewController(handle: self.handle)
+            self.reviewSheets.add(sheet)
+            self.onPresent?(ReviewUI.wrap(sheet))
+        }
+    }
+
+    private func reviewChipSheet() -> UIViewController? {
+        guard let review = handle.composer().review else { return nil }
+        switch review.action {
+        case .openFindings:
+            return findingsSheet(taskId: nil).map { ReviewUI.wrap($0) }
+        case .start:
+            Task { @MainActor [weak self, handle] in
+                do { try await handle.startReview() } catch { self?.reviewFailed(error) }
+            }
+            return nil
+        case .inert:
+            return nil
+        }
+    }
+
+    private func findingsSheet(taskId: String?) -> ReviewFindingsViewController? {
+        guard handle.reviewFindings(taskId: taskId) != nil else { return nil }
+        let sheet = ReviewFindingsViewController(handle: handle, taskId: taskId)
+        reviewSheets.add(sheet)
+        return sheet
+    }
+
+    private func reviewFailed(_ error: Error) {
+        let alert = UIAlertController(title: nil, message: GitText.failure(error, fallback: "\(error)"), preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        onPresent?(alert)
+    }
+
+    func chatChanges() async -> ChatChangesView? {
+        guard handle.composer().review != nil else { return nil }
+        return try? await handle.chatChanges()
+    }
+
+    func openChanges(from host: UIViewController, title: String) {
+        DiffSheetViewController.presentFindings(handle, from: host, title: title, subtitle: nil, focus: nil)
+    }
+
+    func removeStagedComment(_ id: String) {
+        handle.removeStagedComment(id: id)
+    }
+
+    func clearStagedComments() {
+        handle.clearStagedComments()
     }
 
     func handoffMenu(open: @escaping (String) -> Void) -> UIMenuElement? {
