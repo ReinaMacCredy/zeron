@@ -891,6 +891,23 @@ impl Client {
         )
     }
 
+    pub fn watch_outline_docs(&self, root_chat_id: &str) -> Result<()> {
+        let (state, _) = self.inner.workspace.state();
+        let held: Vec<String> = lock(&self.inner.sessions).keys().cloned().collect();
+        let docs = crate::workspace::task_outline_docs(
+            &state,
+            &self.inner.workspace.steps(),
+            &self.workspace(),
+            &self.inner.workspace.supervisors(),
+            root_chat_id,
+            &held,
+        );
+        for doc in docs {
+            self.open_session(&doc)?;
+        }
+        Ok(())
+    }
+
     pub async fn refresh_outline_stats(&self, root_chat_id: &str) -> Result<bool> {
         let ids: Vec<String> = self
             .task_outline(root_chat_id)

@@ -77,3 +77,13 @@ pub(crate) fn tree_rows(
 ) -> Vec<TreeNode> {
     zeron_doc::tree::tree_rows(&Source { state, now }, root_chat_id, native)
 }
+
+pub(crate) fn watched_docs(
+    state: &AppState,
+    root_chat_id: &str,
+    held: &[String],
+    now: DateTime<Utc>,
+) -> Vec<String> {
+    let selected = state.selected_chat.as_deref() == Some(root_chat_id);
+    zeron_doc::tree::watched_docs(&Source { state, now }, root_chat_id, held, selected)
+}

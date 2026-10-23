@@ -84,7 +84,7 @@ final class AppModel {
     private(set) var connectivity: Connectivity?
     /// Front-page sessions that are working / waiting on the user.
     private(set) var live = LiveCounts()
-    private(set) var tasks = TasksPage(missions: [], needsYou: [], working: [], toDo: [], done: [], needsYouCount: 0)
+    private(set) var tasks = TasksPage(missions: [], needsYou: [], working: [], toDo: [], done: [], board: [], needsYouCount: 0)
     private(set) var supervisor = SupervisorPage(hosts: [], doneToday: [], wakes: [])
     private(set) var needsYou: [NeedsYouEntry] = []
     private(set) var today = TodayPage(greeting: "", summary: "", tasks: [], openTasks: 0, prompts: 0, digest: [], slots: [], usage: nil, pullRequests: nil, runsLoaded: false, updated: nil)

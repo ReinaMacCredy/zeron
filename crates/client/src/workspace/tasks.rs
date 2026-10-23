@@ -887,6 +887,27 @@ pub(crate) fn trees(
     })
 }
 
+pub(crate) fn outline_docs(
+    state: &WorkspaceState,
+    steps: &[TaskStep],
+    snapshot: &super::WorkspaceSnapshot,
+    supervisors: &BTreeMap<String, SupervisorSnapshot>,
+    root_chat_id: &str,
+    held: &[String],
+) -> Vec<String> {
+    let ctx = Ctx {
+        state,
+        steps,
+        rows: &snapshot.sessions,
+        devices: &snapshot.devices,
+        supervisors,
+        item_sends: &HashMap::new(),
+        transcripts: &HashMap::new(),
+        now: Utc::now(),
+    };
+    tree::watched_docs(&ctx, root_chat_id, held, false)
+}
+
 pub(crate) fn outline(
     state: &WorkspaceState,
     steps: &[TaskStep],

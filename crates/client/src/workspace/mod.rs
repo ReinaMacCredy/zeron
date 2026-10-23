@@ -28,8 +28,9 @@ pub use tasks::{
     TasksPage, WakeEntry, WatchState,
 };
 pub(crate) use tasks::{
-    Ask, brief as task_brief, detail as task_detail, outline as task_outline, plan_estimate,
-    strip as mission_strip, trees as task_trees, watch as watch_state,
+    Ask, brief as task_brief, detail as task_detail, outline as task_outline,
+    outline_docs as task_outline_docs, plan_estimate, strip as mission_strip, trees as task_trees,
+    watch as watch_state,
 };
 pub use today::{TodayPage, TodayPart, TodayPullRequests, TodaySlot, TodayTask, TodayUsage};
 pub(crate) use view::{DeriveContext, TodayRefresh, device_online};

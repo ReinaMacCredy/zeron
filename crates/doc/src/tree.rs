@@ -330,6 +330,23 @@ struct Walk<'a, S: TreeSource> {
     out: Vec<TreeNode<S::Brand>>,
 }
 
+pub fn watched_docs<S: TreeSource>(
+    source: &S,
+    root_chat_id: &str,
+    held: &[String],
+    root_open: bool,
+) -> Vec<String> {
+    let busy = tree_rows(source, root_chat_id, false)
+        .into_iter()
+        .skip(1)
+        .filter_map(|node| node.chat_id)
+        .filter(|id| held.contains(id) || source.running_subagents(id) > 0);
+    std::iter::once(root_chat_id.to_owned())
+        .filter(|_| !root_open)
+        .chain(busy)
+        .collect()
+}
+
 pub fn tree_rows<S: TreeSource>(
     source: &S,
     root_chat_id: &str,

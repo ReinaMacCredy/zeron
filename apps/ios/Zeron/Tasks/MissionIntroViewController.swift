@@ -18,7 +18,7 @@ final class MissionIntroViewController: UIViewController {
     private let titleLabel = UILabel()
     private let body = UILabel()
     private let dots = UIPageControl()
-    private let next = UIButton(type: .system)
+    private let nextButton = UIButton(type: .system)
     private static let glyphs = ["glyph-mission", "list.number", "point.3.connected.trianglepath.dotted", "glyph-supervisor"]
 
     init(onTry: @escaping () -> Void) {
@@ -68,10 +68,10 @@ final class MissionIntroViewController: UIViewController {
         nextConfig.cornerStyle = .capsule
         nextConfig.baseBackgroundColor = Palette.text
         nextConfig.baseForegroundColor = Palette.background
-        next.configuration = nextConfig
-        next.addAction(UIAction { [weak self] _ in self?.advance() }, for: .primaryActionTriggered)
+        nextButton.configuration = nextConfig
+        nextButton.addAction(UIAction { [weak self] _ in self?.advance() }, for: .primaryActionTriggered)
 
-        let buttons = UIStackView(arrangedSubviews: [dots, UIView(), dismissButton, next])
+        let buttons = UIStackView(arrangedSubviews: [dots, UIView(), dismissButton, nextButton])
         buttons.spacing = 8
         buttons.alignment = .center
         let stack = UIStackView(arrangedSubviews: [card, titleLabel, body, UIView(), buttons])
@@ -118,8 +118,8 @@ final class MissionIntroViewController: UIViewController {
         body.text = intro.pages[ix].body
         dots.currentPage = ix
         dots.accessibilityValue = "Page \(ix + 1) of \(intro.pages.count)"
-        next.configuration?.title = last ? intro.tryIt : intro.next
-        next.accessibilityIdentifier = last ? "mission-intro-try" : "mission-intro-next"
+        nextButton.configuration?.title = last ? intro.tryIt : intro.next
+        nextButton.accessibilityIdentifier = last ? "mission-intro-try" : "mission-intro-next"
         for v in [visual, titleLabel, body] as [UIView] {
             v.alpha = 0
             v.transform = CGAffineTransform(translationX: forward ? 8 : -8, y: 0)

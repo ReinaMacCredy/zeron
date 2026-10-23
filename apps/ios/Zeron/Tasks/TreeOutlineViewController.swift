@@ -121,6 +121,7 @@ final class TreeOutlineViewController: UIViewController, UICollectionViewDelegat
 
     private func reload() {
         guard let client = app.client else { return }
+        try? client.watchOutlineDocs(rootChatId: rootChatId)
         let nodes = client.taskOutline(rootChatId: rootChatId)
         var rows: [Row] = []
         for node in nodes {

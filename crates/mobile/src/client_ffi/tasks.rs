@@ -829,6 +829,10 @@ impl CoreClient {
             .collect()
     }
 
+    pub fn watch_outline_docs(&self, root_chat_id: String) -> CoreResult<()> {
+        Ok(self.client.watch_outline_docs(&root_chat_id)?)
+    }
+
     pub async fn refresh_outline_stats(&self, root_chat_id: String) -> CoreResult<bool> {
         let client = self.client.clone();
         on_runtime(async move { client.refresh_outline_stats(&root_chat_id).await }).await
