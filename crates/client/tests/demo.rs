@@ -756,8 +756,6 @@ fn steering_while_busy_sends_a_steer_not_a_queue_row() {
 fn queued_row_primary_action_steers_into_the_live_turn() {
     let (client, _dir) = demo(DemoOptions::default());
     let session = client.open_session("chat-home").unwrap();
-    let host = session.composer().host.device_id.clone();
-    zeron_client::runtime::shared().block_on(client.list_harnesses(&host));
     session.send(SendRequest::text("first")).unwrap();
     wait_for("turn running and steerable", Duration::from_secs(5), || {
         let composer = session.composer();
