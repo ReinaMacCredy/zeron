@@ -42,11 +42,65 @@ pub enum PreviewAppearance {
 pub struct HtmlPreviewParams {
     pub chat_id: String,
     pub run_secret: String,
-    pub html: String,
+    #[serde(default)]
+    pub html: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
     #[serde(default)]
     pub width: Option<u32>,
     #[serde(default)]
     pub appearance: Option<PreviewAppearance>,
+    #[serde(flatten)]
+    pub inspect: PreviewInspect,
+}
+
+pub const MAX_PREVIEW_STEPS: usize = 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PreviewRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewInspect {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tree: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rect: Option<PreviewRect>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nth: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<serde_json::Value>,
+}
+
+impl PreviewInspect {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.steps.len() > MAX_PREVIEW_STEPS {
+            return Err(format!(
+                "`steps` takes at most {MAX_PREVIEW_STEPS} steps, not {}",
+                self.steps.len()
+            ));
+        }
+        if self.rect.is_some() && self.select.is_some() {
+            return Err("give `rect` or `select`, not both".into());
+        }
+        if let Some(r) = self.rect
+            && !([r.x, r.y, r.w, r.h].iter().all(|v| v.is_finite())
+                && r.x >= 0.0
+                && r.y >= 0.0
+                && r.w >= 1.0
+                && r.h >= 1.0)
+        {
+            return Err("`rect` needs finite x, y >= 0 and w, h >= 1 CSS pixels".into());
+        }
+        Ok(())
+    }
 }
 
 /// A page the engine asks the desktop app to lay out and screenshot.
@@ -57,6 +111,8 @@ pub struct HtmlPreviewRequest {
     pub html: String,
     pub width: u32,
     pub appearance: PreviewAppearance,
+    #[serde(flatten)]
+    pub inspect: PreviewInspect,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,6 +134,24 @@ pub struct HtmlPreview {
     pub missing_images: Vec<String>,
     /// Base64 PNG of the top `captured_height` points.
     pub png: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<PreviewRect>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<PreviewShot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewShot {
+    pub step: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub png: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
