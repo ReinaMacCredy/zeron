@@ -140,7 +140,7 @@ impl TaskCenter {
         let (done, working) = (count(Status::Done), count(Status::Running));
         let asking = nodes.iter().find(|node| node.status == Status::Waiting);
         let (status, word) = match asking {
-            Some(node) if node.kind == NodeKind::Root => (Status::Waiting, "Needs you".into()),
+            Some(node) if node.kind == NodeKind::Root => (Status::Waiting, node.word.into()),
             Some(node) => (Status::Waiting, format!("Needs you \u{b7} {}", node.title)),
             None if settled => (Status::Done, "Done".into()),
             None => (nodes[0].status, nodes[0].word.to_string()),

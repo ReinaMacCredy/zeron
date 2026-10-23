@@ -1638,9 +1638,14 @@ impl TaskCenter {
         let crumb = self.back_crumb(theme, cx);
         let done = task.completed_at.is_some();
         let mission = crate::tasks::is_mission(task, plan);
+        let ready = !done && plan.needs == Some(zeron_proto::NeedsYou::Review);
+        let asks_you = |row: &BarRow| row.status == Status::Waiting && !(ready && row.id == LEAD);
         let steps: Vec<&BarRow> = facts.rows.iter().filter(|row| row.id != LEAD).collect();
         let count = |kind: Status| facts.rows.iter().filter(|row| row.status == kind).count();
-        let (waiting, failed) = (count(Status::Waiting), count(Status::Failed));
+        let (waiting, failed) = (
+            facts.rows.iter().filter(|row| asks_you(row)).count(),
+            count(Status::Failed),
+        );
         let running = steps
             .iter()
             .filter(|row| row.status == Status::Running)
@@ -1670,9 +1675,7 @@ impl TaskCenter {
                 let asking: Vec<&BarRow> = facts
                     .rows
                     .iter()
-                    .filter(|row| {
-                        row.status == Status::Waiting && !(row.id == LEAD && row.text.is_some())
-                    })
+                    .filter(|row| asks_you(row) && !(row.id == LEAD && row.text.is_some()))
                     .collect();
                 let mut parts = Vec::new();
                 if review {
@@ -1745,7 +1748,7 @@ impl TaskCenter {
         };
         let primary = if done || (!mission && plan.lead != Some(ChatIndicator::AwaitingInput)) {
             None
-        } else if let Some(row) = facts.rows.iter().find(|row| row.status == Status::Waiting) {
+        } else if let Some(row) = facts.rows.iter().find(|row| asks_you(row)) {
             if row.id == LEAD && row.text.is_some() {
                 Some(
                     button(
@@ -1834,11 +1837,10 @@ impl TaskCenter {
             });
         let task_id = task.id.clone();
         let toggle_label = if done { "Reopen" } else { "Mark as done" };
-        let review = !done && plan.needs == Some(zeron_proto::NeedsYou::Review);
         let toggle = button(
             toggle_label.into(),
             "task-center-toggle-done",
-            if review {
+            if ready {
                 widgets::ActionTone::Solid
             } else {
                 widgets::ActionTone::Filled

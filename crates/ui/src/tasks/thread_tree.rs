@@ -303,7 +303,7 @@ fn root_line(nodes: &[TreeNode]) -> String {
         .filter(|node| node.parent == Some(0) && node.status.live())
         .count();
     match root.status {
-        Status::Waiting => "Needs you".into(),
+        Status::Waiting => root.word.into(),
         Status::Failed => "Failed".into(),
         _ if working > 0 => format!(
             "Watching {working} {}",
