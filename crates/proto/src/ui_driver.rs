@@ -3,12 +3,14 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const OBSERVE_ACTIONS: &[&str] = &[
-    "state", "tree", "snapshot", "wait", "audit", "frames", "track",
+    "state", "tree", "snapshot", "wait", "audit", "frames", "track", "record",
 ];
 
 pub const DRIVE_ACTIONS: &[&str] = &[
     "click", "move", "drag", "scroll", "key", "type", "press", "action", "set",
 ];
+
+pub const PROCESS_ACTIONS: &[&str] = &["launch", "quit"];
 
 pub const MAX_WAIT_MS: u64 = 60_000;
 

@@ -449,9 +449,9 @@ impl Driver {
         cx: &mut AsyncApp,
         f: impl FnOnce(&mut gpui::Window, &mut gpui::App) -> R,
     ) -> Result<R, String> {
-        let result = cx
-            .update_window(self.window, |_, window, cx| f(window, cx))
-            .map_err(|error| format!("window is gone: {error}"));
+        let result =
+            super::record::driven(|| cx.update_window(self.window, |_, window, cx| f(window, cx)))
+                .map_err(|error| format!("window is gone: {error}"));
         // Key dispatch may draw inline before its handlers run; only a later frame shows their effect.
         self.mark = frame_count();
         result

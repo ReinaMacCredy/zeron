@@ -3,6 +3,7 @@ mod capture;
 mod frames;
 #[cfg(debug_assertions)]
 mod input;
+mod record;
 mod selector;
 #[cfg(unix)]
 mod server;
@@ -10,6 +11,8 @@ mod tree;
 
 #[cfg(unix)]
 pub(crate) use server::start;
+
+pub(crate) use record::tap as record_tap;
 
 use crate::shell::{Route, Shell};
 use gpui::{AnyWindowHandle, App, AsyncApp};
@@ -125,6 +128,7 @@ enum Observe {
     Wait(Until),
     Frames(frames::Frames),
     Track(frames::Track),
+    Record(record::Record),
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -280,6 +284,7 @@ async fn run(raw: Value, cancel: Cancel, cx: &mut AsyncApp) -> Result<Value, Str
         Observe::Wait(until) => wait(window, until, cx).await,
         Observe::Frames(request) => frames::frames(window, request, cancel, cx).await,
         Observe::Track(request) => frames::track(window, request, cancel, cx).await,
+        Observe::Record(record) => record::run(window, record, cx).await,
     }
 }
 

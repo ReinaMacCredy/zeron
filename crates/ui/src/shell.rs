@@ -20695,6 +20695,7 @@ impl Render for Shell {
         };
         // Toasts float over every phase and route.
         let root = root.children(crate::toast::render_toaster(window, cx));
+        let root = root.children(crate::ui_driver::record_tap(window));
 
         // A manually-driven tween is mid-flight: keep frames coming (the same
         // scheduling `with_animation` would have requested). Hover color fades
