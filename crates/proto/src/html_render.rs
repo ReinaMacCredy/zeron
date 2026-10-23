@@ -3,6 +3,7 @@
 //! desktop UI. Ported from t3code `packages/shared/src/htmlRender.ts`.
 
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 pub const RENDER_TOOL: &str = "html_render";
 pub const PREVIEW_TOOL: &str = "html_preview";
@@ -42,11 +43,73 @@ pub enum PreviewAppearance {
 pub struct HtmlPreviewParams {
     pub chat_id: String,
     pub run_secret: String,
-    pub html: String,
+    #[serde(default)]
+    pub html: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
     #[serde(default)]
     pub width: Option<u32>,
     #[serde(default)]
     pub appearance: Option<PreviewAppearance>,
+    #[serde(flatten)]
+    pub inspect: PreviewInspect,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadWorkspacePageParams {
+    pub chat_id: String,
+    pub run_secret: String,
+    pub path: String,
+}
+
+pub const MAX_PREVIEW_STEPS: usize = 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PreviewRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewInspect {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tree: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rect: Option<PreviewRect>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nth: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<serde_json::Value>,
+}
+
+impl PreviewInspect {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.steps.len() > MAX_PREVIEW_STEPS {
+            return Err(format!(
+                "`steps` takes at most {MAX_PREVIEW_STEPS} steps, not {}",
+                self.steps.len()
+            ));
+        }
+        if self.rect.is_some() && self.select.is_some() {
+            return Err("give `rect` or `select`, not both".into());
+        }
+        if let Some(r) = self.rect
+            && !([r.x, r.y, r.w, r.h].iter().all(|v| v.is_finite())
+                && r.x >= 0.0
+                && r.y >= 0.0
+                && r.w >= 1.0
+                && r.h >= 1.0)
+        {
+            return Err("`rect` needs finite x, y >= 0 and w, h >= 1 CSS pixels".into());
+        }
+        Ok(())
+    }
 }
 
 /// A page the engine asks the desktop app to lay out and screenshot.
@@ -57,6 +120,8 @@ pub struct HtmlPreviewRequest {
     pub html: String,
     pub width: u32,
     pub appearance: PreviewAppearance,
+    #[serde(flatten)]
+    pub inspect: PreviewInspect,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,6 +143,24 @@ pub struct HtmlPreview {
     pub missing_images: Vec<String>,
     /// Base64 PNG of the top `captured_height` points.
     pub png: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<PreviewRect>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<PreviewShot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewShot {
+    pub step: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub png: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +212,46 @@ pub const GUIDANCE: &str = "When a visual answer would be clearer than prose, sh
 
 /// What `html_render` tells the agent once the page is shown.
 pub const RENDERED_MESSAGE: &str = "Shown to the reader above your reply. Don't mention or describe the page; reply with only what it doesn't already say.";
+
+pub const CHAT_FOLDER: &str = "this chat's folder";
+pub const CURRENT_FOLDER: &str = "the current folder";
+
+pub fn workspace_page(
+    root: &Path,
+    home: Option<&Path>,
+    folder: &str,
+    path: &str,
+) -> Result<String, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("{folder} {} could not be read: {e}", root.display()))?;
+    if home.and_then(|home| home.canonicalize().ok()).as_deref() == Some(root.as_path()) {
+        return Err(format!(
+            "`path` reads from a project folder, and {folder} is your home folder. Pass `html` instead."
+        ));
+    }
+    let file = root
+        .join(path)
+        .canonicalize()
+        .map_err(|_| format!("`{path}` is not a file in {folder}"))?;
+    if !file.starts_with(&root) {
+        return Err(format!("`{path}` is outside {folder}, so it was not read"));
+    }
+    let html_file = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"));
+    if !html_file || !file.is_file() {
+        return Err(format!("`{path}` is not an .html or .htm file"));
+    }
+    let bytes = std::fs::metadata(&file).map_err(|e| e.to_string())?.len();
+    if bytes > MAX_HTML_BYTES as u64 {
+        return Err(format!(
+            "`{path}` is {bytes} bytes; the limit is {MAX_HTML_BYTES}"
+        ));
+    }
+    std::fs::read_to_string(&file).map_err(|e| format!("`{path}` could not be read: {e}"))
+}
 
 #[cfg(test)]
 mod tests {

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSString};
 use objc2_web_kit::{
@@ -17,6 +17,7 @@ use objc2_web_kit::{
 use serde_json::json;
 use zeron_proto::html_render::{
     ConsoleMessage, HtmlPreview, HtmlPreviewRequest, MAX_CAPTURE_HEIGHT, PreviewAppearance,
+    PreviewInspect, PreviewRect, PreviewShot,
 };
 use zeron_rpc::{RpcError, methods};
 
@@ -65,8 +66,10 @@ pub(crate) fn spawn(engine: EngineHandle, cx: &gpui::App) -> gpui::Task<()> {
             });
             let html =
                 crate::html_render::inject_bootstrap(&request.html, &theme, font_size, false);
-            let timeout = cx.background_executor().timer(LOAD_TIMEOUT);
-            let _ = reply.send(render(&html, request.width, timeout).await);
+            let executor = cx.background_executor().clone();
+            let timeout = executor.timer(LOAD_TIMEOUT);
+            let _ = reply
+                .send(render(&html, request.width, &request.inspect, &executor, timeout).await);
         }
     })
     .detach();
@@ -234,11 +237,36 @@ fn frame(width: u32, height: u32) -> objc2_foundation::NSRect {
     )
 }
 
-async fn render(
-    html: &str,
-    width: u32,
-    timeout: impl std::future::Future<Output = ()>,
-) -> Result<HtmlPreview, String> {
+pub(crate) struct Loaded {
+    pub(crate) view: Retained<WKWebView>,
+    _policy: Retained<Policy>,
+    loaded: RefCell<Option<futures::channel::oneshot::Receiver<Result<(), String>>>>,
+}
+
+impl Loaded {
+    pub(crate) async fn ready(&self) -> Result<(), String> {
+        let loaded = self
+            .loaded
+            .borrow_mut()
+            .take()
+            .ok_or("The page was already loaded.")?;
+        loaded
+            .await
+            .map_err(|_| "The page did not load.".to_string())?
+    }
+}
+
+impl Drop for Loaded {
+    fn drop(&mut self) {
+        unsafe {
+            self.view.setNavigationDelegate(None);
+            self.view.setUIDelegate(None);
+            self.view.stopLoading();
+        }
+    }
+}
+
+pub(crate) fn load(html: &str, width: u32, height: u32) -> Result<Loaded, String> {
     let mtm = MainThreadMarker::new().ok_or("Previews run on the main thread")?;
     let (done, loaded) = futures::channel::oneshot::channel();
     let policy: Retained<Policy> = {
@@ -263,26 +291,91 @@ async fn render(
             true,
         );
         configuration.userContentController().addUserScript(&script);
-        let view =
-            WKWebView::initWithFrame_configuration(mtm.alloc(), frame(width, 600), &configuration);
+        let view = WKWebView::initWithFrame_configuration(
+            mtm.alloc(),
+            frame(width, height),
+            &configuration,
+        );
         view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*policy)));
         view.setUIDelegate(Some(ProtocolObject::from_ref(&*policy)));
         let origin = objc2_foundation::NSURL::URLWithString(&NSString::from_str(PREVIEW_ORIGIN));
         view.loadHTMLString_baseURL(&NSString::from_str(html), origin.as_deref());
         view
     };
+    Ok(Loaded {
+        view,
+        _policy: policy,
+        loaded: RefCell::new(Some(loaded)),
+    })
+}
+
+pub(crate) async fn settle(view: &WKWebView) -> Result<(), String> {
+    eval(view, SETTLE_SCRIPT).await.map(drop)
+}
+
+async fn render(
+    html: &str,
+    width: u32,
+    inspect: &PreviewInspect,
+    executor: &gpui::BackgroundExecutor,
+    timeout: impl std::future::Future<Output = ()>,
+) -> Result<HtmlPreview, String> {
+    let page = load(html, width, 600)?;
+    let view = &page.view;
     let work = async {
-        loaded
-            .await
-            .map_err(|_| "The page did not load.".to_string())??;
-        let measured = eval(&view, MEASURE_SCRIPT, mtm).await?;
+        page.ready().await?;
+        let measured = eval(view, MEASURE_SCRIPT).await?;
         let content_height = measured["height"].as_f64().unwrap_or(0.0).max(1.0).round() as u32;
         let console_messages: Vec<ConsoleMessage> =
             serde_json::from_value(measured["console"].clone()).unwrap_or_default();
         let captured_height = content_height.clamp(1, MAX_CAPTURE_HEIGHT);
         view.setFrame(frame(width, captured_height));
-        eval(&view, SETTLE_SCRIPT, mtm).await?;
-        let png = snapshot(&view, width).await?;
+        settle(view).await?;
+        let page = crate::ui_driver::web::Preview {
+            view,
+            size: (width as f32, captured_height as f32),
+            executor,
+        };
+        let crop = match (inspect.rect, &inspect.select) {
+            (Some(rect), _) => Some(rect),
+            (None, Some(select)) => {
+                let [x, y, w, h] = page.bounds(select, inspect.nth).await?;
+                Some(PreviewRect { x, y, w, h })
+            }
+            (None, None) => None,
+        }
+        .map(|rect| clip(rect, width, captured_height))
+        .transpose()?;
+        let tree = match inspect.tree {
+            true => Some(page.tree().await?),
+            false => None,
+        };
+        let png = snapshot(view, width, crop).await?;
+        let mut steps = Vec::new();
+        for step in &inspect.steps {
+            let shot = match page.step(step).await {
+                Ok(()) => {
+                    settle(view).await?;
+                    PreviewShot {
+                        step: step.clone(),
+                        png: Some(snapshot(view, width, crop).await?),
+                        tree: Some(page.tree().await?),
+                        error: None,
+                    }
+                }
+                Err(error) => PreviewShot {
+                    step: step.clone(),
+                    png: None,
+                    tree: None,
+                    error: Some(error),
+                },
+            };
+            let failed = shot.error.is_some();
+            steps.push(shot);
+            if failed {
+                break;
+            }
+        }
         Ok(HtmlPreview {
             width,
             content_height,
@@ -290,57 +383,43 @@ async fn render(
             console_messages,
             missing_images: Vec::new(),
             png,
+            tree,
+            crop,
+            steps,
         })
     };
     futures::pin_mut!(work, timeout);
-    let result = match futures::future::select(work, timeout).await {
+    match futures::future::select(work, timeout).await {
         futures::future::Either::Left((result, _)) => result,
         futures::future::Either::Right(_) => {
             Err("The page did not finish within 20 seconds; check its scripts.".into())
         }
-    };
-    unsafe {
-        view.setNavigationDelegate(None);
-        view.setUIDelegate(None);
-        view.stopLoading();
     }
-    result
 }
 
-async fn eval(
-    view: &WKWebView,
-    script: &str,
-    mtm: MainThreadMarker,
-) -> Result<serde_json::Value, String> {
-    let (tx, rx) = futures::channel::oneshot::channel();
-    let tx = RefCell::new(Some(tx));
-    let completion = block2::RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
-        let result = if let Some(error) = unsafe { error.as_ref() } {
-            Err(error.localizedDescription().to_string())
-        } else {
-            unsafe { value.as_ref() }
-                .and_then(|value| value.downcast_ref::<NSString>())
-                .ok_or_else(|| "The page did not answer.".to_string())
-                .and_then(|text| serde_json::from_str(&text.to_string()).map_err(|e| e.to_string()))
-        };
-        if let Some(tx) = tx.borrow_mut().take() {
-            let _ = tx.send(result);
-        }
-    });
-    unsafe {
-        view.callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(
-            &NSString::from_str(script),
-            None,
-            None,
-            &objc2_web_kit::WKContentWorld::pageWorld(mtm),
-            Some(&completion),
-        );
-    }
-    rx.await
+async fn eval(view: &WKWebView, script: &str) -> Result<serde_json::Value, String> {
+    crate::ui_driver::web::evaluate(view, script, true)
+        .await
         .map_err(|_| "The page did not answer.".to_string())?
 }
 
-async fn snapshot(view: &WKWebView, width: u32) -> Result<String, String> {
+fn clip(rect: PreviewRect, width: u32, height: u32) -> Result<PreviewRect, String> {
+    let x = rect.x.min(f64::from(width));
+    let y = rect.y.min(f64::from(height));
+    let w = (rect.x + rect.w).min(f64::from(width)) - x;
+    let h = (rect.y + rect.h).min(f64::from(height)) - y;
+    if w < 1.0 || h < 1.0 {
+        return Err(format!(
+            "the crop lies outside the captured {width}x{height} page"
+        ));
+    }
+    Ok(PreviewRect { x, y, w, h })
+}
+
+pub(crate) async fn capture(
+    view: &WKWebView,
+    crop: Option<PreviewRect>,
+) -> Result<Vec<u8>, String> {
     let (tx, rx) = futures::channel::oneshot::channel();
     let tx = RefCell::new(Some(tx));
     let completion = block2::RcBlock::new(
@@ -361,10 +440,30 @@ async fn snapshot(view: &WKWebView, width: u32) -> Result<String, String> {
             let _ = tx.send(tiff);
         },
     );
-    unsafe { view.takeSnapshotWithConfiguration_completionHandler(None, &completion) };
-    let tiff = rx
-        .await
-        .map_err(|_| "The screenshot was dropped.".to_string())??;
+    let configuration = crop.and_then(|rect| {
+        let mtm = MainThreadMarker::new()?;
+        let configuration = unsafe { objc2_web_kit::WKSnapshotConfiguration::new(mtm) };
+        unsafe {
+            configuration.setRect(objc2_foundation::NSRect::new(
+                objc2_foundation::NSPoint::new(rect.x, rect.y),
+                objc2_foundation::NSSize::new(rect.w, rect.h),
+            ))
+        };
+        Some(configuration)
+    });
+    unsafe {
+        view.takeSnapshotWithConfiguration_completionHandler(configuration.as_deref(), &completion)
+    };
+    rx.await
+        .map_err(|_| "The screenshot was dropped.".to_string())?
+}
+
+async fn snapshot(
+    view: &WKWebView,
+    width: u32,
+    crop: Option<PreviewRect>,
+) -> Result<String, String> {
+    let tiff = capture(view, crop).await?;
     let (tx, rx) = futures::channel::oneshot::channel();
     std::thread::spawn(move || {
         let _ = tx.send(encode_png(&tiff, width));
@@ -405,6 +504,16 @@ mod tests {
         let decoded = image::load_from_memory(&png).unwrap();
         assert_eq!(decoded.width(), 1600);
         assert!(png.starts_with(b"\x89PNG"));
+    }
+
+    #[test]
+    fn crops_stay_inside_the_captured_page() {
+        let rect = |x, y, w, h| PreviewRect { x, y, w, h };
+        assert_eq!(
+            clip(rect(700.0, 10.0, 200.0, 50.0), 800, 600).unwrap(),
+            rect(700.0, 10.0, 100.0, 50.0)
+        );
+        assert!(clip(rect(10.0, 700.0, 20.0, 20.0), 800, 600).is_err());
     }
 
     #[test]

@@ -220,6 +220,7 @@ impl BrowserSurface {
                             .text_color(theme.text_muted)
                             .role(gpui::Role::Button)
                             .aria_label(format!("Open {} preview", service.name))
+                            .aria_disabled(!available)
                             .when(available, |el| {
                                 el.cursor_pointer()
                                     .hover(|style| style.bg(crate::theme::ink(0.05)))

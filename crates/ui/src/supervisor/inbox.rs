@@ -1270,6 +1270,7 @@ impl SupervisorPage {
                     .debug_selector(move || selector.clone())
                     .role(gpui::Role::Button)
                     .aria_label(label.clone())
+                    .aria_disabled(!enabled)
                     .flex_none()
                     .flex()
                     .items_center()

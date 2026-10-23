@@ -801,7 +801,7 @@ fn switch_surface_tones(theme: &Theme, base: gpui::Hsla, thumb: bool) -> (gpui::
 
 impl RenderOnce for SwitchVisual {
     fn render(self, window: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
-        let now = std::time::Instant::now();
+        let now = crate::motion::now();
         let target = if self.on { 1.0 } else { 0.0 };
         let reduced = crate::motion::reduced_motion(cx);
         let position = window.with_global_id(self.key.into(), |id, window| {
@@ -1074,7 +1074,7 @@ pub fn tab_selection_t(
     selected: bool,
     reduced_motion: bool,
 ) -> f32 {
-    let now = std::time::Instant::now();
+    let now = crate::motion::now();
     let target = if selected { 1.0 } else { 0.0 };
     let value = window.with_global_id(key.into().into(), |id, window| {
         window.with_element_state(id, |previous: Option<TabSelectionTravel>, _| {

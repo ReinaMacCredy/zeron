@@ -734,6 +734,7 @@ fn relay_refused(method: &str) -> bool {
             | methods::RESPOND_COMPUTER_HOST_REQUEST
             | methods::PUBLISH_HTML_RENDER
             | methods::HTML_PREVIEW
+            | methods::READ_WORKSPACE_PAGE
             | methods::WATCH_HTML_PREVIEW_HOST
             | methods::RESPOND_HTML_PREVIEW
             | methods::CANCEL_COMPUTER_ACTION

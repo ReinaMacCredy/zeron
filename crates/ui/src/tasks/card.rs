@@ -181,7 +181,7 @@ impl TaskCard {
         });
         let agent = cx.new(|cx| Pickers::new_for_tasks(state.clone(), cx));
         let gallery = cx.new(|cx| ImageGallery::new(state.clone(), cx));
-        let now = Instant::now();
+        let now = motion::now();
         Self {
             gallery,
             picking: None,
@@ -246,7 +246,7 @@ impl TaskCard {
         {
             window.blur();
         }
-        let now = Instant::now();
+        let now = motion::now();
         let reduced = motion::reduced_motion(cx);
         if let Some(mut open) = self.open.take() {
             open.save = None;
@@ -372,7 +372,7 @@ impl TaskCard {
                 cx.notify();
             }),
         ];
-        let now = Instant::now();
+        let now = motion::now();
         let reduced = motion::reduced_motion(cx);
         let previous = self.open.replace(Open {
             task_id,
@@ -1371,6 +1371,7 @@ impl TaskCard {
             .debug_selector(move || id.into())
             .role(gpui::Role::Button)
             .aria_label(label.clone())
+            .aria_disabled(!enabled)
             .track_focus(&self.start_focus)
             .tab_index(0)
             .rounded_full()
@@ -1601,6 +1602,7 @@ impl TaskCard {
             .debug_selector(|| "task-card-link-only".into())
             .role(gpui::Role::Button)
             .aria_label("Link only")
+            .aria_disabled(!enabled)
             .tab_index(0)
             .rounded_full()
             .min_h(px(30.0))
@@ -2540,7 +2542,7 @@ pub(super) fn context_chip(
 
 impl Render for TaskCard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let now = Instant::now();
+        let now = motion::now();
         let expired = self.leaving.as_ref().is_some_and(|leaving| {
             leaving
                 .swap_out

@@ -41,6 +41,7 @@ use gpui::{
 use serde::{Deserialize, Serialize};
 
 pub use gpui::AnimationExt;
+pub use gpui::motion_clock::{now, since};
 
 // ---------------------------------------------------------------------------
 // Pulse clock — throttled drive for the repeating loaders
@@ -96,7 +97,7 @@ impl Global for PulseClock {}
 impl Default for PulseClock {
     fn default() -> Self {
         Self {
-            epoch: Instant::now(),
+            epoch: now(),
             leases: HashMap::new(),
             tick: 0,
             running: false,
@@ -129,7 +130,7 @@ fn pulse_delta_every(spec: &MotionSpec, view: EntityId, stride: u64, cx: &mut Ap
 
 fn pulse_phase(spec: &MotionSpec, cx: &mut App) -> f32 {
     let clock = cx.default_global::<PulseClock>();
-    (clock.epoch.elapsed().as_secs_f32() / spec.total().as_secs_f32()).fract()
+    (since(clock.epoch).as_secs_f32() / spec.total().as_secs_f32()).fract()
 }
 
 /// Activity feedback uses a slow, uniform brightness pulse when the system
@@ -638,7 +639,7 @@ impl ResizeEdgeBounce {
     pub fn new(edge: ResizeEdge) -> Self {
         Self {
             edge,
-            started: Instant::now(),
+            started: now(),
         }
     }
 }
@@ -889,14 +890,14 @@ impl DisclosureMotion {
             epoch,
             from,
             to,
-            started: std::time::Instant::now(),
+            started: now(),
         }
     }
 
     pub(crate) fn current(self) -> f32 {
         let total = Self::span().as_secs_f32();
         let raw = if total > 0.0 {
-            self.started.elapsed().as_secs_f32() / total
+            since(self.started).as_secs_f32() / total
         } else {
             1.0
         };
@@ -904,7 +905,7 @@ impl DisclosureMotion {
     }
 
     pub(crate) fn animating(self) -> bool {
-        self.started.elapsed() < Self::span() + Duration::from_millis(120)
+        since(self.started) < Self::span() + Duration::from_millis(120)
     }
 
     fn span() -> Duration {
@@ -1083,16 +1084,12 @@ thread_local! {
 
 /// Hover progress (0..1) for `key` this frame.
 pub fn hover_t(key: &str) -> f32 {
-    HOVER_FADES.with(|fades| fades.borrow_mut().value_at(key, Instant::now()))
+    HOVER_FADES.with(|fades| fades.borrow_mut().value_at(key, now()))
 }
 
 /// Record a hover flip for `key` (reduced motion snaps).
 pub fn set_hover(key: &str, hovered: bool, reduced: bool) {
-    HOVER_FADES.with(|fades| {
-        fades
-            .borrow_mut()
-            .set_at(key, hovered, reduced, Instant::now())
-    });
+    HOVER_FADES.with(|fades| fades.borrow_mut().set_at(key, hovered, reduced, now()));
 }
 
 /// An `.on_hover` listener driving the fade for `key` — pair with
@@ -1114,7 +1111,7 @@ pub fn hover_listener(
 /// Frame-drive hook: call ONCE per window frame (the shell render tail); true
 /// while any hover fade is mid-flight and frames must keep coming.
 pub fn hover_fades_active() -> bool {
-    HOVER_FADES.with(|fades| fades.borrow_mut().tick_at(Instant::now()))
+    HOVER_FADES.with(|fades| fades.borrow_mut().tick_at(now()))
 }
 
 /// Blend two colors by `t` the way the browser transitions them: component
@@ -1224,16 +1221,12 @@ thread_local! {
 
 /// Morph progress (0..1) of `key` toward `on` this frame.
 pub fn state_t(key: &str, on: bool, spec: MotionSpec, reduced: bool) -> f32 {
-    STATE_MORPHS.with(|morphs| {
-        morphs
-            .borrow_mut()
-            .value_at(key, on, spec, reduced, Instant::now())
-    })
+    STATE_MORPHS.with(|morphs| morphs.borrow_mut().value_at(key, on, spec, reduced, now()))
 }
 
 /// Frame-drive hook, beside [`hover_fades_active`]: call ONCE per window frame.
 pub fn state_morphs_active() -> bool {
-    STATE_MORPHS.with(|morphs| morphs.borrow_mut().tick_at(Instant::now()))
+    STATE_MORPHS.with(|morphs| morphs.borrow_mut().tick_at(now()))
 }
 
 // ---------------------------------------------------------------------------

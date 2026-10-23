@@ -136,7 +136,7 @@ impl StripTree {
         host: TreeHost,
         cx: &mut Context<Self>,
     ) -> Self {
-        let now = Instant::now();
+        let now = motion::now();
         Self {
             _state: cx.observe(&state, |_, _, cx| cx.notify()),
             state,
@@ -191,7 +191,7 @@ impl StripTree {
             target,
             tree::FOLD,
             motion::reduced_motion(cx),
-            Instant::now(),
+            motion::now(),
         );
         cx.notify();
     }
@@ -332,7 +332,7 @@ impl StripTree {
     }
 
     pub fn band(&mut self, cx: &mut Context<Self>) -> (f32, bool) {
-        let now = Instant::now();
+        let now = motion::now();
         let Some(rows) = self.rows(cx) else {
             return (0.0, false);
         };
@@ -349,7 +349,7 @@ impl StripTree {
         if folded {
             self.folded.insert(id.to_string());
         }
-        let now = Instant::now();
+        let now = motion::now();
         let reduced = motion::reduced_motion(cx);
         self.chevrons
             .entry(id.to_string())
@@ -458,7 +458,7 @@ impl StripTree {
 
 impl Render for StripTree {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let now = Instant::now();
+        let now = motion::now();
         let reduced = motion::reduced_motion(cx);
         let theme = match self.host {
             TreeHost::Strip | TreeHost::Intro => Theme::of(cx).for_popup(),

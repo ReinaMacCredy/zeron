@@ -147,7 +147,7 @@ impl TaskCenter {
     pub(super) fn sync_drawer(&mut self, open: bool, cx: &App) {
         if self.drawer_open != open {
             self.drawer_open = open;
-            let now = Instant::now();
+            let now = motion::now();
             self.drawer.retarget(
                 f32::from(u8::from(open)),
                 DRAWER,
@@ -169,7 +169,7 @@ impl TaskCenter {
 
     fn toggle_overview(&mut self, cx: &mut Context<Self>) {
         self.overview_open = !self.overview_open;
-        let now = Instant::now();
+        let now = motion::now();
         self.overview_turn.retarget(
             f32::from(u8::from(!self.overview_open)),
             tree::CHEVRON,
@@ -181,7 +181,7 @@ impl TaskCenter {
 
     pub(super) fn toggle_steps(&mut self, cx: &mut Context<Self>) {
         self.folded = !self.folded;
-        let now = Instant::now();
+        let now = motion::now();
         self.fold_turn.retarget(
             f32::from(u8::from(self.folded)),
             tree::CHEVRON,
@@ -192,7 +192,7 @@ impl TaskCenter {
     }
 
     fn toggle_pop(&mut self, kind: Status, cx: &mut Context<Self>) {
-        let now = Instant::now();
+        let now = motion::now();
         self.pop = match &self.pop {
             Some(pop) if pop.kind == kind => None,
             _ => {
@@ -438,7 +438,7 @@ impl TaskCenter {
         theme: &Theme,
     ) -> gpui::Div {
         let phase =
-            (live && !reduced).then(|| tree::amount::phase(self.shimmer_since, Instant::now()));
+            (live && !reduced).then(|| tree::amount::phase(self.shimmer_since, motion::now()));
         div()
             .flex_1()
             .min_w_0()
@@ -548,7 +548,7 @@ impl TaskCenter {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let now = Instant::now();
+        let now = motion::now();
         let (brand, agent) = {
             let state = self.state.read(cx);
             let chat = linked_chat(&state.chats, task);
@@ -2387,7 +2387,7 @@ impl TaskCenter {
             self.pop = None;
         }
         if self.leaving.as_ref().is_some_and(|leave| {
-            leave.grow.settled_at(Instant::now()) && leave.fade.settled_at(Instant::now())
+            leave.grow.settled_at(motion::now()) && leave.fade.settled_at(motion::now())
         }) {
             self.leaving = None;
         }
@@ -3377,7 +3377,7 @@ impl TaskCenter {
             .gap(px(6.0))
             .min_h(px(20.0))
             .child(self.amount(tokens, live, time, reduced, theme))
-            .children((kids > 0).then(|| self.fold_button(kids, Instant::now(), theme, cx)));
+            .children((kids > 0).then(|| self.fold_button(kids, motion::now(), theme, cx)));
         self.card(selected, theme)
             .gap(px(7.0))
             .id("task-center-lead")

@@ -119,22 +119,39 @@ impl SidecarEntry {
         self
     }
 
-    fn tooltip(&self) -> SharedString {
-        let label = match &self.suffix {
+    fn name(&self) -> SharedString {
+        match &self.suffix {
             Some(suffix) => format!("{}{suffix}", self.label).into(),
             None => self.label.clone(),
-        };
-        match &self.value {
-            Some(
-                SidecarValue::Text(v)
-                | SidecarValue::Mono(v)
-                | SidecarValue::Tone(v, _)
-                | SidecarValue::Dot(Some(v), _),
-            ) => format!("{label}: {v}").into(),
-            Some(SidecarValue::Meter(fraction, _)) => {
-                format!("{label}: {}%", (fraction * 100.0).round() as u32).into()
+        }
+    }
+
+    fn value_text(&self) -> Option<SharedString> {
+        match self.value.as_ref()? {
+            SidecarValue::Text(v)
+            | SidecarValue::Mono(v)
+            | SidecarValue::Tone(v, _)
+            | SidecarValue::Dot(Some(v), _) => Some(v.clone()),
+            SidecarValue::Meter(fraction, _) => {
+                Some(format!("{}%", (fraction * 100.0).round() as u32).into())
             }
-            _ => label,
+            SidecarValue::Counts(files, add, del) => {
+                let files = if *files == 1 {
+                    "1 file".to_string()
+                } else {
+                    format!("{files} files")
+                };
+                Some(format!("{files} +{add} −{del}").into())
+            }
+            SidecarValue::Dot(None, _) => None,
+        }
+    }
+
+    fn tooltip(&self) -> SharedString {
+        let label = self.name();
+        match (&self.value, self.value_text()) {
+            (Some(SidecarValue::Counts(..)), _) | (_, None) => label,
+            (_, Some(value)) => format!("{label}: {value}").into(),
         }
     }
 }
@@ -202,7 +219,7 @@ impl Shell {
                 self.sidecar_collapsed_now = Some(collapsed);
                 self.sidecar_flip = Some(SidecarFlip {
                     from,
-                    started: self.render_time.unwrap_or_else(std::time::Instant::now),
+                    started: self.render_time.unwrap_or_else(motion::now),
                 });
             }
             Some(_) => {}
@@ -211,7 +228,7 @@ impl Shell {
         if !(popover_mode && collapsed) && self.sidecar_popover_open() {
             self.sidecar_popover = Some(PopoverFade {
                 open: false,
-                started: std::time::Instant::now(),
+                started: motion::now(),
             });
         }
         self.sidecar_width_now().min(full_column)
@@ -253,7 +270,7 @@ impl Shell {
     fn sidecar_popover_mounted(&self) -> bool {
         self.sidecar_popover.is_some_and(|fade| {
             fade.open
-                || fade.started.elapsed()
+                || motion::since(fade.started)
                     < motion::SIDECAR_POPOVER_SLIDE
                         .total()
                         .mul_f32(motion::speed_scale())
@@ -266,7 +283,7 @@ impl Shell {
         }
         self.sidecar_popover = Some(PopoverFade {
             open,
-            started: std::time::Instant::now(),
+            started: motion::now(),
         });
         cx.notify();
     }
@@ -1019,6 +1036,8 @@ impl Shell {
         let mut root = div()
             .id("sidecar")
             .debug_selector(|| "sidecar".into())
+            .role(gpui::Role::Group)
+            .aria_label("Live state")
             .relative()
             .flex_none()
             .h_full()
@@ -1073,6 +1092,8 @@ impl Shell {
         let collapse = div()
             .id("sidecar-collapse")
             .debug_selector(|| "sidecar-collapse".into())
+            .role(gpui::Role::Button)
+            .aria_label("Collapse live state")
             .absolute()
             .top_0()
             .right(px(10.0))
@@ -1131,6 +1152,13 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         div()
+            .id(SharedString::from(format!(
+                "sidecar-{}-section-{}",
+                surface.tag(),
+                section.heading
+            )))
+            .role(gpui::Role::Group)
+            .aria_label(section.heading.clone())
             .flex()
             .flex_col()
             .flex_none()
@@ -1155,6 +1183,8 @@ impl Shell {
                         div()
                             .id("sidecar-computer-thumbnail")
                             .debug_selector(|| "sidecar-computer-thumbnail".into())
+                            .role(gpui::Role::Button)
+                            .aria_label("Pop out computer preview")
                             .flex_none()
                             .mx(px(4.0))
                             .mt(px(4.0))
@@ -1199,6 +1229,12 @@ impl Shell {
         div()
             .id(SharedString::from(id))
             .debug_selector(move || selector.clone())
+            .role(gpui::Role::Button)
+            .aria_label(fold.label.clone())
+            .aria_expanded(open)
+            .when(fold.failed > 0, |el| {
+                el.aria_description(format!("{} failed", fold.failed))
+            })
             .flex()
             .flex_row()
             .flex_none()
@@ -1255,9 +1291,17 @@ impl Shell {
             .value
             .as_ref()
             .map(|value| sidecar_value(theme, value));
+        let actionable = interactive && entry.action.is_some();
         let mut row = div()
             .id(SharedString::from(id))
             .debug_selector(move || selector.clone())
+            .role(if actionable {
+                gpui::Role::Button
+            } else {
+                gpui::Role::Group
+            })
+            .aria_label(entry.name())
+            .when_some(entry.value_text(), |el, value| el.aria_value(value))
             .group(group.clone())
             .flex()
             .flex_row()
@@ -1323,6 +1367,8 @@ impl Shell {
                     div()
                         .id(SharedString::from(id))
                         .debug_selector(move || selector.clone())
+                        .role(gpui::Role::Button)
+                        .aria_label("Edit action")
                         .size(px(22.0))
                         .flex_none()
                         .flex()
@@ -1391,6 +1437,8 @@ impl Shell {
                 div()
                     .id(SharedString::from(key))
                     .debug_selector(move || selector.clone())
+                    .role(gpui::Role::Button)
+                    .aria_label(tooltip.clone())
                     .size(px(24.0))
                     .flex()
                     .flex_none()
@@ -1536,6 +1584,8 @@ impl Shell {
                 div()
                     .id("sidecar-popover-close")
                     .debug_selector(|| "sidecar-popover-close".into())
+                    .role(gpui::Role::Button)
+                    .aria_label("Close live state")
                     .group("sidecar-popover-close")
                     .size(px(24.0))
                     .flex()

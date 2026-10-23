@@ -34,7 +34,7 @@ pub(super) struct TaskSlide {
 
 impl TaskSlide {
     pub(super) fn resting(route: Route) -> Self {
-        let now = std::time::Instant::now();
+        let now = motion::now();
         Self {
             tween: motion::Tween::at(Self::rest(route), now),
             under: Route::Tasks,

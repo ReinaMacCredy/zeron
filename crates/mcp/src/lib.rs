@@ -494,15 +494,20 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "html_preview",
-            "description": format!("Lay out an HTML page in Zeron's own web engine (the one that shows it in the thread) and get back a PNG screenshot, contentHeight (the height the page needs at this width), and its console output: log, info, warning, error, and uncaught exceptions. console.log is a fine way to report your own checks. Use it to check and iterate on a page before html_render. Needs the Zeron desktop app open on this machine. {} The page gets the theme variables and layout described in html_render.", html_render::PAGE_RULES),
+            "description": format!("Lay out an HTML page in Zeron's own web engine (the one that shows it in the thread) and get back a PNG screenshot, contentHeight (the height the page needs at this width), and its console output: log, info, warning, error, and uncaught exceptions. console.log is a fine way to report your own checks. Use it to check and iterate on a page before html_render. Pass `html`, or `path` for an .html file in this thread's folder. `tree: true` adds the page's elements as UI driver tree lines (refs w1-<n>, every line marked `web` because the page wrote it). `rect` or `select` crops the screenshot. `steps` acts on the page in UI driver syntax and returns a screenshot and tree after each step; a failed step stops the rest. Steps act through the DOM, so events they fire have isTrusted false. Needs the Zeron desktop app open on this machine. {} The page gets the theme variables and layout described in html_render.", html_render::PAGE_RULES),
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "html": { "type": "string", "maxLength": html_render::MAX_HTML_BYTES, "description": "A complete, self-contained HTML document." },
+                    "html": { "type": "string", "maxLength": html_render::MAX_HTML_BYTES, "description": "A complete, self-contained HTML document. Give this or `path`." },
+                    "path": { "type": "string", "description": "An .html or .htm file inside this thread's folder, relative to it or absolute. Files outside it are refused." },
+                    "tree": { "type": "boolean", "description": "Also return the page's elements as tree lines." },
+                    "rect": { "type": "object", "properties": { "x": { "type": "number", "minimum": 0 }, "y": { "type": "number", "minimum": 0 }, "w": { "type": "number", "minimum": 1 }, "h": { "type": "number", "minimum": 1 } }, "required": ["x", "y", "w", "h"], "additionalProperties": false, "description": "Crop the screenshot to this region, in CSS pixels from the page's top-left." },
+                    "select": { "type": "string", "description": "Crop the screenshot to the element this UI driver selector names, e.g. `Button \"Save\"`." },
+                    "nth": { "type": "integer", "minimum": 0, "description": "Which match of `select`, 0-based, when it matches several." },
+                    "steps": { "type": "array", "maxItems": html_render::MAX_PREVIEW_STEPS, "items": { "type": "object", "properties": { "action": { "type": "string", "enum": ["click", "type", "key", "wait"] } }, "required": ["action"] }, "description": "In order: {action:\"click\", select|ref, nth?}, {action:\"type\", text, select|ref?}, {action:\"key\", keys:\"enter\"}, {action:\"wait\", for:\"ms\", ms} or for:\"select\"|\"text\"|\"gone\" as in ui_driver wait." },
                     "width": { "type": "integer", "minimum": html_render::MIN_PREVIEW_WIDTH, "maximum": html_render::MAX_PREVIEW_WIDTH, "description": format!("Viewport width in CSS pixels. Defaults to {}, the reply column; use about 390 to check phones.", html_render::COLUMN_WIDTH) },
                     "appearance": { "type": "string", "enum": ["dark", "light"], "description": "Theme to preview. Defaults to dark." }
                 },
-                "required": ["html"],
                 "additionalProperties": false
             },
             "annotations": { "title": "Preview HTML", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true }
@@ -726,12 +731,49 @@ impl ThreadTools {
             .lock()
             .unwrap()
             .insert(key.clone(), cancel);
+        let call = async {
+            match self.compare_page(tool, args).await {
+                Ok(args) => ui_driver::mcp_result(tool, &args, self.ipc_port).await,
+                Err(text) => {
+                    json!({ "content": [{ "type": "text", "text": text }], "isError": true })
+                }
+            }
+        };
         let result = tokio::select! {
-            result = ui_driver::mcp_result(tool, args, self.ipc_port) => Some(result),
+            result = call => Some(result),
             _ = cancelled => None,
         };
         self.ui_driver_calls.lock().unwrap().remove(&key);
         result
+    }
+
+    async fn compare_page(&self, tool: ui_driver::Tool, args: &Value) -> Result<Value, String> {
+        let Some(map) = args
+            .as_object()
+            .filter(|_| tool == ui_driver::Tool::Observe)
+        else {
+            return Ok(args.clone());
+        };
+        let Some(path) = ui_driver::compare_path(map)? else {
+            return Ok(args.clone());
+        };
+        let secret = self
+            .run_secret
+            .as_deref()
+            .ok_or("ui_driver `compare` reads `path` only in a live Zeron run; pass `html`")?;
+        let page = self
+            .call_engine(
+                methods::READ_WORKSPACE_PAGE,
+                json!({ "chatId": self.chat_id, "runSecret": secret, "path": path }),
+            )
+            .await?;
+        let html = page["html"]
+            .as_str()
+            .ok_or_else(|| format!("{}: no `html` in {page}", methods::READ_WORKSPACE_PAGE))?;
+        let mut map = map.clone();
+        map.remove("path");
+        map.insert("html".into(), json!(html));
+        Ok(Value::Object(map))
     }
 
     async fn tools(&self) -> Value {
@@ -1825,9 +1867,18 @@ impl ThreadTools {
                 .run_secret
                 .as_deref()
                 .ok_or("html_preview needs a live Zeron run")?;
-            let html = args["html"].as_str().ok_or("html must be a string")?;
-            let mut params = json!({ "chatId": self.chat_id, "runSecret": secret, "html": html });
-            for key in ["width", "appearance"] {
+            let mut params = json!({ "chatId": self.chat_id, "runSecret": secret });
+            for key in [
+                "html",
+                "path",
+                "width",
+                "appearance",
+                "tree",
+                "rect",
+                "select",
+                "nth",
+                "steps",
+            ] {
                 if let Some(value) = args.get(key).filter(|value| !value.is_null()) {
                     params[key] = value.clone();
                 }
@@ -1837,15 +1888,45 @@ impl ThreadTools {
         .await;
         match result {
             Ok(mut preview) => {
-                let png = preview
-                    .as_object_mut()
-                    .and_then(|preview| preview.remove("png"))
-                    .unwrap_or_default();
+                let mut summary = preview.clone();
+                let take = |value: &mut Value, key: &str| {
+                    value.as_object_mut().and_then(|value| value.remove(key))
+                };
+                let png = take(&mut preview, "png").unwrap_or_default();
+                let tree = take(&mut summary, "tree");
+                take(&mut summary, "png");
+                let mut content = vec![
+                    Value::Null,
+                    json!({ "type": "image", "data": png, "mimeType": "image/png" }),
+                ];
+                if let Some(Value::String(tree)) = tree {
+                    content.push(json!({ "type": "text", "text": tree }));
+                }
+                let steps = match summary.get_mut("steps") {
+                    Some(Value::Array(steps)) => steps.iter_mut().collect(),
+                    _ => Vec::new(),
+                };
+                for (i, step) in steps.into_iter().enumerate() {
+                    let png = take(step, "png");
+                    let tree = take(step, "tree");
+                    content
+                        .push(json!({ "type": "text", "text": format!("step {}: {step}", i + 1) }));
+                    if let Some(png) = png {
+                        content
+                            .push(json!({ "type": "image", "data": png, "mimeType": "image/png" }));
+                    }
+                    if let Some(Value::String(tree)) = tree {
+                        content.push(json!({ "type": "text", "text": tree }));
+                    }
+                }
+                if let Some(Value::Array(steps)) = preview.get_mut("steps") {
+                    for step in steps {
+                        take(step, "png");
+                    }
+                }
+                content[0] = json!({ "type": "text", "text": summary.to_string() });
                 json!({
-                    "content": [
-                        { "type": "text", "text": preview.to_string() },
-                        { "type": "image", "data": png, "mimeType": "image/png" },
-                    ],
+                    "content": content,
                     "structuredContent": preview,
                     "isError": false,
                 })
@@ -3903,11 +3984,21 @@ mod tests {
                             "html_preview needs the Zeron desktop app open on this machine".into(),
                         ));
                     }
-                    Ok(RpcReply::Value(json!({
+                    let mut preview = json!({
                         "width": 736, "contentHeight": 310, "capturedHeight": 310,
                         "consoleMessages": [{ "level": "error", "text": "x is not defined" }],
                         "png": "iVBORw0KGgo",
-                    })))
+                    });
+                    if params["tree"] == true {
+                        preview["tree"] = json!(
+                            "page \"T\" 736x310 nodes=1/1 focus=none\nw1-0 WebView \"T\" web"
+                        );
+                        preview["steps"] = json!([
+                            { "step": params["steps"][0], "png": "c3RlcA", "tree": "w1-3 Button \"B\" web" },
+                            { "step": params["steps"][1], "error": "no element matches `Button \"Z\"`" },
+                        ]);
+                    }
+                    Ok(RpcReply::Value(preview))
                 }
                 methods::GET_TOOL_SETTINGS if params["chatId"] == "a" => Ok(RpcReply::Value(
                     json!({ "settings": {}, "disabled": self.disabled }),
@@ -5307,10 +5398,49 @@ mod tests {
             .call(json!(2), "html_preview", json!({ "html": "<p>broken</p>" }))
             .await;
         assert_eq!(failed["result"]["isError"], true);
+        let steps = json!([
+            { "action": "click", "select": "Button \"B\"" },
+            { "action": "click", "select": "Button \"Z\"" },
+        ]);
+        let stepped = pipe
+            .call(
+                json!(3),
+                "html_preview",
+                json!({ "path": "mock/a.html", "tree": true, "select": "Button", "steps": steps }),
+            )
+            .await;
+        let content = stepped["result"]["content"].as_array().unwrap();
+        let kinds: Vec<&str> = content
+            .iter()
+            .map(|c| c["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            ["text", "image", "text", "text", "image", "text", "text"]
+        );
+        assert!(content[2]["text"].as_str().unwrap().starts_with("page "));
+        assert_eq!(content[4]["data"], "c3RlcA");
+        assert!(
+            content[6]["text"]
+                .as_str()
+                .unwrap()
+                .contains("no element matches")
+        );
+        let summary = content[0]["text"].as_str().unwrap();
+        assert!(!summary.contains("c3RlcA") && !summary.contains("WebView"));
+        assert!(
+            stepped["result"]["structuredContent"]["steps"][0]
+                .get("png")
+                .is_none()
+        );
         let sent = logged(&rig.calls, methods::HTML_PREVIEW);
         assert_eq!(sent[0]["width"], 390);
         assert_eq!(sent[0]["appearance"], "light");
         assert_eq!(sent[0]["runSecret"], "live");
+        assert_eq!(sent[2]["path"], "mock/a.html");
+        assert!(sent[2].get("html").is_none());
+        assert_eq!(sent[2]["select"], "Button");
+        assert_eq!(sent[2]["steps"], steps);
     }
 
     #[tokio::test]

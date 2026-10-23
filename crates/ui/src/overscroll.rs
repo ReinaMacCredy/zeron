@@ -401,7 +401,7 @@ impl Element for Overscroll {
             state.viewport = f32::from(bounds.size.height);
             if !enabled {
                 state.reset();
-            } else if state.tick(Instant::now()) {
+            } else if state.tick(crate::motion::now()) {
                 window.request_animation_frame();
             }
             state.offset
@@ -441,7 +441,7 @@ impl Element for Overscroll {
                 };
                 let mut band = band.borrow_mut();
                 let before = (band.offset, band.spring.is_some());
-                let now = Instant::now();
+                let now = crate::motion::now();
                 let consumed = if hitbox.should_handle_scroll(window) {
                     let delta = point(f32::from(delta.x), f32::from(delta.y));
                     band.wheel(event.touch_phase, delta, source.room(), now)

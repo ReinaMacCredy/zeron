@@ -126,9 +126,8 @@ impl Toast {
 
     fn deadline(&self) -> Option<Instant> {
         match (self.closing, self.resumed) {
-            (Some(at), _) => Some(at + EXIT),
             (None, Some(since)) => Some(since + self.remaining),
-            (None, None) => None,
+            _ => None,
         }
     }
 }
@@ -171,7 +170,7 @@ fn push(cx: &mut App, kind: ToastKind, message: SharedString) {
             id,
             kind,
             message,
-            created: now,
+            created: crate::motion::now(),
             remaining: DURATION,
             resumed: (!hovered).then_some(now),
             closing: None,
@@ -232,7 +231,7 @@ pub fn messages(cx: &App) -> Vec<SharedString> {
 }
 
 fn dismiss(id: u64, cx: &mut App) {
-    let now = Instant::now();
+    let now = crate::motion::now();
     if let Some(toast) = cx
         .default_global::<ToastStore>()
         .toasts
@@ -263,7 +262,7 @@ fn set_hovered(hovered: bool, cx: &mut App) {
 
 /// Advance the stack: expire, remove finished exits, and pause while the
 /// window is inactive. Returns whether anything is still animating.
-fn tick(store: &mut ToastStore, active: bool, now: Instant) -> bool {
+fn tick(store: &mut ToastStore, active: bool, now: Instant, frame: Instant) -> bool {
     let paused = store.hovered || !active;
     for toast in &mut store.toasts {
         if paused {
@@ -272,13 +271,13 @@ fn tick(store: &mut ToastStore, active: bool, now: Instant) -> bool {
             toast.resume(now);
         }
         if toast.closing.is_none() && toast.expired(now) {
-            toast.closing = Some(now);
+            toast.closing = Some(frame);
         }
     }
     store.toasts.retain(|toast| {
         toast
             .closing
-            .is_none_or(|at| now.saturating_duration_since(at) < EXIT)
+            .is_none_or(|at| frame.saturating_duration_since(at) < EXIT)
     });
     if store.toasts.is_empty() {
         store.hovered = false;
@@ -286,10 +285,10 @@ fn tick(store: &mut ToastStore, active: bool, now: Instant) -> bool {
     }
     store.toasts.iter().any(|toast| {
         toast.closing.is_some()
-            || now.saturating_duration_since(toast.created) < MOVE
-            || toast.bottom.is_some_and(|glide| glide.moving(now))
-            || toast.clip.is_some_and(|glide| glide.moving(now))
-    }) || store.expand.is_some_and(|glide| glide.moving(now))
+            || frame.saturating_duration_since(toast.created) < MOVE
+            || toast.bottom.is_some_and(|glide| glide.moving(frame))
+            || toast.clip.is_some_and(|glide| glide.moving(frame))
+    }) || store.expand.is_some_and(|glide| glide.moving(frame))
 }
 
 /// Wake the window at the next expiry; animation frames cover the rest.
@@ -328,7 +327,7 @@ fn kind_icon(kind: ToastKind, theme: &Theme) -> AnyElement {
 
 /// The toaster for this window, or `None` when nothing is showing.
 pub fn render_toaster(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
-    let now = Instant::now();
+    let now = crate::motion::now();
     let reduced = cx.reduce_motion();
     let active = window.is_window_active();
     let theme = Theme::of(cx).for_popup();
@@ -338,7 +337,7 @@ pub fn render_toaster(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
             return None;
         }
         let store = cx.global_mut::<ToastStore>();
-        tick(store, active, now)
+        tick(store, active, Instant::now(), now)
     };
     let store = cx.global_mut::<ToastStore>();
     if store.toasts.is_empty() {
@@ -650,23 +649,68 @@ mod tests {
         let mut store = ToastStore::default();
         toast(&mut store, "one", start);
         // Hovering banks the elapsed second and stops the clock.
-        tick(&mut store, true, start + Duration::from_secs(1));
+        tick(
+            &mut store,
+            true,
+            start + Duration::from_secs(1),
+            start + Duration::from_secs(1),
+        );
         store.hovered = true;
-        tick(&mut store, true, start + Duration::from_secs(1));
-        tick(&mut store, true, start + Duration::from_secs(30));
+        tick(
+            &mut store,
+            true,
+            start + Duration::from_secs(1),
+            start + Duration::from_secs(1),
+        );
+        tick(
+            &mut store,
+            true,
+            start + Duration::from_secs(30),
+            start + Duration::from_secs(30),
+        );
         assert!(store.toasts[0].closing.is_none(), "paused while hovered");
         store.hovered = false;
         // An inactive window holds the clock too.
-        tick(&mut store, false, start + Duration::from_secs(31));
-        tick(&mut store, false, start + Duration::from_secs(60));
+        tick(
+            &mut store,
+            false,
+            start + Duration::from_secs(31),
+            start + Duration::from_secs(31),
+        );
+        tick(
+            &mut store,
+            false,
+            start + Duration::from_secs(60),
+            start + Duration::from_secs(60),
+        );
         assert!(store.toasts[0].closing.is_none(), "paused while inactive");
         // Three seconds remain once resumed.
-        tick(&mut store, true, start + Duration::from_secs(61));
-        tick(&mut store, true, start + Duration::from_millis(63_900));
+        tick(
+            &mut store,
+            true,
+            start + Duration::from_secs(61),
+            start + Duration::from_secs(61),
+        );
+        tick(
+            &mut store,
+            true,
+            start + Duration::from_millis(63_900),
+            start + Duration::from_millis(63_900),
+        );
         assert!(store.toasts[0].closing.is_none());
-        tick(&mut store, true, start + Duration::from_millis(64_100));
+        tick(
+            &mut store,
+            true,
+            start + Duration::from_millis(64_100),
+            start + Duration::from_millis(64_100),
+        );
         assert!(store.toasts[0].closing.is_some(), "expires on time");
-        tick(&mut store, true, start + Duration::from_millis(64_400));
+        tick(
+            &mut store,
+            true,
+            start + Duration::from_millis(64_400),
+            start + Duration::from_millis(64_400),
+        );
         assert!(store.toasts.is_empty(), "removed after its exit");
     }
 

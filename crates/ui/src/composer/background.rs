@@ -633,7 +633,7 @@ impl Composer {
 
         let theme = Theme::of(cx).clone();
         let stoppable = harness == Some(HarnessId::ClaudeCode);
-        let now = Instant::now();
+        let now = motion::now();
         let now_ms = chrono::Utc::now().timestamp_millis();
         let reduced = motion::reduced_motion(cx);
 
@@ -767,7 +767,7 @@ impl Composer {
 
     pub(super) fn open_roster(&mut self, cx: &mut Context<Self>) {
         self.drop_ask_tray(cx);
-        self.background.roster.open(Instant::now());
+        self.background.roster.open(motion::now());
         if self.background.shells.begin_close() {
             popover::reap_popup(cx, |this: &mut Composer| &mut this.background.shells);
         }

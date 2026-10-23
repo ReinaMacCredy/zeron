@@ -287,7 +287,7 @@ impl TaskCenter {
         let pulse = if reduced {
             1.0
         } else {
-            let t = Instant::now().saturating_duration_since(self.shimmer_since);
+            let t = motion::now().saturating_duration_since(self.shimmer_since);
             0.55 + 0.45 * (t.as_secs_f32() * std::f32::consts::TAU / 1.6).sin().abs()
         };
         let chart_box = self.runs.chart.clone();
@@ -601,8 +601,7 @@ impl TaskCenter {
             let ix = self.picked(nodes);
             self.render_detail(nodes, ix, reduced, theme, cx)
         });
-        let drawer =
-            detail.and_then(|detail| self.render_drawer(detail, Instant::now(), theme, cx));
+        let drawer = detail.and_then(|detail| self.render_drawer(detail, motion::now(), theme, cx));
         div()
             .flex_1()
             .min_h_0()

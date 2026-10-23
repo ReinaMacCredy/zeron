@@ -1,0 +1,31 @@
+{
+  "name": "u6-recorded",
+  "steps": [
+    {
+      "select": "Button \"Not now\"",
+      "ui": "click"
+    },
+    {
+      "select": "Button \"Settings\"",
+      "for": "select",
+      "ui": "wait"
+    },
+    {
+      "select": "Button \"Settings\"",
+      "ui": "click"
+    },
+    {
+      "select": "Switch \"Compact mode\"",
+      "for": "select",
+      "ui": "wait"
+    },
+    {
+      "select": "Switch \"Compact mode\"",
+      "ui": "click"
+    },
+    {
+      "select": "Switch \"Compact mode\"",
+      "ui": "click"
+    }
+  ]
+}

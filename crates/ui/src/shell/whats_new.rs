@@ -73,7 +73,7 @@ pub(super) fn boot_card(settings: &mut UiSettings, cx: &mut App) -> Option<Whats
     Some(WhatsNewCard {
         entry,
         gradient_hero,
-        shown: Instant::now(),
+        shown: motion::now(),
     })
 }
 
@@ -219,7 +219,7 @@ impl Shell {
             view,
             entry,
             expanded: std::collections::HashSet::from([entry.version.as_str()]),
-            shown: Instant::now(),
+            shown: motion::now(),
         });
         cx.notify();
     }

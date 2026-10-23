@@ -593,7 +593,7 @@ impl Shell {
                     cx,
                 )
             });
-        let frame_time = self.render_time.unwrap_or_else(std::time::Instant::now);
+        let frame_time = self.render_time.unwrap_or_else(motion::now);
         let artwork_opacity = self.chat_artwork_ready.opacity(
             artwork.as_ref().map(|image| image.id),
             self.reduced_motion,

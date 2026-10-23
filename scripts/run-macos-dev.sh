@@ -3,6 +3,7 @@
 # open: this bundle has a separate LaunchServices/TCC identity, data directory,
 # and engine IPC port.
 # Set ZERON_DEV_BUILD_ONLY=1 to prepare the signed bundle without launching it.
+# Set ZERON_DEV_PROFILE=release to bundle a release build instead of a debug one.
 
 set -euo pipefail
 
@@ -16,6 +17,7 @@ CONTENTS="$APP/Contents"
 DATA_DIR="${ZERON_DEV_DATA_DIR:-$DEV_ROOT/data}"
 IPC_PORT="${ZERON_DEV_IPC_PORT:-49777}"
 BUNDLE_ID="${ZERON_DEV_BUNDLE_ID:-sh.zeron.app.dev}"
+PROFILE="${ZERON_DEV_PROFILE:-debug}"
 
 if pgrep -f -x "$CONTENTS/MacOS/zeron" >/dev/null 2>&1; then
   echo "Zeron Dev is already running. Quit it before rebuilding the signed bundle." >&2
@@ -23,11 +25,15 @@ if pgrep -f -x "$CONTENTS/MacOS/zeron" >/dev/null 2>&1; then
 fi
 
 cd "$ROOT"
-cargo build -p zeron
+case "$PROFILE" in
+  debug) cargo build -p zeron ;;
+  release) cargo build -p zeron --release ;;
+  *) echo "ZERON_DEV_PROFILE must be debug or release, not $PROFILE" >&2; exit 1 ;;
+esac
 
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources/cua-driver" "$DATA_DIR"
 TARGET_DIR="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
-install -m 755 "$TARGET_DIR/debug/zeron" "$CONTENTS/MacOS/zeron"
+install -m 755 "$TARGET_DIR/$PROFILE/zeron" "$CONTENTS/MacOS/zeron"
 "$ROOT/scripts/build-cua-driver.sh" "$CONTENTS/Resources/cua-driver/cua-driver" >/dev/null
 sed "s/__VERSION__/$VERSION/g" "$ROOT/dist/macos/Info-dev.plist" >"$CONTENTS/Info.plist"
 plutil -replace CFBundleIdentifier -string "$BUNDLE_ID" "$CONTENTS/Info.plist"

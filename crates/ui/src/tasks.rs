@@ -2230,7 +2230,7 @@ impl Render for TasksPage {
         let theme = Theme::of(cx).clone();
         let (mut open, mut done) = self.rows(cx);
         let view = tasks_view(cx);
-        let now = Instant::now();
+        let now = motion::now();
         let reduced = motion::reduced_motion(cx);
         let mut trees = match view {
             TasksView::List => tree_index(self.state.read(cx), Utc::now()),

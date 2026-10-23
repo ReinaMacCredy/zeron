@@ -875,6 +875,46 @@ impl ToolDetail {
             Self::Output { .. } | Self::Thought { .. } => None,
         }
     }
+
+    fn a11y(&self) -> (&'static str, String) {
+        let lines = |lines: Vec<String>| lines.join("\n");
+        match self {
+            Self::Output {
+                lines: output,
+                truncated_by,
+            } => {
+                let mut text = lines(output.iter().map(ToString::to_string).collect());
+                if *truncated_by > 0 {
+                    text += &format!("\n… {truncated_by} more lines");
+                }
+                ("Output", text)
+            }
+            Self::Thought { lines: thought } => (
+                "Thought",
+                lines(
+                    thought
+                        .iter()
+                        .map(|line| line.iter().map(|run| run.text.as_str()).collect())
+                        .collect(),
+                ),
+            ),
+            Self::Diff { file, .. } => (
+                "Changes",
+                format!("{} +{} −{}", file.path, file.additions, file.deletions),
+            ),
+            Self::Stats { stats } => (
+                "Changes",
+                lines(
+                    stats
+                        .iter()
+                        .map(|stat| {
+                            format!("{} +{} −{}", stat.path, stat.additions, stat.deletions)
+                        })
+                        .collect(),
+                ),
+            ),
+        }
+    }
 }
 
 /// Max verbatim output lines per chip before the counted tail row.
@@ -1224,6 +1264,7 @@ pub enum RowKind {
         /// answer as a resumed turn).
         header: SharedString,
         resolved: bool,
+        answer: Option<SharedString>,
     },
     ErrorChip {
         message: SharedString,
@@ -1332,14 +1373,24 @@ fn row_a11y(kind: &RowKind) -> Option<(SharedString, SharedString)> {
         RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => {
             ("", block_plain_text(&tree.blocks.get(*block_ix)?.block))
         }
-        RowKind::InputChip { header, resolved } => (
-            "Question: ",
-            if *resolved {
-                header.to_string()
+        RowKind::InputChip {
+            header,
+            resolved,
+            answer,
+        } => {
+            let text = if *resolved {
+                header.trim()
             } else {
-                "Awaiting your answer…".to_owned()
-            },
-        ),
+                "Awaiting your answer…"
+            };
+            let value = answer.as_deref().map(str::trim).unwrap_or(text);
+            return (!text.is_empty()).then(|| {
+                (
+                    format!("Question: {}", a11y_clip(text, 200)).into(),
+                    a11y_clip(value, 4000).into(),
+                )
+            });
+        }
         _ => return None,
     };
     let text = text.trim();
@@ -2306,6 +2357,7 @@ pub fn rows_for_entry(
                         id: part_id,
                         questions,
                         resolved,
+                        answers,
                         ..
                     } => {
                         // Model-generated header onto the one-line chip.
@@ -2316,13 +2368,27 @@ pub fn rows_for_entry(
                                 .unwrap_or_else(|| "Question".to_string()),
                         )
                         .into();
+                        let answer = answers
+                            .as_ref()
+                            .map(|answers| {
+                                answers
+                                    .iter()
+                                    .map(|answer| answer.labels.join(", "))
+                                    .filter(|labels| !labels.is_empty())
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
+                            })
+                            .filter(|answer| !answer.is_empty())
+                            .map(SharedString::from);
+                        let hashed = format!("{header}\0{}", answer.as_deref().unwrap_or(""));
                         rows.push(Row {
                             id: format!("{}#{}", entry.id, part_id).into(),
-                            version: fnv1a(header.as_bytes()) << 1 | *resolved as u64,
+                            version: fnv1a(hashed.as_bytes()) << 1 | *resolved as u64,
                             turn_start: false,
                             kind: RowKind::InputChip {
                                 header,
                                 resolved: *resolved,
+                                answer,
                             },
                             entry_id: entry_id.clone(),
                             timestamp: None,
@@ -6007,7 +6073,8 @@ impl Transcript {
                 };
                 match fold.toggled_at {
                     Some(at) if !motion::reduced_motion(cx) && fold.duration_ms > 0 => {
-                        let raw = (at.elapsed().as_secs_f32() * 1000.0 / fold.duration_ms as f32)
+                        let raw = (motion::since(at).as_secs_f32() * 1000.0
+                            / fold.duration_ms as f32)
                             .clamp(0.0, 1.0);
                         let progress = user_resize_spec(fold.user_expansion_height).progress(raw);
                         motion::lerp(fold.user_expansion_height - target, target, progress)
@@ -6139,7 +6206,7 @@ impl Transcript {
                 match anchor_bounds {
                     Some(b) => {
                         let err = f32::from(b.top()) - (f32::from(viewport.top()) + inset);
-                        let now = Instant::now();
+                        let now = motion::now();
                         let frames = match self.own_turn_last_tick {
                             Some(last) => (now.duration_since(last).as_secs_f32() * 1000.0
                                 / SPRING_FRAME_MS)
@@ -6170,7 +6237,7 @@ impl Transcript {
             }
             return;
         }
-        let now = Instant::now();
+        let now = motion::now();
         let frames = match self.own_turn_last_tick {
             Some(last) => (now.duration_since(last).as_secs_f32() * 1000.0 / SPRING_FRAME_MS)
                 .min(SPRING_MAX_CATCHUP_FRAMES),
@@ -6426,7 +6493,7 @@ impl Transcript {
     /// while [`Self::spring_should_run`].
     fn wake_spring(&mut self) {
         if self.spring_settled_at.is_some_and(|settled| {
-            settled.elapsed() >= Duration::from_millis(SPRING_SETTLE_GRACE_MS)
+            motion::since(settled) >= Duration::from_millis(SPRING_SETTLE_GRACE_MS)
         }) {
             self.spring.reset();
             self.spring_last_tick = None;
@@ -6460,7 +6527,7 @@ impl Transcript {
             self.spring_last_tick = None;
             return;
         }
-        let now = Instant::now();
+        let now = motion::now();
         if self.spring_settled_at.is_some_and(|settled| {
             now.duration_since(settled) >= Duration::from_millis(SPRING_SETTLE_GRACE_MS)
         }) {
@@ -6905,7 +6972,7 @@ impl Transcript {
                 _ => None,
             })
             .collect();
-        let now = Instant::now();
+        let now = motion::now();
         let mut live_tool_groups = HashSet::new();
         for row in &new_rows {
             let RowKind::ToolGroup {
@@ -7233,7 +7300,7 @@ impl Transcript {
                 fold.open == Some(true)
                     || fold
                         .toggled_at
-                        .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW)
+                        .is_some_and(|at| motion::since(at) < FOLD_TWEEN_WINDOW)
             }),
         }
     }
@@ -7328,7 +7395,7 @@ impl Transcript {
         entry.from = if currently_open { full_h } else { collapsed_h };
         entry.open = Some(!currently_open);
         entry.epoch += 1;
-        entry.toggled_at = Some(Instant::now());
+        entry.toggled_at = Some(motion::now());
         entry.duration_ms = duration_ms;
         entry.user_expansion_height = (full_h - collapsed_h).max(0.0);
 
@@ -7364,7 +7431,7 @@ impl Transcript {
                 }
             } else {
                 self.user_collapse_scroll = Some(UserCollapseScroll {
-                    started_at: Instant::now(),
+                    started_at: motion::now(),
                     duration_ms,
                     height_delta: (full_h - collapsed_h).max(0.0),
                     row_ix,
@@ -7433,8 +7500,8 @@ impl Transcript {
         let row_ix = scroll.row_ix;
         let initial_top = scroll.initial_top;
         let target_top = scroll.target_top;
-        let raw =
-            (started_at.elapsed().as_secs_f32() / (duration_ms as f32 / 1000.0)).clamp(0.0, 1.0);
+        let raw = (motion::since(started_at).as_secs_f32() / (duration_ms as f32 / 1000.0))
+            .clamp(0.0, 1.0);
         let spec = user_resize_spec(height_delta);
         let progress = spec.progress(raw);
         let desired_top = motion::lerp(initial_top, target_top, progress);
@@ -7478,7 +7545,7 @@ impl Transcript {
         let body_height = shell_ix.map(|ix| {
             let total = self.compact_fold_total(&row_id, ix);
             let fold = self.folds.get(&row_id).copied().unwrap_or_default();
-            compact_body_height(fold, total, motion::reduced_motion(cx), Instant::now())
+            compact_body_height(fold, total, motion::reduced_motion(cx), motion::now())
         });
         let now_open = {
             let entry = self.folds.entry(row_id.clone()).or_default();
@@ -7486,7 +7553,7 @@ impl Transcript {
             entry.from = body_height.unwrap_or(if currently_open { open_height } else { 0.0 });
             entry.open = Some(!currently_open);
             entry.epoch += 1;
-            entry.toggled_at = Some(Instant::now());
+            entry.toggled_at = Some(motion::now());
             entry.disclosure_at = entry.toggled_at;
             !currently_open
         };
@@ -7509,15 +7576,28 @@ impl Transcript {
             // The body stays mounted through the close tween; sweep it out
             // of the row list once the retention window elapses.
             self.compact_fold_settle = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(FOLD_TWEEN_WINDOW + Duration::from_millis(50))
-                    .await;
-                this.update(cx, |this, cx| {
-                    this.last_source = None;
-                    this.sync(cx);
-                    cx.notify();
-                })
-                .ok();
+                loop {
+                    cx.background_executor()
+                        .timer(FOLD_TWEEN_WINDOW + Duration::from_millis(50))
+                        .await;
+                    let swept = this.update(cx, |this, cx| {
+                        let closing = this.folds.get(&row_id).is_some_and(|fold| {
+                            fold.open != Some(true)
+                                && fold
+                                    .toggled_at
+                                    .is_some_and(|at| motion::since(at) < FOLD_TWEEN_WINDOW)
+                        });
+                        if !closing {
+                            this.last_source = None;
+                            this.sync(cx);
+                            cx.notify();
+                        }
+                        !closing
+                    });
+                    if swept.unwrap_or(true) {
+                        break;
+                    }
+                }
             }));
         }
     }
@@ -8017,7 +8097,7 @@ impl Transcript {
                 let tweening = folds[ix].epoch > 0
                     && folds[ix]
                         .toggled_at
-                        .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW);
+                        .is_some_and(|at| motion::since(at) < FOLD_TWEEN_WINDOW);
                 if !opens[ix] && !tweening {
                     self.tool_images.release(&chip, Self::tool_images_of, cx);
                     return None;
@@ -8455,7 +8535,7 @@ impl Transcript {
             && fold.epoch > 0
             && fold
                 .toggled_at
-                .is_some_and(|at| at.elapsed() < Duration::from_millis(duration_ms + 200))
+                .is_some_and(|at| motion::since(at) < Duration::from_millis(duration_ms + 200))
             && !motion::reduced_motion(cx);
         let ellipsis = || div().h(px(line_height)).child("...");
         let body: AnyElement = if animating {
@@ -10011,7 +10091,7 @@ impl Transcript {
         wait: CompactionWait,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let now = Instant::now();
+        let now = motion::now();
         let since = match &self.compaction_wait_since {
             Some((id, last, at)) if *id == chat_id && *last == wait => *at,
             _ => {
@@ -10445,7 +10525,7 @@ impl Transcript {
                     row_key: row.id.clone(),
                     veil: None,
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
-                    now: Instant::now(),
+                    now: motion::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
                     link,
                     workspace_root: workspace_root.clone(),
@@ -10517,7 +10597,7 @@ impl Transcript {
                     row_key: row.id.clone(),
                     veil: veil.clone(),
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
-                    now: Instant::now(),
+                    now: motion::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
                     link,
                     workspace_root: workspace_root.clone(),
@@ -10592,7 +10672,9 @@ impl Transcript {
                 &theme,
                 cx,
             ),
-            RowKind::InputChip { header, resolved } => {
+            RowKind::InputChip {
+                header, resolved, ..
+            } => {
                 input_chip(header.clone(), *resolved, &theme)
             }
             RowKind::GeneratedImage {
@@ -10707,15 +10789,22 @@ impl Transcript {
         let copy_text = row.copy_text.clone();
         let copy_entry_id = row.entry_id.clone();
         let strip = row.timestamp.map(|ms| {
+            let time = SharedString::from(format_timestamp(ms, &chrono::Local));
             let timestamp = div()
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted.opacity(0.55))
-                .child(SharedString::from(format_timestamp(ms, &chrono::Local)));
+                .child(time.clone());
             let copy = copy_text.map(|text| {
                 let entry_id = copy_entry_id.clone();
                 let fade_key = format!("copy-message-hover-{entry_id}");
                 div()
                     .id(SharedString::from(format!("copy-message-{entry_id}")))
+                    .role(gpui::Role::Button)
+                    .aria_label(if copied_message {
+                        "Copied"
+                    } else {
+                        "Copy message"
+                    })
                     .size(px(Theme::SPACE_MD * 2.0))
                     .flex()
                     .items_center()
@@ -10746,6 +10835,9 @@ impl Transcript {
             });
             let branch = self.branch_action(&row, is_user_row, &theme, cx);
             let metadata = div()
+                .id(SharedString::from(format!("message-footer-{}", row.id)))
+                .role(gpui::Role::Group)
+                .aria_label(time)
                 .flex()
                 .flex_row()
                 .items_center()
@@ -10864,11 +10956,11 @@ impl Transcript {
         let fold = self.folds.get(&work_id).copied().unwrap_or_default();
         let open = fold.open.unwrap_or(false);
         let reduce_motion = motion::reduced_motion(cx);
-        let now = Instant::now();
+        let now = motion::now();
         let animating = !reduce_motion
             && fold
                 .toggled_at
-                .is_some_and(|at| at.elapsed() < TOOL_FOLD.total());
+                .is_some_and(|at| motion::since(at) < TOOL_FOLD.total());
         if !animating {
             // Settled states render plain — open rows untouched, closed rows
             // empty until the settle sweep drops them from the row list.
@@ -10950,15 +11042,18 @@ impl Transcript {
             .as_ref()
             .map(|t| t.to_string())
             .unwrap_or_default();
-        let (glyph, label) = match kind {
-            BranchKind::Fork => (crate::icons::GIT_BRANCH, "fork"),
-            BranchKind::Rewind => (crate::icons::RESTART, "rewind"),
+        let (glyph, label, name) = match kind {
+            BranchKind::Fork => (crate::icons::GIT_BRANCH, "fork", "Fork chat from here"),
+            BranchKind::Rewind => (crate::icons::RESTART, "rewind", "Rewind to here"),
         };
         let fade_key = format!("{label}-message-hover-{entry_id}");
         let dimmed = blocked.is_some();
         Some(
             div()
                 .id(SharedString::from(format!("{label}-message-{entry_id}")))
+                .role(gpui::Role::Button)
+                .aria_label(name)
+                .when_some(blocked.clone(), |el, why| el.aria_description(why))
                 .size(px(Theme::SPACE_MD * 2.0))
                 .flex()
                 .items_center()
@@ -11624,7 +11719,7 @@ impl Transcript {
         let arrival_pending = !cx.reduce_motion()
             && self.tool_group_reveals.get(row_id).is_some_and(|reveal| {
                 reveal.starts.iter().flatten().any(|start| {
-                    Instant::now()
+                    motion::now()
                         .checked_duration_since(*start)
                         .unwrap_or_default()
                         < TOOL_CONNECTOR_REVEAL.total()
@@ -11646,7 +11741,7 @@ impl Transcript {
                 .is_some_and(|previous| previous != open)
             {
                 fold.from = reveal.rendered_height;
-                fold.toggled_at = Some(Instant::now());
+                fold.toggled_at = Some(motion::now());
                 fold.disclosure_at = fold.toggled_at;
                 self.folds.insert(row_id.clone(), fold);
             }
@@ -11664,19 +11759,19 @@ impl Transcript {
         let worked_secs = worked_secs.filter(|_| compact_shell);
         if worked_secs.is_some() && self.compact_live_entries.remove(row_id) {
             self.compact_worked_fade_at
-                .insert(row_id.clone(), Instant::now());
+                .insert(row_id.clone(), motion::now());
         }
         let animate_worked = self
             .compact_worked_fade_at
             .get(row_id)
-            .is_some_and(|at| at.elapsed() < motion::FADE_IN.total());
+            .is_some_and(|at| motion::since(*at) < motion::FADE_IN.total());
         let worked_fade_t = match worked_secs {
             Some(_) if animate_worked && !cx.reduce_motion() => self
                 .compact_worked_fade_at
                 .get(row_id)
                 .map(|at| {
                     motion::FADE_IN.progress(
-                        at.elapsed().as_secs_f32() / motion::FADE_IN.total().as_secs_f32(),
+                        motion::since(*at).as_secs_f32() / motion::FADE_IN.total().as_secs_f32(),
                     )
                 })
                 .unwrap_or(1.0),
@@ -11691,7 +11786,7 @@ impl Transcript {
             || (!cx.reduce_motion()
                 && fold
                     .toggled_at
-                    .is_some_and(|at| at.elapsed() < TOOL_FOLD.total()));
+                    .is_some_and(|at| motion::since(at) < TOOL_FOLD.total()));
         let tools = if body_visible {
             tools.as_slice()
         } else {
@@ -11873,9 +11968,9 @@ impl Transcript {
                     };
                     if !cx.reduce_motion() {
                         if let Some(at) = fold.toggled_at {
-                            let t = TOOL_FOLD
-                                .curve
-                                .eval(at.elapsed().as_secs_f32() / TOOL_FOLD.total().as_secs_f32());
+                            let t = TOOL_FOLD.curve.eval(
+                                motion::since(at).as_secs_f32() / TOOL_FOLD.total().as_secs_f32(),
+                            );
                             if t < 1.0 {
                                 motion_active = true;
                             }
@@ -11891,7 +11986,7 @@ impl Transcript {
             )
             .collect();
         let reduce_motion = cx.reduce_motion();
-        let now = Instant::now();
+        let now = motion::now();
         let reveal_progress: Vec<f32> = (0..tools.len())
             .map(|ix| {
                 let start = self
@@ -12055,7 +12150,7 @@ impl Transcript {
             if !reduce_motion
                 && fold
                     .toggled_at
-                    .is_some_and(|at| at.elapsed() < TOOL_FOLD.total())
+                    .is_some_and(|at| motion::since(at) < TOOL_FOLD.total())
             {
                 motion_active = true;
             }
@@ -12231,7 +12326,7 @@ impl Transcript {
                 let animating = dfold.epoch > 0
                     && dfold
                         .toggled_at
-                        .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW);
+                        .is_some_and(|at| motion::since(at) < FOLD_TWEEN_WINDOW);
                 let toggle_key = key.clone();
                 // Opening a stats-only file change fetches its diff at once:
                 // the change IS what the click asks to see, not a stat row
@@ -12280,7 +12375,7 @@ impl Transcript {
                                 entry.from = row_height - base_row_height + CHIP_CARD_HEIGHT;
                                 entry.open = Some(!currently_open);
                                 entry.epoch += 1;
-                                entry.toggled_at = Some(Instant::now());
+                                entry.toggled_at = Some(motion::now());
                                 if !currently_open && let Some(blob_ref) = pending_diff.clone() {
                                     this.spawn_blob_fetch(blob_ref, cx);
                                 }
@@ -12318,6 +12413,7 @@ impl Transcript {
                                     .when(!collapses, |body| body.px(px(CHIP_CARD_PAD_X)))
                                     .child(detail_body(
                                         invocation,
+                                        Some("Call"),
                                         None,
                                         &format!("{key}-call"),
                                         theme,
@@ -12342,6 +12438,7 @@ impl Transcript {
                                     .when(!collapses, |body| body.px(px(CHIP_CARD_PAD_X)))
                                     .child(detail_body(
                                         detail,
+                                        None,
                                         detail_highlights[ix].clone(),
                                         &format!("{key}-out"),
                                         theme,
@@ -13563,12 +13660,18 @@ fn file_badge_name(path: &str) -> &str {
 /// lines, indentation intact, counted-tail truncation.
 fn detail_body(
     detail: &ToolDetail,
+    label: Option<&'static str>,
     diff_highlights: Option<Arc<crate::changes::DiffHighlights>>,
     selection_key: &str,
     theme: &Theme,
 ) -> AnyElement {
+    let (kind, text) = detail.a11y();
     let body = div()
+        .id(SharedString::from(format!("{selection_key}-body")))
         .debug_selector(|| "tool-detail-body".into())
+        .role(gpui::Role::Group)
+        .aria_label(label.unwrap_or(kind))
+        .aria_value(a11y_clip(&text, 4000))
         .w_full()
         .min_w_0()
         .flex()
@@ -17209,6 +17312,7 @@ mod tests {
                             lines: vec!["cat /workspace/src/main.rs".into()],
                             truncated_by: 0,
                         },
+                        None,
                         None,
                         "probe",
                         &theme,

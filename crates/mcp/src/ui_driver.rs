@@ -1,12 +1,16 @@
+mod launch;
+
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use base64::Engine as _;
 use serde_json::{Map, Value, json};
+use zeron_proto::html_render::{CURRENT_FOLDER, workspace_page};
 use zeron_proto::ui_driver::{
-    DRAG_STEPS, DRIVE_ACTIONS, MAX_DRIVE_STEPS, MAX_WAIT_MS, OBSERVE_ACTIONS, STEP_CAP_MS,
-    UiDriverBuild, UiDriverDescriptor, descriptor_pid, run_dir, socket_path,
+    DRAG_STEPS, DRIVE_ACTIONS, MAX_DRIVE_STEPS, MAX_WAIT_MS, OBSERVE_ACTIONS, PROCESS_ACTIONS,
+    STEP_CAP_MS, UiDriverBuild, UiDriverDescriptor, UiDriverEndpoint, descriptor_pid, run_dir,
+    socket_path,
 };
 
 pub const TOOL: &str = "ui_driver";
@@ -14,6 +18,7 @@ pub const DRIVE_TOOL: &str = "ui_driver_drive";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const REPLY_SLACK: Duration = Duration::from_secs(10);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const RECORDERS: &[&str] = &["frames", "track"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,18 +39,24 @@ impl Tool {
     fn admits(self, action: &str, args: &Map<String, Value>) -> Result<(), String> {
         let during = args.get("during").is_some_and(|during| !during.is_null());
         let drives = DRIVE_ACTIONS.contains(&action);
+        let process = PROCESS_ACTIONS.contains(&action);
         match self {
+            Tool::Observe if process => Err(format!(
+                "`{action}` starts or quits a Zeron Dev bundle, which {TOOL} never does: call {DRIVE_TOOL}"
+            )),
             Tool::Observe if drives || during => Err(format!(
                 "`{}` drives the UI, which {TOOL} never does: call {DRIVE_TOOL} with a Zeron Dev bundle as `target`",
                 if during { "during" } else { action }
             )),
             Tool::Observe if args.get("path").is_some_and(|path| !path.is_null()) => Err(format!(
-                "{TOOL} never writes where the caller picks, so it takes no `path`: a snapshot is saved under ~/.zeron/run/shots and returned inline, or by path with `inline: false`. `zeron ui snapshot` takes `path`."
+                "{TOOL} never writes where the caller picks, so `{action}` takes no `path`: a snapshot is saved under ~/.zeron/run/shots and returned inline, or by path with `inline: false`; a recording is saved under ~/.zeron/run/recordings and its path returned. `zeron ui snapshot` and `zeron ui record` take `path`."
             )),
-            Tool::Drive if !drives && !(during && RECORDERS.contains(&action)) => Err(format!(
-                "{DRIVE_TOOL} takes a drive action ({}), or `frames` or `track` with `during`; call {TOOL} for `{action}`",
-                DRIVE_ACTIONS.join(", ")
-            )),
+            Tool::Drive if !drives && !process && !(during && RECORDERS.contains(&action)) => {
+                Err(format!(
+                    "{DRIVE_TOOL} takes a drive action ({}), `launch` or `quit`, or `frames` or `track` with `during`; call {TOOL} for `{action}`",
+                    DRIVE_ACTIONS.join(", ")
+                ))
+            }
             _ => Ok(()),
         }
     }
@@ -77,12 +88,17 @@ pub fn tool(tool: Tool) -> Value {
             .chain(OBSERVE_ACTIONS)
             .copied()
             .collect(),
-        Tool::Drive => DRIVE_ACTIONS.iter().chain(RECORDERS).copied().collect(),
+        Tool::Drive => DRIVE_ACTIONS
+            .iter()
+            .chain(RECORDERS)
+            .chain(PROCESS_ACTIONS)
+            .copied()
+            .collect(),
     };
     let properties: Map<String, Value> = [
         (both, "action", json!({ "type": "string", "enum": actions })),
         (observe, "target", field("string", "A pid or label from `list` (exact, or a unique substring such as `dev`), a socket path, or `self`. Defaults to the app serving this chat.")),
-        (drive, "target", field("string", "The Zeron Dev bundle to drive: a pid or label from `ui_driver` `list` (exact, or a unique substring such as `dev`), or a socket path. Never the app serving this chat.")),
+        (drive, "target", field("string", "The Zeron Dev bundle to drive or `quit`: a pid or label from `ui_driver` `list` (exact, or a unique substring such as `dev`), or a socket path. Never the app serving this chat. `launch` takes none.")),
         (both, "window", field("integer", "Window id from `state`. Defaults to the frontmost window.")),
         (drive, "x", field("number", "Window point in logical pixels.")),
         (drive, "y", field("number", "Window point in logical pixels.")),
@@ -92,15 +108,24 @@ pub fn tool(tool: Tool) -> Value {
         (observe, "text", field("string", "Text to wait for, or to wait until it is gone.")),
         (drive, "text", field("string", "Text to type.")),
         (drive, "keys", json!({ "type": "array", "items": { "type": "string" }, "description": "Keystrokes, such as [\"cmd-k\"] or [\"down\", \"enter\"]. The server also takes one string of keystrokes separated by spaces." })),
-        (drive, "name", field("string", "gpui action name, for `action`.")),
+        (drive, "name", field("string", "gpui action name, for `action`; for `launch`, the bundle's app name (default `Zeron Dev <n>`).")),
+        (drive, "n", field("integer", "For `launch`: the Dev number 60-99, which sets target/macos-dev<n> and port 49800+n. Defaults to the lowest free one.")),
+        (drive, "mock", field("boolean", "For `launch`: run the app with the mock harness (ZERON_HARNESS=mock).")),
+        (drive, "appArgs", json!({ "type": "array", "items": { "type": "string" }, "description": "For `launch`: arguments passed to the app." })),
         (drive, "args", field("object", "Arguments of the gpui action, for `action`.")),
-        (observe, "rect", field("object", "Crop of a snapshot in window points: {x, y, w, h}.")),
+        (observe, "rect", field("object", "Crop of a snapshot, or the region `compare` checks, in window points: {x, y, w, h}.")),
+        (observe, "html", field("string", "For `compare`: the approved mockup page. It is laid out in the target app's own web engine at the region's size and current theme, and its nodes are matched to the native ones by role and label.")),
+        (observe, "path", field("string", "For `compare`, instead of `html`: the mockup as an .html or .htm file in this chat's folder, relative to it or absolute, read the way html_preview reads `path`.")),
+        (observe, "width", field("number", "For `compare`: lay the mockup out at this width instead of the region's.")),
+        (observe, "threshold", field("number", "For `compare`: a matched node whose x, y, w or h differs by more than this many points is listed as moved. Defaults to 4.")),
         (drive, "from", end("start")),
         (drive, "to", end("end")),
         (drive, "steps", field("integer", "For `drag`: pointer moves between `from` and `to`. Defaults to 12.")),
         (drive, "holdMs", field("integer", "For `drag`: how long to hold the button at `to` before releasing.")),
-        (drive, "do", field("string", "For `press`: the accessibility action to perform, such as click (default), focus, setValue, increment, decrement, expand, collapse, showContextMenu or scrollIntoView.")),
+        (drive, "do", field("string", "For `press`: the accessibility action to perform, such as click (default), focus, setValue, increment, decrement, expand, collapse, showContextMenu or scrollIntoView. For `clock`: pause, resume or advance.")),
         (drive, "value", field("string", "For `press` with `do: setValue`: the new value.")),
+        (observe, "do", json!({ "type": "string", "enum": ["start", "stop"], "description": "For `record`: start taps the window's real clicks, keys, typing and scrolls; stop writes them as a `zeron ui scenario` file under ~/.zeron/run/recordings and returns {path, steps, fallbacks, redacted}. Text typed into a key, token, secret, password or API field is written as `<redacted>`. Never records the app serving this chat; ask the user to run `zeron ui record` there." })),
+        (observe, "includeDriven", field("boolean", "For `record` start, debug builds only: also record input that `ui_driver_drive` injects.")),
         (observe, "full", field("boolean", "For `tree`: show every node, without hoisting unnamed containers.")),
         (drive, "during", field("object", "For `frames` and `track`, required: a drive request such as {\"action\": \"click\", \"select\": \"Button \\\"Settings\\\"\"} that runs once recording has started.")),
         (both, "jumpPx", field("number", "For `track`: a per-frame move larger than this counts as a jump. Defaults to 40.")),
@@ -114,11 +139,11 @@ pub fn tool(tool: Tool) -> Value {
         (observe, "quietMs", field("integer", "For `wait` idle: how long no frame may draw.")),
         (observe, "timeoutMs", field("integer", "Longest wait.")),
         (observe, "ms", field("integer", "Duration of `wait` ms; the window of `frames` (default 1000, max 10000) and `track` (default 800, max 5000).")),
-        (drive, "ms", field("integer", "The window of `frames` (default 1000, max 10000) and `track` (default 800, max 5000).")),
+        (drive, "ms", field("integer", "The window of `frames` (default 1000, max 10000) and `track` (default 800, max 5000). For `clock` with `do: advance`: how far to step animation time (max 60000).")),
         (observe, "query", field("string", "Keep only `tree` lines that match this text.")),
         (observe, "root", field("string", "Ref the `tree` starts from.")),
         (observe, "depth", field("integer", "Levels of `tree` to print.")),
-        (observe, "json", field("boolean", "`tree` as JSON instead of text lines.")),
+        (observe, "json", field("boolean", "`tree` or `compare` as JSON instead of text lines.")),
         (observe, "inline", field("boolean", "For `snapshot`: false returns only the path, no image. Defaults to true.")),
         (drive, "theme", json!({ "type": "string", "enum": ["light", "dark", "system"], "description": "For `set`: the appearance mode, as Settings > Appearance sets it (saved to the app's settings)." })),
         (drive, "size", json!({ "type": "object", "properties": { "w": { "type": "number" }, "h": { "type": "number" } }, "required": ["w", "h"], "additionalProperties": false, "description": "For `set`: window content size {w, h} in points. The server also takes [w, h]." })),
@@ -137,7 +162,7 @@ pub fn tool(tool: Tool) -> Value {
         Tool::Drive => (
             DRIVE_TOOL,
             "Drive the Zeron UI",
-            "Drive a Zeron Dev bundle's UI as a person would: click, move, drag, scroll, press keys, type, perform an accessibility action, dispatch a gpui action, or `set` theme, window size and motion scale. Only debug builds (Zeron Dev bundles) take input, and this tool refuses the app serving this chat, so pass a Dev bundle's label or pid from `ui_driver` `list` as `target`. Act on an element by `ref` from `ui_driver` `tree`, or by `select` (`Button \"New chat\"`, or a bare `\"label substring\"`, plus `nth`); fall back to `x`,`y` window points. Each action replies after the next frame is drawn; an action addressed by `ref` or `select` first waits up to 1 s for the element to hold still across two frames, and replies `unsettled: true` if it never did. `press` performs an accessibility action given in `do` (click, focus, setValue with `value`, expand, ...) without moving the pointer. `frames` or `track` with a `during` drive request measures the transition it starts. Check the result with `ui_driver` (`tree`, `wait`, `snapshot`).",
+            "Drive a Zeron Dev bundle's UI as a person would: click, move, drag, scroll, press keys, type, perform an accessibility action, dispatch a gpui action, `set` theme, window size and motion scale, or pause and step animation time with `clock`. Only debug builds (Zeron Dev bundles) take input, and this tool refuses the app serving this chat, so pass a Dev bundle's label or pid from `ui_driver` `list` as `target`. Act on an element by `ref` from `ui_driver` `tree`, or by `select` (`Button \"New chat\"`, or a bare `\"label substring\"`, plus `nth`); fall back to `x`,`y` window points. Each action replies after the next frame is drawn; an action addressed by `ref` or `select` first waits up to 1 s for the element to hold still across two frames, and replies `unsettled: true` if it never did. `press` performs an accessibility action given in `do` (click, focus, setValue with `value`, expand, ...) without moving the pointer. `frames` or `track` with a `during` drive request measures the transition it starts. Check the result with `ui_driver` (`tree`, `wait`, `snapshot`).",
         ),
     };
     json!({
@@ -234,6 +259,25 @@ async fn run_in(
     if let Some(tool) = tool {
         tool.admits(&action, &args)?;
     }
+    if tool.is_none()
+        && let Some(path) = compare_path(&args)?
+    {
+        let html = compare_page(path)?;
+        args.remove("path");
+        args.insert("html".into(), json!(html));
+    }
+    if action == "launch" {
+        if target.is_some() {
+            return Err("`launch` starts a new Zeron Dev bundle, so it takes no `target`".into());
+        }
+        return launch::launch(dir, &args, own_port).await;
+    }
+    if action == "quit" && target.is_none() {
+        return Err(format!(
+            "`quit` needs a `target`\n{}",
+            targets(&list_in(dir))
+        ));
+    }
     let live = list_in(dir);
     if action == "list" {
         return serde_json::to_value(live).map_err(|error| error.to_string());
@@ -248,7 +292,43 @@ async fn run_in(
             targets(&live)
         ));
     }
+    if tool.is_some() && action == "record" && own_port == Some(app.ipc_port) {
+        return Err(format!(
+            "{TOOL} does not record {} (pid {}): it serves this chat's engine on port {}, so a recording would capture what the user types here. Ask the user to run `zeron ui record` themselves, or pass a Zeron Dev bundle as `target`.\n{}",
+            app.label,
+            app.pid,
+            app.ipc_port,
+            targets(&live)
+        ));
+    }
+    if action == "quit" {
+        return launch::quit(dir, app).await;
+    }
     request(app, args).await
+}
+
+pub fn compare_path(args: &Map<String, Value>) -> Result<Option<&str>, String> {
+    let path = match args.get("path") {
+        Some(path) if !path.is_null() && args.get("action") == Some(&json!("compare")) => path,
+        _ => return Ok(None),
+    };
+    if args.get("html").is_some_and(|html| !html.is_null()) {
+        return Err("give `html` or `path`, one of them".into());
+    }
+    path.as_str()
+        .map(Some)
+        .ok_or_else(|| "`path` must be a string".into())
+}
+
+fn compare_page(path: &str) -> Result<String, String> {
+    let cwd = std::env::current_dir().map_err(|error| format!("no current folder: {error}"))?;
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    workspace_page(&cwd, home.as_deref(), CURRENT_FOLDER, path).map_err(|error| {
+        format!(
+            "`zeron ui compare` reads `path` from {}: {error}",
+            cwd.display()
+        )
+    })
 }
 
 pub fn list() -> Vec<UiDriverDescriptor> {
@@ -278,25 +358,37 @@ fn list_in(dir: &Path) -> Vec<UiDriverDescriptor> {
     live
 }
 
-#[cfg(unix)]
 fn alive(app: &UiDriverDescriptor) -> bool {
     use std::io::ErrorKind;
-    // SAFETY: signal 0 delivers nothing; kill only reports whether the pid exists.
-    let exited = unsafe { libc::kill(app.pid as libc::pid_t, 0) } != 0
-        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-    !exited
-        && match std::os::unix::net::UnixStream::connect(&app.socket) {
-            Ok(_) => true,
-            Err(error) => !matches!(
-                error.kind(),
-                ErrorKind::ConnectionRefused | ErrorKind::NotFound
-            ),
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 delivers nothing; kill only reports whether the pid exists.
+        let exited = unsafe { libc::kill(app.pid as libc::pid_t, 0) } != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if exited {
+            return false;
         }
-}
-
-#[cfg(not(unix))]
-fn alive(_: &UiDriverDescriptor) -> bool {
-    false
+    }
+    let connected = match &app.endpoint {
+        #[cfg(unix)]
+        UiDriverEndpoint::Unix { socket } => {
+            std::os::unix::net::UnixStream::connect(socket).map(drop)
+        }
+        #[cfg(not(unix))]
+        UiDriverEndpoint::Unix { .. } => return false,
+        UiDriverEndpoint::Loopback { port, .. } => std::net::TcpStream::connect_timeout(
+            &(std::net::Ipv4Addr::LOCALHOST, *port).into(),
+            CONNECT_TIMEOUT,
+        )
+        .map(drop),
+    };
+    match connected {
+        Ok(()) => true,
+        Err(error) => !matches!(
+            error.kind(),
+            ErrorKind::ConnectionRefused | ErrorKind::NotFound
+        ),
+    }
 }
 
 pub fn select<'a>(
@@ -336,7 +428,9 @@ pub fn select<'a>(
         ),
         (Some(target), _) if target.contains('/') => (
             live.iter()
-                .filter(|app| app.socket == Path::new(target))
+                .filter(|app| {
+                    matches!(&app.endpoint, UiDriverEndpoint::Unix { socket } if socket == Path::new(target))
+                })
                 .collect(),
             format!("no Zeron app listens on {target}"),
         ),
@@ -430,7 +524,7 @@ pub async fn request(
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     let timeout = reply_timeout(&request);
     request.insert("id".into(), json!(NEXT_ID.fetch_add(1, Ordering::Relaxed)));
-    let mut reply = tokio::time::timeout(timeout, exchange(&app.socket, Value::Object(request)))
+    let mut reply = tokio::time::timeout(timeout, exchange(&app.endpoint, Value::Object(request)))
         .await
         .map_err(|_| {
             format!(
@@ -451,15 +545,40 @@ pub async fn request(
         .ok_or_else(|| format!("reply has neither ok nor error: {reply}"))
 }
 
-#[cfg(unix)]
-async fn exchange(socket: &Path, request: Value) -> Result<Value, String> {
+async fn exchange(endpoint: &UiDriverEndpoint, request: Value) -> Result<Value, String> {
+    let failed = |error: std::io::Error| format!("{endpoint}: {error}");
+    match endpoint {
+        #[cfg(unix)]
+        UiDriverEndpoint::Unix { socket } => {
+            let stream = tokio::net::UnixStream::connect(socket)
+                .await
+                .map_err(failed)?;
+            talk(stream, None, request, endpoint).await
+        }
+        #[cfg(not(unix))]
+        UiDriverEndpoint::Unix { .. } => Err(format!(
+            "{endpoint} is a unix socket, which this platform cannot open"
+        )),
+        UiDriverEndpoint::Loopback { port, token } => {
+            let stream = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, *port))
+                .await
+                .map_err(failed)?;
+            talk(stream, Some(token), request, endpoint).await
+        }
+    }
+}
+
+async fn talk(
+    stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite,
+    token: Option<&str>,
+    request: Value,
+    endpoint: &UiDriverEndpoint,
+) -> Result<Value, String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    let failed = |error: std::io::Error| format!("{}: {error}", socket.display());
-    let stream = tokio::net::UnixStream::connect(socket)
-        .await
-        .map_err(failed)?;
-    let (reader, mut writer) = stream.into_split();
-    let mut line = request.to_string();
+    let failed = |error: std::io::Error| format!("{endpoint}: {error}");
+    let (reader, mut writer) = tokio::io::split(stream);
+    let mut line = token.map(|token| format!("{token}\n")).unwrap_or_default();
+    line.push_str(&request.to_string());
     line.push('\n');
     writer.write_all(line.as_bytes()).await.map_err(failed)?;
     let mut reply = String::new();
@@ -468,14 +587,9 @@ async fn exchange(socket: &Path, request: Value) -> Result<Value, String> {
         .await
         .map_err(failed)?;
     if reply.trim().is_empty() {
-        return Err(format!("{} closed without a reply", socket.display()));
+        return Err(format!("{endpoint} closed without a reply"));
     }
     serde_json::from_str(&reply).map_err(|error| format!("reply is not JSON: {error}"))
-}
-
-#[cfg(not(unix))]
-async fn exchange(_: &Path, _: Value) -> Result<Value, String> {
-    Err("the UI driver needs unix sockets, which this platform lacks".into())
 }
 
 #[cfg(test)]
@@ -483,6 +597,7 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use std::path::PathBuf;
+    #[cfg(unix)]
     use zeron_proto::ui_driver::descriptor_path;
 
     fn app(
@@ -494,7 +609,9 @@ mod tests {
     ) -> UiDriverDescriptor {
         UiDriverDescriptor {
             pid,
-            socket: PathBuf::from(format!("/run/ui-{pid}.sock")),
+            endpoint: UiDriverEndpoint::Unix {
+                socket: PathBuf::from(format!("/run/ui-{pid}.sock")),
+            },
             label: label.into(),
             bundle_path: None,
             data_dir: PathBuf::from("/data"),
@@ -654,6 +771,14 @@ mod tests {
             assert!(error.starts_with(&format!("`{action}` drives")), "{error}");
             assert!(error.contains(DRIVE_TOOL), "{error}");
         }
+        for action in PROCESS_ACTIONS {
+            let error = Tool::Observe.admits(action, &Map::new()).unwrap_err();
+            assert!(
+                error.starts_with(&format!("`{action}` starts or quits")),
+                "{error}"
+            );
+            assert!(error.ends_with(DRIVE_TOOL), "{error}");
+        }
         for action in std::iter::once(&"list").chain(OBSERVE_ACTIONS) {
             let error = Tool::Drive.admits(action, &Map::new()).unwrap_err();
             assert!(
@@ -676,7 +801,11 @@ mod tests {
             assert_eq!(Tool::named(name), Some(tool));
             let schema = super::tool(tool);
             assert_eq!(schema["name"], name);
-            assert!(schema["inputSchema"]["properties"]["path"].is_null());
+            assert_eq!(
+                schema["inputSchema"]["properties"]["path"].is_null(),
+                tool == Tool::Drive,
+                "{name}"
+            );
             let hints = &schema["annotations"];
             assert_eq!(hints["readOnlyHint"], tool == Tool::Observe, "{name}");
             assert_eq!(hints["destructiveHint"], tool == Tool::Drive, "{name}");
@@ -715,9 +844,12 @@ mod tests {
     async fn request_turns_each_reply_into_its_value_or_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let mut target = app(1, "Zeron Dev", UiDriverBuild::Debug, 49871, 1);
-        target.socket = dir.path().join("ui-1.sock");
+        let socket = dir.path().join("ui-1.sock");
+        target.endpoint = UiDriverEndpoint::Unix {
+            socket: socket.clone(),
+        };
         let server = answering(
-            &target.socket,
+            &socket,
             &[
                 r#"{"id":1,"ok":{"frame":3}}"#,
                 r#"{"id":2,"error":"no window"}"#,
@@ -767,14 +899,20 @@ mod tests {
             27654,
             2,
         );
-        own.socket = socket_path(dir.path(), own.pid);
+        let own_socket = socket_path(dir.path(), own.pid);
+        own.endpoint = UiDriverEndpoint::Unix {
+            socket: own_socket.clone(),
+        };
         write(&own);
         let mut dead = app(1, "Zeron Dev 3", UiDriverBuild::Debug, 49872, 1);
-        dead.socket = socket_path(dir.path(), 1);
-        drop(std::os::unix::net::UnixListener::bind(&dead.socket).unwrap());
+        let dead_socket = socket_path(dir.path(), 1);
+        dead.endpoint = UiDriverEndpoint::Unix {
+            socket: dead_socket.clone(),
+        };
+        drop(std::os::unix::net::UnixListener::bind(&dead_socket).unwrap());
         write(&dead);
         let server = answering(
-            &own.socket,
+            &own_socket,
             &[
                 r#"{"id":0,"ok":"drawn"}"#,
                 r#"{"id":0,"ok":{"windows":[]}}"#,
@@ -783,7 +921,7 @@ mod tests {
 
         let live: Vec<u32> = list_in(dir.path()).iter().map(|app| app.pid).collect();
         assert_eq!(live, [own.pid]);
-        assert!(!dead.socket.exists() && !descriptor_path(dir.path(), 1).exists());
+        assert!(!dead_socket.exists() && !descriptor_path(dir.path(), 1).exists());
 
         let click = json!({ "action": "click", "x": 1, "y": 2 });
         let mut aimed = click.clone();
@@ -794,6 +932,36 @@ mod tests {
                 .unwrap_err();
             assert!(
                 error.starts_with("ui_driver_drive does not drive Zeron Dev 7"),
+                "{error}"
+            );
+        }
+        let quit = json!({ "action": "quit", "target": own.pid });
+        let error = run_in(dir.path(), &quit, Some(27654), Some(Tool::Drive))
+            .await
+            .unwrap_err();
+        assert!(
+            error.starts_with("ui_driver_drive does not drive"),
+            "{error}"
+        );
+        let error = run_in(dir.path(), &quit, None, None).await.unwrap_err();
+        assert!(
+            error.starts_with("`quit` never quits Zeron Dev 7"),
+            "{error}"
+        );
+        let error = run_in(dir.path(), &json!({ "action": "quit" }), None, None)
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("`quit` needs a `target`"), "{error}");
+        let record = json!({ "action": "record", "do": "start" });
+        let mut aimed_record = record.clone();
+        aimed_record["target"] = json!("Zeron Dev 7");
+        for request in [&record, &aimed_record] {
+            let error = run_in(dir.path(), request, Some(27654), Some(Tool::Observe))
+                .await
+                .unwrap_err();
+            assert!(
+                error.starts_with("ui_driver does not record Zeron Dev 7")
+                    && error.contains("`zeron ui record`"),
                 "{error}"
             );
         }
@@ -813,5 +981,53 @@ mod tests {
         assert_eq!(select(&live, None, None).map(|app| app.pid), Ok(200));
         let error = pick(None, None).unwrap_err();
         assert!(error.starts_with("4 Zeron apps match;"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_loopback_app_is_alive_while_it_listens_and_gets_its_token_before_each_request() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut target = app(std::process::id(), "Zeron", UiDriverBuild::Debug, 49871, 1);
+        target.endpoint = UiDriverEndpoint::Loopback {
+            port,
+            token: "secret".into(),
+        };
+        let server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                let mut lines = BufReader::new(reader).lines();
+                let Some(token) = lines.next_line().await.unwrap() else {
+                    continue;
+                };
+                let request: Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                let reply = json!({ "id": request["id"], "ok": { "token": token } });
+                writer
+                    .write_all(format!("{reply}\n").as_bytes())
+                    .await
+                    .unwrap();
+                return request;
+            }
+        });
+
+        assert!(
+            tokio::task::spawn_blocking({
+                let target = target.clone();
+                move || alive(&target)
+            })
+            .await
+            .unwrap()
+        );
+        let state = Map::from_iter([("action".into(), json!("state"))]);
+        assert_eq!(
+            request(&target, state).await,
+            Ok(json!({ "token": "secret" }))
+        );
+        assert_eq!(server.await.unwrap()["action"], "state");
+        assert!(!alive(&target));
     }
 }

@@ -13,7 +13,6 @@ use gpui::{
     Bounds, Context, IntoElement, ParentElement, Pixels, Render, Styled, Task, Window, canvas, div,
     px,
 };
-use std::time::Instant;
 use zeron_orb::{
     OrbAnimator, OrbSize, OrbState, OrbTheme,
     engine::{Frame, draw_mode_into},
@@ -211,7 +210,7 @@ impl Orb {
     pub fn set_audio_levels(&mut self, microphone: f32, speaker: f32, cx: &mut Context<Self>) {
         if self
             .animator
-            .set_audio_levels(microphone, speaker, Instant::now())
+            .set_audio_levels(microphone, speaker, crate::motion::now())
         {
             self.geometry_dirty = true;
             cx.notify();
@@ -224,7 +223,7 @@ impl Orb {
         }
         self.paused = paused;
         if paused {
-            self.animator.stop(Instant::now());
+            self.animator.stop(crate::motion::now());
         }
         self.geometry_dirty = true;
         cx.notify();
@@ -234,7 +233,7 @@ impl Orb {
         if self.reduced_motion != reduced {
             self.reduced_motion = reduced;
             if reduced {
-                self.animator.stop(Instant::now());
+                self.animator.stop(crate::motion::now());
                 self.animator.cancel_transition();
             }
             self.geometry_dirty = true;
@@ -259,7 +258,7 @@ impl Orb {
         if self.visible != visible {
             self.visible = visible;
             if !visible {
-                self.animator.stop(Instant::now());
+                self.animator.stop(crate::motion::now());
                 self.animator.cancel_transition();
             }
             self.geometry_dirty = true;
@@ -342,7 +341,7 @@ impl Render for Orb {
         if self.activation.is_none() {
             self.activation = Some(cx.observe_window_activation(window, |orb, window, cx| {
                 if orb.pause_when_inactive && !window.is_window_active() {
-                    orb.animator.stop(Instant::now());
+                    orb.animator.stop(crate::motion::now());
                 }
                 orb.geometry_dirty = true;
                 cx.notify();
@@ -357,7 +356,7 @@ impl Render for Orb {
             && !self.paused
             && !reduced
             && (!self.pause_when_inactive || window.is_window_active());
-        self.animator.tick(Instant::now(), animating, reduced);
+        self.animator.tick(crate::motion::now(), animating, reduced);
         let r_min = self.animator.r_min();
 
         // Only ticks and semantic changes invalidate geometry. A parent can

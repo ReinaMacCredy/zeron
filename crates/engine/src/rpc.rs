@@ -1926,6 +1926,31 @@ impl EngineRpc {
         self.file_search_root(p).await
     }
 
+    async fn chat_page(&self, chat_id: &str, path: String) -> Result<String, RpcError> {
+        let cwd = self
+            .workspace
+            .chat(chat_id)
+            .map_err(|e| RpcError::Failed(e.to_string()))?
+            .and_then(|chat| chat.cwd)
+            .ok_or_else(|| {
+                RpcError::BadParams("this chat has no folder for `path`; pass `html`".into())
+            })?;
+        let root = crate::repos::resolve_chat_cwd(&cwd, &self.repos.scratch_root())
+            .map_err(RpcError::Failed)?;
+        let home = crate::repos::session_home_dir().ok();
+        tokio::task::spawn_blocking(move || {
+            crate::html_render::workspace_page(
+                std::path::Path::new(&root),
+                home.as_deref(),
+                zeron_proto::html_render::CHAT_FOLDER,
+                &path,
+            )
+        })
+        .await
+        .map_err(|e| RpcError::Failed(e.to_string()))?
+        .map_err(RpcError::BadParams)
+    }
+
     async fn source_control_checkout(
         &self,
         target: &zeron_proto::WorkspaceTarget,
@@ -6689,11 +6714,35 @@ impl RpcService for EngineRpc {
                         "html_preview needs this chat's live Zeron run".into(),
                     ));
                 }
-                let preview =
-                    crate::html_render::preview(&self.html_preview, p.html, p.width, p.appearance)
-                        .await
-                        .map_err(RpcError::Failed)?;
+                let html = match (p.html, p.path) {
+                    (Some(html), None) => html,
+                    (None, Some(path)) => self.chat_page(&p.chat_id, path).await?,
+                    _ => {
+                        return Err(RpcError::BadParams(
+                            "give `html` or `path`, one of them".into(),
+                        ));
+                    }
+                };
+                let preview = crate::html_render::preview(
+                    &self.html_preview,
+                    html,
+                    p.width,
+                    p.appearance,
+                    p.inspect,
+                )
+                .await
+                .map_err(RpcError::Failed)?;
                 RpcReply::value(&preview)
+            }
+            methods::READ_WORKSPACE_PAGE => {
+                let p: zeron_proto::html_render::ReadWorkspacePageParams = parse_params(params)?;
+                if self.sessions.computer_run(&p.chat_id, &p.run_secret).is_none() {
+                    return Err(RpcError::Failed(
+                        "reading a page by `path` needs this chat's live Zeron run".into(),
+                    ));
+                }
+                let html = self.chat_page(&p.chat_id, p.path).await?;
+                RpcReply::value(&serde_json::json!({ "html": html }))
             }
             methods::WATCH_HTML_PREVIEW_HOST => Ok(RpcReply::Stream(
                 self.html_preview

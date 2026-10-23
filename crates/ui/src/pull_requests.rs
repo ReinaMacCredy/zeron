@@ -430,7 +430,7 @@ impl PullRequestsPage {
                 || self.tab != self.layout_tab
                 || self.page_width.is_none();
             self.split_slide
-                .retarget(if open { 1.0 } else { 0.0 }, snap, Instant::now());
+                .retarget(if open { 1.0 } else { 0.0 }, snap, crate::motion::now());
             self.split_open = open;
         }
         self.layout_tab = self.tab;
@@ -722,7 +722,7 @@ impl PullRequestsPage {
             }
         });
         let mut filter_fades = crate::motion::HoverFades::default();
-        filter_fades.set_at("pr-filter-authored", true, true, Instant::now());
+        filter_fades.set_at("pr-filter-authored", true, true, crate::motion::now());
         let tab = crate::settings::current(cx).pull_requests_tab;
         let mut page = Self {
             state,
@@ -777,7 +777,7 @@ impl PullRequestsPage {
             return_focus: None,
             _observe: observe,
             tab,
-            tab_slide: crate::motion::IndicatorSlide::at(git::tab_slot(tab), Instant::now()),
+            tab_slide: crate::motion::IndicatorSlide::at(git::tab_slot(tab), crate::motion::now()),
             tab_focus: [cx.focus_handle(), cx.focus_handle()],
             git_view: None,
             git_project: None,
@@ -785,7 +785,7 @@ impl PullRequestsPage {
             full_detail: None,
             wide: false,
             page_width: None,
-            split_slide: crate::motion::IndicatorSlide::at(0.0, Instant::now()),
+            split_slide: crate::motion::IndicatorSlide::at(0.0, crate::motion::now()),
             split_open: false,
             layout_tab: tab,
             scope_changed: false,
@@ -1164,7 +1164,7 @@ impl PullRequestsPage {
                 key,
                 candidate == filter,
                 crate::motion::reduced_motion(cx),
-                Instant::now(),
+                crate::motion::now(),
             );
         }
         self.filter = filter;
@@ -2624,7 +2624,8 @@ impl Render for PullRequestsPage {
                                 .into_iter()
                                 .map(|(filter, label, id)| {
                                     let chosen = self.filter == filter;
-                                    let selected = self.filter_fades.value_at(id, Instant::now());
+                                    let selected =
+                                        self.filter_fades.value_at(id, crate::motion::now());
                                     let hover_key = format!("pr-filter-{}-{id}", cx.entity_id());
                                     let hover = crate::motion::hover_t(&hover_key);
                                     let fill = move || {
@@ -2863,7 +2864,7 @@ impl Render for PullRequestsPage {
             .then(|| self.render_load_more(&theme, cx))
             .flatten();
         let scrollbar = popover::rail(self, "pull-requests-scrollbar", &theme, cx);
-        if self.filter_fades.tick_at(Instant::now()) {
+        if self.filter_fades.tick_at(crate::motion::now()) {
             window.request_animation_frame();
         }
         let results = match content {
@@ -2960,7 +2961,7 @@ impl Render for PullRequestsPage {
             .size_full()
             .flex()
             .child(page_probe);
-        let now = Instant::now();
+        let now = crate::motion::now();
         let opened = self.split_slide.value_at(now);
         let tweening = self.split_slide.animating_at(now);
         if tweening {

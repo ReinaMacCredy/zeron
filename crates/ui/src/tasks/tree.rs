@@ -529,7 +529,7 @@ fn cap(window: &mut gpui::Window, at: gpui::Point<gpui::Pixels>, width: f32, col
 
 fn spin_epoch() -> Instant {
     static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    *EPOCH.get_or_init(Instant::now)
+    *EPOCH.get_or_init(motion::now)
 }
 
 fn arc(
@@ -577,7 +577,7 @@ pub(crate) fn spinner(diameter: f32, color: Hsla, reduced: bool) -> impl IntoEle
                 0.0
             } else {
                 let period = SPIN.mul_f32(motion::speed_scale()).as_secs_f32();
-                let elapsed = Instant::now().saturating_duration_since(spin_epoch());
+                let elapsed = motion::now().saturating_duration_since(spin_epoch());
                 (elapsed.as_secs_f32() / period).fract()
             };
             let center = bounds.center();
