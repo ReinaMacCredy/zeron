@@ -119,6 +119,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     var isQueueing: Bool { currentAction == .queue }
     private var mentions = MentionIndex()
     private let suggestions = MentionSuggestions()
+    private var suggestionsShown = false
     private var mentionQuery: (range: NSRange, query: String)?
     private var mentionTask: Task<Void, Never>?
     private var attachCard: AttachCard?
@@ -341,6 +342,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             suggestions.leadingAnchor.constraint(equalTo: leadingAnchor),
             suggestions.trailingAnchor.constraint(equalTo: trailingAnchor),
             suggestions.bottomAnchor.constraint(equalTo: topAnchor, constant: -8),
+            suggestions.topAnchor.constraint(greaterThanOrEqualTo: root.safeAreaLayoutGuide.topAnchor, constant: 8),
         ])
     }
 
@@ -415,15 +417,18 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     }
 
     private func setSuggestionsVisible(_ visible: Bool) {
-        guard suggestions.isHidden == visible else { return }
+        guard suggestionsShown != visible else { return }
+        suggestionsShown = visible
+        if visible && suggestions.isHidden {
+            suggestions.alpha = 0
+            suggestions.transform = CGAffineTransform(translationX: 0, y: 8)
+        }
         suggestions.isHidden = false
-        suggestions.alpha = visible ? 0 : 1
-        suggestions.transform = visible ? CGAffineTransform(translationX: 0, y: 8) : .identity
         UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
             self.suggestions.alpha = visible ? 1 : 0
             self.suggestions.transform = visible ? .identity : CGAffineTransform(translationX: 0, y: 8)
         } completion: { _ in
-            if !visible { self.suggestions.isHidden = true }
+            if !self.suggestionsShown { self.suggestions.isHidden = true }
         }
     }
 

@@ -80,6 +80,7 @@ enum MentionPick {
 final class MentionSuggestions: UIView {
     var onPick: ((MentionPick) -> Void)?
     private let card = Glass.surface(radius: 18)
+    private let scroll = UIScrollView()
     private let stack = UIStackView()
     private(set) var threads: [ThreadMention] = []
     private(set) var files: [FileMatch] = []
@@ -94,16 +95,27 @@ final class MentionSuggestions: UIView {
         addSubview(card)
         stack.axis = .vertical
         stack.translatesAutoresizingMaskIntoConstraints = false
-        card.contentView.addSubview(stack)
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.alwaysBounceVertical = false
+        card.contentView.addSubview(scroll)
+        scroll.addSubview(stack)
+        let fit = scroll.heightAnchor.constraint(equalTo: stack.heightAnchor)
+        fit.priority = .defaultHigh - 1
         NSLayoutConstraint.activate([
             card.topAnchor.constraint(equalTo: topAnchor),
             card.leadingAnchor.constraint(equalTo: leadingAnchor),
             card.trailingAnchor.constraint(equalTo: trailingAnchor),
             card.bottomAnchor.constraint(equalTo: bottomAnchor),
-            stack.topAnchor.constraint(equalTo: card.contentView.topAnchor, constant: 4),
-            stack.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor),
-            stack.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor, constant: -4),
+            scroll.topAnchor.constraint(equalTo: card.contentView.topAnchor, constant: 4),
+            scroll.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor, constant: -4),
+            stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
+            stack.widthAnchor.constraint(equalTo: scroll.frameLayoutGuide.widthAnchor),
+            fit,
         ])
     }
 
@@ -115,6 +127,7 @@ final class MentionSuggestions: UIView {
         self.invocations = Array(invocations.prefix(6))
         self.note = note
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        scroll.contentOffset = .zero
         if let note { stack.addArrangedSubview(header(note)) }
         for (i, entry) in self.invocations.enumerated() {
             let b = row(symbol: entry.skill ? "sparkles" : "command", title: entry.title, subtitle: entry.detail, mono: false) { [weak self] in self?.onPick?(.invocation(entry)) }
@@ -129,6 +142,7 @@ final class MentionSuggestions: UIView {
         self.threads = threads
         self.files = Array(files.prefix(threads.isEmpty ? 5 : 3))
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        scroll.contentOffset = .zero
         if !threads.isEmpty {
             stack.addArrangedSubview(header("Threads"))
             for (i, thread) in threads.enumerated() {
