@@ -3,6 +3,7 @@
 //! desktop UI. Ported from t3code `packages/shared/src/htmlRender.ts`.
 
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 pub const RENDER_TOOL: &str = "html_render";
 pub const PREVIEW_TOOL: &str = "html_preview";
@@ -203,6 +204,41 @@ pub const GUIDANCE: &str = "When a visual answer would be clearer than prose, sh
 
 /// What `html_render` tells the agent once the page is shown.
 pub const RENDERED_MESSAGE: &str = "Shown to the reader above your reply. Don't mention or describe the page; reply with only what it doesn't already say.";
+
+pub fn workspace_page(root: &Path, home: Option<&Path>, path: &str) -> Result<String, String> {
+    let root = root.canonicalize().map_err(|e| {
+        format!(
+            "this chat's folder {} could not be read: {e}",
+            root.display()
+        )
+    })?;
+    if home.and_then(|home| home.canonicalize().ok()).as_deref() == Some(root.as_path()) {
+        return Err("`path` reads from a project folder, and this chat runs in your home folder. Pass `html` instead.".into());
+    }
+    let file = root
+        .join(path)
+        .canonicalize()
+        .map_err(|_| format!("`{path}` is not a file in this chat's folder"))?;
+    if !file.starts_with(&root) {
+        return Err(format!(
+            "`{path}` is outside this chat's folder, so it was not read"
+        ));
+    }
+    let html_file = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"));
+    if !html_file || !file.is_file() {
+        return Err(format!("`{path}` is not an .html or .htm file"));
+    }
+    let bytes = std::fs::metadata(&file).map_err(|e| e.to_string())?.len();
+    if bytes > MAX_HTML_BYTES as u64 {
+        return Err(format!(
+            "`{path}` is {bytes} bytes; the limit is {MAX_HTML_BYTES}"
+        ));
+    }
+    std::fs::read_to_string(&file).map_err(|e| format!("`{path}` could not be read: {e}"))
+}
 
 #[cfg(test)]
 mod tests {
