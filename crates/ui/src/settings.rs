@@ -1718,6 +1718,10 @@ pub struct UiSettings {
     #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), serde(skip))]
     pub appshot_welcome_acknowledged: bool,
     pub mission_intro_acknowledged: bool,
+    /// Older files load this empty so upgraders see what is new; a fresh
+    /// install starts with every release intro marked.
+    #[serde(default)]
+    pub onboarding_seen: Vec<String>,
     pub computer_getting_started_acknowledged: bool,
     pub computer_effort_hint_dismissed: bool,
     /// Whether bare Escape stops the active agent after contextual consumers
@@ -1847,6 +1851,8 @@ pub struct UiSettings {
 }
 
 // A file written before the field existed is an upgrade, not a fresh install.
+pub const SINCE_INTRO_ID: &str = "since-0.2.114";
+
 fn whats_new_seen_before_tracking() -> Option<String> {
     Some("0.0.0".into())
 }
@@ -1923,6 +1929,7 @@ impl Default for UiSettings {
             appshot_destination: crate::appshots::AppshotDestination::Automatic,
             appshot_welcome_acknowledged: false,
             mission_intro_acknowledged: false,
+            onboarding_seen: vec![SINCE_INTRO_ID.into()],
             computer_getting_started_acknowledged: false,
             computer_effort_hint_dismissed: false,
             appearance: crate::appearance::AppearanceMode::default(),
@@ -2669,6 +2676,7 @@ impl UiSettings {
             split_ratio,
             appshot_welcome_acknowledged,
             mission_intro_acknowledged,
+            onboarding_seen,
             computer_getting_started_acknowledged,
             computer_effort_hint_dismissed,
             html_open_app,
@@ -3091,6 +3099,7 @@ mod tests {
             legacy,
             UiSettings {
                 whats_new_seen_version: Some("0.0.0".into()),
+                onboarding_seen: Vec::new(),
                 ..UiSettings::default()
             }
         );
@@ -4024,8 +4033,13 @@ mod tests {
                 .as_deref(),
             Some("0.0.0")
         );
+        assert!(UiSettings::load(dir.path()).onboarding_seen.is_empty());
         UiSettings::default().save(dir.path()).unwrap();
         assert_eq!(UiSettings::load(dir.path()).whats_new_seen_version, None);
+        assert_eq!(
+            UiSettings::load(dir.path()).onboarding_seen,
+            vec![SINCE_INTRO_ID.to_owned()]
+        );
     }
 
     #[test]
@@ -4127,6 +4141,7 @@ mod tests {
             },
             appshot_welcome_acknowledged: cfg!(any(target_os = "macos", target_os = "linux")),
             mission_intro_acknowledged: true,
+            onboarding_seen: vec!["tasks-home".into()],
             computer_getting_started_acknowledged: true,
             computer_effort_hint_dismissed: true,
             appearance: crate::appearance::AppearanceMode::Light,

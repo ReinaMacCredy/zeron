@@ -6087,6 +6087,7 @@ pub enum ComposerEvent {
     OpenChanges,
     StartMission(MissionStart),
     OpenTaskCenter(String),
+    PlanFirst,
 }
 
 #[derive(Debug, Clone)]
@@ -7401,6 +7402,7 @@ impl Composer {
         self.mission = on;
         if on {
             self.set_running_tab(false, cx);
+            cx.emit(ComposerEvent::PlanFirst);
         }
         cx.notify();
     }

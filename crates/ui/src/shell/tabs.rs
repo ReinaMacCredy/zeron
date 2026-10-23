@@ -1686,6 +1686,7 @@ impl Shell {
             }
             None => groups.push(task_id.to_owned()),
         }
+        self.mark_onboarded(super::intros::MISSION_TABS, cx);
         self.schedule_save(cx);
         cx.notify();
     }

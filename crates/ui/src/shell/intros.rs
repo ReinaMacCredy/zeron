@@ -1,4 +1,5 @@
 use super::*;
+use crate::settings::SINCE_INTRO_ID;
 use crate::tasks::{SampleRow, StripTree, TaskCenter, TreeStatus, tree_glyph};
 use std::time::Instant;
 use zeron_proto::TaskMode;
@@ -9,34 +10,90 @@ const VISUAL_HEIGHT: f32 = 172.0;
 const TREE_PAGE: usize = 2;
 const TEXT_HEIGHT: f32 = 23.0 + 8.0 + 4.0 * 21.0;
 
+pub(super) const TASKS_HOME: &str = "tasks-home";
+pub(super) const MISSION_TABS: &str = "mission-tabs";
+pub(super) const SIDEBAR_MISSION: &str = "sidebar-mission";
+pub(super) const SUPERVISOR_CONVERSATION: &str = "supervisor-conversation";
+
 struct Page {
+    id: &'static str,
     title: &'static str,
     body: &'static str,
 }
 
-const PAGES: [Page; 4] = [
+const MISSION_PAGES: [Page; 4] = [
     Page {
+        id: "",
         title: "Start with a goal",
         body: "Press Shift+Tab in the composer, or turn on Plan first on a task\u{2019}s card, and describe what you want done. Add up to five chats for the lead to read before it plans.",
     },
     Page {
+        id: "",
         title: "Approve the plan",
         body: "A lead agent turns your goal into steps you can edit, reorder and add images to. By default nothing runs until you click Approve and run.",
     },
     Page {
+        id: "",
         title: "Watch every step",
         body: "Each step runs on its own thread, side by side when steps don\u{2019}t depend on each other. The tree on the lead\u{2019}s thread follows them live, and the mission page adds each step\u{2019}s token count.",
     },
     Page {
+        id: "",
         title: "A lead and a Supervisor watch",
         body: "The lead reviews each step\u{2019}s work when it finishes and sends it back if something is missing. The Supervisor gathers what needs you into one sheet per mission, and one Send answers it all.",
     },
 ];
 
+const SINCE_PAGES: [Page; 4] = [
+    Page {
+        id: TASKS_HOME,
+        title: "Tasks is home for missions",
+        body: "Mission Control moved into Tasks. Missions, agent trees and tasks sit in one list, and the Missions, Trees and Needs you chips narrow it.",
+    },
+    Page {
+        id: MISSION_TABS,
+        title: "A mission\u{2019}s tabs travel together",
+        body: "Steps you open join the mission\u{2019}s group in the titlebar. Click its title to fold the group to the Lead; hover lists the rest.",
+    },
+    Page {
+        id: SIDEBAR_MISSION,
+        title: "Missions on the sidebar",
+        body: "A mission is one row with a progress ring. Its live steps sit under it and the rest fold into N more steps.",
+    },
+    Page {
+        id: SUPERVISOR_CONVERSATION,
+        title: "Ask the Supervisor about any thread",
+        body: "Mention a thread in the Supervisor\u{2019}s Conversation and it starts watching that tree. Watched trees show an eye.",
+    },
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Deck {
+    Mission,
+    Since,
+}
+
+impl Deck {
+    fn pages(self) -> &'static [Page] {
+        match self {
+            Self::Mission => &MISSION_PAGES,
+            Self::Since => &SINCE_PAGES,
+        }
+    }
+
+    fn cta(self) -> &'static str {
+        match self {
+            Self::Mission => "Try Mission Control",
+            Self::Since => "Open Tasks",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum MissionIntro {
-    Pending,
+pub(super) enum Intro {
     Open {
+        deck: Deck,
+        pages: Vec<usize>,
         page: usize,
         forward: bool,
         since: Option<Instant>,
@@ -45,19 +102,19 @@ pub(super) enum MissionIntro {
     Closed,
 }
 
-impl MissionIntro {
-    pub(super) fn at_boot(acknowledged: bool) -> Self {
-        if std::env::var("ZERON_OPEN_DIALOG").as_deref() == Ok("mission-intro") {
-            Self::open()
-        } else if acknowledged {
-            Self::Closed
-        } else {
-            Self::Pending
+impl Intro {
+    pub(super) fn at_boot() -> Self {
+        match std::env::var("ZERON_OPEN_DIALOG").as_deref() {
+            Ok("mission-intro") => Self::open(Deck::Mission, (0..MISSION_PAGES.len()).collect()),
+            Ok("new-since") => Self::open(Deck::Since, (0..SINCE_PAGES.len()).collect()),
+            _ => Self::Closed,
         }
     }
 
-    fn open() -> Self {
+    fn open(deck: Deck, pages: Vec<usize>) -> Self {
         Self::Open {
+            deck,
+            pages,
             page: 0,
             forward: true,
             since: None,
@@ -65,72 +122,144 @@ impl MissionIntro {
         }
     }
 
-    pub(super) fn resolve(state: &AppState) -> Option<Self> {
-        if !state.tasks_synced {
+    fn page(&self) -> Option<(Deck, &'static Page, usize, usize)> {
+        let Self::Open {
+            deck, pages, page, ..
+        } = self
+        else {
             return None;
-        }
-        let started = state
-            .tasks
-            .iter()
-            .any(|task| task.mode == TaskMode::Orchestrated);
-        Some(if started { Self::Closed } else { Self::open() })
+        };
+        Some((*deck, &deck.pages()[pages[*page]], *page, pages.len()))
     }
 }
 
+pub(super) fn since_pages(seen: &[String]) -> Vec<usize> {
+    if seen.iter().any(|id| id == SINCE_INTRO_ID) {
+        return Vec::new();
+    }
+    (0..SINCE_PAGES.len())
+        .filter(|&ix| !seen.iter().any(|id| id == SINCE_PAGES[ix].id))
+        .collect()
+}
+
+fn mission_started(state: &AppState) -> bool {
+    state
+        .tasks
+        .iter()
+        .any(|task| task.mode == TaskMode::Orchestrated)
+}
+
+fn mission_tab_open(state: &AppState, open_tabs: Option<&[String]>) -> bool {
+    let members = crate::tasks::tab_members(state);
+    open_tabs.is_some_and(|tabs| tabs.iter().any(|id| members.contains_key(id)))
+}
+
 impl Shell {
-    pub(super) fn resolve_mission_intro(&mut self, cx: &mut Context<Self>) {
-        if self.mission_intro != MissionIntro::Pending {
+    pub(super) fn resolve_intros(&mut self, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        if !state.tasks_synced {
             return;
         }
-        match MissionIntro::resolve(self.state.read(cx)) {
-            Some(MissionIntro::Closed) => self.close_mission_intro(cx),
-            Some(intro) => self.mission_intro = intro,
-            None => {}
+        let chats_synced = state.chats_synced;
+        if !self.settings.mission_intro_acknowledged && mission_started(state) {
+            self.settings.mission_intro_acknowledged = true;
+            self.schedule_save(cx);
+        }
+        if !self.since_pending || !chats_synced {
+            return;
+        }
+        self.since_pending = false;
+        if mission_tab_open(self.state.read(cx), self.settings.open_tabs.as_deref()) {
+            self.mark_onboarded(MISSION_TABS, cx);
+        }
+        let pages = since_pages(&self.settings.onboarding_seen);
+        if pages.is_empty() {
+            self.mark_onboarded(SINCE_INTRO_ID, cx);
+        } else if self.intro == Intro::Closed {
+            self.intro = Intro::open(Deck::Since, pages);
+            self.appshot_welcome = false;
+            cx.notify();
         }
     }
 
-    pub(super) fn mission_intro_visible(&self) -> bool {
-        matches!(self.mission_intro, MissionIntro::Open { .. })
+    pub(super) fn mark_onboarded(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.settings.onboarding_seen.iter().any(|seen| seen == id) {
+            return;
+        }
+        self.settings.onboarding_seen.push(id.to_owned());
+        self.schedule_save(cx);
+    }
+
+    pub(super) fn on_plan_first(&mut self, cx: &mut Context<Self>) {
+        if self.settings.mission_intro_acknowledged || self.intro != Intro::Closed {
+            return;
+        }
+        if mission_started(self.state.read(cx)) {
+            self.settings.mission_intro_acknowledged = true;
+            self.schedule_save(cx);
+            return;
+        }
+        self.intro = Intro::open(Deck::Mission, (0..MISSION_PAGES.len()).collect());
+        cx.notify();
+    }
+
+    pub(super) fn intro_visible(&self) -> bool {
+        matches!(self.intro, Intro::Open { .. })
             && !self.appshot_welcome
             && self.whats_new_dialog.is_none()
             && !self.sync_flow.has_visible_overlay()
     }
 
-    pub(super) fn reopen_mission_intro(&mut self, cx: &mut Context<Self>) {
-        self.mission_intro = MissionIntro::open();
+    pub(super) fn reopen_intro(&mut self, deck: Deck, cx: &mut Context<Self>) {
+        self.intro = Intro::open(deck, (0..deck.pages().len()).collect());
         cx.notify();
     }
 
-    pub(super) fn close_mission_intro(&mut self, cx: &mut Context<Self>) {
-        self.mission_intro = MissionIntro::Closed;
-        if !self.settings.mission_intro_acknowledged {
-            self.settings.mission_intro_acknowledged = true;
-            self.schedule_save(cx);
+    pub(super) fn close_intro(&mut self, cx: &mut Context<Self>) {
+        let Intro::Open { deck, .. } = std::mem::replace(&mut self.intro, Intro::Closed) else {
+            return;
+        };
+        match deck {
+            Deck::Mission if !self.settings.mission_intro_acknowledged => {
+                self.settings.mission_intro_acknowledged = true;
+                self.schedule_save(cx);
+            }
+            Deck::Mission => {}
+            Deck::Since => self.mark_onboarded(SINCE_INTRO_ID, cx),
         }
         cx.notify();
     }
 
-    pub(super) fn page_mission_intro(&mut self, delta: isize, cx: &mut Context<Self>) {
+    pub(super) fn page_intro(&mut self, delta: isize, cx: &mut Context<Self>) {
         let reduced = motion::reduced_motion(cx);
-        let MissionIntro::Open { page, .. } = self.mission_intro else {
+        let Intro::Open {
+            pages,
+            page,
+            forward,
+            since,
+            tree,
+            ..
+        } = &mut self.intro
+        else {
             return;
         };
-        let next = page.saturating_add_signed(delta).min(PAGES.len() - 1);
-        if next == page {
+        let next = page.saturating_add_signed(delta).min(pages.len() - 1);
+        if next == *page {
             return;
         }
-        self.mission_intro = MissionIntro::Open {
-            page: next,
-            forward: next > page,
-            since: (!reduced).then(Instant::now),
-            tree: None,
-        };
+        *forward = next > *page;
+        *since = (!reduced).then(Instant::now);
+        *page = next;
+        *tree = None;
         cx.notify();
     }
 
-    fn try_mission_control(&mut self, cx: &mut Context<Self>) {
-        self.close_mission_intro(cx);
-        self.new_mission(cx);
+    fn finish_intro(&mut self, deck: Deck, cx: &mut Context<Self>) {
+        self.close_intro(cx);
+        match deck {
+            Deck::Mission => self.new_mission(cx),
+            Deck::Since => self.open_tasks(cx),
+        }
     }
 
     pub(super) fn new_mission(&mut self, cx: &mut Context<Self>) {
@@ -143,43 +272,41 @@ impl Shell {
     }
 
     fn mission_intro_tree(&mut self, cx: &mut Context<Self>) -> Entity<StripTree> {
-        if let MissionIntro::Open {
+        if let Intro::Open {
             tree: Some(tree), ..
-        } = &self.mission_intro
+        } = &self.intro
         {
             return tree.clone();
         }
         let state = self.state.clone();
         let tree = cx.new(|cx| StripTree::sample(state, sample_rows(), cx));
-        if let MissionIntro::Open { tree: slot, .. } = &mut self.mission_intro {
+        if let Intro::Open { tree: slot, .. } = &mut self.intro {
             *slot = Some(tree.clone());
         }
         tree
     }
 
-    pub(super) fn render_mission_intro(
+    pub(super) fn render_intro(
         &mut self,
         viewport: gpui::Size<Pixels>,
         theme: &Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let MissionIntro::Open {
-            page,
-            forward,
-            since,
-            ..
-        } = self.mission_intro
-        else {
+        let Some((deck, content, page, count)) = self.intro.page() else {
             return div().into_any_element();
         };
-        let visual = match page {
-            TREE_PAGE => div()
+        let Intro::Open { forward, since, .. } = self.intro else {
+            return div().into_any_element();
+        };
+        let visual = match (deck, content.id) {
+            (Deck::Mission, _) if page == TREE_PAGE => div()
                 .size_full()
                 .pt(px(8.0))
                 .child(self.mission_intro_tree(cx))
                 .into_any_element(),
-            _ => intro_visual(page, theme),
+            (Deck::Mission, _) => mission_visual(page, theme),
+            (Deck::Since, id) => since_visual(id, theme),
         };
         let progress = since.map_or(1.0, |since| {
             let total = PAGE_IN.total().as_secs_f32() * motion::speed_scale();
@@ -190,8 +317,8 @@ impl Shell {
             PAGE_IN.progress(raw)
         });
         let shift = (1.0 - progress) * PAGE_SHIFT * if forward { 1.0 } else { -1.0 };
-        let last = page + 1 == PAGES.len();
-        let content = div()
+        let last = page + 1 == count;
+        let body = div()
             .relative()
             .left(px(shift))
             .opacity(progress)
@@ -214,37 +341,35 @@ impl Shell {
             .child(
                 div()
                     .min_h(px(TEXT_HEIGHT))
-                    .child(popover::welcome_title(theme, PAGES[page].title))
-                    .child(popover::welcome_body(theme, PAGES[page].body)),
+                    .child(popover::welcome_title(theme, content.title))
+                    .child(popover::welcome_body(theme, content.body)),
             );
         let dots = div()
-            .id("mission-intro-pages")
+            .id("intro-pages")
             .role(gpui::Role::Group)
-            .aria_label(SharedString::from(format!(
-                "Page {} of {}",
-                page + 1,
-                PAGES.len()
-            )))
+            .aria_label(SharedString::from(format!("Page {} of {count}", page + 1)))
             .flex_1()
             .flex()
             .items_center()
             .gap(px(5.0))
-            .children((0..PAGES.len()).map(|dot| {
-                div().size(px(6.0)).rounded_full().bg(if dot == page {
-                    theme.text
-                } else {
-                    crate::theme::ink(0.18)
-                })
-            }));
+            .when(count > 1, |el| {
+                el.children((0..count).map(|dot| {
+                    div().size(px(6.0)).rounded_full().bg(if dot == page {
+                        theme.text
+                    } else {
+                        crate::theme::ink(0.18)
+                    })
+                }))
+            });
         let next = if last {
-            popover::welcome_action(theme, "mission-intro-try", "Try Mission Control", true)
-                .on_click(cx.listener(|this, _, _, cx| this.try_mission_control(cx)))
+            popover::welcome_action(theme, "intro-finish", deck.cta(), true)
+                .on_click(cx.listener(move |this, _, _, cx| this.finish_intro(deck, cx)))
         } else {
-            popover::welcome_action(theme, "mission-intro-next", "Next", true)
-                .on_click(cx.listener(|this, _, _, cx| this.page_mission_intro(1, cx)))
+            popover::welcome_action(theme, "intro-next", "Next", true)
+                .on_click(cx.listener(|this, _, _, cx| this.page_intro(1, cx)))
         };
-        let card = popover::welcome_sheet(theme, "mission-intro-card", PAGES[page].title)
-            .child(content)
+        let card = popover::welcome_sheet(theme, "intro-card", content.title)
+            .child(body)
             .child(
                 div()
                     .mt(px(14.0))
@@ -254,13 +379,13 @@ impl Shell {
                     .gap(px(8.0))
                     .child(dots)
                     .child(
-                        popover::welcome_action(theme, "mission-intro-dismiss", "Not now", false)
-                            .on_click(cx.listener(|this, _, _, cx| this.close_mission_intro(cx))),
+                        popover::welcome_action(theme, "intro-dismiss", "Not now", false)
+                            .on_click(cx.listener(|this, _, _, cx| this.close_intro(cx))),
                     )
                     .child(next),
             )
             .into_any_element();
-        popover::modal_glass("mission-intro-sheet", viewport, card, 20.0)
+        popover::modal_glass("intro-sheet", viewport, card, 20.0)
     }
 }
 
@@ -660,7 +785,7 @@ fn supervisor_visual(theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-fn intro_visual(page: usize, theme: &Theme) -> AnyElement {
+fn mission_visual(page: usize, theme: &Theme) -> AnyElement {
     match page {
         0 => div()
             .flex()
@@ -699,39 +824,300 @@ fn intro_visual(page: usize, theme: &Theme) -> AnyElement {
     }
 }
 
+fn since_row(
+    theme: &Theme,
+    lead: AnyElement,
+    title: &'static str,
+    meta: Option<&'static str>,
+) -> gpui::Div {
+    div()
+        .h(px(28.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .rounded(px(8.0))
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(theme.text)
+        .child(lead)
+        .child(div().flex_1().min_w_0().truncate().child(title))
+        .children(meta.map(|meta| {
+            div()
+                .flex_none()
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.text_faint)
+                .child(meta)
+        }))
+}
+
+fn ring(theme: &Theme, percent: u8) -> AnyElement {
+    let (_, _, working) = chat_status_tone(zeron_proto::ChatIndicator::Working, theme);
+    crate::loaders::upload_progress_arc(percent, 12.0, theme.text_faint.opacity(0.35), working)
+}
+
+fn running(theme: &Theme) -> AnyElement {
+    let (_, _, working) = chat_status_tone(zeron_proto::ChatIndicator::Working, theme);
+    tree_glyph(TreeStatus::Running, 12.0, working, true)
+}
+
+fn filter_chip(theme: &Theme, label: &'static str, count: &'static str, on: bool) -> gpui::Div {
+    div()
+        .flex_none()
+        .h(px(22.0))
+        .px(px(8.0))
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(if on {
+            theme.border_strong
+        } else {
+            theme.border
+        })
+        .when(on, |el| el.bg(theme.wash(0.06)))
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(if on { theme.text } else { theme.text_muted })
+        .child(label)
+        .child(div().text_color(theme.text_faint).child(count))
+}
+
+fn tasks_visual(theme: &Theme) -> AnyElement {
+    let task_box = div()
+        .flex_none()
+        .size(px(12.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(theme.border_strong)
+        .into_any_element();
+    div()
+        .size_full()
+        .px(px(14.0))
+        .pt(px(14.0))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(
+            div()
+                .flex()
+                .gap(px(6.0))
+                .mb(px(2.0))
+                .child(filter_chip(theme, "All", "3", true))
+                .child(filter_chip(theme, "Missions", "1", false))
+                .child(filter_chip(theme, "Trees", "1", false))
+                .child(filter_chip(theme, "Needs you", "0", false)),
+        )
+        .child(since_row(
+            theme,
+            ring(theme, 80),
+            "Ship the shop",
+            Some("4/5"),
+        ))
+        .child(since_row(
+            theme,
+            running(theme),
+            "Fix tab strip jitter",
+            Some("tree \u{b7} 3"),
+        ))
+        .child(since_row(
+            theme,
+            task_box,
+            "Write the release notes",
+            Some("task"),
+        ))
+        .into_any_element()
+}
+
+fn tabs_visual(theme: &Theme) -> AnyElement {
+    let tone = motion::mix(theme.accent, theme.text, 0.2);
+    let tab = |label: &'static str, selected: bool| {
+        div()
+            .flex_none()
+            .h(px(26.0))
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .rounded(px(8.0))
+            .text_size(px(12.0))
+            .text_color(if selected {
+                theme.text
+            } else {
+                theme.text_muted
+            })
+            .when(selected, |el| {
+                el.bg(crate::theme::glass_selected_bg())
+                    .shadow(crate::theme::glass_selected_shadows())
+            })
+            .child(label)
+    };
+    let title = div()
+        .flex_none()
+        .h(px(26.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(px(12.0))
+        .text_color(tone)
+        .child(
+            icons::icon(icons::LUCIDE_FOLDER)
+                .size(px(12.0))
+                .text_color(tone),
+        )
+        .child("Ship the shop");
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(14.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(2.0))
+                        .pr(px(3.0))
+                        .rounded(px(9.0))
+                        .border_1()
+                        .border_color(tone.opacity(0.45))
+                        .child(title)
+                        .child(tab("Lead", true))
+                        .child(tab("Step 2", false))
+                        .child(tab("Step 3", false)),
+                ),
+        )
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(11.5))
+                .text_color(theme.text_faint)
+                .child("Click the title to fold the group to the Lead"),
+        )
+        .into_any_element()
+}
+
+fn sidebar_visual(theme: &Theme) -> AnyElement {
+    let nested = |row: gpui::Div| row.ml(px(18.0));
+    div()
+        .w(px(250.0))
+        .p(px(6.0))
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(theme.border)
+        .bg(crate::settings::widgets::block_fill(theme))
+        .child(since_row(theme, ring(theme, 80), "Ship the shop", Some("4/5")).bg(theme.wash(0.06)))
+        .child(nested(since_row(
+            theme,
+            running(theme),
+            "Product grid with filters",
+            None,
+        )))
+        .child(nested(since_row(
+            theme,
+            running(theme),
+            "Cart with persistence",
+            None,
+        )))
+        .child(nested(
+            div()
+                .h(px(24.0))
+                .px(px(10.0))
+                .flex()
+                .items_center()
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(theme.text_muted.opacity(0.6))
+                .child("2 more steps"),
+        ))
+        .into_any_element()
+}
+
+fn supervisor_conversation_visual(theme: &Theme) -> AnyElement {
+    let tone = crate::supervisor::ok_tone(theme);
+    let bubble = div()
+        .max_w(px(300.0))
+        .px(px(12.0))
+        .py(px(8.0))
+        .rounded(px(14.0))
+        .bg(theme.wash(0.08))
+        .text_size(crate::typography::ui_rems(12.5))
+        .text_color(theme.text)
+        .flex()
+        .flex_wrap()
+        .gap(px(4.0))
+        .child("Keep an eye on")
+        .child(
+            div()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.accent)
+                .child("@Fix tab strip jitter"),
+        );
+    let watched = div()
+        .h(px(26.0))
+        .pl(px(9.0))
+        .pr(px(12.0))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .rounded_full()
+        .border_1()
+        .border_color(tone.opacity(0.55))
+        .bg(tone.opacity(0.08))
+        .text_size(crate::typography::ui_rems(12.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.text)
+        .child(
+            icons::icon(icons::LUCIDE_EYE)
+                .size(px(13.0))
+                .text_color(tone),
+        )
+        .child("Watched");
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(12.0))
+        .child(bubble)
+        .child(watched)
+        .into_any_element()
+}
+
+fn since_visual(id: &str, theme: &Theme) -> AnyElement {
+    match id {
+        TASKS_HOME => tasks_visual(theme),
+        MISSION_TABS => tabs_visual(theme),
+        SIDEBAR_MISSION => sidebar_visual(theme),
+        _ => supervisor_conversation_visual(theme),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::MissionIntro;
-    use crate::state::AppState;
-    use zeron_proto::TaskMode;
+    use super::{MISSION_TABS, SIDEBAR_MISSION, SUPERVISOR_CONVERSATION, TASKS_HOME, since_pages};
+    use crate::settings::SINCE_INTRO_ID;
 
-    fn task(mode: TaskMode) -> zeron_proto::Task {
-        serde_json::from_value(serde_json::json!({
-            "id": "t1",
-            "title": "Ship the shop",
-            "mode": mode,
-        }))
-        .unwrap()
+    fn seen(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| (*id).to_owned()).collect()
     }
 
     #[test]
-    fn the_intro_waits_for_tasks_and_skips_once_a_mission_exists() {
-        let mut state = AppState::default();
-        assert_eq!(MissionIntro::resolve(&state), None);
-
-        state.apply_tasks(Vec::new());
-        assert!(matches!(
-            MissionIntro::resolve(&state),
-            Some(MissionIntro::Open { page: 0, .. })
-        ));
-
-        state.apply_tasks(vec![task(TaskMode::Single)]);
-        assert!(matches!(
-            MissionIntro::resolve(&state),
-            Some(MissionIntro::Open { .. })
-        ));
-
-        state.apply_tasks(vec![task(TaskMode::Orchestrated)]);
-        assert_eq!(MissionIntro::resolve(&state), Some(MissionIntro::Closed));
+    fn the_since_sheet_drops_used_pages_and_never_returns_once_closed() {
+        assert_eq!(since_pages(&[]), vec![0, 1, 2, 3]);
+        assert_eq!(since_pages(&seen(&[TASKS_HOME, MISSION_TABS])), vec![2, 3]);
+        assert_eq!(
+            since_pages(&seen(&[
+                TASKS_HOME,
+                MISSION_TABS,
+                SIDEBAR_MISSION,
+                SUPERVISOR_CONVERSATION
+            ])),
+            Vec::<usize>::new()
+        );
+        assert_eq!(since_pages(&seen(&[SINCE_INTRO_ID])), Vec::<usize>::new());
     }
 }

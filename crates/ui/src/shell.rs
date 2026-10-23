@@ -92,7 +92,7 @@ mod file_mutations;
 mod files_panel;
 mod handoff;
 mod harness_updates;
-mod mission_intro;
+mod intros;
 mod mission_strip;
 mod navigation_focus;
 #[cfg(test)]
@@ -2761,7 +2761,8 @@ pub struct Shell {
     /// Synara's one-time AppSnap introduction: shown on desktop until the
     /// user dismisses it or follows it into Settings → Appshots.
     appshot_welcome: bool,
-    mission_intro: mission_intro::MissionIntro,
+    intro: intros::Intro,
+    since_pending: bool,
     whats_new_card: Option<whats_new::WhatsNewCard>,
     whats_new_dialog: Option<whats_new::WhatsNewDialog>,
     /// The fork/rewind confirmation, centered like the delete dialog.
@@ -3169,6 +3170,7 @@ impl Shell {
                 }
                 ComposerEvent::OpenChat(chat_id) => this.open_chat(chat_id.clone(), cx),
                 ComposerEvent::StartMission(start) => this.start_mission(start.clone(), cx),
+                ComposerEvent::PlanFirst => this.on_plan_first(cx),
                 ComposerEvent::OpenTaskCenter(task_id) => {
                     this.open_task_center(task_id.clone(), cx)
                 }
@@ -3490,9 +3492,8 @@ impl Shell {
             chat_rename: None,
             delete_confirm: None,
             appshot_welcome,
-            mission_intro: mission_intro::MissionIntro::at_boot(
-                settings.mission_intro_acknowledged,
-            ),
+            intro: intros::Intro::at_boot(),
+            since_pending: !intros::since_pages(&settings.onboarding_seen).is_empty(),
             whats_new_card,
             whats_new_dialog: None,
             branch_modal: None,
@@ -3749,7 +3750,7 @@ impl Shell {
         self.refresh_harness_update_watch(cx);
         self.advance_update_all(cx);
         self.sync_search_warm(cx);
-        self.resolve_mission_intro(cx);
+        self.resolve_intros(cx);
         if state.read(cx).engine().is_none() {
             self.side_chats.clear();
             self.side_chat_creating = false;
@@ -7181,7 +7182,8 @@ impl Shell {
             | ComposerEvent::OpenChat(_)
             | ComposerEvent::OpenChanges
             | ComposerEvent::StartMission(_)
-            | ComposerEvent::OpenTaskCenter(_) => {}
+            | ComposerEvent::OpenTaskCenter(_)
+            | ComposerEvent::PlanFirst => {}
             ComposerEvent::OpenSubagent {
                 chat_id,
                 doc_id,
@@ -7861,6 +7863,9 @@ impl Shell {
             if let Some(page) = self.pull_requests_page.as_ref().cloned() {
                 page.update(cx, |page, cx| page.on_hidden(cx));
             }
+        }
+        if route == Route::Tasks {
+            self.mark_onboarded(intros::TASKS_HOME, cx);
         }
         self.route = route;
         if !was_pull_requests && will_show_pull_requests {
@@ -12432,6 +12437,9 @@ impl Shell {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
+                if crate::tasks::tab_members(this.state.read(cx)).contains_key(&lead_id) {
+                    this.mark_onboarded(intros::SIDEBAR_MISSION, cx);
+                }
                 this.toggle_sidebar_lead(&lead_id, cx);
             }))
             .tooltip(crate::settings::widgets::text_tooltip_above(label))
@@ -15615,8 +15623,8 @@ impl Shell {
             self.acknowledge_appshot_welcome(cx);
             return true;
         }
-        if self.mission_intro_visible() {
-            self.close_mission_intro(cx);
+        if self.intro_visible() {
+            self.close_intro(cx);
             return true;
         }
         if self.cancel_device_rename(cx) {
@@ -15718,7 +15726,7 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
-        if self.mission_intro_visible()
+        if self.intro_visible()
             && !event.keystroke.modifiers.modified()
             && let Some(delta) = match event.keystroke.key.as_str() {
                 "left" => Some(-1),
@@ -15726,7 +15734,7 @@ impl Shell {
                 _ => None,
             }
         {
-            self.page_mission_intro(delta, cx);
+            self.page_intro(delta, cx);
             cx.stop_propagation();
             return;
         }
@@ -16319,8 +16327,8 @@ impl Shell {
                 20.0,
             ));
         }
-        if self.mission_intro_visible() {
-            overlays.push(self.render_mission_intro(viewport, &theme, window, cx));
+        if self.intro_visible() {
+            overlays.push(self.render_intro(viewport, &theme, window, cx));
         }
         if let Some(dialog) = self.render_whats_new_dialog(viewport, &theme, cx) {
             overlays.push(dialog);

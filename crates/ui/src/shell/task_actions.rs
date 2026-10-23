@@ -580,6 +580,7 @@ impl Shell {
                 cx,
             ),
             TaskCardEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
+            TaskCardEvent::PlanFirst => self.on_plan_first(cx),
             TaskCardEvent::Refused(message) => {
                 self.show_notice(crate::toast::ToastKind::Error, message.clone(), cx);
                 cx.notify();

@@ -334,8 +334,16 @@ impl Shell {
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.close_help_menu(cx);
-                    this.reopen_mission_intro(cx);
+                    this.reopen_intro(super::intros::Deck::Mission, cx);
                 })),
+            )
+            .child(
+                help_row(theme, "help-new-since", icons::TASKS, "New since 0.2.114").on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.close_help_menu(cx);
+                        this.reopen_intro(super::intros::Deck::Since, cx);
+                    }),
+                ),
             )
             .into_any_element();
         trigger

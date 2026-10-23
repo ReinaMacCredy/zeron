@@ -143,6 +143,9 @@ impl Shell {
             SupervisorEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             SupervisorEvent::WatchDoc(doc) => self.set_supervisor_doc(doc.clone(), cx),
             SupervisorEvent::Discuss(text) => self.discuss_with_supervisor(text.clone(), cx),
+            SupervisorEvent::ConversationOpened => {
+                self.mark_onboarded(super::intros::SUPERVISOR_CONVERSATION, cx)
+            }
         }
     }
 
