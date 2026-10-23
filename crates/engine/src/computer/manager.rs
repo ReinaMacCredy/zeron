@@ -66,8 +66,9 @@ pub const SCROLL_PROBE_TRIGGER_PX: f64 = SCROLL_PROBE_PX;
 pub const SCROLL_SETTLE_ARRIVAL_TOLERANCE: f64 = 0.15;
 pub const SCROLL_SETTLE_ARRIVAL_MIN_PX: f64 = 4.0;
 pub const COMPUTER_ERROR_REPUBLISH_DEBOUNCE_MS: u64 = 250;
-pub const COMPUTER_CONTROL_ON_DISCLOSURE: &str = "Computer control is on for this turn. If the user uses an app you are driving, input pauses: read fresh state and continue. If a computer tool returns user_revoked, the user pressed Stop: stop using computer tools and summarize.";
-pub const COMPUTER_USER_PAUSE_NOTE_PREFIX: &str = "Paused while you used ";
+pub use zeron_proto::computer::cards::{
+    COMPUTER_CONTROL_ON_DISCLOSURE, COMPUTER_USER_PAUSE_NOTE_PREFIX,
+};
 pub const COMPUTER_USER_REVOKED: &str = "The user took back desktop control for the rest of this turn; no input was sent. Do not call computer tools again this turn. Tell the user what you finished and what is left.";
 const COMPUTER_DENYLIST_APP_CACHE_MS: u64 = 30_000;
 const THREAD_RECORD_LIMIT: usize = 256;

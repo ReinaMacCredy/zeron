@@ -12,7 +12,7 @@ pub mod host_socket;
 #[cfg(target_os = "macos")]
 pub mod native;
 pub mod presence;
-pub mod presentation;
+pub use zeron_proto::computer::presentation;
 pub mod preview;
 pub mod preview_card;
 pub mod protected_surfaces;
