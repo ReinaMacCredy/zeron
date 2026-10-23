@@ -560,9 +560,10 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         let present = { [weak self] in
             guard let self, let window = self.window, self.attachCard == nil else { return }
             let fallback = CGRect(x: 0, y: window.bounds.height - 336, width: window.bounds.width, height: 336)
-            var keyboard = self.keyboardFrame.flatMap { $0.height >= 200 ? $0 : nil } ?? fallback
+            let keys = self.keyboardFrame.flatMap { $0.height >= 200 ? $0 : nil }
+            var keyboard = keys ?? fallback
             if let frame = self.keyboardFrame, frame.height < 200 { keyboard.origin.y = frame.minY - keyboard.height }
-            self.attachCard = AttachCard.present(in: window, input: self.textView, anchor: self.attachButton, composer: self, keyboard: keyboard, picker: picker) { [weak self] in
+            self.attachCard = AttachCard.present(in: window, input: self.textView, anchor: self.attachButton, composer: self, keyboard: keyboard, keysUp: keys != nil, picker: picker) { [weak self] in
                 self?.attachCard = nil
                 self?.rotateAttach(open: false)
             }

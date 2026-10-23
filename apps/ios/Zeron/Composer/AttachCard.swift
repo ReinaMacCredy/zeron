@@ -1,9 +1,30 @@
 import Photos
 import UIKit
 
-/// The composer's attach card. The menu floats in the app window with its
-/// bottom edge at the keyboard top, so the keys stay live under it. Photos
-/// swaps the text view's input view for the recent-photos grid.
+/// The system keyboard's window. It is internal and sits above every app
+/// window, so only a view inside it draws over the keys; Apple does not
+/// support this, so it is found by type name as it becomes visible.
+enum KeyboardWindow {
+    private static weak var window: UIWindow?
+    private static var observer: NSObjectProtocol?
+
+    static func observe() {
+        guard observer == nil else { return }
+        observer = NotificationCenter.default.addObserver(forName: UIWindow.didBecomeVisibleNotification, object: nil, queue: .main) { note in
+            guard let w = note.object as? UIWindow, String(describing: type(of: w)).contains("RemoteKeyboardWindow") else { return }
+            window = w
+        }
+    }
+
+    static func over(_ appWindow: UIWindow) -> UIWindow? {
+        guard let w = window, !w.isHidden, w.alpha > 0, w.bounds == appWindow.bounds else { return nil }
+        return w
+    }
+}
+
+/// The composer's attach card. With the software keyboard up it is drawn in
+/// the keyboard's window, over the live keys. Otherwise the menu sits above
+/// the keyboard and Photos swaps the grid in as the text view's input view.
 final class AttachCard: UIView {
     private static let menuRadius: CGFloat = 32
     private static let gridRadius: CGFloat = 34
@@ -17,15 +38,19 @@ final class AttachCard: UIView {
     private let scrim = UIControl()
     private let card = Glass.surface(radius: AttachCard.menuRadius)
     private let menu = UIStackView()
+    private var overlay: KeysOverlay?
+    private var observers: [NSObjectProtocol] = []
+    private var grid: RecentPhotosGrid?
     private var gridHost: GridHost?
     private var inGrid = false
     private var closing = false
 
     private var reduceMotion: Bool { UIAccessibility.isReduceMotionEnabled }
 
-    static func present(in window: UIWindow, input: UITextView, anchor: UIView, composer: UIView, keyboard: CGRect, picker: AttachmentPicker, onClose: @escaping () -> Void) -> AttachCard {
+    static func present(in window: UIWindow, input: UITextView, anchor: UIView, composer: UIView, keyboard: CGRect, keysUp: Bool, picker: AttachmentPicker, onClose: @escaping () -> Void) -> AttachCard {
         let card = AttachCard(window: window, input: input, anchor: anchor, composer: composer, keyboard: keyboard, picker: picker, onClose: onClose)
         window.addSubview(card)
+        if keysUp, let keys = KeyboardWindow.over(window) { card.host(in: keys, appWindow: window) }
         card.open()
         return card
     }
@@ -80,6 +105,33 @@ final class AttachCard: UIView {
         card.contentView.addSubview(menu)
     }
 
+    /// Both windows are full-screen at the origin, so the card keeps app-window
+    /// coordinates there; `convert` across them returns NaN on iOS 27.
+    private func host(in keys: UIWindow, appWindow: UIWindow) {
+        let overlay = KeysOverlay(frame: keys.bounds)
+        overlay.card = card
+        overlay.overrideUserInterfaceStyle = appWindow.traitCollection.userInterfaceStyle
+        overlay.tintColor = appWindow.tintColor
+        overlay.onEscape = { [weak self] in _ = self?.accessibilityPerformEscape() }
+        overlay.onLost = { [weak self] in self?.reattach() }
+        overlay.addSubview(card)
+        keys.addSubview(overlay)
+        self.overlay = overlay
+        observers = [UIResponder.keyboardWillHideNotification, UIApplication.didEnterBackgroundNotification].map {
+            NotificationCenter.default.addObserver(forName: $0, object: nil, queue: .main) { [weak self] _ in self?.close() }
+        }
+    }
+
+    /// UIKit rebuilds the keyboard's views without notice.
+    private func reattach() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let overlay = self.overlay, !overlay.ending, overlay.window == nil else { return }
+            guard let window = self.window, let keys = KeyboardWindow.over(window) else { return self.close() }
+            overlay.frame = keys.bounds
+            keys.addSubview(overlay)
+        }
+    }
+
     private func row(_ id: String, _ title: String, symbol: String, action: @escaping () -> Void) -> MenuRow {
         let r = MenuRow(title: title, symbol: symbol)
         r.accessibilityIdentifier = "attach-\(id)"
@@ -107,16 +159,17 @@ final class AttachCard: UIView {
         let left = (composer.map { $0.convert($0.bounds, to: nil).minX } ?? 10) + 3
         let w = min(280, bounds.width - left - 8)
         let h = CGFloat(menu.arrangedSubviews.count) * MenuRow.height + 28
-        return CGRect(x: left, y: keyboard.minY - h, width: w, height: h)
+        let bottom = overlay == nil ? keyboard.minY : keyboard.minY + 132
+        return CGRect(x: left, y: bottom - h, width: w, height: h)
     }
 
     private var gridRect: CGRect {
         CGRect(x: 2, y: keyboard.minY + 6, width: bounds.width - 4, height: keyboard.height - 46)
     }
 
-    /// The keyboard window draws above every app window, so while the grid
-    /// is up the card is drawn twice with the same frame: this view shows the
-    /// part above the keyboard top, the grid host's twin the part below.
+    /// Without the keyboard's window, the grid's card is drawn twice with the
+    /// same frame: this view shows the part above the keyboard top, the grid
+    /// host's twin the part below.
     private func place(_ rect: CGRect, radius: CGFloat?) {
         let corners: UICornerConfiguration = radius.map { .uniformCorners(radius: .fixed($0)) } ?? .capsule()
         card.frame = rect
@@ -167,46 +220,51 @@ final class AttachCard: UIView {
         }
     }
 
-    private func makeGridHost() -> GridHost {
-        let host = GridHost(keyboard: keyboard, limit: picker.limit, showsCamera: picker.canTakePhoto, radius: Self.gridRadius)
-        host.card.frame = card.frame.offsetBy(dx: 0, dy: -keyboard.minY)
-        host.onBackground = { [weak self] in self?.close() }
-        host.grid.onBack = { [weak self] in self?.morph(toGrid: false) }
-        host.grid.onCamera = { [weak self] in self?.close { $0.presentCamera() } }
-        host.grid.onAllPhotos = { [weak self] in self?.close { $0.presentPhotos() } }
-        host.grid.onAdd = { [weak self] assets in
+    private func makeGrid() -> RecentPhotosGrid {
+        let grid = RecentPhotosGrid(limit: picker.limit, showsCamera: picker.canTakePhoto)
+        grid.alpha = 0
+        grid.frame = CGRect(origin: .zero, size: gridRect.size)
+        grid.onBack = { [weak self] in self?.morph(toGrid: false) }
+        grid.onCamera = { [weak self] in self?.close { $0.presentCamera() } }
+        grid.onAllPhotos = { [weak self] in self?.close { $0.presentPhotos() } }
+        grid.onAdd = { [weak self] assets in
             guard let self else { return }
             let picker = self.picker
             self.close()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { picker.attach(assets) }
         }
-        host.onEscape = { [weak self] in self?.morph(toGrid: false) }
-        gridHost = host
-        return host
+        self.grid = grid
+        return grid
     }
 
     private func morph(toGrid: Bool) {
         guard !closing, toGrid != inGrid else { return }
         inGrid = toGrid
-        if toGrid {
-            let host = makeGridHost()
-            host.onMounted = { [weak self] in self?.runMorph(toGrid: true) }
-            input?.inputView = host
-            input?.reloadInputViews()
-        } else {
-            runMorph(toGrid: false)
+        guard toGrid else { return runMorph(toGrid: false) }
+        let grid = makeGrid()
+        if overlay != nil {
+            card.contentView.addSubview(grid)
+            return runMorph(toGrid: true)
         }
+        let host = GridHost(grid: grid, keyboard: keyboard)
+        host.card.frame = card.frame.offsetBy(dx: 0, dy: -keyboard.minY)
+        host.onBackground = { [weak self] in self?.close() }
+        host.onEscape = { [weak self] in self?.morph(toGrid: false) }
+        host.onMounted = { [weak self] in self?.runMorph(toGrid: true) }
+        gridHost = host
+        input?.inputView = host
+        input?.reloadInputViews()
     }
 
     private func runMorph(toGrid: Bool) {
-        guard let host = gridHost, !closing else { return }
+        guard let grid, !closing else { return }
         let target = toGrid ? gridRect : menuRect
         let radius = toGrid ? Self.gridRadius : Self.menuRadius
-        let shown: UIView = toGrid ? host.grid : menu
-        let hidden: UIView = toGrid ? menu : host.grid
+        let shown: UIView = toGrid ? grid : menu
+        let hidden: UIView = toGrid ? menu : grid
         let done = { [weak self] in
             guard let self, !toGrid, !self.inGrid, !self.closing else { return }
-            self.dropGridHost()
+            self.dropGrid()
         }
         if reduceMotion {
             place(target, radius: radius)
@@ -224,35 +282,42 @@ final class AttachCard: UIView {
         UIAccessibility.post(notification: .screenChanged, argument: shown)
     }
 
-    private func dropGridHost() {
-        guard gridHost != nil else { return }
-        if input?.inputView === gridHost {
+    private func dropGrid() {
+        grid?.removeFromSuperview()
+        grid = nil
+        guard let host = gridHost else { return }
+        gridHost = nil
+        if input?.inputView === host {
             input?.inputView = nil
             input?.reloadInputViews()
         }
-        gridHost = nil
     }
 
     func close(then: ((AttachmentPicker) -> Void)? = nil) {
         guard !closing else { return }
         closing = true
         isUserInteractionEnabled = false
+        card.isUserInteractionEnabled = false
         gridHost?.isUserInteractionEnabled = false
         onClose()
         let finish = { [self] in
-            dropGridHost()
+            dropGrid()
+            overlay?.ending = true
+            overlay?.removeFromSuperview()
+            observers.forEach(NotificationCenter.default.removeObserver)
             removeFromSuperview()
             then?(picker)
         }
-        let contents = [menu, gridHost?.grid].compactMap { $0 }
+        let contents = [menu, grid].compactMap { $0 }
         if reduceMotion {
             UIView.animate(withDuration: 0.12) {
                 self.alpha = 0
+                self.card.alpha = 0
                 self.gridHost?.card.alpha = 0
             } completion: { _ in finish() }
             return
         }
-        UIView.animate(withDuration: 0.14, delay: 0, options: [.beginFromCurrentState]) { contents.forEach { $0.alpha = 0 } } completion: { _ in self.dropGridHost() }
+        UIView.animate(withDuration: 0.14, delay: 0, options: [.beginFromCurrentState]) { contents.forEach { $0.alpha = 0 } } completion: { _ in self.dropGrid() }
         UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0, options: [.beginFromCurrentState]) {
             self.place(self.anchorRect, radius: nil)
             self.card.effect = nil
@@ -261,16 +326,39 @@ final class AttachCard: UIView {
     }
 }
 
-/// The grid's half of the card, mounted as the text view's input view.
+/// The card's layer in the keyboard's window: touches outside the card go on
+/// to the keys under it.
+private final class KeysOverlay: UIView {
+    weak var card: UIView?
+    var ending = false
+    var onLost: () -> Void = {}
+    var onEscape: () -> Void = {}
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        guard let card, card.frame.contains(point) else { return nil }
+        return super.hitTest(point, with: event)
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil, !ending { onLost() }
+    }
+
+    override func accessibilityPerformEscape() -> Bool {
+        onEscape()
+        return true
+    }
+}
+
+/// The grid's half of the card, mounted as the text view's input view when
+/// the keyboard's window can't be reached.
 private final class GridHost: UIInputView {
     let card = Glass.surface(radius: 34)
-    let grid: RecentPhotosGrid
     var onMounted: (() -> Void)?
     var onBackground: (() -> Void)?
     var onEscape: (() -> Void)?
 
-    init(keyboard: CGRect, limit: Int, showsCamera: Bool, radius: CGFloat) {
-        grid = RecentPhotosGrid(limit: limit, showsCamera: showsCamera)
+    init(grid: RecentPhotosGrid, keyboard: CGRect) {
         super.init(frame: CGRect(origin: .zero, size: keyboard.size), inputViewStyle: .keyboard)
         allowsSelfSizing = false
         let background = UIControl(frame: bounds)
@@ -280,8 +368,6 @@ private final class GridHost: UIInputView {
         card.clipsToBounds = true
         card.effect = Glass.effect()
         addSubview(card)
-        grid.alpha = 0
-        grid.frame = CGRect(x: 0, y: 0, width: keyboard.width - 4, height: keyboard.height - 46)
         card.contentView.addSubview(grid)
     }
 
