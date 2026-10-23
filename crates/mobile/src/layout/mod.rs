@@ -217,10 +217,10 @@ pub struct UsageMeter {
 
 impl UsageMeter {
     pub(crate) fn new(label: String, fraction: f32) -> Self {
-        let level = match zeron_proto::usage_level(fraction) {
-            zeron_proto::UsageLevel::Normal => UsageLevel::Normal,
-            zeron_proto::UsageLevel::Warn => UsageLevel::Warn,
-            zeron_proto::UsageLevel::Critical => UsageLevel::Critical,
+        let level = match zeron_proto::account_usage::usage_level(fraction) {
+            zeron_proto::account_usage::UsageLevel::Normal => UsageLevel::Normal,
+            zeron_proto::account_usage::UsageLevel::Warn => UsageLevel::Warn,
+            zeron_proto::account_usage::UsageLevel::Critical => UsageLevel::Critical,
         };
         Self { label, fraction, level }
     }

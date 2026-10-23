@@ -228,6 +228,45 @@ pub struct LimitResumes {
 }
 
 impl HarnessUpdateStatus {
+    /// A provider's version line: the installed version, plus only what the
+    /// Update button doesn't already say (progress, a failure). Up-to-date
+    /// providers, checks in flight and providers whose updates aren't
+    /// monitored show just the version, so rows don't flash through states
+    /// while checks run.
+    pub fn version_line(&self) -> String {
+        let installed = self
+            .installed_version
+            .as_deref()
+            .map(|version| format!("v{version}"));
+        let with = |detail: &str| match &installed {
+            Some(version) => format!("{version} · {detail}"),
+            None => detail.to_owned(),
+        };
+        let version_only = || installed.clone().unwrap_or_default();
+        match self.phase {
+            HarnessUpdatePhase::Dormant
+            | HarnessUpdatePhase::Checking
+            | HarnessUpdatePhase::Current => version_only(),
+            HarnessUpdatePhase::Available | HarnessUpdatePhase::ManualActionRequired
+                if self.can_apply =>
+            {
+                version_only()
+            }
+            HarnessUpdatePhase::Available => match self.latest_version.as_deref() {
+                Some(latest) => with(&format!("v{latest} available")),
+                None => with("Update available"),
+            },
+            HarnessUpdatePhase::ManualActionRequired => version_only(),
+            HarnessUpdatePhase::WaitingForIdle => with("Waiting for agent to be idle"),
+            HarnessUpdatePhase::Preparing => with("Preparing update…"),
+            HarnessUpdatePhase::Downloading => with("Downloading…"),
+            HarnessUpdatePhase::Installing => with("Installing…"),
+            HarnessUpdatePhase::Verifying => with("Verifying…"),
+            HarnessUpdatePhase::Updated => with("Updated"),
+            HarnessUpdatePhase::Failed => with("Couldn't check for updates"),
+        }
+    }
+
     /// Home notices describe discovered releases or an update in progress.
     /// Manual checks remain available in Settings without implying that a
     /// newer release exists.
@@ -260,6 +299,22 @@ pub enum ReasoningLevel {
     Ultracode,
     /// Prompt-prefix driven (Claude).
     Ultrathink,
+}
+
+impl ReasoningLevel {
+    pub fn label(self) -> &'static str {
+        match self {
+            ReasoningLevel::Minimal => "Minimal",
+            ReasoningLevel::Low => "Low",
+            ReasoningLevel::Medium => "Medium",
+            ReasoningLevel::High => "High",
+            ReasoningLevel::XHigh => "X-High",
+            ReasoningLevel::Max => "Max",
+            ReasoningLevel::Ultra => "Ultra",
+            ReasoningLevel::Ultracode => "Ultracode",
+            ReasoningLevel::Ultrathink => "Ultrathink",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -315,6 +370,14 @@ impl PermissionMode {
             PermissionMode::Ask => "Ask for approval",
             PermissionMode::Auto => "Approve for me",
             PermissionMode::Full => "Full access",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            PermissionMode::Ask => "Ask",
+            PermissionMode::Auto => "Auto",
+            PermissionMode::Full => "Full",
         }
     }
 }

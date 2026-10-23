@@ -11,6 +11,7 @@
 
 mod fixtures;
 mod png;
+mod settings;
 mod transcripts;
 mod visuals;
 
@@ -84,6 +85,7 @@ pub(crate) struct DemoHost {
     forks: Mutex<HashMap<String, Vec<SessionMessageEntry>>>,
     rng: Mutex<Rng>,
     cancel: Mutex<Option<CancellationToken>>,
+    settings: Mutex<settings::HostSettings>,
 }
 
 fn doc_err(err: zeron_doc::DocError) -> ClientError {
@@ -105,6 +107,7 @@ impl DemoHost {
             forks: Mutex::new(HashMap::new()),
             rng: Mutex::new(Rng(0x9e37_79b9_7f4a_7c15)),
             cancel: Mutex::new(None),
+            settings: Mutex::new(settings::HostSettings::new()),
         })
     }
 
@@ -844,12 +847,14 @@ impl DemoHost {
             return Err(ClientError::HostUnavailable(device_id.to_owned()));
         }
         tokio::time::sleep(Duration::from_millis(80)).await;
+        if settings::HostSettings::handles(method) {
+            return lock(&self.settings).call(method, &params);
+        }
         match method {
             m::HARNESS_COMPACTION => {
                 return Ok(serde_json::json!({ "compaction": "native", "branching": true }));
             }
             m::FORK_CHAT => return self.fork_chat(&client, &params),
-            m::LIST_AGENT_ACCOUNTS => return Ok(demo_accounts()),
             m::FETCH_TOOL_BLOB => return Ok(demo_blob(&params)),
             m::RESOLVE_LIMIT_OFFER | m::SET_LIMIT_RESUME => {
                 return Ok(limit_rpc(&client, method == m::SET_LIMIT_RESUME, &params));
@@ -1056,6 +1061,7 @@ impl DemoHost {
             harness.steering_mode = Some("step-boundary".into());
             harness.enabled = Some(true);
         }
+        let disabled = lock(&self.settings).disabled_harnesses.clone();
         for (id, label) in [
             ("opencode", "OpenCode"),
             ("cursor", "Cursor"),
@@ -1076,21 +1082,31 @@ impl DemoHost {
                 enabled: Some(true),
             });
         }
+        for harness in &mut list {
+            if disabled.contains(&harness.id) {
+                harness.enabled = Some(false);
+            }
+        }
         list
     }
 
     pub(crate) async fn list_models(&self, harness: &str) -> Vec<ModelInfo> {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        match harness {
+        let mut models = match harness {
             "cursor" | "acp" => vec![ModelInfo {
                 id: "default".into(),
                 label: "Agent default".into(),
                 description: None,
                 reasoning_levels: Vec::new(),
                 options: Vec::new(),
+                is_new: false,
             }],
             _ => catalog::fallback_models(harness),
+        };
+        for model in &mut models {
+            model.is_new = model.id == "claude-sonnet-5-5";
         }
+        models
     }
 
     fn seeded_refs(path: &str) -> Vec<RepoRef> {
@@ -1320,24 +1336,3 @@ fn demo_blob(params: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({ "text": text })
 }
 
-fn demo_accounts() -> serde_json::Value {
-    use zeron_proto::HarnessId::*;
-    let accounts: Vec<serde_json::Value> = [ClaudeCode, Codex, Devin, Grok, Hermes]
-        .into_iter()
-        .enumerate()
-        .map(|(i, harness)| {
-            serde_json::json!({
-                "id": format!("acct-{i}"),
-                "harness": harness,
-                "email": "dev@zeron.sh",
-                "planLabel": "Max",
-                "active": true,
-                "usageWindows": [
-                    { "label": "5-hour", "usedFraction": 0.42 + 0.1 * i as f32, "resetsAt": null },
-                    { "label": "Weekly", "usedFraction": 0.18, "resetsAt": null },
-                ],
-            })
-        })
-        .collect();
-    serde_json::json!({ "accounts": accounts, "warnings": [] })
-}

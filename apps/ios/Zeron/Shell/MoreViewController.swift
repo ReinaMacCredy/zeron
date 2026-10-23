@@ -148,6 +148,10 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             app.groupByProject = on
             return
         }
+        if id == "wallpaper:chats" {
+            WallpaperStore.behindChats = on
+            return
+        }
         if id == "math:render" {
             MathSettings.render = on
             return reload()
@@ -209,6 +213,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         var wall = [Row(id: "wallpaper:choose", title: WallpaperStore.isSet ? "Change Wallpaper…" : "Choose Wallpaper…", subtitle: WallpaperStore.isSet ? WallpaperStore.name : "Shown behind new chats and the sessions list", symbol: "photo")]
         if WallpaperStore.isSet {
             let effect = WallpaperStore.effect
+            wall.append(Row(id: "wallpaper:chats", title: "Chat background", subtitle: "Show the artwork behind open conversations.", symbol: "bubble.left.and.text.bubble.right", accessory: .toggle(WallpaperStore.behindChats)))
             wall.append(Row(id: "wallpaper:effect", title: "Effect", subtitle: "\(WallpaperStore.label(effect)) — \(WallpaperStore.detail(effect))", symbol: "wand.and.stars"))
             wall.append(Row(id: "wallpaper:remove", title: "Remove Wallpaper", symbol: "trash", accessory: .none, destructive: true))
         }
@@ -226,6 +231,17 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             Row(id: "groupByProject", title: "Group by Project", subtitle: "Sessions outside your sections, under their project", symbol: "square.stack.3d.up", accessory: .toggle(app.groupByProject)),
             Row(id: "archived", title: "Archived Sessions", symbol: "archivebox"),
         ])
+        s.appendSections(["Composer"])
+        let steer = UserDefaults.standard.string(forKey: "followUpBehavior") == "steer"
+        s.appendItems([
+            Row(id: "followUp:queue", title: "Queue", subtitle: "Queue follow-ups while the agent runs", symbol: "text.line.last.and.arrowtriangle.forward", accessory: .check(!steer)),
+            Row(id: "followUp:steer", title: "Steer", subtitle: "Steer the current run", symbol: "arrow.triangle.turn.up.right.diamond", accessory: .check(steer)),
+        ])
+        s.appendSections(["Help"])
+        s.appendItems([
+            Row(id: "whatsnew", title: "What's New", subtitle: whatsNew().map { "v\($0.version) · \($0.date)" }, symbol: "sparkles"),
+            Row(id: "docs", title: "Docs", subtitle: "How Zeron works, by topic", symbol: "book"),
+        ])
         s.appendSections([" "])
         s.appendItems([Row(id: "signout", title: "Sign Out", symbol: "rectangle.portrait.and.arrow.right", accessory: .none, destructive: true)])
         dataSource.apply(s, animatingDifferences: false)
@@ -236,6 +252,11 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         guard let row = dataSource.itemIdentifier(for: path) else { return }
         switch row.id {
         case "voice": navigationController?.pushViewController(VoiceViewController(app: app), animated: true)
+        case let id where id.hasPrefix("device:"):
+            navigationController?.pushViewController(HostPageViewController(app: app, deviceId: String(id.dropFirst(7)), page: "mac", title: row.title), animated: true)
+        case let id where id.hasPrefix("followUp:"):
+            UserDefaults.standard.set(String(id.dropFirst(9)), forKey: "followUpBehavior")
+            reload()
         case let id where id.hasPrefix("appearance:"):
             let style = Int(id.dropFirst(11)) ?? 0
             UserDefaults.standard.set(style, forKey: "appearance")
@@ -281,6 +302,10 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             present(sheet, animated: true)
         case "wallpaper:remove":
             WallpaperStore.remove()
+        case "whatsnew":
+            WhatsNewViewController.present(from: self)
+        case "docs":
+            navigationController?.pushViewController(DocsViewController(), animated: true)
         case "archived":
             navigationController?.pushViewController(FolderViewController(app: app, folder: FolderRowVM(id: "archived", name: "Archived", count: 0, symbol: "archivebox")), animated: true)
         case "signout":

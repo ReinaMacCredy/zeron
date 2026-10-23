@@ -315,6 +315,7 @@ pub(crate) enum PBlock {
     List { items: Vec<PItem>, marker_w: f32 },
     Table(Box<PTable>),
     Rule,
+    Image { reference: String, w: f32, h: f32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -504,9 +505,20 @@ pub(crate) fn prepare_plain(
     }
 }
 
+/// A paragraph that is only an image the app bundles (doc screenshots), laid
+/// out at its @2x size.
+fn bundled_image(runs: &[InlineRun]) -> Option<PBlock> {
+    let [run] = runs else { return None };
+    let source = &run.style.image.as_ref()?.source;
+    let (w, h) = zeron_docs::images::image_size(source)?;
+    Some(PBlock::Image { reference: format!("docs:{source}"), w: w as f32 / 2.0, h: h as f32 / 2.0 })
+}
+
 pub(crate) fn prepare_block(ctx: &mut Ctx, block: &Block, depth: usize, muted: bool) -> PBlock {
     match block {
-        Block::Paragraph { runs } => PBlock::Text(prepare_runs(ctx, runs, TextKind::Body, muted)),
+        Block::Paragraph { runs } => {
+            bundled_image(runs).unwrap_or_else(|| PBlock::Text(prepare_runs(ctx, runs, TextKind::Body, muted)))
+        }
         Block::Heading { level, runs } => {
             PBlock::Heading(prepare_runs(ctx, runs, TextKind::Heading(*level), muted))
         }
@@ -979,6 +991,14 @@ pub(crate) fn place(block: &PBlock, px: Px, x: f32, y: f32, width: f32, out: Opt
             h
         }
         PBlock::Table(t) => place_table(t, px, x, y, width, out),
+        PBlock::Image { reference, w, h } => {
+            let iw = w.min(width);
+            let ih = iw * h / w;
+            if let Some(out) = out {
+                out.widget(WidgetKind::Image { reference: reference.clone() }, (x, y, iw, ih), None);
+            }
+            ih
+        }
         PBlock::Rule => {
             let h = px.v(RULE_HEIGHT);
             if let Some(out) = out {

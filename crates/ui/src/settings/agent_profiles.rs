@@ -6,7 +6,8 @@ use gpui::{
 };
 use zeron_engine::registry::HarnessDescriptor;
 use zeron_proto::tools::{
-    HarnessToolInventory, TOOL_GROUPS, ToolGroup, ToolSettingsState, tool_group,
+    HarnessToolInventory, TOOL_GROUPS, ToolGroup, ToolSettingsState, rules_on, set_rules,
+    set_zeron_group, tool_group, unlisted_rules, zeron_rule, zeron_unlocked,
 };
 use zeron_proto::{
     AgentProfile, AgentProfileDraft, HarnessId, Model, PermissionMode, ReasoningLevel,
@@ -15,8 +16,7 @@ use zeron_rpc::methods;
 
 use crate::agent_profiles::{
     ProfileWrite, blank_draft, brand_badge, draft_of, draft_summary, expand_toggle, folded_row,
-    in_pairs, mode_label, options_for_model, rules_on, set_rules, set_zeron_group, summary,
-    token_count, unlisted_rules, zeron_rule, zeron_unlocked,
+    in_pairs, mode_label, options_for_model, summary, token_count,
 };
 use crate::composer::{ComposerInput, ComposerInputEvent, INPUT_LINE_HEIGHT, scrolling_field};
 use crate::device_panel::setup::activate;

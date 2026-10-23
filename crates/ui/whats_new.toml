@@ -1,5 +1,5 @@
 # What's New entries, one per release. Images live in assets/whats_new/ and
-# must be listed in whats_new.rs IMAGES. Order does not matter.
+# must be listed in crates/docs/src/images.rs IMAGES. Order does not matter.
 
 [[entry]]
 version = "0.2.114"

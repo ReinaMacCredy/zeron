@@ -32,8 +32,11 @@ const LIVENESS_WARMUP_MS: i64 = 60_000;
 pub(crate) fn deadline(method: &str) -> Duration {
     match method {
         methods::CREATE_WORKTREE => Duration::from_secs(120),
-        methods::LIST_MODELS => Duration::from_secs(100),
+        methods::LIST_MODELS | methods::LIST_HARNESS_TOOLS => Duration::from_secs(100),
         methods::UPLOAD_COMMIT => Duration::from_secs(150),
+        methods::CHECK_HARNESS_UPDATES => Duration::from_secs(4 * 60),
+        methods::PREPARE_ACP_AGENT => Duration::from_secs(15 * 60),
+        methods::APPLY_HARNESS_UPDATE => Duration::from_secs(20 * 60),
         _ => CALL_TIMEOUT,
     }
 }
@@ -158,6 +161,25 @@ impl Relay {
             }
         }
         unreachable!("the second attempt always returns")
+    }
+
+    pub(crate) async fn first(
+        &self,
+        device_id: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<Value> {
+        let first = async {
+            let client = self.links.client(device_id).await?;
+            let mut stream = client.subscribe_checked(method, params).await?;
+            stream.recv().await.ok_or(RpcError::Closed)
+        };
+        match tokio::time::timeout(deadline(method), first).await {
+            Ok(result) => result.map_err(|e| map_rpc(device_id, method, e)),
+            Err(_) => Err(ClientError::HostUnavailable(format!(
+                "{method} on {device_id} timed out"
+            ))),
+        }
     }
 
     /// Chunked upload (`UploadChunk` ×N with `seq`, then `UploadCommit`).

@@ -474,6 +474,7 @@ class SessionsViewController: SessionListController {
         title = "Sessions"
         navigationItem.largeTitleDisplayMode = .always
         navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: optionsMenu())
+        WhatsNewCardView.install(on: self)
     }
 
     override func buildSections() -> [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] {

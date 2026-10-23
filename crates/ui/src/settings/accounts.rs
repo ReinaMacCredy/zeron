@@ -33,7 +33,7 @@ use crate::theme::Theme;
 // Pure: usage meters + labels
 // ---------------------------------------------------------------------------
 
-pub use zeron_proto::{UsageLevel, usage_level};
+pub use zeron_proto::account_usage::{UsageLevel, usage_level};
 
 /// Usage meter columns: window label, reset time, and the meters' overall
 /// measure — long enough to read at a glance, short of a full-width gauge.
@@ -87,29 +87,11 @@ pub fn force_usage_for(trigger: LoadTrigger) -> bool {
     }
 }
 
-/// Whether a login URL may be opened. Remote logins relay their URL from
-/// another device (or from a CLI's output there), so only web sign-in pages
-/// and loopback callbacks pass — never `file://` or custom schemes. Pure.
-pub fn is_openable_login_url(url: &str) -> bool {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return false;
-    };
-    match scheme.to_ascii_lowercase().as_str() {
-        "https" => true,
-        "http" => {
-            let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-            let authority = authority
-                .rsplit_once('@')
-                .map_or(authority, |(_, host)| host);
-            let host = match authority.strip_prefix('[') {
-                Some(v6) => v6.split(']').next().unwrap_or(""),
-                None => authority.split(':').next().unwrap_or(""),
-            };
-            matches!(host, "localhost" | "127.0.0.1" | "::1")
-        }
-        _ => false,
-    }
-}
+pub use zeron_proto::account_usage::{
+    LoginOption, PROVIDERS, add_account_label, add_option_label, is_openable_login_url,
+    keeps_one_login, login_copy, login_options, provider_accounts, provider_name, provider_note,
+    reports_usage, sidebar_accounts, signs_in, switches_accounts,
+};
 
 pub(crate) fn open_login_url(url: &str, cx: &mut gpui::App) {
     if is_openable_login_url(url) {
@@ -150,195 +132,6 @@ pub(crate) fn usage_resets(
         })
         .collect::<Vec<_>>()
         .join(" · ")
-}
-
-/// The providers zeron can sign into, in display order: (harness, name, CLI
-/// command — named in the empty-state copy, zeron settings.agents.tsx
-/// `PROVIDERS`). Every agent with a login of its own is here; what each one
-/// supports is documented engine-side (`agent_accounts` module docs).
-pub const PROVIDERS: [(HarnessId, &str, &str); 9] = [
-    (HarnessId::ClaudeCode, "Claude Code", "claude"),
-    (HarnessId::Codex, "Codex", "codex"),
-    (HarnessId::Cursor, "Cursor", "cursor-agent"),
-    (HarnessId::Antigravity, "Antigravity", "Antigravity"),
-    (HarnessId::Grok, "Grok", "grok login"),
-    (HarnessId::Devin, "Devin", "devin auth login"),
-    (HarnessId::Opencode, "OpenCode", "opencode auth login"),
-    (HarnessId::Pi, "Pi", "pi"),
-    (HarnessId::Hermes, "Hermes", "hermes auth add"),
-];
-
-/// Whether `harness` has an Accounts section (and sign-in flow). Pure.
-pub fn signs_in(harness: HarnessId) -> bool {
-    PROVIDERS
-        .iter()
-        .any(|(provider, _, _)| *provider == harness)
-}
-
-pub(crate) fn provider_name(harness: HarnessId) -> &'static str {
-    PROVIDERS
-        .iter()
-        .find(|(provider, _, _)| *provider == harness)
-        .map_or("this provider", |(_, name, _)| name)
-}
-
-/// Whether the provider reports plan usage. One that doesn't shows no meters
-/// and no "usage unavailable" note — there is nothing missing. Pure.
-pub fn reports_usage(harness: HarnessId) -> bool {
-    harness != HarnessId::Antigravity
-}
-
-/// Providers whose agent holds exactly ONE login (Antigravity): once it is
-/// connected there is nothing to add — signing in again only re-confirms it.
-pub fn keeps_one_login(harness: HarnessId) -> bool {
-    harness == HarnessId::Antigravity
-}
-
-/// Whether zeron switches this agent's logins. Hermes rotates through its
-/// own credential pool (listed, never reordered); Antigravity keeps one.
-pub fn switches_accounts(harness: HarnessId) -> bool {
-    !matches!(harness, HarnessId::Hermes | HarnessId::Antigravity)
-}
-
-/// A standing note under a provider's Accounts label, for an agent whose
-/// accounts work differently. Hermes owns its credential pool: zeron lists
-/// it and adds to it through Hermes' own CLI, but never switches or removes
-/// its entries. Pure.
-pub fn provider_note(harness: HarnessId) -> Option<&'static str> {
-    match harness {
-        HarnessId::Hermes => Some(
-            "Hermes manages its own credential pool and rotates through it. Accounts added \
-             here go through `hermes auth add`; remove one with `hermes auth remove`.",
-        ),
-        _ => None,
-    }
-}
-
-/// One way to add an account: agents that keep a login PER model provider
-/// (OpenCode, Pi, Hermes) sign in to a named provider; the rest have one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LoginOption {
-    /// The engine's `provider` param (`None` = the agent's only login).
-    pub provider: Option<&'static str>,
-    /// Who the user signs in to.
-    pub label: &'static str,
-}
-
-/// The sign-ins zeron offers for `harness`, in button order. Pure.
-pub fn login_options(harness: HarnessId) -> Vec<LoginOption> {
-    let option = |provider, label| LoginOption {
-        provider: Some(provider),
-        label,
-    };
-    match harness {
-        HarnessId::Opencode => vec![
-            option("openai", "ChatGPT"),
-            option("github-copilot", "GitHub Copilot"),
-        ],
-        HarnessId::Pi => vec![option("openai-codex", "ChatGPT")],
-        HarnessId::Hermes => vec![
-            option("openai-codex", "ChatGPT"),
-            option("nous", "Nous Portal"),
-        ],
-        _ => vec![LoginOption {
-            provider: None,
-            label: provider_name(harness),
-        }],
-    }
-}
-
-/// The list's last row: connect the first account, or add another. Pure.
-pub fn add_account_label(harness: HarnessId, empty: bool) -> String {
-    if empty {
-        format!("Connect a {} account", provider_name(harness))
-    } else {
-        "Add account".to_string()
-    }
-}
-
-/// [`add_account_label`] for one [`LoginOption`]: a per-provider sign-in
-/// names its provider ("Connect ChatGPT", "Add GitHub Copilot account"). Pure.
-pub fn add_option_label(harness: HarnessId, option: LoginOption, empty: bool) -> String {
-    match option.provider {
-        None => add_account_label(harness, empty),
-        Some(_) if empty => format!("Connect {}", option.label),
-        Some(_) => format!("Add {} account", option.label),
-    }
-}
-
-/// What the sign-in dialog says while the browser finishes — one sentence
-/// per provider, same shape. Pure.
-fn login_copy(harness: HarnessId, provider: Option<&str>) -> &'static str {
-    match (harness, provider) {
-        (HarnessId::ClaudeCode, _) => {
-            "Finish signing in to Claude in your browser. The new login is saved next to \
-             your current one — nothing changes until you switch."
-        }
-        (HarnessId::Codex, _) => {
-            "Finish signing in to ChatGPT in your browser. The new login is saved next to \
-             your current one — nothing changes until you switch."
-        }
-        (HarnessId::Cursor, _) => {
-            "Finish signing in to Cursor in your browser. This mints a zeron-named API key \
-             you can revoke any time from Cursor's dashboard."
-        }
-        (HarnessId::Antigravity, _) => {
-            "Finish signing in to Google in your browser. Antigravity keeps one login on \
-             this device; if it is already signed in, this just confirms it."
-        }
-        (HarnessId::Grok, _) => {
-            "Finish signing in to Grok in your browser — approve the code shown below. The \
-             new login is saved next to your current one — nothing changes until you switch."
-        }
-        (HarnessId::Devin, _) => {
-            "Finish signing in to Devin in your browser. The new login is saved next to your \
-             current one — nothing changes until you switch."
-        }
-        (HarnessId::Opencode, Some("github-copilot")) => {
-            "Finish signing in to GitHub in your browser — enter the code shown below. The \
-             new login is saved next to your current one — nothing changes until you switch."
-        }
-        (HarnessId::Opencode | HarnessId::Pi, _) => {
-            "Finish signing in to ChatGPT in your browser. The agent gets its own login, saved \
-             next to any current one — nothing changes until you switch."
-        }
-        (HarnessId::Hermes, _) => {
-            "Finish signing in in your browser — enter the code shown below. Hermes adds the \
-             login to its own credential pool and rotates through it itself."
-        }
-        _ => "Finish signing in in your browser.",
-    }
-}
-
-/// Accounts of one provider, in the engine's order (slot creation). No
-/// active-first re-sort: switching accounts must not move the switched-to
-/// card — the Active badge already says which one is live, and a list that
-/// reshuffles under the click reads as broken. Pure.
-pub fn provider_accounts(
-    snapshot: &AgentAccountsSnapshot,
-    harness: HarnessId,
-) -> Vec<&AgentAccount> {
-    snapshot
-        .accounts
-        .iter()
-        .filter(|a| a.harness == harness)
-        .collect()
-}
-
-/// The accounts the sidebar user row summarizes (docs/research/usage-mini):
-/// per provider in [`PROVIDERS`] order, the active account, and only when a
-/// usage probe has landed — a cold engine cache draws nothing rather than a
-/// row of "0%". Pure.
-pub fn sidebar_accounts(snapshot: &AgentAccountsSnapshot) -> Vec<&AgentAccount> {
-    PROVIDERS
-        .iter()
-        .filter_map(|(harness, _, _)| {
-            snapshot
-                .accounts
-                .iter()
-                .find(|a| a.harness == *harness && a.active && !a.usage_windows.is_empty())
-        })
-        .collect()
 }
 
 /// The 5px usage track with its level-coloured fill (shared by the settings

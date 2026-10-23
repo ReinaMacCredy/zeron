@@ -344,17 +344,7 @@ pub fn clamp_reasoning(
 // ---------------------------------------------------------------------------
 
 pub fn reasoning_label(level: ReasoningLevel) -> &'static str {
-    match level {
-        ReasoningLevel::Minimal => "Minimal",
-        ReasoningLevel::Low => "Low",
-        ReasoningLevel::Medium => "Medium",
-        ReasoningLevel::High => "High",
-        ReasoningLevel::XHigh => "X-High",
-        ReasoningLevel::Max => "Max",
-        ReasoningLevel::Ultra => "Ultra",
-        ReasoningLevel::Ultracode => "Ultracode",
-        ReasoningLevel::Ultrathink => "Ultrathink",
-    }
+    level.label()
 }
 
 /// Keep only the picks `model` still offers. Remembered picks outlive the

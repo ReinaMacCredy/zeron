@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use gpui::{AnyElement, Div, Hsla, SharedString, Stateful, div, prelude::*, px};
+use zeron_proto::account_usage::UsageBlock;
 use zeron_proto::{AgentAccount, AgentAccountsSnapshot, AgentUsageWindow, HarnessId};
 
-use crate::account_usage::{PaceStatus, UsagePace, usage_pace, used_fraction};
+use crate::account_usage::used_fraction;
 use crate::icons::{self, icon};
 use crate::motion;
 use crate::popover;
@@ -272,20 +273,7 @@ impl RingHover {
     }
 }
 
-fn window_label(label: &str) -> &str {
-    match label {
-        "Session" => "5h",
-        "Week" => "Weekly",
-        "Day" => "Daily",
-        other => other,
-    }
-}
-
-fn window_color(window: &AgentUsageWindow, theme: &Theme) -> Hsla {
-    usage_color(usage_level(window.used_fraction.clamp(0.0, 1.0)), theme)
-}
-
-fn pace_bar(remaining: f32, pace: Option<&UsagePace>, fill: Hsla, theme: &Theme) -> Div {
+fn pace_bar(remaining: f32, marker: Option<(f32, UsageLevel)>, fill: Hsla, theme: &Theme) -> Div {
     let segment = |left: f32, width: f32| {
         div()
             .absolute()
@@ -302,20 +290,10 @@ fn pace_bar(remaining: f32, pace: Option<&UsagePace>, fill: Hsla, theme: &Theme)
         .rounded_full()
         .overflow_hidden()
         .bg(theme.wash(0.08));
-    let marker = pace
-        .map(|pace| (pace.expected_remaining as f32 / 100.0).clamp(0.0, 1.0))
-        .filter(|_| remaining > 0.0 && remaining < 1.0);
-    let Some(marker) = marker else {
+    let Some((marker, marker_level)) = marker else {
         return track.child(segment(0.0, remaining).child(fill_bar()));
     };
-    let marker_color = usage_color(
-        match pace.map(|pace| pace.status) {
-            Some(PaceStatus::Behind) => UsageLevel::Critical,
-            Some(PaceStatus::OnTrack) => UsageLevel::Warn,
-            _ => UsageLevel::Normal,
-        },
-        theme,
-    );
+    let marker_color = usage_color(marker_level, theme);
     track
         .child(
             segment(0.0, remaining.min(marker))
@@ -409,74 +387,41 @@ fn usage_block(
         })
 }
 
-fn window_block(window: &AgentUsageWindow, now: DateTime<Utc>, theme: &Theme) -> Div {
-    let used = window.used_fraction.clamp(0.0, 1.0);
-    let remaining = 1.0 - used;
-    let pace = usage_pace(window, now);
-    let bar = pace_bar(remaining, pace.as_ref(), window_color(window, theme), theme);
-    let foot = pace
-        .filter(|pace| pace.amount.is_some() || pace.eta.is_some())
-        .map(|pace| {
-            let deficit = f64::from(remaining) * 100.0 < pace.expected_remaining;
-            let behind = pace.status == PaceStatus::Behind;
-            BlockFoot {
-                left: pace.amount,
-                right: pace.eta,
-                left_color: if deficit {
-                    theme.danger
-                } else {
-                    theme.text_muted
-                },
-                right_color: if behind {
-                    theme.danger
-                } else {
-                    theme.text_faint
-                },
-            }
-        });
+fn block(block: UsageBlock, theme: &Theme) -> Div {
+    let foot = (block.foot_left.is_some() || block.foot_right.is_some()).then(|| BlockFoot {
+        left: block.foot_left,
+        right: block.foot_right,
+        left_color: if block.foot_left_alert {
+            theme.danger
+        } else {
+            theme.text_muted
+        },
+        right_color: if block.foot_right_alert {
+            theme.danger
+        } else {
+            theme.text_faint
+        },
+    });
     usage_block(
-        SharedString::from(window_label(&window.label).to_owned()),
-        Some(format!("{}% left", (remaining * 100.0).round() as u32)),
-        window
-            .resets_at
-            .and_then(|at| crate::inbox::resets_in(at, now))
-            .map(|left| format!("Resets in {left}")),
-        bar,
+        SharedString::from(block.label),
+        block.headline,
+        block.resets,
+        pace_bar(
+            block.fill,
+            block.marker,
+            usage_color(block.level, theme),
+            theme,
+        ),
         foot,
-        theme,
-    )
-}
-
-fn extra_usage_block(extra: &zeron_proto::AgentExtraUsage, theme: &Theme) -> Div {
-    let view = crate::account_usage::extra_usage_view(extra);
-    let fill = usage_color(usage_level(view.used_fraction), theme);
-    usage_block(
-        "Extra Usage".into(),
-        None,
-        Some(view.headline),
-        pace_bar(view.used_fraction, None, fill, theme),
-        Some(BlockFoot {
-            left: Some(view.amount),
-            right: view.note,
-            left_color: theme.text_muted,
-            right_color: theme.text_faint,
-        }),
         theme,
     )
 }
 
 /// One block per plan window, then Claude's Extra Usage: the hover card and the Usage page.
 pub(crate) fn usage_blocks(account: &AgentAccount, now: DateTime<Utc>, theme: &Theme) -> Vec<Div> {
-    account
-        .usage_windows
-        .iter()
-        .map(|window| window_block(window, now, theme))
-        .chain(
-            account
-                .extra_usage
-                .as_ref()
-                .map(|extra| extra_usage_block(extra, theme)),
-        )
+    zeron_proto::account_usage::usage_blocks(account, now)
+        .into_iter()
+        .map(|b| block(b, theme))
         .collect()
 }
 
@@ -558,13 +503,14 @@ pub(crate) fn ring_hover_card(
                             .flex()
                             .items_center()
                             .gap(px(6.0))
-                            .child(
-                                div()
-                                    .size(px(6.0))
-                                    .rounded_full()
-                                    .bg(window_color(window, theme)),
-                            )
-                            .child(format!("{} · {ring}", window_label(&window.label)))
+                            .child(div().size(px(6.0)).rounded_full().bg(usage_color(
+                                usage_level(window.used_fraction.clamp(0.0, 1.0)),
+                                theme,
+                            )))
+                            .child(format!(
+                                "{} · {ring}",
+                                zeron_proto::account_usage::window_label(&window.label)
+                            ))
                     }),
             )
     });

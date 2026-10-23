@@ -128,6 +128,7 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     var onLimit: ((_ chatId: String) -> Void)?
     /// An attachment's picture, for an image chip opened full size.
     var imageFetcher: ((String) async -> UIImage?)?
+    var onLink: ((URL) -> Bool)?
 
     // MARK: Runway (desktop transcript.rs `OwnTurnAnchor`)
     //
@@ -666,7 +667,7 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     }
 
     func rowView(_ view: RowView, open url: URL) {
-        guard let vc = findViewController() else { return }
+        guard let vc = findViewController(), onLink?(url) != true else { return }
         // An image chip opens its upload full size, as its thumbnail did.
         if url.scheme == "zeron-preview" {
             guard let reference = URLComponents(url: url, resolvingAgainstBaseURL: false)?

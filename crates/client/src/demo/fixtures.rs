@@ -89,7 +89,7 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             last_ago_ms: 2 * MIN,
             created_ago_ms: 2 * HOUR,
             seen: false,
-            model: "claude-opus-5",
+            model: "claude-opus-5-5",
             ..chat(
                 "chat-picker",
                 Some("space-zeron"),

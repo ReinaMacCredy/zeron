@@ -22,6 +22,7 @@ pub(crate) const DRAW_LEAD_MS: u64 = 160;
 pub(crate) const FIRST_ENTER_MS: u64 = 200;
 pub(crate) const LATER_ENTER_MS: u64 = 160;
 pub(crate) const STAGGER_MS: u64 = 60;
+const STAGGER_SPAN_MS: u64 = 180;
 pub(crate) const GLIDE: MotionSpec = MotionSpec::new(420, EASE);
 pub(crate) const LEAVE: MotionSpec = MotionSpec::new(280, EASE);
 pub(crate) const LEAVE_Y: f32 = 4.0;
@@ -194,6 +195,13 @@ pub(crate) struct TreeMotion {
     solid: bool,
 }
 
+fn stagger_step(count: usize) -> u64 {
+    match count {
+        0 | 1 => STAGGER_MS,
+        n => STAGGER_MS.min(STAGGER_SPAN_MS / (n as u64 - 1)),
+    }
+}
+
 impl TreeMotion {
     pub fn solid() -> Self {
         Self {
@@ -211,6 +219,18 @@ impl TreeMotion {
     }
 
     pub fn sync(&mut self, nodes: &[NodeIn], reduced: bool, now: Instant) {
+        let entering = nodes
+            .iter()
+            .filter(|node| {
+                node.visible
+                    && !node.root
+                    && self
+                        .nodes
+                        .get(node.id)
+                        .is_none_or(|current| current.leave.is_some())
+            })
+            .count();
+        let enter_step = stagger_step(entering);
         let mut fresh = 0;
         let mut leaving = Vec::new();
         for node in nodes {
@@ -240,7 +260,7 @@ impl TreeMotion {
                             FIRST_ENTER_MS
                         };
                         fresh += 1;
-                        base + (fresh - 1) * STAGGER_MS
+                        base + (fresh - 1) * enter_step
                     };
                     let at = self.nodes.get(node.id).and_then(|old| old.at);
                     let mut entering = Node::entering(delay, node.status, reduced, now);
@@ -249,9 +269,10 @@ impl TreeMotion {
                 }
             }
         }
+        let leave_step = stagger_step(leaving.len());
         for (i, id) in leaving.iter().rev().enumerate() {
             if let Some(node) = self.nodes.get_mut(*id) {
-                let delay = i as u64 * STAGGER_MS;
+                let delay = i as u64 * leave_step;
                 let out = |spec: MotionSpec| {
                     let mut tween = Tween::at(1.0, now);
                     tween.retarget(0.0, spec.with_delay(delay), reduced, now);
@@ -853,6 +874,32 @@ mod tests {
         );
         assert_eq!(at(&tree, "c", 160), 0.0);
         assert!(at(&tree, "c", 161) > 0.0);
+    }
+
+    #[test]
+    fn a_long_fold_starts_every_row_within_the_short_span() {
+        let now = Instant::now();
+        let ids: Vec<String> = (0..15).map(|i| format!("s{i}")).collect();
+        let nodes = |visible| -> Vec<NodeIn> {
+            std::iter::once(NodeIn {
+                id: "lead",
+                root: true,
+                visible: true,
+                status: Status::Done,
+            })
+            .chain(ids.iter().map(|id| NodeIn {
+                id,
+                root: false,
+                visible,
+                status: Status::Done,
+            }))
+            .collect()
+        };
+        let mut tree = TreeMotion::default();
+        tree.sync(&nodes(true), false, now - Duration::from_secs(5));
+        tree.sync(&nodes(false), false, now);
+        let span = now + Duration::from_millis(STAGGER_SPAN_MS + 20);
+        assert!(tree.frame("s0", span).opacity < 1.0, "the top row has left");
     }
 
     #[test]

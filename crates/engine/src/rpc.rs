@@ -3006,6 +3006,8 @@ fn forwardable(method: &str) -> bool {
             | methods::COMPLETE_AGENT_LOGIN
             | methods::POLL_AGENT_LOGIN
             | methods::CANCEL_AGENT_LOGIN
+            // The usage summary reads this device's agent session logs.
+            | methods::GET_USAGE_SUMMARY
             // Uploads/attachments target the chat's host device (the agent reads
             // the committed file from that device's disk).
             | methods::UPLOAD_CHUNK
@@ -3948,10 +3950,19 @@ impl RpcService for EngineRpc {
                     },
                     _ => None,
                 };
+                let prompt = match &p.command {
+                    _ if !zeron_proto::supervisor::is_supervisor_chat(&p.chat_id) => None,
+                    SessionCommandPayload::Run { request, .. } => Some(request.prompt.clone()),
+                    SessionCommandPayload::Steer { prompt, .. } => Some(prompt.clone()),
+                    _ => None,
+                };
                 let command_id = self
                     .doc_host
                     .queue_command_with_transfers(&p.chat_id, p.command, p.transfers)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if let Some(prompt) = prompt {
+                    self.watch_mentioned_trees(&p.chat_id, &prompt);
+                }
                 if let Some((basis, request_id, text)) = respond {
                     self.doc_host.record_intervention(
                         basis,
@@ -4183,6 +4194,7 @@ impl RpcService for EngineRpc {
                         p.hold_for_turn_end,
                     )
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
+                self.watch_mentioned_trees(&p.chat_id, &p.text);
                 if p.steer_now {
                     self.doc_host.steer_queued_on_submit(&p.chat_id, &id).await;
                 }
@@ -7348,6 +7360,7 @@ mod tests {
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));
         assert!(forwardable(methods::QUEUE_COMMAND));
+        assert!(forwardable(methods::GET_USAGE_SUMMARY));
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));
         assert!(forwardable(methods::FETCH_ALL));
