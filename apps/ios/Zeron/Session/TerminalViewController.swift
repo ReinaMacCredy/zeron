@@ -185,7 +185,6 @@ final class TerminalViewController: UIViewController {
         }
         let atBottom = output.contentOffset.y + output.bounds.height >= output.contentSize.height - 24
         output.attributedText = text
-        output.accessibilityValue = screen.tab.status
         if atBottom {
             output.layoutIfNeeded()
             output.scrollRangeToVisible(NSRange(location: text.length, length: 0))
