@@ -2021,6 +2021,20 @@ impl Client {
         {
             self.inner.nudge_host(chat_id);
         }
+        if let Some(device_id) = self
+            .inner
+            .workspace
+            .snapshot()
+            .session(chat_id)
+            .map(|row| row.device_id.clone())
+            && !device_id.is_empty()
+            && !lock(&self.inner.harness_catalogs).contains_key(&device_id)
+        {
+            let client = self.clone();
+            crate::runtime::shared().spawn(async move {
+                client.list_harnesses(&device_id).await;
+            });
+        }
         if let Some(demo) = self.inner.demo() {
             demo.session_opened(&core);
         }
