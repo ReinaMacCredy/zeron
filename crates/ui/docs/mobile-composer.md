@@ -7,7 +7,7 @@ The composer sits at the bottom of every open session on the iPhone, and on the 
 The field reads "Message" followed by the agent's name. With a keyboard attached, Cmd+Return sends.
 
 - **+** opens the attach card in place of the keyboard: **Camera**, **Photos**, **Files**, and **Paste image** when your clipboard holds an image. **Photos** shows your recent photos; select several and tap **Add**, or open **All Photos**. Tap **+** again, or the text, to get the keyboard back.
-- A long paste becomes a **Pasted text** chip instead of filling the field. After you send, tap the chip in the transcript to read the text.
+- A long paste becomes a **Pasted text** tile instead of filling the field. After you send, tap its pill in the transcript to read the text.
 - Touch and hold text in the transcript and choose **Quote in reply** to stage it as a quote above the field.
 - Type `/` for commands such as `/compact`, `/btw` and `/sidechat`, and `$` for skills. Both lists open above the keyboard. See [Commands and mentions](zeron://docs/commands-and-mentions).
 - Type `@` to mention a thread or a file. Threads come first, each with its status, then files from the project.
@@ -18,7 +18,7 @@ The field reads "Message" followed by the agent's name. With a keyboard attached
 The chips under the field change this chat's settings.
 
 - **Start mission** comes first. Turn it on to send the message as a [mission](zeron://docs/mission-control) instead (see below).
-- **Model** reads the agent profile and the model. A dot after the profile name means you changed the profile's settings in this chat. The menu opens on your [agent profiles](zeron://docs/agent-profiles): apply one, **Revert** or **Save** an edited one, or choose **No profile**. Below them come the models of the current provider and of each provider instance, each with its agent's mark; an instance that fails to load shows why, with **Retry**. On the **New session** canvas, a profile applies to the draft once its Mac is online. Switching models on a chat that already has messages asks **Switch model?** first, and the transcript notes the change.
+- **Model** reads the agent profile and the model. A dot after the profile name means you changed the profile's settings in this chat. The menu opens on your [agent profiles](zeron://docs/agent-profiles): apply one, **Revert** or **Save** an edited one, or choose **No profile**. Below them come the models of the current provider and of each provider instance; an instance that fails to load shows why, with **Retry**. On the **New session** canvas, each model shows its agent's mark, and a profile applies to the draft once its Mac is online. Switching models on a chat that already has messages asks **Switch model?** first, and the transcript notes the change.
 - **Effort** offers **Low** to **Max**, plus **Fast** where the model has it. See [Models and reasoning effort](zeron://docs/models-and-effort).
 - **Approve agent actions** sets the permission mode: **Ask for approval**, **Approve for me**, or **Full access**. It offers only the modes the agent supports.
 - **Context** shows how full the context is, such as "92% context". It opens **Context and stats**.

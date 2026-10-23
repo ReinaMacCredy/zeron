@@ -46,7 +46,7 @@ id = "ios-composer"
 title = "The composer on iPhone"
 description = "The composer on iPhone has the chips you know from the Mac: Start mission, the model with your agent profiles, effort, the permission mode and how full the context is. Tap the context chip for Context and stats."
 image = "ios-composer-menus.jpg"
-details = "Type / for commands, $ for skills and @ to mention a thread or a file. Touch and hold send to queue, steer or stop and send. The session's … menu has Agents, New sidechat, Hand off thread and Compact Context. The + card attaches photos, files or a pasted image, and a long paste becomes a Pasted text chip."
+details = "Type / for commands, $ for skills and @ to mention a thread or a file. Touch and hold send to queue, steer or stop and send. The session's … menu has Agents, New sidechat, Hand off thread and Compact Context. The + card attaches photos, files or a pasted image, and a long paste becomes a Pasted text tile."
 
 [[entry.features]]
 id = "ios-tasks"
