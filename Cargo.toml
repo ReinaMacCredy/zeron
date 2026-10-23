@@ -211,23 +211,23 @@ strip = "debuginfo"
 # (branch ui-driver); a patch so gpui-base (which pins zeronsh/zui itself)
 # builds against the same gpui.
 [patch."https://github.com/zeronsh/zui"]
-collections = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
-derive_refineable = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
-gpui = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
-gpui_linux = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
-gpui_macos = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
-gpui_macros = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
-gpui_platform = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
-gpui_shared_string = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
-gpui_tokio = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
-gpui_util = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
-gpui_web = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
-gpui_wgpu = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
-gpui_windows = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
-http_client = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
-media = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
-perf = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
-refineable = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
-scheduler = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
-sum_tree = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
-util_macros = { git = "https://github.com/ReinaMacCredy/zui", rev = "5b30b3b469b4631ab22888ab4b5bb045492ecf51" }
+collections = { path = "/Users/reinamaccredy/Code/zui/crates/collections" }
+derive_refineable = { path = "/Users/reinamaccredy/Code/zui/crates/refineable/derive_refineable" }
+gpui = { path = "/Users/reinamaccredy/Code/zui/crates/gpui" }
+gpui_linux = { path = "/Users/reinamaccredy/Code/zui/crates/gpui_linux" }
+gpui_macos = { path = "/Users/reinamaccredy/Code/zui/crates/gpui_macos" }
+gpui_macros = { path = "/Users/reinamaccredy/Code/zui/crates/gpui_macros" }
+gpui_platform = { path = "/Users/reinamaccredy/Code/zui/crates/gpui_platform" }
+gpui_shared_string = { path = "/Users/reinamaccredy/Code/zui/crates/gpui_shared_string" }
+gpui_tokio = { path = "/Users/reinamaccredy/Code/zui/crates/gpui_tokio" }
+gpui_util = { path = "/Users/reinamaccredy/Code/zui/crates/gpui_util" }
+gpui_web = { path = "/Users/reinamaccredy/Code/zui/crates/gpui_web" }
+gpui_wgpu = { path = "/Users/reinamaccredy/Code/zui/crates/gpui_wgpu" }
+gpui_windows = { path = "/Users/reinamaccredy/Code/zui/crates/gpui_windows" }
+http_client = { path = "/Users/reinamaccredy/Code/zui/crates/http_client" }
+media = { path = "/Users/reinamaccredy/Code/zui/crates/media" }
+perf = { path = "/Users/reinamaccredy/Code/zui/tooling/perf" }
+refineable = { path = "/Users/reinamaccredy/Code/zui/crates/refineable" }
+scheduler = { path = "/Users/reinamaccredy/Code/zui/crates/scheduler" }
+sum_tree = { path = "/Users/reinamaccredy/Code/zui/crates/sum_tree" }
+util_macros = { path = "/Users/reinamaccredy/Code/zui/crates/util_macros" }
