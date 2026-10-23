@@ -483,7 +483,7 @@ final class SessionFlowTests: XCTestCase {
             let attach = app.buttons["composer-attach"]
             XCTAssertTrue(attach.waitForExistence(timeout: 10))
             attach.tap()
-            XCTAssertTrue(app.buttons["Photo Library"].waitForExistence(timeout: 5), "attach menu opens (\(route))")
+            XCTAssertTrue(app.buttons["attach-photos"].waitForExistence(timeout: 5), "attach menu opens (\(route))")
             snapshot(app, "attach-menu")
             app.terminate()
         }
@@ -494,7 +494,72 @@ final class SessionFlowTests: XCTestCase {
         input.tap()
         input.typeText("Draft")
         app.buttons["composer-attach"].tap()
-        XCTAssertTrue(app.buttons["Photo Library"].waitForExistence(timeout: 5), "attach menu opens from the card")
+        XCTAssertTrue(app.buttons["attach-photos"].waitForExistence(timeout: 5), "attach menu opens from the card")
+    }
+
+    /// Needs `simctl privacy grant photos` and `simctl addmedia` on the simulator.
+    func testAttachCardReplacesKeyboardAddsRecentPhotos() throws {
+        let app = launch(["-route", "chat:chat-ios-keyboard"])
+        let input = app.textViews["composer-input"]
+        let attach = app.buttons["composer-attach"]
+        let photos = app.buttons["attach-photos"]
+        XCTAssertTrue(input.waitForExistence(timeout: 10))
+        input.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        sleep(1)
+        snapshot(app, "keyboard-open")
+
+        attach.tap()
+        XCTAssertTrue(photos.waitForExistence(timeout: 5))
+        sleep(1)
+        snapshot(app, "attach-card-in-keyboard")
+        XCTAssertTrue(app.buttons["attach-files"].isHittable, "card rows reachable where the keyboard was")
+        attach.tap()
+        XCTAssertTrue(photos.waitForNonExistence(timeout: 5), "\"+\" again closes the card")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "keyboard comes back")
+
+        attach.tap()
+        XCTAssertTrue(photos.waitForExistence(timeout: 5))
+        input.tap()
+        XCTAssertTrue(photos.waitForNonExistence(timeout: 5), "tapping the text closes the card")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "keyboard comes back")
+
+        attach.tap()
+        XCTAssertTrue(photos.waitForExistence(timeout: 5))
+        photos.tap()
+        let grid = app.collectionViews["attach-grid"]
+        try XCTSkipUnless(grid.waitForExistence(timeout: 5), "needs photo access and library images")
+        let photoCells = grid.cells.matching(NSPredicate(format: "label == 'Photo'"))
+        XCTAssertTrue(photoCells.element(boundBy: 1).waitForExistence(timeout: 5))
+        sleep(1)
+        snapshot(app, "attach-grid")
+        XCTAssertEqual(app.buttons["attach-grid-main"].label, "All Photos")
+        photoCells.element(boundBy: 0).tap()
+        photoCells.element(boundBy: 1).tap()
+        XCTAssertEqual(app.buttons["attach-grid-main"].label, "Add 2")
+        sleep(1)
+        snapshot(app, "attach-grid-selected")
+        app.buttons["attach-grid-main"].tap()
+        let attached = NSPredicate(format: "count == 2")
+        expectation(for: attached, evaluatedWith: app.buttons.matching(identifier: "Remove image"))
+        waitForExpectations(timeout: 10)
+        XCTAssertFalse(grid.exists, "card closed")
+        snapshot(app, "attached")
+    }
+
+    /// Run after `simctl privacy revoke photos`, with TEST_RUNNER_ZERON_PHOTOS_DENIED=1.
+    func testAttachPhotosFallsBackToPickerWhenDenied() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["ZERON_PHOTOS_DENIED"] == "1", "needs photo access revoked")
+        let app = launch(["-route", "chat:chat-ios-keyboard"])
+        XCTAssertTrue(app.textViews["composer-input"].waitForExistence(timeout: 10))
+        app.buttons["composer-attach"].tap()
+        let photos = app.buttons["attach-photos"]
+        XCTAssertTrue(photos.waitForExistence(timeout: 5))
+        photos.tap()
+        XCTAssertTrue(photos.waitForNonExistence(timeout: 5), "card closes")
+        XCTAssertFalse(app.collectionViews["attach-grid"].exists, "no inline grid")
+        sleep(3)
+        snapshot(app, "photos-denied-picker")
     }
 
     /// Regression: the model chip's menu completed off the main thread.
@@ -675,7 +740,7 @@ final class SessionFlowTests: XCTestCase {
         let input = app.textViews["composer-input"]
         XCTAssertTrue(input.waitForExistence(timeout: 10))
         app.buttons["composer-attach"].tap()
-        let paste = app.buttons["Paste Image"]
+        let paste = app.buttons["attach-paste"]
         XCTAssertTrue(paste.waitForExistence(timeout: 5))
         paste.tap()
         let allow = XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons["Allow Paste"]

@@ -117,10 +117,6 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         list.topEdgeEffect.style = .soft
         list.bottomEdgeEffect.isHidden = true
 
-        composer.attachMenu = { [weak self] in
-            guard let self else { return UIMenu() }
-            return AttachmentPicker.menu(host: self, limit: 8 - self.composer.images.count) { [weak self] in self?.composer.addImages($0) }
-        }
         composer.onSend = { [weak self] text, images, mode in
             guard let self else { return .kept }
             if self.editingQueueId != nil {

@@ -136,10 +136,6 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         composer.translatesAutoresizingMaskIntoConstraints = false
         composer.placeholder = "Describe the task"
         composer.chipsAlwaysVisible = true
-        composer.attachMenu = { [weak self] in
-            guard let self else { return UIMenu() }
-            return AttachmentPicker.menu(host: self, limit: 8 - self.composer.images.count) { [weak self] in self?.composer.addImages($0) }
-        }
         composer.onChipTap = { _, _ in }
         composer.mentionSearch = { [weak self] q in
             guard let self, let p = self.project else { return [] }
