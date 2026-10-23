@@ -18,6 +18,8 @@ pub struct Entry {
     pub date: String,
     #[serde(default)]
     pub hero: Option<String>,
+    #[serde(default)]
+    pub hero_visual: Option<String>,
     pub features: Vec<Feature>,
 }
 
@@ -29,6 +31,8 @@ pub struct Feature {
     pub description: String,
     #[serde(default)]
     pub image: Option<String>,
+    #[serde(default)]
+    pub visual: Option<String>,
     #[serde(default)]
     pub details: Option<String>,
 }

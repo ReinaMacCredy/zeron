@@ -1,9 +1,11 @@
+use super::intros;
 use super::*;
 use crate::motion::{CubicBezier, MotionSpec};
 use crate::whats_new::{self, CURRENT_VERSION, Entry, Feature, Resolution};
 use gpui::{
     Animation, AnimationExt as _, Div, ObjectFit, img, linear_color_stop, linear_gradient, relative,
 };
+use std::time::Instant;
 
 const CARD_RADIUS: f32 = 12.0;
 const HERO_HEIGHT: f32 = 96.0;
@@ -23,12 +25,20 @@ const HELP_MENU_WIDTH: f32 = 264.0;
 pub(super) struct WhatsNewCard {
     entry: &'static Entry,
     gradient_hero: bool,
+    shown: Instant,
+}
+
+impl WhatsNewCard {
+    fn visual(&self) -> Option<&'static str> {
+        visual_id(self.entry.hero_visual.as_deref()).filter(|_| !self.gradient_hero)
+    }
 }
 
 pub(super) struct WhatsNewDialog {
     view: WhatsNewView,
     entry: &'static Entry,
     expanded: std::collections::HashSet<&'static str>,
+    shown: Instant,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -63,6 +73,7 @@ pub(super) fn boot_card(settings: &mut UiSettings, cx: &mut App) -> Option<Whats
     Some(WhatsNewCard {
         entry,
         gradient_hero,
+        shown: Instant::now(),
     })
 }
 
@@ -76,7 +87,20 @@ fn spring_at(raw: f32) -> f32 {
     ((raw * total - CARD_DELAY_MS as f32) / CARD_SPRING_MS as f32).clamp(0.0, 1.0)
 }
 
-fn feature_section(theme: &Theme, feature: &'static Feature) -> Div {
+fn visual_id(id: Option<&'static str>) -> Option<&'static str> {
+    id.filter(|id| intros::is_since_visual(id))
+}
+
+fn visual_stage(theme: &Theme, id: &str, clock: Option<f32>) -> Div {
+    div()
+        .size_full()
+        .text_size(crate::typography::ui_rems(12.5))
+        .text_color(theme.text_muted)
+        .child(intros::since_visual(id, theme, clock))
+}
+
+fn feature_section(theme: &Theme, feature: &'static Feature, clock: Option<f32>) -> Div {
+    let visual = visual_id(feature.visual.as_deref());
     div()
         .w_full()
         .flex()
@@ -103,8 +127,25 @@ fn feature_section(theme: &Theme, feature: &'static Feature) -> Div {
                         .child(SharedString::from(feature.description.as_str())),
                 ),
         )
+        .when_some(visual, |el, id| {
+            el.child(
+                div()
+                    .w_full()
+                    .h(px(intros::VISUAL_HEIGHT))
+                    .overflow_hidden()
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(crate::theme::ink(0.04))
+                    .child(visual_stage(theme, id, clock)),
+            )
+        })
         .when_some(
-            feature.image.as_deref().and_then(whats_new::picture),
+            feature
+                .image
+                .as_deref()
+                .filter(|_| visual.is_none())
+                .and_then(whats_new::picture),
             |el, picture| {
                 el.child(
                     div()
@@ -178,6 +219,7 @@ impl Shell {
             view,
             entry,
             expanded: std::collections::HashSet::from([entry.version.as_str()]),
+            shown: Instant::now(),
         });
         cx.notify();
     }
@@ -364,6 +406,15 @@ impl Shell {
         }
     }
 
+    pub(super) fn whats_new_card_animates(&self, cx: &App) -> bool {
+        self.whats_new_dialog.is_none()
+            && !motion::reduced_motion(cx)
+            && self
+                .whats_new_card
+                .as_ref()
+                .is_some_and(|card| card.visual().is_some())
+    }
+
     pub(super) fn render_whats_new_card(
         &self,
         theme: &Theme,
@@ -375,11 +426,12 @@ impl Shell {
         }
         let entry = card.entry;
         let surface = theme.surface_raised;
+        let visual = card.visual();
         let picture = entry
             .hero
             .as_deref()
             .and_then(whats_new::picture)
-            .filter(|_| !card.gradient_hero);
+            .filter(|_| !card.gradient_hero && visual.is_none());
         let title = entry
             .features
             .first()
@@ -410,13 +462,18 @@ impl Shell {
             .h(px(HERO_HEIGHT))
             .w_full()
             .overflow_hidden()
-            .map(|el| match picture {
-                Some(picture) => el.child(
+            .map(|el| match (visual, picture) {
+                (Some(id), _) => el.bg(crate::theme::ink(0.04)).child(visual_stage(
+                    theme,
+                    id,
+                    intros::loop_clock(card.shown, cx),
+                )),
+                (None, Some(picture)) => el.child(
                     img(picture.image.clone())
                         .size_full()
                         .object_fit(ObjectFit::Cover),
                 ),
-                None => el
+                (None, None) => el
                     .bg(linear_gradient(
                         135.0,
                         linear_color_stop(theme.accent.opacity(0.42), 0.0),
@@ -543,6 +600,7 @@ impl Shell {
         &self,
         viewport: gpui::Size<Pixels>,
         theme: &Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let dialog = self.whats_new_dialog.as_ref()?;
@@ -550,6 +608,20 @@ impl Shell {
             return None;
         }
         let entry = dialog.entry;
+        let clock = intros::loop_clock(dialog.shown, cx);
+        let animated = match dialog.view {
+            WhatsNewView::Highlights => vec![entry],
+            WhatsNewView::Changelog => whats_new::entries()
+                .iter()
+                .filter(|release| dialog.expanded.contains(release.version.as_str()))
+                .collect(),
+        }
+        .iter()
+        .flat_map(|release| &release.features)
+        .any(|feature| visual_id(feature.visual.as_deref()).is_some());
+        if clock.is_some() && animated {
+            window.request_animation_frame();
+        }
         let caption = |copy: SharedString| {
             div()
                 .text_size(crate::typography::ui_rems(12.0))
@@ -618,7 +690,7 @@ impl Shell {
                     staggered(
                         format!("whats-new-feature-{}-{ix}", entry.version).into(),
                         ix,
-                        feature_section(theme, feature),
+                        feature_section(theme, feature, clock),
                     )
                 }),
             ),
@@ -699,7 +771,7 @@ impl Shell {
                                                     )
                                                     .into(),
                                                     ix,
-                                                    feature_section(theme, feature),
+                                                    feature_section(theme, feature, clock),
                                                 )
                                             },
                                         )),
@@ -763,5 +835,25 @@ impl Shell {
             card,
             16.0,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn bundled_visual_ids_name_a_live_visual() {
+        for entry in crate::whats_new::entries() {
+            let ids = entry
+                .hero_visual
+                .iter()
+                .chain(entry.features.iter().filter_map(|f| f.visual.as_ref()));
+            for id in ids {
+                assert!(
+                    super::intros::is_since_visual(id),
+                    "{id} in {} is not a live visual",
+                    entry.version
+                );
+            }
+        }
     }
 }

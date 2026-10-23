@@ -2454,6 +2454,9 @@ impl Render for SidebarPane {
         let inner = shell.update(cx, |shell, cx| {
             shell.sidebar_windowing = !window.is_a11y_active();
             let theme = Theme::of(cx).clone();
+            if shell.whats_new_card_animates(cx) && window.is_window_active() {
+                window.request_animation_frame();
+            }
             shell.render_chat_sidebar(&theme, cx)
         });
         div().size_full().child(inner).into_any_element()
@@ -16330,7 +16333,7 @@ impl Shell {
         if self.intro_visible() {
             overlays.push(self.render_intro(viewport, &theme, window, cx));
         }
-        if let Some(dialog) = self.render_whats_new_dialog(viewport, &theme, cx) {
+        if let Some(dialog) = self.render_whats_new_dialog(viewport, &theme, window, cx) {
             overlays.push(dialog);
         }
 

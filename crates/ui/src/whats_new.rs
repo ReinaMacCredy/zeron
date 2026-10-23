@@ -367,6 +367,7 @@ mod tests {
             version: version.into(),
             date: "Oct 17".into(),
             hero: None,
+            hero_visual: None,
             features: Vec::new(),
         }
     }

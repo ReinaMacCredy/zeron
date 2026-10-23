@@ -6,7 +6,7 @@ use zeron_proto::TaskMode;
 
 const PAGE_IN: motion::MotionSpec = motion::MotionSpec::new(250, motion::EASE_OUT);
 const PAGE_SHIFT: f32 = 8.0;
-const VISUAL_HEIGHT: f32 = 172.0;
+pub(super) const VISUAL_HEIGHT: f32 = 172.0;
 const TREE_PAGE: usize = 2;
 const TEXT_HEIGHT: f32 = 23.0 + 8.0 + 4.0 * 21.0;
 
@@ -317,10 +317,10 @@ impl Shell {
                 .into_any_element(),
             (Deck::Mission, _) => mission_visual(page, theme),
             (Deck::Since, id) => {
-                let clock = (!motion::reduced_motion(cx)).then(|| {
+                let clock = loop_clock(shown, cx);
+                if clock.is_some() {
                     window.request_animation_frame();
-                    shown.elapsed().as_secs_f32() / motion::speed_scale().max(f32::EPSILON)
-                });
+                }
                 since_visual(id, theme, clock)
             }
         };
@@ -1247,7 +1247,16 @@ fn supervisor_conversation_visual(theme: &Theme, t: f32) -> AnyElement {
         .into_any_element()
 }
 
-fn since_visual(id: &str, theme: &Theme, clock: Option<f32>) -> AnyElement {
+pub(super) fn loop_clock(shown: Instant, cx: &App) -> Option<f32> {
+    (!motion::reduced_motion(cx))
+        .then(|| shown.elapsed().as_secs_f32() / motion::speed_scale().max(f32::EPSILON))
+}
+
+pub(super) fn is_since_visual(id: &str) -> bool {
+    SINCE_PAGES.iter().any(|page| page.id == id)
+}
+
+pub(super) fn since_visual(id: &str, theme: &Theme, clock: Option<f32>) -> AnyElement {
     let (period, rest) = match id {
         TASKS_HOME => (6.6, 1.9),
         MISSION_TABS => (6.0, 1.5),
