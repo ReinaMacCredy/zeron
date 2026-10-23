@@ -1158,6 +1158,12 @@ fn capability_denial_adds_one_card_per_tool_after_its_chip() {
     assert!(card.text.starts_with(COMPUTER_DENIED_TITLE), "{}", card.text);
     assert!(card.text.contains(COMPUTER_DENIED_HINT));
     assert_eq!(actions(&frame, 2), [display::CardAction::EnableComputer]);
+
+    w.builder.expanded.clear();
+    let frame = w.pass();
+    let cards: Vec<u32> = (0u32..).zip(kinds(&frame)).filter(|(_, k)| *k == RowKind::Card).map(|(i, _)| i).collect();
+    assert_eq!(cards.len(), 2, "the denied cards stay outside a closed fold, as on the desktop");
+    assert_eq!(actions(&frame, cards[0]), [display::CardAction::EnableComputer]);
 }
 
 #[test]

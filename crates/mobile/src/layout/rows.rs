@@ -531,7 +531,7 @@ impl RowBuilder {
             tools.clear();
         };
         let nparts = entry.parts.len();
-        let mut denied_tools: HashSet<&'static str> = HashSet::new();
+        let denied = first_denials(&entry.parts);
         for (pi, part) in entry.parts.iter().enumerate() {
             match part {
                 // Consecutive tools and thoughts share a group; subagent
@@ -558,7 +558,7 @@ impl RowBuilder {
                     tools.push(part);
                     flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
                 }
-                MessagePart::Tool { id, call, is_error, output, .. } => {
+                MessagePart::Tool { id, call, .. } => {
                     let genus = Genus::of(call);
                     let genus_flip = tools.iter().any(|p| match p {
                         MessagePart::Tool { call, .. } => Genus::of(call) != genus,
@@ -568,10 +568,7 @@ impl RowBuilder {
                         flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
                     }
                     tools.push(part);
-                    if let Some(computer) = computer_call(call)
-                        && is_control_denied(*is_error, output.as_deref())
-                        && denied_tools.insert(computer.tool)
-                    {
+                    if denied.contains(&id.as_str()) {
                         flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
                         let gap = gap_for(&rows, false);
                         let core = denied_row(ctx, &format!("{}#{}-denied", entry.id, id), &entry.id);
@@ -714,6 +711,11 @@ impl RowBuilder {
         let settled = Some(MessageRole::Assistant);
         if open {
             rows.extend(self.entry_rows(ctx, &work, false, settled, input, live_parts));
+        } else {
+            for id in first_denials(&work.parts) {
+                let core = denied_row(ctx, &format!("{}#{id}-denied", entry.id), &entry.id);
+                rows.push(Placed { core: Arc::new(core), gap: Gap::Block });
+            }
         }
         if !after.parts.is_empty() {
             rows.extend(self.entry_rows(ctx, &after, false, settled, input, live_parts));
@@ -1002,6 +1004,19 @@ fn prepare_user_text(ctx: &mut Ctx, body: &str, style: super::style::Resolved, l
 
 fn is_agent_call(call: &zeron_proto::ToolCall) -> bool {
     call.is_subagent_spawn() || call.is_delegate_task()
+}
+
+fn first_denials(parts: &[MessagePart]) -> Vec<&str> {
+    let mut tools = HashSet::new();
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::Tool { id, call, is_error, output, .. } => computer_call(call)
+                .filter(|computer| is_control_denied(*is_error, output.as_deref()) && tools.insert(computer.tool))
+                .map(|_| id.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Desktop `ToolGenus`: agents and device calls never share a group with
