@@ -799,6 +799,21 @@ final class SessionFlowTests: XCTestCase {
         XCTAssertEqual(first.frame.minY, restingY, accuracy: 4, "refresh ended and the list settled back")
     }
 
+    func testRowsStackHarnessMarksAndShowTheInstanceIcon() {
+        let app = launch()
+        XCTAssertTrue(app.staticTexts["Sessions"].waitForExistence(timeout: 10))
+        let list = app.collectionViews.firstMatch
+        let veil = app.cells["session-chat-veil"].firstMatch
+        scrollTo(veil, in: list)
+        XCTAssertTrue(veil.isHittable)
+        snapshot(app, "d11-stacked-marks")
+        let acp = app.cells["session-chat-acp"].firstMatch
+        scrollTo(acp, in: list)
+        XCTAssertTrue(acp.isHittable)
+        sleep(2)
+        snapshot(app, "d11-acp-instance-icon")
+    }
+
     private func expandButton(on row: XCUIElement, in app: XCUIApplication) -> XCUIElement? {
         app.buttons.matching(NSPredicate(format: "label == 'Expand'")).allElementsBoundByIndex
             .first { row.frame.intersects($0.frame) }
