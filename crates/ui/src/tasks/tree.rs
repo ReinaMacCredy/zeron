@@ -22,13 +22,13 @@ pub(crate) const DRAW_LEAD_MS: u64 = 160;
 pub(crate) const FIRST_ENTER_MS: u64 = 200;
 pub(crate) const STAGGER_MS: u64 = 60;
 const STAGGER_SPAN_MS: u64 = 180;
-const QUICK_STAGGER_MS: u64 = 30;
-const QUICK_SPAN_MS: u64 = 90;
+const QUICK_STAGGER_MS: u64 = 15;
+const QUICK_SPAN_MS: u64 = 45;
+const QUICK_RISE: MotionSpec = MotionSpec::new(200, EASE);
 pub(crate) const GLIDE: MotionSpec = MotionSpec::new(420, EASE);
-pub(crate) const LEAVE: MotionSpec = MotionSpec::new(280, EASE);
+pub(crate) const LEAVE: MotionSpec = MotionSpec::new(160, EASE);
 pub(crate) const LEAVE_Y: f32 = 4.0;
 pub(crate) const STATUS: MotionSpec = MotionSpec::new(240, motion::EASE);
-pub(crate) const FADE: MotionSpec = MotionSpec::new(280, motion::EASE);
 pub(crate) const FOLD: MotionSpec = MotionSpec::new(280, EASE);
 pub(crate) const POP: MotionSpec = MotionSpec::new(200, EASE);
 pub(crate) const CHEVRON: MotionSpec = MotionSpec::new(220, EASE);
@@ -162,15 +162,18 @@ struct Node {
 }
 
 impl Node {
-    fn entering(delay_ms: u64, status: Status, reduced: bool, now: Instant) -> Self {
+    fn entering(delay_ms: u64, quick: bool, status: Status, reduced: bool, now: Instant) -> Self {
         let rise = |spec: MotionSpec| {
             let mut tween = Tween::at(0.0, now);
             tween.retarget(1.0, spec, reduced, now);
             tween
         };
         Self {
-            rise: rise(RISE.with_delay(delay_ms)),
-            draw: rise(DRAW.with_delay(delay_ms.saturating_sub(DRAW_LEAD_MS))),
+            rise: rise(if quick { QUICK_RISE } else { RISE }.with_delay(delay_ms)),
+            draw: rise(
+                if quick { QUICK_RISE } else { DRAW }
+                    .with_delay(delay_ms.saturating_sub(DRAW_LEAD_MS)),
+            ),
             leave: None,
             fade: None,
             at: None,
@@ -275,7 +278,7 @@ impl TreeMotion {
                         base + (fresh - 1) * enter_step
                     };
                     let at = self.nodes.get(node.id).and_then(|old| old.at);
-                    let mut entering = Node::entering(delay, node.status, reduced, now);
+                    let mut entering = Node::entering(delay, self.built, node.status, reduced, now);
                     entering.at = at;
                     self.nodes.insert(node.id.to_string(), entering);
                 }
@@ -291,7 +294,7 @@ impl TreeMotion {
                     tween
                 };
                 node.leave = Some(out(LEAVE));
-                node.fade = Some(out(FADE));
+                node.fade = Some(out(LEAVE));
             }
         }
         let listed: HashSet<&str> = nodes.iter().map(|node| node.id).collect();
@@ -940,14 +943,14 @@ mod tests {
             false,
             now,
         );
-        let mid = now + Duration::from_millis(15);
+        let mid = now + Duration::from_millis(10);
         assert!(tree.frame("b", mid).opacity < 1.0);
         assert_eq!(
             tree.frame("a", mid).opacity,
             1.0,
-            "the upper node waits 30 ms"
+            "the upper node waits 15 ms"
         );
-        let first_gone = now + Duration::from_millis(300);
+        let first_gone = now + Duration::from_millis(168);
         tree.sync(
             &[node("lead", true), node("a", false), node("b", false)],
             false,
