@@ -2,6 +2,52 @@
 # must be listed in whats_new.rs IMAGES. Order does not matter.
 
 [[entry]]
+version = "0.2.118"
+date = "Oct 23"
+hero = "tasks-card.jpg"
+
+[[entry.features]]
+id = "tasks-replace-mission-control"
+title = "Tasks takes over from Mission Control"
+description = "Every task and mission now opens as a task page, with a Plan first switch that has the lead plan before it works. All, Missions, Trees and Needs you chips sort the list."
+image = "tasks-card.jpg"
+details = "A mission's tabs gather into one group in the titlebar, and the selected tab in a group stands out like a folder tab."
+
+[[entry.features]]
+id = "sidebar-mission-row"
+title = "A mission on one sidebar row"
+description = "A mission's sidebar row carries a progress ring and its live steps, then folds the rest into N more steps."
+image = "mission-control-strip.jpg"
+
+[[entry.features]]
+id = "supervisor-conversation"
+title = "The Supervisor's conversation over its feed"
+description = "Open Conversation on the Supervisor page and it opens over the feed. Mention a thread to the Supervisor and it watches that thread's tree; watched trees show an eye."
+image = "supervisor-feed.jpg"
+
+[[entry.features]]
+id = "spine-wide"
+title = "Room for a Spec or Overview"
+description = "The spine widens when you open a step's Spec or the mission's Overview."
+
+[[entry.features]]
+id = "stopped-subagents"
+title = "Stop means stopped"
+description = "A subagent you stop reads Stopped instead of Done or Failed, and a Stop that leaves sub-agents running no longer leaves a working row."
+
+[[entry.features]]
+id = "ui-driver-tools"
+title = "A UI driver group in Settings > Tools"
+description = "ui_driver and ui_driver_drive sit in a UI driver group of their own, so you can switch them for your agents in one place."
+image = "agent-tools-settings.jpg"
+
+[[entry.features]]
+id = "upstream-0-2-118"
+title = "From upstream Zeron"
+description = "First-run setup for new installs, a background engine that keeps sessions running after you quit the app, and desktop notifications posted by the engine. Error cards say when an agent is signed out or out of usage and offer Log in, Claude sign-in falls back to its credentials file when the Keychain refuses, and long transcripts no longer drop the engine connection."
+details = "Zeron Cloud and Billing pages appear for accounts that are offered Cloud. Your existing provider switch stays: the model picker keeps the fork's confirm dialog instead of upstream's in-picker switch."
+
+[[entry]]
 version = "0.2.114"
 date = "Oct 20"
 hero = "mission-control.jpg"
