@@ -90,9 +90,9 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     var chipMenus: [String: () -> UIMenu?] = [:] { didSet { applyChipMenus() } }
     /// Stay in the card state even when idle (new-session canvas).
     var chipsAlwaysVisible = false { didSet { updateMode(animated: false) } }
-    var images: [StagedImage] = [] { didSet { rebuildThumbs(); refreshAction(animated: true); updateMode(animated: true) } }
-    var quotes: [String] = [] { didSet { rebuildThumbs(); refreshAction(animated: true); updateMode(animated: true) } }
-    var comments: SessionChrome.Comments? { didSet { if comments != oldValue { rebuildThumbs(); refreshAction(animated: true); updateMode(animated: true) } } }
+    var images: [StagedImage] = [] { didSet { syncThumbs(); refreshAction(animated: true); updateMode(animated: true) } }
+    var quotes: [String] = [] { didSet { syncThumbs(); refreshAction(animated: true); updateMode(animated: true) } }
+    var comments: SessionChrome.Comments? { didSet { if comments != oldValue { syncThumbs(); refreshAction(animated: true); updateMode(animated: true) } } }
     private var hasComments: Bool { comments?.items.isEmpty == false }
 
     var text: String {
@@ -111,7 +111,11 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     private let attachButton = UIButton(type: .system)
     private let actionButton = UIButton(type: .system)
     private let thumbs = UIStackView()
-    private let thumbsScroll = FadingScrollView()
+    private let thumbsScroll = UIScrollView()
+    private var thumbCells: [String: ThumbCell] = [:]
+    private var quoteChip: UIButton?
+    private var commentsChipView: UIButton?
+    private var collapseDelay: TimeInterval = 0
     private let toolbar = UIView()
     private let chipStrip = UIStackView()
     private let chipScroll = FadingScrollView()
@@ -129,7 +133,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     private var mentionQuery: (range: NSRange, query: String)?
     private var mentionTask: Task<Void, Never>?
     private var attachCard: AttachCard?
-    private var keyboardHeight: CGFloat = 336
+    private var keyboardFrame: CGRect?
 
     private let font = Fonts.ui(.sans, UIFontMetrics(forTextStyle: .body).scaledValue(for: 16.5))
     private var maxLines: Int {
@@ -160,7 +164,9 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         thumbsScroll.showsHorizontalScrollIndicator = false
         thumbsScroll.translatesAutoresizingMaskIntoConstraints = false
         thumbs.axis = .horizontal
-        thumbs.spacing = 8
+        thumbs.spacing = 6
+        thumbs.alignment = .center
+        thumbs.isLayoutMarginsRelativeArrangement = true
         thumbs.translatesAutoresizingMaskIntoConstraints = false
         thumbsScroll.addSubview(thumbs)
         content.addSubview(thumbsScroll)
@@ -176,7 +182,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         attachButton.accessibilityIdentifier = "composer-attach"
         attachButton.translatesAutoresizingMaskIntoConstraints = false
         attachButton.addAction(UIAction { [weak self] _ in self?.toggleAttachCard() }, for: .touchUpInside)
-        NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillShow), name: UIResponder.keyboardWillShowNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillChangeFrame), name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
         content.addSubview(attachButton)
 
         textView.font = font
@@ -252,8 +258,8 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             glass.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             thumbsScroll.topAnchor.constraint(equalTo: content.topAnchor),
-            thumbsScroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
-            thumbsScroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            thumbsScroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            thumbsScroll.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             thumbsHeight,
             thumbs.topAnchor.constraint(equalTo: thumbsScroll.contentLayoutGuide.topAnchor),
             thumbs.bottomAnchor.constraint(equalTo: thumbsScroll.contentLayoutGuide.bottomAnchor),
@@ -551,16 +557,26 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         if let attachCard { return attachCard.close() }
         guard let host = findViewController() else { return }
         let picker = AttachmentPicker(host: host, limit: 8 - images.count) { [weak self] in self?.addImages($0) }
-        attachCard = AttachCard.present(in: textView, from: attachButton, picker: picker, height: keyboardHeight) { [weak self] in
-            self?.attachCard = nil
-            self?.rotateAttach(open: false)
+        let present = { [weak self] in
+            guard let self, let window = self.window, self.attachCard == nil else { return }
+            let fallback = CGRect(x: 0, y: window.bounds.height - 336, width: window.bounds.width, height: 336)
+            var keyboard = self.keyboardFrame.flatMap { $0.height >= 200 ? $0 : nil } ?? fallback
+            if let frame = self.keyboardFrame, frame.height < 200 { keyboard.origin.y = frame.minY - keyboard.height }
+            self.attachCard = AttachCard.present(in: window, input: self.textView, anchor: self.attachButton, composer: self, keyboard: keyboard, picker: picker) { [weak self] in
+                self?.attachCard = nil
+                self?.rotateAttach(open: false)
+            }
+            self.rotateAttach(open: true)
         }
-        rotateAttach(open: true)
+        if textView.isFirstResponder { return present() }
+        textView.becomeFirstResponder()
+        DispatchQueue.main.async(execute: present)
     }
 
-    @objc private func keyboardWillShow(_ note: Notification) {
-        guard attachCard == nil, let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect, frame.height >= 200 else { return }
-        keyboardHeight = frame.height
+    @objc private func keyboardWillChangeFrame(_ note: Notification) {
+        guard attachCard == nil, let window, let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+        let local = window.convert(frame, from: window.screen.coordinateSpace)
+        keyboardFrame = local.minY < window.bounds.height ? local : nil
     }
 
     private func rotateAttach(open: Bool) {
@@ -604,82 +620,122 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         return chip
     }
 
-    private func rebuildThumbs() {
-        thumbs.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        thumbs.alignment = .center
-        if !quotes.isEmpty {
-            var q = UIButton.Configuration.filled()
-            q.title = quoteChipLabel(count: UInt32(quotes.count))
-            q.image = UIImage(systemName: "text.quote", withConfiguration: UIImage.SymbolConfiguration(pointSize: 11.5, weight: .semibold))
-            q.imagePadding = 6
-            q.baseForegroundColor = Palette.text
-            q.baseBackgroundColor = Palette.controlFill
-            q.cornerStyle = .capsule
-            q.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 11, bottom: 7, trailing: 11)
-            q.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attrs in
-                var a = attrs
-                a.font = Fonts.ui(.sansMedium, 13.5)
-                return a
-            }
-            let chip = UIButton(configuration: q)
-            chip.accessibilityIdentifier = "composer-quotes"
-            let previews = quotes.map { UIAction(title: $0, attributes: .disabled) { _ in } }
-            let remove = UIAction(title: "Remove", image: UIImage(systemName: "xmark"), attributes: .destructive) { [weak self] _ in
-                self?.quotes = []
-            }
-            chip.menu = UIMenu(children: [UIMenu(options: .displayInline, children: previews), remove])
-            chip.showsMenuAsPrimaryAction = true
-            thumbs.addArrangedSubview(chip)
+    private func removeImage(id: String) {
+        guard let cell = thumbCells.removeValue(forKey: id) else { return }
+        let remaining = images.filter { $0.id != id }
+        if remaining.isEmpty { collapseDelay = 0.12 }
+        if UIAccessibility.isReduceMotionEnabled {
+            UIView.animate(withDuration: 0.12) { cell.alpha = 0 } completion: { _ in cell.removeFromSuperview() }
+        } else {
+            UIView.animate(withDuration: 0.22, delay: 0, options: [.beginFromCurrentState]) {
+                cell.isHidden = true
+                cell.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
+                self.thumbs.layoutIfNeeded()
+            } completion: { _ in cell.removeFromSuperview() }
+            UIView.animate(withDuration: 0.15, delay: 0, options: [.beginFromCurrentState]) { cell.alpha = 0 }
         }
-        if let comments, !comments.items.isEmpty {
-            thumbs.addArrangedSubview(commentsChip(comments))
-        }
-        for img in images {
-            let iv = img.isImage ? UIImageView(image: img.thumbnail) : pastedTextTile(img)
-            iv.contentMode = .scaleAspectFill
-            iv.clipsToBounds = true
-            iv.layer.cornerRadius = 14
-            iv.layer.cornerCurve = .continuous
-            iv.layer.borderWidth = 1 / max(1, traitCollection.displayScale)
-            iv.layer.borderColor = Palette.hairline.resolvedColor(with: window?.traitCollection ?? traitCollection).cgColor
-            iv.isUserInteractionEnabled = true
-            iv.translatesAutoresizingMaskIntoConstraints = false
-            iv.widthAnchor.constraint(equalToConstant: img.isImage ? 56 : 168).isActive = true
-            iv.heightAnchor.constraint(equalToConstant: 56).isActive = true
-            var x = UIButton.Configuration.filled()
-            x.image = UIImage(systemName: "xmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 8, weight: .bold))
-            x.baseBackgroundColor = UIColor.black.withAlphaComponent(0.55)
-            x.baseForegroundColor = .white
-            x.cornerStyle = .capsule
-            x.contentInsets = .zero
-            let remove = UIButton(configuration: x)
-            remove.accessibilityLabel = img.isImage ? "Remove image" : "Remove pasted text"
-            remove.translatesAutoresizingMaskIntoConstraints = false
-            remove.addAction(UIAction { [weak self] _ in
-                UIView.animate(withDuration: 0.25) { self?.images.removeAll { $0.id == img.id } }
-            }, for: .touchUpInside)
-            iv.addSubview(remove)
-            NSLayoutConstraint.activate([
-                remove.topAnchor.constraint(equalTo: iv.topAnchor, constant: 4),
-                remove.trailingAnchor.constraint(equalTo: iv.trailingAnchor, constant: -4),
-                remove.widthAnchor.constraint(equalToConstant: 18),
-                remove.heightAnchor.constraint(equalToConstant: 18),
-            ])
-            thumbs.addArrangedSubview(iv)
-        }
-        thumbsHeight.constant = !images.isEmpty ? 68 : quotes.isEmpty && !hasComments ? 0 : 46
-        thumbs.layoutMargins = UIEdgeInsets(top: 12, left: 0, bottom: 0, right: 0)
-        thumbs.isLayoutMarginsRelativeArrangement = true
-        onHeightChange?()
+        images = remaining
     }
 
-    private func pastedTextTile(_ item: StagedImage) -> UIImageView {
+    private func syncThumbs() {
+        quoteChip?.removeFromSuperview()
+        quoteChip = quotes.isEmpty ? nil : makeQuoteChip()
+        if let quoteChip { thumbs.insertArrangedSubview(quoteChip, at: 0) }
+        commentsChipView?.removeFromSuperview()
+        commentsChipView = comments.flatMap { $0.items.isEmpty ? nil : commentsChip($0) }
+        if let commentsChipView { thumbs.insertArrangedSubview(commentsChipView, at: quoteChip == nil ? 0 : 1) }
+
+        let ids = Set(images.map(\.id))
+        for (id, cell) in thumbCells where !ids.contains(id) {
+            cell.removeFromSuperview()
+            thumbCells[id] = nil
+        }
+        let wasEmpty = thumbCells.isEmpty
+        var added: [ThumbCell] = []
+        for img in images where thumbCells[img.id] == nil {
+            let cell = ThumbCell(item: img, tile: img.isImage ? nil : pastedTextTile(img))
+            cell.onRemove = { [weak self] in self?.removeImage(id: img.id) }
+            cell.onOpen = { [weak self, weak cell] in
+                guard let self, let cell else { return }
+                if img.isImage { self.preview(img, from: cell) } else { self.previewPastedText(img) }
+            }
+            thumbCells[img.id] = cell
+            thumbs.addArrangedSubview(cell)
+            added.append(cell)
+        }
+        let pictures = images.filter(\.isImage)
+        for (i, img) in pictures.enumerated() {
+            thumbCells[img.id]?.accessibilityLabel = "Image \(i + 1) of \(pictures.count)"
+        }
+
+        let height: CGFloat = !images.isEmpty ? 118 : quotes.isEmpty && !hasComments ? 0 : 46
+        thumbs.layoutMargins = images.isEmpty
+            ? UIEdgeInsets(top: 12, left: 8, bottom: 0, right: 8)
+            : UIEdgeInsets(top: 8, left: 8, bottom: 6, right: 8)
+        let animated = window != nil && !UIAccessibility.isReduceMotionEnabled
+        if animated, !added.isEmpty {
+            UIView.performWithoutAnimation {
+                for cell in added {
+                    cell.alpha = 0
+                    cell.transform = CGAffineTransform(scaleX: 0.4, y: 0.4)
+                }
+                thumbs.layoutIfNeeded()
+            }
+            for (n, cell) in added.enumerated() {
+                let delay = (wasEmpty ? 0.12 : 0) + Double(n) * 0.04
+                UIView.animate(withDuration: 0.42, delay: delay, usingSpringWithDamping: 0.86, initialSpringVelocity: 0, options: [.allowUserInteraction, .beginFromCurrentState]) { cell.transform = .identity }
+                UIView.animate(withDuration: 0.16, delay: delay, options: [.allowUserInteraction, .beginFromCurrentState]) { cell.alpha = 1 }
+            }
+        } else if !added.isEmpty, window != nil {
+            added.forEach { $0.alpha = 0 }
+            UIView.animate(withDuration: 0.12) { added.forEach { $0.alpha = 1 } }
+        }
+
+        guard height != thumbsHeight.constant else { return }
+        let resize = {
+            self.thumbsHeight.constant = height
+            self.onHeightChange?()
+            self.superview?.layoutIfNeeded()
+        }
+        let delay = collapseDelay
+        collapseDelay = 0
+        guard animated else { return resize() }
+        let spring = {
+            UIView.animate(withDuration: 0.42, delay: 0, usingSpringWithDamping: 0.86, initialSpringVelocity: 0, options: [.allowUserInteraction, .beginFromCurrentState], animations: resize)
+        }
+        if delay > 0 { DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: spring) } else { spring() }
+    }
+
+    private func makeQuoteChip() -> UIButton {
+        var q = UIButton.Configuration.filled()
+        q.title = quoteChipLabel(count: UInt32(quotes.count))
+        q.image = UIImage(systemName: "text.quote", withConfiguration: UIImage.SymbolConfiguration(pointSize: 11.5, weight: .semibold))
+        q.imagePadding = 6
+        q.baseForegroundColor = Palette.text
+        q.baseBackgroundColor = Palette.controlFill
+        q.cornerStyle = .capsule
+        q.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 11, bottom: 7, trailing: 11)
+        q.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attrs in
+            var a = attrs
+            a.font = Fonts.ui(.sansMedium, 13.5)
+            return a
+        }
+        let chip = UIButton(configuration: q)
+        chip.accessibilityIdentifier = "composer-quotes"
+        let previews = quotes.map { UIAction(title: $0, attributes: .disabled) { _ in } }
+        let remove = UIAction(title: "Remove", image: UIImage(systemName: "xmark"), attributes: .destructive) { [weak self] _ in
+            self?.quotes = []
+        }
+        chip.menu = UIMenu(children: [UIMenu(options: .displayInline, children: previews), remove])
+        chip.showsMenuAsPrimaryAction = true
+        return chip
+    }
+
+    private func pastedTextTile(_ item: StagedImage) -> UIView {
         let text = String(decoding: item.data, as: UTF8.self)
         let info = pastedTextPreview(reference: item.name, text: text)
-        let tile = UIImageView()
+        let tile = UIView()
         tile.backgroundColor = Palette.controlFill
-        tile.accessibilityIdentifier = "composer-pasted-text"
-        tile.accessibilityLabel = info.title
         let icon = UIImageView(image: UIImage(systemName: "doc.text", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .medium)))
         icon.tintColor = Palette.secondary
         let title = UILabel()
@@ -701,18 +757,25 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         tile.addSubview(row)
         NSLayoutConstraint.activate([
             row.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 12),
-            row.trailingAnchor.constraint(lessThanOrEqualTo: tile.trailingAnchor, constant: -26),
+            row.trailingAnchor.constraint(lessThanOrEqualTo: tile.trailingAnchor, constant: -12),
             row.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
         ])
-        tile.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(previewPastedText(_:))))
-        tile.tag = images.firstIndex(of: item) ?? 0
         return tile
     }
 
-    @objc private func previewPastedText(_ tap: UITapGestureRecognizer) {
-        guard let index = tap.view?.tag, images.indices.contains(index), let vc = findViewController() else { return }
-        let item = images[index]
+    private func previewPastedText(_ item: StagedImage) {
+        guard let vc = findViewController() else { return }
         PastedTextPreviewer.present(text: String(decoding: item.data, as: UTF8.self), reference: item.name, from: vc)
+    }
+
+    private func preview(_ item: StagedImage, from cell: ThumbCell) {
+        guard let vc = findViewController() else { return }
+        let pictures = images.filter(\.isImage)
+        let index = pictures.firstIndex { $0.id == item.id } ?? 0
+        let preview = AttachmentPreview(item: item, index: index, count: pictures.count, source: cell.imageArea) { [weak self] in
+            self?.removeImage(id: item.id)
+        }
+        vc.present(preview, animated: false)
     }
 
     // MARK: Text
@@ -902,4 +965,68 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     @objc private func commandReturn() {
         if hasContent { primaryAction() }
     }
+}
+
+/// A staged attachment in the composer's row: a 104 pt image (or a pasted
+/// text tile) with a remove button, keyed by `StagedImage.id`.
+private final class ThumbCell: UIView {
+    var onRemove: (() -> Void)?
+    var onOpen: (() -> Void)?
+    let imageArea: UIView
+
+    init(item: StagedImage, tile: UIView?) {
+        if let tile {
+            imageArea = tile
+        } else {
+            let iv = UIImageView(image: item.thumbnail)
+            iv.contentMode = .scaleAspectFill
+            imageArea = iv
+        }
+        super.init(frame: .zero)
+        imageArea.clipsToBounds = true
+        imageArea.layer.cornerRadius = 22
+        imageArea.layer.cornerCurve = .continuous
+        imageArea.isUserInteractionEnabled = true
+        imageArea.translatesAutoresizingMaskIntoConstraints = false
+        imageArea.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(open)))
+        addSubview(imageArea)
+
+        var x = UIButton.Configuration.filled()
+        x.image = UIImage(systemName: "xmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .bold))
+        x.baseBackgroundColor = UIColor.black.withAlphaComponent(0.5)
+        x.baseForegroundColor = .white
+        x.cornerStyle = .capsule
+        x.contentInsets = .zero
+        let remove = UIButton(configuration: x)
+        remove.accessibilityLabel = item.isImage ? "Remove image" : "Remove pasted text"
+        remove.translatesAutoresizingMaskIntoConstraints = false
+        remove.addAction(UIAction { [weak self] _ in self?.onRemove?() }, for: .touchUpInside)
+        addSubview(remove)
+
+        NSLayoutConstraint.activate([
+            imageArea.topAnchor.constraint(equalTo: topAnchor),
+            imageArea.bottomAnchor.constraint(equalTo: bottomAnchor),
+            imageArea.leadingAnchor.constraint(equalTo: leadingAnchor),
+            imageArea.trailingAnchor.constraint(equalTo: trailingAnchor),
+            widthAnchor.constraint(equalToConstant: item.isImage ? 104 : 168),
+            heightAnchor.constraint(equalToConstant: 104),
+            remove.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            remove.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            remove.widthAnchor.constraint(equalToConstant: 26),
+            remove.heightAnchor.constraint(equalToConstant: 26),
+        ])
+        imageArea.isAccessibilityElement = true
+        imageArea.accessibilityTraits = .button
+        imageArea.accessibilityIdentifier = item.isImage ? "composer-image" : "composer-pasted-text"
+        if !item.isImage { imageArea.accessibilityLabel = pastedTextPreview(reference: item.name, text: String(decoding: item.data, as: UTF8.self)).title }
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var accessibilityLabel: String? {
+        get { imageArea.accessibilityLabel }
+        set { imageArea.accessibilityLabel = newValue }
+    }
+
+    @objc private func open() { onOpen?() }
 }

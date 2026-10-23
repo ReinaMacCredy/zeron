@@ -126,7 +126,8 @@ final class AttachmentPicker: NSObject, PHPickerViewControllerDelegate, UIImageP
         format.scale = 1
         let resized = scale < 1 ? UIGraphicsImageRenderer(size: target, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: target)) } : image
         guard let data = resized.jpegData(compressionQuality: 0.86), data.count <= 24 * 1024 * 1024 else { return nil }
-        let thumb = resized.preparingThumbnail(of: CGSize(width: 180, height: 180)) ?? resized
+        let fill = min(1, 312 / max(1, min(target.width, target.height)))
+        let thumb = resized.preparingThumbnail(of: CGSize(width: (target.width * fill).rounded(), height: (target.height * fill).rounded())) ?? resized
         let id = UUID().uuidString.lowercased()
         return StagedImage(id: id, name: "\(name ?? "image-\(id.prefix(8))").jpg", data: data, thumbnail: thumb)
     }

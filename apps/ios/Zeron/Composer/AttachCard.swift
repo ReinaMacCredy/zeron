@@ -1,41 +1,45 @@
 import Photos
 import UIKit
 
-/// The composer's attach card: it takes the keyboard's place as the text
-/// view's input view, springs out of the "+" as a Liquid Glass menu, and
-/// morphs in place into the recent photos grid. The keyboard window draws
-/// above every app window on iOS 27, so the input view is the only public
-/// way to put the card where the keyboard is.
-final class AttachCard: UIInputView {
-    private static let menuRadius: CGFloat = 30
+/// The composer's attach card. The menu floats in the app window with its
+/// bottom edge at the keyboard top, so the keys stay live under it. Photos
+/// swaps the text view's input view for the recent-photos grid.
+final class AttachCard: UIView {
+    private static let menuRadius: CGFloat = 32
+    private static let gridRadius: CGFloat = 34
 
     private weak var anchor: UIView?
+    private weak var composer: UIView?
     private weak var input: UITextView?
     private let picker: AttachmentPicker
+    private let keyboard: CGRect
     private let onClose: () -> Void
     private let scrim = UIControl()
     private let card = Glass.surface(radius: AttachCard.menuRadius)
     private let menu = UIStackView()
-    private var grid: RecentPhotosGrid?
+    private var gridHost: GridHost?
     private var inGrid = false
     private var closing = false
-    private var laidOutSize = CGSize.zero
 
     private var reduceMotion: Bool { UIAccessibility.isReduceMotionEnabled }
 
-    static func present(in input: UITextView, from anchor: UIView, picker: AttachmentPicker, height: CGFloat, onClose: @escaping () -> Void) -> AttachCard {
-        let card = AttachCard(anchor: anchor, input: input, picker: picker, height: height, onClose: onClose)
-        input.inputView = card
-        if input.isFirstResponder { input.reloadInputViews() } else { input.becomeFirstResponder() }
+    static func present(in window: UIWindow, input: UITextView, anchor: UIView, composer: UIView, keyboard: CGRect, picker: AttachmentPicker, onClose: @escaping () -> Void) -> AttachCard {
+        let card = AttachCard(window: window, input: input, anchor: anchor, composer: composer, keyboard: keyboard, picker: picker, onClose: onClose)
+        window.addSubview(card)
+        card.open()
         return card
     }
 
-    private init(anchor: UIView, input: UITextView, picker: AttachmentPicker, height: CGFloat, onClose: @escaping () -> Void) {
+    private init(window: UIWindow, input: UITextView, anchor: UIView, composer: UIView, keyboard: CGRect, picker: AttachmentPicker, onClose: @escaping () -> Void) {
         self.anchor = anchor
+        self.composer = composer
         self.input = input
         self.picker = picker
+        self.keyboard = keyboard
         self.onClose = onClose
-        super.init(frame: CGRect(x: 0, y: 0, width: anchor.window?.bounds.width ?? 0, height: height), inputViewStyle: .keyboard)
+        super.init(frame: window.bounds)
+        autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        accessibilityViewIsModal = true
         build()
     }
 
@@ -57,7 +61,7 @@ final class AttachCard: UIInputView {
 
         menu.axis = .vertical
         menu.isLayoutMarginsRelativeArrangement = true
-        menu.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 10, leading: 10, bottom: 10, trailing: 10)
+        menu.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 14, leading: 12, bottom: 14, trailing: 12)
         menu.alpha = 0
         if picker.canTakePhoto {
             menu.addArrangedSubview(row("camera", "Camera", symbol: "camera") { [weak self] in
@@ -88,39 +92,37 @@ final class AttachCard: UIInputView {
         return true
     }
 
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        guard window != nil, bounds.width > 0, bounds.size != laidOutSize else { return }
-        let first = laidOutSize == .zero
-        laidOutSize = bounds.size
-        if first { return open() }
-        guard !closing else { return }
-        card.frame = inGrid ? gridRect : menuRect
-        menu.frame = CGRect(origin: .zero, size: menuRect.size)
-        grid?.frame = CGRect(origin: .zero, size: gridRect.size)
-    }
+    // MARK: Geometry (window coordinates)
 
-    // MARK: Geometry
-
-    /// The "+" sits just above this view, in another window.
     private var anchorRect: CGRect {
         let size = CGSize(width: 34, height: 34)
-        guard let anchor, window != nil, anchor.window != nil else {
-            return CGRect(origin: CGPoint(x: 10, y: 8), size: size)
+        guard let anchor, anchor.window != nil else {
+            return CGRect(origin: CGPoint(x: 13, y: keyboard.minY - 50), size: size)
         }
-        let x = anchor.convert(CGPoint(x: anchor.bounds.midX, y: 0), to: nil).x - convert(CGPoint.zero, to: nil).x
-        return CGRect(x: x - size.width / 2, y: 8, width: size.width, height: size.height)
+        let c = anchor.convert(CGPoint(x: anchor.bounds.midX, y: anchor.bounds.midY), to: nil)
+        return CGRect(x: c.x - size.width / 2, y: c.y - size.height / 2, width: size.width, height: size.height)
     }
 
     private var menuRect: CGRect {
-        let w = min(288, bounds.width - 20)
-        let h = min(CGFloat(menu.arrangedSubviews.count) * MenuRow.height + 20, bounds.height - safeAreaInsets.bottom - 20)
-        let x = min(max(10, anchorRect.minX - 6), bounds.width - w - 10)
-        return CGRect(x: x, y: 10, width: w, height: h)
+        let left = (composer.map { $0.convert($0.bounds, to: nil).minX } ?? 10) + 3
+        let w = min(280, bounds.width - left - 8)
+        let h = CGFloat(menu.arrangedSubviews.count) * MenuRow.height + 28
+        return CGRect(x: left, y: keyboard.minY - h, width: w, height: h)
     }
 
     private var gridRect: CGRect {
-        CGRect(x: 6, y: 6, width: bounds.width - 12, height: bounds.height - safeAreaInsets.bottom - 12)
+        CGRect(x: 2, y: keyboard.minY + 6, width: bounds.width - 4, height: keyboard.height - 46)
+    }
+
+    /// The keyboard window draws above every app window, so while the grid
+    /// is up the card is drawn twice with the same frame: this view shows the
+    /// part above the keyboard top, the grid host's twin the part below.
+    private func place(_ rect: CGRect, radius: CGFloat?) {
+        let corners: UICornerConfiguration = radius.map { .uniformCorners(radius: .fixed($0)) } ?? .capsule()
+        card.frame = rect
+        card.cornerConfiguration = corners
+        gridHost?.card.frame = rect.offsetBy(dx: 0, dy: -keyboard.minY)
+        gridHost?.card.cornerConfiguration = corners
     }
 
     // MARK: Transitions
@@ -129,24 +131,20 @@ final class AttachCard: UIInputView {
         let target = menuRect
         menu.frame = CGRect(origin: .zero, size: target.size)
         if reduceMotion {
-            card.frame = target
-            UIView.animate(withDuration: 0.22) { self.reveal(self.menu) }
+            place(target, radius: Self.menuRadius)
+            UIView.animate(withDuration: 0.12) {
+                self.card.effect = Glass.effect()
+                self.menu.alpha = 1
+            }
         } else {
-            card.frame = anchorRect
-            card.cornerConfiguration = .capsule()
+            place(anchorRect, radius: nil)
             UIView.animate(withDuration: 0.5, delay: 0, usingSpringWithDamping: 0.78, initialSpringVelocity: 0, options: [.allowUserInteraction, .beginFromCurrentState]) {
-                self.card.frame = target
-                self.card.cornerConfiguration = .uniformCorners(radius: .fixed(Self.menuRadius))
+                self.place(target, radius: Self.menuRadius)
                 self.card.effect = Glass.effect()
             }
             UIView.animate(withDuration: 0.24, delay: 0.1, options: [.allowUserInteraction, .beginFromCurrentState]) { self.menu.alpha = 1 }
         }
         UIAccessibility.post(notification: .screenChanged, argument: menu.arrangedSubviews.first)
-    }
-
-    private func reveal(_ content: UIView) {
-        card.effect = Glass.effect()
-        content.alpha = 1
     }
 
     private func showPhotos() {
@@ -169,45 +167,70 @@ final class AttachCard: UIInputView {
         }
     }
 
-    private func makeGrid() -> RecentPhotosGrid {
-        let g = RecentPhotosGrid(limit: picker.limit, showsCamera: picker.canTakePhoto)
-        g.alpha = 0
-        g.onBack = { [weak self] in self?.morph(toGrid: false) }
-        g.onCamera = { [weak self] in self?.close { $0.presentCamera() } }
-        g.onAllPhotos = { [weak self] in self?.close { $0.presentPhotos() } }
-        g.onAdd = { [weak self] assets in self?.close { $0.attach(assets) } }
-        card.contentView.addSubview(g)
-        grid = g
-        return g
+    private func makeGridHost() -> GridHost {
+        let host = GridHost(keyboard: keyboard, limit: picker.limit, showsCamera: picker.canTakePhoto, radius: Self.gridRadius)
+        host.card.frame = card.frame.offsetBy(dx: 0, dy: -keyboard.minY)
+        host.onBackground = { [weak self] in self?.close() }
+        host.grid.onBack = { [weak self] in self?.morph(toGrid: false) }
+        host.grid.onCamera = { [weak self] in self?.close { $0.presentCamera() } }
+        host.grid.onAllPhotos = { [weak self] in self?.close { $0.presentPhotos() } }
+        host.grid.onAdd = { [weak self] assets in
+            guard let self else { return }
+            let picker = self.picker
+            self.close()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { picker.attach(assets) }
+        }
+        host.onEscape = { [weak self] in self?.morph(toGrid: false) }
+        gridHost = host
+        return host
     }
 
     private func morph(toGrid: Bool) {
-        guard !closing else { return }
+        guard !closing, toGrid != inGrid else { return }
         inGrid = toGrid
-        let g = grid ?? makeGrid()
+        if toGrid {
+            let host = makeGridHost()
+            host.onMounted = { [weak self] in self?.runMorph(toGrid: true) }
+            input?.inputView = host
+            input?.reloadInputViews()
+        } else {
+            runMorph(toGrid: false)
+        }
+    }
+
+    private func runMorph(toGrid: Bool) {
+        guard let host = gridHost, !closing else { return }
         let target = toGrid ? gridRect : menuRect
-        let corners: UICornerConfiguration = .uniformCorners(radius: toGrid ? .containerConcentric(minimum: 34) : .fixed(Self.menuRadius))
-        if toGrid { g.frame = CGRect(origin: .zero, size: target.size) }
-        let shown: UIView = toGrid ? g : menu
-        let hidden: UIView = toGrid ? menu : g
+        let radius = toGrid ? Self.gridRadius : Self.menuRadius
+        let shown: UIView = toGrid ? host.grid : menu
+        let hidden: UIView = toGrid ? menu : host.grid
+        let done = { [weak self] in
+            guard let self, !toGrid, !self.inGrid, !self.closing else { return }
+            self.dropGridHost()
+        }
         if reduceMotion {
-            UIView.animate(withDuration: 0.15) {
-                self.card.effect = nil
+            place(target, radius: radius)
+            UIView.animate(withDuration: 0.12) {
                 hidden.alpha = 0
-            } completion: { _ in
-                self.card.frame = target
-                self.card.cornerConfiguration = corners
-                UIView.animate(withDuration: 0.22) { self.reveal(shown) }
-            }
+                shown.alpha = 1
+            } completion: { _ in done() }
         } else {
             UIView.animate(withDuration: 0.52, delay: 0, usingSpringWithDamping: 0.84, initialSpringVelocity: 0, options: [.allowUserInteraction, .beginFromCurrentState]) {
-                self.card.frame = target
-                self.card.cornerConfiguration = corners
-            }
+                self.place(target, radius: radius)
+            } completion: { _ in done() }
             UIView.animate(withDuration: 0.16, delay: 0, options: [.beginFromCurrentState]) { hidden.alpha = 0 }
             UIView.animate(withDuration: 0.26, delay: 0.12, options: [.beginFromCurrentState, .allowUserInteraction]) { shown.alpha = 1 }
         }
         UIAccessibility.post(notification: .screenChanged, argument: shown)
+    }
+
+    private func dropGridHost() {
+        guard gridHost != nil else { return }
+        if input?.inputView === gridHost {
+            input?.inputView = nil
+            input?.reloadInputViews()
+        }
+        gridHost = nil
     }
 
     func close(then: ((AttachmentPicker) -> Void)? = nil) {
@@ -215,38 +238,77 @@ final class AttachCard: UIInputView {
         closing = true
         onClose()
         let finish = { [self] in
-            if input?.inputView === self {
-                input?.inputView = nil
-                input?.reloadInputViews()
-            }
+            dropGridHost()
+            removeFromSuperview()
             then?(picker)
         }
-        let contents = [menu, grid].compactMap { $0 }
+        let contents = [menu, gridHost?.grid].compactMap { $0 }
         if reduceMotion {
-            UIView.animate(withDuration: 0.2) {
-                self.card.effect = nil
-                contents.forEach { $0.alpha = 0 }
+            UIView.animate(withDuration: 0.12) {
+                self.alpha = 0
+                self.gridHost?.card.alpha = 0
             } completion: { _ in finish() }
             return
         }
         UIView.animate(withDuration: 0.14, delay: 0, options: [.beginFromCurrentState]) { contents.forEach { $0.alpha = 0 } }
         UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0, options: [.beginFromCurrentState]) {
-            self.card.frame = self.anchorRect
-            self.card.cornerConfiguration = .capsule()
+            self.place(self.anchorRect, radius: nil)
             self.card.effect = nil
+            self.gridHost?.card.effect = nil
         } completion: { _ in finish() }
     }
 }
 
+/// The grid's half of the card, mounted as the text view's input view.
+private final class GridHost: UIInputView {
+    let card = Glass.surface(radius: 34)
+    let grid: RecentPhotosGrid
+    var onMounted: (() -> Void)?
+    var onBackground: (() -> Void)?
+    var onEscape: (() -> Void)?
+
+    init(keyboard: CGRect, limit: Int, showsCamera: Bool, radius: CGFloat) {
+        grid = RecentPhotosGrid(limit: limit, showsCamera: showsCamera)
+        super.init(frame: CGRect(origin: .zero, size: keyboard.size), inputViewStyle: .keyboard)
+        allowsSelfSizing = false
+        let background = UIControl(frame: bounds)
+        background.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        background.addAction(UIAction { [weak self] _ in self?.onBackground?() }, for: .touchUpInside)
+        addSubview(background)
+        card.clipsToBounds = true
+        card.effect = Glass.effect()
+        addSubview(card)
+        grid.alpha = 0
+        grid.frame = CGRect(x: 0, y: 0, width: keyboard.width - 4, height: keyboard.height - 46)
+        grid.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        card.contentView.addSubview(grid)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func accessibilityPerformEscape() -> Bool {
+        onEscape?()
+        return true
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard window != nil, bounds.width > 0, let mounted = onMounted else { return }
+        onMounted = nil
+        // Mounting lays out without animation; start the spring a turn later.
+        DispatchQueue.main.async(execute: mounted)
+    }
+}
+
 private final class MenuRow: UIControl {
-    static let height: CGFloat = 58
+    static let height: CGFloat = 64
 
     private let highlight = UIView()
 
     init(title: String, symbol: String) {
         super.init(frame: .zero)
         highlight.backgroundColor = Palette.controlFill
-        highlight.layer.cornerRadius = 20
+        highlight.layer.cornerRadius = 22
         highlight.layer.cornerCurve = .continuous
         highlight.alpha = 0
         highlight.isUserInteractionEnabled = false
@@ -255,11 +317,11 @@ private final class MenuRow: UIControl {
 
         let well = UIView()
         well.backgroundColor = Palette.controlFill
-        well.layer.cornerRadius = 20
+        well.layer.cornerRadius = 22
         well.isUserInteractionEnabled = false
         well.translatesAutoresizingMaskIntoConstraints = false
         addSubview(well)
-        let icon = UIImageView(image: UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .medium)))
+        let icon = UIImageView(image: UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 19, weight: .regular)))
         icon.tintColor = Palette.text
         icon.contentMode = .center
         icon.translatesAutoresizingMaskIntoConstraints = false
@@ -267,24 +329,27 @@ private final class MenuRow: UIControl {
 
         let label = UILabel()
         label.text = title
-        label.font = UIFont.systemFont(ofSize: 17)
+        label.font = UIFontMetrics(forTextStyle: .body).scaledFont(for: .systemFont(ofSize: 18), maximumPointSize: 26)
+        label.adjustsFontForContentSizeCategory = true
+        label.adjustsFontSizeToFitWidth = true
+        label.minimumScaleFactor = 0.7
         label.textColor = Palette.text
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
 
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: Self.height),
-            highlight.topAnchor.constraint(equalTo: topAnchor, constant: 2),
-            highlight.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+            highlight.topAnchor.constraint(equalTo: topAnchor),
+            highlight.bottomAnchor.constraint(equalTo: bottomAnchor),
             highlight.leadingAnchor.constraint(equalTo: leadingAnchor),
             highlight.trailingAnchor.constraint(equalTo: trailingAnchor),
             well.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             well.centerYAnchor.constraint(equalTo: centerYAnchor),
-            well.widthAnchor.constraint(equalToConstant: 40),
-            well.heightAnchor.constraint(equalToConstant: 40),
+            well.widthAnchor.constraint(equalToConstant: 44),
+            well.heightAnchor.constraint(equalToConstant: 44),
             icon.centerXAnchor.constraint(equalTo: well.centerXAnchor),
             icon.centerYAnchor.constraint(equalTo: well.centerYAnchor),
-            label.leadingAnchor.constraint(equalTo: well.trailingAnchor, constant: 14),
+            label.leadingAnchor.constraint(equalTo: well.trailingAnchor, constant: 16),
             label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
