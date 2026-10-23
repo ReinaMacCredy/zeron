@@ -115,8 +115,8 @@ final class FindingCardCell: UITableViewCell {
 }
 
 extension DiffSheetViewController {
-    static func presentFindings(_ handle: SessionHandle, from host: UIViewController, title: String, subtitle: String?, focus: String?) {
-        present(from: host, title: title, subtitle: subtitle, focus: focus, finding: { card, action in
+    static func presentFindings(_ handle: SessionHandle, from host: UIViewController, title: String, focus: String?) {
+        present(from: host, title: title, subtitle: nil, focus: focus, finding: { card, action in
             switch action {
             case .fix: _ = handle.fixReviewFindings(only: card.id)
             case .dismiss: handle.dismissReviewFinding(id: card.id)
