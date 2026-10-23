@@ -7,7 +7,7 @@ final class Toast: UIView {
     private let glass = Glass.surface()
     private var dismissWork: DispatchWorkItem?
 
-    static func show(_ text: String, action: String? = nil, in window: UIWindow?, atTop: Bool = false, handler: (() -> Void)? = nil) {
+    static func show(_ text: String, action: String? = nil, in window: UIWindow?, atTop: Bool = false, above bar: UIView? = nil, handler: (() -> Void)? = nil) {
         guard let window else { return }
         current?.dismiss(animated: false)
         let toast = Toast(text: text, action: action, handler: handler)
@@ -17,11 +17,19 @@ final class Toast: UIView {
         // session" accessory or the tab bar — expanded or minimized), not at a
         // fixed height that floats over list rows.
         let gap: CGFloat = 12
+        let rest: NSLayoutConstraint
+        if atTop {
+            rest = toast.topAnchor.constraint(equalTo: window.safeAreaLayoutGuide.topAnchor, constant: gap)
+        } else if let bar, bar.window == window {
+            rest = toast.bottomAnchor.constraint(equalTo: bar.topAnchor, constant: -gap)
+        } else {
+            rest = toast.bottomAnchor.constraint(equalTo: window.topAnchor, constant: chromeTop(in: window) - gap)
+            rest.priority = .defaultHigh
+        }
         NSLayoutConstraint.activate([
             toast.centerXAnchor.constraint(equalTo: window.centerXAnchor),
-            atTop
-                ? toast.topAnchor.constraint(equalTo: window.safeAreaLayoutGuide.topAnchor, constant: gap)
-                : toast.bottomAnchor.constraint(equalTo: window.topAnchor, constant: chromeTop(in: window) - gap),
+            rest,
+            toast.bottomAnchor.constraint(lessThanOrEqualTo: window.keyboardLayoutGuide.topAnchor, constant: -gap),
             toast.widthAnchor.constraint(lessThanOrEqualTo: window.widthAnchor, constant: -48),
         ])
         current = toast
@@ -41,8 +49,6 @@ final class Toast: UIView {
                 top = min(top, accessory.minY)
             }
         }
-        // A pushed screen's own bottom bar (e.g. the composer) isn't tab
-        // chrome; keep clear of the keyboard / home indicator either way.
         return top
     }
 

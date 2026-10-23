@@ -25,7 +25,7 @@ enum MissionStart {
     }
 
     @MainActor
-    static func run(app: AppModel, deviceId: String, text: String, spaceId: String?, images: [StagedImage], config: ChatConfig?, options: MissionOptions, from host: UIViewController) async -> String? {
+    static func run(app: AppModel, deviceId: String, text: String, spaceId: String?, images: [StagedImage], config: ChatConfig?, options: MissionOptions, from host: UIViewController, above bar: UIView? = nil) async -> String? {
         guard let client = app.client else { return nil }
         do {
             let paths = try await upload(images, to: deviceId, client: client)
@@ -33,7 +33,7 @@ enum MissionStart {
             (host.tabBarController as? MainTabController)?.showTasks("mission:\(taskId)")
             return taskId
         } catch {
-            Toast.show(TasksErrors.message(error), in: host.view.window)
+            Toast.show(TasksErrors.message(error), in: host.view.window, above: bar)
             return nil
         }
     }
