@@ -1294,7 +1294,10 @@ impl SessionHandle {
         }
         self.respond_input(
             request_id,
-            crate::computer::consent_answers(question_id, label),
+            vec![UserInputAnswer {
+                question_id: question_id.to_owned(),
+                labels: vec![label.to_owned()],
+            }],
         )?;
         Ok(true)
     }
@@ -1313,6 +1316,91 @@ impl SessionHandle {
             )
             .await?;
         Ok(crate::computer::parse_still_reply(&reply))
+    }
+
+    async fn chat_host_rpc<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &'static str,
+        mut params: serde_json::Value,
+    ) -> Result<T> {
+        let host = self.composer().host.clone();
+        if host.device_id.is_empty() || !host.online {
+            return Err(ClientError::HostUnavailable(host.device_id));
+        }
+        params["chatId"] = self.core.chat_id.clone().into();
+        let reply = self
+            .core
+            .client()?
+            .host_rpc(&host.device_id, method, params)
+            .await?;
+        serde_json::from_value(reply).map_err(|e| ClientError::Internal(e.to_string()))
+    }
+
+    /// Per chat, as the host's revoke is: other chats keep their access.
+    pub async fn computer_stop(&self) -> Result<bool> {
+        let reply: serde_json::Value = self
+            .chat_host_rpc(
+                zeron_rpc::methods::COMPUTER_REVOKE_DESKTOP,
+                serde_json::json!({}),
+            )
+            .await?;
+        Ok(reply["revoked"].as_bool().unwrap_or(false))
+    }
+
+    pub async fn list_terminals(&self) -> Result<Vec<zeron_proto::TerminalInfo>> {
+        self.chat_host_rpc(zeron_rpc::methods::LIST_TERMINALS, serde_json::json!({}))
+            .await
+    }
+
+    pub async fn read_terminal(&self, terminal_id: &str) -> Result<zeron_proto::TerminalScreen> {
+        self.chat_host_rpc(
+            zeron_rpc::methods::READ_TERMINAL,
+            serde_json::json!({ "terminalId": terminal_id, "lines": 400, "styled": true }),
+        )
+        .await
+    }
+
+    fn space_id(&self) -> Result<Option<String>> {
+        let client = self.core.client()?;
+        Ok(client
+            .workspace
+            .chat(&self.core.chat_id)
+            .and_then(|chat| chat.space_id))
+    }
+
+    pub async fn list_project_actions(
+        &self,
+    ) -> Result<Option<zeron_proto::ProjectActionsSnapshot>> {
+        let Some(space_id) = self.space_id()? else {
+            return Ok(None);
+        };
+        self.chat_host_rpc(
+            zeron_rpc::methods::LIST_PROJECT_ACTIONS,
+            serde_json::json!({ "spaceId": space_id }),
+        )
+        .await
+        .map(Some)
+    }
+
+    pub async fn run_project_action(
+        &self,
+        action_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<zeron_proto::ProjectActionRun> {
+        let space_id = self
+            .space_id()?
+            .ok_or_else(|| ClientError::InvalidArgument("this chat has no project".into()))?;
+        self.chat_host_rpc(
+            zeron_rpc::methods::RUN_PROJECT_ACTION,
+            serde_json::json!({
+                "spaceId": space_id,
+                "actionId": action_id,
+                "cols": cols,
+                "rows": rows,
+            }),
+        )
+        .await
     }
 
     fn enqueue_inner(

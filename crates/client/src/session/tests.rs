@@ -214,3 +214,92 @@ fn still_frames_come_from_an_online_host_only() {
         None
     );
 }
+
+fn revoked_notes(session: &SessionHandle) -> usize {
+    session
+        .snapshot()
+        .transcript()
+        .iter()
+        .filter(|entry| {
+            entry.message.parts.iter().any(|part| {
+                matches!(part, MessagePart::Text { text, .. } if text == zeron_proto::computer::cards::COMPUTER_DESKTOP_REVOKED_NOTE)
+            })
+        })
+        .count()
+}
+
+#[test]
+fn stop_revokes_this_chat_once_and_ends_its_preview() {
+    let runtime = crate::runtime::shared();
+    let (client, _dir) = demo(true);
+    let session = client.open_session("chat-computer").unwrap();
+    wait_for("the host", || session.composer().host.online);
+    wait_for("the fixture", || session.snapshot().transcript_len > 0);
+    let before = revoked_notes(&session);
+    assert!(runtime.block_on(session.computer_stop()).unwrap());
+    assert!(
+        !runtime.block_on(session.computer_stop()).unwrap(),
+        "nothing left to revoke"
+    );
+    wait_for("the revoked note", || revoked_notes(&session) == before + 1);
+    assert_eq!(
+        runtime.block_on(session.computer_still_frame()).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn terminals_and_project_actions_come_from_the_chats_host() {
+    use zeron_proto::TerminalColor;
+    let runtime = crate::runtime::shared();
+    let (client, _dir) = demo(false);
+    let session = client.open_session("chat-computer").unwrap();
+    wait_for("the host", || session.composer().host.online);
+    let terminals = runtime.block_on(session.list_terminals()).unwrap();
+    assert_eq!(terminals.len(), 1);
+    let screen = runtime
+        .block_on(session.read_terminal(&terminals[0].id))
+        .unwrap();
+    assert_eq!(screen.lines.len(), screen.styled_lines.len());
+    assert!(
+        screen
+            .styled_lines
+            .iter()
+            .flatten()
+            .any(|run| run.bold && run.fg == Some(TerminalColor::Indexed(1))),
+        "the host's colours travel with the text"
+    );
+
+    let actions = runtime
+        .block_on(session.list_project_actions())
+        .unwrap()
+        .expect("chat-computer has a project");
+    let names: Vec<&str> = actions.actions.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, ["Dev server", "Test", "Lint"]);
+    let run = runtime
+        .block_on(session.run_project_action("act-lint", 120, 32))
+        .unwrap();
+    assert_eq!(run.action_name, "Lint");
+    let newest = |session: &SessionHandle| {
+        runtime
+            .block_on(session.list_terminals())
+            .unwrap()
+            .remove(0)
+    };
+    let tab = newest(&session);
+    assert_eq!(
+        (tab.id.as_str(), tab.title.as_deref()),
+        (run.terminal.id.as_str(), Some("Lint"))
+    );
+    assert_eq!(tab.exit_code, None, "a run starts out running");
+    wait_for("the run to exit", || newest(&session).exit_code == Some(1));
+
+    let other = client.open_session("chat-veil").unwrap();
+    wait_for("the host", || other.composer().host.online);
+    assert!(
+        runtime
+            .block_on(other.read_terminal(&terminals[0].id))
+            .is_err(),
+        "a terminal belongs to its chat"
+    );
+}

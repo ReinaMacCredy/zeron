@@ -7,12 +7,17 @@
 use zeron_doc::{
     MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus, ToolDiffStat,
 };
-use zeron_proto::computer::ComputerConsentScope;
+use zeron_proto::computer::cards::{
+    COMPUTER_CONSENT_ALLOW, COMPUTER_CONSENT_DECLINE, COMPUTER_CONTROL_ON_DISCLOSURE,
+    COMPUTER_DESKTOP_REVOKED_NOTE, COMPUTER_ESCAPE_STOP_NOTICE, COMPUTER_FOREGROUND_ALLOW,
+    COMPUTER_FOREGROUND_DECLINE, COMPUTER_SETUP_NOTE, COMPUTER_UNAVAILABLE_NOTE,
+    COMPUTER_USER_PAUSE_NOTE_PREFIX, ConsentOutcome, RevokeSource, consent_always_label,
+    foreground_title,
+};
+use zeron_proto::computer::{ComputerConsentApp, ComputerConsentScope};
 use zeron_proto::{
     TodoItem, TodoStatus, ToolCall, UserInputAnswer, UserInputKind, UserInputQuestion,
 };
-
-use crate::computer::{self, ConsentOutcome};
 
 pub(crate) const PHONE: &str = "ios-demo";
 
@@ -681,34 +686,58 @@ fn consent(
     id: &str,
     scope: ComputerConsentScope,
     question: &str,
+    app: Option<ComputerConsentApp>,
+    tool: Option<&str>,
     answer: Option<&str>,
 ) -> MessagePart {
+    let mut options = vec![COMPUTER_CONSENT_ALLOW.to_owned()];
+    options.extend(app.as_ref().and_then(consent_always_label));
+    options.push(COMPUTER_CONSENT_DECLINE.into());
+    input(
+        id,
+        "Computer",
+        question,
+        options,
+        UserInputKind::Consent {
+            scope,
+            app,
+            tool: tool.map(str::to_owned),
+            params: None,
+        },
+        answer,
+    )
+}
+
+fn input(
+    id: &str,
+    header: &str,
+    question: &str,
+    options: Vec<String>,
+    kind: UserInputKind,
+    answer: Option<&str>,
+) -> MessagePart {
+    let question_id = match kind {
+        UserInputKind::Foreground { .. } => "foreground",
+        _ => "consent",
+    };
     MessagePart::Input {
         id: id.into(),
         request_id: id.into(),
         questions: vec![UserInputQuestion {
             approval: false,
-            id: "consent".into(),
-            header: "Computer".into(),
+            id: question_id.into(),
+            header: header.into(),
             question: question.into(),
-            options: vec![
-                computer::CONSENT_ALLOW.into(),
-                computer::CONSENT_DECLINE.into(),
-            ],
+            options,
             multi_select: false,
-            kind: Some(UserInputKind::Consent {
-                scope,
-                app: None,
-                tool: None,
-                params: None,
-            }),
+            kind: Some(kind),
             prefill: None,
             multiline: false,
         }],
         resolved: answer.is_some(),
         answers: answer.map(|label| {
             vec![UserInputAnswer {
-                question_id: "consent".into(),
+                question_id: question_id.into(),
                 labels: vec![label.into()],
             }]
         }),
@@ -717,12 +746,30 @@ fn consent(
     }
 }
 
+fn app(name: &str, bundle_id: &str) -> Option<ComputerConsentApp> {
+    Some(ComputerConsentApp {
+        name: name.into(),
+        bundle_id: Some(bundle_id.into()),
+        pid: None,
+    })
+}
+
 fn computer(host: &str, now: i64) -> Vec<SessionMessageEntry> {
     let note = |id: &str, at: i64, body: &str, hint: Option<&str>| {
         let mut parts = vec![text("t0", body)];
         parts.extend(hint.map(|hint| text("t1", hint)));
         entry(id, MessageRole::System, host, at, parts)
     };
+    let script = serde_json::json!({
+        "title": "Work out 2 + 2 in Calculator",
+        "app": "Calculator",
+        "code": "let app = await cua.getApp(\"Calculator\");\nawait app.click(12);\nawait app.typeText(\"2+2=\");",
+        "actions": [
+            { "tool": "launch_app" },
+            { "tool": "click", "n": 3 },
+            { "tool": "type_text", "detail": "2+2=" },
+        ],
+    });
     vec![
         user(
             "m1",
@@ -732,18 +779,18 @@ fn computer(host: &str, now: i64) -> Vec<SessionMessageEntry> {
         note(
             "n1",
             now - 560_000,
-            computer::SETUP_NOTE,
+            COMPUTER_SETUP_NOTE,
             Some("Allow Accessibility for Zeron in System Settings, then continue."),
         ),
         note(
             "n2",
             now - 540_000,
-            computer::UNAVAILABLE_NOTE,
+            COMPUTER_UNAVAILABLE_NOTE,
             Some(
                 "OpenCode does not receive Zeron's Computer tools. Switch this chat to Claude, Codex or another agent that does to use Computer.",
             ),
         ),
-        note("n3", now - 520_000, computer::ESCAPE_STOP_NOTICE, None),
+        note("n3", now - 520_000, COMPUTER_ESCAPE_STOP_NOTICE, None),
         assistant(
             "m2",
             host,
@@ -759,26 +806,23 @@ fn computer(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                     "computer-consent-demo-call",
                     ComputerConsentScope::Call,
                     "Allow the agent to run computer_read_clipboard once?",
-                    Some(computer::CONSENT_ALLOW),
+                    None,
+                    Some("computer_read_clipboard"),
+                    Some(COMPUTER_CONSENT_ALLOW),
                 ),
             ],
         ),
-        note("n4", now - 350_000, computer::CONTROL_ON_DISCLOSURE, None),
+        note("n4", now - 350_000, COMPUTER_CONTROL_ON_DISCLOSURE, None),
         assistant(
             "m3",
             host,
             now - 300_000,
             vec![
-                computer_tool(
-                    "c1",
-                    "computer_launch_app",
-                    Some(serde_json::json!({ "name": "Calculator" })),
-                    false,
-                ),
+                computer_tool("c1", "computer", Some(script), false),
                 computer_tool(
                     "c2",
-                    "computer_click",
-                    Some(serde_json::json!({ "x": 380, "y": 220 })),
+                    "computer_launch_app",
+                    Some(serde_json::json!({ "name": "Calculator" })),
                     false,
                 ),
                 computer_tool(
@@ -788,11 +832,49 @@ fn computer(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                     false,
                 ),
                 computer_tool("c4", "computer_read_clipboard", None, false),
-                text("t0", "Calculator shows 4. One more step needs the desktop:"),
+                input(
+                    "computer-foreground-demo",
+                    "Computer",
+                    &foreground_title(Some("Calculator")),
+                    vec![
+                        COMPUTER_FOREGROUND_ALLOW.into(),
+                        COMPUTER_FOREGROUND_DECLINE.into(),
+                    ],
+                    UserInputKind::Foreground {
+                        app: app("Calculator", "com.apple.calculator"),
+                    },
+                    Some(COMPUTER_FOREGROUND_ALLOW),
+                ),
+            ],
+        ),
+        note(
+            "n5",
+            now - 280_000,
+            &format!("{COMPUTER_USER_PAUSE_NOTE_PREFIX}Calculator"),
+            None,
+        ),
+        note(
+            "n6",
+            now - 260_000,
+            COMPUTER_DESKTOP_REVOKED_NOTE,
+            Some(RevokeSource::Stop.hint()),
+        ),
+        note("n7", now - 240_000, "Left 2 Calculator windows open", None),
+        assistant(
+            "m4",
+            host,
+            now - 200_000,
+            vec![
+                text(
+                    "t0",
+                    "Calculator shows 4. To paste it into your shell I need Terminal:",
+                ),
                 consent(
                     "computer-consent-demo-task",
                     ComputerConsentScope::Task,
-                    "Allow Computer for this task? The agent wants to run computer_click and will drive this Mac's apps until the turn ends.",
+                    "Allow Computer for this task? The agent wants to use Terminal and will drive this Mac's apps until the turn ends.",
+                    app("Terminal", "com.apple.Terminal"),
+                    None,
                     None,
                 ),
             ],
@@ -1311,7 +1393,7 @@ pub(crate) fn answered(labels: &[String]) -> Vec<Step> {
 pub(crate) fn consent_answered(outcome: Option<ConsentOutcome>) -> Vec<Step> {
     let reply = match outcome {
         Some(ConsentOutcome::Allowed | ConsentOutcome::AlwaysAllowed) => {
-            "Clicked **=** — Calculator shows 4 again, so the sum checks out."
+            "Pasted 4 into Terminal, so the sum checks out."
         }
         _ => "Stopping here: I won't touch the desktop without your go-ahead.",
     };

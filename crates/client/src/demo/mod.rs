@@ -12,6 +12,7 @@
 mod fixtures;
 mod png;
 mod settings;
+mod terminals;
 mod transcripts;
 mod visuals;
 
@@ -26,6 +27,7 @@ use zeron_doc::{
     MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, SegmentWriter,
     SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry,
 };
+use zeron_proto::computer::cards::{COMPUTER_DESKTOP_REVOKED_NOTE, RevokeSource};
 use zeron_proto::{Chat, FolderEntry, FolderListing, RepoRef, Session, SessionStatus};
 
 use crate::catalog::{self, HarnessInfo, ModelInfo};
@@ -44,6 +46,7 @@ const ADOPT_DELAY: Duration = Duration::from_millis(180);
 const HEARTBEAT: Duration = Duration::from_secs(10);
 const LEASE_MS: i64 = 60_000;
 const DEMO_TOKEN_RATE: u32 = 58;
+const COMPUTER_CHAT: &str = "chat-computer";
 const DEMO_SKILL_PATH: &str = "/Users/dev/.claude/skills/review/SKILL.md";
 const DEMO_SKILL_MD: &str = "---\nname: review\ndescription: Review the current diff before it merges.\n---\n\n# Review\n\n1. Read the diff against `main`.\n2. Flag behavior changes without a test.\n3. Report findings as `file:line` with a one-line fix.\n";
 
@@ -86,6 +89,8 @@ pub(crate) struct DemoHost {
     rng: Mutex<Rng>,
     cancel: Mutex<Option<CancellationToken>>,
     settings: Mutex<settings::HostSettings>,
+    terminals: Mutex<terminals::HostTerminals>,
+    computer_stopped: Mutex<HashSet<String>>,
 }
 
 fn doc_err(err: zeron_doc::DocError) -> ClientError {
@@ -108,6 +113,8 @@ impl DemoHost {
             rng: Mutex::new(Rng(0x9e37_79b9_7f4a_7c15)),
             cancel: Mutex::new(None),
             settings: Mutex::new(settings::HostSettings::new()),
+            terminals: Mutex::new(terminals::HostTerminals::new(now_ms())),
+            computer_stopped: Mutex::new(HashSet::new()),
         })
     }
 
@@ -380,7 +387,7 @@ impl DemoHost {
                     let _ =
                         core.write(|doc| doc.resolve_input(&request_id, Some(&answers), now_ms()));
                     let steps = if consent {
-                        transcripts::consent_answered(crate::computer::consent_outcome(
+                        transcripts::consent_answered(zeron_proto::computer::cards::consent_outcome(
                             true,
                             Some(&answers),
                         ))
@@ -791,6 +798,35 @@ impl DemoHost {
         );
     }
 
+    fn revoke_computer(
+        &self,
+        client: &Arc<ClientInner>,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let chat_id = params["chatId"].as_str().unwrap_or_default();
+        let revoked = chat_id == COMPUTER_CHAT && lock(&self.computer_stopped).insert(chat_id.to_owned());
+        if revoked && let Some(core) = client.session_core(chat_id) {
+            let now = now_ms();
+            let host = client
+                .workspace
+                .chat(chat_id)
+                .map(|chat| chat.device_id)
+                .unwrap_or_default();
+            let entry = transcripts::entry(
+                &format!("revoked-{now}"),
+                MessageRole::System,
+                &host,
+                now,
+                vec![
+                    transcripts::text("t0", COMPUTER_DESKTOP_REVOKED_NOTE),
+                    transcripts::text("t1", RevokeSource::Stop.hint()),
+                ],
+            );
+            core.write(|doc| doc.push_message(&entry))?;
+        }
+        Ok(serde_json::json!({ "revoked": revoked }))
+    }
+
     fn fork_chat(
         &self,
         client: &Arc<ClientInner>,
@@ -850,12 +886,16 @@ impl DemoHost {
         if settings::HostSettings::handles(method) {
             return lock(&self.settings).call(method, &params);
         }
+        if terminals::HostTerminals::handles(method) {
+            return lock(&self.terminals).call(method, &params, now_ms());
+        }
         match method {
             m::HARNESS_COMPACTION => {
                 return Ok(serde_json::json!({ "compaction": "native", "branching": true }));
             }
             m::FORK_CHAT => return self.fork_chat(&client, &params),
             m::FETCH_TOOL_BLOB => return Ok(demo_blob(&params)),
+            m::COMPUTER_REVOKE_DESKTOP => return self.revoke_computer(&client, &params),
             m::RESOLVE_LIMIT_OFFER | m::SET_LIMIT_RESUME => {
                 return Ok(limit_rpc(&client, method == m::SET_LIMIT_RESUME, &params));
             }
@@ -1038,7 +1078,8 @@ impl DemoHost {
                 serde_json::json!({ "removed": removed })
             }
             m::GET_COMPUTER_STILL_FRAME => {
-                let frame = self.options.computer_still.then(|| {
+                let stopped = lock(&self.computer_stopped).contains(&chat_id);
+                let frame = (self.options.computer_still && !stopped).then(|| {
                     serde_json::json!({
                         "sequence": 1,
                         "timestampMs": now as f64,
