@@ -11,16 +11,17 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use zeron_client::computer;
 use zeron_doc::parts::MessagePart;
 use zeron_doc::parts::MessageStatus;
 use zeron_doc::schema::{MessageRole, SessionMessageEntry};
 use zeron_markdown::parser::{IncrementalParser, TopBlock};
+use zeron_proto::computer::cards::{computer_notice, consent_question, is_control_denied};
+use zeron_proto::computer::presentation::computer_call;
 use zeron_proto::transcript::CompactionWait;
 use zeron_proto::{HarnessId, UserInputAnswer};
 use zeron_text::WhiteSpace;
 
-use super::cards::{Card, consent_row, denied_row, notice_row, place_card};
+use super::cards::{Card, consent_row, denied_row, foreground_question, foreground_row, notice_row, place_card};
 use super::display::{ColorRole, DisplayBuilder, FadeEdge, LinkHit, TextRun, WidgetKind};
 use super::file_icons::file_icon_asset;
 use super::markdown::geom::PARA_GAP;
@@ -495,9 +496,10 @@ impl RowBuilder {
             });
             let text = texts.next().unwrap_or_default();
             let hint = texts.next().filter(|hint| !hint.trim().is_empty());
-            if let Some(notice) = computer::notice(text) {
-                let core = notice_row(ctx, &format!("{}#notice", entry.id), &entry.id, notice, text, hint);
-                rows.push(Placed { core: Arc::new(core), gap });
+            if let Some(notice) = computer_notice(text) {
+                if let Some(core) = notice_row(ctx, &format!("{}#notice", entry.id), &entry.id, notice, text, hint) {
+                    rows.push(Placed { core: Arc::new(core), gap });
+                }
                 return rows;
             }
             if !text.trim().is_empty() {
@@ -566,9 +568,9 @@ impl RowBuilder {
                         flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
                     }
                     tools.push(part);
-                    if let Some(tool) = computer::computer_tool(call)
-                        && computer::is_control_denied(*is_error, output.as_deref())
-                        && denied_tools.insert(tool)
+                    if let Some(computer) = computer_call(call)
+                        && is_control_denied(*is_error, output.as_deref())
+                        && denied_tools.insert(computer.tool)
                     {
                         flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
                         let gap = gap_for(&rows, false);
@@ -629,10 +631,16 @@ impl RowBuilder {
                         }
                         MessagePart::Input { id, request_id, questions, resolved, answers, .. } => {
                             let gap = gap_for(&rows, false);
-                            if let Some(question) = computer::consent_question(questions) {
-                                let answers = answers.as_deref().or_else(|| sent.get(request_id).map(Vec::as_slice));
-                                let core = consent_row(ctx, &format!("{}#{}", entry.id, id), &entry.id, request_id, question, *resolved, answers);
+                            let answers_or_sent = answers.as_deref().or_else(|| sent.get(request_id).map(Vec::as_slice));
+                            if let Some(question) = consent_question(questions) {
+                                let core = consent_row(ctx, &format!("{}#{}", entry.id, id), &entry.id, id, request_id, question, *resolved, answers_or_sent);
                                 rows.push(Placed { core: Arc::new(core), gap });
+                                continue;
+                            }
+                            if foreground_question(questions).is_some() {
+                                if let Some(core) = foreground_row(ctx, &format!("{}#{}", entry.id, id), &entry.id, id, request_id, questions, *resolved, answers_or_sent) {
+                                    rows.push(Placed { core: Arc::new(core), gap });
+                                }
                                 continue;
                             }
                             let text = if *resolved {
@@ -1001,6 +1009,7 @@ fn is_agent_call(call: &zeron_proto::ToolCall) -> bool {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Genus {
     Agent,
+    Computer,
     Device,
     Other,
 }
@@ -1009,6 +1018,8 @@ impl Genus {
     fn of(call: &zeron_proto::ToolCall) -> Self {
         if is_agent_call(call) {
             Genus::Agent
+        } else if computer_call(call).is_some() {
+            Genus::Computer
         } else if zeron_proto::device_tools::device_call(call).is_some() {
             Genus::Device
         } else {
@@ -1017,7 +1028,7 @@ impl Genus {
     }
 }
 
-fn chip_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, icon: &'static str, color: ColorRole, text: &str) -> RowCore {
+pub(crate) fn chip_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, icon: &'static str, color: ColorRole, text: &str) -> RowCore {
     let (size, lh) = TYPE.small;
     let style = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
     let lh = ctx.typo.px(lh);

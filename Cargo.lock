@@ -13854,6 +13854,7 @@ dependencies = [
  "zeron-proto",
  "zeron-syntax",
  "zeron-text",
+ "zeron-theme",
  "zeron-veil",
  "zeron-visual",
  "zeron-visual-gpu",

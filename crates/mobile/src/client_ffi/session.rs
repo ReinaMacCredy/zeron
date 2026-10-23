@@ -583,6 +583,49 @@ impl SessionHandle {
         }))
     }
 
+    pub async fn computer_stop(&self) -> CoreResult<bool> {
+        let inner = self.inner.clone();
+        Ok(on_runtime(async move { inner.computer_stop().await }).await?)
+    }
+
+    pub async fn list_terminals(&self) -> CoreResult<Vec<crate::terminal::TerminalTab>> {
+        let inner = self.inner.clone();
+        let infos = on_runtime(async move { inner.list_terminals().await }).await?;
+        Ok(infos.iter().map(crate::terminal::tab).collect())
+    }
+
+    pub async fn read_terminal(
+        &self,
+        terminal_id: String,
+        dark: bool,
+    ) -> CoreResult<crate::terminal::TerminalView> {
+        let inner = self.inner.clone();
+        let screen = on_runtime(async move { inner.read_terminal(&terminal_id).await }).await?;
+        Ok(crate::terminal::view(&screen, dark))
+    }
+
+    pub async fn list_project_actions(
+        &self,
+    ) -> CoreResult<Option<crate::terminal::ProjectActions>> {
+        let inner = self.inner.clone();
+        let snapshot = on_runtime(async move { inner.list_project_actions().await }).await?;
+        Ok(snapshot.map(|snapshot| crate::terminal::ProjectActions {
+            actions: snapshot
+                .actions
+                .iter()
+                .map(crate::terminal::action_item)
+                .collect(),
+            issue: snapshot.project_file_issue,
+        }))
+    }
+
+    pub async fn run_project_action(&self, action_id: String) -> CoreResult<String> {
+        let inner = self.inner.clone();
+        let run =
+            on_runtime(async move { inner.run_project_action(&action_id, 120, 32).await }).await?;
+        Ok(run.terminal.id)
+    }
+
     /// Park a message on the shared queue directly. Returns the row id.
     pub fn enqueue(
         &self,

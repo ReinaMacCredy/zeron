@@ -755,25 +755,37 @@ fn actions(frame: &LayoutFrame, row: u32) -> Vec<display::CardAction> {
 }
 
 #[test]
-fn computer_notes_become_cards_and_other_system_text_is_a_divider() {
-    use zeron_client::computer::{CONTROL_ON_DISCLOSURE, ESCAPE_STOP_NOTICE, SETUP_NOTE, UNAVAILABLE_NOTE};
+fn computer_notes_take_the_desktop_shapes_and_other_system_text_is_a_divider() {
     use zeron_doc::schema::MessageRole::System;
-    for (note, hint) in [
-        (CONTROL_ON_DISCLOSURE, None),
-        (ESCAPE_STOP_NOTICE, None),
-        (SETUP_NOTE, Some("Allow Accessibility for Zeron in System Settings, then continue.")),
-        (UNAVAILABLE_NOTE, Some("OpenCode does not receive Zeron's Computer tools.")),
-    ] {
+    use zeron_proto::computer::cards::{
+        COMPUTER_CONTROL_ON_DISCLOSURE, COMPUTER_DESKTOP_REVOKED_NOTE, COMPUTER_ESCAPE_STOP_NOTICE, COMPUTER_SETUP_NOTE,
+        COMPUTER_UNAVAILABLE_NOTE,
+    };
+    let rows = |note: &str, hint: Option<&str>| {
         let mut parts = vec![text_part("t0", note)];
         parts.extend(hint.map(|h| text_part("t1", h)));
-        let frame = frame_of(vec![message("n", System, parts)], 390.0);
+        frame_of(vec![message("n", System, parts)], 390.0)
+    };
+    assert!(kinds(&rows(COMPUTER_CONTROL_ON_DISCLOSURE, None)).is_empty(), "the model-facing disclosure is not shown");
+    for (note, hint) in [
+        (COMPUTER_SETUP_NOTE, "Allow Accessibility for Zeron in System Settings, then continue."),
+        (COMPUTER_UNAVAILABLE_NOTE, "OpenCode does not receive Zeron's Computer tools."),
+    ] {
+        let frame = rows(note, Some(hint));
         assert_eq!(kinds(&frame), [RowKind::Card], "{note}");
         let d = frame.display(0).unwrap();
-        assert!(d.text.starts_with(note), "{}", d.text);
-        if let Some(hint) = hint {
-            assert!(d.text.contains(hint));
-        }
+        assert!(d.text.starts_with(note) && d.text.contains(hint), "{}", d.text);
         assert!(actions(&frame, 0).is_empty());
+    }
+    for (note, hint, shown) in [
+        (COMPUTER_ESCAPE_STOP_NOTICE, None, "Desktop access revoked by you (Esc)"),
+        (COMPUTER_DESKTOP_REVOKED_NOTE, Some("Stop"), "Desktop access revoked by you"),
+        ("Paused while you used Calculator", None, "Paused while you used Calculator"),
+        ("Left 2 Calculator windows open", None, "Left 2 Calculator windows open"),
+    ] {
+        let frame = rows(note, hint);
+        assert_eq!(kinds(&frame), [RowKind::Chip], "{note}");
+        assert_eq!(frame.display(0).unwrap().text, shown);
     }
     let other = frame_of(vec![message("n", System, vec![text_part("t0", "Context compacted")])], 390.0);
     assert_eq!(kinds(&other), [RowKind::Chip]);
@@ -1019,45 +1031,117 @@ fn a_context_block_becomes_a_pill_that_opens_its_card() {
 
 #[test]
 fn consent_is_a_card_with_its_choices_until_an_answer_settles_it() {
-    use zeron_client::computer::CONSENT_ALLOW;
     use zeron_doc::schema::MessageRole::Assistant;
+    use zeron_proto::computer::cards::{ConsentChoice, consent_answers};
     let entry = message("m", Assistant, vec![consent_part("req-1")]);
     let mut w = worker(390.0);
     w.input = TranscriptInput { entries: vec![entry.clone()], ..Default::default() };
     let open = w.pass();
     assert_eq!(kinds(&open), [RowKind::Card]);
-    let answers: Vec<String> = actions(&open, 0)
+    let answers: Vec<(String, String)> = actions(&open, 0)
         .into_iter()
         .map(|a| match a {
-            display::CardAction::Consent { request_id, question_id, answer } => {
+            display::CardAction::Consent { request_id, question_id, answer, identifier } => {
                 assert_eq!((request_id.as_str(), question_id.as_str()), ("req-1", "consent"));
-                answer
+                (answer, identifier)
             }
             other => panic!("{other:?}"),
         })
         .collect();
-    assert_eq!(answers, ["Allow", "Deny"]);
+    assert_eq!(
+        answers,
+        [("Deny".to_owned(), "computer-consent-deny".to_owned()), ("Allow".to_owned(), "computer-consent-allow".to_owned())]
+    );
     let text = open.display(0).unwrap().text;
-    assert!(text.starts_with("Allow Computer for this task?"), "{text}");
-    assert!(text.contains("The agent wants to run computer_click"));
-    assert!(text.contains("Allow Computer for this task"));
+    assert!(text.starts_with("Allow Zeron to use this Mac?"), "{text}");
+    assert!(text.contains("The agent wants to run computer_click"), "{text}");
+    assert!(text.contains("Allow this conversation"), "{text}");
+    assert!(!text.contains("Elevated Risk"), "{text}");
 
     // The same entry Arc: only the in-flight answer changed.
-    let sent = zeron_client::computer::consent_answers("consent", CONSENT_ALLOW);
+    let sent = consent_answers("consent", &ConsentChoice::Allow);
     w.input = TranscriptInput {
         entries: vec![entry],
         input_answers: Arc::new([("req-1".to_owned(), sent)].into_iter().collect()),
         ..Default::default()
     };
     let settled = w.pass();
-    assert_ne!(open.placement(0).unwrap().version, settled.placement(0).unwrap().version);
-    assert!(actions(&settled, 0).is_empty(), "a settled card has no buttons");
-    assert!(settled.display(0).unwrap().text.ends_with("Allowed"));
+    assert_eq!(kinds(&settled), [RowKind::Chip]);
+    assert!(actions(&settled, 0).is_empty(), "a settled consent has no buttons");
+    assert_eq!(settled.display(0).unwrap().text, "Allowed Computer for this task");
+}
+
+#[test]
+fn an_app_consent_names_the_app_and_warns_of_its_risk() {
+    use zeron_doc::schema::MessageRole::Assistant;
+    let mut part = consent_part("req-1");
+    let MessagePart::Input { questions, .. } = &mut part else { unreachable!() };
+    questions[0].kind = Some(zeron_proto::UserInputKind::Consent {
+        scope: zeron_proto::computer::ComputerConsentScope::Task,
+        app: Some(zeron_proto::computer::ComputerConsentApp { name: "Terminal".into(), bundle_id: Some("com.apple.Terminal".into()), pid: None }),
+        tool: None,
+        params: None,
+    });
+    let frame = frame_of(vec![message("m", Assistant, vec![part])], 390.0);
+    let text = frame.display(0).unwrap().text;
+    assert!(text.contains("Allow Zeron to use Terminal?"), "{text}");
+    assert!(text.contains("Elevated Risk") && text.contains("run commands that change files"), "{text}");
+    let labels: Vec<String> = actions(&frame, 0)
+        .into_iter()
+        .filter_map(|a| match a {
+            display::CardAction::Consent { identifier, .. } => Some(identifier),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(labels, ["computer-consent-deny", "computer-consent-always", "computer-consent-allow"]);
+}
+
+#[test]
+fn a_foreground_request_is_a_card_until_answered_then_its_outcome() {
+    use zeron_doc::schema::MessageRole::Assistant;
+    let part = |answers: Option<Vec<zeron_proto::UserInputAnswer>>, resolved: bool| MessagePart::Input {
+        id: "fg".into(),
+        request_id: "fg".into(),
+        questions: vec![zeron_proto::UserInputQuestion {
+            approval: false,
+            id: "foreground".into(),
+            header: "Computer".into(),
+            question: "Bring Calculator to the front?".into(),
+            options: vec!["No".into(), "Allow for this turn".into()],
+            multi_select: false,
+            kind: Some(zeron_proto::UserInputKind::Foreground {
+                app: Some(zeron_proto::computer::ComputerConsentApp { name: "Calculator".into(), bundle_id: None, pid: None }),
+            }),
+            prefill: None,
+            multiline: false,
+        }],
+        resolved,
+        answers,
+        asked_at_ms: None,
+        answered_at_ms: None,
+    };
+    let open = frame_of(vec![message("m", Assistant, vec![part(None, false)])], 390.0);
+    assert_eq!(kinds(&open), [RowKind::Card]);
+    assert!(open.display(0).unwrap().text.starts_with("Bring Calculator to the front?"));
+    let ids: Vec<String> = actions(&open, 0)
+        .into_iter()
+        .filter_map(|a| match a {
+            display::CardAction::Consent { identifier, .. } => Some(identifier),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids, ["computer-foreground-decline", "computer-foreground-allow"]);
+    let allowed = vec![zeron_proto::UserInputAnswer { question_id: "foreground".into(), labels: vec!["Allow for this turn".into()] }];
+    let settled = frame_of(vec![message("m", Assistant, vec![part(Some(allowed), true)])], 390.0);
+    assert_eq!(kinds(&settled), [RowKind::Chip]);
+    assert_eq!(settled.display(0).unwrap().text, "You allowed Calculator to come to the front");
+    assert!(kinds(&frame_of(vec![message("m", Assistant, vec![part(None, true)])], 390.0)).is_empty());
 }
 
 #[test]
 fn capability_denial_adds_one_card_per_tool_after_its_chip() {
     use zeron_doc::schema::MessageRole::Assistant;
+    use zeron_proto::computer::cards::{COMPUTER_DENIED_HINT, COMPUTER_DENIED_TITLE};
     let denied = r#"{"error":{"code":"capability_denied","message":"Computer control is off for this turn; no input was sent."}}"#;
     let parts = vec![
         computer_part("c1", "computer_click", None, true, Some(denied)),
@@ -1071,13 +1155,13 @@ fn capability_denial_adds_one_card_per_tool_after_its_chip() {
     let frame = w.pass();
     assert_eq!(kinds(&frame), [RowKind::Tools, RowKind::Tools, RowKind::Card, RowKind::Tools, RowKind::Card, RowKind::Tools]);
     let card = frame.display(2).unwrap();
-    assert!(card.text.starts_with("Computer control is off"));
-    assert!(card.text.contains("Turn it on in Settings to let the agent use the desktop."));
+    assert!(card.text.starts_with(COMPUTER_DENIED_TITLE), "{}", card.text);
+    assert!(card.text.contains(COMPUTER_DENIED_HINT));
     assert_eq!(actions(&frame, 2), [display::CardAction::EnableComputer]);
 }
 
 #[test]
-fn computer_tools_show_titles_and_never_their_arguments() {
+fn computer_tools_take_the_desktop_label_and_never_repeat_arguments_in_detail() {
     use zeron_doc::schema::MessageRole::Assistant;
     let secret = "hunter2-typed-secret";
     let parts = vec![computer_part("c1", "computer_type_text", Some(serde_json::json!({ "text": secret })), false, Some(secret))];
@@ -1088,9 +1172,9 @@ fn computer_tools_show_titles_and_never_their_arguments() {
     w.input = TranscriptInput { entries: vec![message("m", Assistant, parts)], ..Default::default() };
     let frame = w.pass();
     let d = frame.display(1).unwrap();
-    assert!(d.text.contains("Type"), "{}", d.text);
-    assert!(!d.text.contains(secret), "{}", d.text);
-    assert!(!d.copy_text.contains(secret));
+    assert!(d.text.starts_with("Used the desktop · 1 action"), "{}", d.text);
+    assert!(d.text.contains(&format!("Typed text \u{201c}{secret}\u{201d} in App")), "{}", d.text);
+    assert_eq!(d.text.matches(secret).count(), 1, "the detail rows never repeat it: {}", d.text);
 }
 
 #[test]
