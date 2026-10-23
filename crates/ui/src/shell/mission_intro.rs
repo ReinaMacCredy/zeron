@@ -1,5 +1,5 @@
 use super::*;
-use crate::tasks::{SampleRow, StripTree, TaskCenter, TreeStatus, tree_glyph};
+use crate::tasks::{SampleRow, StatusTone, StripTree, TaskCenter, TreeStatus, tree_glyph};
 use std::time::Instant;
 use zeron_proto::mission::{INTRO_DISMISS, INTRO_NEXT, INTRO_PAGES as PAGES, INTRO_TRY};
 

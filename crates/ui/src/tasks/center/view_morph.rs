@@ -7,7 +7,7 @@ use super::*;
 use crate::settings::TreeView;
 use crate::tasks::morph::{Morph, Rects};
 use crate::tasks::thread_tree::{NodeKind, TreeNode};
-use crate::tasks::tree::{self, Status};
+use crate::tasks::tree::{self, Status, StatusTone};
 
 pub(super) const SLIDE: f32 = 48.0;
 

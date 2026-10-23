@@ -1,171 +1,18 @@
-use std::collections::{HashMap, HashSet};
+use chrono::{DateTime, Utc};
 
-use chrono::{DateTime, Local, Utc};
-use zeron_proto::Chat;
-
-use super::task_led_by;
-use super::thread_tree::{NodeKind, TreeNode, tree_rows};
-use super::tree::Status;
+use super::thread_tree::Source;
 use crate::state::AppState;
 
-#[derive(Debug, Clone)]
-pub(crate) struct IndexRow {
-    pub root: String,
-    pub title: String,
-    pub status: Status,
-    pub line: String,
-    pub asks: bool,
-    pub segments: Vec<Status>,
-    pub started: DateTime<Utc>,
-    pub ended: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct IndexRows {
-    pub running: Vec<IndexRow>,
-    pub done_today: Vec<IndexRow>,
-}
-
-fn is_today(at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
-    at.with_timezone(&Local).date_naive() == now.with_timezone(&Local).date_naive()
-}
-
-fn roots_a_tree(
-    state: &AppState,
-    chat: &Chat,
-    children: &HashMap<&str, Vec<&Chat>>,
-    nested: &HashSet<&str>,
-) -> bool {
-    if chat.archived || chat.is_system() || state.is_hidden_chat(&chat.id) {
-        return false;
-    }
-    !nested.contains(chat.id.as_str())
-        && children.contains_key(chat.id.as_str())
-        && task_led_by(&state.tasks, &chat.id).is_none()
-}
+pub(crate) use zeron_doc::tree::{IndexRow, IndexRows};
 
 pub(crate) fn tree_index(state: &AppState, now: DateTime<Utc>) -> IndexRows {
-    let children = super::thread_tree::children_by_parent(state);
-    let nested: HashSet<&str> = children
-        .iter()
-        .flat_map(|(parent, kids)| {
-            kids.iter()
-                .filter(move |kid| kid.id != *parent)
-                .map(|kid| kid.id.as_str())
-        })
-        .collect();
-    let mut rows = IndexRows::default();
-    for chat in &state.chats {
-        if !roots_a_tree(state, chat, &children, &nested) {
-            continue;
-        }
-        let nodes = tree_rows(state, &chat.id, false, now);
-        if nodes.is_empty() {
-            continue;
-        }
-        let live = nodes.iter().any(|node| node.status.live());
-        let last = nodes
-            .iter()
-            .filter_map(|node| node.chat_id.as_deref())
-            .filter_map(|id| state.chats.iter().find(|chat| chat.id == id))
-            .filter_map(|chat| chat.last_message_at)
-            .max();
-        let settled_today = chat
-            .settle
-            .filter(|settle| {
-                settle.settled && chat.last_message_at.is_none_or(|at| at <= settle.at)
-            })
-            .map(|settle| settle.at);
-        let done = match settled_today {
-            Some(at) if is_today(at, now) => Some(at),
-            Some(_) => continue,
-            None if live => None,
-            None => match last {
-                Some(at) if is_today(at, now) => Some(at),
-                _ => continue,
-            },
-        };
-        let row = index_row(state, chat, &nodes, done);
-        if done.is_some() {
-            rows.done_today.push(row);
-        } else {
-            rows.running.push(row);
-        }
-    }
-    let latest = |row: &IndexRow| std::cmp::Reverse(row.ended.unwrap_or(row.started));
-    rows.running.sort_by_key(latest);
-    rows.done_today.sort_by_key(latest);
-    rows
-}
-
-fn index_row(
-    state: &AppState,
-    chat: &Chat,
-    nodes: &[TreeNode],
-    done: Option<DateTime<Utc>>,
-) -> IndexRow {
-    let asker = nodes
-        .iter()
-        .find(|node| node.status == Status::Waiting && node.kind != NodeKind::Root);
-    let root_waits = nodes[0].status == Status::Waiting;
-    let agents_running = nodes
-        .iter()
-        .filter(|node| {
-            matches!(node.kind, NodeKind::Agent | NodeKind::Native)
-                && node.status == Status::Running
-        })
-        .count();
-    let line = if let Some(asker) = asker {
-        format!("Needs you \u{b7} {} asks", asker.title)
-    } else if root_waits {
-        format!("Needs you \u{b7} {}", nodes[0].title)
-    } else if done.is_some() {
-        "Done".into()
-    } else if agents_running > 0 {
-        format!(
-            "Watching {agents_running} {}",
-            if agents_running == 1 {
-                "agent"
-            } else {
-                "agents"
-            }
-        )
-    } else if nodes[0].status == Status::Running {
-        "Working".into()
-    } else {
-        "Idle".into()
-    };
-    let status = if done.is_some() {
-        Status::Done
-    } else if asker.is_some() || root_waits {
-        Status::Waiting
-    } else if nodes[0].status == Status::Done && nodes.iter().any(|node| node.status.live()) {
-        Status::Running
-    } else {
-        nodes[0].status
-    };
-    let started = nodes[1..]
-        .iter()
-        .filter_map(|node| node.chat_id.as_deref())
-        .filter_map(|id| state.chats.iter().find(|chat| chat.id == id))
-        .map(|chat| chat.created_at)
-        .min()
-        .unwrap_or(chat.created_at);
-    IndexRow {
-        root: chat.id.clone(),
-        title: crate::transcript::single_line(&crate::home::chat_title(chat)),
-        status,
-        line,
-        asks: asker.is_some() || root_waits,
-        segments: nodes[1..].iter().map(|node| node.status).collect(),
-        started,
-        ended: done,
-    }
+    zeron_doc::tree::tree_index(&Source { state, now })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeron_proto::Chat;
 
     fn chat(id: &str, at: DateTime<Utc>) -> Chat {
         serde_json::from_value(serde_json::json!({

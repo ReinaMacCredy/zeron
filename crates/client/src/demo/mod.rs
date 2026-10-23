@@ -938,6 +938,7 @@ impl DemoHost {
             }
             m::FORK_CHAT => return self.fork_chat(&client, &params),
             m::FETCH_TOOL_BLOB => return Ok(demo_blob(&params)),
+            m::GET_SESSION_STATS => return Ok(missions::session_stats(&params)),
             m::COMPUTER_REVOKE_DESKTOP => return self.revoke_computer(&client, &params),
             m::RESOLVE_LIMIT_OFFER | m::SET_LIMIT_RESUME => {
                 return Ok(limit_rpc(&client, method == m::SET_LIMIT_RESUME, &params));

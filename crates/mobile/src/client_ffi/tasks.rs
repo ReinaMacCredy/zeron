@@ -57,6 +57,129 @@ impl From<zeron_proto::StepStatus> for StepStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum TreeStatus {
+    Queued,
+    Running,
+    Waiting,
+    Done,
+    Failed,
+    Stopped,
+}
+
+impl From<zeron_doc::tree::TreeStatus> for TreeStatus {
+    fn from(s: zeron_doc::tree::TreeStatus) -> Self {
+        use zeron_doc::tree::TreeStatus as S;
+        match s {
+            S::Queued => Self::Queued,
+            S::Running => Self::Running,
+            S::Waiting => Self::Waiting,
+            S::Done => Self::Done,
+            S::Failed => Self::Failed,
+            S::Stopped => Self::Stopped,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum TreeNodeKind {
+    Root,
+    Step { n: u32 },
+    Agent,
+    Native,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct TreeNodeRow {
+    pub id: String,
+    pub parent: Option<u32>,
+    pub depth: u32,
+    pub kind: TreeNodeKind,
+    pub group: Option<String>,
+    pub title: String,
+    pub status: TreeStatus,
+    pub muted: bool,
+    pub word: String,
+    pub brand: Option<String>,
+    pub chat_id: Option<String>,
+    pub step_id: Option<String>,
+    pub tokens: Option<String>,
+    pub time: Option<String>,
+}
+
+impl From<&zc::OutlineRow> for TreeNodeRow {
+    fn from(row: &zc::OutlineRow) -> Self {
+        use zeron_doc::tree::NodeKind;
+        let n = &row.node;
+        Self {
+            id: n.id.clone(),
+            parent: n.parent.map(|ix| ix as u32),
+            depth: n.depth as u32,
+            kind: match n.kind {
+                NodeKind::Root => TreeNodeKind::Root,
+                NodeKind::Step(n) => TreeNodeKind::Step { n: n as u32 },
+                NodeKind::Agent => TreeNodeKind::Agent,
+                NodeKind::Native => TreeNodeKind::Native,
+            },
+            group: n.group.map(|group| group.label()),
+            title: n.title.clone(),
+            status: n.status.into(),
+            muted: n.status.muted(),
+            word: n.word.to_owned(),
+            brand: n.brand.clone().filter(|b| !b.is_empty()),
+            chat_id: n.chat_id.clone(),
+            step_id: n.step_id.clone(),
+            tokens: row.tokens.clone(),
+            time: row.time.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct TreeIndexRow {
+    pub root: String,
+    pub title: String,
+    pub status: TreeStatus,
+    pub line: String,
+    pub asks: bool,
+    pub agents: Option<String>,
+    pub segments: Vec<TreeStatus>,
+}
+
+impl From<&zeron_doc::tree::IndexRow> for TreeIndexRow {
+    fn from(r: &zeron_doc::tree::IndexRow) -> Self {
+        Self {
+            root: r.root.clone(),
+            title: r.title.clone(),
+            status: r.status.into(),
+            line: r.line.clone(),
+            asks: r.asks,
+            agents: r.agents_line(),
+            segments: r.segments.iter().copied().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct TaskTrees {
+    pub running: Vec<TreeIndexRow>,
+    pub done_today: Vec<TreeIndexRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct TreeLabels {
+    pub views: Vec<String>,
+    pub badge: String,
+}
+
+#[uniffi::export]
+pub fn tree_labels() -> TreeLabels {
+    TreeLabels {
+        views: zeron_doc::tree::TREE_VIEWS.map(str::to_owned).to_vec(),
+        badge: zeron_doc::tree::BADGE.to_owned(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum PlanPhase {
     PlanReady,
     Planning,
@@ -688,6 +811,27 @@ impl CoreClient {
 
     pub fn mission_intro_due(&self) -> bool {
         self.client.mission_intro_due()
+    }
+
+    pub fn task_trees(&self) -> TaskTrees {
+        let trees = self.client.task_trees();
+        TaskTrees {
+            running: trees.running.iter().map(Into::into).collect(),
+            done_today: trees.done_today.iter().map(Into::into).collect(),
+        }
+    }
+
+    pub fn task_outline(&self, root_chat_id: String) -> Vec<TreeNodeRow> {
+        self.client
+            .task_outline(&root_chat_id)
+            .iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    pub async fn refresh_outline_stats(&self, root_chat_id: String) -> CoreResult<bool> {
+        let client = self.client.clone();
+        on_runtime(async move { client.refresh_outline_stats(&root_chat_id).await }).await
     }
 
     pub fn supervisor_page(&self) -> SupervisorPage {

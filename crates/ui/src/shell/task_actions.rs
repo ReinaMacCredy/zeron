@@ -1293,7 +1293,7 @@ impl Shell {
         let current = settings::current(cx).tree_view;
         self.view_switch(
             "tree-view",
-            ["Spine", "Outline", "Timeline"],
+            zeron_doc::tree::TREE_VIEWS,
             views.iter().position(|view| *view == current).unwrap_or(0),
             TREE_VIEW_SEGMENT,
             theme,

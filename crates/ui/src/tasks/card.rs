@@ -1508,7 +1508,7 @@ impl TaskCard {
                         div()
                             .flex_none()
                             .text_color(tone)
-                            .child(super::TasksPage::linked_label(indicator))
+                            .child(zeron_doc::tree::linked_label(indicator))
                     }))
                     .child(
                         div()
@@ -2293,7 +2293,7 @@ impl TaskCard {
                             div()
                                 .flex_none()
                                 .text_color(tone)
-                                .child(super::TasksPage::linked_label(linked.indicator)),
+                                .child(zeron_doc::tree::linked_label(linked.indicator)),
                         )
                         .children(
                             linked

@@ -13,6 +13,7 @@ final class MissionControlViewController: UIViewController, UICollectionViewDele
     private var draft = Draft()
     private var estimate: PlanEstimate?
     private var estimateKey: String?
+    private var outline: TreeOutlineViewController?
 
     struct Row: Hashable {
         let id: String
@@ -274,6 +275,15 @@ final class MissionControlViewController: UIViewController, UICollectionViewDele
         snap.reconfigureItems(snap.itemIdentifiers.filter { $0.id.hasPrefix("step:") || $0.id.hasPrefix("new:") })
         dataSource.apply(snap, animatingDifferences: view.window != nil)
         updateBar(detail)
+        if let lead = task.leadChatId, navigationItem.titleView == nil {
+            let views = UISegmentedControl(items: Array(treeLabels().views.prefix(2)))
+            views.selectedSegmentIndex = 0
+            views.accessibilityIdentifier = "mc-tree-view"
+            views.addAction(UIAction { [weak self, weak views] _ in
+                self?.showOutline(views?.selectedSegmentIndex == 1 ? lead : nil)
+            }, for: .valueChanged)
+            navigationItem.titleView = views
+        }
 
         let held = detail.approval?.held == true
         if held, countdown == nil {
@@ -282,6 +292,22 @@ final class MissionControlViewController: UIViewController, UICollectionViewDele
             countdown?.invalidate()
             countdown = nil
         }
+    }
+
+    private func showOutline(_ lead: String?) {
+        outline?.willMove(toParent: nil)
+        outline?.view.removeFromSuperview()
+        outline?.removeFromParent()
+        outline = nil
+        collectionView.isHidden = lead != nil
+        guard let lead else { return }
+        let tree = TreeOutlineViewController(app: app, rootChatId: lead, title: detail?.row.title)
+        addChild(tree)
+        tree.view.frame = view.bounds
+        tree.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(tree.view)
+        tree.didMove(toParent: self)
+        outline = tree
     }
 
     private func refreshEstimate(_ detail: TaskDetail) {

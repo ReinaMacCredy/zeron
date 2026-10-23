@@ -42,7 +42,7 @@ pub(crate) use index::tree_index;
 use logic::COLUMNS;
 use morph::{Key, Morph, Painted, Rects};
 pub(crate) use strip_tree::{SampleRow, StripTree, StripTreeEvent, TreeHost};
-pub(crate) use tree::{Status as TreeStatus, glyph as tree_glyph, kind_badge};
+pub(crate) use tree::{Status as TreeStatus, StatusTone, glyph as tree_glyph, kind_badge};
 
 pub(crate) const ADD_PLACEHOLDER: &str = "Add a task, or press Tab to add notes and start it";
 const LIST_MAX_WIDTH: f32 = 640.0;
@@ -606,15 +606,6 @@ impl TasksPage {
             .into_any_element()
     }
 
-    pub(crate) fn linked_label(indicator: ChatIndicator) -> &'static str {
-        match indicator {
-            ChatIndicator::Working => "Working",
-            ChatIndicator::AwaitingInput => "Asked you a question",
-            ChatIndicator::Errored => "Failed",
-            ChatIndicator::Completed | ChatIndicator::Idle => "Ready for you",
-        }
-    }
-
     fn marks(marks: &[Brand], theme: &Theme) -> AnyElement {
         div()
             .flex()
@@ -718,7 +709,7 @@ impl TasksPage {
                 Some(_) => Self::not_sent(theme),
                 None => div()
                     .text_color(tone)
-                    .child(Self::linked_label(linked.indicator))
+                    .child(linked_label(linked.indicator))
                     .into_any_element(),
             };
             fragments.push(
@@ -1036,11 +1027,6 @@ impl TasksPage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let root = row.root.clone();
-        let finished = row
-            .segments
-            .iter()
-            .filter(|status| **status == TreeStatus::Done)
-            .count();
         let mut meta = vec![
             tree::kind_badge(false, theme),
             div()
@@ -1048,12 +1034,8 @@ impl TasksPage {
                 .child(row.line.clone())
                 .into_any_element(),
         ];
-        if !row.segments.is_empty() {
-            meta.push(
-                div()
-                    .child(format!("{finished}/{} agents", row.segments.len()))
-                    .into_any_element(),
-            );
+        if let Some(agents) = row.agents_line() {
+            meta.push(div().child(agents).into_any_element());
         }
         let hover = theme.glass_hover();
         div()
@@ -1704,19 +1686,6 @@ pub(crate) fn can_add_plan(state: &AppState, chat: &zeron_proto::Chat) -> bool {
         && !state.is_hidden_chat(&chat.id)
         && !state.is_draft(&chat.id)
         && zeron_proto::plan_of_chat(&state.tasks, &chat.id).is_none()
-}
-
-/// A plan first, else the task handed to this chat, open before done.
-pub(crate) fn task_led_by<'a>(
-    tasks: &'a [zeron_proto::Task],
-    chat_id: &str,
-) -> Option<&'a zeron_proto::Task> {
-    plan_led_by(tasks, chat_id).or_else(|| {
-        tasks
-            .iter()
-            .filter(|task| !task.deleted && task.chat_id.as_deref() == Some(chat_id))
-            .max_by_key(|task| (task.completed_at.is_none(), task.completed_at))
-    })
 }
 
 fn row_for(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> Row {

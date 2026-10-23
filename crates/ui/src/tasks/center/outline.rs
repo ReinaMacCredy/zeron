@@ -1,6 +1,6 @@
 use super::*;
 use crate::tasks::thread_tree::{NodeKind, TreeNode, tree_rows};
-use crate::tasks::tree::{self, Status};
+use crate::tasks::tree::{self, Status, StatusTone};
 use crate::tasks::{StripTree, StripTreeEvent, TreeHost};
 
 const OUTLINE_WIDTH: f32 = 480.0;

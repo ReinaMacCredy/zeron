@@ -912,3 +912,26 @@ pub(crate) fn input_answered(client: &Arc<ClientInner>, chat_id: &str, request_i
         client.recompute_workspace();
     }
 }
+
+pub(crate) fn session_stats(params: &serde_json::Value) -> serde_json::Value {
+    let ids = params["chatIds"].as_array().into_iter().flatten();
+    let stats = ids.filter_map(serde_json::Value::as_str).map(|id| {
+        let seed = id
+            .bytes()
+            .fold(7u64, |h, b| h.wrapping_mul(31).wrapping_add(u64::from(b)));
+        let stats = zeron_proto::SessionStats {
+            turns: 2 + seed % 9,
+            llm_ms: 40_000 + seed % 500_000,
+            tool_ms: 10_000 + seed % 200_000,
+            output_tokens: 3_000 + seed % 40_000,
+            input_tokens: 8_000 + seed % 30_000,
+            cache_read_tokens: 90_000 + seed % 900_000,
+            ..Default::default()
+        };
+        (
+            id.to_owned(),
+            serde_json::to_value(stats).unwrap_or_default(),
+        )
+    });
+    serde_json::Value::Object(stats.collect())
+}

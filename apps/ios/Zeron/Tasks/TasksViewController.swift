@@ -72,6 +72,7 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
         case supervisor(title: String, subtitle: String)
         case mission(TaskRow)
         case task(TaskRow)
+        case tree(TreeIndexRow)
     }
 
     init(app: AppModel) {
@@ -143,6 +144,11 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
                 c.secondaryText = Self.taskLine(task)
                 accessories.append(TaskGlyph.leading(TaskGlyph.kind(task.status)))
                 cell.accessibilityIdentifier = "task-\(task.id)"
+            case let .tree(tree):
+                c.text = tree.title
+                c.secondaryText = [treeLabels().badge, tree.line, tree.agents].compactMap { $0 }.joined(separator: " · ")
+                accessories.append(TaskGlyph.leading(TreeOutlineViewController.kind(tree.status)))
+                cell.accessibilityIdentifier = "tree-\(tree.root)"
             }
             accessories.append(.disclosureIndicator())
             cell.accessories = accessories
@@ -237,11 +243,15 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
             snap.appendSections(["Missions"])
             snap.appendItems(page.missions.map(Row.mission))
         }
+        let trees = app.client?.taskTrees() ?? TaskTrees(running: [], doneToday: [])
         let title = { (status: TaskStatus) in page.board.first { $0.status == status }?.title ?? "" }
-        for (status, rows) in [(TaskStatus.needsYou, page.needsYou), (.working, page.working), (.toDo, page.toDo), (.done, page.done)] where !rows.isEmpty {
-            let section = "\(title(status)) · \(rows.count)"
-            snap.appendSections([section])
-            snap.appendItems(rows.map(Row.task))
+        for (status, rows) in [(TaskStatus.needsYou, page.needsYou), (.working, page.working), (.toDo, page.toDo), (.done, page.done)] {
+            var items = rows.map(Row.task)
+            if status == .working { items = trees.running.map(Row.tree) + items }
+            if status == .done { items += trees.doneToday.map(Row.tree) }
+            guard !items.isEmpty else { continue }
+            snap.appendSections(["\(title(status)) · \(items.count)"])
+            snap.appendItems(items)
         }
         empty.isHidden = snap.numberOfItems > 0
         dataSource.apply(snap, animatingDifferences: view.window != nil)
@@ -263,6 +273,8 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
             openMission(task.id)
         case let .task(task):
             presentTask(task.id)
+        case let .tree(tree):
+            navigationController?.pushViewController(TreeOutlineViewController(app: app, rootChatId: tree.root, title: tree.title), animated: true)
         }
     }
 
