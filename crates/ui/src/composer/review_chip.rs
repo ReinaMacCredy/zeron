@@ -10,8 +10,8 @@ use super::{Composer, ComposerEvent};
 use crate::changes::{default_base_ref, parse_patch};
 use crate::popover::{self, Popup};
 use crate::review::{
-    self, FindingState, ReviewRun, ReviewScope, ReviewSettings, ReviewerChoice, ReviewerOptions,
-    RunStatus,
+    self, FindingState, Look, ReviewRun, ReviewScope, ReviewSettings, ReviewerChoice,
+    ReviewerOptions, RunStatus,
 };
 use crate::theme::Theme;
 
@@ -53,18 +53,6 @@ struct Target {
     branch: Option<String>,
     worktree: bool,
     harness: Option<HarnessId>,
-}
-
-enum Look {
-    Idle(u32, u32),
-    Empty(String),
-    Busy,
-    Findings(usize),
-    Again(u32, u32),
-    Stopped(u32, u32),
-    Clean,
-    Unreadable,
-    Failed(String),
 }
 
 async fn checkout_diff(
@@ -112,68 +100,6 @@ async fn checkout_diff(
     Ok((diff, base))
 }
 
-fn chip_look(review: &review::ChatReview, scope: ReviewScope) -> Option<Look> {
-    let counts = review.changes(scope).filter(|(add, del)| add + del > 0);
-    let idle = || match counts {
-        Some((add, del)) => Some(Look::Idle(add, del)),
-        None => review.scope.is_some().then(|| {
-            Look::Empty(match (review.changes(scope), review.unavailable(scope)) {
-                (Some(_), _) => "No changes".to_string(),
-                (None, Some(message)) => capitalize(message),
-                (None, None) => "…".to_string(),
-            })
-        }),
-    };
-    let Some(run) = &review.run else {
-        return idle();
-    };
-    let open = run
-        .findings
-        .iter()
-        .filter(|finding| run.outcome(&finding.id).is_none())
-        .count();
-    let look = match &run.status {
-        status if run.busy() && *status != RunStatus::Done => Look::Busy,
-        RunStatus::Unreadable => Look::Unreadable,
-        RunStatus::Stopped => {
-            let (add, del) = counts.unwrap_or_default();
-            Look::Stopped(add, del)
-        }
-        RunStatus::Failed(message) => Look::Failed(message.clone()),
-        _ if run.outdated() > 0 => {
-            let (add, del) = counts.unwrap_or_default();
-            Look::Again(add, del)
-        }
-        _ if open > 0 => Look::Findings(open),
-        _ if run.reported > 0 || counts.is_none() => return idle(),
-        _ => Look::Clean,
-    };
-    Some(look)
-}
-
-fn outcome_counts(run: &ReviewRun) -> String {
-    let count = |states: &[FindingState]| {
-        run.findings
-            .iter()
-            .filter(|finding| states.contains(&run.state(&finding.id)))
-            .count()
-    };
-    [
-        (count(&[FindingState::Fixed]), "fixed"),
-        (count(&[FindingState::Skipped]), "skipped"),
-        (count(&[FindingState::NoChange]), "no change"),
-        (
-            count(&[FindingState::Open, FindingState::AgentOnIt]),
-            "open",
-        ),
-    ]
-    .into_iter()
-    .filter(|(n, _)| *n > 0)
-    .map(|(n, word)| format!("{n} {word}"))
-    .collect::<Vec<_>>()
-    .join(" · ")
-}
-
 fn badge_look(
     state: FindingState,
     theme: &Theme,
@@ -185,14 +111,6 @@ fn badge_look(
         FindingState::Open => (theme.text_muted, None, Some(theme.border_strong)),
         FindingState::AgentOnIt => (theme.accent, None, Some(theme.accent.opacity(0.6))),
     }
-}
-
-fn capitalize(text: &str) -> String {
-    let mut chars = text.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
 }
 
 async fn launch_review(
@@ -789,7 +707,11 @@ impl Composer {
     }
 
     fn review_look(&self, target: &Target, scope: ReviewScope, cx: &App) -> Option<Look> {
-        chip_look(self.state.read(cx).reviews.get(&target.chat_id)?, scope)
+        self.state
+            .read(cx)
+            .reviews
+            .get(&target.chat_id)?
+            .look(scope)
     }
 
     pub(crate) fn render_review_chip(
@@ -839,94 +761,38 @@ impl Composer {
                         .child(format!("−{del}")),
                 )
         };
-        let review_label: SharedString = match (scope, &picked) {
-            (ReviewScope::Commit, Some(short)) => format!("Review {short}").into(),
-            _ => "Review".into(),
+        let label: SharedString = look.label(scope, picked.as_deref()).into();
+        let tip: SharedString = look.tip(scope).into();
+        let (icon, color, border, fill) = match &look {
+            Look::Idle(..) => (crate::icons::CHECKLIST, theme.text, theme.border, None),
+            Look::Findings(_) => (
+                crate::icons::CHECKLIST,
+                theme.danger,
+                theme.danger.opacity(0.45),
+                Some(theme.danger.opacity(0.10)),
+            ),
+            Look::Again(..) | Look::Stopped(..) => {
+                (crate::icons::REFRESH, theme.text_muted, theme.border, None)
+            }
+            Look::Clean => (
+                crate::icons::LUCIDE_CIRCLE_CHECK,
+                theme.success,
+                theme.success.opacity(0.40),
+                None,
+            ),
+            Look::Failed(_) => (
+                crate::icons::CHECKLIST,
+                theme.danger,
+                theme.danger.opacity(0.45),
+                None,
+            ),
+            Look::Empty(_) | Look::Busy | Look::Unreadable => (
+                crate::icons::CHECKLIST,
+                theme.text_muted,
+                theme.border,
+                None,
+            ),
         };
-        let (icon, label, color, border, fill, tip): (&str, SharedString, _, _, _, SharedString) =
-            match &look {
-                Look::Idle(..) => (
-                    crate::icons::CHECKLIST,
-                    review_label,
-                    theme.text,
-                    theme.border,
-                    None,
-                    format!(
-                        "Review {} with a fresh agent",
-                        scope.label(None).to_lowercase()
-                    )
-                    .into(),
-                ),
-                Look::Empty(_) => (
-                    crate::icons::CHECKLIST,
-                    review_label,
-                    theme.text_muted,
-                    theme.border,
-                    None,
-                    format!(
-                        "Nothing to review in {}. Pick another scope from the menu.",
-                        scope.label(None).to_lowercase()
-                    )
-                    .into(),
-                ),
-                Look::Busy => (
-                    crate::icons::CHECKLIST,
-                    "Reviewing".into(),
-                    theme.text_muted,
-                    theme.border,
-                    None,
-                    "The reviewer is working. Its progress is in the agents pill.".into(),
-                ),
-                Look::Findings(n) => (
-                    crate::icons::CHECKLIST,
-                    format!("{n} finding{}", if *n == 1 { "" } else { "s" }).into(),
-                    theme.danger,
-                    theme.danger.opacity(0.45),
-                    Some(theme.danger.opacity(0.10)),
-                    "Open the findings".into(),
-                ),
-                Look::Again(..) => (
-                    crate::icons::REFRESH,
-                    "Review again".into(),
-                    theme.text_muted,
-                    theme.border,
-                    None,
-                    "The code changed since the review. Some findings are outdated.".into(),
-                ),
-                Look::Stopped(..) => (
-                    crate::icons::REFRESH,
-                    "Review again".into(),
-                    theme.text_muted,
-                    theme.border,
-                    None,
-                    "The review was stopped. Click to run it again.".into(),
-                ),
-                Look::Clean => (
-                    crate::icons::LUCIDE_CIRCLE_CHECK,
-                    "No issues".into(),
-                    theme.success,
-                    theme.success.opacity(0.40),
-                    None,
-                    "The reviewer found no problems. Click to review again.".into(),
-                ),
-                Look::Unreadable => (
-                    crate::icons::CHECKLIST,
-                    "Couldn’t read findings".into(),
-                    theme.text_muted,
-                    theme.border,
-                    None,
-                    "The reviewer did not end with a findings block. Click to review again; its thread is in the agents pill."
-                        .into(),
-                ),
-                Look::Failed(message) => (
-                    crate::icons::CHECKLIST,
-                    "Review failed".into(),
-                    theme.danger,
-                    theme.danger.opacity(0.45),
-                    None,
-                    message.clone().into(),
-                ),
-            };
         let busy = matches!(look, Look::Busy);
         let stoppable = busy
             && self
@@ -934,11 +800,7 @@ impl Composer {
                 .read(cx)
                 .reviews
                 .get(&target.chat_id)
-                .is_some_and(|review| {
-                    review.run.as_ref().is_some_and(|run| {
-                        run.status == RunStatus::Running && run.task_id.is_some()
-                    })
-                });
+                .is_some_and(|review| review.run.as_ref().is_some_and(ReviewRun::stoppable));
         let stopping = stoppable && self.review.busy_hover;
         let (icon, label, color) = if stopping {
             (
@@ -1169,7 +1031,7 @@ impl Composer {
             .filter(|scope| !(on_base && *scope == ReviewScope::Branch))
             .map(|scope| {
                 let counts = review.changes(scope);
-                let unavailable = review.unavailable(scope).map(capitalize);
+                let unavailable = review.unavailable(scope).map(review::capitalize);
                 let empty =
                     counts.is_some_and(|(add, del)| add + del == 0) || unavailable.is_some();
                 let id = SharedString::from(format!("composer-review-scope-{}", scope.key()));
@@ -1353,13 +1215,7 @@ impl Composer {
                     .into_any_element()
             })
             .collect();
-        let review_label = match (selected, &review.commit) {
-            (ReviewScope::Commit, Some(pick)) => format!("Review commit {}", pick.short()),
-            _ => format!(
-                "Review {}",
-                selected.label(review.base.as_deref()).to_lowercase()
-            ),
-        };
+        let review_label = review.start_label(selected);
         let review_now = popover::menu_row(&popup, false, "composer-review-now")
             .id("composer-review-now")
             .debug_selector(|| "composer-review-now".into())
@@ -1645,7 +1501,7 @@ impl Composer {
                 .get(&harness)
                 .and_then(|models| models.iter().find(|m| m.id == id))
         });
-        let levels = review::reasoning_stops(options, harness, model_entry);
+        let levels = options.reasoning_stops(harness, model_entry);
         if levels.is_empty() {
             return None;
         }
@@ -1995,27 +1851,7 @@ impl Composer {
     }
 
     pub(super) fn review_pill_suffix(&self, doc_id: &str, cx: &App) -> Option<String> {
-        let run = self.review_run_for(doc_id, cx)?;
-        let suffix = match run.status {
-            RunStatus::Unreadable => "couldn’t read findings".to_string(),
-            RunStatus::Stopped => "stopped".to_string(),
-            RunStatus::Failed(_) => "failed".to_string(),
-            RunStatus::Done if run.reported == 0 => "no issues".to_string(),
-            RunStatus::Done if run.findings.is_empty() => format!("{} handled", run.reported),
-            RunStatus::Done => {
-                let mut text = outcome_counts(&run);
-                if run.outdated() > 0 {
-                    text.push_str(&format!(" · {} outdated", run.outdated()));
-                }
-                text
-            }
-            _ if run.note.is_some() => "working".to_string(),
-            _ => return None,
-        };
-        Some(match run.note {
-            Some(_) => format!("{suffix} · fallback"),
-            None => suffix,
-        })
+        self.review_run_for(doc_id, cx)?.pill_suffix()
     }
 
     pub(super) fn render_review_findings(
@@ -2040,26 +1876,14 @@ impl Composer {
                 .child(format!("Review again failed: {message}"))
         });
         let rows = run.findings.iter().map(|finding| {
-            let (tint, wash) = finding.severity.colors(theme);
+            let (tint, wash) = review::severity_colors(finding.severity, theme);
             let outdated = finding.placement == review::Placement::Outdated;
             let state = run.state(&finding.id);
-            let outcome = run.outcome(&finding.id);
-            let reason = outcome
-                .filter(|_| matches!(state, FindingState::Skipped | FindingState::NoChange))
-                .and_then(|outcome| outcome.note.clone());
-            let label = match outcome.and_then(|outcome| outcome.commit.as_deref()) {
-                Some(sha) if state == FindingState::Fixed => {
-                    format!("Fixed · {}", review::short_sha(sha))
-                }
-                _ => state.label().to_string(),
-            };
+            let reason = run.reason(&finding.id);
+            let label = run.state_label(&finding.id);
             let (badge_text, badge_bg, badge_border) = badge_look(state, theme);
             let id = finding.id.clone();
-            let meta = if outdated {
-                format!("{} · {} · outdated", finding.id, finding.location())
-            } else {
-                format!("{} · {}", finding.id, finding.location())
-            };
+            let meta = finding.meta();
             div()
                 .debug_selector({
                     let id = finding.id.clone();
@@ -2070,10 +1894,7 @@ impl Composer {
                 .items_start()
                 .gap(px(8.0))
                 .py(px(3.0))
-                .when(
-                    outdated || matches!(state, FindingState::Fixed | FindingState::NoChange),
-                    |el| el.opacity(0.5),
-                )
+                .when(outdated || state.settled(), |el| el.opacity(0.5))
                 .child(
                     div()
                         .flex_none()
@@ -2237,90 +2058,5 @@ impl Composer {
             state.dismiss_review_finding(&key, id);
             cx.notify();
         });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::review::ChatReview;
-
-    #[test]
-    fn a_picked_scope_with_nothing_to_review_keeps_the_chip() {
-        let turn = ReviewScope::LatestTurn;
-        let picked = |stat: Option<Result<(u32, u32), String>>| ChatReview {
-            scope: Some(turn),
-            stats: stat.into_iter().map(|stat| (turn, stat)).collect(),
-            ..ChatReview::default()
-        };
-        for review in [
-            picked(Some(Ok((0, 0)))),
-            picked(Some(Err("no turn recorded".into()))),
-            picked(None),
-        ] {
-            assert!(matches!(chip_look(&review, turn), Some(Look::Empty(_))));
-        }
-        let mut clean = picked(Some(Ok((0, 0))));
-        let mut run = ReviewRun::new(turn);
-        run.status = RunStatus::Done;
-        clean.run = Some(run);
-        assert!(matches!(chip_look(&clean, turn), Some(Look::Empty(_))));
-
-        let untouched = ChatReview {
-            stats: [(ReviewScope::Uncommitted, Ok((0, 0)))].into(),
-            ..ChatReview::default()
-        };
-        assert!(chip_look(&untouched, ReviewScope::Uncommitted).is_none());
-    }
-
-    #[test]
-    fn the_pill_counts_outcomes_and_leaves_out_the_empty_ones() {
-        let reply = (1..=5)
-            .map(|n| {
-                format!("{{\"path\":\"a\",\"line\":{n},\"severity\":\"bug\",\"title\":\"t\"}}")
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        let review::ReadOutcome::Read(Some(findings)) =
-            review::read_outcome("completed", &format!("```zeron-review\n[{reply}]\n```"))
-        else {
-            panic!("unread");
-        };
-        let mut delegation: zeron_proto::Delegation = serde_json::from_value(serde_json::json!({
-            "delegatedByChatId": "owner",
-            "depth": 1,
-            "anchor": "task",
-            "wake": "never",
-            "status": "completed",
-            "startedAt": "2026-10-17T10:00:00Z",
-        }))
-        .unwrap();
-        for (id, kind) in [
-            ("F1", zeron_proto::FindingOutcomeKind::Fixed),
-            ("F2", zeron_proto::FindingOutcomeKind::Fixed),
-            ("F3", zeron_proto::FindingOutcomeKind::Skipped),
-            ("F4", zeron_proto::FindingOutcomeKind::NoChange),
-        ] {
-            delegation.finding_outcomes.insert(
-                id.into(),
-                zeron_proto::FindingOutcome {
-                    outcome: kind,
-                    note: None,
-                    commit: None,
-                },
-            );
-        }
-        let mut run = ReviewRun::new(ReviewScope::Uncommitted);
-        run.status = RunStatus::Done;
-        run.findings = findings;
-        run.delegation = Some(delegation.clone());
-        assert_eq!(
-            outcome_counts(&run),
-            "2 fixed · 1 skipped · 1 no change · 1 open"
-        );
-        delegation.finding_outcomes.remove("F3");
-        delegation.finding_outcomes.remove("F4");
-        run.delegation = Some(delegation);
-        assert_eq!(outcome_counts(&run), "2 fixed · 3 open");
     }
 }

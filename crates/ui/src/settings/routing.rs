@@ -811,7 +811,7 @@ impl RoutingPage {
                 .find(|model| model.id == id)
         });
         let levels: Vec<ReasoningLevel> = match &self.options {
-            Some(options) => crate::review::reasoning_stops(options, target.harness, model),
+            Some(options) => options.reasoning_stops(target.harness, model),
             None => Vec::new(),
         };
         if levels.is_empty() {

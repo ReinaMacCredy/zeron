@@ -47,7 +47,8 @@ use zeron_proto::{Chat, CheckoutDiff, GitHistoryCommit};
 use zeron_rpc::methods;
 
 pub use zeron_proto::patch::{
-    DiffLine, FileDiff, FileStatus, Hunk, LineKind, file_notices, parse_patch, truncate_file_lines,
+    DiffLine, FileDiff, FileStatus, Hunk, LineKind, file_notices, line_anchor, parse_patch,
+    truncate_file_lines,
 };
 
 use crate::comments::{self, CommentSide, ReviewComment};
@@ -513,16 +514,6 @@ fn pair_anchors(lines: &[DiffLine], pair: LinePair) -> [Option<(CommentSide, u32
     }
 }
 
-/// A deletion only exists in the pre-change file; everything else is cited
-/// against the post-change file, which is what the agent edits.
-pub fn line_anchor(line: &DiffLine) -> Option<(CommentSide, u32)> {
-    match line.kind {
-        LineKind::Meta => None,
-        LineKind::Del => line.old_no.map(|no| (CommentSide::Old, no)),
-        _ => line.new_no.map(|no| (CommentSide::New, no)),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Resolution + states (pure)
 // ---------------------------------------------------------------------------
@@ -645,7 +636,7 @@ pub fn scope_label(scope: DiffScope, count: usize, base: Option<&str>) -> String
 /// `ListBranches` with the repo's default branch first — but a repo with no
 /// `origin/HEAD` falls back to the *checked-out* branch there, and comparing a
 /// branch with itself is useless; prefer `main`/`master` in that case.
-pub use zeron_engine::review::default_base_ref;
+pub use zeron_proto::review::default_base_ref;
 
 /// Empty-state copy per scope.
 pub fn clean_message(scope: DiffScope, base: Option<&str>) -> String {

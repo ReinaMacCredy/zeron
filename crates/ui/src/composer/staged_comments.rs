@@ -113,7 +113,9 @@ impl Composer {
                         .flex_none()
                         .size(px(6.0))
                         .rounded_full()
-                        .when_some(severity, |el, severity| el.bg(severity.colors(&popup).0)),
+                        .when_some(severity, |el, severity| {
+                            el.bg(crate::review::severity_colors(severity, &popup).0)
+                        }),
                 )
                 .child(
                     div()

@@ -874,7 +874,7 @@ impl DocHost {
         &self,
         child: &Chat,
         delegation: &Delegation,
-    ) -> Option<Vec<crate::review::ReviewFinding>> {
+    ) -> Option<Vec<crate::review::Finding>> {
         if !crate::review::is_review(delegation) || delegation.status != DelegationStatus::Completed
         {
             return None;
@@ -899,7 +899,7 @@ impl DocHost {
         &self,
         owner: &str,
         task_id: &str,
-    ) -> Result<(Delegation, Vec<crate::review::ReviewFinding>), EngineError> {
+    ) -> Result<(Delegation, Vec<crate::review::Finding>), EngineError> {
         let (child, _) = self.owned_child(owner, task_id)?;
         let delegation = child.delegation.clone().expect("a delegated chat");
         if !crate::review::is_review(&delegation) {
@@ -953,7 +953,7 @@ impl DocHost {
             let commit = trimmed(resolution.commit);
             if let Some(commit) = commit
                 .as_deref()
-                .filter(|commit| !crate::working_tree::is_commit_id(commit))
+                .filter(|commit| !crate::review::is_commit_id(commit))
             {
                 return Err(failure(
                     "invalid_commit",
