@@ -8,6 +8,8 @@ mod selector;
 #[cfg(unix)]
 mod server;
 mod tree;
+#[cfg(target_os = "macos")]
+pub(crate) mod web;
 
 #[cfg(unix)]
 pub(crate) use server::start;
@@ -265,7 +267,7 @@ async fn run(raw: Value, cancel: Cancel, cx: &mut AsyncApp) -> Result<Value, Str
         }
         Observe::Audit => {
             let handle = cx.update(|cx| target_window(window, cx))?;
-            let tree = tree::read(handle, cx).await?;
+            let tree = tree::read_native(handle, cx).await?;
             let focus_held = cx
                 .update(|cx| handle.update(cx, |_, window, cx| window.focused(cx).is_some()))
                 .map_err(|error| format!("window is gone: {error}"))?;

@@ -562,7 +562,7 @@ impl NativePage {
         let monitor = unsafe {
             NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &callback)
         };
-        Ok(Self(Rc::new(RefCell::new(Host {
+        let host = Rc::new(RefCell::new(Host {
             automation_snapshot_epoch: Cell::new(None),
             data: data.clone(),
             web,
@@ -580,7 +580,9 @@ impl NativePage {
             #[cfg(feature = "browser-fixture")]
             visibility_changes: Cell::new(0),
             tx,
-        }))))
+        }));
+        crate::ui_driver::web::register(Rc::downgrade(&host) as _);
+        Ok(Self(host))
     }
     pub fn handle(&self) -> Rc<RefCell<Host>> {
         self.0.clone()
@@ -794,6 +796,21 @@ impl Host {
     }
 }
 
+impl crate::ui_driver::web::Hosted for RefCell<Host> {
+    fn page(&self) -> Option<crate::ui_driver::web::Page> {
+        let host = self.try_borrow().ok()?;
+        if host.view.isHidden() || host.clip.isHidden() {
+            return None;
+        }
+        Some(crate::ui_driver::web::Page {
+            view: host.view.clone(),
+            bounds: host.bounds?,
+            #[cfg(debug_assertions)]
+            visible: host.visible_bounds?,
+        })
+    }
+}
+
 impl Drop for Host {
     fn drop(&mut self) {
         if has_focus(&self.view) {
@@ -991,45 +1008,11 @@ impl NativePage {
         script: &str,
         page_world: bool,
     ) -> futures::channel::oneshot::Receiver<Result<serde_json::Value, String>> {
-        let (tx, rx) = futures::channel::oneshot::channel();
-        let tx = RefCell::new(Some(tx));
-        let completion = block2::RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
-            let result = if let Some(error) = unsafe { error.as_ref() } {
-                Err(error.localizedDescription().to_string())
-            } else {
-                unsafe { value.as_ref() }
-                    .and_then(|value| value.downcast_ref::<NSString>())
-                    .ok_or_else(|| "JavaScript did not return JSON text.".to_string())
-                    .and_then(|text| {
-                        let text = text.to_string();
-                        if text.len() > 1024 * 1024 {
-                            return Err("Browser result exceeds 1 MiB.".into());
-                        }
-                        serde_json::from_str(&text).map_err(|e| e.to_string())
-                    })
-            };
-            if let Some(tx) = tx.borrow_mut().take() {
-                let _ = tx.send(result);
-            }
-        });
-        let host = self.0.borrow();
-        let mtm = MainThreadMarker::new().expect("browser runs on main thread");
-        unsafe {
-            let world = if page_world {
-                objc2_web_kit::WKContentWorld::pageWorld(mtm)
-            } else {
-                objc2_web_kit::WKContentWorld::defaultClientWorld(mtm)
-            };
-            host.view
-                .callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(
-                    &NSString::from_str(&format!("return {script};")),
-                    None,
-                    None,
-                    &world,
-                    Some(&completion),
-                );
-        }
-        rx
+        crate::ui_driver::web::evaluate(
+            &self.0.borrow().view,
+            &format!("return {script};"),
+            page_world,
+        )
     }
 
     pub(super) fn automation_screenshot(

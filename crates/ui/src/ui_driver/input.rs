@@ -1,3 +1,6 @@
+use super::selector::Keys;
+#[cfg(target_os = "macos")]
+use super::web;
 use super::{Cancel, frame_count, frames, next_frame, selector, target_window, tree};
 use gpui::accesskit::{Action as AxAction, ActionData, NodeId};
 use gpui::{
@@ -140,6 +143,14 @@ pub(super) async fn run(
         cx.background_executor().timer(LOCK_POLL).await;
     };
     let driver = Driver::open(window, cancel, cx)?;
+    #[cfg(target_os = "macos")]
+    let driver = {
+        let mut driver = driver;
+        if let Some(page) = on_page(&mut driver, &drive, cx).await? {
+            return on_web(driver, drive, page, cx).await;
+        }
+        driver
+    };
     match drive {
         Drive::Set(set) => self::set(driver, set, cx).await,
         Drive::Click {
@@ -353,22 +364,6 @@ pub(super) enum Modifier {
     Ctrl,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(untagged)]
-pub(super) enum Keys {
-    One(String),
-    Many(Vec<String>),
-}
-
-impl Keys {
-    pub(super) fn strokes(&self) -> Vec<&str> {
-        match self {
-            Keys::One(keys) => keys.split_whitespace().collect(),
-            Keys::Many(keys) => keys.iter().flat_map(|k| k.split_whitespace()).collect(),
-        }
-    }
-}
-
 fn modifiers(list: &[Modifier]) -> Modifiers {
     let mut modifiers = Modifiers::default();
     for modifier in list {
@@ -387,6 +382,7 @@ struct Driver {
     mark: u64,
     unsettled: bool,
     cancel: Cancel,
+    found: Option<(selector::Element, tree::Node, (f32, f32))>,
 }
 
 impl Driver {
@@ -397,6 +393,7 @@ impl Driver {
             mark: frame_count(),
             unsettled: false,
             cancel,
+            found: None,
         })
     }
 
@@ -421,6 +418,11 @@ impl Driver {
         element: &selector::Element,
         cx: &mut AsyncApp,
     ) -> Result<(tree::Node, (f32, f32)), String> {
+        if let Some((found, node, viewport)) = self.found.take()
+            && &found == element
+        {
+            return Ok((node, viewport));
+        }
         let (node, viewport, unsettled) = settled(self.window, element, cx).await?;
         self.unsettled |= unsettled;
         Ok((node, viewport))
@@ -796,6 +798,181 @@ async fn press(
     })?;
     let mut reply = driver.settle(cx).await?;
     reply["ref"] = json!(node.id);
+    Ok(reply)
+}
+
+#[cfg(target_os = "macos")]
+struct OnPage {
+    view: u64,
+    at: Option<Point<Pixels>>,
+    node: Option<(tree::Node, (f32, f32))>,
+}
+
+#[cfg(target_os = "macos")]
+impl OnPage {
+    fn point(&self) -> Result<Point<Pixels>, String> {
+        match (&self.node, self.at) {
+            (Some((node, viewport)), _) => center(node, *viewport),
+            (None, Some(at)) => Ok(at),
+            (None, None) => Err("this drive needs a target on the page".into()),
+        }
+    }
+
+    fn enabled(&self) -> Result<(), String> {
+        match &self.node {
+            Some((node, _)) if node.disabled => {
+                Err(format!("`#{}` is disabled: {}", node.id, tree::line(node)))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn on_page(
+    driver: &mut Driver,
+    drive: &Drive,
+    cx: &mut AsyncApp,
+) -> Result<Option<OnPage>, String> {
+    let target = match drive {
+        Drive::Click { at, .. } | Drive::Move { at } | Drive::Scroll { at, .. } => at.clone(),
+        Drive::Type {
+            into: TypeAt::Target(at),
+            ..
+        } => at.clone(),
+        Drive::Press { element, .. } => Target::Element(element.clone()),
+        Drive::Type {
+            into: TypeAt::Focused,
+            ..
+        }
+        | Drive::Key { .. } => {
+            let view = driver.dispatch(cx, |window, _| web::focused(window))?;
+            return Ok(view.map(|view| OnPage {
+                view,
+                at: None,
+                node: None,
+            }));
+        }
+        _ => return Ok(None),
+    };
+    match target {
+        Target::Element(element) => {
+            let (node, viewport) = driver.find(&element, cx).await?;
+            let Some((view, _)) = node.web.then(|| web::parse_ref(&node.id)).flatten() else {
+                driver.found = Some((element, node, viewport));
+                return Ok(None);
+            };
+            Ok(Some(OnPage {
+                view,
+                at: None,
+                node: Some((node, viewport)),
+            }))
+        }
+        Target::Point { x, y } | Target::Pair([x, y]) => {
+            let at = point(px(x), px(y));
+            let view = driver.dispatch(cx, |window, _| web::page_at(window, at))?;
+            Ok(view.map(|view| OnPage {
+                view,
+                at: Some(at),
+                node: None,
+            }))
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn on_web(
+    mut driver: Driver,
+    drive: Drive,
+    page: OnPage,
+    cx: &mut AsyncApp,
+) -> Result<Value, String> {
+    let view = page.view;
+    let mut route = "event";
+    match drive {
+        Drive::Click {
+            button,
+            count,
+            modifiers,
+            ..
+        } => {
+            if button != Button::Left || !modifiers.is_empty() {
+                return Err("a web page takes plain left clicks only".into());
+            }
+            page.enabled()?;
+            let at = page.point()?;
+            driver.apply(cx, |_, _| web::click(view, at, count))??;
+        }
+        Drive::Move { .. } => {
+            let at = page.point()?;
+            driver.apply(cx, |_, _| web::hover(view, at))??;
+        }
+        Drive::Scroll { dx, dy, .. } => {
+            let at = page.point()?;
+            driver.live()?;
+            web::scroll(view, at, dx, dy, cx).await?;
+            route = "dom";
+        }
+        Drive::Key { keys } => {
+            let strokes = keys
+                .strokes()
+                .into_iter()
+                .map(|stroke| {
+                    Keystroke::parse(stroke)
+                        .map_err(|error| format!("bad keystroke `{stroke}`: {error}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if strokes.is_empty() {
+                return Err("`keys` is empty".into());
+            }
+            driver.apply(cx, |_, _| web::keys(view, &strokes))??;
+        }
+        Drive::Type { text, into } => {
+            if let TypeAt::Target(_) = into {
+                page.enabled()?;
+                let at = page.point()?;
+                driver.apply(cx, |_, _| web::click(view, at, 1))??;
+                driver.step(cx).await;
+            }
+            let strokes: Vec<Keystroke> = text.chars().map(typed).collect();
+            driver.apply(cx, |_, _| web::keys(view, &strokes))??;
+        }
+        Drive::Press { perform, value, .. } => {
+            page.enabled()?;
+            let name = perform.as_deref().unwrap_or("click");
+            if name.eq_ignore_ascii_case("click") && value.is_none() {
+                let at = page.point()?;
+                driver.apply(cx, |_, _| web::click(view, at, 1))??;
+            } else {
+                let n = page
+                    .node
+                    .as_ref()
+                    .and_then(|(node, _)| web::parse_ref(&node.id))
+                    .map(|(_, n)| n)
+                    .ok_or("`press` needs a web element")?;
+                driver.live()?;
+                web::script_on(
+                    view,
+                    json!({ "op": "act", "n": n, "do": name, "value": value }),
+                    cx,
+                )
+                .await?;
+                route = "dom";
+            }
+        }
+        _ => return Err("this drive does not reach web pages".into()),
+    }
+    driver.mark = frame_count();
+    driver.step(cx).await;
+    let mut reply = driver.settle(cx).await?;
+    // The page paints in its own layer, so an app frame is no sign it changed.
+    if let Some(reply) = reply.as_object_mut() {
+        reply.remove("stale");
+    }
+    if let Some((node, _)) = &page.node {
+        reply["ref"] = json!(node.id);
+    }
+    reply["web"] = json!(route);
     Ok(reply)
 }
 

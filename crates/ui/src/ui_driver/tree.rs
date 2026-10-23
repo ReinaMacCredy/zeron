@@ -64,6 +64,8 @@ pub(super) struct Node {
     pub(super) depth: usize,
     #[serde(skip)]
     pub(super) parent: Option<usize>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(super) web: bool,
 }
 
 impl Node {
@@ -262,6 +264,7 @@ pub(super) fn parse_dump(dump: &str, window: u64, refs: &mut Refs) -> Result<Tre
             source: raw.source_location,
             depth,
             parent,
+            web: false,
         });
     }
     Ok(tree)
@@ -313,6 +316,9 @@ pub(super) fn line(node: &Node) -> String {
     }
     if !node.actions.is_empty() {
         out += &format!(" [{}]", node.actions.join(","));
+    }
+    if node.web {
+        out += " web";
     }
     out
 }
@@ -494,6 +500,20 @@ async fn reap(cx: &mut AsyncApp) {
 }
 
 pub(super) async fn read(handle: AnyWindowHandle, cx: &mut AsyncApp) -> Result<Tree, String> {
+    let tree = read_native(handle, cx).await?;
+    #[cfg(target_os = "macos")]
+    let tree = {
+        let mut tree = tree;
+        super::web::splice(&mut tree, handle, cx).await;
+        tree
+    };
+    Ok(tree)
+}
+
+pub(super) async fn read_native(
+    handle: AnyWindowHandle,
+    cx: &mut AsyncApp,
+) -> Result<Tree, String> {
     let id = handle.window_id().as_u64();
     let gone = |error: anyhow::Error| format!("window is gone: {error}");
     let prior = cx
