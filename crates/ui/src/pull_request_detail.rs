@@ -514,7 +514,10 @@ impl PullRequestDetailPage {
             diff_refresh_owed: false,
             tab: Tab::Summary,
             checks_expanded: false,
-            tab_slide: crate::motion::IndicatorSlide::at(tab_slot(Tab::Summary), Instant::now()),
+            tab_slide: crate::motion::IndicatorSlide::at(
+                tab_slot(Tab::Summary),
+                crate::motion::now(),
+            ),
             tab_focus: [cx.focus_handle(), cx.focus_handle(), cx.focus_handle()],
             tree_focus: cx.focus_handle().tab_stop(true),
             files_focus: cx.focus_handle().tab_stop(true),
@@ -566,7 +569,7 @@ impl PullRequestDetailPage {
             chat_expanded: false,
             chat_float: Default::default(),
             tucked: false,
-            tuck: crate::motion::IndicatorSlide::at(0.0, Instant::now()),
+            tuck: crate::motion::IndicatorSlide::at(0.0, crate::motion::now()),
         };
         cx.on_release(|page: &mut Self, _| {
             crate::markdown::render::clear_selection_surface(&page.selection_prefix);
@@ -967,7 +970,7 @@ impl PullRequestDetailPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let now = Instant::now();
+        let now = crate::motion::now();
         if self.tuck.animating_at(now) || self.tab_slide.animating_at(now) {
             window.request_animation_frame();
         }
@@ -1031,7 +1034,7 @@ impl PullRequestDetailPage {
                 "pr-detail-nav",
                 &segments,
                 tab_slot(self.tab) as usize,
-                self.tab_slide.value_at(Instant::now()),
+                self.tab_slide.value_at(crate::motion::now()),
                 &self.tab_focus,
                 PILL,
                 theme,
@@ -1060,7 +1063,7 @@ impl PullRequestDetailPage {
         self.tuck.retarget(
             if tucked { 1.0 } else { 0.0 },
             crate::motion::reduced_motion(cx),
-            Instant::now(),
+            crate::motion::now(),
         );
         cx.notify();
     }
@@ -1074,7 +1077,7 @@ impl PullRequestDetailPage {
     }
 
     pub(crate) fn pill_room(&self) -> f32 {
-        PILL_ROOM * (1.0 - self.tuck.value_at(Instant::now()))
+        PILL_ROOM * (1.0 - self.tuck.value_at(crate::motion::now()))
     }
 
     pub(crate) fn nav_clearance(&self) -> f32 {
@@ -1096,7 +1099,7 @@ impl PullRequestDetailPage {
 
     pub(crate) fn start_on(&mut self, tab: Tab, cx: &mut Context<Self>) {
         self.select_tab(tab, cx);
-        self.tab_slide = crate::motion::IndicatorSlide::at(tab_slot(tab), Instant::now());
+        self.tab_slide = crate::motion::IndicatorSlide::at(tab_slot(tab), crate::motion::now());
     }
 
     pub(crate) fn select_tab_slot(&mut self, slot: usize, cx: &mut Context<Self>) {
@@ -1117,7 +1120,7 @@ impl PullRequestDetailPage {
         self.tab_slide.retarget(
             tab_slot(tab),
             crate::motion::reduced_motion(cx),
-            Instant::now(),
+            crate::motion::now(),
         );
         crate::markdown::render::clear_selection_surface(&self.selection_prefix);
         self.tab = tab;
@@ -1501,7 +1504,7 @@ fn rich_text(
         row_key: key.into(),
         veil: None,
         cache: None,
-        now: Instant::now(),
+        now: crate::motion::now(),
         link: None,
         workspace_root: None,
         code: None,
@@ -2613,7 +2616,7 @@ impl Render for PullRequestDetailPage {
                 .when(self.tab != Tab::Code, |el| el.children(rail))
                 .into_any_element()
         };
-        let now = Instant::now();
+        let now = crate::motion::now();
         if self.tab_slide.animating_at(now) || self.tuck.animating_at(now) {
             window.request_animation_frame();
         }

@@ -485,12 +485,12 @@ impl TaskCenter {
             live: None,
             tree: super::tree::TreeMotion::solid(),
             stats: Default::default(),
-            drawer: Tween::at(0.0, Instant::now()),
+            drawer: Tween::at(0.0, motion::now()),
             drawer_open: false,
             overview_open: false,
-            overview_turn: Tween::at(1.0, Instant::now()),
+            overview_turn: Tween::at(1.0, motion::now()),
             folded: false,
-            fold_turn: Tween::at(0.0, Instant::now()),
+            fold_turn: Tween::at(0.0, motion::now()),
             pop: None,
             pop_dismissed: None,
             pop_pressed: false,
@@ -505,7 +505,7 @@ impl TaskCenter {
             drag: None,
             press: 0.0,
             focus: cx.focus_handle(),
-            shimmer_since: Instant::now(),
+            shimmer_since: motion::now(),
             outline: None,
             runs: Default::default(),
             views: Default::default(),
@@ -748,7 +748,7 @@ impl TaskCenter {
         };
         let focus = title.as_ref().unwrap_or(&body).focus_handle(cx);
         window.focus(&focus, cx);
-        let now = Instant::now();
+        let now = motion::now();
         let reduced = motion::reduced_motion(cx);
         let from = match &target {
             EditTarget::Overview => {
@@ -861,7 +861,7 @@ impl TaskCenter {
                     } else {
                         center.draft.edited.insert(step_id.clone(), text);
                     }
-                    center.open_spec(&step_id, true, motion::reduced_motion(cx), Instant::now());
+                    center.open_spec(&step_id, true, motion::reduced_motion(cx), motion::now());
                     cx.notify();
                 })
                 .ok();
@@ -886,7 +886,7 @@ impl TaskCenter {
     fn end_edit(&mut self, cx: &mut Context<Self>) -> Option<Editor> {
         let editor = self.editor.take()?;
         if let EditTarget::Step(id) = &editor.target {
-            let now = Instant::now();
+            let now = motion::now();
             let reduced = motion::reduced_motion(cx);
             let run = |spec: MotionSpec| {
                 let mut tween = Tween::at(0.0, now);
@@ -990,7 +990,7 @@ impl TaskCenter {
             return;
         }
         let open = !self.spec_open(step_id);
-        self.open_spec(step_id, open, motion::reduced_motion(cx), Instant::now());
+        self.open_spec(step_id, open, motion::reduced_motion(cx), motion::now());
         cx.notify();
     }
 
@@ -1580,7 +1580,7 @@ impl TaskCenter {
     fn shimmer(&self, working: bool, cx: &mut Context<Self>) -> Option<f32> {
         (working && !motion::reduced_motion(cx)).then(|| {
             motion::pulse_lease(cx.entity_id(), cx);
-            super::tree::title_phase(self.shimmer_since, Instant::now())
+            super::tree::title_phase(self.shimmer_since, motion::now())
         })
     }
 
@@ -1795,7 +1795,7 @@ impl TaskCenter {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let now = Instant::now();
+        let now = motion::now();
         let growing = !editor.grow.settled_at(now);
         if growing {
             window.request_animation_frame();
@@ -2236,7 +2236,7 @@ impl Render for TaskCenter {
             task.completed_at.is_none() && plan.lead.is_some() && super::is_mission(&task, &plan);
         let shown = self.shown(&task, &plan, cx);
         let reduced = motion::reduced_motion(cx);
-        let now = Instant::now();
+        let now = motion::now();
         if self.drag.is_some() && !cx.has_active_drag() {
             self.drag = None;
         }
@@ -2244,10 +2244,13 @@ impl Render for TaskCenter {
         if self.sync_kind(true, reduced, now) {
             window.request_animation_frame();
         }
-        if task.completed_at.is_none() && self.clock.as_ref().is_none_or(|(due, _)| now >= *due) {
+        let clock_now = Instant::now();
+        if task.completed_at.is_none()
+            && self.clock.as_ref().is_none_or(|(due, _)| clock_now >= *due)
+        {
             let tick = std::time::Duration::from_secs(1);
             self.clock = Some((
-                now + tick,
+                clock_now + tick,
                 cx.spawn(async move |center, cx| {
                     cx.background_executor().timer(tick).await;
                     center.update(cx, |_, cx| cx.notify()).ok();

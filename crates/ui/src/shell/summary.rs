@@ -219,7 +219,7 @@ impl Shell {
                 self.sidecar_collapsed_now = Some(collapsed);
                 self.sidecar_flip = Some(SidecarFlip {
                     from,
-                    started: self.render_time.unwrap_or_else(std::time::Instant::now),
+                    started: self.render_time.unwrap_or_else(motion::now),
                 });
             }
             Some(_) => {}
@@ -228,7 +228,7 @@ impl Shell {
         if !(popover_mode && collapsed) && self.sidecar_popover_open() {
             self.sidecar_popover = Some(PopoverFade {
                 open: false,
-                started: std::time::Instant::now(),
+                started: motion::now(),
             });
         }
         self.sidecar_width_now().min(full_column)
@@ -270,7 +270,7 @@ impl Shell {
     fn sidecar_popover_mounted(&self) -> bool {
         self.sidecar_popover.is_some_and(|fade| {
             fade.open
-                || fade.started.elapsed()
+                || motion::since(fade.started)
                     < motion::SIDECAR_POPOVER_SLIDE
                         .total()
                         .mul_f32(motion::speed_scale())
@@ -283,7 +283,7 @@ impl Shell {
         }
         self.sidecar_popover = Some(PopoverFade {
             open,
-            started: std::time::Instant::now(),
+            started: motion::now(),
         });
         cx.notify();
     }

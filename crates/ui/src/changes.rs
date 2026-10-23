@@ -1601,7 +1601,7 @@ impl FileFold {
         self.epoch > 0
             && self
                 .toggled_at
-                .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW)
+                .is_some_and(|at| motion::since(at) < FOLD_TWEEN_WINDOW)
     }
 }
 
@@ -2610,7 +2610,7 @@ impl Changes {
         };
         fold.collapsed = !currently_collapsed;
         fold.epoch += 1;
-        fold.toggled_at = Some(std::time::Instant::now());
+        fold.toggled_at = Some(motion::now());
         // The body tweens as ONE clipped stand-in row; the settle sweep
         // swaps it for steady rows (all lines, or none) once the window
         // elapses.

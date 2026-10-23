@@ -329,7 +329,7 @@ impl HomeView {
     }
 
     fn toggle_collapsed(&mut self, cx: &mut Context<Self>) {
-        self.collapse_since = Some(Instant::now());
+        self.collapse_since = Some(crate::motion::now());
         crate::settings::update_home_widgets(cx, |widgets| widgets.collapsed = !widgets.collapsed);
         cx.notify();
     }
@@ -370,7 +370,7 @@ impl HomeView {
         }
         let total =
             crate::motion::SIDECAR_LAYOUT.total().as_secs_f32() * crate::motion::speed_scale();
-        let raw = since.elapsed().as_secs_f32() / total.max(f32::EPSILON);
+        let raw = crate::motion::since(since).as_secs_f32() / total.max(f32::EPSILON);
         if raw < 1.0 {
             window.request_animation_frame();
         }

@@ -6073,7 +6073,8 @@ impl Transcript {
                 };
                 match fold.toggled_at {
                     Some(at) if !motion::reduced_motion(cx) && fold.duration_ms > 0 => {
-                        let raw = (at.elapsed().as_secs_f32() * 1000.0 / fold.duration_ms as f32)
+                        let raw = (motion::since(at).as_secs_f32() * 1000.0
+                            / fold.duration_ms as f32)
                             .clamp(0.0, 1.0);
                         let progress = user_resize_spec(fold.user_expansion_height).progress(raw);
                         motion::lerp(fold.user_expansion_height - target, target, progress)
@@ -6205,7 +6206,7 @@ impl Transcript {
                 match anchor_bounds {
                     Some(b) => {
                         let err = f32::from(b.top()) - (f32::from(viewport.top()) + inset);
-                        let now = Instant::now();
+                        let now = motion::now();
                         let frames = match self.own_turn_last_tick {
                             Some(last) => (now.duration_since(last).as_secs_f32() * 1000.0
                                 / SPRING_FRAME_MS)
@@ -6236,7 +6237,7 @@ impl Transcript {
             }
             return;
         }
-        let now = Instant::now();
+        let now = motion::now();
         let frames = match self.own_turn_last_tick {
             Some(last) => (now.duration_since(last).as_secs_f32() * 1000.0 / SPRING_FRAME_MS)
                 .min(SPRING_MAX_CATCHUP_FRAMES),
@@ -6492,7 +6493,7 @@ impl Transcript {
     /// while [`Self::spring_should_run`].
     fn wake_spring(&mut self) {
         if self.spring_settled_at.is_some_and(|settled| {
-            settled.elapsed() >= Duration::from_millis(SPRING_SETTLE_GRACE_MS)
+            motion::since(settled) >= Duration::from_millis(SPRING_SETTLE_GRACE_MS)
         }) {
             self.spring.reset();
             self.spring_last_tick = None;
@@ -6526,7 +6527,7 @@ impl Transcript {
             self.spring_last_tick = None;
             return;
         }
-        let now = Instant::now();
+        let now = motion::now();
         if self.spring_settled_at.is_some_and(|settled| {
             now.duration_since(settled) >= Duration::from_millis(SPRING_SETTLE_GRACE_MS)
         }) {
@@ -6971,7 +6972,7 @@ impl Transcript {
                 _ => None,
             })
             .collect();
-        let now = Instant::now();
+        let now = motion::now();
         let mut live_tool_groups = HashSet::new();
         for row in &new_rows {
             let RowKind::ToolGroup {
@@ -7299,7 +7300,7 @@ impl Transcript {
                 fold.open == Some(true)
                     || fold
                         .toggled_at
-                        .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW)
+                        .is_some_and(|at| motion::since(at) < FOLD_TWEEN_WINDOW)
             }),
         }
     }
@@ -7394,7 +7395,7 @@ impl Transcript {
         entry.from = if currently_open { full_h } else { collapsed_h };
         entry.open = Some(!currently_open);
         entry.epoch += 1;
-        entry.toggled_at = Some(Instant::now());
+        entry.toggled_at = Some(motion::now());
         entry.duration_ms = duration_ms;
         entry.user_expansion_height = (full_h - collapsed_h).max(0.0);
 
@@ -7430,7 +7431,7 @@ impl Transcript {
                 }
             } else {
                 self.user_collapse_scroll = Some(UserCollapseScroll {
-                    started_at: Instant::now(),
+                    started_at: motion::now(),
                     duration_ms,
                     height_delta: (full_h - collapsed_h).max(0.0),
                     row_ix,
@@ -7499,8 +7500,8 @@ impl Transcript {
         let row_ix = scroll.row_ix;
         let initial_top = scroll.initial_top;
         let target_top = scroll.target_top;
-        let raw =
-            (started_at.elapsed().as_secs_f32() / (duration_ms as f32 / 1000.0)).clamp(0.0, 1.0);
+        let raw = (motion::since(started_at).as_secs_f32() / (duration_ms as f32 / 1000.0))
+            .clamp(0.0, 1.0);
         let spec = user_resize_spec(height_delta);
         let progress = spec.progress(raw);
         let desired_top = motion::lerp(initial_top, target_top, progress);
@@ -7544,7 +7545,7 @@ impl Transcript {
         let body_height = shell_ix.map(|ix| {
             let total = self.compact_fold_total(&row_id, ix);
             let fold = self.folds.get(&row_id).copied().unwrap_or_default();
-            compact_body_height(fold, total, motion::reduced_motion(cx), Instant::now())
+            compact_body_height(fold, total, motion::reduced_motion(cx), motion::now())
         });
         let now_open = {
             let entry = self.folds.entry(row_id.clone()).or_default();
@@ -7552,7 +7553,7 @@ impl Transcript {
             entry.from = body_height.unwrap_or(if currently_open { open_height } else { 0.0 });
             entry.open = Some(!currently_open);
             entry.epoch += 1;
-            entry.toggled_at = Some(Instant::now());
+            entry.toggled_at = Some(motion::now());
             entry.disclosure_at = entry.toggled_at;
             !currently_open
         };
@@ -7575,15 +7576,28 @@ impl Transcript {
             // The body stays mounted through the close tween; sweep it out
             // of the row list once the retention window elapses.
             self.compact_fold_settle = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(FOLD_TWEEN_WINDOW + Duration::from_millis(50))
-                    .await;
-                this.update(cx, |this, cx| {
-                    this.last_source = None;
-                    this.sync(cx);
-                    cx.notify();
-                })
-                .ok();
+                loop {
+                    cx.background_executor()
+                        .timer(FOLD_TWEEN_WINDOW + Duration::from_millis(50))
+                        .await;
+                    let swept = this.update(cx, |this, cx| {
+                        let closing = this.folds.get(&row_id).is_some_and(|fold| {
+                            fold.open != Some(true)
+                                && fold
+                                    .toggled_at
+                                    .is_some_and(|at| motion::since(at) < FOLD_TWEEN_WINDOW)
+                        });
+                        if !closing {
+                            this.last_source = None;
+                            this.sync(cx);
+                            cx.notify();
+                        }
+                        !closing
+                    });
+                    if swept.unwrap_or(true) {
+                        break;
+                    }
+                }
             }));
         }
     }
@@ -8083,7 +8097,7 @@ impl Transcript {
                 let tweening = folds[ix].epoch > 0
                     && folds[ix]
                         .toggled_at
-                        .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW);
+                        .is_some_and(|at| motion::since(at) < FOLD_TWEEN_WINDOW);
                 if !opens[ix] && !tweening {
                     self.tool_images.release(&chip, Self::tool_images_of, cx);
                     return None;
@@ -8521,7 +8535,7 @@ impl Transcript {
             && fold.epoch > 0
             && fold
                 .toggled_at
-                .is_some_and(|at| at.elapsed() < Duration::from_millis(duration_ms + 200))
+                .is_some_and(|at| motion::since(at) < Duration::from_millis(duration_ms + 200))
             && !motion::reduced_motion(cx);
         let ellipsis = || div().h(px(line_height)).child("...");
         let body: AnyElement = if animating {
@@ -10077,7 +10091,7 @@ impl Transcript {
         wait: CompactionWait,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let now = Instant::now();
+        let now = motion::now();
         let since = match &self.compaction_wait_since {
             Some((id, last, at)) if *id == chat_id && *last == wait => *at,
             _ => {
@@ -10511,7 +10525,7 @@ impl Transcript {
                     row_key: row.id.clone(),
                     veil: None,
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
-                    now: Instant::now(),
+                    now: motion::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
                     link,
                     workspace_root: workspace_root.clone(),
@@ -10583,7 +10597,7 @@ impl Transcript {
                     row_key: row.id.clone(),
                     veil: veil.clone(),
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
-                    now: Instant::now(),
+                    now: motion::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
                     link,
                     workspace_root: workspace_root.clone(),
@@ -10942,11 +10956,11 @@ impl Transcript {
         let fold = self.folds.get(&work_id).copied().unwrap_or_default();
         let open = fold.open.unwrap_or(false);
         let reduce_motion = motion::reduced_motion(cx);
-        let now = Instant::now();
+        let now = motion::now();
         let animating = !reduce_motion
             && fold
                 .toggled_at
-                .is_some_and(|at| at.elapsed() < TOOL_FOLD.total());
+                .is_some_and(|at| motion::since(at) < TOOL_FOLD.total());
         if !animating {
             // Settled states render plain — open rows untouched, closed rows
             // empty until the settle sweep drops them from the row list.
@@ -11705,7 +11719,7 @@ impl Transcript {
         let arrival_pending = !cx.reduce_motion()
             && self.tool_group_reveals.get(row_id).is_some_and(|reveal| {
                 reveal.starts.iter().flatten().any(|start| {
-                    Instant::now()
+                    motion::now()
                         .checked_duration_since(*start)
                         .unwrap_or_default()
                         < TOOL_CONNECTOR_REVEAL.total()
@@ -11727,7 +11741,7 @@ impl Transcript {
                 .is_some_and(|previous| previous != open)
             {
                 fold.from = reveal.rendered_height;
-                fold.toggled_at = Some(Instant::now());
+                fold.toggled_at = Some(motion::now());
                 fold.disclosure_at = fold.toggled_at;
                 self.folds.insert(row_id.clone(), fold);
             }
@@ -11745,19 +11759,19 @@ impl Transcript {
         let worked_secs = worked_secs.filter(|_| compact_shell);
         if worked_secs.is_some() && self.compact_live_entries.remove(row_id) {
             self.compact_worked_fade_at
-                .insert(row_id.clone(), Instant::now());
+                .insert(row_id.clone(), motion::now());
         }
         let animate_worked = self
             .compact_worked_fade_at
             .get(row_id)
-            .is_some_and(|at| at.elapsed() < motion::FADE_IN.total());
+            .is_some_and(|at| motion::since(*at) < motion::FADE_IN.total());
         let worked_fade_t = match worked_secs {
             Some(_) if animate_worked && !cx.reduce_motion() => self
                 .compact_worked_fade_at
                 .get(row_id)
                 .map(|at| {
                     motion::FADE_IN.progress(
-                        at.elapsed().as_secs_f32() / motion::FADE_IN.total().as_secs_f32(),
+                        motion::since(*at).as_secs_f32() / motion::FADE_IN.total().as_secs_f32(),
                     )
                 })
                 .unwrap_or(1.0),
@@ -11772,7 +11786,7 @@ impl Transcript {
             || (!cx.reduce_motion()
                 && fold
                     .toggled_at
-                    .is_some_and(|at| at.elapsed() < TOOL_FOLD.total()));
+                    .is_some_and(|at| motion::since(at) < TOOL_FOLD.total()));
         let tools = if body_visible {
             tools.as_slice()
         } else {
@@ -11954,9 +11968,9 @@ impl Transcript {
                     };
                     if !cx.reduce_motion() {
                         if let Some(at) = fold.toggled_at {
-                            let t = TOOL_FOLD
-                                .curve
-                                .eval(at.elapsed().as_secs_f32() / TOOL_FOLD.total().as_secs_f32());
+                            let t = TOOL_FOLD.curve.eval(
+                                motion::since(at).as_secs_f32() / TOOL_FOLD.total().as_secs_f32(),
+                            );
                             if t < 1.0 {
                                 motion_active = true;
                             }
@@ -11972,7 +11986,7 @@ impl Transcript {
             )
             .collect();
         let reduce_motion = cx.reduce_motion();
-        let now = Instant::now();
+        let now = motion::now();
         let reveal_progress: Vec<f32> = (0..tools.len())
             .map(|ix| {
                 let start = self
@@ -12136,7 +12150,7 @@ impl Transcript {
             if !reduce_motion
                 && fold
                     .toggled_at
-                    .is_some_and(|at| at.elapsed() < TOOL_FOLD.total())
+                    .is_some_and(|at| motion::since(at) < TOOL_FOLD.total())
             {
                 motion_active = true;
             }
@@ -12312,7 +12326,7 @@ impl Transcript {
                 let animating = dfold.epoch > 0
                     && dfold
                         .toggled_at
-                        .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW);
+                        .is_some_and(|at| motion::since(at) < FOLD_TWEEN_WINDOW);
                 let toggle_key = key.clone();
                 // Opening a stats-only file change fetches its diff at once:
                 // the change IS what the click asks to see, not a stat row
@@ -12361,7 +12375,7 @@ impl Transcript {
                                 entry.from = row_height - base_row_height + CHIP_CARD_HEIGHT;
                                 entry.open = Some(!currently_open);
                                 entry.epoch += 1;
-                                entry.toggled_at = Some(Instant::now());
+                                entry.toggled_at = Some(motion::now());
                                 if !currently_open && let Some(blob_ref) = pending_diff.clone() {
                                     this.spawn_blob_fetch(blob_ref, cx);
                                 }

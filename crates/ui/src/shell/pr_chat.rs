@@ -1128,7 +1128,7 @@ impl Shell {
         }
         if panel.shown != visible {
             panel.shown = visible;
-            panel.motion = (!reduced).then(|| (Instant::now(), visible));
+            panel.motion = (!reduced).then(|| (motion::now(), visible));
             if !visible {
                 panel.sessions_menu = false;
             }
@@ -1137,7 +1137,7 @@ impl Shell {
             Some((at, opening)) => {
                 let total = motion::RESIZE.total().as_secs_f32() * motion::speed_scale();
                 let raw = if total > 0.0 {
-                    at.elapsed().as_secs_f32() / total
+                    motion::since(at).as_secs_f32() / total
                 } else {
                     1.0
                 };

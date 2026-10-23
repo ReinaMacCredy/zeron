@@ -3653,7 +3653,7 @@ impl Shell {
                 from: 0.0,
                 to: 0.0,
                 epoch: drag.slide.epoch,
-                started: std::time::Instant::now(),
+                started: motion::now(),
             });
         slide.retarget(target);
         let (from, to, epoch) = (slide.from, slide.to, slide.epoch);
@@ -3703,7 +3703,7 @@ impl Shell {
                 from: 0.0,
                 to: 0.0,
                 epoch: 0,
-                started: std::time::Instant::now(),
+                started: motion::now(),
             },
             collapsed_height: 0.0,
             section_gaps: Default::default(),
@@ -3712,13 +3712,13 @@ impl Shell {
                 from: f32::from(lifted.y),
                 to: f32::from(lifted.y),
                 epoch: self.pinned_session_drag_generation << 32,
-                started: std::time::Instant::now(),
+                started: motion::now(),
             },
             slide_x: SidebarSessionSlide {
                 from: f32::from(lifted.x),
                 to: f32::from(lifted.x),
                 epoch: self.pinned_session_drag_generation << 32,
-                started: std::time::Instant::now(),
+                started: motion::now(),
             },
         });
         {
@@ -3852,7 +3852,7 @@ impl Shell {
                 self.sidebar_session_return = Some(SidebarSessionReturn {
                     transfer,
                     epoch: self.pinned_session_drag_generation,
-                    started: std::time::Instant::now(),
+                    started: motion::now(),
                 });
                 let epoch = self.pinned_session_drag_generation;
                 cx.spawn(async move |this, cx| {
@@ -3870,16 +3870,16 @@ impl Shell {
                                 if returning.epoch != epoch {
                                     return false;
                                 }
-                                if returning.started.elapsed() >= TAB_SLIDE.total()
-                                    && returning.transfer.slide.started.elapsed()
+                                if motion::since(returning.started) >= TAB_SLIDE.total()
+                                    && motion::since(returning.transfer.slide.started)
                                         >= TAB_SLIDE.total()
-                                    && returning.transfer.source_collapse.started.elapsed()
+                                    && motion::since(returning.transfer.source_collapse.started)
                                         >= TAB_SLIDE.total()
                                     && returning
                                         .transfer
                                         .section_gaps
                                         .values()
-                                        .all(|gap| gap.started.elapsed() >= TAB_SLIDE.total())
+                                        .all(|gap| motion::since(gap.started) >= TAB_SLIDE.total())
                                 {
                                     shell.sidebar_session_return = None;
                                     cx.notify();
@@ -3945,7 +3945,7 @@ impl Shell {
             } else {
                 slide.from = target;
                 slide.to = target;
-                slide.started = std::time::Instant::now();
+                slide.started = motion::now();
             }
         }
         let (from, to) = (transfer.slide.from, transfer.slide.to);
@@ -6781,7 +6781,7 @@ impl Shell {
                             from: 0.0,
                             to: 0.0,
                             epoch: 0,
-                            started: std::time::Instant::now(),
+                            started: motion::now(),
                         });
                 }
                 for (group, gap) in &mut drag.section_gaps {
@@ -7671,7 +7671,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let now = std::time::Instant::now();
+        let now = motion::now();
         let slot = usize::from(!self.state.read(cx).no_project);
         if !leaving && self.chat_work_slide.0 != slot {
             self.chat_work_slide

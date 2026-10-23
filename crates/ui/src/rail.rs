@@ -9,7 +9,7 @@
 
 use gpui::{AnyElement, Context, ListOffset, SharedString, div, prelude::*, px};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 
@@ -260,17 +260,16 @@ impl Transcript {
             return;
         }
         self.set_scroll_task(cx.spawn(async move |this, cx| {
-            let started = Instant::now();
+            let started = motion::now();
             let total = motion::SCROLL_GLIDE.total().mul_f32(motion::speed_scale());
             let mut timeline = GlideTimeline::new();
             let mut height_ema: Option<f32> = None;
             let trace = scroll_trace_enabled();
-            let frames = (total.as_millis() / 16) as usize + 90;
-            for _ in 0..frames {
+            loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(16))
                     .await;
-                let raw = (started.elapsed().as_secs_f32() / total.as_secs_f32()).min(1.0);
+                let raw = (motion::since(started).as_secs_f32() / total.as_secs_f32()).min(1.0);
                 let eased = motion::SCROLL_GLIDE.curve.eval(raw);
                 let frac = timeline.step(eased);
                 let done = this.update(cx, |t, cx| {
@@ -328,7 +327,7 @@ impl Transcript {
                             .unwrap_or(0.0);
                     if trace {
                         tracing::warn!(
-                            ms = started.elapsed().as_millis() as u64,
+                            ms = motion::since(started).as_millis() as u64,
                             eased,
                             here,
                             dist = t.distance_from_bottom(),
@@ -396,15 +395,6 @@ impl Transcript {
                     Ok(false) => {}
                 }
             }
-            // Timeline exhausted (shouldn't happen): land exactly.
-            this.update(cx, |t, cx| {
-                t.list_state().scroll_to(ListOffset {
-                    item_ix: target,
-                    offset_in_item: px(0.0),
-                });
-                cx.notify();
-            })
-            .ok();
         }));
     }
 

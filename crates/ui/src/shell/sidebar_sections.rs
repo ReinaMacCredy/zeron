@@ -703,7 +703,7 @@ impl Shell {
                             from: 0.0,
                             to: 0.0,
                             epoch: 0,
-                            started: std::time::Instant::now(),
+                            started: motion::now(),
                         });
                 slide.retarget(crate::terminal::panel::slide_offset(ix, from, over) * step);
                 if reduced_motion {

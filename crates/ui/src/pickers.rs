@@ -974,7 +974,7 @@ impl EffortTween {
         Self {
             from,
             to,
-            started: std::time::Instant::now(),
+            started: motion::now(),
         }
     }
 
@@ -995,7 +995,7 @@ impl EffortTween {
     fn glide(snap: Option<Self>, target: f32, cx: &App) -> (f32, bool) {
         match snap {
             Some(snap) if (snap.to - target).abs() <= 1e-4 && !motion::reduced_motion(cx) => {
-                snap.eval(motion::SNAP, std::time::Instant::now())
+                snap.eval(motion::SNAP, motion::now())
             }
             _ => (target, false),
         }
@@ -3512,7 +3512,7 @@ impl Pickers {
     /// The pressed-disc scale progress this frame and whether it is mid-flight.
     fn effort_press(&self) -> (f32, bool) {
         self.effort_press
-            .map(|press| press.eval(motion::PRESS, std::time::Instant::now()))
+            .map(|press| press.eval(motion::PRESS, motion::now()))
             .unwrap_or((0.0, false))
     }
 
@@ -5126,7 +5126,7 @@ impl Pickers {
         let (value, moving) = compact::ScalarTransition::sample(
             &mut self.chip_width,
             target,
-            std::time::Instant::now(),
+            motion::now(),
             cx.reduce_motion(),
         );
         self.chip_resizing = moving;

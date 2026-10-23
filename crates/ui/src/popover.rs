@@ -140,7 +140,7 @@ impl<T> Popup<T> {
     pub fn begin_close(&mut self) -> bool {
         match &mut self.inner {
             Some((_, closing @ None)) => {
-                *closing = Some(std::time::Instant::now());
+                *closing = Some(motion::now());
                 true
             }
             _ => false,
@@ -179,7 +179,7 @@ impl<T> Popup<T> {
     /// newer phase's own reap handles it.
     pub fn finish_close(&mut self) {
         if let Some((_, Some(since))) = &self.inner
-            && since.elapsed() >= motion::MENU_OUT.total().mul_f32(motion::speed_scale())
+            && motion::since(*since) >= motion::MENU_OUT.total().mul_f32(motion::speed_scale())
         {
             self.inner = None;
         }
@@ -194,19 +194,24 @@ pub fn reap_popup<V: 'static, T: 'static>(
     popup: impl Fn(&mut V) -> &mut Popup<T> + 'static,
 ) {
     cx.spawn(async move |view, cx| {
-        cx.background_executor()
-            .timer(
-                motion::MENU_OUT
-                    .total()
-                    .mul_f32(motion::speed_scale())
-                    .saturating_add(std::time::Duration::from_millis(20)),
-            )
-            .await;
-        view.update(cx, |view, cx| {
-            popup(view).finish_close();
-            cx.notify();
-        })
-        .ok();
+        loop {
+            cx.background_executor()
+                .timer(
+                    motion::MENU_OUT
+                        .total()
+                        .mul_f32(motion::speed_scale())
+                        .saturating_add(std::time::Duration::from_millis(20)),
+                )
+                .await;
+            let closing = view.update(cx, |view, cx| {
+                popup(view).finish_close();
+                cx.notify();
+                popup(view).is_closing()
+            });
+            if !closing.unwrap_or(false) {
+                break;
+            }
+        }
     })
     .detach();
 }
@@ -467,7 +472,7 @@ fn exit_progress(since: std::time::Instant) -> f32 {
     let raw = if total <= 0.0 {
         1.0
     } else {
-        (since.elapsed().as_secs_f32() / total).clamp(0.0, 1.0)
+        (motion::since(since).as_secs_f32() / total).clamp(0.0, 1.0)
     };
     motion::MENU_OUT.progress(raw)
 }

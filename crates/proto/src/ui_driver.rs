@@ -7,7 +7,7 @@ pub const OBSERVE_ACTIONS: &[&str] = &[
 ];
 
 pub const DRIVE_ACTIONS: &[&str] = &[
-    "click", "move", "drag", "scroll", "key", "type", "press", "action", "set",
+    "click", "move", "drag", "scroll", "key", "type", "press", "action", "set", "clock",
 ];
 
 pub const MAX_WAIT_MS: u64 = 60_000;

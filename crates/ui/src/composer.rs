@@ -2209,7 +2209,7 @@ impl Default for VoiceTween {
         Self {
             from: 0.0,
             to: 0.0,
-            start: Instant::now(),
+            start: motion::now(),
         }
     }
 }
@@ -7367,7 +7367,7 @@ impl Composer {
             return;
         }
         self.running_tab = on;
-        self.running_tab_since = Some(Instant::now());
+        self.running_tab_since = Some(motion::now());
         self.running_ticker = on.then(|| {
             cx.spawn(async move |this, cx| {
                 loop {
@@ -7416,7 +7416,7 @@ impl Composer {
             return target;
         }
         let total = RUNNING_TAB_FADE.total().as_secs_f32() * motion::speed_scale();
-        let raw = since.elapsed().as_secs_f32() / total.max(f32::EPSILON);
+        let raw = motion::since(since).as_secs_f32() / total.max(f32::EPSILON);
         if raw < 1.0 {
             window.request_animation_frame();
         }
@@ -7435,7 +7435,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let now = Instant::now();
+        let now = motion::now();
         let slot = if self.running_tab {
             2.0
         } else if self.mission {
@@ -7887,8 +7887,8 @@ impl Composer {
             mission_plan_doc: true,
             mission_review: true,
             started_missions: HashMap::new(),
-            mission_motion: MissionMotion::at(false, Instant::now()),
-            home_tab_slide: motion::Tween::at(0.0, Instant::now()),
+            mission_motion: MissionMotion::at(false, motion::now()),
+            home_tab_slide: motion::Tween::at(0.0, motion::now()),
             home_tab_bounds: Default::default(),
             dock_reflow: Default::default(),
             dock_height_changed: false,
@@ -7898,7 +7898,7 @@ impl Composer {
             sidechat_count: None,
             last_target_height: 0.0,
             height_morph: None,
-            morph_clock: Instant::now(),
+            morph_clock: motion::now(),
             route_snap_until: None,
             _observe: observe,
             _pickers_observe: pickers_observe,
@@ -8269,10 +8269,10 @@ impl Composer {
             return false;
         }
         self.appshot_entrances
-            .retain(|_, start| start.elapsed().as_secs_f32() < motion::speed_scale());
+            .retain(|_, start| motion::since(*start).as_secs_f32() < motion::speed_scale());
         if !motion::reduced_motion(cx) {
             self.appshot_entrances
-                .insert(appshot.id.clone(), Instant::now());
+                .insert(appshot.id.clone(), motion::now());
         }
         // A capture completing while a queue edit is being saved belongs to
         // the displaced draft; it must not be lost or change the in-flight edit.
@@ -9405,7 +9405,7 @@ impl Composer {
             );
             // Entity-owned timestamps prevent the entrance replaying on route remount.
             if let Some(start) = self.appshot_entrances.get(&appshot.id) {
-                let raw = (start.elapsed().as_secs_f32() / (0.24 * motion::speed_scale()))
+                let raw = (motion::since(*start).as_secs_f32() / (0.24 * motion::speed_scale()))
                     .clamp(0.0, 1.0);
                 if raw < 1.0 && !motion::reduced_motion(cx) {
                     let progress =
@@ -10899,7 +10899,7 @@ impl Composer {
         let state = self.state.read(cx);
         let sidechats = state.live_sidechats_of(&chat.id, chrono::Utc::now());
         let count = sidechats.len();
-        let now = Instant::now();
+        let now = motion::now();
         let roll = match &self.sidechat_count {
             Some((id, _, to, _)) if *id == chat.id && *to == count => self.sidechat_count.clone(),
             Some((id, _, to, _))
@@ -11348,7 +11348,7 @@ impl Composer {
             };
             self.current_key = key;
             self.mission = false;
-            self.mission_motion = MissionMotion::at(false, Instant::now());
+            self.mission_motion = MissionMotion::at(false, motion::now());
             self.prompt_history = None;
             // `failure` deliberately survives navigation: chat-scoped
             // failures render only under their own chat (see `failure_key`),
@@ -11378,7 +11378,7 @@ impl Composer {
                 // always expanded; an established session begins compact.
                 self.expanded_mode = returning_to_new_thread;
                 let now_ms =
-                    self.morph_clock.elapsed().as_secs_f32() * 1000.0 / motion::speed_scale();
+                    motion::since(self.morph_clock).as_secs_f32() * 1000.0 / motion::speed_scale();
                 self.flip_morph = Some(FlipMorph::new_thread_transition(
                     self.last_rendered_height,
                     now_ms,
@@ -13770,12 +13770,13 @@ impl Composer {
     fn update_voice(&mut self, window: &mut Window, cx: &App) -> (f32, Option<VoiceFrame>) {
         use crate::dictation::{Phase, waveform::Mode};
         let now = Instant::now();
+        let tween_now = motion::now();
         let reduced = motion::reduced_motion(cx);
         let dictation = &self.input.read(cx).dictation;
         let active = dictation.phase.active();
         self.voice_tween
-            .retarget(if active { 1.0 } else { 0.0 }, now, reduced);
-        let t = self.voice_tween.value(now);
+            .retarget(if active { 1.0 } else { 0.0 }, tween_now, reduced);
+        let t = self.voice_tween.value(tween_now);
         if active {
             let meter = &dictation.meter;
             let mode = match dictation.phase {
@@ -13802,7 +13803,7 @@ impl Composer {
         } else if t <= 0.0 {
             self.voice_last = None;
         }
-        if !reduced && (active || !self.voice_tween.settled(now)) {
+        if !reduced && (active || !self.voice_tween.settled(tween_now)) {
             // Bars scroll, the glow follows the voice, and the morph advances.
             window.request_animation_frame();
         }
@@ -13958,7 +13959,7 @@ impl Composer {
 
     fn render_mission_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
         let on = self.mission;
-        let t = self.mission_motion.border.value_at(Instant::now());
+        let t = self.mission_motion.border.value_at(motion::now());
         let tone = motion::mix(theme.text_muted, theme.text, t);
         div()
             .flex_none()
@@ -14325,14 +14326,14 @@ impl Render for Composer {
                 self.mission,
                 from,
                 motion::reduced_motion(cx),
-                Instant::now(),
+                motion::now(),
             );
         }
         let lit = self.mission || self.leads_open_mission(cx);
         self.mission_motion
-            .light(lit, motion::reduced_motion(cx), Instant::now());
+            .light(lit, motion::reduced_motion(cx), motion::now());
         self.sync_prediction(cx);
-        let mission_now = Instant::now();
+        let mission_now = motion::now();
         if !self.mission_motion.settled_at(mission_now) {
             window.request_animation_frame();
         }
@@ -14493,7 +14494,7 @@ impl Render for Composer {
         let new_chat = self.bound_chat_id(cx).is_none();
         // Morph clock in ms; dividing by the measurement knob stretches the
         // timeline exactly like shell.rs eval_tween's scaled duration.
-        let now_ms = self.morph_clock.elapsed().as_secs_f32() * 1000.0 / motion::speed_scale();
+        let now_ms = motion::since(self.morph_clock).as_secs_f32() * 1000.0 / motion::speed_scale();
         let route_snap = self
             .route_snap_until
             .is_some_and(|until| Instant::now() < until);

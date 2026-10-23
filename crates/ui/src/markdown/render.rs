@@ -411,7 +411,7 @@ impl RenderOptions {
             tasks: None,
             veil: None,
             cache: None,
-            now: Instant::now(),
+            now: crate::motion::now(),
             copy: None,
             link: None,
             workspace_root: None,
