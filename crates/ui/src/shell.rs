@@ -19308,6 +19308,7 @@ fn nav_history_button(
             .debug_selector(move || id.to_owned())
             .role(gpui::Role::Button)
             .aria_label(label)
+            .aria_disabled(true)
             .size(px(24.0))
             .flex_none()
             .flex()

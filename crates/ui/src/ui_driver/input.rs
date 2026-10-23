@@ -295,6 +295,14 @@ impl Target {
     }
 }
 
+fn enabled(node: tree::Node, element: &selector::Element) -> Result<tree::Node, String> {
+    if !node.disabled {
+        return Ok(node);
+    }
+    let (_, _, raw) = element.selector()?;
+    Err(format!("`{raw}` is disabled: {}", tree::line(&node)))
+}
+
 fn center(node: &tree::Node, (width, height): (f32, f32)) -> Result<Point<Pixels>, String> {
     let Some(b) = node.bounds.filter(|b| !b.is_empty()) else {
         return Err(format!(
@@ -418,6 +426,15 @@ impl Driver {
         Ok((node, viewport))
     }
 
+    async fn find_enabled(
+        &mut self,
+        element: &selector::Element,
+        cx: &mut AsyncApp,
+    ) -> Result<(tree::Node, (f32, f32)), String> {
+        let (node, viewport) = self.find(element, cx).await?;
+        Ok((enabled(node, element)?, viewport))
+    }
+
     fn apply<R>(
         &mut self,
         cx: &mut AsyncApp,
@@ -514,7 +531,14 @@ async fn click(
     held: &[Modifier],
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
-    let (position, modifiers) = (at.point(&mut driver, cx).await?, modifiers(held));
+    let position = match &at {
+        Target::Element(element) => {
+            let (node, viewport) = driver.find_enabled(element, cx).await?;
+            center(&node, viewport)?
+        }
+        at => at.point(&mut driver, cx).await?,
+    };
+    let modifiers = modifiers(held);
     let button = match button {
         Button::Left => MouseButton::Left,
         Button::Right => MouseButton::Right,
@@ -662,7 +686,7 @@ async fn type_text(
     let position = match into {
         TypeAt::Focused => None,
         TypeAt::Target(Target::Element(element)) => {
-            let (node, viewport) = driver.find(&element, cx).await?;
+            let (node, viewport) = driver.find_enabled(&element, cx).await?;
             if node.supports("focus") {
                 let id = NodeId(node.accesskit_id);
                 driver.apply(cx, |window, cx| {
@@ -758,7 +782,7 @@ async fn press(
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
     let action = ax_action(perform.as_deref().unwrap_or("click"))?;
-    let (node, viewport) = driver.find(&element, cx).await?;
+    let (node, viewport) = driver.find_enabled(&element, cx).await?;
     let name = performable(&node, action, viewport)?;
     let data = match (action, value) {
         (AxAction::SetValue, Some(value)) => Some(ActionData::Value(value.into())),
@@ -877,6 +901,25 @@ mod tests {
         );
         empty.bounds = None;
         assert!(center(&empty, (800.0, 600.0)).is_err());
+    }
+
+    #[test]
+    fn a_disabled_element_refuses_and_names_its_selector() {
+        let back = node("e1", "Button", Some("Back"));
+        let select = selector::Element::Select {
+            select: "Button \"Back\"".into(),
+            nth: None,
+        };
+        assert_eq!(enabled(back.clone(), &select), Ok(back.clone()));
+        let mut off = back;
+        off.disabled = true;
+        let error = enabled(off.clone(), &select).unwrap_err();
+        assert!(
+            error.starts_with("`Button \"Back\"` is disabled: e1 Button \"Back\""),
+            "{error}"
+        );
+        let by_ref = enabled(off, &selector::Element::Ref { id: "e1".into() }).unwrap_err();
+        assert!(by_ref.starts_with("`#e1` is disabled"), "{by_ref}");
     }
 
     #[test]

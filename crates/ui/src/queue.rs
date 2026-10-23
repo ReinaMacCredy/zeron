@@ -1207,6 +1207,7 @@ impl Composer {
             .id(SharedString::from(format!("{key}-primary")))
             .role(gpui::Role::Button)
             .aria_label(tooltip)
+            .aria_disabled(!enabled)
             // Both labels occupy the same slot; modifier previews never move
             // the message text, thumbnails, or adjacent actions.
             .w(px(if compact { ROW_CONTROL_SIZE } else { 72.0 }))

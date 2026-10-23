@@ -53,6 +53,8 @@ pub(super) struct Node {
     pub(super) expanded: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) toggled: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(super) disabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) view: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -170,6 +172,8 @@ struct Aria {
     selected: Option<bool>,
     expanded: Option<bool>,
     toggled: Option<String>,
+    #[serde(default)]
+    disabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -252,6 +256,7 @@ pub(super) fn parse_dump(dump: &str, window: u64, refs: &mut Refs) -> Result<Tre
             selected: aria.selected,
             expanded: aria.expanded,
             toggled: aria.toggled.map(|toggled| toggled.to_lowercase()),
+            disabled: aria.disabled,
             view: raw.view,
             element_id: raw.element_id,
             source: raw.source_location,
@@ -302,6 +307,9 @@ pub(super) fn line(node: &Node) -> String {
     }
     if let Some(toggled) = &node.toggled {
         out += &format!(" toggled={toggled}");
+    }
+    if node.disabled {
+        out += " disabled";
     }
     if !node.actions.is_empty() {
         out += &format!(" [{}]", node.actions.join(","));
@@ -685,7 +693,7 @@ pub(super) mod tests {
                     "accesskit_id": "901",
                     "bounds": { "x": 1.0, "y": 2.0, "w": 3.0, "h": 4.0 },
                     "source_location": "crates/ui/src/shell.rs:10:5",
-                    "aria": { "role": "Button", "label": "Go", "on_action": ["Click", "ScrollIntoView"], "toggled": "True" }
+                    "aria": { "role": "Button", "label": "Go", "on_action": ["Click", "ScrollIntoView"], "toggled": "True", "disabled": true }
                 },
                 "c": { "accesskit_id": "902", "aria": { "role": "TextInput", "value": "hi" } },
             },
@@ -700,8 +708,10 @@ pub(super) mod tests {
         assert_eq!(tree.nodes[2].actions, ["click", "scrollIntoView"]);
         assert_eq!(
             line(&tree.nodes[2]),
-            "e3 Button \"Go\" @1,2 3x4 toggled=true [click,scrollIntoView]"
+            "e3 Button \"Go\" @1,2 3x4 toggled=true disabled [click,scrollIntoView]"
         );
+        assert_eq!(json!(tree.nodes[2])["disabled"], true);
+        assert!(json!(tree.nodes[1]).get("disabled").is_none());
         assert_eq!((tree.frame, tree.tab_stops), (7, 4));
         let again = parse_dump(&dump.to_string(), 5, &mut refs).unwrap();
         assert_eq!(again.nodes[2].id, "e3");
