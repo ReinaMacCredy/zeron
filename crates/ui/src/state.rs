@@ -1214,13 +1214,8 @@ impl AppState {
     }
 
     fn withdraw_staged_finding(&mut self, key: &str, comment_id: &str) {
-        if let Some(finding) = comment_id.strip_prefix(crate::review::STAGED_PREFIX)
-            && let Some(run) = self
-                .reviews
-                .get_mut(key)
-                .and_then(|review| review.run.as_mut())
-        {
-            run.withdraw(finding);
+        if let Some(review) = self.reviews.get_mut(key) {
+            review.withdraw_comment(comment_id);
         }
     }
 

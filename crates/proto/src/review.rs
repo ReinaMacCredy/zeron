@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::comments::{CommentSide, ReviewComment};
 use crate::patch::{FileDiff, line_anchor};
 use crate::{
-    AgentProfile, Delegation, FindingOutcome, FindingOutcomeKind, HarnessId, Model, ReasoningLevel,
+    AgentProfile, Chat, CheckoutDiff, Delegation, FindingOutcome, FindingOutcomeKind, HarnessId,
+    Model, ReasoningLevel,
 };
 
 pub const REQUEST_PREFIX: &str = "zeron-review:";
@@ -534,6 +535,11 @@ pub fn read_outcome(status: &str, summary: &str) -> ReadOutcome {
     }
 }
 
+pub fn read_task_view(view: &serde_json::Value) -> ReadOutcome {
+    let field = |key: &str| view.get(key).and_then(|v| v.as_str()).unwrap_or_default();
+    read_outcome(field("status"), field("summary"))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FindingState {
     Open,
@@ -697,6 +703,75 @@ impl ReviewRun {
         self.status == RunStatus::Running && self.task_id.is_some()
     }
 
+    pub fn apply_read(&mut self, outcome: ReadOutcome, reviewed: Option<&str>, restored: bool) {
+        match outcome {
+            ReadOutcome::Stopped => self.status = RunStatus::Stopped,
+            ReadOutcome::Failed(message) => self.status = RunStatus::Failed(message),
+            ReadOutcome::Read(None) => self.status = RunStatus::Unreadable,
+            ReadOutcome::Read(Some(mut findings)) => {
+                let files = crate::patch::parse_patch(reviewed.unwrap_or_default());
+                if restored {
+                    refresh(&mut findings, &files);
+                } else {
+                    place_new(&mut findings, &files);
+                }
+                self.reported = findings.len();
+                self.findings = findings;
+                self.status = RunStatus::Done;
+            }
+        }
+    }
+
+    pub fn apply_start(
+        &mut self,
+        started: Result<StartedReview, String>,
+        previous: Option<ReviewRun>,
+    ) {
+        if self.status != RunStatus::Starting {
+            return;
+        }
+        match started {
+            Ok(started) => {
+                self.task_id = Some(started.task_id);
+                self.reviewed = Some(started.patch);
+                self.note = started.note;
+                self.status = RunStatus::Running;
+            }
+            Err(message) => match previous {
+                Some(mut previous) => {
+                    previous.retry_error = Some(message);
+                    *self = previous;
+                }
+                None => self.status = RunStatus::Failed(message),
+            },
+        }
+    }
+
+    pub fn sync_child(&mut self, delegation: Option<Delegation>, owner_working: bool) -> bool {
+        let changed = self.delegation != delegation || self.owner_working != owner_working;
+        self.delegation = delegation;
+        self.owner_working = owner_working;
+        changed
+    }
+
+    pub fn next_hand(&self) -> Option<(Vec<String>, bool)> {
+        let withdrawals = self.unsent_withdrawals();
+        if withdrawals.is_empty() {
+            Some((self.unsent_hands(), false)).filter(|(ids, _)| !ids.is_empty())
+        } else {
+            Some((withdrawals, true))
+        }
+    }
+
+    pub fn hand_failed(&mut self, ids: &[String], withdraw: bool) {
+        let sent = if withdraw {
+            &mut self.withdrawn
+        } else {
+            &mut self.handed_here
+        };
+        sent.retain(|id| !ids.contains(id));
+    }
+
     pub fn outdated(&self) -> usize {
         self.findings
             .iter()
@@ -782,7 +857,193 @@ pub fn short_sha(sha: &str) -> &str {
         .map_or(sha, |(end, _)| &sha[..end])
 }
 
+pub fn reviewer_child<'a>(
+    chats: &'a [Chat],
+    owner: &str,
+    task_id: Option<&str>,
+) -> Option<&'a Chat> {
+    chats
+        .iter()
+        .filter(|chat| {
+            chat.delegation
+                .as_ref()
+                .is_some_and(|d| d.delegated_by_chat_id == owner && is_review(d))
+        })
+        .filter(|chat| task_id.is_none_or(|id| chat.id == id))
+        .max_by_key(|chat| chat.delegation.as_ref().map(|d| d.started_at))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FinishedRead {
+    pub task_id: String,
+    pub scope: ReviewScope,
+    pub reviewed: Option<String>,
+    pub commit: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct StartedReview {
+    pub task_id: String,
+    pub patch: String,
+    pub note: Option<String>,
+}
+
+pub fn start_params(
+    owner: &str,
+    scope: ReviewScope,
+    commit: Option<&str>,
+    choice: Option<&ReviewerChoice>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "ownerChatId": owner,
+        "scope": scope.key(),
+        "commitSha": commit,
+        "reviewer": choice,
+    })
+}
+
+pub fn diff_base(
+    scope: ReviewScope,
+    commit: Option<&str>,
+    branches: &[String],
+    current: Option<&str>,
+) -> Result<Option<String>, String> {
+    match scope {
+        ReviewScope::Commit if commit.is_none() => Err("Pick a commit".to_string()),
+        ReviewScope::Branch => default_base_ref(branches, current)
+            .map(Some)
+            .ok_or_else(|| "No base branch to compare against".to_string()),
+        _ => Ok(None),
+    }
+}
+
+pub fn checkout_diff_params(
+    cwd: &str,
+    chat_id: &str,
+    scope: ReviewScope,
+    commit: Option<&str>,
+    base: Option<&str>,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "cwd": cwd,
+        "mode": scope.mode(),
+        "chatId": chat_id,
+        "commitSha": commit,
+    });
+    if let Some(base) = base {
+        params["baseRef"] = serde_json::Value::String(base.to_string());
+    }
+    params
+}
+
+pub fn hand_params(
+    owner: &str,
+    task_id: &str,
+    ids: &[String],
+    withdraw: bool,
+) -> serde_json::Value {
+    serde_json::json!({ "ownerChatId": owner, "taskId": task_id, "ids": ids, "withdraw": withdraw })
+}
+
 impl ChatReview {
+    pub fn adopt(&mut self, chats: &[Chat], owner: &str) -> bool {
+        let current = self.run.as_ref().map(|run| run.task_id.clone());
+        let started_at = |chat: &Chat| chat.delegation.as_ref().map(|d| d.started_at);
+        let Some(child) = reviewer_child(chats, owner, None) else {
+            return false;
+        };
+        let adoptable = match &current {
+            None => true,
+            Some(None) => false,
+            Some(Some(task)) => {
+                task != &child.id
+                    && reviewer_child(chats, owner, Some(task))
+                        .is_none_or(|own| started_at(child) > started_at(own))
+            }
+        };
+        let Some((scope, commit)) = child
+            .delegation
+            .as_ref()
+            .and_then(|d| d.client_request_id.as_deref())
+            .and_then(parse_request)
+            .filter(|_| adoptable)
+        else {
+            return false;
+        };
+        let mut run = ReviewRun::new(scope);
+        run.task_id = Some(child.id.clone());
+        run.commit = commit.clone();
+        run.status = RunStatus::Running;
+        if current.is_some() {
+            self.scope = Some(scope);
+            if let Some(sha) = commit {
+                self.commit = Some(CommitPick {
+                    subject: sha.clone(),
+                    sha,
+                });
+            }
+        }
+        self.run = Some(run);
+        true
+    }
+
+    pub fn begin(&mut self, scope: ReviewScope, choice: ReviewerChoice) -> Option<ReviewRun> {
+        let mut run = ReviewRun::new(scope);
+        run.choice = Some(choice);
+        run.commit = self
+            .commit
+            .as_ref()
+            .filter(|_| scope == ReviewScope::Commit)
+            .map(|pick| pick.sha.clone());
+        self.run
+            .replace(run)
+            .filter(|run| run.status == RunStatus::Done && !run.findings.is_empty())
+    }
+
+    pub fn finished(&self, chats: &[Chat], owner: &str) -> Option<FinishedRead> {
+        let run = self
+            .run
+            .as_ref()
+            .filter(|run| run.status == RunStatus::Running)?;
+        let task_id = run.task_id.clone()?;
+        reviewer_child(chats, owner, Some(&task_id))
+            .and_then(|child| child.delegation.as_ref())
+            .filter(|d| !d.is_running())?;
+        Some(FinishedRead {
+            task_id,
+            scope: run.scope,
+            reviewed: run.reviewed.clone(),
+            commit: run.commit.clone(),
+        })
+    }
+
+    pub fn apply_stats(
+        &mut self,
+        scope: ReviewScope,
+        result: Result<(CheckoutDiff, Option<String>), String>,
+    ) {
+        let (diff, base) = match result {
+            Ok(fetched) => fetched,
+            Err(message) => {
+                self.stats.insert(scope, Err(message));
+                return;
+            }
+        };
+        self.stats
+            .insert(scope, Ok((diff.additions, diff.deletions)));
+        if base.is_some() {
+            self.base = base;
+        }
+        if let Some(run) = self
+            .run
+            .as_mut()
+            .filter(|run| run.scope == scope && run.status == RunStatus::Done)
+        {
+            refresh(&mut run.findings, &crate::patch::parse_patch(&diff.patch));
+        }
+    }
+
     pub fn changes(&self, scope: ReviewScope) -> Option<(u32, u32)> {
         self.stats.get(&scope)?.as_ref().ok().copied()
     }
@@ -836,6 +1097,14 @@ impl ChatReview {
             run.handed_here.insert(finding.id.clone());
         }
         staged.iter().map(Finding::comment).collect()
+    }
+
+    pub fn withdraw_comment(&mut self, comment_id: &str) {
+        if let Some(finding) = comment_id.strip_prefix(STAGED_PREFIX)
+            && let Some(run) = self.run.as_mut()
+        {
+            run.withdraw(finding);
+        }
     }
 
     pub fn dismiss(&mut self, id: &str) {
