@@ -2323,6 +2323,80 @@ pub struct TerminalScreen {
     pub cursor_col: usize,
     pub lines: Vec<String>,
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub styled_lines: Vec<Vec<TerminalRun>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TerminalColor {
+    Indexed(u8),
+    Rgb(u8, u8, u8),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalRun {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fg: Option<TerminalColor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bg: Option<TerminalColor>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub italic: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub underline: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dim: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inverse: bool,
+}
+
+impl TerminalRun {
+    pub fn same_style(&self, other: &Self) -> bool {
+        (
+            self.fg,
+            self.bg,
+            self.bold,
+            self.italic,
+            self.underline,
+            self.dim,
+            self.inverse,
+        ) == (
+            other.fg,
+            other.bg,
+            other.bold,
+            other.italic,
+            other.underline,
+            other.dim,
+            other.inverse,
+        )
+    }
+}
+
+const TERMINAL_CUBE_LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+
+/// 16-231 is the xterm cube, left alone in both appearances; 232-255 is the
+/// grey ramp tools use for de-emphasis, so light mode mirrors it.
+pub fn terminal_extended_rgb(dark: bool, index: u8) -> Option<(u8, u8, u8)> {
+    match index {
+        0..=15 => None,
+        16..=231 => {
+            let n = index as usize - 16;
+            Some((
+                TERMINAL_CUBE_LEVELS[n / 36],
+                TERMINAL_CUBE_LEVELS[(n / 6) % 6],
+                TERMINAL_CUBE_LEVELS[n % 6],
+            ))
+        }
+        232..=255 => {
+            let step = index - 232;
+            let v = 8 + 10 * if dark { step } else { 23 - step };
+            Some((v, v, v))
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2438,6 +2512,38 @@ pub struct ChatConnectivity {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn the_terminal_cube_is_appearance_independent_and_the_grey_ramp_mirrors() {
+        for dark in [true, false] {
+            assert_eq!(terminal_extended_rgb(dark, 7), None);
+            assert_eq!(terminal_extended_rgb(dark, 16), Some((0, 0, 0)));
+            assert_eq!(terminal_extended_rgb(dark, 231), Some((255, 255, 255)));
+            assert_eq!(terminal_extended_rgb(dark, 196), Some((255, 0, 0)));
+            assert_eq!(terminal_extended_rgb(dark, 21), Some((0, 0, 255)));
+        }
+        assert_eq!(terminal_extended_rgb(true, 232), Some((8, 8, 8)));
+        assert_eq!(terminal_extended_rgb(true, 255), Some((238, 238, 238)));
+        assert_eq!(terminal_extended_rgb(false, 232), Some((238, 238, 238)));
+        assert_eq!(terminal_extended_rgb(false, 255), Some((8, 8, 8)));
+    }
+
+    #[test]
+    fn a_plain_screen_reply_omits_styled_lines_both_ways() {
+        let screen: TerminalScreen = serde_json::from_value(serde_json::json!({
+            "terminal": { "id": "t", "cwd": "/", "shell": "zsh" },
+            "cols": 80, "rows": 24, "altScreen": false, "cursorRow": 0, "cursorCol": 0,
+            "lines": ["$ ls"], "truncated": false,
+        }))
+        .unwrap();
+        assert!(screen.styled_lines.is_empty());
+        assert!(
+            serde_json::to_value(&screen)
+                .unwrap()
+                .get("styledLines")
+                .is_none()
+        );
+    }
 
     #[test]
     fn task_status_derives_from_completion_then_the_linked_thread() {
