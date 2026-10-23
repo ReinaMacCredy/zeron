@@ -38,6 +38,16 @@ final class GitFlowTests: XCTestCase {
         row.tap()
         XCTAssertTrue(app.tables["pr-board"].waitForExistence(timeout: 10))
         snapshot(app, "git-ios-needs-you-prs-board")
+
+        let accessory = app.buttons["new-session"]
+        XCTAssertTrue(accessory.isHittable)
+        app.tables["pr-board"].cells.matching(NSPredicate(format: "identifier BEGINSWITH 'pr-row-'")).firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["pr-title"].waitForExistence(timeout: 20))
+        XCTAssertFalse(accessory.isHittable, "the PR page hides the New session accessory")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.tables["pr-board"].waitForExistence(timeout: 10))
+        expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: accessory)
+        waitForExpectations(timeout: 5)
     }
 
     func testTheBoardPageAndGitViewsRender() {
@@ -52,6 +62,8 @@ final class GitFlowTests: XCTestCase {
         tabs.buttons.element(boundBy: 1).tap()
         XCTAssertTrue(app.cells.matching(NSPredicate(format: "identifier BEGINSWITH 'diff-file-'")).firstMatch.waitForExistence(timeout: 10))
         snapshot(app, "git-ios-pr-code")
+        scrollTo(app.buttons["Unresolve"].firstMatch, in: app.tables["pr-detail"])
+        snapshot(app, "git-ios-pr-code-threads")
         tabs.buttons.element(boundBy: 2).tap()
         XCTAssertTrue(app.cells.matching(NSPredicate(format: "identifier BEGINSWITH 'pr-activity-'")).firstMatch.waitForExistence(timeout: 10))
         snapshot(app, "git-ios-pr-activity")
@@ -112,6 +124,7 @@ final class GitFlowTests: XCTestCase {
         push.tap()
         let alert = app.alerts.firstMatch
         XCTAssertTrue(alert.waitForExistence(timeout: 5))
+        XCTAssertTrue(alert.buttons["Cancel"].exists)
         snapshot(app, "git-ios-push-confirm")
         alert.buttons["Push"].tap()
         XCTAssertTrue(alert.waitForNonExistence(timeout: 10))
@@ -128,6 +141,7 @@ final class GitFlowTests: XCTestCase {
         merge.tap()
         let alert = app.alerts.firstMatch
         XCTAssertTrue(alert.waitForExistence(timeout: 5))
+        XCTAssertTrue(alert.buttons["Cancel"].exists)
         snapshot(app, "git-ios-merge-confirm")
         alert.buttons["Squash and merge"].tap()
         XCTAssertTrue(app.staticTexts["Pull request merged"].waitForExistence(timeout: 10))
