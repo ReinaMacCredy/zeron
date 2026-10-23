@@ -236,6 +236,8 @@ final class AttachCard: UIView {
     func close(then: ((AttachmentPicker) -> Void)? = nil) {
         guard !closing else { return }
         closing = true
+        isUserInteractionEnabled = false
+        gridHost?.isUserInteractionEnabled = false
         onClose()
         let finish = { [self] in
             dropGridHost()
