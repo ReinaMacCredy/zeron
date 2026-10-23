@@ -1122,7 +1122,7 @@ fn today_card_merges_both_macs_runs_tasks_and_tightest_usage() {
     let usage = today.usage.expect("tightest window");
     assert_eq!(
         (usage.harness.as_str(), usage.window.as_str(), usage.host.device_id.as_str()),
-        ("claude-code", "5h", "dev-mac")
+        ("claude-code", "Session", "dev-mac")
     );
     assert_eq!(usage.resets_in.as_deref(), Some("2h 5m"));
 

@@ -466,7 +466,7 @@ fn demo_accounts(device_id: &str, now: DateTime<Utc>) -> AgentAccountsSnapshot {
                 "id": "reina", "harness": "claude-code", "email": "reina@zeron.sh",
                 "planLabel": "Max 20x", "active": true, "switchable": true,
                 "usageWindows": [
-                    { "label": "5h", "usedFraction": 0.38, "resetsAt": at(125) },
+                    { "label": "Session", "usedFraction": 0.38, "resetsAt": at(125) },
                     { "label": "Week", "usedFraction": 0.21, "resetsAt": at(3 * 24 * 60) }
                 ],
                 "extraUsage": { "enabled": true, "used": 12.4, "limit": 50.0, "currency": "USD" }
@@ -480,7 +480,7 @@ fn demo_accounts(device_id: &str, now: DateTime<Utc>) -> AgentAccountsSnapshot {
             "id": "codex", "harness": "codex", "email": "reina@zeron.sh",
             "planLabel": "Pro", "active": true, "switchable": true,
             "usageWindows": [
-                { "label": "5h", "usedFraction": 0.12, "resetsAt": at(200) },
+                { "label": "Session", "usedFraction": 0.12, "resetsAt": at(200) },
                 { "label": "Week", "usedFraction": 0.30, "resetsAt": at(5 * 24 * 60) }
             ]
         })],
@@ -495,7 +495,7 @@ fn demo_accounts(device_id: &str, now: DateTime<Utc>) -> AgentAccountsSnapshot {
             "id": format!("{device_id}-{harness}"), "harness": harness, "email": "dev@zeron.sh",
             "planLabel": "Max", "active": true,
             "usageWindows": [
-                { "label": "5h", "usedFraction": 0.04 + 0.02 * i as f32, "resetsAt": null },
+                { "label": "Session", "usedFraction": 0.04 + 0.02 * i as f32, "resetsAt": null },
                 { "label": "Week", "usedFraction": 0.08, "resetsAt": null }
             ]
         })
