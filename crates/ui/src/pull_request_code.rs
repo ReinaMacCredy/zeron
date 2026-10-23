@@ -813,6 +813,7 @@ impl PullRequestDetailPage {
             })
             .child(
                 action("pr-previous-file", "Previous file", theme)
+                    .aria_disabled(position <= 1)
                     .when(position <= 1, |el| el.opacity(0.4))
                     .on_click(cx.listener(move |page, _, _, cx| {
                         if let Some(file) = page.active_file().filter(|file| *file > 0) {
@@ -822,6 +823,7 @@ impl PullRequestDetailPage {
             )
             .child(
                 action("pr-next-file", "Next file", theme)
+                    .aria_disabled(position >= file_count)
                     .when(position >= file_count, |el| el.opacity(0.4))
                     .on_click(cx.listener(move |page, _, _, cx| {
                         let next = page.active_file().map_or(0, |file| file + 1);

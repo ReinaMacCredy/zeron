@@ -1,5 +1,7 @@
 //! [`Client`] — the account-scoped root object.
 
+mod host_git;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -8,7 +10,8 @@ use std::time::Duration;
 use chrono::{TimeZone, Utc};
 use tokio_util::sync::CancellationToken;
 use zeron_doc::RegistryDoc;
-use zeron_proto::{Chat, ChatConfig, SidebarPinChange, SidebarSectionChange};
+use zeron_proto::supervisor::{SupervisorSettings, SupervisorSnapshot};
+use zeron_proto::{Chat, ChatConfig, SidebarPinChange, SidebarSectionChange, SidebarSettle};
 
 use crate::attachments::{self, AttachmentCache};
 use crate::auth::TokenProvider;
@@ -23,7 +26,10 @@ use crate::events::{ClientEvent, ClientListener, EventPump};
 use crate::live::LiveBackend;
 use crate::rpc::{FolderListing, ProgressFn, QUEUED_ATTACHMENTS_MIN, RepoRef, capability};
 use crate::session::{HostCapabilities, OutgoingAttachment, RoomState, SessionCore, SessionHandle};
-use crate::workspace::{SearchHit, WorkspaceSnapshot, WorkspaceStore};
+use crate::workspace::{
+    ItemSend, MissionFromChat, MissionOptions, NeedsYouEntry, SearchHit, SidebarView, TaskDetail,
+    TaskDraft, WorkspaceSnapshot, WorkspaceStore,
+};
 use crate::{lock, now_ms, read, write};
 
 /// Attachment read cache budget.
@@ -83,6 +89,7 @@ pub(crate) struct ClientInner {
     /// `owner/name`): starting a Cloud session needs one, and reading it
     /// again would hold the new chat up.
     pub(crate) cloud_repos: Mutex<HashMap<String, crate::cloud::CloudRepoRef>>,
+    tree_stats: Mutex<HashMap<String, zeron_proto::SessionStats>>,
 }
 
 impl Drop for ClientInner {
@@ -135,10 +142,15 @@ impl ClientInner {
             .iter()
             .filter_map(|core| core.send_state().map(|s| (core.chat_id.clone(), s)))
             .collect();
+        let asks: HashMap<String, crate::workspace::Ask> = self
+            .cores()
+            .iter()
+            .filter_map(|core| core.ask().map(|ask| (core.chat_id.clone(), ask)))
+            .collect();
         let synced = self.synced.load(Ordering::Acquire);
         if let Some(revision) =
             self.workspace
-                .recompute(&self.config.device_id, &send_states, synced)
+                .recompute(&self.config.device_id, &send_states, &asks, synced)
         {
             self.events.workspace(revision);
             // Host presence / live status feed every open session's snapshot
@@ -182,7 +194,7 @@ impl ClientInner {
         }
         self.recompute_connectivity();
         self.recompute_workspace();
-        self.reconcile_change_request_watches();
+        self.reconcile_watches();
         // New rows may flip a chat's roomGen / host: attach rooms.
         for core in self.cores() {
             core.ensure_room(self);
@@ -206,6 +218,7 @@ impl ClientInner {
             self.workspace.replace_presence(presence);
         }
         self.recompute_workspace();
+        self.reconcile_watches();
     }
 
     pub(crate) fn connectivity_changed(self: &Arc<Self>) {
@@ -213,8 +226,9 @@ impl ClientInner {
     }
 
     /// PR-status streams for every active chat with a branch (per
-    /// `(device, repo root, branch)`), only while foregrounded.
-    pub(crate) fn reconcile_change_request_watches(self: &Arc<Self>) {
+    /// `(device, repo root, branch)`) and every host's Supervisor and
+    /// sessions, only while foregrounded.
+    pub(crate) fn reconcile_watches(self: &Arc<Self>) {
         let Some(live) = self.live() else { return };
         if !self.foreground.load(Ordering::Acquire) {
             live.relay.stop_watches();
@@ -238,6 +252,41 @@ impl ClientInner {
             })
             .collect();
         live.relay.reconcile_watches(self, targets);
+        let hosts = self
+            .workspace
+            .snapshot()
+            .devices
+            .iter()
+            .filter(|d| d.is_execution_host && !d.is_self)
+            .map(|d| d.id.clone())
+            .collect();
+        live.relay.reconcile_hosts(self, hosts);
+        let limits = self
+            .workspace
+            .snapshot()
+            .devices
+            .iter()
+            .filter(|d| {
+                d.online
+                    && d.capabilities
+                        .iter()
+                        .any(|c| c == zeron_proto::capabilities::LIMIT_RESUME_V1)
+            })
+            .map(|d| d.id.clone())
+            .collect();
+        live.relay.reconcile_limit_watches(self, limits);
+    }
+
+    pub(crate) fn limits_changed(
+        self: &Arc<Self>,
+        device_id: &str,
+        limits: zeron_proto::LimitResumes,
+    ) {
+        if self.workspace.put_limits(device_id, limits) {
+            for core in self.cores() {
+                core.refresh();
+            }
+        }
     }
 
     /// Durable wake: retry until the edge accepts it, including after relaunch.
@@ -467,6 +516,18 @@ impl ClientInner {
         }
     }
 
+    pub(crate) async fn host_first(
+        self: &Arc<Self>,
+        device_id: &str,
+        method: &'static str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        match self.backend() {
+            Backend::Demo(demo) => demo.host_rpc(device_id, method, params).await,
+            Backend::Live(live) => live.relay.first(device_id, method, params).await,
+        }
+    }
+
     /// Fresh socket for the chat's room (retry delivery).
     pub(crate) fn kick_room(&self, chat_id: &str) {
         if let Some(room) = self.session_core(chat_id).and_then(|c| c.room()) {
@@ -483,7 +544,10 @@ impl ClientInner {
         let mut idle: Vec<(i64, String)> = sessions
             .values()
             .filter(|core| {
-                !core.view_attached() && !core.has_pending_sends() && !core.snapshot().streaming
+                !core.view_attached()
+                    && !core.has_pending_sends()
+                    && !core.snapshot().streaming
+                    && core.composer().open_input.is_none()
             })
             .map(|core| (core.touched_ms(), core.chat_id.clone()))
             .collect();
@@ -599,6 +663,7 @@ impl Client {
             synced: AtomicBool::new(false),
             harness_catalogs: Mutex::new(HashMap::new()),
             cloud_repos: Mutex::new(HashMap::new()),
+            tree_stats: Mutex::new(HashMap::new()),
             credentials: credentials.clone(),
             config,
         });
@@ -699,6 +764,85 @@ impl Client {
         self.inner.connectivity()
     }
 
+    pub fn chat(&self, chat_id: &str) -> Option<zeron_proto::Chat> {
+        self.inner.workspace.chat(chat_id)
+    }
+
+    pub fn limit_resume(&self, chat_id: &str) -> Option<zeron_proto::LimitResume> {
+        self.inner.workspace.limit(chat_id)
+    }
+
+    pub async fn resolve_limit_offer(&self, chat_id: &str, choice: &str) -> Result<bool> {
+        self.limit_rpc(
+            chat_id,
+            zeron_rpc::methods::RESOLVE_LIMIT_OFFER,
+            serde_json::json!({ "chatId": chat_id, "choice": choice }),
+        )
+        .await
+    }
+
+    pub async fn set_limit_resume(&self, chat_id: &str, auto: bool) -> Result<bool> {
+        self.limit_rpc(
+            chat_id,
+            zeron_rpc::methods::SET_LIMIT_RESUME,
+            serde_json::json!({ "chatId": chat_id, "auto": auto }),
+        )
+        .await
+    }
+
+    pub async fn chat_usage(&self, chat_id: &str) -> Result<Option<(String, f32)>> {
+        let chat = self
+            .chat(chat_id)
+            .ok_or_else(|| ClientError::NotFound(chat_id.to_owned()))?;
+        let Some(harness) = chat.config.as_ref().map(|c| c.harness) else {
+            return Ok(None);
+        };
+        let reply = self
+            .inner
+            .host_rpc(
+                &chat.device_id,
+                zeron_rpc::methods::LIST_AGENT_ACCOUNTS,
+                serde_json::json!({ "forceUsage": false }),
+            )
+            .await?;
+        let snapshot: zeron_proto::AgentAccountsSnapshot =
+            serde_json::from_value(reply).map_err(|e| ClientError::HostError(e.to_string()))?;
+        Ok(snapshot
+            .busiest_window(harness)
+            .map(|(label, fraction)| (label.to_owned(), fraction)))
+    }
+
+    pub async fn fetch_tool_blob(&self, blob_ref: &str) -> Result<String> {
+        let chat_id = blob_ref.split_once('/').map_or(blob_ref, |(chat, _)| chat);
+        let device = self
+            .chat(chat_id)
+            .map(|c| c.device_id)
+            .ok_or_else(|| ClientError::NotFound(chat_id.to_owned()))?;
+        let reply = self
+            .inner
+            .host_rpc(
+                &device,
+                zeron_rpc::methods::FETCH_TOOL_BLOB,
+                serde_json::json!({ "blobRef": blob_ref }),
+            )
+            .await?;
+        Ok(reply["text"].as_str().unwrap_or_default().to_owned())
+    }
+
+    async fn limit_rpc(
+        &self,
+        chat_id: &str,
+        method: &'static str,
+        params: serde_json::Value,
+    ) -> Result<bool> {
+        let device = self
+            .chat(chat_id)
+            .map(|c| c.device_id)
+            .ok_or_else(|| ClientError::NotFound(chat_id.to_owned()))?;
+        let reply = self.inner.host_rpc(&device, method, params).await?;
+        Ok(reply["changed"].as_bool().unwrap_or(false))
+    }
+
     /// The chat's run configuration (harness/model/effort/options/sandbox).
     pub fn session_config(&self, chat_id: &str) -> Option<ChatConfig> {
         self.inner.workspace.chat(chat_id).and_then(|c| c.config)
@@ -706,6 +850,807 @@ impl Client {
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
         self.workspace().search(query, limit)
+    }
+
+    pub fn mission_intro_due(&self) -> bool {
+        let (state, _) = self.inner.workspace.state();
+        self.workspace().synced && zeron_proto::mission::intro_due(&state.tasks)
+    }
+
+    pub fn task_detail(&self, task_id: &str) -> Option<TaskDetail> {
+        let (state, _) = self.inner.workspace.state();
+        crate::workspace::task_detail(
+            &state,
+            &self.inner.workspace.steps(),
+            &self.workspace(),
+            &self.inner.workspace.supervisors(),
+            task_id,
+        )
+    }
+
+    pub fn task_trees(&self) -> zeron_doc::tree::IndexRows {
+        let (state, _) = self.inner.workspace.state();
+        crate::workspace::task_trees(
+            &state,
+            &self.inner.workspace.steps(),
+            &self.workspace(),
+            &self.inner.workspace.supervisors(),
+        )
+    }
+
+    pub fn task_outline(&self, root_chat_id: &str) -> Vec<crate::workspace::OutlineRow> {
+        let (state, _) = self.inner.workspace.state();
+        let transcripts = self
+            .inner
+            .cores()
+            .into_iter()
+            .map(|core| (core.chat_id.clone(), core.snapshot().transcript_messages()))
+            .collect();
+        crate::workspace::task_outline(
+            &state,
+            &self.inner.workspace.steps(),
+            &self.workspace(),
+            &self.inner.workspace.supervisors(),
+            &crate::lock(&self.inner.tree_stats),
+            &transcripts,
+            root_chat_id,
+        )
+    }
+
+    pub fn watch_outline_docs(&self, root_chat_id: &str) -> Result<()> {
+        let (state, _) = self.inner.workspace.state();
+        let held: Vec<String> = lock(&self.inner.sessions).keys().cloned().collect();
+        let docs = crate::workspace::task_outline_docs(
+            &state,
+            &self.inner.workspace.steps(),
+            &self.workspace(),
+            &self.inner.workspace.supervisors(),
+            root_chat_id,
+            &held,
+        );
+        for doc in docs {
+            self.open_session(&doc)?;
+        }
+        Ok(())
+    }
+
+    pub async fn refresh_outline_stats(&self, root_chat_id: &str) -> Result<bool> {
+        let ids: Vec<String> = self
+            .task_outline(root_chat_id)
+            .into_iter()
+            .filter_map(|row| row.node.chat_id)
+            .collect();
+        let (state, _) = self.inner.workspace.state();
+        let Some(device_id) = state
+            .chats
+            .iter()
+            .find(|chat| chat.id == root_chat_id)
+            .map(|chat| chat.device_id.clone())
+        else {
+            return Ok(false);
+        };
+        let stats: HashMap<String, zeron_proto::SessionStats> = self
+            .host_call(
+                &device_id,
+                zeron_rpc::methods::GET_SESSION_STATS,
+                serde_json::json!({ "chatIds": ids }),
+            )
+            .await?;
+        let mut cache = crate::lock(&self.inner.tree_stats);
+        let changed = ids.iter().any(|id| cache.get(id) != stats.get(id));
+        cache.extend(stats);
+        Ok(changed)
+    }
+
+    pub fn mission_strip(&self, chat_id: &str) -> Option<crate::workspace::MissionStrip> {
+        let (state, _) = self.inner.workspace.state();
+        crate::workspace::mission_strip(
+            &state,
+            &self.inner.workspace.steps(),
+            &self.workspace(),
+            &self.inner.workspace.supervisors(),
+            chat_id,
+        )
+    }
+
+    pub fn brief(&self, task_id: &str, step_id: Option<&str>) -> Option<crate::workspace::Brief> {
+        let (state, _) = self.inner.workspace.state();
+        crate::workspace::task_brief(
+            &state,
+            &self.inner.workspace.steps(),
+            &self.workspace(),
+            &self.inner.workspace.supervisors(),
+            task_id,
+            step_id,
+        )
+    }
+
+    pub async fn plan_estimate(&self, task_id: &str) -> Option<crate::workspace::PlanEstimate> {
+        use zeron_proto::route_preview as rp;
+        let (state, _) = self.inner.workspace.state();
+        let all = self.inner.workspace.steps();
+        let steps = rp::plan_steps(task_id, &all);
+        let task = state.tasks.iter().find(|task| task.id == task_id)?;
+        if steps.is_empty() {
+            return None;
+        }
+        let lead = task
+            .chat_id
+            .as_deref()
+            .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
+            .and_then(|chat| chat.config.as_ref())
+            .map(rp::target_of);
+        let roles = rp::preview_roles(&steps);
+        let preview = if roles.is_empty() {
+            Some(rp::Preview::default())
+        } else {
+            let host = self.task_host(task_id).ok()?;
+            self.inner
+                .host_rpc(
+                    &host,
+                    zeron_rpc::methods::PREVIEW_ROUTES,
+                    serde_json::json!({ "ownerChatId": task.chat_id, "roles": roles, "steps": true }),
+                )
+                .await
+                .ok()
+                .and_then(|reply| serde_json::from_value(reply).ok())
+        };
+        Some(crate::workspace::plan_estimate(
+            &steps,
+            &state.chats,
+            lead.as_ref(),
+            preview.as_ref(),
+        ))
+    }
+
+    /// The user-role entries of the brief's thread, tagged by who sent them.
+    pub async fn brief_messages(
+        &self,
+        brief: &crate::workspace::Brief,
+    ) -> Result<Vec<crate::workspace::BriefMessage>> {
+        let Some(own) = brief.thread_chat_id.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let handle = self.open_session(own)?;
+        let mut rx = handle.subscribe();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(10),
+            rx.wait_for(|snapshot| snapshot.hydrated),
+        )
+        .await;
+        let snapshot = handle.snapshot();
+        let label = |chat: &str| {
+            brief
+                .step_labels
+                .iter()
+                .find(|(id, _)| id == chat)
+                .map(|(_, label)| label.clone())
+        };
+        Ok(snapshot.entries[..snapshot.transcript_len]
+            .iter()
+            .filter(|entry| entry.role() == zeron_doc::MessageRole::User)
+            .map(|entry| {
+                let sender = zeron_proto::supervisor::brief_sender(
+                    entry.message.from_chat_id.as_deref(),
+                    own,
+                    brief.lead_chat_id.as_deref(),
+                    &label,
+                );
+                crate::workspace::BriefMessage {
+                    from_you: sender == zeron_proto::supervisor::BriefSender::You,
+                    tag: sender.tag(),
+                    text: entry
+                        .parts()
+                        .iter()
+                        .filter_map(|part| match part {
+                            zeron_doc::MessagePart::Text { text, .. } => Some(text.trim()),
+                            _ => None,
+                        })
+                        .filter(|text| !text.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n\n"),
+                    at_ms: entry.message.created_at,
+                }
+            })
+            .collect())
+    }
+
+    pub fn watch_state(&self, chat_id: &str) -> Option<crate::workspace::WatchState> {
+        let (state, _) = self.inner.workspace.state();
+        crate::workspace::watch_state(
+            &state,
+            &self.inner.workspace.steps(),
+            &self.workspace(),
+            &self.inner.workspace.supervisors(),
+            chat_id,
+        )
+    }
+
+    fn task_host(&self, task_id: &str) -> Result<String> {
+        let workspace = self.workspace();
+        let page = &workspace.tasks;
+        let row = [
+            &page.missions,
+            &page.needs_you,
+            &page.working,
+            &page.to_do,
+            &page.done,
+        ]
+        .into_iter()
+        .flatten()
+        .find(|row| row.id == task_id)
+        .ok_or_else(|| ClientError::NotFound(task_id.to_owned()))?;
+        row.host
+            .as_ref()
+            .map(|host| host.device_id.clone())
+            .or_else(|| {
+                workspace
+                    .devices
+                    .iter()
+                    .find(|d| d.is_execution_host && d.online && !d.is_self)
+                    .map(|d| d.id.clone())
+            })
+            .ok_or_else(|| ClientError::HostUnavailable("no host is online".into()))
+    }
+
+    fn step_host(&self, step_id: &str) -> Result<String> {
+        let steps = self.inner.workspace.steps();
+        let step = steps
+            .iter()
+            .find(|step| step.id == step_id)
+            .ok_or_else(|| ClientError::NotFound(step_id.to_owned()))?;
+        self.task_host(&step.task_id)
+    }
+
+    async fn mutate(&self, device_id: &str, params: serde_json::Value) -> Result<()> {
+        self.inner
+            .host_rpc(device_id, zeron_rpc::methods::MUTATE, params)
+            .await
+            .map(drop)
+    }
+
+    pub async fn approve_plan(&self, task_id: &str) -> Result<()> {
+        let host = self.task_host(task_id)?;
+        self.mutate(
+            &host,
+            serde_json::json!({ "op": "approvePlan", "taskId": task_id }),
+        )
+        .await
+    }
+
+    pub async fn take_back_plan_approval(&self, task_id: &str) -> Result<()> {
+        let host = self.task_host(task_id)?;
+        self.mutate(
+            &host,
+            serde_json::json!({ "op": "takeBackPlanApproval", "taskId": task_id }),
+        )
+        .await
+    }
+
+    pub async fn retry_step(&self, step_id: &str) -> Result<()> {
+        let host = self.step_host(step_id)?;
+        self.mutate(
+            &host,
+            serde_json::json!({ "op": "retryTaskStep", "stepId": step_id }),
+        )
+        .await
+    }
+
+    pub async fn set_step_skipped(&self, step_id: &str, skipped: bool) -> Result<()> {
+        let host = self.step_host(step_id)?;
+        let patch = zeron_proto::TaskStepPatch {
+            outcome: Some(skipped.then_some(zeron_proto::StepOutcome::Skipped)),
+            ..Default::default()
+        };
+        self.mutate(
+            &host,
+            serde_json::json!({ "op": "updateTaskStep", "stepId": step_id, "patch": patch }),
+        )
+        .await
+    }
+
+    pub async fn set_task_completed(&self, task_id: &str, completed: bool) -> Result<()> {
+        let host = self.task_host(task_id)?;
+        let patch = zeron_proto::TaskPatch {
+            completed: Some(completed),
+            ..Default::default()
+        };
+        self.mutate(
+            &host,
+            serde_json::json!({ "op": "updateTask", "taskId": task_id, "patch": patch }),
+        )
+        .await
+    }
+
+    pub async fn delete_task(&self, task_id: &str) -> Result<()> {
+        let host = self.task_host(task_id)?;
+        self.mutate(
+            &host,
+            serde_json::json!({ "op": "deleteTask", "taskId": task_id }),
+        )
+        .await
+    }
+
+    pub async fn create_task(&self, device_id: &str, draft: TaskDraft) -> Result<String> {
+        self.create_task_due(device_id, draft, None).await
+    }
+
+    /// The Today sheet's add-task row: due on today's work day, on the first
+    /// online Mac (the host a new mission picks).
+    pub async fn add_today_task(&self, title: &str) -> Result<String> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(ClientError::InvalidArgument("empty task title".into()));
+        }
+        let devices = self.workspace().devices.clone();
+        let host = devices
+            .iter()
+            .filter(|d| d.is_execution_host)
+            .find(|d| d.online)
+            .or_else(|| devices.iter().find(|d| d.is_execution_host))
+            .ok_or_else(|| ClientError::HostUnavailable("no Mac to hold the task".into()))?;
+        let due_on = zeron_proto::today::work_day(chrono::Local::now())
+            .format("%Y-%m-%d")
+            .to_string();
+        let draft = TaskDraft {
+            title: title.to_owned(),
+            ..TaskDraft::default()
+        };
+        self.create_task_due(&host.id, draft, Some(due_on)).await
+    }
+
+    async fn create_task_due(
+        &self,
+        device_id: &str,
+        draft: TaskDraft,
+        due_on: Option<String>,
+    ) -> Result<String> {
+        let task_id = crate::new_id();
+        let mut params = serde_json::json!({
+            "op": "createTask",
+            "taskId": task_id,
+            "title": draft.title,
+            "notes": draft.notes,
+            "spaceId": draft.space_id,
+            "dueOn": due_on,
+        });
+        if !draft.images.is_empty() {
+            params["images"] = draft.images.into();
+        }
+        if !draft.context.is_empty() {
+            params["context"] = draft.context.into();
+        }
+        self.mutate(device_id, params).await?;
+        Ok(task_id)
+    }
+
+    pub async fn update_task(&self, task_id: &str, patch: zeron_proto::TaskPatch) -> Result<()> {
+        let host = self.task_host(task_id)?;
+        self.mutate(
+            &host,
+            serde_json::json!({ "op": "updateTask", "taskId": task_id, "patch": patch }),
+        )
+        .await
+    }
+
+    /// The engine creates the chat on whichever Mac receives the call.
+    pub async fn start_task(
+        &self,
+        task_id: &str,
+        device_id: &str,
+        space_id: Option<Option<String>>,
+        config: Option<ChatConfig>,
+        mission: Option<MissionOptions>,
+    ) -> Result<String> {
+        let chat_id = crate::new_id();
+        let mut params = serde_json::json!({
+            "op": "startTask",
+            "taskId": task_id,
+            "chatId": chat_id,
+            "config": config,
+            "orchestrate": mission.is_some(),
+            "approvePlan": mission.is_none_or(|m| m.approve_plan),
+            "sameAgents": mission.is_some_and(|m| m.same_agents),
+            "planDoc": mission.is_some_and(|m| m.plan_doc),
+        });
+        if let Some(space_id) = space_id {
+            params["spaceId"] = space_id.into();
+        }
+        self.mutate(device_id, params).await?;
+        Ok(chat_id)
+    }
+
+    pub async fn assign_task(&self, task_id: &str, chat_id: &str, send: bool) -> Result<()> {
+        let host = self
+            .inner
+            .workspace
+            .chat(chat_id)
+            .map(|chat| chat.device_id)
+            .ok_or_else(|| ClientError::NotFound(chat_id.to_owned()))?;
+        self.assign_task_on(&host, task_id, chat_id, send, None)
+            .await
+    }
+
+    async fn assign_task_on(
+        &self,
+        host: &str,
+        task_id: &str,
+        chat_id: &str,
+        send: bool,
+        mission: Option<MissionOptions>,
+    ) -> Result<()> {
+        self.mutate(
+            host,
+            serde_json::json!({
+                "op": "assignTask",
+                "taskId": task_id,
+                "chatId": chat_id,
+                "send": send,
+                "orchestrate": mission.is_some(),
+                "approvePlan": mission.is_none_or(|m| m.approve_plan),
+                "sameAgents": mission.is_some_and(|m| m.same_agents),
+                "planDoc": mission.is_some_and(|m| m.plan_doc),
+                "attachPlan": false,
+            }),
+        )
+        .await
+    }
+
+    pub async fn start_mission(
+        &self,
+        device_id: &str,
+        draft: TaskDraft,
+        config: Option<ChatConfig>,
+        options: MissionOptions,
+    ) -> Result<String> {
+        let space_id = draft.space_id.clone();
+        let task_id = self.create_task(device_id, draft).await?;
+        let started = self
+            .start_task(&task_id, device_id, Some(space_id), config, Some(options))
+            .await;
+        self.keep_task_if(device_id, task_id, started).await
+    }
+
+    async fn keep_task_if<T>(
+        &self,
+        host: &str,
+        task_id: String,
+        started: Result<T>,
+    ) -> Result<String> {
+        if let Err(err) = started {
+            let _ = self
+                .mutate(
+                    host,
+                    serde_json::json!({ "op": "deleteTask", "taskId": task_id }),
+                )
+                .await;
+            return Err(err);
+        }
+        Ok(task_id)
+    }
+
+    pub async fn start_mission_from_chat(
+        &self,
+        chat_id: &str,
+        draft: TaskDraft,
+        options: MissionOptions,
+        lead: bool,
+    ) -> Result<MissionFromChat> {
+        let chat = self
+            .inner
+            .workspace
+            .chat(chat_id)
+            .ok_or_else(|| ClientError::NotFound(chat_id.to_owned()))?;
+        let host = chat.device_id;
+        let (state, _) = self.inner.workspace.state();
+        let text = format!("{}\n{}", draft.title, draft.notes);
+        let reads = zeron_proto::mission::mission_reads(
+            (!lead).then_some(chat_id),
+            lead.then_some(chat_id),
+            &text,
+            draft.notes,
+            zeron_doc::TASK_CONTEXT_MAX,
+            |id| {
+                state
+                    .chats
+                    .iter()
+                    .any(|c| c.id == id && c.device_id == host)
+            },
+        );
+        let draft = TaskDraft {
+            notes: reads.notes,
+            context: reads.context,
+            space_id: chat.space_id,
+            ..draft
+        };
+        let task_id = if lead {
+            let task_id = self.create_task(&host, draft).await?;
+            let assigned = self
+                .assign_task_on(&host, &task_id, chat_id, true, Some(options))
+                .await;
+            self.keep_task_if(&host, task_id, assigned).await?
+        } else {
+            self.start_mission(&host, draft, chat.config, options)
+                .await?
+        };
+        Ok(MissionFromChat {
+            task_id,
+            capped: reads.capped,
+        })
+    }
+
+    pub async fn edit_task_plan(
+        &self,
+        task_id: &str,
+        edit: Option<zeron_proto::PlanEdit>,
+        approve: bool,
+    ) -> Result<()> {
+        let host = self.task_host(task_id)?;
+        if let Some(edit) = edit {
+            let mut params =
+                serde_json::to_value(edit).map_err(|e| ClientError::HostError(e.to_string()))?;
+            params["op"] = "editTaskPlan".into();
+            params["taskId"] = task_id.into();
+            self.mutate(&host, params).await?;
+        }
+        if approve {
+            self.mutate(
+                &host,
+                serde_json::json!({ "op": "approvePlan", "taskId": task_id }),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn set_watched(&self, chat_id: &str, watched: bool) -> Result<()> {
+        let watch = self
+            .watch_state(chat_id)
+            .ok_or_else(|| ClientError::NotFound(chat_id.to_owned()))?;
+        let (state, _) = self.inner.workspace.state();
+        let params = match zeron_proto::plan_of_chat(&state.tasks, &watch.root_chat_id) {
+            Some(task) => serde_json::json!({
+                "op": "setMissionSupervised",
+                "taskId": task.id,
+                "supervised": watched,
+            }),
+            None => serde_json::json!({
+                "op": "setTreeWatched",
+                "rootChatId": watch.root_chat_id,
+                "watched": watched,
+            }),
+        };
+        self.mutate(&watch.host.device_id, params).await
+    }
+
+    pub async fn set_watch_everything(&self, device_id: &str, on: bool) -> Result<()> {
+        self.mutate(
+            device_id,
+            serde_json::json!({ "op": "setWatchEverything", "on": on }),
+        )
+        .await
+    }
+
+    pub async fn ensure_supervisor(
+        &self,
+        device_id: &str,
+        fallback: Option<ChatConfig>,
+    ) -> Result<String> {
+        let profiles = self
+            .inner
+            .host_rpc(
+                device_id,
+                zeron_rpc::methods::LIST_AGENT_PROFILES,
+                serde_json::json!({}),
+            )
+            .await
+            .ok()
+            .and_then(|reply| {
+                serde_json::from_value::<zeron_proto::AgentProfilesSnapshot>(reply).ok()
+            });
+        let config = profiles
+            .and_then(|snapshot| {
+                snapshot
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == zeron_proto::supervisor::PROFILE_ID)
+                    .map(zeron_proto::supervisor::profile_config)
+            })
+            .or_else(|| {
+                fallback.map(|mut config| {
+                    config.permission_mode = zeron_proto::PermissionMode::Full;
+                    config
+                })
+            })
+            .ok_or_else(|| ClientError::InvalidArgument("pick an agent first".into()))?;
+        let reply = self
+            .inner
+            .host_rpc(
+                device_id,
+                zeron_rpc::methods::ENSURE_SUPERVISOR,
+                serde_json::json!({ "config": config }),
+            )
+            .await?;
+        reply
+            .get("chatId")
+            .and_then(|id| id.as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| ClientError::HostError("EnsureSupervisor sent no chatId".into()))
+    }
+
+    fn supervisor_chat(&self, device_id: &str) -> Result<(String, SupervisorSnapshot)> {
+        let snapshot = self
+            .inner
+            .workspace
+            .supervisors()
+            .get(device_id)
+            .cloned()
+            .ok_or_else(|| ClientError::NotFound(device_id.to_owned()))?;
+        let chat_id = snapshot
+            .chat_id
+            .clone()
+            .ok_or_else(|| ClientError::NotFound("supervisor chat".into()))?;
+        Ok((chat_id, snapshot))
+    }
+
+    /// Stop is an interrupt on the Supervisor chat; the host pauses its queue and reports Stopped.
+    pub async fn stop_supervisor(&self, device_id: &str) -> Result<()> {
+        let (chat_id, _) = self.supervisor_chat(device_id)?;
+        self.inner
+            .host_rpc(
+                device_id,
+                zeron_rpc::methods::QUEUE_COMMAND,
+                serde_json::json!({ "chatId": chat_id, "command": { "kind": "interrupt" } }),
+            )
+            .await
+            .map(drop)
+    }
+
+    pub async fn resume_supervisor(&self, device_id: &str) -> Result<()> {
+        let (chat_id, snapshot) = self.supervisor_chat(device_id)?;
+        for wake in snapshot.held_wakes() {
+            let reply = self
+                .inner
+                .host_rpc(
+                    device_id,
+                    zeron_rpc::methods::STEER_QUEUED_MESSAGE_NOW,
+                    serde_json::json!({ "chatId": chat_id, "id": wake.id }),
+                )
+                .await?;
+            if reply.get("sent").and_then(|sent| sent.as_bool()) == Some(true) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn resolve_supervisor_items(
+        &self,
+        device_id: &str,
+        answers: Vec<(String, String)>,
+    ) -> Result<()> {
+        let keys: Vec<String> = answers
+            .iter()
+            .map(|(item_id, _)| format!("{device_id}/item:{item_id}"))
+            .collect();
+        for ((_, choice), key) in answers.iter().zip(&keys) {
+            self.inner.workspace.set_item_send(
+                key.clone(),
+                Some(ItemSend::Sending {
+                    choice: choice.clone(),
+                }),
+            );
+        }
+        self.inner.recompute_workspace();
+        let body: Vec<serde_json::Value> = answers
+            .iter()
+            .map(|(item_id, choice)| serde_json::json!({ "itemId": item_id, "choice": choice }))
+            .collect();
+        let result = self
+            .mutate(
+                device_id,
+                serde_json::json!({ "op": "resolveSupervisorItems", "answers": body }),
+            )
+            .await;
+        for ((_, choice), key) in answers.into_iter().zip(keys) {
+            let send = match &result {
+                Ok(()) => ItemSend::Sent { choice },
+                Err(err) => ItemSend::Failed {
+                    choice,
+                    reason: err.to_string(),
+                },
+            };
+            self.inner.workspace.set_item_send(key, Some(send));
+        }
+        self.inner.recompute_workspace();
+        result
+    }
+
+    pub async fn refresh_today(&self) {
+        let since_ms = zeron_proto::today::work_day_start(chrono::Local::now()).timestamp_millis();
+        let hosts: Vec<(String, bool)> = self
+            .workspace()
+            .devices
+            .iter()
+            .filter(|d| d.is_execution_host && d.online)
+            .map(|d| {
+                let prs = d
+                    .capabilities
+                    .iter()
+                    .any(|c| c == zeron_proto::capabilities::PULL_REQUESTS_PAGE_V1);
+                (d.id.clone(), prs)
+            })
+            .collect();
+        let fetches = hosts.iter().map(|(device_id, prs)| async move {
+            let request = zeron_proto::TodayRunsRequest {
+                since_ms,
+                chat_ids: None,
+            };
+            let runs = self
+                .inner
+                .host_rpc(
+                    device_id,
+                    zeron_rpc::methods::GET_TODAY_RUNS,
+                    serde_json::to_value(request).unwrap_or_default(),
+                )
+                .await
+                .ok()
+                .and_then(|reply| serde_json::from_value(reply).ok());
+            let accounts = self
+                .inner
+                .host_rpc(
+                    device_id,
+                    zeron_rpc::methods::LIST_AGENT_ACCOUNTS,
+                    serde_json::json!({}),
+                )
+                .await
+                .ok()
+                .and_then(|reply| serde_json::from_value(reply).ok());
+            let prs = if *prs {
+                self.attention_candidates(device_id).await
+            } else {
+                None
+            };
+            let loaded = runs.is_some();
+            self.inner
+                .workspace
+                .put_today(device_id, runs, accounts, prs);
+            loaded
+        });
+        let loaded = futures::future::join_all(fetches).await;
+        self.inner
+            .workspace
+            .set_today_refresh(loaded.into_iter().any(|ok| ok));
+        self.inner.recompute_workspace();
+    }
+
+    pub async fn supervisor_settings(&self, device_id: &str) -> Result<SupervisorSettings> {
+        let reply = self
+            .inner
+            .host_rpc(
+                device_id,
+                zeron_rpc::methods::GET_SUPERVISOR_SETTINGS,
+                serde_json::json!({}),
+            )
+            .await?;
+        serde_json::from_value(reply).map_err(|e| ClientError::HostError(e.to_string()))
+    }
+
+    pub async fn set_supervisor_settings(
+        &self,
+        device_id: &str,
+        before: SupervisorSettings,
+        after: SupervisorSettings,
+    ) -> Result<SupervisorSettings> {
+        let reply = self
+            .inner
+            .host_rpc(
+                device_id,
+                zeron_rpc::methods::SET_SUPERVISOR_SETTINGS,
+                zeron_proto::supervisor::settings_patch(Some(before), after),
+            )
+            .await?;
+        serde_json::from_value(reply).map_err(|e| ClientError::HostError(e.to_string()))
     }
 
     // ── workspace writes ───────────────────────────────────────────────────
@@ -804,6 +1749,21 @@ impl Client {
 
     pub fn unarchive_session(&self, chat_id: &str) -> Result<()> {
         self.chat_write(chat_id, |doc| doc.set_chat_archived(chat_id, false))
+    }
+
+    /// Settle / Unsettle, as the desktop's `setChatSettled`; holds until the chat's next message.
+    pub fn set_session_settled(&self, chat_id: &str, settled: bool) -> Result<()> {
+        let settle = SidebarSettle {
+            settled,
+            at: Utc::now(),
+        };
+        self.chat_write(chat_id, |doc| doc.set_chat_settle(chat_id, settle))
+    }
+
+    /// The front page's Organize and Sort choice (a local preference, as on the desktop).
+    pub fn set_sidebar_view(&self, view: SidebarView) {
+        self.inner.workspace.set_sidebar_view(view);
+        self.inner.recompute_workspace();
     }
 
     pub fn rename_session(&self, chat_id: &str, title: &str) -> Result<()> {
@@ -999,6 +1959,20 @@ impl Client {
         })
     }
 
+    /// Reorder a section between neighbours (either may be `None` at the ends).
+    pub fn move_section(
+        &self,
+        section_id: &str,
+        after: Option<String>,
+        before: Option<String>,
+    ) -> Result<()> {
+        self.section_change(SidebarSectionChange::Move {
+            id: section_id.to_owned(),
+            after,
+            before,
+        })
+    }
+
     pub fn set_section_collapsed(&self, section_id: &str, collapsed: bool) -> Result<()> {
         self.section_change(SidebarSectionChange::Collapse {
             id: section_id.to_owned(),
@@ -1140,6 +2114,20 @@ impl Client {
         Ok(())
     }
 
+    /// A chat the host just created reaches this device by registry sync;
+    /// opening it before then finds nothing.
+    pub(crate) async fn host_created_chat(&self, reply: serde_json::Value) -> Result<String> {
+        let chat: Chat =
+            serde_json::from_value(reply).map_err(|err| ClientError::HostError(err.to_string()))?;
+        for _ in 0..100 {
+            if self.inner.workspace.chat(&chat.id).is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok(chat.id)
+    }
+
     // ── sessions ───────────────────────────────────────────────────────────
 
     /// Open (or return the already-open) session. Instant: the local
@@ -1183,6 +2171,20 @@ impl Client {
                 == Some(None)
         {
             self.inner.nudge_host(chat_id);
+        }
+        if let Some(device_id) = self
+            .inner
+            .workspace
+            .snapshot()
+            .session(chat_id)
+            .map(|row| row.device_id.clone())
+            && !device_id.is_empty()
+            && !lock(&self.inner.harness_catalogs).contains_key(&device_id)
+        {
+            let client = self.clone();
+            crate::runtime::shared().spawn(async move {
+                client.list_harnesses(&device_id).await;
+            });
         }
         if let Some(demo) = self.inner.demo() {
             demo.session_opened(&core);
@@ -1274,8 +2276,7 @@ impl Client {
                     )
                     .await
                     .and_then(|v| {
-                        serde_json::from_value::<Vec<ModelInfo>>(v)
-                            .map_err(|e| ClientError::HostError(e.to_string()))
+                        catalog::decode_models(v).map_err(|e| ClientError::HostError(e.to_string()))
                     });
                 match reply {
                     Ok(list) if !list.is_empty() => {
@@ -1572,7 +2573,7 @@ impl Client {
             live.probe_health();
             self.kick_rooms();
             live.relay.clear_unsupported();
-            self.inner.reconcile_change_request_watches();
+            self.inner.reconcile_watches();
         }
         self.inner.tick();
     }
@@ -1615,6 +2616,19 @@ impl Client {
                 let _ = self.open_session(&row.id);
             }
         }
+    }
+
+    pub fn needs_you(&self) -> Vec<NeedsYouEntry> {
+        let workspace = self.workspace();
+        for row in workspace.sessions.values() {
+            if !row.archived
+                && row.indicator == zeron_proto::ChatIndicator::AwaitingInput
+                && self.inner.session_core(&row.id).is_none()
+            {
+                let _ = self.open_session(&row.id);
+            }
+        }
+        self.workspace().needs_you.clone()
     }
 
     /// Ids of the sessions currently open (warm), most recently used first.

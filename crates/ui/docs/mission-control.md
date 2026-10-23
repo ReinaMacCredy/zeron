@@ -1,6 +1,6 @@
 Mission Control follows every chat that started other agents, and every mission. A chat that hands work to other threads becomes the root of a tree: its children, their children, and the sub-agents they run. A mission is the same tree with a plan: a lead agent plans the work into steps, runs each step on its own thread, checks the results and reports back. You can add a plan to any chat at any time, read and change it, approve it before anything runs, and watch every thread live. A mission is a task on your [Tasks](zeron://docs/tasks) list, so it shows there with the rest of your work.
 
-Mission Control introduces itself once, in a four-page sheet that appears after the update unless you have already started a mission: **Start with a goal**, **Approve the plan**, **Watch every step**, and **A lead and a Supervisor watch**. **Try Mission Control** on its last page opens New chat in Mission Control mode. To see the sheet again, choose **Mission Control intro** in the rail's **Help** menu.
+Mission Control introduces itself once, in a four-page sheet that appears the first time you turn on **Plan first** (or press Shift+Tab in the composer), unless you have already started a mission: **Start with a goal**, **Approve the plan**, **Watch every step**, and **A lead and a Supervisor watch**. **Try Mission Control** on its last page opens New chat in Mission Control mode. To see the sheet again, choose **Mission Control intro** in the rail's **Help** menu.
 
 ## Find missions and trees
 
@@ -44,7 +44,7 @@ While the lead writes, its line reads **Planning**. The planned steps rise in ab
 
 ## Watched by the Supervisor
 
-Every mission is watched by the [Supervisor](zeron://docs/supervisor) unless you turn it off. A tree without a plan, or whose plan has finished, is watched only when you pick it: click **Watch** in its header, read what the Supervisor will do, set its two **Authority** switches if you want, and click **Start watching**. The button turns into **Watched** with a green dot. Click it again for **Stop watching**. With **Watch everything** on, every tree is watched.
+Every mission is watched by the [Supervisor](zeron://docs/supervisor) unless you turn it off. A tree without a plan, or whose plan has finished, is watched only when you pick it: click **Watch** in its header, read what the Supervisor will do, set its two **Authority** switches if you want, and click **Start watching**. The button turns into **Watched** with a green eye. Click it again for **Stop watching**. With **Watch everything** on, every tree is watched.
 
 ## Start a mission from a task
 
@@ -88,7 +88,7 @@ A mission opens its own page instead of the card, from the Tasks list, the board
 
 The header shows the task's title with **Mission**, and under it the lead's agent and model and when the mission started, or when it finished. On the right:
 
-- **Watched** with a green dot while the Supervisor watches the mission, or **Watch**.
+- **Watched** with a green eye while the Supervisor watches the mission, or **Watch**.
 - A status pill: **Needs you** with what waits (**plan review**, **1 question**), **1 step failed**, **✓ Done**, or the lead's state (**Planning**, **Working**, **Idle**). A mission with no steps yet reads **Planning**. Click **Needs you** or **failed** for a small window that lists those steps, with **Open thread** and **Answer**, **Approve and run** for a plan that waits for you, or **Skip** and **Retry**.
 - The next thing to do, when there is one: **Answer** (or **Approve and run**) for the first thing that waits on you, or **Retry step N** for the first failed step.
 - **Mark as done**, or **Reopen** once the mission is done, and **⋯** with **Open lead thread** and **Fold the steps**.
@@ -172,7 +172,7 @@ Click **Mission page** in the strip to open the mission's page with that thread 
 
 ## In the sidebar
 
-A lead shows its step threads indented under its row. Hover the lead and click the chevron at its left edge, or use the right-click menu, to fold them away. A collapsed lead sums up its steps, for example **4 · 1 running**: the number of steps, then the most pressing of asking you, failed, or running. See [Sessions in the sidebar](zeron://docs/sessions-sidebar).
+A lead is one row with a progress ring and its steps done out of all steps, such as **3/7**; click it to open the mission's page. Only the steps that are running or asking you show indented under it, and a step that asks reads **asks you**. One faint row, such as **5 more steps**, counts the rest and opens the mission's page. Hover the lead and click the chevron at its left edge, or use the right-click menu, to fold the steps away. A collapsed lead sums up its steps, for example **4 · 1 running**: the number of steps, then the most pressing of asking you, failed, or running. See [Sessions in the sidebar](zeron://docs/sessions-sidebar).
 
 ## On the Tasks page
 

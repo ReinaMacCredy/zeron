@@ -156,6 +156,59 @@ pub fn parse_full_line_breaks(source: &str) -> BlockTree {
     parse_guarded(source, 0, options(), true)
 }
 
+/// `__init__`, `# comment` lines and indented code are plain developer text, so they stay text.
+pub fn user_markdown(text: &str) -> Option<BlockTree> {
+    let attribution = text
+        .strip_prefix("Message from ")
+        .and_then(|rest| rest.split_once("\n\n"));
+    let body = attribution.map_or(text, |(_, body)| body);
+    let mut tree = parse_full_line_breaks(body);
+    let typed = |runs: &[InlineRun]| {
+        runs.iter()
+            .any(|run| run.style.code || run.style.math || run.style.link.is_some())
+    };
+    let structured = tree.blocks.iter().any(|top| match &top.block {
+        Block::List { .. }
+        | Block::Table { .. }
+        | Block::BlockQuote { .. }
+        | Block::Math { .. } => true,
+        Block::CodeBlock { .. } => body
+            .get(top.range.clone())
+            .map(|source| source.trim_start_matches(' '))
+            .is_some_and(|source| source.starts_with("```") || source.starts_with("~~~")),
+        Block::Paragraph { runs } | Block::Heading { runs, .. } => typed(runs),
+        Block::Rule => false,
+    });
+    if !structured {
+        return None;
+    }
+    if let Some((name, _)) = attribution {
+        let header = Block::Paragraph {
+            runs: vec![
+                InlineRun {
+                    text: "Message from ".into(),
+                    style: InlineStyle::default(),
+                },
+                InlineRun {
+                    text: name.into(),
+                    style: InlineStyle {
+                        bold: true,
+                        ..InlineStyle::default()
+                    },
+                },
+            ],
+        };
+        tree.blocks.insert(
+            0,
+            Arc::new(TopBlock {
+                range: 0..0,
+                block: header,
+            }),
+        );
+    }
+    Some(tree)
+}
+
 fn parse_at(source: &str, offset: usize) -> BlockTree {
     parse_with(source, offset, options())
 }

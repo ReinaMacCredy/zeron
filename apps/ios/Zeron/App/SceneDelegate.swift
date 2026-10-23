@@ -66,8 +66,17 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         showOnboardingIfNeeded()
         if let router = window.rootViewController as? AppRouter, let i = args.firstIndex(of: "-route"), i + 1 < args.count {
             let route = args[i + 1]
-            DispatchQueue.main.async {
-                if route.hasPrefix("chat:") { router.openSession(String(route.dropFirst(5))) }
+            DispatchQueue.main.async { [app] in
+                let needs = route.hasSuffix("/needs-you") || route == "needs-you"
+                let chat = route.hasPrefix("chat:") ? String(route.dropFirst(5).prefix { $0 != "/" }) : nil
+                if let chat { router.openSession(chat) }
+                if needs {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        var top = window.rootViewController
+                        while let next = top?.presentedViewController { top = next }
+                        if let top { NeedsYou.present(app: app, from: top, excluding: chat) }
+                    }
+                }
                 if route == "new" { router.presentNewSession(prompt: nil) }
                 if route == "more" { router.showSettings() }
                 if route == "search" { router.showSearch() }
@@ -75,6 +84,28 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                 // Cloud screens straight away (screenshots, tests).
                 if route.hasPrefix("cloud") || route.hasPrefix("providers") || route.hasPrefix("accounts") || route == "billing" || route == "welcome" { self.openCloudRoute(route) }
                 #endif
+                if route == "prs" { router.showPullRequests(git: false, history: false) }
+                if route == "git" { router.showPullRequests(git: true, history: false) }
+                if route == "git-history" { router.showPullRequests(git: true, history: true) }
+                if route.hasPrefix("pr:") { router.openPullRequest(url: String(route.dropFirst(3)), deviceId: nil) }
+                if route.hasPrefix("tasks"), let shell = router as? MainTabController {
+                    shell.showTasks(String(route.dropFirst(6)))
+                }
+                if route.hasPrefix("page:") || route.hasPrefix("doc:") || route == "whatsnew" {
+                    router.showSettings()
+                    DispatchQueue.main.async { [app = self.app] in
+                        guard let nav = (router as? UITabBarController)?.selectedViewController as? UINavigationController else { return }
+                        if route == "whatsnew" { return WhatsNewViewController.present(from: nav) }
+                        if route.hasPrefix("doc:") {
+                            return nav.pushViewController(DocArticleViewController(id: String(route.dropFirst(4)), title: "Docs"), animated: false)
+                        }
+                        let spec = route.dropFirst(5).split(separator: "@", maxSplits: 1).map(String.init)
+                        let page = spec.first ?? "mac"
+                        guard let host = spec.count > 1 ? app.hostOptions.first(where: { $0.name == spec[1] }) : app.hostOptions.first else { return }
+                        nav.pushViewController(HostPageViewController(app: app, deviceId: host.id, page: "mac", title: host.name), animated: false)
+                        if page != "mac" { nav.pushViewController(HostPageViewController(app: app, deviceId: host.id, page: page, title: ""), animated: false) }
+                    }
+                }
             }
         }
     }

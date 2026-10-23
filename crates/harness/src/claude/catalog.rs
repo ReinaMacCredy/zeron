@@ -7,7 +7,9 @@
 //! CLI can under-report supported modes. The shared initialize probe also supplies
 //! slash commands and is cached by credential and binary context.
 
-use zeron_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel};
+pub use zeron_proto::model_catalog::claude::static_models;
+pub(crate) use zeron_proto::model_catalog::claude::{FULL_LADDER, context_window};
+use zeron_proto::{Model, ReasoningLevel};
 
 /// The ultrathink directive rides every user message as a prompt prefix — that
 /// is how the mode actually works in Claude Code (a prompt convention, not an
@@ -62,84 +64,6 @@ pub(crate) fn to_effort(
     }
     Some(base)
 }
-
-/// A boolean toggle rendered as an off/on select (the Rust `ModelOption` wire
-/// type has no dedicated boolean kind).
-pub(crate) fn toggle(id: &str, label: &str) -> ModelOption {
-    ModelOption {
-        id: id.into(),
-        label: label.into(),
-        choices: vec![
-            ModelOptionChoice {
-                id: "off".into(),
-                label: "Off".into(),
-            },
-            ModelOptionChoice {
-                id: "on".into(),
-                label: "On".into(),
-            },
-        ],
-        default_choice: "off".into(),
-    }
-}
-
-/// The 200K/1M context-window select carried by the long-context models. The
-/// CLI's model table marks every one of them `native_1m`: first-party runs get
-/// the 1M window with or without the `<model>[1m]` suffix (live-verified on
-/// 2.1.274, `modelUsage.contextWindow` = 1000000 for a bare id), so 1M is the
-/// honest default and 200K is the opt-in, applied through
-/// `CLAUDE_CODE_DISABLE_1M_CONTEXT` — the CLI's only kill switch for it.
-pub(crate) fn context_window() -> ModelOption {
-    ModelOption {
-        id: "contextWindow".into(),
-        label: "Context Window".into(),
-        choices: vec![
-            ModelOptionChoice {
-                id: "200k".into(),
-                label: "200K".into(),
-            },
-            ModelOptionChoice {
-                id: "1m".into(),
-                label: "1M".into(),
-            },
-        ],
-        default_choice: "1m".into(),
-    }
-}
-
-pub fn context_window_tokens(choice_id: &str) -> Option<u64> {
-    match choice_id {
-        "200k" => Some(200_000),
-        "1m" => Some(1_000_000),
-        _ => None,
-    }
-}
-
-/// The CLI's `autoCompactWindow` (100K to 1M tokens). `auto` sends nothing,
-/// so the CLI keeps the window tuned for the model; the CLI compacts 33K
-/// before the chosen window (live-probed on 2.1.293 via `get_context_usage`).
-pub(crate) fn auto_compact() -> ModelOption {
-    ModelOption {
-        id: "autoCompact".into(),
-        label: "Auto-compact".into(),
-        choices: AUTO_COMPACT_CHOICES
-            .iter()
-            .map(|(id, label)| ModelOptionChoice {
-                id: (*id).into(),
-                label: (*label).into(),
-            })
-            .collect(),
-        default_choice: "auto".into(),
-    }
-}
-
-const AUTO_COMPACT_CHOICES: &[(&str, &str)] = &[
-    ("auto", "Auto"),
-    ("300k", "300K"),
-    ("400k", "400K"),
-    ("600k", "600K"),
-    ("800k", "800K"),
-];
 
 /// The built-ins a chat may run without, grouped as a person thinks of
 /// them; names from the CLI's `init` frame (2.1.293). Bash, Read, Edit,
@@ -218,78 +142,6 @@ pub(crate) fn builtin_tool_groups() -> Vec<zeron_proto::tools::BuiltinToolGroup>
         },
     )
     .collect()
-}
-
-/// The CLI compacts this far below the chosen window (live-probed on 2.1.293).
-pub const AUTO_COMPACT_HEADROOM: u64 = 33_000;
-
-/// Where a chat with these picks compacts; a custom window applies on 1M only.
-pub fn compact_threshold(window_choice: &str, compact_choice: &str) -> Option<u64> {
-    let window = context_window_tokens(window_choice)?;
-    let chosen = auto_compact_tokens(compact_choice)
-        .filter(|_| window > 200_000)
-        .map_or(window, |tokens| tokens.min(window));
-    Some(chosen.saturating_sub(AUTO_COMPACT_HEADROOM))
-}
-
-/// The CLI reports the model's whole window, never the smaller one the chat's picks set.
-pub fn chat_budget(config: &zeron_proto::ChatConfig) -> Option<u64> {
-    if config.harness != zeron_proto::HarnessId::ClaudeCode {
-        return None;
-    }
-    let pick = |id: &str| config.model_options.get(id).and_then(|v| v.as_str());
-    let window = pick("contextWindow").and_then(context_window_tokens);
-    let compact = pick("autoCompact")
-        .and_then(auto_compact_tokens)
-        .filter(|_| window != Some(200_000));
-    compact.or(window)
-}
-
-pub fn auto_compact_tokens(choice_id: &str) -> Option<u64> {
-    match choice_id {
-        "300k" => Some(300_000),
-        "400k" => Some(400_000),
-        "600k" => Some(600_000),
-        "800k" => Some(800_000),
-        _ => None,
-    }
-}
-
-const FULL_LADDER: &[ReasoningLevel] = &[
-    ReasoningLevel::Low,
-    ReasoningLevel::Medium,
-    ReasoningLevel::High,
-    ReasoningLevel::XHigh,
-    ReasoningLevel::Max,
-    ReasoningLevel::Ultracode,
-    ReasoningLevel::Ultrathink,
-];
-
-/// opus-4-7 / sonnet-5+ tier (claude.ts `claudeEffortsFor`): xhigh native,
-/// no ultracode.
-const XHIGH_LADDER: &[ReasoningLevel] = &[
-    ReasoningLevel::Low,
-    ReasoningLevel::Medium,
-    ReasoningLevel::High,
-    ReasoningLevel::XHigh,
-    ReasoningLevel::Max,
-    ReasoningLevel::Ultrathink,
-];
-
-fn model(
-    id: &str,
-    label: &str,
-    description: &str,
-    ladder: &[ReasoningLevel],
-    options: Vec<ModelOption>,
-) -> Model {
-    Model {
-        id: id.into(),
-        label: label.into(),
-        description: (!description.is_empty()).then(|| description.into()),
-        reasoning_levels: ladder.to_vec(),
-        options,
-    }
 }
 
 /// The curated model list, mirroring claude.ts's `claudeEffortsFor` /
@@ -472,78 +324,6 @@ fn snapshot_base(id: &str) -> Option<&str> {
     (date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit())).then_some(base)
 }
 
-pub fn static_models() -> Vec<Model> {
-    vec![
-        model(
-            "claude-fable-5-1",
-            "Fable 5.1",
-            "Most intelligent model for building agents",
-            FULL_LADDER,
-            vec![context_window(), auto_compact()],
-        ),
-        model(
-            "claude-fable-5",
-            "Fable 5",
-            "Previous generation Fable",
-            FULL_LADDER,
-            vec![context_window(), auto_compact()],
-        ),
-        model(
-            "claude-opus-5-5",
-            "Opus 5.5",
-            "Best for everyday, complex tasks",
-            FULL_LADDER,
-            vec![
-                context_window(),
-                auto_compact(),
-                toggle("fastMode", "Fast Mode"),
-            ],
-        ),
-        model(
-            "claude-opus-4-8",
-            "Opus 4.8",
-            "Previous generation Opus",
-            FULL_LADDER,
-            vec![toggle("fastMode", "Fast Mode")],
-        ),
-        model(
-            "claude-opus-4-7",
-            "Opus 4.7",
-            "Older generation Opus",
-            XHIGH_LADDER,
-            vec![toggle("fastMode", "Fast Mode")],
-        ),
-        model(
-            "claude-sonnet-5-5",
-            "Sonnet 5.5",
-            "Most efficient for simpler tasks",
-            XHIGH_LADDER,
-            vec![context_window(), auto_compact()],
-        ),
-        model(
-            "claude-sonnet-5",
-            "Sonnet 5",
-            "Balanced speed and intelligence",
-            XHIGH_LADDER,
-            vec![context_window(), auto_compact()],
-        ),
-        model(
-            "claude-haiku-5-5",
-            "Haiku 5.5",
-            "Fastest for quick answers",
-            XHIGH_LADDER,
-            vec![context_window(), auto_compact()],
-        ),
-        model(
-            "claude-haiku-4-5",
-            "Haiku 4.5",
-            "Fastest model for everyday tasks",
-            &[],
-            vec![toggle("thinking", "Thinking")],
-        ),
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,11 +331,12 @@ mod tests {
     #[test]
     fn context_window_tokens_covers_every_choice() {
         for choice in context_window().choices {
-            assert!(context_window_tokens(&choice.id).is_some(), "{}", choice.id);
+            assert!(
+                zeron_proto::model_options::context_window_tokens(&choice.id).is_some(),
+                "{}",
+                choice.id
+            );
         }
-        assert_eq!(context_window_tokens("200k"), Some(200_000));
-        assert_eq!(context_window_tokens("1m"), Some(1_000_000));
-        assert_eq!(context_window_tokens("standard"), None);
     }
 
     #[test]

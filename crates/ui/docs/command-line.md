@@ -27,7 +27,7 @@ Running `zeron` with no command opens the desktop app. One engine serves each ma
 | `zeron daemon …` | Runs `zeron headless` as a background service. |
 | `zeron appshot` | Linux only: takes an Appshot in the running Zeron app. |
 
-`zeron --help` lists them, and `zeron <command> --help` explains one. The list also shows `zeron ui`, a developer tool for driving the app. Zeron has a few more commands it runs for itself, such as the tool server it starts next to each agent; you never need to run those.
+`zeron --help` lists them, and `zeron <command> --help` explains one. The list also shows `zeron ui`, a developer tool for reading and driving the app. To hand a bug over, run `zeron ui record start`, reproduce it, then `zeron ui record stop`: it saves your clicks and typing as a script a developer can replay, with text typed into key, API, token, secret or password fields written as `<redacted>`. Zeron has a few more commands it runs for itself, such as the tool server it starts next to each agent; you never need to run those.
 
 ### Sign in and out
 

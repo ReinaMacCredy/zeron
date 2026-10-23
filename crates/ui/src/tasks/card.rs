@@ -64,6 +64,7 @@ pub enum TaskCardEvent {
     },
     OpenChat(String),
     Refused(String),
+    PlanFirst,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,7 +181,7 @@ impl TaskCard {
         });
         let agent = cx.new(|cx| Pickers::new_for_tasks(state.clone(), cx));
         let gallery = cx.new(|cx| ImageGallery::new(state.clone(), cx));
-        let now = Instant::now();
+        let now = motion::now();
         Self {
             gallery,
             picking: None,
@@ -245,7 +246,7 @@ impl TaskCard {
         {
             window.blur();
         }
-        let now = Instant::now();
+        let now = motion::now();
         let reduced = motion::reduced_motion(cx);
         if let Some(mut open) = self.open.take() {
             open.save = None;
@@ -371,7 +372,7 @@ impl TaskCard {
                 cx.notify();
             }),
         ];
-        let now = Instant::now();
+        let now = motion::now();
         let reduced = motion::reduced_motion(cx);
         let previous = self.open.replace(Open {
             task_id,
@@ -995,6 +996,9 @@ impl TaskCard {
         if let Some(open) = self.open.as_mut() {
             open.plan_first = plan_first;
         }
+        if plan_first {
+            cx.emit(TaskCardEvent::PlanFirst);
+        }
         cx.notify();
     }
 
@@ -1367,6 +1371,7 @@ impl TaskCard {
             .debug_selector(move || id.into())
             .role(gpui::Role::Button)
             .aria_label(label.clone())
+            .aria_disabled(!enabled)
             .track_focus(&self.start_focus)
             .tab_index(0)
             .rounded_full()
@@ -1508,7 +1513,7 @@ impl TaskCard {
                         div()
                             .flex_none()
                             .text_color(tone)
-                            .child(super::TasksPage::linked_label(indicator))
+                            .child(zeron_doc::tree::linked_label(indicator))
                     }))
                     .child(
                         div()
@@ -1597,6 +1602,7 @@ impl TaskCard {
             .debug_selector(|| "task-card-link-only".into())
             .role(gpui::Role::Button)
             .aria_label("Link only")
+            .aria_disabled(!enabled)
             .tab_index(0)
             .rounded_full()
             .min_h(px(30.0))
@@ -1641,7 +1647,7 @@ impl TaskCard {
                         div()
                             .text_size(ui_rems(12.5))
                             .text_color(theme.text)
-                            .child("Plan first"),
+                            .child(zeron_proto::mission::PLAN_FIRST),
                     )
                     .child(
                         div()
@@ -1660,7 +1666,7 @@ impl TaskCard {
                     .cursor_pointer()
                     .tab_index(0)
                     .role(gpui::Role::Switch)
-                    .aria_label("Plan first")
+                    .aria_label(zeron_proto::mission::PLAN_FIRST)
                     .aria_toggled(if on {
                         gpui::Toggled::True
                     } else {
@@ -1703,7 +1709,10 @@ impl TaskCard {
         let plan_mode = widgets::segmented(
             theme,
             "task-card-plan-mode",
-            &[(true, "plan.md"), (false, "Steps only")],
+            &[
+                (true, zeron_proto::mission::PLAN_DOC),
+                (false, zeron_proto::mission::STEPS_ONLY),
+            ],
             choice.plan_doc,
             move |plan_doc, _, cx| {
                 weak.update(cx, |card, cx| {
@@ -1714,7 +1723,7 @@ impl TaskCard {
         )
         .debug_selector(|| "task-card-plan-mode".into());
         let review = if choice.plan_doc {
-            "Let me review the plan before it runs"
+            zeron_proto::mission::REVIEW_PLAN
         } else {
             "Show me the plan before it runs"
         };
@@ -2290,7 +2299,7 @@ impl TaskCard {
                             div()
                                 .flex_none()
                                 .text_color(tone)
-                                .child(super::TasksPage::linked_label(linked.indicator)),
+                                .child(zeron_doc::tree::linked_label(linked.indicator)),
                         )
                         .children(
                             linked
@@ -2536,7 +2545,7 @@ pub(super) fn context_chip(
 
 impl Render for TaskCard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let now = Instant::now();
+        let now = motion::now();
         let expired = self.leaving.as_ref().is_some_and(|leaving| {
             leaving
                 .swap_out

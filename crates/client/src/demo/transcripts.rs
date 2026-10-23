@@ -4,13 +4,20 @@
 //! groups, questions, errors, attachments), the synthetic big transcripts
 //! for benchmarks, and the scripted streaming reply.
 
-use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolDiffStat};
-use zeron_proto::computer::ComputerConsentScope;
+use zeron_doc::{
+    MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus, ToolDiffStat,
+};
+use zeron_proto::computer::cards::{
+    COMPUTER_CONSENT_ALLOW, COMPUTER_CONSENT_DECLINE, COMPUTER_CONTROL_ON_DISCLOSURE,
+    COMPUTER_DESKTOP_REVOKED_NOTE, COMPUTER_ESCAPE_STOP_NOTICE, COMPUTER_FOREGROUND_ALLOW,
+    COMPUTER_FOREGROUND_DECLINE, COMPUTER_SETUP_NOTE, COMPUTER_UNAVAILABLE_NOTE,
+    COMPUTER_USER_PAUSE_NOTE_PREFIX, ConsentOutcome, RevokeSource, consent_always_label,
+    foreground_title,
+};
+use zeron_proto::computer::{ComputerConsentApp, ComputerConsentScope};
 use zeron_proto::{
     TodoItem, TodoStatus, ToolCall, UserInputAnswer, UserInputKind, UserInputQuestion,
 };
-
-use crate::computer::{self, ConsentOutcome};
 
 pub(crate) const PHONE: &str = "ios-demo";
 
@@ -368,42 +375,115 @@ fn picker(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                 MessagePart::Input {
                     id: "req-1".into(),
                     request_id: "req-1".into(),
-                    questions: vec![
-                        UserInputQuestion {
-                            approval: false,
-                            id: "q1".into(),
-                            header: "Catalog source".into(),
-                            question:
-                                "Which device should serve harness/model catalogs for the picker?"
-                                    .into(),
-                            options: vec![
-                                "Space's device (Recommended)".into(),
-                                "Local device".into(),
-                                "Union of both".into(),
-                            ],
-                            prefill: None,
-                            multiline: false,
-                            multi_select: false,
-                            kind: None,
-                        },
-                        UserInputQuestion {
-                            approval: false,
-                            id: "q2".into(),
-                            header: "Harnesses".into(),
-                            question: "Which harnesses should the picker offer on phones?".into(),
-                            options: vec![
-                                "Claude Code".into(),
-                                "Codex".into(),
-                                "OpenCode".into(),
-                                "Grok".into(),
-                            ],
-                            prefill: None,
-                            multiline: false,
-                            multi_select: true,
-                            kind: None,
-                        },
-                    ],
-                    resolved: false, answers: None, 
+                    questions: picker_questions(),
+                    resolved: false,
+                    answers: None,
+                    asked_at_ms: None,
+                    answered_at_ms: None,
+                },
+            ],
+        ),
+    ]
+}
+
+pub(crate) fn picker_questions() -> Vec<UserInputQuestion> {
+    vec![
+        UserInputQuestion {
+            approval: false,
+            id: "q1".into(),
+            header: "Catalog source".into(),
+            question: "Which device should serve harness/model catalogs for the picker?".into(),
+            options: vec![
+                "Space's device (Recommended)".into(),
+                "Local device".into(),
+                "Union of both".into(),
+            ],
+            prefill: None,
+            multiline: false,
+            multi_select: false,
+            kind: None,
+        },
+        UserInputQuestion {
+            approval: false,
+            id: "q2".into(),
+            header: "Harnesses".into(),
+            question: "Which harnesses should the picker offer on phones?".into(),
+            options: vec![
+                "Claude Code".into(),
+                "Codex".into(),
+                "OpenCode".into(),
+                "Grok".into(),
+            ],
+            prefill: None,
+            multiline: false,
+            multi_select: true,
+            kind: None,
+        },
+    ]
+}
+
+fn shelf(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    vec![
+        user(
+            "m1",
+            now - 300_000,
+            "Step 4 of Inbox settle shelf: read settle_after_days from the host.",
+        ),
+        assistant(
+            "m2",
+            host,
+            now - 240_000,
+            vec![
+                text(
+                    "t0",
+                    "The phone has no settings row for it yet. One question before I read the setting:",
+                ),
+                MessagePart::Input {
+                    id: super::missions::SHELF_QUESTION.into(),
+                    request_id: super::missions::SHELF_QUESTION.into(),
+                    questions: super::missions::shelf_questions(),
+                    resolved: false,
+                    answers: None,
+                    asked_at_ms: None,
+                    answered_at_ms: None,
+                },
+            ],
+        ),
+    ]
+}
+
+fn approval(
+    host: &str,
+    now: i64,
+    prompt: &str,
+    reply: &str,
+    question: (&str, &str, [&str; 2]),
+) -> Vec<SessionMessageEntry> {
+    let (header, ask, options) = question;
+    vec![
+        user("m1", now - 200_000, prompt),
+        assistant(
+            "m2",
+            host,
+            now - 180_000,
+            vec![
+                text("t0", reply),
+                MessagePart::Input {
+                    id: "req-approve".into(),
+                    request_id: "req-approve".into(),
+                    questions: vec![UserInputQuestion {
+                        approval: true,
+                        id: "approve".into(),
+                        header: header.into(),
+                        question: ask.into(),
+                        options: options.iter().map(|o| (*o).to_owned()).collect(),
+                        prefill: None,
+                        multiline: false,
+                        multi_select: false,
+                        kind: None,
+                    }],
+                    resolved: false,
+                    answers: None,
                     asked_at_ms: None,
                     answered_at_ms: None,
                 },
@@ -637,6 +717,8 @@ fn visuals(host: &str, now: i64) -> Vec<SessionMessageEntry> {
             host,
             now - 290_000,
             vec![
+                text("th", "Three treatments of the onboarding card:"),
+                super::pages::part(),
                 text("t0", "A canvas that follows your finger:"),
                 super::visuals::part(1),
                 text(
@@ -713,34 +795,58 @@ fn consent(
     id: &str,
     scope: ComputerConsentScope,
     question: &str,
+    app: Option<ComputerConsentApp>,
+    tool: Option<&str>,
     answer: Option<&str>,
 ) -> MessagePart {
+    let mut options = vec![COMPUTER_CONSENT_ALLOW.to_owned()];
+    options.extend(app.as_ref().and_then(consent_always_label));
+    options.push(COMPUTER_CONSENT_DECLINE.into());
+    input(
+        id,
+        "Computer",
+        question,
+        options,
+        UserInputKind::Consent {
+            scope,
+            app,
+            tool: tool.map(str::to_owned),
+            params: None,
+        },
+        answer,
+    )
+}
+
+fn input(
+    id: &str,
+    header: &str,
+    question: &str,
+    options: Vec<String>,
+    kind: UserInputKind,
+    answer: Option<&str>,
+) -> MessagePart {
+    let question_id = match kind {
+        UserInputKind::Foreground { .. } => "foreground",
+        _ => "consent",
+    };
     MessagePart::Input {
         id: id.into(),
         request_id: id.into(),
         questions: vec![UserInputQuestion {
             approval: false,
-            id: "consent".into(),
-            header: "Computer".into(),
+            id: question_id.into(),
+            header: header.into(),
             question: question.into(),
-            options: vec![
-                computer::CONSENT_ALLOW.into(),
-                computer::CONSENT_DECLINE.into(),
-            ],
+            options,
             multi_select: false,
-            kind: Some(UserInputKind::Consent {
-                scope,
-                app: None,
-                tool: None,
-                params: None,
-            }),
+            kind: Some(kind),
             prefill: None,
             multiline: false,
         }],
         resolved: answer.is_some(),
         answers: answer.map(|label| {
             vec![UserInputAnswer {
-                question_id: "consent".into(),
+                question_id: question_id.into(),
                 labels: vec![label.into()],
             }]
         }),
@@ -749,12 +855,30 @@ fn consent(
     }
 }
 
+fn app(name: &str, bundle_id: &str) -> Option<ComputerConsentApp> {
+    Some(ComputerConsentApp {
+        name: name.into(),
+        bundle_id: Some(bundle_id.into()),
+        pid: None,
+    })
+}
+
 fn computer(host: &str, now: i64) -> Vec<SessionMessageEntry> {
     let note = |id: &str, at: i64, body: &str, hint: Option<&str>| {
         let mut parts = vec![text("t0", body)];
         parts.extend(hint.map(|hint| text("t1", hint)));
         entry(id, MessageRole::System, host, at, parts)
     };
+    let script = serde_json::json!({
+        "title": "Work out 2 + 2 in Calculator",
+        "app": "Calculator",
+        "code": "let app = await cua.getApp(\"Calculator\");\nawait app.click(12);\nawait app.typeText(\"2+2=\");",
+        "actions": [
+            { "tool": "launch_app" },
+            { "tool": "click", "n": 3 },
+            { "tool": "type_text", "detail": "2+2=" },
+        ],
+    });
     vec![
         user(
             "m1",
@@ -764,18 +888,18 @@ fn computer(host: &str, now: i64) -> Vec<SessionMessageEntry> {
         note(
             "n1",
             now - 560_000,
-            computer::SETUP_NOTE,
+            COMPUTER_SETUP_NOTE,
             Some("Allow Accessibility for Zeron in System Settings, then continue."),
         ),
         note(
             "n2",
             now - 540_000,
-            computer::UNAVAILABLE_NOTE,
+            COMPUTER_UNAVAILABLE_NOTE,
             Some(
                 "OpenCode does not receive Zeron's Computer tools. Switch this chat to Claude, Codex or another agent that does to use Computer.",
             ),
         ),
-        note("n3", now - 520_000, computer::ESCAPE_STOP_NOTICE, None),
+        note("n3", now - 520_000, COMPUTER_ESCAPE_STOP_NOTICE, None),
         assistant(
             "m2",
             host,
@@ -791,26 +915,23 @@ fn computer(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                     "computer-consent-demo-call",
                     ComputerConsentScope::Call,
                     "Allow the agent to run computer_read_clipboard once?",
-                    Some(computer::CONSENT_ALLOW),
+                    None,
+                    Some("computer_read_clipboard"),
+                    Some(COMPUTER_CONSENT_ALLOW),
                 ),
             ],
         ),
-        note("n4", now - 350_000, computer::CONTROL_ON_DISCLOSURE, None),
+        note("n4", now - 350_000, COMPUTER_CONTROL_ON_DISCLOSURE, None),
         assistant(
             "m3",
             host,
             now - 300_000,
             vec![
-                computer_tool(
-                    "c1",
-                    "computer_launch_app",
-                    Some(serde_json::json!({ "name": "Calculator" })),
-                    false,
-                ),
+                computer_tool("c1", "computer", Some(script), false),
                 computer_tool(
                     "c2",
-                    "computer_click",
-                    Some(serde_json::json!({ "x": 380, "y": 220 })),
+                    "computer_launch_app",
+                    Some(serde_json::json!({ "name": "Calculator" })),
                     false,
                 ),
                 computer_tool(
@@ -820,11 +941,49 @@ fn computer(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                     false,
                 ),
                 computer_tool("c4", "computer_read_clipboard", None, false),
-                text("t0", "Calculator shows 4. One more step needs the desktop:"),
+                input(
+                    "computer-foreground-demo",
+                    "Computer",
+                    &foreground_title(Some("Calculator")),
+                    vec![
+                        COMPUTER_FOREGROUND_ALLOW.into(),
+                        COMPUTER_FOREGROUND_DECLINE.into(),
+                    ],
+                    UserInputKind::Foreground {
+                        app: app("Calculator", "com.apple.calculator"),
+                    },
+                    Some(COMPUTER_FOREGROUND_ALLOW),
+                ),
+            ],
+        ),
+        note(
+            "n5",
+            now - 280_000,
+            &format!("{COMPUTER_USER_PAUSE_NOTE_PREFIX}Calculator"),
+            None,
+        ),
+        note(
+            "n6",
+            now - 260_000,
+            COMPUTER_DESKTOP_REVOKED_NOTE,
+            Some(RevokeSource::Stop.hint()),
+        ),
+        note("n7", now - 240_000, "Left 2 Calculator windows open", None),
+        assistant(
+            "m4",
+            host,
+            now - 200_000,
+            vec![
+                text(
+                    "t0",
+                    "Calculator shows 4. To paste it into your shell I need Terminal:",
+                ),
                 consent(
                     "computer-consent-demo-task",
                     ComputerConsentScope::Task,
-                    "Allow Computer for this task? The agent wants to run computer_click and will drive this Mac's apps until the turn ends.",
+                    "Allow Computer for this task? The agent wants to use Terminal and will drive this Mac's apps until the turn ends.",
+                    app("Terminal", "com.apple.Terminal"),
+                    None,
                     None,
                 ),
             ],
@@ -839,6 +998,322 @@ fn short(host: &str, now: i64, prompt: &str, reply: &str) -> Vec<SessionMessageE
     ]
 }
 
+fn spawn(id: &str, task: &str, model: Option<&str>, status: SubagentStatus) -> MessagePart {
+    let input = match model {
+        Some(model) => serde_json::json!({ "description": task, "model": model }),
+        None => serde_json::json!({ "description": task }),
+    };
+    let mut part = tool(
+        id,
+        ToolCall::Unknown {
+            name: format!("Agent: {task}"),
+            input: Some(input),
+        },
+        false,
+        None,
+    );
+    if let MessagePart::Tool {
+        subagent_ref,
+        subagent_status,
+        ..
+    } = &mut part
+    {
+        *subagent_ref = Some(format!("sub-{id}"));
+        *subagent_status = Some(status);
+    }
+    part
+}
+
+fn agents(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    vec![
+        user(
+            "m1",
+            now - 300_000,
+            "Fan the parity audit out to one agent per surface.",
+        ),
+        assistant(
+            "m2",
+            host,
+            now - 280_000,
+            vec![
+                text("t0", "Spawning one agent per surface:"),
+                spawn(
+                    "s1",
+                    "Audit the layout cache",
+                    Some("claude-haiku-5-5"),
+                    SubagentStatus::Done,
+                ),
+                spawn(
+                    "s2",
+                    "Port the veil to Android",
+                    Some("openai/gpt-5.6-sol"),
+                    SubagentStatus::Done,
+                ),
+                spawn(
+                    "s3",
+                    "Review the edge worker",
+                    Some("xai/grok-4.5"),
+                    SubagentStatus::Running,
+                ),
+                spawn("s4", "Summarize the CRDT notes", None, SubagentStatus::Done),
+                text("t1", "Four agents reported back."),
+            ],
+        ),
+        from_thread(
+            "m3",
+            now - 200_000,
+            "chat-cursor",
+            "Delegated task chat-cursor (\"Raise the tab bar hit targets\") completed.\n<agent-response>\nRaised every tab to **44pt** and kept the icons centered.\n</agent-response>",
+        ),
+        assistant(
+            "m4",
+            host,
+            now - 190_000,
+            vec![text("t0", "Cursor finished the hit targets.")],
+        ),
+        from_thread(
+            "m5",
+            now - 150_000,
+            "chat-pi",
+            "The layout pass p95 is 3.1ms on the A17. Want the trace?",
+        ),
+        from_thread(
+            "m6",
+            now - 120_000,
+            "chat-hermes",
+            "Step \"Draft the changelog\" reported back on its thread chat-hermes.\n<agent-response>\nGrouped the changelog by surface: iOS, desktop, engine.\n</agent-response>",
+        ),
+        from_thread(
+            "m7",
+            now - 90_000,
+            "chat-agents",
+            "Continue with the Android bindings once the explorer reports.",
+        ),
+        assistant(
+            "m8",
+            host,
+            now - 80_000,
+            vec![
+                text("t0", "Delegating the remaining surfaces:"),
+                delegate(
+                    "d1",
+                    "Raise the tab bar hit targets",
+                    Some("chat-cursor"),
+                    None,
+                ),
+                delegate("d2", "Find the flaky e2e on CI", Some("chat-devin"), None),
+                delegate("d3", "Tune the edge cache headers", Some("chat-grok"), None),
+                delegate(
+                    "d4",
+                    "Map the Android bindings",
+                    None,
+                    Some(zeron_proto::ChildRoute {
+                        source: zeron_proto::ChildRoute::CHOSEN_BY_AGENT.into(),
+                        role: Some("explorer".into()),
+                        ..Default::default()
+                    }),
+                ),
+                started_thread("c1", "Changelog draft", "chat-hermes"),
+            ],
+        ),
+    ]
+}
+
+fn delegate(
+    id: &str,
+    task: &str,
+    child: Option<&str>,
+    route: Option<zeron_proto::ChildRoute>,
+) -> MessagePart {
+    let mut part = tool(
+        id,
+        ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "delegate_task".into(),
+            input: Some(serde_json::json!({ "task": task })),
+        },
+        false,
+        None,
+    );
+    if let MessagePart::Tool {
+        subagent_ref,
+        delegate_route,
+        ..
+    } = &mut part
+    {
+        *subagent_ref = child.map(str::to_owned);
+        *delegate_route = route;
+    }
+    part
+}
+
+fn started_thread(id: &str, title: &str, chat_id: &str) -> MessagePart {
+    let mut part = tool(
+        id,
+        ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "create_thread".into(),
+            input: Some(serde_json::json!({ "title": title })),
+        },
+        false,
+        None,
+    );
+    if let MessagePart::Tool { subagent_ref, .. } = &mut part {
+        *subagent_ref = Some(chat_id.into());
+    }
+    part
+}
+
+fn from_thread(id: &str, at: i64, from: &str, body: &str) -> SessionMessageEntry {
+    let mut entry = user(id, at, body);
+    entry.from_chat_id = Some(from.into());
+    entry
+}
+
+fn system(id: &str, host: &str, at: i64, parts: Vec<MessagePart>) -> SessionMessageEntry {
+    entry(id, MessageRole::System, host, at, parts)
+}
+
+fn seams(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    let packet = "User: Bench the layout pass on the A17.\nAssistant: p95 is 3.1ms; the markdown prepare dominates.\nUser: Can the prepare move off the main thread?\nAssistant: It already runs on the layout worker.";
+    vec![
+        user("m1", now - 600_000, "Bench the layout pass on the A17."),
+        assistant(
+            "m2",
+            host,
+            now - 590_000,
+            vec![text("t0", "p95 is **3.1ms**; the markdown prepare dominates.")],
+        ),
+        system(
+            "m3",
+            host,
+            now - 500_000,
+            vec![MessagePart::Handoff {
+                id: "h0".into(),
+                harness: zeron_proto::HarnessId::ClaudeCode,
+                text: packet.into(),
+                route: zeron_doc::parts::HandoffRoute {
+                    from_harness: Some(zeron_proto::HarnessId::Codex),
+                    from_model: Some("gpt-5.6-sol".into()),
+                    to_model: Some("claude-opus-5".into()),
+                    source_chat_id: Some("chat-pi".into()),
+                    source_title: Some("Bench the layout pass".into()),
+                    kind: Default::default(),
+                },
+            }],
+        ),
+        user(
+            "m4",
+            now - 400_000,
+            "Now profile the scroll path:\n\n- frame time at `120Hz`\n- the $O(n)$ row walk on each fling",
+        ),
+        system(
+            "m5",
+            host,
+            now - 399_000,
+            vec![MessagePart::Classifier {
+                id: "k0".into(),
+                record: zeron_doc::parts::ClassifierRecord {
+                    harness: Some(zeron_proto::HarnessId::ClaudeCode),
+                    model: Some("claude-sonnet-5".into()),
+                    verdict: zeron_doc::parts::ClassifierVerdict::Carry,
+                    classifier_verdict: None,
+                    decided_by: zeron_doc::parts::DecidedBy::Stage1,
+                    duration_ms: 820,
+                    context_tokens: 48_200,
+                    input: "Now profile the scroll path:\n\n- frame time at `120Hz`\n- the $O(n)$ row walk on each fling".into(),
+                    reply: "CARRY: same benchmark thread, new surface.".into(),
+                    stage2_reply: None,
+                    input_tokens: Some(1_240),
+                    output_tokens: Some(12),
+                },
+            }],
+        ),
+        assistant(
+            "m6",
+            host,
+            now - 380_000,
+            vec![text("t0", "Scroll stays under 2ms per frame.")],
+        ),
+        system(
+            "m7",
+            host,
+            now - 300_000,
+            vec![
+                text("t0", "Context compacted"),
+                text("t1", "Older turns were summarized to free the context window."),
+            ],
+        ),
+        system("m8", host, now - 200_000, vec![text("t0", "Host restarted")]),
+        user("m9", now - 120_000, zeron_proto::RESUME_PROMPT),
+        assistant(
+            "m10",
+            host,
+            now - 100_000,
+            vec![
+                tool(
+                    "v0",
+                    ToolCall::Mcp {
+                        server: "zeron".into(),
+                        tool: "device_open".into(),
+                        input: None,
+                    },
+                    false,
+                    None,
+                ),
+                tool(
+                    "v1",
+                    ToolCall::Mcp {
+                        server: "zeron".into(),
+                        tool: "device_screenshot".into(),
+                        input: None,
+                    },
+                    false,
+                    Some(
+                        r#"{"device":{"name":"iPhone 17 Pro"},"screenshot":{"mimeType":"image/png","width":1206,"height":2622}}"#,
+                    ),
+                ),
+                tool(
+                    "a0",
+                    ToolCall::Unknown {
+                        name: zeron_proto::ADVISOR_TOOL_NAME.into(),
+                        input: None,
+                    },
+                    false,
+                    None,
+                ),
+                text("t1", "Back on the scroll profile."),
+            ],
+        ),
+        user(
+            "m11",
+            now - 60_000,
+            &format!(
+                "Address these before merging.\n\n{}\n- crates/mobile/src/layout/rows.rs:412 (R): The divider should keep its hint.\n\n{}\n> Pull request #94 in zeron-sh/zeron: Transcript seams on iOS\n> Adds peer rows, delegate chips and dividers to the phone transcript.\n\n> Checks: 2 of 3 passed\n> ios-build: pending",
+                zeron_proto::badges::COMMENT_BLOCK_HEADER,
+                zeron_proto::badges::PR_CONTEXT_HEADER,
+            ),
+        ),
+        assistant(
+            "m12",
+            host,
+            now - 50_000,
+            vec![
+                tool(
+                    "t-skill",
+                    ToolCall::Unknown {
+                        name: "Skill".into(),
+                        input: Some(serde_json::json!({ "skill": "review" })),
+                    },
+                    false,
+                    Some("Launching skill: review"),
+                ),
+                text("t0", "Kept the hint on the divider; `ios-build` is green now."),
+            ],
+        ),
+    ]
+}
+
 /// Fixture transcript for a demo chat (`None` = starts empty).
 pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<SessionMessageEntry> {
     let now = last_activity;
@@ -846,6 +1321,28 @@ pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<Sess
         "chat-veil" => veil(host, crate::now_ms()),
         "chat-picker" => picker(host, now),
         "chat-tabs" => tabs(host, now),
+        "chat-approve-test" => approval(
+            host,
+            now,
+            "Run the mobile tests before we tag.",
+            "Running the mobile crate's tests first.",
+            (
+                "Approve command",
+                "Codex wants to run `cargo test -p zeron-mobile`. Allow it?",
+                ["Yes", "No"],
+            ),
+        ),
+        "chat-approve-push" => approval(
+            host,
+            now,
+            "Ship the release branch.",
+            "The branch is ready; publishing it needs a push.",
+            (
+                "Allow Bash?",
+                "Claude wants to use Bash: git push origin release",
+                ["Allow", "Deny"],
+            ),
+        ),
         "chat-errored" => errored(host, now),
         "chat-ios-scroll" => scroll(host, now),
         "chat-home" => home(host, now),
@@ -888,6 +1385,33 @@ pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<Sess
             "Presence beats spam the DO.",
             "Batched to one beat per 25s.",
         ),
+        "chat-lead-ios" => short(
+            host,
+            now,
+            "Plan the iOS install flow: install sheet, sign-in, TestFlight, then push, the widget and release notes.",
+            "The plan is ready: six steps, one screen each. I'll wait for your review before step 1.",
+        ),
+        "supervisor-dev-mac" => short(
+            host,
+            now,
+            "Wake: step failed, needs you on Build iOS App Install.",
+            "Asked you whether to ship to TestFlight before the widget; the lead holds step 3 until you answer.",
+        ),
+        "supervisor-dev-mini" => short(
+            host,
+            now,
+            "Wake: step failed on Inbox settle shelf.",
+            "Re-briefed step 3 to use the system swipe actions.",
+        ),
+        "chat-agents" => agents(host, now),
+        "chat-cursor" => short(
+            host,
+            now,
+            "Raise the tab bar hit targets",
+            "Raised every tab to **44pt** and kept the icons centered.",
+        ),
+        "chat-seams" => seams(host, now),
+        "chat-shelf-4" => shelf(host, now),
         _ => Vec::new(),
     }
 }
@@ -1034,7 +1558,7 @@ pub(crate) fn answered(labels: &[String]) -> Vec<Step> {
 pub(crate) fn consent_answered(outcome: Option<ConsentOutcome>) -> Vec<Step> {
     let reply = match outcome {
         Some(ConsentOutcome::Allowed | ConsentOutcome::AlwaysAllowed) => {
-            "Clicked **=** — Calculator shows 4 again, so the sum checks out."
+            "Pasted 4 into Terminal, so the sum checks out."
         }
         _ => "Stopping here: I won't touch the desktop without your go-ahead.",
     };

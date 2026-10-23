@@ -253,7 +253,8 @@ impl Shell {
                         | ComposerEvent::OpenChat(_)
                         | ComposerEvent::OpenChanges
                         | ComposerEvent::StartMission(_)
-                        | ComposerEvent::OpenTaskCenter(_) => {}
+                        | ComposerEvent::OpenTaskCenter(_)
+                        | ComposerEvent::PlanFirst => {}
                         ComposerEvent::UnsentChanged => cx.notify(),
                         ComposerEvent::ThreadMentionDropped => this.accept_command_palette_drop(),
                         ComposerEvent::OpenComputerSetup { missing } => {

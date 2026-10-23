@@ -64,7 +64,7 @@ impl TaskCenter {
             return;
         };
         let previous = self.authority.ready().copied();
-        let patch = crate::supervisor::settings_patch(previous, settings);
+        let patch = zeron_proto::supervisor::settings_patch(previous, settings);
         self.authority = popover::Loadable::Ready(settings);
         self.authority_task = Some(cx.spawn(async move |center, cx| {
             let saved = engine

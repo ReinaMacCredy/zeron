@@ -1,6 +1,6 @@
 use super::*;
 use crate::tasks::thread_tree::{NodeKind, TreeNode, tree_rows};
-use crate::tasks::tree::{self, Status};
+use crate::tasks::tree::{self, Status, StatusTone};
 use crate::tasks::{StripTree, StripTreeEvent, TreeHost};
 
 const OUTLINE_WIDTH: f32 = 480.0;
@@ -140,7 +140,7 @@ impl TaskCenter {
         let (done, working) = (count(Status::Done), count(Status::Running));
         let asking = nodes.iter().find(|node| node.status == Status::Waiting);
         let (status, word) = match asking {
-            Some(node) if node.kind == NodeKind::Root => (Status::Waiting, "Needs you".into()),
+            Some(node) if node.kind == NodeKind::Root => (Status::Waiting, node.word.into()),
             Some(node) => (Status::Waiting, format!("Needs you \u{b7} {}", node.title)),
             None if settled => (Status::Done, "Done".into()),
             None => (nodes[0].status, nodes[0].word.to_string()),
@@ -717,7 +717,7 @@ impl TaskCenter {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let now = Instant::now();
+        let now = motion::now();
         let reduced = motion::reduced_motion(cx);
         let (chat, nodes) = {
             let state = self.state.read(cx);

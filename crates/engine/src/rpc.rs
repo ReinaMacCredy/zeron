@@ -670,6 +670,8 @@ struct ReadTerminalParams {
     chat_id: String,
     #[serde(default)]
     lines: Option<usize>,
+    #[serde(default)]
+    styled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2283,6 +2285,31 @@ impl EngineRpc {
         self.file_search_root(p).await
     }
 
+    async fn chat_page(&self, chat_id: &str, path: String) -> Result<String, RpcError> {
+        let cwd = self
+            .workspace
+            .chat(chat_id)
+            .map_err(|e| RpcError::Failed(e.to_string()))?
+            .and_then(|chat| chat.cwd)
+            .ok_or_else(|| {
+                RpcError::BadParams("this chat has no folder for `path`; pass `html`".into())
+            })?;
+        let root = crate::repos::resolve_chat_cwd(&cwd, &self.repos.scratch_root())
+            .map_err(RpcError::Failed)?;
+        let home = crate::repos::session_home_dir().ok();
+        tokio::task::spawn_blocking(move || {
+            crate::html_render::workspace_page(
+                std::path::Path::new(&root),
+                home.as_deref(),
+                zeron_proto::html_render::CHAT_FOLDER,
+                &path,
+            )
+        })
+        .await
+        .map_err(|e| RpcError::Failed(e.to_string()))?
+        .map_err(RpcError::BadParams)
+    }
+
     async fn source_control_checkout(
         &self,
         target: &zeron_proto::WorkspaceTarget,
@@ -3409,6 +3436,8 @@ fn forwardable(method: &str) -> bool {
             | methods::POLL_AGENT_LOGIN
             | methods::CANCEL_AGENT_LOGIN
             | methods::RELAY_AGENT_LOGIN_CALLBACK
+            // The usage summary reads this device's agent session logs.
+            | methods::GET_USAGE_SUMMARY
             // Uploads/attachments target the chat's host device (the agent reads
             // the committed file from that device's disk).
             | methods::UPLOAD_CHUNK
@@ -6144,8 +6173,7 @@ impl RpcService for EngineRpc {
                                 .map_err(|error| RpcError::Failed(error.to_string()))?;
                         if tree.revision != request.expected_revision {
                             return Err(RpcError::Failed(
-                                "The working tree changed since it was shown. Check the refreshed list and try again."
-                                    .into(),
+                                zeron_proto::git_tab::WORKING_TREE_CHANGED.into(),
                             ));
                         }
                         let result =
@@ -6661,6 +6689,7 @@ impl RpcService for EngineRpc {
                         &p.terminal_id,
                         &p.chat_id,
                         p.lines.unwrap_or(80).clamp(1, 2000),
+                        p.styled,
                     )
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&screen)
@@ -6868,7 +6897,8 @@ impl RpcService for EngineRpc {
             }
             methods::READ_ATTACHMENT_CHUNK => {
                 let p: ReadAttachmentChunkParams = parse_params(params)?;
-                // Path jail: the uploads dir plus every workspace-known chat cwd.
+                // Path jail: the uploads dir, the ACP registry icons, and every
+                // workspace-known chat cwd.
                 let roots: Vec<std::path::PathBuf> = self
                     .workspace
                     .read_chats()
@@ -6876,6 +6906,11 @@ impl RpcService for EngineRpc {
                     .into_iter()
                     .filter_map(|chat| chat.cwd)
                     .map(std::path::PathBuf::from)
+                    .chain(
+                        self.provider_instances
+                            .as_ref()
+                            .map(|store| store.data_dir().join("registry-icons")),
+                    )
                     .collect();
                 let uploads = self.uploads.clone();
                 let chunk = tokio::task::spawn_blocking(move || {
@@ -7244,11 +7279,35 @@ impl RpcService for EngineRpc {
                         "html_preview needs this chat's live Zeron run".into(),
                     ));
                 }
-                let preview =
-                    crate::html_render::preview(&self.html_preview, p.html, p.width, p.appearance)
-                        .await
-                        .map_err(RpcError::Failed)?;
+                let html = match (p.html, p.path) {
+                    (Some(html), None) => html,
+                    (None, Some(path)) => self.chat_page(&p.chat_id, path).await?,
+                    _ => {
+                        return Err(RpcError::BadParams(
+                            "give `html` or `path`, one of them".into(),
+                        ));
+                    }
+                };
+                let preview = crate::html_render::preview(
+                    &self.html_preview,
+                    html,
+                    p.width,
+                    p.appearance,
+                    p.inspect,
+                )
+                .await
+                .map_err(RpcError::Failed)?;
                 RpcReply::value(&preview)
+            }
+            methods::READ_WORKSPACE_PAGE => {
+                let p: zeron_proto::html_render::ReadWorkspacePageParams = parse_params(params)?;
+                if self.sessions.computer_run(&p.chat_id, &p.run_secret).is_none() {
+                    return Err(RpcError::Failed(
+                        "reading a page by `path` needs this chat's live Zeron run".into(),
+                    ));
+                }
+                let html = self.chat_page(&p.chat_id, p.path).await?;
+                RpcReply::value(&serde_json::json!({ "html": html }))
             }
             methods::WATCH_HTML_PREVIEW_HOST => Ok(RpcReply::Stream(
                 self.html_preview
@@ -7913,6 +7972,7 @@ mod tests {
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));
         assert!(forwardable(methods::QUEUE_COMMAND));
+        assert!(forwardable(methods::GET_USAGE_SUMMARY));
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));
         assert!(forwardable(methods::FETCH_ALL));

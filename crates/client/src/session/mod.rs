@@ -9,10 +9,15 @@
 //!
 //! The host writes all transcript entries and command outcomes.
 
+mod background;
+mod compaction;
+mod prediction;
+mod review;
 mod snapshot;
 #[cfg(test)]
 mod tests;
 pub(crate) mod transcript;
+mod host_watch;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,13 +31,15 @@ use zeron_doc::{
 };
 use zeron_proto::{
     ChatIndicator, ContextUsage, RunRequest, SandboxLevel, UserInputAnswer, UserInputQuestion,
-    WorktreeSpec,
+    WorktreeSpec, transcript::CompactionWait,
 };
 
+pub use background::BackgroundRoster;
+pub use review::{NextReviewer, ReviewChip, ReviewSnapshot, model_levels};
 pub use snapshot::{
     AppendHint, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest, LiveStatus,
-    LocalEcho, PendingKind, PendingSend, QueueGate, QueueItem, RoomState, SessionSnapshot,
-    SnapshotDelta,
+    LocalEcho, PendingKind, PendingSend, QueueGate, QueueItem, QueuePrimaryAction, RoomState,
+    SessionSnapshot, SnapshotDelta,
 };
 use transcript::{Dirty, Tracker};
 
@@ -104,6 +111,13 @@ pub enum SendOutcome {
     Steered { message_id: String },
     /// Parked on the shared queue.
     Queued { queue_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillFile {
+    pub path: String,
+    pub text: String,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,6 +196,15 @@ struct CoreState {
     hydrated: bool,
     transcript_revision: u64,
     composer_revision: u64,
+    token_rate: Option<u32>,
+    compaction: Option<(CompactionWait, i64)>,
+    /// This device's own `CompactChat` is in flight.
+    compacting: bool,
+    kept_full_history: Option<i64>,
+    prediction: Option<zeron_proto::prediction::ComposerPrediction>,
+    session: Option<zeron_proto::Session>,
+    shell_output: Option<(String, Vec<String>)>,
+    review: review::ReviewState,
 }
 
 pub(crate) struct SessionCore {
@@ -204,6 +227,10 @@ pub(crate) struct SessionCore {
     /// under it, so an older read can't land after a newer one.
     recompute_gate: Mutex<()>,
     view_attached: AtomicBool,
+    rate_watch: Mutex<Option<tokio_util::sync::CancellationToken>>,
+    prediction_watch: Mutex<Option<tokio_util::sync::CancellationToken>>,
+    session_watch: Mutex<Option<tokio_util::sync::CancellationToken>>,
+    output_watch: Mutex<Option<tokio_util::sync::CancellationToken>>,
     /// Last open/attach/detach (warm-set eviction order).
     touched_ms: std::sync::atomic::AtomicI64,
 }
@@ -255,11 +282,23 @@ impl SessionCore {
                 hydrated: false,
                 transcript_revision: 0,
                 composer_revision: 0,
+                token_rate: None,
+                compaction: None,
+                compacting: false,
+                kept_full_history: None,
+                prediction: None,
+                session: None,
+                shell_output: None,
+                review: review::ReviewState::default(),
             }),
             transcript_tx,
             composer: RwLock::new(composer),
             recompute_gate: Mutex::new(()),
             view_attached: AtomicBool::new(false),
+            rate_watch: Mutex::new(None),
+            prediction_watch: Mutex::new(None),
+            session_watch: Mutex::new(None),
+            output_watch: Mutex::new(None),
             touched_ms: std::sync::atomic::AtomicI64::new(now_ms()),
         });
         // Coalesced republish for remote imports (a backfill of N rows costs
@@ -425,6 +464,17 @@ impl SessionCore {
         oldest_state(&lock(&self.state).pending)
     }
 
+    pub(crate) fn ask(&self) -> Option<crate::workspace::Ask> {
+        let request = self.composer().open_input.clone()?;
+        Some(
+            if self.snapshot().input_answers.contains_key(&request.request_id) {
+                crate::workspace::Ask::Answered(request.request_id)
+            } else {
+                crate::workspace::Ask::Open(request)
+            },
+        )
+    }
+
     pub(crate) fn has_pending_sends(&self) -> bool {
         !lock(&self.state).pending.is_empty()
             || self.room().is_some_and(|room| room.has_pending_pushes())
@@ -437,12 +487,14 @@ impl SessionCore {
         let now = now_ms();
         let degraded = client.chat_delivery_degraded(&self.chat_id);
         let workspace = client.workspace.snapshot();
-        let (indicator_working, working_since_ms) = workspace
+        let (indicator_working, working_since_ms, compacting, classifying) = workspace
             .session(&self.chat_id)
-            .map_or((false, None), |row| {
+            .map_or((false, None, false, None), |row| {
                 (
-                    row.host_indicator == ChatIndicator::Working,
+                    row.host_indicator == ChatIndicator::Working && !row.held_by_subagents,
                     row.working_since_ms,
+                    row.compacting,
+                    row.classifying.clone(),
                 )
             });
         // A Cloud chat whose machine isn't up yet: it is being started (or
@@ -453,6 +505,7 @@ impl SessionCore {
         });
         drop(workspace);
         let mut transcript_event = None;
+        let ask_before = self.ask();
         let send_before;
         let send_after;
         {
@@ -476,14 +529,35 @@ impl SessionCore {
                 .entries()
                 .last()
                 .is_some_and(|e| e.is_streaming());
+            let working = indicator_working || streaming;
+            let wait = CompactionWait::of(
+                compacting.then(|| {
+                    zeron_doc::schema::boundary_compaction(
+                        st.tracker.entries().iter().map(|e| &*e.message),
+                    )
+                }),
+                classifying.as_ref(),
+                st.session.as_ref().and_then(|session| session.compact_plan),
+                !working,
+            );
+            st.compaction = match (wait, st.compaction.take()) {
+                (Some(wait), Some((last, since))) if wait == last => Some((wait, since)),
+                (wait, _) => wait.map(|wait| (wait, now)),
+            };
             let live = LiveFlags {
-                working: indicator_working || streaming,
+                working,
                 working_since_ms,
                 cloud_booting,
+                token_rate: st.token_rate.filter(|_| working),
+                limits_rev: client.workspace.limits_rev(),
+                compaction: st.compaction.clone(),
             };
             let placeholder_changed = refresh_setup_placeholder(&mut st, cloud_booting);
             let live_changed = previous.working != live.working
+                || previous.compaction != live.compaction
                 || previous.working_since_ms != live.working_since_ms
+                || previous.token_rate != live.token_rate
+                || previous.limits_rev != live.limits_rev
                 || previous.hydrated != st.hydrated
                 || placeholder_changed;
             let answers = sent_answers(&st.commands, now);
@@ -510,8 +584,11 @@ impl SessionCore {
             client.events.session(&self.chat_id, revision);
         }
         self.recompute_composer(&client);
-        if send_before != send_after {
+        if send_before != send_after || ask_before != self.ask() {
             client.recompute_workspace();
+        }
+        if self.view_attached() {
+            self.sync_review(&client);
         }
     }
 
@@ -531,6 +608,25 @@ impl SessionCore {
         let device = workspace.device(&host_id);
         let capabilities =
             client.host_capabilities(&host_id, row.as_ref().and_then(|r| r.harness.as_deref()));
+        let queue = st
+            .queue
+            .iter()
+            .map(|item| {
+                let mut queued = queue_item(
+                    item,
+                    &client.config.device_id,
+                    &st.queue_actions_pending,
+                    &capabilities,
+                );
+                queued.from_label = zeron_proto::transcript::queue_from_label(
+                    &self.chat_id,
+                    item.from_chat_id.as_deref(),
+                    &item.text,
+                    |id| client.workspace.chat(id).and_then(|chat| chat.title),
+                );
+                queued
+            })
+            .collect();
         let indicator = row.as_ref().map_or(ChatIndicator::Idle, |r| r.indicator);
         let host_indicator = row
             .as_ref()
@@ -539,7 +635,21 @@ impl SessionCore {
             host_indicator,
             ChatIndicator::Working | ChatIndicator::AwaitingInput
         );
-        let turn_running = host_indicator == ChatIndicator::Working || snapshot.streaming;
+        let parked = row.as_ref().is_some_and(|r| r.held_by_subagents);
+        let turn_running =
+            (host_indicator == ChatIndicator::Working && !parked) || snapshot.streaming;
+        let compacting = st.compacting || row.as_ref().is_some_and(|r| r.compacting);
+        let compact_blocked = compaction::compact_blocked(compacting, busy || snapshot.streaming);
+        let resume_compaction = compact_blocked
+            .is_none()
+            .then(|| {
+                compaction::resume_offer(
+                    row.as_deref(),
+                    st.context_usage.and_then(|u| u.tokens),
+                    st.kept_full_history,
+                )
+            })
+            .flatten();
         let mut next = ComposerState {
             chat_id: self.chat_id.clone(),
             revision: 0,
@@ -558,12 +668,17 @@ impl SessionCore {
                 working_since_ms: row.as_ref().and_then(|r| r.working_since_ms),
                 streaming: snapshot.streaming,
                 can_interrupt: busy || snapshot.streaming,
+                resumable: !busy
+                    && !matches!(
+                        indicator,
+                        ChatIndicator::Working | ChatIndicator::AwaitingInput
+                    )
+                    && snapshot
+                        .transcript()
+                        .last()
+                        .is_some_and(|entry| zeron_doc::schema::turn_stopped(&entry.message)),
             },
-            queue: st
-                .queue
-                .iter()
-                .map(|item| queue_item(item, &client.config.device_id, &st.queue_actions_pending))
-                .collect(),
+            queue,
             pending_sends: st.pending.clone(),
             send_state: oldest_state(&st.pending),
             delivery_degraded: degraded,
@@ -573,6 +688,14 @@ impl SessionCore {
             queue_error: st.queue_error.clone(),
             last_submitted_message_id: st.last_submitted.clone(),
             context_usage: st.context_usage,
+            limit: client.workspace.limit(&self.chat_id),
+            compacting,
+            compact_blocked,
+            resume_compaction,
+            prediction: st.prediction.as_ref().map(|p| p.text.clone()),
+            review: review::chip(&st, review::target(client, &self.chat_id).as_ref()),
+            staged_comments: review::staged(&st),
+            review_revision: review::revision(&st),
         };
         let current = self.composer();
         next.revision = current.revision;
@@ -643,6 +766,61 @@ impl SessionCore {
     pub(crate) fn touched_ms(&self) -> i64 {
         self.touched_ms.load(Ordering::Acquire)
     }
+
+    pub(crate) fn set_token_rate(&self, rate: Option<u32>) {
+        let changed = std::mem::replace(&mut lock(&self.state).token_rate, rate) != rate;
+        if changed {
+            self.schedule_refresh();
+        }
+    }
+
+    fn follow_token_rate(self: &Arc<Self>, on: bool) {
+        let mut slot = lock(&self.rate_watch);
+        if let Some(cancel) = slot.take() {
+            cancel.cancel();
+        }
+        if !on {
+            drop(slot);
+            self.set_token_rate(None);
+            return;
+        }
+        let Ok(client) = self.client() else { return };
+        let Some(live) = client.live() else { return };
+        let Some(chat) = client.workspace.chat(&self.chat_id) else {
+            return;
+        };
+        let cancel = self.tasks.child_token();
+        *slot = Some(cancel.clone());
+        drop(slot);
+        let weak = Arc::downgrade(self);
+        live.relay.follow(
+            chat.device_id.clone(),
+            zeron_rpc::methods::WATCH_TOKEN_RATE,
+            serde_json::json!({ "chatId": self.chat_id }),
+            cancel,
+            move |item| {
+                let Some(core) = weak.upgrade() else {
+                    return false;
+                };
+                let rate = item["rate"].as_u64().map(|rate| rate as u32);
+                core.set_token_rate(rate);
+                true
+            },
+            || {},
+        );
+    }
+}
+
+fn host_reason(err: ClientError) -> ClientError {
+    match err {
+        ClientError::HostError(message) => ClientError::HostError(
+            message
+                .split_once(": ")
+                .map_or(message.as_str(), |(_, reason)| reason)
+                .to_owned(),
+        ),
+        other => other,
+    }
 }
 
 fn empty_composer(chat_id: &str) -> ComposerState {
@@ -662,6 +840,7 @@ fn empty_composer(chat_id: &str) -> ComposerState {
             working_since_ms: None,
             streaming: false,
             can_interrupt: false,
+            resumable: false,
         },
         queue: Vec::new(),
         pending_sends: Vec::new(),
@@ -673,6 +852,14 @@ fn empty_composer(chat_id: &str) -> ComposerState {
         queue_error: None,
         last_submitted_message_id: None,
         context_usage: None,
+        limit: None,
+        compacting: false,
+        compact_blocked: None,
+        resume_compaction: None,
+        prediction: None,
+        review: None,
+        staged_comments: Vec::new(),
+        review_revision: 0,
     }
 }
 
@@ -686,7 +873,13 @@ fn oldest_state(pending: &[PendingSend]) -> Option<SendState> {
     })
 }
 
-fn queue_item(item: &QueuedMessage, device_id: &str, pending: &HashSet<String>) -> QueueItem {
+fn queue_item(
+    item: &QueuedMessage,
+    device_id: &str,
+    pending: &HashSet<String>,
+    caps: &HostCapabilities,
+) -> QueueItem {
+    let action_pending = pending.contains(&item.id);
     QueueItem {
         id: item.id.clone(),
         text: item.text.clone(),
@@ -713,7 +906,19 @@ fn queue_item(item: &QueuedMessage, device_id: &str, pending: &HashSet<String>) 
                 owner_device_id: owner_device_id.clone(),
             },
         }),
-        action_pending: pending.contains(&item.id),
+        action_pending,
+        from_label: None,
+        primary_action: QueuePrimaryAction::resolve(
+            item.delivery_gate.is_some() || action_pending,
+            caps.queue_actions,
+            !item.attachments.is_empty(),
+            caps.mid_turn_steering == Some(true),
+        ),
+        image: item
+            .attachments
+            .iter()
+            .find(|path| zeron_proto::attachment_mentions::is_image_path(path))
+            .cloned(),
     }
 }
 
@@ -863,13 +1068,16 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
     changed
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct LiveFlags {
     working: bool,
     working_since_ms: Option<i64>,
     /// The chat's Cloud machine isn't up (see [`refresh_setup_placeholder`]).
     #[allow(dead_code)]
     cloud_booting: bool,
+    token_rate: Option<u32>,
+    limits_rev: u64,
+    compaction: Option<(CompactionWait, i64)>,
 }
 
 /// While a Cloud chat's machine is being started or woken for the latest
@@ -1004,6 +1212,9 @@ fn build_snapshot(
         streaming,
         working: live.working,
         working_since_ms: live.working_since_ms,
+        token_rate: live.token_rate,
+        limits_rev: live.limits_rev,
+        compaction: live.compaction,
         pending: st.pending.clone(),
         context_usage: st.context_usage,
         hydrated: st.hydrated,
@@ -1093,6 +1304,10 @@ impl SessionHandle {
         self.core.composer()
     }
 
+    pub fn session_stats(&self) -> Option<zeron_proto::SessionStats> {
+        self.core.doc().session_stats()
+    }
+
     /// Tell the client whether a transcript view is on screen (marks seen on
     /// attach; prioritizes this room's sync in live mode).
     pub fn set_view_attached(&self, attached: bool) {
@@ -1109,6 +1324,30 @@ impl SessionHandle {
         }
         if attached && !was {
             self.mark_seen();
+            if let Ok(client) = self.core.client() {
+                self.core.sync_review(&client);
+            }
+            *lock(&self.core.prediction_watch) = prediction::start(&self.core);
+            *lock(&self.core.session_watch) = background::start(&self.core);
+        }
+        if !attached && was {
+            for watch in [
+                &self.core.prediction_watch,
+                &self.core.session_watch,
+                &self.core.output_watch,
+            ] {
+                if let Some(watch) = lock(watch).take() {
+                    watch.cancel();
+                }
+            }
+            self.core.update_state(|st| {
+                st.prediction = None;
+                st.session = None;
+                st.shell_output = None;
+            });
+        }
+        if attached != was {
+            self.core.follow_token_rate(attached);
         }
     }
 
@@ -1127,10 +1366,11 @@ impl SessionHandle {
             .workspace
             .chat(&self.core.chat_id)
             .ok_or_else(|| ClientError::NotFound(self.core.chat_id.clone()))?;
-        if request.text.trim().is_empty() && request.attachments.is_empty() {
+        let composer = self.composer();
+        let staged = composer.staged_comments.clone();
+        if request.text.trim().is_empty() && request.attachments.is_empty() && staged.is_empty() {
             return Err(ClientError::InvalidArgument("empty message".into()));
         }
-        let composer = self.composer();
         // A turn is running, or a Run of ours is about to start one on a
         // reachable host (don't double-start in that ~RTT window).
         let starting = composer
@@ -1149,7 +1389,7 @@ impl SessionHandle {
         }
         let refs =
             client.stage_attachments(&self.core.chat_id, &chat.device_id, &request.attachments)?;
-        let prompt_text = request.text.trim_end().to_owned();
+        let prompt_text = zeron_proto::comments::with_comments(request.text.trim_end(), &staged);
         let device_id = client.config.device_id.clone();
 
         // Steering is a Steer command, never a queue row: the host no longer
@@ -1167,7 +1407,7 @@ impl SessionHandle {
         {
             let text = if refs.is_empty() || caps.clean_attachment_text {
                 if prompt_text.is_empty() {
-                    attachments::ATTACHMENT_ONLY_TEXT.to_owned()
+                    attachments::attachment_only_text(&refs).to_owned()
                 } else {
                     prompt_text.clone()
                 }
@@ -1203,7 +1443,7 @@ impl SessionHandle {
                     model_options: config.map(|c| c.model_options.clone()).unwrap_or_default(),
                     cwd: chat.cwd.clone().unwrap_or_else(|| "~".into()),
                     sandbox: config.map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox),
-                    auto_approve: true,
+                    auto_approve: false,
                     resume: None,
                     attachments: refs.clone(),
                     worktree: request.worktree.clone(),
@@ -1211,7 +1451,7 @@ impl SessionHandle {
                     branch: None,
                     forked_at: None,
                     computer_control: false,
-                    permission_mode: Default::default(),
+                    permission_mode: config.map(|c| c.permission_mode).unwrap_or_default(),
                     disabled_tools: config.map(|c| c.disabled_tools.clone()).unwrap_or_default(),
                     env: Default::default(),
                 };
@@ -1230,6 +1470,8 @@ impl SessionHandle {
             let id = message_id.clone();
             self.core.update_state(|st| st.last_submitted = Some(id));
         }
+        self.core.take_staged_comments(&staged);
+        self.core.update_state(|st| st.prediction = None);
         client.after_command(&self.core, !refs.is_empty());
         Ok(outcome)
     }
@@ -1265,7 +1507,10 @@ impl SessionHandle {
         }
         self.respond_input(
             request_id,
-            crate::computer::consent_answers(question_id, label),
+            vec![UserInputAnswer {
+                question_id: question_id.to_owned(),
+                labels: vec![label.to_owned()],
+            }],
         )?;
         Ok(true)
     }
@@ -1284,6 +1529,91 @@ impl SessionHandle {
             )
             .await?;
         Ok(crate::computer::parse_still_reply(&reply))
+    }
+
+    async fn chat_host_rpc<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &'static str,
+        mut params: serde_json::Value,
+    ) -> Result<T> {
+        let host = self.composer().host.clone();
+        if host.device_id.is_empty() || !host.online {
+            return Err(ClientError::HostUnavailable(host.device_id));
+        }
+        params["chatId"] = self.core.chat_id.clone().into();
+        let reply = self
+            .core
+            .client()?
+            .host_rpc(&host.device_id, method, params)
+            .await?;
+        serde_json::from_value(reply).map_err(|e| ClientError::Internal(e.to_string()))
+    }
+
+    /// Per chat, as the host's revoke is: other chats keep their access.
+    pub async fn computer_stop(&self) -> Result<bool> {
+        let reply: serde_json::Value = self
+            .chat_host_rpc(
+                zeron_rpc::methods::COMPUTER_REVOKE_DESKTOP,
+                serde_json::json!({}),
+            )
+            .await?;
+        Ok(reply["revoked"].as_bool().unwrap_or(false))
+    }
+
+    pub async fn list_terminals(&self) -> Result<Vec<zeron_proto::TerminalInfo>> {
+        self.chat_host_rpc(zeron_rpc::methods::LIST_TERMINALS, serde_json::json!({}))
+            .await
+    }
+
+    pub async fn read_terminal(&self, terminal_id: &str) -> Result<zeron_proto::TerminalScreen> {
+        self.chat_host_rpc(
+            zeron_rpc::methods::READ_TERMINAL,
+            serde_json::json!({ "terminalId": terminal_id, "lines": 400, "styled": true }),
+        )
+        .await
+    }
+
+    fn space_id(&self) -> Result<Option<String>> {
+        let client = self.core.client()?;
+        Ok(client
+            .workspace
+            .chat(&self.core.chat_id)
+            .and_then(|chat| chat.space_id))
+    }
+
+    pub async fn list_project_actions(
+        &self,
+    ) -> Result<Option<zeron_proto::ProjectActionsSnapshot>> {
+        let Some(space_id) = self.space_id()? else {
+            return Ok(None);
+        };
+        self.chat_host_rpc(
+            zeron_rpc::methods::LIST_PROJECT_ACTIONS,
+            serde_json::json!({ "spaceId": space_id }),
+        )
+        .await
+        .map(Some)
+    }
+
+    pub async fn run_project_action(
+        &self,
+        action_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<zeron_proto::ProjectActionRun> {
+        let space_id = self
+            .space_id()?
+            .ok_or_else(|| ClientError::InvalidArgument("this chat has no project".into()))?;
+        self.chat_host_rpc(
+            zeron_rpc::methods::RUN_PROJECT_ACTION,
+            serde_json::json!({
+                "spaceId": space_id,
+                "actionId": action_id,
+                "cols": cols,
+                "rows": rows,
+            }),
+        )
+        .await
     }
 
     fn enqueue_inner(
@@ -1541,18 +1871,28 @@ impl SessionHandle {
         self.queue_action(id, QueueAction::Steer).await
     }
 
-    /// A row's primary action, as the desktop resolves it: text never
+    /// A row's [`QueuePrimaryAction`], as the desktop resolves it: text never
     /// interrupts the turn (steer / send next); only attachments, which need
     /// a fresh request, send now.
     pub async fn deliver_queued_now(&self, id: &str) -> Result<bool> {
-        let has_attachments = lock(&self.core.state)
+        let action = self
+            .composer()
             .queue
             .iter()
-            .any(|q| q.id == id && !q.attachments.is_empty());
-        if has_attachments {
-            self.send_queued_now(id).await
-        } else {
-            self.steer_queued_now(id).await
+            .find(|q| q.id == id)
+            .map(|q| q.primary_action);
+        match action {
+            None => Ok(false),
+            Some(None) => {
+                let message = "This message can't be sent yet: it is being edited or sent, or its host needs an update.".to_owned();
+                self.core
+                    .update_state(|st| st.queue_error = Some(message.clone()));
+                Err(ClientError::Unsupported(message))
+            }
+            Some(Some(QueuePrimaryAction::SendNow)) => self.send_queued_now(id).await,
+            Some(Some(QueuePrimaryAction::Steer | QueuePrimaryAction::SendNext)) => {
+                self.steer_queued_now(id).await
+            }
         }
     }
 
@@ -1563,6 +1903,113 @@ impl SessionHandle {
 
     pub fn clear_queue_error(&self) {
         self.core.update_state(|st| st.queue_error = None);
+    }
+
+    pub async fn fork_from(&self, entry_id: &str) -> Result<String> {
+        let chat_id = crate::new_id();
+        let reply = self
+            .queue_rpc(
+                zeron_rpc::methods::FORK_CHAT,
+                serde_json::json!({
+                    "sourceChatId": self.core.chat_id,
+                    "entryId": entry_id,
+                    "chatId": chat_id,
+                }),
+            )
+            .await
+            .map_err(host_reason)?;
+        Ok(reply["id"].as_str().map_or(chat_id, str::to_owned))
+    }
+
+    pub async fn rewind_to(&self, entry_id: &str) -> Result<String> {
+        let reply = self
+            .queue_rpc(
+                zeron_rpc::methods::REWIND_CHAT,
+                serde_json::json!({ "chatId": self.core.chat_id, "entryId": entry_id }),
+            )
+            .await
+            .map_err(host_reason)?;
+        Ok(reply["prompt"].as_str().unwrap_or_default().to_owned())
+    }
+
+    pub async fn skill_file(&self, name: &str, path: Option<&str>) -> Result<SkillFile> {
+        let path = match path {
+            Some(path) => path.to_owned(),
+            None => {
+                let harness = self
+                    .core
+                    .client()?
+                    .workspace
+                    .chat(&self.core.chat_id)
+                    .and_then(|chat| chat.config)
+                    .map(|config| config.harness)
+                    .ok_or_else(|| {
+                        ClientError::NotFound(format!("Can't find the file for {name} here"))
+                    })?;
+                let skills = self
+                    .queue_rpc(
+                        zeron_rpc::methods::LIST_SKILLS,
+                        serde_json::json!({ "harness": harness, "chatId": self.core.chat_id }),
+                    )
+                    .await?;
+                serde_json::from_value::<Option<Vec<zeron_proto::invocation::Skill>>>(skills)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|skill| {
+                        skill.name == name
+                            && !zeron_proto::invocation::native_skill_identity(&skill.path)
+                    })
+                    .map(|skill| skill.path)
+                    .ok_or_else(|| ClientError::NotFound(format!("No SKILL.md found for {name}")))?
+            }
+        };
+        // An absolute path outside the workspace reads only with the chat named.
+        let file = self
+            .queue_rpc(
+                zeron_rpc::methods::READ_WORKSPACE_FILE,
+                serde_json::json!({ "chatId": self.core.chat_id, "path": path }),
+            )
+            .await
+            .map_err(host_reason)?;
+        let file: zeron_proto::WorkspaceFileText =
+            serde_json::from_value(file).map_err(|err| ClientError::Internal(err.to_string()))?;
+        Ok(SkillFile {
+            path: file.path,
+            text: file.text.unwrap_or_default(),
+            truncated: file.truncated,
+        })
+    }
+
+    // An unanswered harness probe allows it; the host still refuses.
+    pub async fn branch_blocked(&self, rewind: bool) -> Option<String> {
+        if rewind
+            && matches!(
+                self.composer().live.indicator,
+                ChatIndicator::Working | ChatIndicator::AwaitingInput
+            )
+        {
+            return Some("Stop the running turn before rewinding".into());
+        }
+        let harness = self
+            .core
+            .client()
+            .ok()?
+            .workspace
+            .chat(&self.core.chat_id)?
+            .config?
+            .harness;
+        let reply = self
+            .queue_rpc(
+                zeron_rpc::methods::HARNESS_COMPACTION,
+                serde_json::json!({ "harness": harness }),
+            )
+            .await
+            .ok()?;
+        let probe: zeron_proto::HarnessCompactionResult = serde_json::from_value(reply).ok()?;
+        (!probe.branching)
+            .then(|| format!("{} does not support fork or rewind", harness.display_name()))
     }
 
     /// "Not delivered — tap to retry": restart grace clocks, re-issue dead
@@ -1655,6 +2102,14 @@ mod setup_placeholder_tests {
             hydrated: true,
             transcript_revision: 0,
             composer_revision: 0,
+            token_rate: None,
+            compaction: None,
+            compacting: false,
+            kept_full_history: None,
+            prediction: None,
+            session: None,
+            shell_output: None,
+            review: review::ReviewState::default(),
         };
         let pending = PendingSend {
             message_id: "m1".into(),

@@ -11,14 +11,11 @@ fn label(resets_at: Option<i64>, auto: bool, now: DateTime<Utc>) -> (String, Opt
     let reset = resets_at.and_then(DateTime::from_timestamp_millis);
     let when = crate::settings::accounts::format_reset(reset, now)
         .map(|when| when.trim_start_matches("resets ").to_owned());
-    match (when, reset.is_some_and(|at| at > now)) {
-        (Some(when), true) if auto => (format!("Usage limit · resumes {when}"), Some("Cancel")),
-        (Some(when), true) => (
-            format!("Usage limit · resets {when}"),
-            Some("Resume at reset"),
-        ),
-        _ => ("Usage limit · reset time unknown".into(), None),
-    }
+    zeron_proto::transcript::limit_pill_label(
+        when.as_deref(),
+        reset.is_some_and(|at| at > now),
+        auto,
+    )
 }
 
 impl Composer {

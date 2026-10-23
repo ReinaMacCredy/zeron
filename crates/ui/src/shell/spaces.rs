@@ -15,6 +15,10 @@ use crate::pickers::{
 };
 use gpui::{FocusHandle, Window};
 use std::collections::HashSet;
+use zeron_proto::sidebar_view::{
+    SHELF_INITIAL_ROWS, SHELF_PAGE_ROWS, compare_sidebar_chats, compare_sidebar_rows, shelf_next,
+    shelf_visible,
+};
 use zeron_proto::{
     ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, HomeFolderMatch,
     HomeFolderSearchResult, SearchHomeFoldersRequest, Space,
@@ -2432,33 +2436,6 @@ impl ActiveChatRow {
     }
 }
 
-pub(super) fn compare_sidebar_chats(
-    sort: SidebarSort,
-    left: &zeron_proto::Chat,
-    right: &zeron_proto::Chat,
-) -> std::cmp::Ordering {
-    let primary = match sort {
-        SidebarSort::Created => right.created_at.cmp(&left.created_at),
-        SidebarSort::LastUpdated => right
-            .last_message_at
-            .unwrap_or(right.created_at)
-            .cmp(&left.last_message_at.unwrap_or(left.created_at)),
-    };
-    primary.then_with(|| left.id.cmp(&right.id))
-}
-
-pub(super) fn compare_sidebar_rows(
-    sort: SidebarSort,
-    active_first: bool,
-    left: (ChatIndicator, &zeron_proto::Chat),
-    right: (ChatIndicator, &zeron_proto::Chat),
-) -> std::cmp::Ordering {
-    let active = |status: ChatIndicator| active_first && status != ChatIndicator::Idle;
-    active(right.0)
-        .cmp(&active(left.0))
-        .then_with(|| compare_sidebar_chats(sort, left.1, right.1))
-}
-
 #[derive(Clone, Copy)]
 pub(super) struct InboxMark {
     working: bool,
@@ -2492,28 +2469,13 @@ impl InboxShelf {
     }
 }
 
-pub(super) fn inbox_settled_at(
-    status: ChatIndicator,
-    chat: &zeron_proto::Chat,
-    after_days: u32,
-    now: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
-    if matches!(
-        status,
-        ChatIndicator::Working | ChatIndicator::AwaitingInput
-    ) {
-        return None;
-    }
-    chat.settled_at(after_days, now)
-}
-
 pub(super) fn sidebar_settled_at(
     state: &AppState,
     status: ChatIndicator,
     chat: &zeron_proto::Chat,
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
-    inbox_settled_at(status, chat, state.sidebar_settings.settle_after_days, now)
+    chat.inbox_settled_at(status, state.sidebar_settings.settle_after_days, now)
 }
 
 pub(super) fn inbox_rank(
@@ -2668,10 +2630,6 @@ pub(super) const SIDEBAR_DISCLOSURE_HEADER_HEIGHT: f32 = 32.0;
 pub(super) const SIDEBAR_DISCLOSURE_BODY_INSET: f32 = 4.0;
 const SIDEBAR_DISCLOSURE_SECTION_HEIGHT: f32 =
     SIDEBAR_SECTION_GAP + SIDEBAR_DISCLOSURE_HEADER_HEIGHT;
-/// The Archived and Settled shelves show this many rows, then "Show more"
-/// pages by [`SHELF_PAGE_ROWS`].
-const SHELF_INITIAL_ROWS: usize = 10;
-const SHELF_PAGE_ROWS: usize = 25;
 
 fn sidebar_show_more_row(
     id: &'static str,
@@ -2703,25 +2661,10 @@ fn sidebar_show_more_row(
 const CHATS_GROUP_KEY: &str = "chats";
 const NEW_CHAT_DIMMED_OPACITY: f32 = 0.45;
 
-/// Put one group first (this machine's device, or the projectless Chats)
-/// without disturbing the recency-based order of the others. A targeted
-/// promotion is more truthful than a full name sort: that context leads, then
-/// the user's chosen chat sort wins.
 fn promote_group<T>(groups: &mut Vec<(Option<(String, String)>, Vec<T>)>, key: Option<&str>) {
-    let Some(key) = key else {
-        return;
-    };
-    let Some(index) = groups.iter().position(|(group, _)| {
-        group
-            .as_ref()
-            .is_some_and(|(group_key, _)| group_key == key)
-    }) else {
-        return;
-    };
-    if index > 0 {
-        let local = groups.remove(index);
-        groups.insert(0, local);
-    }
+    zeron_proto::sidebar_view::promote_group(groups, key, |(group, _)| {
+        group.as_ref().map(|(group_key, _)| group_key.as_str())
+    });
 }
 
 /// The chat ids in the order the sidebar draws them: the sorted input
@@ -3797,7 +3740,7 @@ impl Shell {
                 from: 0.0,
                 to: 0.0,
                 epoch: drag.slide.epoch,
-                started: std::time::Instant::now(),
+                started: motion::now(),
             });
         slide.retarget(target);
         let (from, to, epoch) = (slide.from, slide.to, slide.epoch);
@@ -3847,7 +3790,7 @@ impl Shell {
                 from: 0.0,
                 to: 0.0,
                 epoch: 0,
-                started: std::time::Instant::now(),
+                started: motion::now(),
             },
             collapsed_height: 0.0,
             section_gaps: Default::default(),
@@ -3856,13 +3799,13 @@ impl Shell {
                 from: f32::from(lifted.y),
                 to: f32::from(lifted.y),
                 epoch: self.pinned_session_drag_generation << 32,
-                started: std::time::Instant::now(),
+                started: motion::now(),
             },
             slide_x: SidebarSessionSlide {
                 from: f32::from(lifted.x),
                 to: f32::from(lifted.x),
                 epoch: self.pinned_session_drag_generation << 32,
-                started: std::time::Instant::now(),
+                started: motion::now(),
             },
         });
         {
@@ -3996,7 +3939,7 @@ impl Shell {
                 self.sidebar_session_return = Some(SidebarSessionReturn {
                     transfer,
                     epoch: self.pinned_session_drag_generation,
-                    started: std::time::Instant::now(),
+                    started: motion::now(),
                 });
                 let epoch = self.pinned_session_drag_generation;
                 cx.spawn(async move |this, cx| {
@@ -4014,16 +3957,16 @@ impl Shell {
                                 if returning.epoch != epoch {
                                     return false;
                                 }
-                                if returning.started.elapsed() >= TAB_SLIDE.total()
-                                    && returning.transfer.slide.started.elapsed()
+                                if motion::since(returning.started) >= TAB_SLIDE.total()
+                                    && motion::since(returning.transfer.slide.started)
                                         >= TAB_SLIDE.total()
-                                    && returning.transfer.source_collapse.started.elapsed()
+                                    && motion::since(returning.transfer.source_collapse.started)
                                         >= TAB_SLIDE.total()
                                     && returning
                                         .transfer
                                         .section_gaps
                                         .values()
-                                        .all(|gap| gap.started.elapsed() >= TAB_SLIDE.total())
+                                        .all(|gap| motion::since(gap.started) >= TAB_SLIDE.total())
                                 {
                                     shell.sidebar_session_return = None;
                                     cx.notify();
@@ -4089,7 +4032,7 @@ impl Shell {
             } else {
                 slide.from = target;
                 slide.to = target;
-                slide.started = std::time::Instant::now();
+                slide.started = motion::now();
             }
         }
         let (from, to) = (transfer.slide.from, transfer.slide.to);
@@ -6517,6 +6460,7 @@ impl Shell {
             .text_color(theme.text_muted.opacity(0.6))
             .whitespace_nowrap()
             .on_click(cx.listener(move |this, _, _, cx| {
+                this.mark_onboarded(super::intros::SIDEBAR_MISSION, cx);
                 this.open_task_center(task_id.clone(), cx);
             }))
             .child(label)
@@ -6927,7 +6871,7 @@ impl Shell {
                             from: 0.0,
                             to: 0.0,
                             epoch: 0,
-                            started: std::time::Instant::now(),
+                            started: motion::now(),
                         });
                 }
                 for (group, gap) in &mut drag.section_gaps {
@@ -7294,8 +7238,7 @@ impl Shell {
             let row_count = rendered_rows.len();
             let more_height = sidebar_row_height(self.settings.sidebar_compact, true, true);
             let hidden = if slim {
-                let shown = self.sidebar_settled_shown.max(SHELF_INITIAL_ROWS);
-                let cut = shown.min(row_count);
+                let cut = shelf_visible(self.sidebar_settled_shown, row_count);
                 let mut tail = rendered_rows.split_off(cut);
                 let pulled = [
                     selected.as_deref(),
@@ -7348,9 +7291,7 @@ impl Shell {
                             theme,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.sidebar_settled_shown =
-                                this.sidebar_settled_shown.max(SHELF_INITIAL_ROWS)
-                                    + SHELF_PAGE_ROWS;
+                            this.sidebar_settled_shown = shelf_next(this.sidebar_settled_shown);
                             cx.notify();
                         })),
                     )
@@ -7817,7 +7758,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let now = std::time::Instant::now();
+        let now = motion::now();
         let slot = usize::from(!self.state.read(cx).no_project);
         if !leaving && self.chat_work_slide.0 != slot {
             self.chat_work_slide
@@ -9861,7 +9802,7 @@ mod tests {
 
     use super::{
         CHATS_GROUP_KEY, ChatIndicator, InboxMark, compare_sidebar_chats, compare_sidebar_rows,
-        grouped_visible_order, inbox_rank, inbox_settled_at, lead_rollup, promote_group,
+        grouped_visible_order, inbox_rank, lead_rollup, promote_group,
     };
     use crate::settings::{SidebarOrganization, SidebarSort};
 
@@ -10054,7 +9995,7 @@ mod tests {
     fn inbox_ids(rows: &mut [InboxRow], working_shelf: bool) -> Vec<String> {
         let now = inbox_at(1_000);
         rows.sort_by_key(|(status, chat, started, mark)| {
-            let settled = inbox_settled_at(*status, chat, 3, now);
+            let settled = chat.inbox_settled_at(*status, 3, now);
             inbox_rank(*status, chat, *started, *mark, settled, working_shelf)
         });
         rows.iter().map(|row| row.1.id.clone()).collect()

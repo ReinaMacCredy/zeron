@@ -5,12 +5,14 @@
 pub mod audit;
 mod bounds;
 pub mod browser;
+pub mod cards;
 pub mod contract;
 pub mod diagnostics;
 pub mod driver;
 pub mod frame;
 pub mod grants;
 pub mod key_names;
+pub mod presentation;
 pub mod spaces;
 pub mod wire;
 

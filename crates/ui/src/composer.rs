@@ -26,8 +26,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use zeron_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry};
 use zeron_proto::{
-    FileSearchMatch, HarnessId, RunRequest, SandboxLevel, SlashCommand, SlashCommandKind,
-    UserInputAnswer, UserInputQuestion, capabilities,
+    FileSearchMatch, HarnessId, RunRequest, SandboxLevel, SlashCommand, UserInputAnswer,
+    UserInputQuestion, capabilities,
 };
 use zeron_rpc::{RpcError, methods};
 
@@ -105,7 +105,7 @@ const MISSION_EXTRAS: motion::MotionSpec =
     motion::MotionSpec::new(280, motion::EASE).with_delay(60);
 const MISSION_SEND: motion::MotionSpec = motion::MotionSpec::new(280, motion::EASE_BOUNCE);
 const HOME_TAB_SLIDE: motion::MotionSpec = motion::MotionSpec::new(260, motion::EASE_BOUNCE);
-const START_MISSION_LABEL: &str = "Start mission";
+const START_MISSION_LABEL: &str = zeron_proto::mission::START_MISSION;
 
 struct MissionMotion {
     border: motion::Tween,
@@ -609,17 +609,11 @@ fn prediction_display(
     text: &str,
     idle: SharedString,
 ) -> (SharedString, Option<SharedString>) {
-    match prediction {
-        Some(prediction) if text.is_empty() => (prediction.to_string().into(), None),
-        Some(prediction) => (
-            idle,
-            prediction
-                .strip_prefix(text)
-                .filter(|rest| !rest.is_empty())
-                .map(|rest| rest.to_string().into()),
-        ),
-        None => (idle, None),
-    }
+    let (placeholder, ghost) = zeron_proto::prediction::prediction_display(prediction, text);
+    (
+        placeholder.map_or(idle, |p| p.to_string().into()),
+        ghost.map(|g| g.to_string().into()),
+    )
 }
 
 /// What the composer holds that a send could carry. A staged image or diff
@@ -1071,7 +1065,7 @@ const THREAD_ICON_SIZE: f32 = 14.0;
 /// harness brand, or a plain chat glyph when the chat is not in this
 /// device's list (another device, archived, gone).
 pub(crate) fn thread_chip_icon(chat: Option<&zeron_proto::Chat>) -> (&'static str, Option<Hsla>) {
-    chat.and_then(|chat| crate::pickers::chat_harness_marks(chat).last().copied())
+    chat.and_then(|chat| chat.harness_marks().last().copied())
         .map(crate::pickers::harness_brand_icon)
         .unwrap_or((crate::icons::CHAT_ROUND_LINE, None))
 }
@@ -2230,7 +2224,7 @@ impl Default for VoiceTween {
         Self {
             from: 0.0,
             to: 0.0,
-            start: Instant::now(),
+            start: motion::now(),
         }
     }
 }
@@ -4005,12 +3999,7 @@ impl ComposerInput {
             if self.mentions_enabled
                 && !self.single_line
                 && !from_composer
-                && text.chars().count() >= crate::attachments::PASTED_TEXT_MIN_CHARS
-                && zeron_proto::attachment_mentions::attachment_mentions(&text).is_empty()
-                && !zeron_proto::invocation::leading_command(
-                    &zeron_proto::invocation::invocation_prompt(self.text()),
-                )
-                .is_some_and(|(name, _)| zeron_proto::invocation::valid_skill_command_name(name))
+                && zeron_proto::attachment_mentions::pastes_as_file(&text, self.text())
             {
                 cx.emit(ComposerInputEvent::PastedLongText(text));
                 return;
@@ -6130,6 +6119,7 @@ pub enum ComposerEvent {
     OpenChanges,
     StartMission(MissionStart),
     OpenTaskCenter(String),
+    PlanFirst,
 }
 
 #[derive(Debug, Clone)]
@@ -6401,91 +6391,17 @@ fn invocation_token(text: &str, cursor: usize, prefix: char) -> Option<MentionTo
     })
 }
 
-/// Zeron's own slash command — the composer runs it, the prompt never
-/// reaches the agent.
-const COMPACT_COMMAND: &str = "compact";
-
-/// Zeron's second own command — it opens a side conversation instead of
-/// running a turn on this chat.
-const SIDECHAT_COMMAND: &str = "sidechat";
-const BTW_COMMAND: &str = "btw";
-
-/// `Some(argument)` when the prompt invokes zeron's own `command`: the first
-/// token must be exactly `/command`, and the rest of the line is its argument.
-fn app_command_argument(text: &str, command: &str) -> Option<Option<String>> {
-    let rest = text.strip_prefix('/')?.strip_prefix(command)?;
-    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
-        return None;
-    }
-    let argument = rest.trim();
-    Some((!argument.is_empty()).then(|| argument.to_string()))
-}
-
-/// `Some(focus)` when the prompt is a `/compact` invocation: the first token
-/// must be exactly `/compact`, and the rest of the line is the focus the
-/// harness compacts around.
-fn compact_focus(text: &str) -> Option<Option<String>> {
-    app_command_argument(text, COMPACT_COMMAND)
-}
-
-/// `Some(prompt)` when the prompt is a `/btw` or `/sidechat` invocation: bare
-/// opens the side conversation, and the rest of the line is its first turn.
-fn sidechat_prompt(text: &str) -> Option<Option<String>> {
-    app_command_argument(text, BTW_COMMAND).or_else(|| app_command_argument(text, SIDECHAT_COMMAND))
-}
-
-/// Zeron's `/compact` rides every harness's list; one that advertises its own
-/// keeps it, so the popup never shows the name twice.
-fn with_compact_entry(mut commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
-    if commands.iter().any(|c| c.name == COMPACT_COMMAND) {
-        return commands;
-    }
-    commands.insert(
-        0,
-        SlashCommand {
-            name: COMPACT_COMMAND.into(),
-            description: "Free up context by summarizing the conversation".into(),
-            input_hint: Some("focus".into()),
-            kind: SlashCommandKind::BuiltIn,
-        },
-    );
-    commands
-}
-
-const COMPUTER_USE_COMMAND: &str = zeron_engine::computer::activation::COMPUTER_USE_SLASH_COMMAND;
-
-/// Mirrors `Harness::computer_tools_reachable`: no Opencode, Cursor, Pi or Antigravity.
-fn offers_computer_use(harness: HarnessId) -> bool {
-    matches!(
-        harness,
-        HarnessId::ClaudeCode
-            | HarnessId::Codex
-            | HarnessId::Devin
-            | HarnessId::Grok
-            | HarnessId::Hermes
-    )
-}
-
-/// Zeron owns `/computer-use` even where the harness advertises a native one.
-fn with_computer_use_entry(
-    harness: HarnessId,
-    mut commands: Vec<SlashCommand>,
-) -> Vec<SlashCommand> {
-    if !offers_computer_use(harness) {
-        return commands;
-    }
-    commands.retain(|c| c.name != COMPUTER_USE_COMMAND);
-    commands.insert(
-        0,
-        SlashCommand {
-            name: COMPUTER_USE_COMMAND.into(),
-            description: "Use Zeron Computer for this request only".into(),
-            input_hint: Some("request".into()),
-            kind: SlashCommandKind::BuiltIn,
-        },
-    );
-    commands
-}
+use zeron_proto::app_commands::{
+    COMPACT_COMMAND, COMPUTER_USE_COMMAND, compact_focus, sidechat_prompt,
+};
+use zeron_proto::command_catalog::{
+    CatalogFailure, catalog_empty_message, catalog_error_message, invocation_detail,
+    invocation_insertion, skill_display_name, with_zeron_commands, zeron_owned_command,
+};
+use zeron_proto::compaction::{
+    RESUME_COMPACTION_TITLE, ResumeCompaction, compact_outcome_notice, resume_compaction_due,
+};
+use zeron_proto::sidechat::{SIDECHAT_TAB_PREFIX, sidechat_tab_label};
 
 /// Remote hosts own their grants, so only a macOS UI on the chat's host checks them.
 fn computer_preflight_applies(
@@ -6506,113 +6422,19 @@ fn computer_send_blockers(
     crate::computer::cards::missing_computer_permissions(capabilities)
 }
 
-/// Same ride as `/compact`: zeron's `/btw` and `/sidechat` join every
-/// harness's list unless the harness already advertises that name.
-fn with_sidechat_entry(mut commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
-    for name in [SIDECHAT_COMMAND, BTW_COMMAND] {
-        if commands.iter().any(|c| c.name == name) {
-            continue;
-        }
-        commands.insert(
-            0,
-            SlashCommand {
-                name: name.into(),
-                description: "Ask about this chat on the side, without touching it".into(),
-                input_hint: Some("prompt".into()),
-                kind: SlashCommandKind::BuiltIn,
-            },
-        );
-    }
-    commands
-}
-
-// Skills complete under `$`, so `/` keeps only the agent's built-ins.
-fn with_zeron_commands(
-    harness: Option<HarnessId>,
-    mut commands: Vec<SlashCommand>,
-) -> Vec<SlashCommand> {
-    commands.retain(|command| command.kind == SlashCommandKind::BuiltIn);
-    let commands = match harness {
-        Some(harness) => with_computer_use_entry(harness, commands),
-        None => commands,
-    };
-    with_sidechat_entry(with_compact_entry(commands))
-}
-
-// Send intercepts these from the typed text, so they insert as plain `/name`.
-fn zeron_owned_command(name: &str) -> bool {
-    [
-        COMPACT_COMMAND,
-        SIDECHAT_COMMAND,
-        BTW_COMMAND,
-        COMPUTER_USE_COMMAND,
-    ]
-    .contains(&name)
-}
-
 fn zeron_owned_command_range(raw: &str) -> Option<Range<usize>> {
     let (name, _) = zeron_proto::invocation::leading_command(raw)?;
     let end = name.as_ptr() as usize - raw.as_ptr() as usize + name.len();
     zeron_owned_command(name).then(|| end - name.len() - 1..end)
 }
 
-const SIDECHAT_TAB_PREFIX: &str = "Sidechats (btw) \u{b7} ";
 const SIDECHAT_COUNT_ROLL: motion::MotionSpec =
     motion::MotionSpec::new(180, motion::EASE_OUT_QUINT);
-
-fn sidechat_tab_label(live: usize) -> String {
-    match live {
-        0 => "New sidechat (btw)".to_string(),
-        count => format!("{SIDECHAT_TAB_PREFIX}{count}"),
-    }
-}
 
 /// The catalog's names live on the engine's harness descriptors, which the
 /// composer never holds; this is the same list, for one sentence of copy.
 pub(crate) fn harness_display_name(harness: HarnessId) -> &'static str {
     harness.display_name()
-}
-
-// Claude's prompt cache lives at most an hour; the thresholds match Claude's own resume dialog.
-const RESUME_COMPACTION_TOKENS: u64 = 100_000;
-const RESUME_COMPACTION_IDLE_MINUTES: i64 = 70;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ResumeCompaction {
-    pub tokens: u64,
-    pub idle_minutes: i64,
-}
-
-impl ResumeCompaction {
-    pub(crate) fn idle_label(self) -> String {
-        let minutes = self.idle_minutes;
-        if minutes >= 24 * 60 {
-            format!("{}d", minutes / (24 * 60))
-        } else if minutes >= 60 && minutes % 60 != 0 {
-            format!("{}h {}m", minutes / 60, minutes % 60)
-        } else if minutes >= 60 {
-            format!("{}h", minutes / 60)
-        } else {
-            format!("{minutes}m")
-        }
-    }
-}
-
-fn resume_compaction_due(
-    harness: HarnessId,
-    tokens: Option<u64>,
-    last_message_at: Option<chrono::DateTime<chrono::Utc>>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Option<ResumeCompaction> {
-    if harness != HarnessId::ClaudeCode {
-        return None;
-    }
-    let tokens = tokens.filter(|tokens| *tokens >= RESUME_COMPACTION_TOKENS)?;
-    let idle_minutes = (now - last_message_at?).num_minutes();
-    (idle_minutes >= RESUME_COMPACTION_IDLE_MINUTES).then_some(ResumeCompaction {
-        tokens,
-        idle_minutes,
-    })
 }
 
 /// Pasted prose is eligible only at completion boundaries, never inside
@@ -6690,22 +6512,6 @@ fn completion_trigger(
     let token = skill_token.or_else(|| slash_token(text, cursor));
     let commands_allowed = token.is_some() && !skill;
     (token, skill, include_skills, commands_allowed)
-}
-
-/// Human-readable presentation only; invocation names and paths stay canonical.
-fn skill_display_name(name: &str) -> String {
-    name.rsplit(':')
-        .next()
-        .unwrap_or(name)
-        .split(|c: char| c == '-' || c == '_' || c.is_whitespace())
-        .filter(|word| !word.is_empty())
-        .map(|word| {
-            let mut chars = word.chars();
-            let first = chars.next().unwrap();
-            first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// Commands implemented by Zeron, independently of the provider protocol.
@@ -6802,22 +6608,6 @@ struct InvocationCandidate {
     invocation: zeron_proto::invocation::Invocation,
 }
 
-fn invocation_insertion(
-    invocation: &zeron_proto::invocation::Invocation,
-    supported: bool,
-) -> String {
-    if !supported
-        && matches!(
-            invocation,
-            zeron_proto::invocation::Invocation::Command { .. }
-        )
-    {
-        invocation.prompt_text()
-    } else {
-        invocation.link()
-    }
-}
-
 fn references_require_update(text: &str, supported: bool) -> bool {
     !supported
         && (!zeron_proto::invocation::invocation_links(text).is_empty()
@@ -6881,27 +6671,9 @@ pub(crate) struct ThreadMatch {
     pub(crate) project: String,
 }
 
-/// Where the prompt will run and read from: the device `read_thread`
-/// resolves ids on, the project whose threads list first, and the chat
-/// being composed for (which can't mention itself).
-pub(crate) struct MentionScope<'a> {
-    pub(crate) device_id: &'a str,
-    pub(crate) space_id: Option<&'a str>,
-    pub(crate) exclude: Option<&'a str>,
-}
+pub(crate) use zeron_proto::chat_mentions::MentionScope;
+use zeron_proto::chat_mentions::chat_mention_title;
 
-const THREAD_MENTION_LIMIT: usize = 6;
-
-/// The sidebar title as the chip label; an untitled chat mentions as the
-/// same placeholder the sidebar shows for it.
-fn chat_mention_title(chat: &zeron_proto::Chat) -> String {
-    crate::transcript::single_line(chat.title.as_deref().unwrap_or("New session"))
-}
-
-/// Threads whose title contains the query (case-insensitive) or whose id
-/// starts with it, on the scope's device, minus the composed-for chat and
-/// drafts (nothing to read). The scope's own project lists first, then the
-/// rest, each in sidebar (recency) order. An empty query lists the first few.
 pub(crate) fn thread_matches<'a>(
     chats: impl Iterator<Item = &'a zeron_proto::Chat>,
     query: &str,
@@ -6910,26 +6682,9 @@ pub(crate) fn thread_matches<'a>(
     project_of: impl Fn(&zeron_proto::Chat) -> String,
     marks_of: impl Fn(&zeron_proto::Chat) -> Vec<crate::provider_instances::InstanceIcon>,
 ) -> Vec<ThreadMatch> {
-    let query = query.trim().to_lowercase();
-    let mut matches: Vec<(bool, String, &zeron_proto::Chat)> = chats
-        .filter(|chat| {
-            chat.device_id == scope.device_id
-                && Some(chat.id.as_str()) != scope.exclude
-                && !is_draft(&chat.id)
-        })
-        .filter_map(|chat| {
-            let title = chat_mention_title(chat);
-            (query.is_empty()
-                || title.to_lowercase().contains(&query)
-                || chat.id.to_lowercase().starts_with(&query))
-            .then(|| (chat.space_id.as_deref() != scope.space_id, title, chat))
-        })
-        .collect();
-    matches.sort_by_key(|(other_project, _, _)| *other_project);
-    matches
+    zeron_proto::chat_mentions::thread_matches(chats, query, scope, is_draft)
         .into_iter()
-        .take(THREAD_MENTION_LIMIT)
-        .map(|(_, title, chat)| ThreadMatch {
+        .map(|(chat, title)| ThreadMatch {
             chat_id: chat.id.clone(),
             title,
             marks: marks_of(chat),
@@ -6954,66 +6709,25 @@ fn mention_error_message(err: &RpcError) -> SharedString {
     }
 }
 
-/// A failed command discovery, translated for the popup.
+impl From<zeron_proto::command_catalog::InvocationCandidate> for InvocationCandidate {
+    fn from(c: zeron_proto::command_catalog::InvocationCandidate) -> Self {
+        Self {
+            workspace_command: None,
+            name: c.name,
+            description: c.description,
+            input_hint: c.input_hint,
+            invocation: c.invocation,
+        }
+    }
+}
+
 fn invocation_candidates(
     commands: Vec<SlashCommand>,
     skills: Vec<zeron_proto::invocation::Skill>,
 ) -> Vec<InvocationCandidate> {
-    use zeron_proto::invocation::{
-        valid_invocation_name, valid_skill_command_name, valid_skill_path,
-    };
-    // A remote engine may use an older catalog decoder. Every visible choice
-    // must still survive the local canonical-reference decoder unchanged.
-    let skills: Vec<_> = skills
+    zeron_proto::command_catalog::invocation_candidates(commands, skills)
         .into_iter()
-        .filter(|skill| {
-            valid_invocation_name(&skill.name)
-                && valid_skill_path(&skill.path)
-                && skill
-                    .command
-                    .as_ref()
-                    .is_none_or(|command| valid_skill_command_name(&command.name))
-        })
-        .collect();
-    let skill_commands: std::collections::HashSet<_> = skills
-        .iter()
-        .filter_map(|skill| skill.command.as_ref().map(|command| command.name.as_str()))
-        .collect();
-    let commands: Vec<_> = commands
-        .into_iter()
-        .filter(|command| {
-            valid_invocation_name(&command.name) && !skill_commands.contains(command.name.as_str())
-        })
-        .collect();
-    commands
-        .into_iter()
-        .map(|c| InvocationCandidate {
-            workspace_command: None,
-            input_hint: c.input_hint,
-            name: c.name.clone(),
-            description: c.description,
-            invocation: zeron_proto::invocation::Invocation::Command { name: c.name },
-        })
-        .chain(
-            skills
-                .into_iter()
-                .filter(|s| s.enabled)
-                .map(|s| InvocationCandidate {
-                    workspace_command: None,
-                    input_hint: None,
-                    name: s.name.clone(),
-                    description: if zeron_proto::invocation::native_skill_identity(&s.path) {
-                        s.description.clone()
-                    } else {
-                        format!("{} — {}", s.description, s.path)
-                    },
-                    invocation: zeron_proto::invocation::Invocation::Skill {
-                        name: s.name,
-                        path: s.path,
-                        command: s.command,
-                    },
-                }),
-        )
+        .map(InvocationCandidate::from)
         .collect()
 }
 
@@ -7075,47 +6789,26 @@ fn merge_invocation_results(
     skills: Result<Option<Vec<zeron_proto::invocation::Skill>>, RpcError>,
     skill_only: bool,
 ) -> Result<(Vec<InvocationCandidate>, bool, Option<SharedString>), RpcError> {
-    match (commands, skills) {
-        (Ok(commands), Ok(skills)) => {
-            let supported = !skill_only || skills.is_some();
-            Ok((
-                invocation_candidates(commands, skills.unwrap_or_default()),
+    zeron_proto::command_catalog::merge_invocation_results(commands, skills, skill_only).map(
+        |(rows, supported, warning)| {
+            (
+                rows.into_iter().map(InvocationCandidate::from).collect(),
                 supported,
-                None,
-            ))
-        }
-        (Ok(commands), Err(error)) if !skill_only && !commands.is_empty() => Ok((
-            invocation_candidates(commands, vec![]),
-            true,
-            Some(slash_error_message(&error, true)),
-        )),
-        (Err(error), Ok(Some(skills))) if skills.iter().any(|skill| skill.enabled) => Ok((
-            invocation_candidates(vec![], skills),
-            true,
-            Some(slash_error_message(&error, false)),
-        )),
-        (Err(error), _) | (_, Err(error)) => Err(error),
-    }
+                warning.map(|(error, skill)| slash_error_message(&error, skill)),
+            )
+        },
+    )
 }
 
 fn slash_error_message(err: &RpcError, skill: bool) -> SharedString {
-    match err {
-        RpcError::UnknownMethod(_) => {
-            if skill {
-                "Skills require an updated engine on the selected device. Restart that device’s Zeron after updating.".into()
-            } else {
-                "Commands require an updated engine on the selected device. Restart that device’s Zeron after updating.".into()
-            }
-        }
-        RpcError::Transport(_) | RpcError::Closed => "The session's device is unreachable".into(),
+    let failure = match err {
+        RpcError::UnknownMethod(_) => CatalogFailure::OutdatedEngine,
+        RpcError::Transport(_) | RpcError::Closed => CatalogFailure::Unreachable,
         RpcError::BadParams(_) | RpcError::Capability(_) | RpcError::Failed(_) => {
-            if skill {
-                "Couldn't load this agent's skills".into()
-            } else {
-                "Couldn't load this agent's commands".into()
-            }
+            CatalogFailure::Failed
         }
-    }
+    };
+    catalog_error_message(failure, skill).into()
 }
 
 struct PromptHistoryCursor {
@@ -7224,6 +6917,7 @@ pub struct Composer {
     /// under their own chat — a blanket clear-on-switch erased the one
     /// visible trace of a failed send (2026-08-19).
     failure_key: Option<String>,
+    queue_failure: Option<(String, SharedString)>,
     resume_compaction_kept: Option<(String, Option<chrono::DateTime<chrono::Utc>>)>,
     wizard: Option<Wizard>,
     wizard_focus: FocusHandle,
@@ -7409,7 +7103,7 @@ impl Composer {
             return;
         }
         self.running_tab = on;
-        self.running_tab_since = Some(Instant::now());
+        self.running_tab_since = Some(motion::now());
         self.running_ticker = on.then(|| {
             cx.spawn(async move |this, cx| {
                 loop {
@@ -7444,6 +7138,7 @@ impl Composer {
         self.mission = on;
         if on {
             self.set_running_tab(false, cx);
+            cx.emit(ComposerEvent::PlanFirst);
         }
         cx.notify();
     }
@@ -7457,7 +7152,7 @@ impl Composer {
             return target;
         }
         let total = RUNNING_TAB_FADE.total().as_secs_f32() * motion::speed_scale();
-        let raw = since.elapsed().as_secs_f32() / total.max(f32::EPSILON);
+        let raw = motion::since(since).as_secs_f32() / total.max(f32::EPSILON);
         if raw < 1.0 {
             window.request_animation_frame();
         }
@@ -7475,8 +7170,8 @@ impl Composer {
         running: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let now = Instant::now();
+    ) -> gpui::Stateful<gpui::Div> {
+        let now = motion::now();
         let slot = if self.running_tab {
             2.0
         } else if self.mission {
@@ -7492,6 +7187,7 @@ impl Composer {
             window.request_animation_frame();
         }
         let position = self.home_tab_slide.value_unclamped_at(now);
+        let current = slot as usize;
         let amount = |slot: usize| (1.0 - (position - slot as f32).abs()).clamp(0.0, 1.0);
         let tab = |id: &'static str,
                    label: &'static str,
@@ -7514,6 +7210,8 @@ impl Composer {
                 .cursor_pointer()
                 .role(Role::Tab)
                 .aria_label(label)
+                .aria_selected(slot == current)
+                .when_some(count, |el, count| el.aria_description(count.to_string()))
                 .text_color(color)
                 .hover(|style| style.text_color(theme.text))
                 .when_some(glyph, |el, glyph| {
@@ -7546,6 +7244,9 @@ impl Composer {
         .absolute()
         .inset_0();
         div()
+            .id("composer-home-tabs")
+            .role(Role::TabList)
+            .aria_label("New thread mode")
             .relative()
             .flex()
             .items_center()
@@ -7668,7 +7369,7 @@ impl Composer {
                                     .font_family(theme.font_mono.clone())
                                     .text_size(crate::typography::ui_rems(11.0))
                                     .text_color(theme.text_faint)
-                                    .child(crate::composer::background::elapsed_label(secs)),
+                                    .child(zeron_proto::background::elapsed_label(secs)),
                             )
                     })),
             )
@@ -7871,6 +7572,7 @@ impl Composer {
             ask_focus: cx.focus_handle(),
             _ask_input_events: ask_input_events,
             failure_key: None,
+            queue_failure: None,
             resume_compaction_kept: None,
             action_task: None,
             computer_preflight: None,
@@ -7922,8 +7624,8 @@ impl Composer {
             mission_plan_doc: true,
             mission_review: true,
             started_missions: HashMap::new(),
-            mission_motion: MissionMotion::at(false, Instant::now()),
-            home_tab_slide: motion::Tween::at(0.0, Instant::now()),
+            mission_motion: MissionMotion::at(false, motion::now()),
+            home_tab_slide: motion::Tween::at(0.0, motion::now()),
             home_tab_bounds: Default::default(),
             dock_reflow: Default::default(),
             dock_height_changed: false,
@@ -7933,7 +7635,7 @@ impl Composer {
             sidechat_count: None,
             last_target_height: 0.0,
             height_morph: None,
-            morph_clock: Instant::now(),
+            morph_clock: motion::now(),
             route_snap_until: None,
             _observe: observe,
             _pickers_observe: pickers_observe,
@@ -8121,13 +7823,7 @@ impl Composer {
         }
         let prediction = self.active_prediction(cx);
         let idle = if self.mission {
-            match self.bound_chat_id(cx) {
-                Some(_) => "Turn this chat into a mission: what should the team build?".into(),
-                None => {
-                    "Describe the mission. A lead plans it and runs each step on its own thread."
-                        .into()
-                }
-            }
+            zeron_proto::mission::mission_placeholder(self.bound_chat_id(cx).is_some()).into()
         } else if !self.side_chat
             && self.bound_chat_id(cx).is_none()
             && self.state.read(cx).no_project
@@ -8154,8 +7850,7 @@ impl Composer {
         if input.marked_range.is_some()
             || !input.selected_range.is_empty()
             || input.cursor_offset() != input.text().len()
-            || !prediction.starts_with(input.text())
-            || prediction.len() == input.text().len()
+            || !zeron_proto::prediction::accepts_prediction(&prediction, input.text())
         {
             return false;
         }
@@ -8304,10 +7999,10 @@ impl Composer {
             return false;
         }
         self.appshot_entrances
-            .retain(|_, start| start.elapsed().as_secs_f32() < motion::speed_scale());
+            .retain(|_, start| motion::since(*start).as_secs_f32() < motion::speed_scale());
         if !motion::reduced_motion(cx) {
             self.appshot_entrances
-                .insert(appshot.id.clone(), Instant::now());
+                .insert(appshot.id.clone(), motion::now());
         }
         // A capture completing while a queue edit is being saved belongs to
         // the displaced draft; it must not be lost or change the in-flight edit.
@@ -8489,6 +8184,39 @@ impl Composer {
         self.failure = Some(message.into());
         self.failure_key = Some(self.current_key.clone());
         cx.notify();
+    }
+
+    pub(crate) fn show_queue_failure(
+        &mut self,
+        chat_id: String,
+        row: Option<String>,
+        message: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        self.queue_failure = row.map(|row| (row, message.clone()));
+        self.failure = Some(message);
+        self.failure_key = Some(chat_id);
+        cx.notify();
+    }
+
+    pub(crate) fn clear_settled_queue_failure(
+        &mut self,
+        chat_id: &str,
+        queue: &[zeron_doc::QueuedMessage],
+        cx: &mut Context<Self>,
+    ) {
+        let Some((row, message)) = &self.queue_failure else {
+            return;
+        };
+        if self.failure_key.as_deref() != Some(chat_id) || queue.iter().any(|q| q.id == *row) {
+            return;
+        }
+        if self.failure.as_ref() == Some(message) {
+            self.failure = None;
+            self.failure_key = None;
+            cx.notify();
+        }
+        self.queue_failure = None;
     }
 
     fn add_staged(&mut self, staged: Vec<StagedAttachment>, cx: &mut Context<Self>) {
@@ -9000,7 +8728,7 @@ impl Composer {
                 .map(|quote| crate::badges::BadgeDetail {
                     location: quote.location().into(),
                     tag: None,
-                    body: quote.text.clone().into(),
+                    body: quote.text.clone(),
                 })
                 .collect();
             let group: SharedString = "composer-quotes".into();
@@ -9013,8 +8741,8 @@ impl Composer {
                     .child(crate::badges::render(
                         "composer-quotes",
                         &crate::badges::MessageBadge {
-                            icon: crate::icons::WRAP_TEXT,
-                            label: crate::quotes::chip_label(quotes.len()).into(),
+                            kind: crate::badges::BadgeKind::Selection,
+                            label: zeron_proto::badges::selection_label(quotes.len()),
                             details,
                         },
                         theme,
@@ -9440,7 +9168,7 @@ impl Composer {
             );
             // Entity-owned timestamps prevent the entrance replaying on route remount.
             if let Some(start) = self.appshot_entrances.get(&appshot.id) {
-                let raw = (start.elapsed().as_secs_f32() / (0.24 * motion::speed_scale()))
+                let raw = (motion::since(*start).as_secs_f32() / (0.24 * motion::speed_scale()))
                     .clamp(0.0, 1.0);
                 if raw < 1.0 && !motion::reduced_motion(cx) {
                     let progress =
@@ -10067,7 +9795,7 @@ impl Composer {
                         .map_or(zeron_proto::ChatIndicator::Idle, |chat| {
                             state.display_status_for(chat, now)
                         });
-                    let ring = background::sidebar_ring(status, state.session_for(&thread.chat_id));
+                    let ring = zeron_proto::background::sidebar_ring(status, state.session_for(&thread.chat_id));
                     (status, ring)
                 })
                 .collect()
@@ -10076,13 +9804,7 @@ impl Composer {
             let selected = self.mention.active == Some(ix);
             let (status, ring) = statuses[ix];
             let status_color = crate::shell::status_dot_color(status, theme);
-            let status_label = match status {
-                zeron_proto::ChatIndicator::Working => Some("Working"),
-                zeron_proto::ChatIndicator::AwaitingInput => Some("Input"),
-                zeron_proto::ChatIndicator::Errored => Some("Failed"),
-                zeron_proto::ChatIndicator::Completed => Some("Done"),
-                zeron_proto::ChatIndicator::Idle => None,
-            };
+            let status_label = zeron_proto::chat_mentions::thread_status_label(status);
             let status_badge = match (status_label, ring) {
                 (None, Some(count)) => Some(background::sidebar_ring_mark(count, theme)),
                 (None, None) => None,
@@ -10849,14 +10571,7 @@ impl Composer {
                 });
                 // Compacted: the boundary entry arrives through the doc watch.
                 let message = match result {
-                    Ok(value) => (value.get("compacted") != Some(&serde_json::Value::Bool(true)))
-                        .then(|| {
-                            value
-                                .get("message")
-                                .and_then(|m| m.as_str())
-                                .unwrap_or("Nothing to compact")
-                                .to_string()
-                        }),
+                    Ok(value) => compact_outcome_notice(&value),
                     Err(err) => Some(format!("Compaction failed: {err}")),
                 };
                 if let Some(message) = message {
@@ -10934,7 +10649,7 @@ impl Composer {
         let state = self.state.read(cx);
         let sidechats = state.live_sidechats_of(&chat.id, chrono::Utc::now());
         let count = sidechats.len();
-        let now = Instant::now();
+        let now = motion::now();
         let roll = match &self.sidechat_count {
             Some((id, _, to, _)) if *id == chat.id && *to == count => self.sidechat_count.clone(),
             Some((id, _, to, _))
@@ -11110,33 +10825,14 @@ impl Composer {
                     .py(px(10.0))
                     .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_muted)
-                    .child(if commands.is_empty() {
-                        if self.slash.skill {
-                            if self.slash.supported {
-                                "No skills available for this project"
-                            } else {
-                                "This agent does not advertise skills"
-                            }
-                        } else if !crate::settings::current(cx)
+                    .child(catalog_empty_message(
+                        self.slash.skill,
+                        self.slash.supported,
+                        commands.is_empty(),
+                        crate::settings::current(cx)
                             .skill_completion(self.slash.harness.unwrap_or(HarnessId::Codex))
-                            .separate_from_slash
-                        {
-                            "No commands or skills available"
-                        } else {
-                            "No slash commands available in this integration"
-                        }
-                    } else {
-                        if self.slash.skill {
-                            "No matching skills"
-                        } else if !crate::settings::current(cx)
-                            .skill_completion(self.slash.harness.unwrap_or(HarnessId::Codex))
-                            .separate_from_slash
-                        {
-                            "No matching commands or skills"
-                        } else {
-                            "No matching commands"
-                        }
-                    }),
+                            .separate_from_slash,
+                    )),
             );
         } else {
             let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(self.slash.filtered.len());
@@ -11160,17 +10856,8 @@ impl Composer {
                     .flatten();
                 let description: SharedString = match blocked {
                     Some(reason) => reason,
-                    None => {
-                        let mut description = command.description.clone();
-                        if let Some(hint) = &command.input_hint {
-                            if description.is_empty() {
-                                description = format!("<{hint}>");
-                            } else {
-                                description = format!("{description} · <{hint}>");
-                            }
-                        }
-                        description.into()
-                    }
+                    None => invocation_detail(&command.description, command.input_hint.as_deref())
+                        .into(),
                 };
                 let disabled = command.name == COMPACT_COMMAND && unsupported.is_some();
                 rows.push(
@@ -11383,7 +11070,7 @@ impl Composer {
             };
             self.current_key = key;
             self.mission = false;
-            self.mission_motion = MissionMotion::at(false, Instant::now());
+            self.mission_motion = MissionMotion::at(false, motion::now());
             self.prompt_history = None;
             // `failure` deliberately survives navigation: chat-scoped
             // failures render only under their own chat (see `failure_key`),
@@ -11413,7 +11100,7 @@ impl Composer {
                 // always expanded; an established session begins compact.
                 self.expanded_mode = returning_to_new_thread;
                 let now_ms =
-                    self.morph_clock.elapsed().as_secs_f32() * 1000.0 / motion::speed_scale();
+                    motion::since(self.morph_clock).as_secs_f32() * 1000.0 / motion::speed_scale();
                 self.flip_morph = Some(FlipMorph::new_thread_transition(
                     self.last_rendered_height,
                     now_ms,
@@ -11747,26 +11434,23 @@ impl Composer {
                 .selected_space_row()
                 .map(|space| space.id.clone()),
         };
-        if let Some(file) = self.staged().iter().find(|att| {
+        let file = self.staged().iter().find(|att| {
             att.image().is_none()
                 && zeron_proto::attachment_mentions::pasted_text_index_from_name(&att.name)
                     .is_none()
-        }) {
-            let message = format!(
-                "A mission takes images and pasted text; remove {}.",
-                file.name
-            );
-            crate::toast::error(cx, message);
-            return;
-        }
+        });
         let images = self
             .staged()
             .iter()
             .filter(|att| att.image().is_some())
             .count()
             + self.staged_appshots().len();
-        if images > zeron_doc::TASK_IMAGES_MAX {
-            crate::toast::error(cx, "A mission holds up to 12 images.");
+        if let Some(message) = zeron_proto::mission::mission_staged_error(
+            images,
+            zeron_doc::TASK_IMAGES_MAX,
+            file.map(|att| att.name.as_str()),
+        ) {
+            crate::toast::error(cx, message);
             return;
         }
         let key = self.current_key.clone();
@@ -13508,9 +13192,12 @@ impl Composer {
                     .id("wizard-submit")
                     .role(Role::Button)
                     .aria_label(if last { "Submit" } else { "Next" })
+                    .aria_disabled(!can_advance)
                     .px(px(16.0))
                     .when(!can_advance, |el| el.opacity(0.4))
-                    .on_click(cx.listener(move |this, _, _, cx| this.host_advance(host, cx))),
+                    .when(can_advance, |el| {
+                        el.on_click(cx.listener(move |this, _, _, cx| this.host_advance(host, cx)))
+                    }),
             );
         Some((body, footer))
     }
@@ -13899,12 +13586,13 @@ impl Composer {
     fn update_voice(&mut self, window: &mut Window, cx: &App) -> (f32, Option<VoiceFrame>) {
         use crate::dictation::{Phase, waveform::Mode};
         let now = Instant::now();
+        let tween_now = motion::now();
         let reduced = motion::reduced_motion(cx);
         let dictation = &self.input.read(cx).dictation;
         let active = dictation.phase.active();
         self.voice_tween
-            .retarget(if active { 1.0 } else { 0.0 }, now, reduced);
-        let t = self.voice_tween.value(now);
+            .retarget(if active { 1.0 } else { 0.0 }, tween_now, reduced);
+        let t = self.voice_tween.value(tween_now);
         if active {
             let meter = &dictation.meter;
             let mode = match dictation.phase {
@@ -13931,7 +13619,7 @@ impl Composer {
         } else if t <= 0.0 {
             self.voice_last = None;
         }
-        if !reduced && (active || !self.voice_tween.settled(now)) {
+        if !reduced && (active || !self.voice_tween.settled(tween_now)) {
             // Bars scroll, the glow follows the voice, and the morph advances.
             window.request_animation_frame();
         }
@@ -14029,7 +13717,10 @@ impl Composer {
         let plan = crate::settings::widgets::segmented(
             theme,
             "composer-mission-plan",
-            &[(true, "plan.md"), (false, "Steps only")],
+            &[
+                (true, zeron_proto::mission::PLAN_DOC),
+                (false, zeron_proto::mission::STEPS_ONLY),
+            ],
             self.mission_plan_doc,
             move |plan_doc, _, cx| {
                 composer
@@ -14046,7 +13737,7 @@ impl Composer {
             .id("composer-mission-review")
             .debug_selector(|| "composer-mission-review".into())
             .role(Role::Switch)
-            .aria_label("Review plan first")
+            .aria_label(zeron_proto::mission::REVIEW_PLAN_FIRST)
             .aria_toggled(if review {
                 gpui::Toggled::True
             } else {
@@ -14071,7 +13762,7 @@ impl Composer {
                 review,
                 "composer-mission-review-switch",
             ))
-            .child("Review plan first")
+            .child(zeron_proto::mission::REVIEW_PLAN_FIRST)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.mission_review = !review;
                 cx.notify();
@@ -14087,7 +13778,7 @@ impl Composer {
 
     fn render_mission_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
         let on = self.mission;
-        let t = self.mission_motion.border.value_at(Instant::now());
+        let t = self.mission_motion.border.value_at(motion::now());
         let tone = motion::mix(theme.text_muted, theme.text, t);
         div()
             .flex_none()
@@ -14147,7 +13838,7 @@ impl Composer {
         let theme = Theme::of(cx).clone();
         let blocked = self.send_blocked(cx);
         let (id, label) = if self.mission {
-            ("composer-start-mission", "Start mission")
+            ("composer-start-mission", START_MISSION_LABEL)
         } else {
             ("composer-send", "Send message")
         };
@@ -14156,6 +13847,7 @@ impl Composer {
             .debug_selector(move || id.into())
             .role(Role::Button)
             .aria_label(label)
+            .aria_disabled(blocked)
             .h(px(28.0))
             .flex_none()
             .flex()
@@ -14358,6 +14050,7 @@ pub(crate) fn send_circle(
         .debug_selector(move || id.into())
         .role(Role::Button)
         .aria_label("Send message")
+        .aria_disabled(blocked)
         .size(px(28.0))
         .flex_none()
         .rounded_full()
@@ -14456,14 +14149,14 @@ impl Render for Composer {
                 self.mission,
                 from,
                 motion::reduced_motion(cx),
-                Instant::now(),
+                motion::now(),
             );
         }
         let lit = self.mission || self.leads_open_mission(cx);
         self.mission_motion
-            .light(lit, motion::reduced_motion(cx), Instant::now());
+            .light(lit, motion::reduced_motion(cx), motion::now());
         self.sync_prediction(cx);
-        let mission_now = Instant::now();
+        let mission_now = motion::now();
         if !self.mission_motion.settled_at(mission_now) {
             window.request_animation_frame();
         }
@@ -14624,7 +14317,7 @@ impl Render for Composer {
         let new_chat = self.bound_chat_id(cx).is_none();
         // Morph clock in ms; dividing by the measurement knob stretches the
         // timeline exactly like shell.rs eval_tween's scaled duration.
-        let now_ms = self.morph_clock.elapsed().as_secs_f32() * 1000.0 / motion::speed_scale();
+        let now_ms = motion::since(self.morph_clock).as_secs_f32() * 1000.0 / motion::speed_scale();
         let route_snap = self
             .route_snap_until
             .is_some_and(|until| Instant::now() < until);
@@ -14823,15 +14516,8 @@ impl Render for Composer {
                         .child(crate::computer::cards::computer_card(
                             crate::computer::cards::CardTone::Info,
                             crate::icons::COLLAPSE_ARROWS,
-                            "Resume with less context".into(),
-                            vec![
-                                format!(
-                                    "{} tokens from {} ago \u{b7} cache expired",
-                                    crate::pickers::compact_tokens(offer.tokens),
-                                    offer.idle_label()
-                                )
-                                .into(),
-                            ],
+                            RESUME_COMPACTION_TITLE.into(),
+                            vec![offer.body().into()],
                             vec![
                                 crate::computer::cards::CardAction {
                                     id: "composer-resume-compact".into(),
@@ -14936,11 +14622,13 @@ impl Render for Composer {
         // With Steer as the default, an agent that only takes input between
         // turns still queues; without this line the queue read as a dropped
         // steer (user report: "my steer didn't apply until grok finished").
-        let steer_queues = mode == SendButtonMode::Queue
-            && crate::settings::current(cx).follow_up_behavior == FollowUpBehavior::Steer
-            && self.pickers.read(cx).resolved_steering_mode(cx)
-                == Some(zeron_proto::SteeringMode::TurnBoundary);
-        let container = container.when(steer_queues, |el| {
+        let steer_queues = zeron_proto::steer_queues_notice(
+            mode == SendButtonMode::Queue,
+            crate::settings::current(cx).follow_up_behavior == FollowUpBehavior::Steer,
+            self.pickers.read(cx).resolved_steering_mode(cx)
+                != Some(zeron_proto::SteeringMode::TurnBoundary),
+        );
+        let container = container.when_some(steer_queues, |el, notice| {
             el.child(
                 div()
                     .mx(px(8.0))
@@ -14948,7 +14636,7 @@ impl Render for Composer {
                     .text_size(px(11.0))
                     .line_height(px(14.0))
                     .text_color(theme.text_faint)
-                    .child("This agent can't be steered mid-turn. Your message will be queued and sent when the current turn finishes."),
+                    .child(notice),
             )
         });
 
@@ -15968,29 +15656,6 @@ mod tests {
             .unwrap();
     }
 
-    #[test]
-    fn prediction_display_follows_the_draft() {
-        let idle = SharedString::from("Do anything…");
-        let fix = Some("Fix the spacing.");
-        assert_eq!(
-            prediction_display(fix, "", idle.clone()),
-            ("Fix the spacing.".into(), None)
-        );
-        assert_eq!(
-            prediction_display(fix, "Fix", idle.clone()),
-            (idle.clone(), Some(" the spacing.".into()))
-        );
-        assert_eq!(
-            prediction_display(fix, "Fix the spacing.", idle.clone()),
-            (idle.clone(), None)
-        );
-        assert_eq!(
-            prediction_display(fix, "Ship", idle.clone()),
-            (idle.clone(), None)
-        );
-        assert_eq!(prediction_display(None, "", idle.clone()), (idle, None));
-    }
-
     #[gpui::test]
     fn tab_takes_the_prediction_and_shift_tab_toggles_mission_control(
         cx: &mut gpui::TestAppContext,
@@ -16645,6 +16310,43 @@ mod tests {
             assert!(input.read(cx).focus_handle.is_focused(window));
         })
         .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_queue_action_failure_clears_once_its_row_is_delivered(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let row = zeron_doc::QueuedMessage::new("row-1", "photos", "phone");
+        handle
+            .update(cx, |composer, _, cx| {
+                composer.current_key = "chat-a".into();
+                composer.show_queue_failure(
+                    "chat-a".into(),
+                    Some("row-1".into()),
+                    "Couldn't send that message: still uploading".into(),
+                    cx,
+                );
+                composer.clear_settled_queue_failure("chat-a", std::slice::from_ref(&row), cx);
+                assert!(composer.visible_failure().is_some(), "row still queued");
+                composer.clear_settled_queue_failure("chat-b", &[], cx);
+                assert!(composer.visible_failure().is_some(), "another chat's queue");
+                composer.clear_settled_queue_failure("chat-a", &[], cx);
+                assert_eq!(composer.visible_failure(), None, "row left the queue");
+
+                composer.show_queue_failure(
+                    "chat-a".into(),
+                    Some("row-1".into()),
+                    "Couldn't send that message".into(),
+                    cx,
+                );
+                composer.show_error("Something else", cx);
+                composer.clear_settled_queue_failure("chat-a", &[], cx);
+                assert_eq!(
+                    composer.visible_failure().as_deref(),
+                    Some("Something else"),
+                    "a newer failure stays"
+                );
+            })
+            .unwrap();
     }
 
     #[gpui::test]
@@ -19302,46 +19004,6 @@ mod tests {
             .unwrap();
     }
 
-    #[test]
-    fn partial_discovery_keeps_commands_and_skills_independently() {
-        let command = SlashCommand {
-            name: "review".into(),
-            description: String::new(),
-            input_hint: None,
-            kind: Default::default(),
-        };
-        let skill = zeron_proto::invocation::Skill {
-            command: None,
-            name: "review".into(),
-            path: "/repo/SKILL.md".into(),
-            description: String::new(),
-            enabled: true,
-        };
-        let (rows, supported, warning) = merge_invocation_results(
-            Ok(vec![command]),
-            Err(RpcError::UnknownMethod("ListSkills".into())),
-            false,
-        )
-        .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].invocation.prefix(), '/');
-        assert!(supported && warning.is_some());
-        assert_eq!(invocation_insertion(&rows[0].invocation, false), "/review");
-        let (rows, _, warning) = merge_invocation_results(
-            Err(RpcError::Failed("commands unavailable".into())),
-            Ok(Some(vec![skill])),
-            false,
-        )
-        .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].invocation.prefix(), '$');
-        assert!(warning.is_some());
-        assert!(merge_invocation_results(Ok(vec![]), Err(RpcError::Closed), true).is_err());
-        let (rows, supported, warning) =
-            merge_invocation_results(Ok(vec![]), Ok(None), true).unwrap();
-        assert!(rows.is_empty() && !supported && warning.is_none());
-    }
-
     #[gpui::test]
     fn commands_complete_inline_and_partial_discovery_retries(cx: &mut gpui::TestAppContext) {
         let (_dir, handle) = composer_focus_window(cx);
@@ -19404,138 +19066,6 @@ mod tests {
     }
 
     #[test]
-    fn every_harness_catalog_only_offers_round_trippable_references() {
-        use zeron_proto::invocation::{Skill, SkillCommand, invocation_links};
-        for (harness, _) in crate::settings::SKILL_COMPLETION_HARNESSES {
-            let commands = ["review", "bad\ncommand", "two words"]
-                .into_iter()
-                .map(|name| SlashCommand {
-                    name: name.into(),
-                    description: String::new(),
-                    input_hint: None,
-                    kind: Default::default(),
-                })
-                .collect();
-            let skills = [
-                ("审查-é", "/repo/skill dir/SKILL.md", None),
-                ("bad name", "/repo/SKILL.md", None),
-                ("review", "/repo/bad\npath/SKILL.md", Some("review")),
-                ("broken-native", "harness-skill:probe", Some("bad command")),
-            ]
-            .into_iter()
-            .map(|(name, path, command)| Skill {
-                name: name.into(),
-                path: path.into(),
-                description: String::new(),
-                enabled: true,
-                command: command.map(|name| SkillCommand {
-                    name: name.into(),
-                    harness,
-                }),
-            })
-            .collect();
-            let rows = invocation_candidates(commands, skills);
-            assert_eq!(
-                rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
-                ["review", "审查-é"],
-                "{harness:?}"
-            );
-            for row in rows {
-                assert_eq!(
-                    invocation_links(&row.invocation.link())[0].1,
-                    row.invocation
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn separated_native_skills_are_not_left_in_the_command_catalog() {
-        use zeron_proto::invocation::{Skill, SkillCommand};
-        for (harness, _) in crate::settings::SKILL_COMPLETION_HARNESSES {
-            let commands = vec![
-                SlashCommand {
-                    name: "review".into(),
-                    description: String::new(),
-                    input_hint: None,
-                    kind: Default::default(),
-                },
-                SlashCommand {
-                    name: "compact".into(),
-                    description: String::new(),
-                    input_hint: None,
-                    kind: Default::default(),
-                },
-            ];
-            let skills = vec![Skill {
-                name: "review".into(),
-                path: "/repo/SKILL.md".into(),
-                description: String::new(),
-                enabled: true,
-                command: Some(SkillCommand {
-                    name: "review".into(),
-                    harness,
-                }),
-            }];
-            let rows = invocation_candidates(commands, skills);
-            assert_eq!(rows.len(), 2);
-            assert_eq!(
-                rows.iter()
-                    .filter(|row| row.invocation.prefix() == '/')
-                    .map(|row| row.name.as_str())
-                    .collect::<Vec<_>>(),
-                vec!["compact"]
-            );
-            assert_eq!(rows[1].invocation.prefix(), '$');
-        }
-    }
-
-    #[test]
-    fn combined_invocations_preserve_skill_identity_and_command_collisions() {
-        use zeron_proto::invocation::{Invocation, Skill};
-        let commands = vec![SlashCommand {
-            name: "review".into(),
-            description: "Command".into(),
-            input_hint: None,
-            kind: Default::default(),
-        }];
-        let skills = vec![
-            Skill {
-                command: None,
-                name: "review".into(),
-                path: "/a/SKILL.md".into(),
-                description: "A".into(),
-                enabled: true,
-            },
-            Skill {
-                command: None,
-                name: "review".into(),
-                path: "/b/SKILL.md".into(),
-                description: "B".into(),
-                enabled: true,
-            },
-            Skill {
-                command: None,
-                name: "hidden".into(),
-                path: "/c/SKILL.md".into(),
-                description: String::new(),
-                enabled: false,
-            },
-        ];
-        assert_eq!(invocation_candidates(commands.clone(), vec![]).len(), 1);
-        let dollar = invocation_candidates(vec![], skills.clone());
-        assert_eq!(dollar.len(), 2);
-        let slash = invocation_candidates(commands, skills);
-        assert_eq!(slash.len(), 3);
-        assert!(matches!(slash[0].invocation, Invocation::Command { .. }));
-        for candidate in &slash[1..] {
-            assert!(matches!(candidate.invocation, Invocation::Skill { .. }));
-            assert!(candidate.invocation.prompt_text().contains("SKILL.md"));
-        }
-        assert_ne!(slash[1].invocation, slash[2].invocation);
-    }
-
-    #[test]
     fn slash_token_opens_at_prose_boundaries() {
         assert_eq!(
             slash_token("/comp", 5),
@@ -19564,38 +19094,6 @@ mod tests {
     }
 
     #[test]
-    fn slash_rows_keep_built_ins_and_zeron_commands() {
-        let command = |name: &str, kind: SlashCommandKind| SlashCommand {
-            name: name.into(),
-            description: String::new(),
-            input_hint: None,
-            kind,
-        };
-        let names: Vec<String> = with_zeron_commands(
-            Some(HarnessId::ClaudeCode),
-            vec![
-                command("maestro-work", SlashCommandKind::Skill),
-                command("model", SlashCommandKind::BuiltIn),
-            ],
-        )
-        .into_iter()
-        .map(|command| command.name)
-        .collect();
-        assert_eq!(
-            names,
-            vec![
-                BTW_COMMAND,
-                SIDECHAT_COMMAND,
-                COMPACT_COMMAND,
-                COMPUTER_USE_COMMAND,
-                "model"
-            ]
-        );
-        assert!(zeron_owned_command(COMPACT_COMMAND));
-        assert!(!zeron_owned_command("model"));
-    }
-
-    #[test]
     fn a_leading_zeron_command_is_the_only_plain_text_painted_as_a_command() {
         assert_eq!(zeron_owned_command_range("/sidechat á"), Some(0..9));
         assert_eq!(zeron_owned_command_range("/btw á"), Some(0..4));
@@ -19616,45 +19114,6 @@ mod tests {
         assert!(display.contains("/review"));
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].kind, ChipKind::Command);
-    }
-
-    #[test]
-    fn compact_is_intercepted_with_its_focus_and_nothing_else_is() {
-        assert_eq!(compact_focus("/compact"), Some(None));
-        assert_eq!(
-            compact_focus("/compact focus on auth"),
-            Some(Some("focus on auth".into()))
-        );
-        // A longer name that merely starts with it is another command.
-        assert!(compact_focus("/compaction").is_none());
-        assert!(compact_focus("/compact-now").is_none());
-        // Not the first token → an ordinary prompt, sent as a turn.
-        assert!(compact_focus("please /compact").is_none());
-        assert!(compact_focus("/goal ship it").is_none());
-    }
-
-    #[test]
-    fn the_compact_entry_never_doubles_a_harness_that_advertises_it() {
-        let advertised = |name: &str| SlashCommand {
-            name: name.into(),
-            description: "harness copy".into(),
-            input_hint: None,
-            kind: SlashCommandKind::BuiltIn,
-        };
-        let names = |commands: &[SlashCommand]| -> Vec<String> {
-            commands.iter().map(|c| c.name.clone()).collect()
-        };
-        // Harness advertises it: exactly one row, the harness's own.
-        let merged = with_compact_entry(vec![advertised("compact"), advertised("clear")]);
-        assert_eq!(names(&merged), vec!["compact", "clear"]);
-        assert_eq!(merged[0].description, "harness copy");
-        // Harness does not (cursor advertises nothing at all): zeron's rides.
-        let merged = with_compact_entry(Vec::new());
-        assert_eq!(names(&merged), vec!["compact"]);
-        assert_eq!(
-            merged[0].description,
-            "Free up context by summarizing the conversation"
-        );
     }
 
     #[gpui::test]
@@ -19734,41 +19193,6 @@ mod tests {
                 assert!(composer.compact_disabled_reason(cx).is_none());
             })
             .unwrap();
-    }
-
-    #[test]
-    fn resume_compaction_is_due_only_for_a_large_idle_claude_chat() {
-        let now = chrono::Utc::now();
-        let ago = |minutes| Some(now - chrono::Duration::minutes(minutes));
-        let due = |harness, tokens, at| resume_compaction_due(harness, tokens, at, now);
-        assert_eq!(
-            due(HarnessId::ClaudeCode, Some(184_312), ago(145)),
-            Some(ResumeCompaction {
-                tokens: 184_312,
-                idle_minutes: 145
-            })
-        );
-        assert!(due(HarnessId::ClaudeCode, Some(100_000), ago(70)).is_some());
-        assert!(due(HarnessId::ClaudeCode, Some(99_999), ago(145)).is_none());
-        assert!(due(HarnessId::ClaudeCode, Some(184_312), ago(69)).is_none());
-        assert!(due(HarnessId::ClaudeCode, None, ago(145)).is_none());
-        assert!(due(HarnessId::ClaudeCode, Some(184_312), None).is_none());
-        assert!(due(HarnessId::Codex, Some(184_312), ago(145)).is_none());
-    }
-
-    #[test]
-    fn resume_compaction_idle_label_reads_in_hours_and_days() {
-        let label = |idle_minutes| {
-            ResumeCompaction {
-                tokens: 0,
-                idle_minutes,
-            }
-            .idle_label()
-        };
-        assert_eq!(label(45), "45m");
-        assert_eq!(label(120), "2h");
-        assert_eq!(label(145), "2h 25m");
-        assert_eq!(label(3 * 24 * 60 + 5), "3d");
     }
 
     #[gpui::test]
@@ -19959,57 +19383,6 @@ mod tests {
             unsettled_at: None,
             harness_session_harness: Default::default(),
         }
-    }
-
-    #[test]
-    fn sidechat_is_intercepted_with_its_prompt_and_nothing_else_is() {
-        for command in ["sidechat", "btw"] {
-            assert_eq!(sidechat_prompt(&format!("/{command}")), Some(None));
-            assert_eq!(
-                sidechat_prompt(&format!("/{command} compare the two")),
-                Some(Some("compare the two".into()))
-            );
-            // A longer name that merely starts with it is another command.
-            assert!(sidechat_prompt(&format!("/{command}s")).is_none());
-            assert!(sidechat_prompt(&format!("/{command}-now")).is_none());
-            // Not the first token → an ordinary prompt, sent as a turn.
-            assert!(sidechat_prompt(&format!("ask in a /{command}")).is_none());
-        }
-        assert!(sidechat_prompt("/compact").is_none());
-    }
-
-    #[test]
-    fn the_sidechat_entry_never_doubles_a_harness_that_advertises_it() {
-        let advertised = |name: &str| SlashCommand {
-            name: name.into(),
-            description: "harness copy".into(),
-            input_hint: None,
-            kind: SlashCommandKind::BuiltIn,
-        };
-        let names = |commands: &[SlashCommand]| -> Vec<String> {
-            commands.iter().map(|c| c.name.clone()).collect()
-        };
-        let merged = with_sidechat_entry(vec![advertised("sidechat"), advertised("clear")]);
-        assert_eq!(names(&merged), vec!["btw", "sidechat", "clear"]);
-        assert_eq!(merged[1].description, "harness copy");
-        let merged = with_sidechat_entry(vec![advertised("btw")]);
-        assert_eq!(names(&merged), vec!["sidechat", "btw"]);
-        assert_eq!(merged[1].description, "harness copy");
-        // The popup's real list: every zeron command rides, each exactly once.
-        let merged = with_sidechat_entry(with_compact_entry(Vec::new()));
-        assert_eq!(names(&merged), vec!["btw", "sidechat", "compact"]);
-        for entry in &merged[..2] {
-            assert_eq!(
-                entry.description,
-                "Ask about this chat on the side, without touching it"
-            );
-        }
-    }
-
-    #[test]
-    fn the_tab_counts_the_live_sidechats() {
-        assert_eq!(sidechat_tab_label(0), "New sidechat (btw)");
-        assert_eq!(sidechat_tab_label(2), "Sidechats (btw) \u{b7} 2");
     }
 
     #[gpui::test]
@@ -22160,47 +21533,6 @@ mod computer_use_tests {
     use super::*;
     use gpui::TestAppContext;
     use zeron_proto::computer::ComputerPermission;
-
-    fn command(name: &str) -> SlashCommand {
-        SlashCommand {
-            name: name.into(),
-            description: "native".into(),
-            input_hint: None,
-            kind: SlashCommandKind::BuiltIn,
-        }
-    }
-
-    #[test]
-    fn computer_use_is_offered_where_the_catalog_exists_and_wins_a_native_collision() {
-        let merged = with_computer_use_entry(
-            HarnessId::Codex,
-            vec![command("computer-use"), command("clear")],
-        );
-        let names: Vec<&str> = merged.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["computer-use", "clear"]);
-        assert_eq!(
-            merged[0].description,
-            "Use Zeron Computer for this request only"
-        );
-        for harness in [
-            HarnessId::Opencode,
-            HarnessId::Cursor,
-            HarnessId::Pi,
-            HarnessId::Antigravity,
-        ] {
-            assert!(
-                with_computer_use_entry(harness, vec![command("clear")])
-                    .iter()
-                    .all(|c| c.name != "computer-use")
-            );
-        }
-        let all = with_sidechat_entry(with_compact_entry(with_computer_use_entry(
-            HarnessId::ClaudeCode,
-            Vec::new(),
-        )));
-        let names: Vec<&str> = all.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["btw", "sidechat", "compact", "computer-use"]);
-    }
 
     #[test]
     fn the_preflight_runs_only_in_a_mac_ui_on_the_chats_host() {

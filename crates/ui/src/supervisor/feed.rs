@@ -3,11 +3,11 @@ use std::rc::Rc;
 
 use chrono::{DateTime, Duration, Utc};
 use zeron_proto::supervisor::{
-    InputAsker, InterventionChip, InterventionKind, LeadQuestion, NeedsYouRow, QuestionState,
-    ResourceState, SharedResource, SupervisorIntervention, SupervisorSnapshot,
+    InterventionChip, InterventionKind, LeadQuestion, NeedsYouRow, QuestionState, ResourceState,
+    SharedResource, SupervisorIntervention, SupervisorSnapshot,
 };
 
-use super::{no_effect_yet, row_key, row_origin};
+use super::no_effect_yet;
 
 const OPEN_HOURS: i64 = 24;
 const MEMORY_ROWS: usize = 50;
@@ -113,24 +113,9 @@ impl Feed {
     }
 }
 
-/// A watched plain tree has no task, so its threads' asks group under the tree's root chat.
-pub(crate) fn needs_group(
-    row: &NeedsYouRow,
-    root_of: &dyn Fn(&str) -> Option<String>,
-) -> Option<String> {
-    match row {
-        NeedsYouRow::Input(input)
-            if input.task_id.is_none() && input.asker != InputAsker::Supervisor =>
-        {
-            root_of(&input.chat_id)
-        }
-        row => row_origin(row).0.map(str::to_owned),
-    }
-}
-
 fn group_of(entry: &Entry, root_of: &dyn Fn(&str) -> Option<String>) -> Option<String> {
     match entry {
-        Entry::Needs(row) | Entry::Answered(Answered { row, .. }) => needs_group(row, root_of),
+        Entry::Needs(row) | Entry::Answered(Answered { row, .. }) => row.group(root_of),
         Entry::Question(question) => Some(question.task_id.clone()),
         Entry::Intervention(intervention) => intervention.task_id.clone(),
         Entry::Resource(_) => None,
@@ -186,13 +171,6 @@ pub(crate) fn grouped<'a>(rows: impl IntoIterator<Item = &'a Row>) -> Vec<Group<
             ))
     });
     groups
-}
-
-fn needs_at(row: &NeedsYouRow) -> DateTime<Utc> {
-    match row {
-        NeedsYouRow::Item(item) => item.at,
-        NeedsYouRow::Input(input) => input.at,
-    }
 }
 
 fn question_key(question: &LeadQuestion) -> String {
@@ -256,9 +234,9 @@ pub(crate) fn feed(
         .needs_you
         .iter()
         .map(|row| Row {
-            key: row_key(row),
+            key: row.key(),
             kind: Kind::Needs,
-            at: needs_at(row),
+            at: row.at(),
             entry: Entry::Needs(row.clone()),
             group: None,
         })
@@ -328,7 +306,7 @@ pub(crate) fn feed(
         );
     }
     earlier.extend(memory.answered.iter().map(|answered| Row {
-        key: row_key(&answered.row),
+        key: answered.row.key(),
         kind: Kind::Needs,
         at: answered.at,
         entry: Entry::Answered(answered.clone()),
@@ -372,10 +350,10 @@ impl Memory {
             self.open_resources = None;
             return Vec::new();
         };
-        let keys: Vec<String> = snapshot.needs_you.iter().map(row_key).collect();
+        let keys: Vec<String> = snapshot.needs_you.iter().map(NeedsYouRow::key).collect();
         let mut arrived = Vec::new();
         if let Some(previous) = self.needs.take() {
-            let before: Vec<String> = previous.iter().map(row_key).collect();
+            let before: Vec<String> = previous.iter().map(NeedsYouRow::key).collect();
             arrived = keys
                 .iter()
                 .filter(|key| !before.contains(key))
@@ -385,7 +363,7 @@ impl Memory {
                 if keys.contains(&key) {
                     continue;
                 }
-                self.answered.retain(|known| row_key(&known.row) != key);
+                self.answered.retain(|known| known.row.key() != key);
                 self.answered.push(Answered {
                     choice: choices.get(&key).cloned(),
                     row,
@@ -394,7 +372,7 @@ impl Memory {
             }
         }
         self.answered
-            .retain(|known| !keys.contains(&row_key(&known.row)));
+            .retain(|known| !keys.contains(&known.row.key()));
         self.needs = Some(snapshot.needs_you.clone());
         let open: Vec<SharedResource> = snapshot
             .resources

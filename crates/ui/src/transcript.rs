@@ -43,22 +43,24 @@ use gpui::{
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
 use zeron_proto::{HarnessId, ToolCall};
+use zeron_proto::device_tools::{
+    device_call, device_call_detail, device_call_label, device_group_label,
+};
 
 use crate::route_badge::{self, RouteInfo};
 
 use crate::computer::cards::{
-    ApprovalCard, CardAction, CardTone, ComputerNotice, ComputerRequest, ConsentChoice,
-    ConsentOutcome, approval_card, computer_card, computer_event_row, computer_notice,
-    consent_answers, consent_app, consent_card_title, consent_choice_key, consent_choices,
-    consent_detail, consent_event_label, consent_outcome, consent_question, consent_scope,
-    elevated_risk, is_control_denied, left_open_app, missing_computer_permissions, revoked_label,
+    ApprovalCard, COMPUTER_DENIED_ACTION, COMPUTER_DENIED_HINT, COMPUTER_DENIED_TITLE, CardAction,
+    CardTone, ComputerNotice, ComputerRequest, ConsentChoice, ConsentOutcome, approval_card,
+    computer_card, computer_event_row, computer_notice, consent_answers, consent_app,
+    consent_card_title, consent_choice_key, consent_choices, consent_detail, consent_event_label,
+    consent_outcome, consent_question, consent_scope, elevated_risk, is_control_denied,
+    left_open_app, missing_computer_permissions, revoked_label,
 };
 use crate::computer::presentation::{
     ComputerCall, computer_action_label, computer_call, computer_call_app, computer_call_rows,
-    computer_js_action_label, computer_js_actions, computer_output_hidden,
-};
-use crate::device_panel::presentation::{
-    device_call, device_call_detail, device_call_label, device_group_label,
+    computer_call_js_actions, computer_group_segment, computer_js_action_label,
+    computer_output_hidden,
 };
 use crate::markdown::mermaid_cache::{self, MermaidCache};
 use crate::markdown::parser::{
@@ -878,6 +880,46 @@ impl ToolDetail {
             Self::Output { .. } | Self::Thought { .. } => None,
         }
     }
+
+    fn a11y(&self) -> (&'static str, String) {
+        let lines = |lines: Vec<String>| lines.join("\n");
+        match self {
+            Self::Output {
+                lines: output,
+                truncated_by,
+            } => {
+                let mut text = lines(output.iter().map(ToString::to_string).collect());
+                if *truncated_by > 0 {
+                    text += &format!("\n… {truncated_by} more lines");
+                }
+                ("Output", text)
+            }
+            Self::Thought { lines: thought } => (
+                "Thought",
+                lines(
+                    thought
+                        .iter()
+                        .map(|line| line.iter().map(|run| run.text.as_str()).collect())
+                        .collect(),
+                ),
+            ),
+            Self::Diff { file, .. } => (
+                "Changes",
+                format!("{} +{} −{}", file.path, file.additions, file.deletions),
+            ),
+            Self::Stats { stats } => (
+                "Changes",
+                lines(
+                    stats
+                        .iter()
+                        .map(|stat| {
+                            format!("{} +{} −{}", stat.path, stat.additions, stat.deletions)
+                        })
+                        .collect(),
+                ),
+            ),
+        }
+    }
 }
 
 /// Max verbatim output lines per chip before the counted tail row.
@@ -1227,6 +1269,7 @@ pub enum RowKind {
         /// answer as a resumed turn).
         header: SharedString,
         resolved: bool,
+        answer: Option<SharedString>,
     },
     ErrorChip {
         message: SharedString,
@@ -1342,14 +1385,24 @@ fn row_a11y(kind: &RowKind) -> Option<(SharedString, SharedString)> {
         RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => {
             ("", block_plain_text(&tree.blocks.get(*block_ix)?.block))
         }
-        RowKind::InputChip { header, resolved } => (
-            "Question: ",
-            if *resolved {
-                header.to_string()
+        RowKind::InputChip {
+            header,
+            resolved,
+            answer,
+        } => {
+            let text = if *resolved {
+                header.trim()
             } else {
-                "Awaiting your answer…".to_owned()
-            },
-        ),
+                "Awaiting your answer…"
+            };
+            let value = answer.as_deref().map(str::trim).unwrap_or(text);
+            return (!text.is_empty()).then(|| {
+                (
+                    format!("Question: {}", a11y_clip(text, 200)).into(),
+                    a11y_clip(value, 4000).into(),
+                )
+            });
+        }
         _ => return None,
     };
     let text = text.trim();
@@ -1688,7 +1741,8 @@ pub fn rows_for_entry(
                 .from_chat_id
                 .as_ref()
                 .and_then(|_| handback_quotes(&text));
-            user_markdown(quoted.as_deref().unwrap_or(&text))
+            crate::markdown::parser::user_markdown(quoted.as_deref().unwrap_or(&text))
+                .map(Arc::new)
         } else {
             None
         };
@@ -1885,18 +1939,7 @@ pub fn rows_for_entry(
                     .is_some_and(|c| computer_output_hidden(c.tool, c.args));
                 let js_actions = computer
                     .as_ref()
-                    .filter(|computer| computer.tool == "computer")
-                    .map(|computer| {
-                        let badge = computer.args.and_then(|args| {
-                            let actions = args.get("actions")?;
-                            Some(serde_json::json!({ "appName": args.get("app"), "actions": actions }).to_string())
-                        });
-                        badge
-                            .as_deref()
-                            .or(output.as_deref())
-                            .map(computer_js_actions)
-                            .unwrap_or_default()
-                    })
+                    .map(|computer| computer_call_js_actions(computer, output.as_deref()))
                     .unwrap_or_default();
                 let detail = if output_hidden {
                     None
@@ -2058,7 +2101,7 @@ pub fn rows_for_entry(
                         turn_start: false,
                         kind: RowKind::ComputerNotice {
                             notice: ComputerNotice::ControlDenied,
-                            text: "Computer is off for ordinary turns".into(),
+                            text: COMPUTER_DENIED_TITLE.into(),
                             hint: None,
                         },
                         entry_id: entry_id.clone(),
@@ -2321,6 +2364,7 @@ pub fn rows_for_entry(
                         id: part_id,
                         questions,
                         resolved,
+                        answers,
                         ..
                     } => {
                         // Model-generated header onto the one-line chip.
@@ -2331,13 +2375,27 @@ pub fn rows_for_entry(
                                 .unwrap_or_else(|| "Question".to_string()),
                         )
                         .into();
+                        let answer = answers
+                            .as_ref()
+                            .map(|answers| {
+                                answers
+                                    .iter()
+                                    .map(|answer| answer.labels.join(", "))
+                                    .filter(|labels| !labels.is_empty())
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
+                            })
+                            .filter(|answer| !answer.is_empty())
+                            .map(SharedString::from);
+                        let hashed = format!("{header}\0{}", answer.as_deref().unwrap_or(""));
                         rows.push(Row {
                             id: format!("{}#{}", entry.id, part_id).into(),
-                            version: fnv1a(header.as_bytes()) << 1 | *resolved as u64,
+                            version: fnv1a(hashed.as_bytes()) << 1 | *resolved as u64,
                             turn_start: false,
                             kind: RowKind::InputChip {
                                 header,
                                 resolved: *resolved,
+                                answer,
                             },
                             entry_id: entry_id.clone(),
                             timestamp: None,
@@ -2792,7 +2850,7 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
     // The shared rule has no resolution bit; while the advisor is still out
     // the group says so (it is the only chip that waits minutes for an answer).
     if tools.iter().any(|t| t.call.is_advisor() && !t.resolved) {
-        base = base.replace("onsulted advisor", "onsulting advisor");
+        base = zeron_proto::transcript::advisor_out(&base);
     }
     // Thought and note chips ride the group (they are UI-synthesized, so the
     // shared view summary never sees them): name them on the collapsed line.
@@ -2808,17 +2866,7 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
         n => segments.push(format!("wrote {n} notes")),
     }
     if computer_actions > 0 {
-        let apps = if computer_apps.is_empty() {
-            "the desktop".to_owned()
-        } else {
-            computer_apps.join(", ")
-        };
-        let actions = if computer_actions == 1 {
-            "1 action".to_owned()
-        } else {
-            format!("{computer_actions} actions")
-        };
-        segments.push(format!("used {apps} · {actions}"));
+        segments.push(computer_group_segment(&computer_apps, computer_actions));
     }
     if device_calls > 0 {
         segments.push(device_group_label(device_calls));
@@ -3020,14 +3068,9 @@ struct ChipAffordance {
     label: SharedString,
 }
 
-/// User and assistant turns inside a provider-switch packet, counted the way
-/// `bounded_source_copy` wrote them: one `User: ` / `Assistant: ` line each.
-fn handoff_message_count(packet: &str) -> usize {
-    packet
-        .lines()
-        .filter(|line| line.starts_with("User: ") || line.starts_with("Assistant: "))
-        .count()
-}
+#[cfg(test)]
+use zeron_proto::transcript::{handoff_message_count, handoff_size_label};
+use zeron_proto::transcript::{CompactionWait, format_kb};
 
 struct HandoffSide {
     icon: (&'static str, Option<gpui::Hsla>),
@@ -3072,43 +3115,10 @@ impl HandoffSide {
     }
 }
 
-#[derive(Clone, PartialEq)]
-enum CompactionWait {
-    Queued,
-    Classifying {
-        harness: zeron_proto::HarnessId,
-        model: Option<String>,
-        agent_note: bool,
-    },
-    Compacting(Option<(u64, bool)>),
-}
-
-fn boundary_compaction(transcript: &[SessionMessageEntry]) -> Option<(u64, bool)> {
-    let entry = transcript
-        .iter()
-        .rev()
-        .find(|entry| entry.role != MessageRole::User)?;
-    entry.parts.iter().find_map(|part| match part {
-        MessagePart::Classifier { record, .. } => match record.verdict {
-            zeron_doc::ClassifierVerdict::New => Some((record.context_tokens, false)),
-            zeron_doc::ClassifierVerdict::Carry => Some((record.context_tokens, true)),
-            _ => None,
-        },
-        _ => None,
-    })
-}
-
 /// Capture knob (`ZERON_OPEN_HANDOFF=1`): synthetic clicks never reach a Dev bundle.
 fn handoff_open_knob() -> bool {
     static OPEN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OPEN.get_or_init(|| std::env::var_os("ZERON_OPEN_HANDOFF").is_some())
-}
-
-fn handoff_size_label(chars: usize) -> String {
-    format!(
-        "~{} tokens",
-        crate::session_stats::tokens(zeron_engine::estimated_tokens(chars))
-    )
 }
 
 /// Line cap for a FETCHED full output (a defensive ceiling, not a doc cap —
@@ -3138,14 +3148,6 @@ fn blob_detail(text: &str, is_diff: bool) -> Option<ToolDetail> {
     })
 }
 
-/// Compact byte size for the fetch affordance label ("812 B", "12 KB").
-fn format_kb(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else {
-        format!("{} KB", bytes.div_ceil(1024))
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Working indicator flavour (pure; rendered by the shell strip)
@@ -3193,18 +3195,11 @@ pub fn flavour_seed(chat_id: &str) -> u64 {
 /// minutes with nothing streaming, and a rotating "Scheming…" over it read
 /// as a stalled run (user report).
 pub fn consulting_advisor(entries: &[SessionMessageEntry]) -> bool {
-    entries.last().is_some_and(|last| {
-        last.status == Some(MessageStatus::Streaming)
-            && last.parts.iter().any(|part| {
-                matches!(
-                    part,
-                    MessagePart::Tool { call, resolved: false, .. } if call.is_advisor()
-                )
-            })
-    })
+    entries.last().is_some_and(zeron_doc::schema::consulting_advisor)
 }
 
 pub use zeron_proto::RESUME_PROMPT;
+use zeron_proto::transcript::agent_message_display;
 
 /// True when the chat's last turn stopped short and the chat sits idle (the
 /// composer's send circle becomes the resume triangle): the reply was interrupted (its entry is `Aborted`), or the interrupt landed
@@ -3219,12 +3214,7 @@ pub fn resume_offer(entries: &[SessionMessageEntry], indicator: crate::state::In
     ) {
         return false;
     }
-    entries.last().is_some_and(|last| {
-        last.role == MessageRole::User
-            || last.status == Some(MessageStatus::Aborted)
-            || (last.status != Some(MessageStatus::Streaming)
-                && matches!(last.parts.last(), Some(MessagePart::Error { .. })))
-    })
+    entries.last().is_some_and(zeron_doc::schema::turn_stopped)
 }
 
 /// The working trailer's "Sending…" bridge: true while an in-flight send is
@@ -3242,19 +3232,7 @@ pub fn sending_bridge(
     }
 }
 
-/// Compact elapsed formatting, using at most two units up to days.
-pub fn format_elapsed(secs: i64) -> String {
-    let secs = secs.max(0);
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3_600 {
-        format!("{}m {}s", secs / 60, secs % 60)
-    } else if secs < 86_400 {
-        format!("{}h {}m", secs / 3_600, (secs % 3_600) / 60)
-    } else {
-        format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3_600)
-    }
-}
+pub use zeron_proto::transcript::format_elapsed;
 
 fn worked_for_label(secs: i64) -> String {
     format!("Worked for {}", format_elapsed(secs))
@@ -6056,7 +6034,8 @@ impl Transcript {
                 };
                 match fold.toggled_at {
                     Some(at) if !motion::reduced_motion(cx) && fold.duration_ms > 0 => {
-                        let raw = (at.elapsed().as_secs_f32() * 1000.0 / fold.duration_ms as f32)
+                        let raw = (motion::since(at).as_secs_f32() * 1000.0
+                            / fold.duration_ms as f32)
                             .clamp(0.0, 1.0);
                         let progress = user_resize_spec(fold.user_expansion_height).progress(raw);
                         motion::lerp(fold.user_expansion_height - target, target, progress)
@@ -6188,7 +6167,7 @@ impl Transcript {
                 match anchor_bounds {
                     Some(b) => {
                         let err = f32::from(b.top()) - (f32::from(viewport.top()) + inset);
-                        let now = Instant::now();
+                        let now = motion::now();
                         let frames = match self.own_turn_last_tick {
                             Some(last) => (now.duration_since(last).as_secs_f32() * 1000.0
                                 / SPRING_FRAME_MS)
@@ -6219,7 +6198,7 @@ impl Transcript {
             }
             return;
         }
-        let now = Instant::now();
+        let now = motion::now();
         let frames = match self.own_turn_last_tick {
             Some(last) => (now.duration_since(last).as_secs_f32() * 1000.0 / SPRING_FRAME_MS)
                 .min(SPRING_MAX_CATCHUP_FRAMES),
@@ -6334,7 +6313,7 @@ impl Transcript {
                         if !tool.call.is_delegate_task() {
                             return Some(SubagentSummary {
                                 chat_id: chat_id.clone(),
-                                title: subagent_tab_title(&tool.call),
+                                title: tool.call.subagent_title().into(),
                                 status: tool.subagent_status,
                                 delegated: false,
                                 harness,
@@ -6475,7 +6454,7 @@ impl Transcript {
     /// while [`Self::spring_should_run`].
     fn wake_spring(&mut self) {
         if self.spring_settled_at.is_some_and(|settled| {
-            settled.elapsed() >= Duration::from_millis(SPRING_SETTLE_GRACE_MS)
+            motion::since(settled) >= Duration::from_millis(SPRING_SETTLE_GRACE_MS)
         }) {
             self.spring.reset();
             self.spring_last_tick = None;
@@ -6509,7 +6488,7 @@ impl Transcript {
             self.spring_last_tick = None;
             return;
         }
-        let now = Instant::now();
+        let now = motion::now();
         if self.spring_settled_at.is_some_and(|settled| {
             now.duration_since(settled) >= Duration::from_millis(SPRING_SETTLE_GRACE_MS)
         }) {
@@ -6954,7 +6933,7 @@ impl Transcript {
                 _ => None,
             })
             .collect();
-        let now = Instant::now();
+        let now = motion::now();
         let mut live_tool_groups = HashSet::new();
         for row in &new_rows {
             let RowKind::ToolGroup {
@@ -7282,7 +7261,7 @@ impl Transcript {
                 fold.open == Some(true)
                     || fold
                         .toggled_at
-                        .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW)
+                        .is_some_and(|at| motion::since(at) < FOLD_TWEEN_WINDOW)
             }),
         }
     }
@@ -7377,7 +7356,7 @@ impl Transcript {
         entry.from = if currently_open { full_h } else { collapsed_h };
         entry.open = Some(!currently_open);
         entry.epoch += 1;
-        entry.toggled_at = Some(Instant::now());
+        entry.toggled_at = Some(motion::now());
         entry.duration_ms = duration_ms;
         entry.user_expansion_height = (full_h - collapsed_h).max(0.0);
 
@@ -7413,7 +7392,7 @@ impl Transcript {
                 }
             } else {
                 self.user_collapse_scroll = Some(UserCollapseScroll {
-                    started_at: Instant::now(),
+                    started_at: motion::now(),
                     duration_ms,
                     height_delta: (full_h - collapsed_h).max(0.0),
                     row_ix,
@@ -7482,8 +7461,8 @@ impl Transcript {
         let row_ix = scroll.row_ix;
         let initial_top = scroll.initial_top;
         let target_top = scroll.target_top;
-        let raw =
-            (started_at.elapsed().as_secs_f32() / (duration_ms as f32 / 1000.0)).clamp(0.0, 1.0);
+        let raw = (motion::since(started_at).as_secs_f32() / (duration_ms as f32 / 1000.0))
+            .clamp(0.0, 1.0);
         let spec = user_resize_spec(height_delta);
         let progress = spec.progress(raw);
         let desired_top = motion::lerp(initial_top, target_top, progress);
@@ -7527,7 +7506,7 @@ impl Transcript {
         let body_height = shell_ix.map(|ix| {
             let total = self.compact_fold_total(&row_id, ix);
             let fold = self.folds.get(&row_id).copied().unwrap_or_default();
-            compact_body_height(fold, total, motion::reduced_motion(cx), Instant::now())
+            compact_body_height(fold, total, motion::reduced_motion(cx), motion::now())
         });
         let now_open = {
             let entry = self.folds.entry(row_id.clone()).or_default();
@@ -7535,7 +7514,7 @@ impl Transcript {
             entry.from = body_height.unwrap_or(if currently_open { open_height } else { 0.0 });
             entry.open = Some(!currently_open);
             entry.epoch += 1;
-            entry.toggled_at = Some(Instant::now());
+            entry.toggled_at = Some(motion::now());
             entry.disclosure_at = entry.toggled_at;
             !currently_open
         };
@@ -7558,15 +7537,28 @@ impl Transcript {
             // The body stays mounted through the close tween; sweep it out
             // of the row list once the retention window elapses.
             self.compact_fold_settle = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(FOLD_TWEEN_WINDOW + Duration::from_millis(50))
-                    .await;
-                this.update(cx, |this, cx| {
-                    this.last_source = None;
-                    this.sync(cx);
-                    cx.notify();
-                })
-                .ok();
+                loop {
+                    cx.background_executor()
+                        .timer(FOLD_TWEEN_WINDOW + Duration::from_millis(50))
+                        .await;
+                    let swept = this.update(cx, |this, cx| {
+                        let closing = this.folds.get(&row_id).is_some_and(|fold| {
+                            fold.open != Some(true)
+                                && fold
+                                    .toggled_at
+                                    .is_some_and(|at| motion::since(at) < FOLD_TWEEN_WINDOW)
+                        });
+                        if !closing {
+                            this.last_source = None;
+                            this.sync(cx);
+                            cx.notify();
+                        }
+                        !closing
+                    });
+                    if swept.unwrap_or(true) {
+                        break;
+                    }
+                }
             }));
         }
     }
@@ -8066,7 +8058,7 @@ impl Transcript {
                 let tweening = folds[ix].epoch > 0
                     && folds[ix]
                         .toggled_at
-                        .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW);
+                        .is_some_and(|at| motion::since(at) < FOLD_TWEEN_WINDOW);
                 if !opens[ix] && !tweening {
                     self.tool_images.release(&chip, Self::tool_images_of, cx);
                     return None;
@@ -8504,7 +8496,7 @@ impl Transcript {
             && fold.epoch > 0
             && fold
                 .toggled_at
-                .is_some_and(|at| at.elapsed() < Duration::from_millis(duration_ms + 200))
+                .is_some_and(|at| motion::since(at) < Duration::from_millis(duration_ms + 200))
             && !motion::reduced_motion(cx);
         let ellipsis = || div().h(px(line_height)).child("...");
         let body: AnyElement = if animating {
@@ -10063,23 +10055,15 @@ impl Transcript {
             return None;
         }
         let state = self.state.read(cx);
-        if state.chat_compacting(chat_id) {
-            return Some(CompactionWait::Compacting(boundary_compaction(
-                &state.transcript,
-            )));
-        }
-        let session = state.session_for(chat_id)?;
-        let agent = session.compact_plan == Some(zeron_proto::CompactPlan::Agent);
-        if let Some(run) = &session.classifying {
-            return Some(CompactionWait::Classifying {
-                harness: run.harness,
-                model: run.model.clone(),
-                agent_note: agent,
-            });
-        }
-        // The agent's compaction runs after its turn settles, with the chat idle.
-        (agent && state.indicator_for(chat_id, now) == crate::state::Indicator::None)
-            .then_some(CompactionWait::Queued)
+        let session = state.session_for(chat_id);
+        CompactionWait::of(
+            state
+                .chat_compacting(chat_id)
+                .then(|| zeron_doc::schema::boundary_compaction(&state.transcript)),
+            session.and_then(|session| session.classifying.as_ref()),
+            session.and_then(|session| session.compact_plan),
+            state.indicator_for(chat_id, now) == crate::state::Indicator::None,
+        )
     }
 
     /// Drawn where the classifier row or compaction note lands, so the result replaces it in place.
@@ -10089,7 +10073,7 @@ impl Transcript {
         wait: CompactionWait,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let now = Instant::now();
+        let now = motion::now();
         let since = match &self.compaction_wait_since {
             Some((id, last, at)) if *id == chat_id && *last == wait => *at,
             _ => {
@@ -10120,44 +10104,13 @@ impl Transcript {
                 None => text.into_any_element(),
             }
         };
-        let (lead, chip, tail, timed) = match &wait {
-            CompactionWait::Queued => (
-                "Compaction queued · starts when the turn settles".to_string(),
-                None,
-                None,
-                false,
-            ),
-            CompactionWait::Classifying {
-                harness,
-                model,
-                agent_note,
-            } => (
-                "Classifier".to_string(),
-                Some(HandoffSide::new(*harness, model.as_deref(), cx).chip(&theme)),
-                Some(if *agent_note {
-                    "· checking the agent's note"
-                } else {
-                    "· checking if this is a new task"
-                }),
-                true,
-            ),
-            CompactionWait::Compacting(boundary) => (
-                match boundary {
-                    Some((tokens, carry)) => format!(
-                        "Compacting {}{}",
-                        crate::composer::background::compact_count(*tokens),
-                        if *carry {
-                            ", carrying the last turns over"
-                        } else {
-                            " before the new task"
-                        }
-                    ),
-                    None => "Compacting context".to_string(),
-                },
-                None,
-                None,
-                true,
-            ),
+        let (lead, tail) = wait.words();
+        let timed = wait.timed();
+        let chip = match &wait {
+            CompactionWait::Classifying { harness, model, .. } => {
+                Some(HandoffSide::new(*harness, model.as_deref(), cx).chip(&theme))
+            }
+            _ => None,
         };
         let elapsed = format!(
             "· {}",
@@ -10523,7 +10476,7 @@ impl Transcript {
                     row_key: row.id.clone(),
                     veil: None,
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
-                    now: Instant::now(),
+                    now: motion::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
                     link,
                     workspace_root: workspace_root.clone(),
@@ -10595,7 +10548,7 @@ impl Transcript {
                     row_key: row.id.clone(),
                     veil: veil.clone(),
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
-                    now: Instant::now(),
+                    now: motion::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
                     link,
                     workspace_root: workspace_root.clone(),
@@ -10670,7 +10623,9 @@ impl Transcript {
                 &theme,
                 cx,
             ),
-            RowKind::InputChip { header, resolved } => {
+            RowKind::InputChip {
+                header, resolved, ..
+            } => {
                 input_chip(header.clone(), *resolved, &theme)
             }
             RowKind::GeneratedImage {
@@ -10806,15 +10761,22 @@ impl Transcript {
         let copy_text = row.copy_text.clone();
         let copy_entry_id = row.entry_id.clone();
         let strip = row.timestamp.map(|ms| {
+            let time = SharedString::from(format_timestamp(ms, &chrono::Local));
             let timestamp = div()
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted.opacity(0.55))
-                .child(SharedString::from(format_timestamp(ms, &chrono::Local)));
+                .child(time.clone());
             let copy = copy_text.map(|text| {
                 let entry_id = copy_entry_id.clone();
                 let fade_key = format!("copy-message-hover-{entry_id}");
                 div()
                     .id(SharedString::from(format!("copy-message-{entry_id}")))
+                    .role(gpui::Role::Button)
+                    .aria_label(if copied_message {
+                        "Copied"
+                    } else {
+                        "Copy message"
+                    })
                     .size(px(Theme::SPACE_MD * 2.0))
                     .flex()
                     .items_center()
@@ -10845,6 +10807,9 @@ impl Transcript {
             });
             let branch = self.branch_action(&row, is_user_row, &theme, cx);
             let metadata = div()
+                .id(SharedString::from(format!("message-footer-{}", row.id)))
+                .role(gpui::Role::Group)
+                .aria_label(time)
                 .flex()
                 .flex_row()
                 .items_center()
@@ -10963,11 +10928,11 @@ impl Transcript {
         let fold = self.folds.get(&work_id).copied().unwrap_or_default();
         let open = fold.open.unwrap_or(false);
         let reduce_motion = motion::reduced_motion(cx);
-        let now = Instant::now();
+        let now = motion::now();
         let animating = !reduce_motion
             && fold
                 .toggled_at
-                .is_some_and(|at| at.elapsed() < TOOL_FOLD.total());
+                .is_some_and(|at| motion::since(at) < TOOL_FOLD.total());
         if !animating {
             // Settled states render plain — open rows untouched, closed rows
             // empty until the settle sweep drops them from the row list.
@@ -11049,15 +11014,18 @@ impl Transcript {
             .as_ref()
             .map(|t| t.to_string())
             .unwrap_or_default();
-        let (glyph, label) = match kind {
-            BranchKind::Fork => (crate::icons::GIT_BRANCH, "fork"),
-            BranchKind::Rewind => (crate::icons::RESTART, "rewind"),
+        let (glyph, label, name) = match kind {
+            BranchKind::Fork => (crate::icons::GIT_BRANCH, "fork", "Fork chat from here"),
+            BranchKind::Rewind => (crate::icons::RESTART, "rewind", "Rewind to here"),
         };
         let fade_key = format!("{label}-message-hover-{entry_id}");
         let dimmed = blocked.is_some();
         Some(
             div()
                 .id(SharedString::from(format!("{label}-message-{entry_id}")))
+                .role(gpui::Role::Button)
+                .aria_label(name)
+                .when_some(blocked.clone(), |el, why| el.aria_description(why))
                 .size(px(Theme::SPACE_MD * 2.0))
                 .flex()
                 .items_center()
@@ -11318,21 +11286,7 @@ impl Transcript {
             )
             .child(to.chip(theme));
         let details = open.then(|| {
-            let messages = handoff_message_count(&text);
-            let context = if text.is_empty() {
-                "None".to_string()
-            } else if pointer {
-                "A link to the source thread".to_string()
-            } else {
-                format!(
-                    "{} · {}",
-                    match messages {
-                        1 => "1 message".to_string(),
-                        n => format!("{n} messages"),
-                    },
-                    handoff_size_label(text.chars().count())
-                )
-            };
+            let context = zeron_proto::transcript::handoff_context_label(&text, pointer);
             let field = |key: &'static str, value: String| {
                 div()
                     .flex()
@@ -11406,11 +11360,7 @@ impl Transcript {
                             div()
                                 .text_size(crate::typography::ui_rems(11.5))
                                 .text_color(theme.text_muted.opacity(0.7))
-                                .child(if pointer {
-                                    "Sent ahead of your next message so the new model reads the source thread itself."
-                                } else {
-                                    "Sent ahead of your next message so the new model can continue this thread."
-                                }),
+                                .child(zeron_proto::transcript::handoff_footnote(pointer)),
                         )
                 })
         });
@@ -11456,12 +11406,7 @@ impl Transcript {
             .clone()
             .filter(|_| record.harness.is_none())
             .map(SharedString::from);
-        let label = |verdict: ClassifierVerdict| match verdict {
-            ClassifierVerdict::New => "New task",
-            ClassifierVerdict::Carry => "Carry over",
-            ClassifierVerdict::Continue => "Same task",
-            ClassifierVerdict::Failed => "No answer",
-        };
+        let label = ClassifierVerdict::label;
         let verdict_color = match record.verdict {
             ClassifierVerdict::New => theme.accent,
             ClassifierVerdict::Carry => theme.success,
@@ -11476,13 +11421,7 @@ impl Transcript {
             && record.stage2_reply.is_some()
             && record.verdict != ClassifierVerdict::Continue;
         let secs = format!("{:.1}s", record.duration_ms as f64 / 1000.0);
-        let decided = match record.decided_by {
-            DecidedBy::Stage1 => "First look",
-            DecidedBy::Stage2 => "Second look",
-            DecidedBy::Streak => "Three same-task verdicts in a row",
-            DecidedBy::Ceiling => "Context near the window, not asked",
-            DecidedBy::AgentNote => "Agent note, compacted without asking",
-        };
+        let decided = record.decided_by.label();
         let toggle_id = row_id.clone();
         let rule = || {
             div()
@@ -11723,7 +11662,7 @@ impl Transcript {
         let arrival_pending = !cx.reduce_motion()
             && self.tool_group_reveals.get(row_id).is_some_and(|reveal| {
                 reveal.starts.iter().flatten().any(|start| {
-                    Instant::now()
+                    motion::now()
                         .checked_duration_since(*start)
                         .unwrap_or_default()
                         < TOOL_CONNECTOR_REVEAL.total()
@@ -11745,7 +11684,7 @@ impl Transcript {
                 .is_some_and(|previous| previous != open)
             {
                 fold.from = reveal.rendered_height;
-                fold.toggled_at = Some(Instant::now());
+                fold.toggled_at = Some(motion::now());
                 fold.disclosure_at = fold.toggled_at;
                 self.folds.insert(row_id.clone(), fold);
             }
@@ -11763,19 +11702,19 @@ impl Transcript {
         let worked_secs = worked_secs.filter(|_| compact_shell);
         if worked_secs.is_some() && self.compact_live_entries.remove(row_id) {
             self.compact_worked_fade_at
-                .insert(row_id.clone(), Instant::now());
+                .insert(row_id.clone(), motion::now());
         }
         let animate_worked = self
             .compact_worked_fade_at
             .get(row_id)
-            .is_some_and(|at| at.elapsed() < motion::FADE_IN.total());
+            .is_some_and(|at| motion::since(*at) < motion::FADE_IN.total());
         let worked_fade_t = match worked_secs {
             Some(_) if animate_worked && !cx.reduce_motion() => self
                 .compact_worked_fade_at
                 .get(row_id)
                 .map(|at| {
                     motion::FADE_IN.progress(
-                        at.elapsed().as_secs_f32() / motion::FADE_IN.total().as_secs_f32(),
+                        motion::since(*at).as_secs_f32() / motion::FADE_IN.total().as_secs_f32(),
                     )
                 })
                 .unwrap_or(1.0),
@@ -11790,7 +11729,7 @@ impl Transcript {
             || (!cx.reduce_motion()
                 && fold
                     .toggled_at
-                    .is_some_and(|at| at.elapsed() < TOOL_FOLD.total()));
+                    .is_some_and(|at| motion::since(at) < TOOL_FOLD.total()));
         let tools = if body_visible {
             tools.as_slice()
         } else {
@@ -11972,9 +11911,9 @@ impl Transcript {
                     };
                     if !cx.reduce_motion() {
                         if let Some(at) = fold.toggled_at {
-                            let t = TOOL_FOLD
-                                .curve
-                                .eval(at.elapsed().as_secs_f32() / TOOL_FOLD.total().as_secs_f32());
+                            let t = TOOL_FOLD.curve.eval(
+                                motion::since(at).as_secs_f32() / TOOL_FOLD.total().as_secs_f32(),
+                            );
                             if t < 1.0 {
                                 motion_active = true;
                             }
@@ -11990,7 +11929,7 @@ impl Transcript {
             )
             .collect();
         let reduce_motion = cx.reduce_motion();
-        let now = Instant::now();
+        let now = motion::now();
         let reveal_progress: Vec<f32> = (0..tools.len())
             .map(|ix| {
                 let start = self
@@ -12154,7 +12093,7 @@ impl Transcript {
             if !reduce_motion
                 && fold
                     .toggled_at
-                    .is_some_and(|at| at.elapsed() < TOOL_FOLD.total())
+                    .is_some_and(|at| motion::since(at) < TOOL_FOLD.total())
             {
                 motion_active = true;
             }
@@ -12267,7 +12206,7 @@ impl Transcript {
                 }
                 if let Some(doc_id) = tool.subagent_ref.clone().filter(|_| is_spawn_link(tool)) {
                     let chat_id = self.chat_id.clone().unwrap_or_default();
-                    let title = subagent_tab_title(&tool.call);
+                    let title: SharedString = tool.call.subagent_title().into();
                     let frozen = matches!(
                         tool.subagent_status,
                         Some(
@@ -12330,7 +12269,7 @@ impl Transcript {
                 let animating = dfold.epoch > 0
                     && dfold
                         .toggled_at
-                        .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW);
+                        .is_some_and(|at| motion::since(at) < FOLD_TWEEN_WINDOW);
                 let toggle_key = key.clone();
                 // Opening a stats-only file change fetches its diff at once:
                 // the change IS what the click asks to see, not a stat row
@@ -12379,7 +12318,7 @@ impl Transcript {
                                 entry.from = row_height - base_row_height + CHIP_CARD_HEIGHT;
                                 entry.open = Some(!currently_open);
                                 entry.epoch += 1;
-                                entry.toggled_at = Some(Instant::now());
+                                entry.toggled_at = Some(motion::now());
                                 if !currently_open && let Some(blob_ref) = pending_diff.clone() {
                                     this.spawn_blob_fetch(blob_ref, cx);
                                 }
@@ -12417,6 +12356,7 @@ impl Transcript {
                                     .when(!collapses, |body| body.px(px(CHIP_CARD_PAD_X)))
                                     .child(detail_body(
                                         invocation,
+                                        Some("Call"),
                                         None,
                                         &format!("{key}-call"),
                                         theme,
@@ -12441,6 +12381,7 @@ impl Transcript {
                                     .when(!collapses, |body| body.px(px(CHIP_CARD_PAD_X)))
                                     .child(detail_body(
                                         detail,
+                                        None,
                                         detail_highlights[ix].clone(),
                                         &format!("{key}-out"),
                                         theme,
@@ -12588,96 +12529,6 @@ impl Transcript {
             })
             .into_any_element()
     }
-}
-
-/// A sent message's text with its file-mention chips. The same recipe as the
-/// markdown renderer's inline code (`flat_text_element`): chip ranges shape in
-/// the mono font at the spectrum's `code_text`, [`StyledText`] supplies wrapped glyph
-/// geometry through its layout handle, and a canvas paints the rounded
-/// `code_wash` *beneath* the glyphs — so chips wrap, clip, and scroll exactly
-/// like the text they decorate.
-///
-/// Per-frame cost while an assistant message streams below: shaping hits
-/// gpui's line-layout cache (identical text + runs ⇒ reuse) and the underlay
-/// repaints O(chips) quads — no layout work, no re-projection (spans were
-/// computed once in [`rows_for_entry`]).
-/// The user bubble's text: runs split at mention-chip boundaries (one plain
-/// run when there are none), with the same selection machinery as rendered
-/// markdown — the element registers into the frame's document-ordered
-/// registry, so drags select, span into adjacent rows, and Cmd+C copies.
-/// Keep routing instructions in the stored prompt for agents, but show a
-/// concise attribution in the human transcript (including existing messages).
-fn agent_message_display(text: &str) -> String {
-    let Some(rest) = text.strip_prefix("[Message from Zeron chat ") else {
-        return text.to_owned();
-    };
-    let Some((header, body)) = rest.split_once("]\n\n") else {
-        return text.to_owned();
-    };
-    let Some((label, id)) =
-        header.rsplit_once(". Reply to it with the Zeron `send_message` tool, chat ")
-    else {
-        return text.to_owned();
-    };
-    let Some(id) = id.strip_suffix('.') else {
-        return text.to_owned();
-    };
-    let suffix = format!(" ({id})");
-    let name = label.strip_suffix(&suffix).unwrap_or(label);
-    format!("Message from {name}\n\n{body}")
-}
-
-/// `__init__`, `# comment` lines and indented code are plain developer text, so they stay text.
-fn user_markdown(text: &str) -> Option<Arc<BlockTree>> {
-    let attribution = text
-        .strip_prefix("Message from ")
-        .and_then(|rest| rest.split_once("\n\n"));
-    let body = attribution.map_or(text, |(_, body)| body);
-    let mut tree = crate::markdown::parser::parse_full_line_breaks(body);
-    let typed = |runs: &[InlineRun]| {
-        runs.iter()
-            .any(|run| run.style.code || run.style.math || run.style.link.is_some())
-    };
-    let structured = tree.blocks.iter().any(|top| match &top.block {
-        Block::List { .. }
-        | Block::Table { .. }
-        | Block::BlockQuote { .. }
-        | Block::Math { .. } => true,
-        Block::CodeBlock { .. } => body
-            .get(top.range.clone())
-            .map(|source| source.trim_start_matches(' '))
-            .is_some_and(|source| source.starts_with("```") || source.starts_with("~~~")),
-        Block::Paragraph { runs } | Block::Heading { runs, .. } => typed(runs),
-        Block::Rule => false,
-    });
-    if !structured {
-        return None;
-    }
-    if let Some((name, _)) = attribution {
-        let header = Block::Paragraph {
-            runs: vec![
-                InlineRun {
-                    text: "Message from ".into(),
-                    style: InlineStyle::default(),
-                },
-                InlineRun {
-                    text: name.into(),
-                    style: InlineStyle {
-                        bold: true,
-                        ..InlineStyle::default()
-                    },
-                },
-            ],
-        };
-        tree.blocks.insert(
-            0,
-            Arc::new(crate::markdown::parser::TopBlock {
-                range: 0..0,
-                block: header,
-            }),
-        );
-    }
-    Some(Arc::new(tree))
 }
 
 /// The bubble text's runs: body text in the sans font, chips as labels in it
@@ -13261,11 +13112,8 @@ impl Transcript {
         approval_card(
             ApprovalCard {
                 icon: app.and_then(|app| crate::appshots::running_app_icon(None, None, Some(app))),
-                title: format!("Bring {} to the front?", app.unwrap_or("the app")).into(),
-                detail: Some(
-                    "Zeron needs it in front to type. It will cover your screen until the turn ends."
-                        .into(),
-                ),
+                title: crate::computer::cards::foreground_title(app).into(),
+                detail: Some(crate::computer::cards::COMPUTER_FOREGROUND_DETAIL.into()),
                 risk: None,
                 disclosure: false,
                 actions,
@@ -13350,13 +13198,10 @@ impl Transcript {
                 CardTone::Warning,
                 icon,
                 text,
-                vec![
-                    "Send this request with /computer-use to let the agent use the desktop once."
-                        .into(),
-                ],
+                vec![COMPUTER_DENIED_HINT.into()],
                 vec![CardAction {
                     id: format!("{row_id}-enable").into(),
-                    label: "Use for this request".into(),
+                    label: COMPUTER_DENIED_ACTION.into(),
                     primary: false,
                     on_click: Box::new(cx.listener(|_, _, _, cx| {
                         cx.emit(TranscriptEvent::Computer {
@@ -13794,12 +13639,18 @@ fn file_badge_name(path: &str) -> &str {
 /// lines, indentation intact, counted-tail truncation.
 fn detail_body(
     detail: &ToolDetail,
+    label: Option<&'static str>,
     diff_highlights: Option<Arc<crate::changes::DiffHighlights>>,
     selection_key: &str,
     theme: &Theme,
 ) -> AnyElement {
+    let (kind, text) = detail.a11y();
     let body = div()
+        .id(SharedString::from(format!("{selection_key}-body")))
         .debug_selector(|| "tool-detail-body".into())
+        .role(gpui::Role::Group)
+        .aria_label(label.unwrap_or(kind))
+        .aria_value(a11y_clip(&text, 4000))
         .w_full()
         .min_w_0()
         .flex()
@@ -14502,67 +14353,6 @@ pub(crate) fn spawn_agent_type(call: &ToolCall) -> Option<SharedString> {
         .map(|kind| SharedString::from(kind.to_owned()))
 }
 
-/// Max chars a subagent tab title keeps. The strip chip is fixed-width and
-/// truncates visually, but the derived title also rides drag ghosts and any
-/// future pickers — cap it at the source.
-const SUBAGENT_TITLE_MAX: usize = 40;
-
-/// First line of `text`, trimmed, capped at `max` chars with an ellipsis.
-fn title_line(text: &str, max: usize) -> Option<String> {
-    let line = text.lines().find(|l| !l.trim().is_empty())?.trim();
-    let mut out: String = line.chars().take(max).collect();
-    if line.chars().count() > max {
-        out.push('…');
-    }
-    Some(out)
-}
-
-/// Drop a leading "Agent"/"Task" genus (with its `:` and spacing) from a
-/// spawn-title candidate. Only a real word boundary strips — "Taskmaster"
-/// keeps its name. A bare "Agent"/"Task" strips to "" (no context at all).
-fn strip_spawn_prefix(text: &str) -> &str {
-    let t = text.trim();
-    for prefix in ["agent", "task"] {
-        if t.len() >= prefix.len()
-            && t.is_char_boundary(prefix.len())
-            && t[..prefix.len()].eq_ignore_ascii_case(prefix)
-        {
-            let rest = &t[prefix.len()..];
-            if rest.is_empty() {
-                return "";
-            }
-            if rest.starts_with(':') || rest.starts_with(char::is_whitespace) {
-                return rest.trim_start_matches(':').trim();
-            }
-        }
-    }
-    t
-}
-
-/// Tab title for a spawn chip's subagent surface: the BARE task description
-/// ("verify the marker pipeline"). The chip keeps the tool's fuller name —
-/// a fixed-width tab spent on "Agent: " never shows the task, so the genus
-/// is stripped here and the call input's description/prompt fields back up
-/// a bare name (older docs); "Subagent" only as the last resort.
-pub(crate) fn subagent_tab_title(call: &ToolCall) -> SharedString {
-    let (name, input) = match call {
-        ToolCall::Unknown { name, input } => (name.as_str(), input.as_ref()),
-        ToolCall::Mcp { tool, input, .. } => (tool.as_str(), input.as_ref()),
-        _ => return "Subagent".into(),
-    };
-    let candidates = [
-        Some(name),
-        input.and_then(|i| i.get("description")?.as_str()),
-        input.and_then(|i| i.get("prompt")?.as_str()),
-    ];
-    for text in candidates.into_iter().flatten() {
-        if let Some(title) = title_line(strip_spawn_prefix(text), SUBAGENT_TITLE_MAX) {
-            return title.into();
-        }
-    }
-    "Subagent".into()
-}
-
 /// Clip one newly appended task row to its committed height. Fade and lift are
 /// applied to the row content itself, leaving the connector at full contrast
 /// while it draws; fading the whole row made the path animation imperceptible.
@@ -14809,17 +14599,6 @@ pub(crate) fn delegate_view(chats: &[zeron_proto::Chat], child_id: &str) -> Dele
     }
 }
 
-fn delegate_status_text(status: Option<zeron_proto::DelegationStatus>) -> &'static str {
-    use zeron_proto::DelegationStatus::*;
-    match status {
-        Some(Running) => "Running",
-        Some(Completed) => "Completed",
-        Some(Failed) => "Failed",
-        Some(Cancelled | Interrupted) => "Stopped",
-        None => "Unavailable",
-    }
-}
-
 fn started_thread_title(
     chats: &[zeron_proto::Chat],
     thread: &str,
@@ -14932,16 +14711,9 @@ fn delegate_chip(
     } else {
         harness.into()
     };
-    let state: SharedString = match (running, view.elapsed_secs) {
-        _ if view.limited => "Hit usage limit".into(),
-        (false, Some(secs)) => format!(
-            "{} in {}",
-            delegate_status_text(view.status),
-            format_elapsed(secs)
-        )
-        .into(),
-        _ => delegate_status_text(view.status).into(),
-    };
+    let state: SharedString =
+        zeron_proto::transcript::delegate_state_text(view.status, view.elapsed_secs, view.limited)
+            .into();
     let a11y_label = if native {
         SharedString::from(format!("{label} {}", view.title))
     } else {
@@ -15059,110 +14831,12 @@ fn delegate_chip(
     agent_chip_card(id, a11y_label, Some("delegate-chip"), rail, on_open, header)
 }
 
-fn handback_status_lines(text: &str) -> impl Iterator<Item = &str> {
-    let mut quoted = false;
-    text.lines().filter(move |line| match *line {
-        "<agent-response>" => {
-            quoted = true;
-            false
-        }
-        "</agent-response>" => {
-            quoted = false;
-            false
-        }
-        _ => !quoted,
-    })
-}
-
-pub(crate) fn wake_task_ids(text: &str) -> Option<Vec<String>> {
-    let ids: Vec<String> = handback_status_lines(text)
-        .filter_map(|line| {
-            let (id, rest) = line.strip_prefix("Delegated task ")?.split_once(" (\"")?;
-            [
-                "completed.",
-                "failed.",
-                "was cancelled.",
-                "was interrupted.",
-                "ended.",
-            ]
-            .iter()
-            .any(|outcome| rest.ends_with(&format!("\") {outcome}")))
-            .then(|| id.to_string())
-        })
-        .collect();
-    if !ids.is_empty() {
-        return Some(ids);
-    }
-    // Saved transcripts keep wakes written before the handback carried the reply.
-    if let Some(rest) = text.strip_prefix("Delegated task ") {
-        let (id, _) = rest.split_once(" reached a terminal state.")?;
-        return Some(vec![id.to_string()]);
-    }
-    let rest = text.strip_prefix("Delegated tasks ")?;
-    let (ids, _) = rest.split_once(" reached terminal states.")?;
-    Some(ids.split(", ").map(str::to_string).collect())
-}
-
-fn handback_quotes(text: &str) -> Option<String> {
-    if wake_task_ids(text).is_none() && step_handback_threads(text).is_empty() {
-        return None;
-    }
-    let mut quoted = false;
-    let lines: Vec<String> = text
-        .lines()
-        .filter_map(|line| match line {
-            "<agent-response>" => {
-                quoted = true;
-                None
-            }
-            "</agent-response>" => {
-                quoted = false;
-                None
-            }
-            "" if quoted => Some(">".to_string()),
-            _ if quoted => Some(format!("> {line}")),
-            _ => Some(line.to_string()),
-        })
-        .collect();
-    Some(lines.join("\n"))
-}
-
-pub(crate) fn step_handback_threads(text: &str) -> Vec<String> {
-    handback_status_lines(text)
-        .filter(|line| line.starts_with("Step \""))
-        .filter_map(|line| {
-            let (_, thread) = line.rsplit_once(" on its thread ")?;
-            thread
-                .strip_suffix('.')
-                .filter(|thread| !thread.contains(char::is_whitespace))
-                .map(str::to_string)
-        })
-        .collect()
-}
+pub(crate) use zeron_proto::transcript::{handback_quotes, step_handback_threads, wake_task_ids};
 
 pub(crate) fn wake_summary(views: &[DelegateView]) -> String {
-    use zeron_proto::DelegationStatus::*;
-    let outcome = if views.iter().any(|v| v.status == Some(Failed)) {
-        "failed"
-    } else if views
-        .iter()
-        .any(|v| matches!(v.status, Some(Cancelled | Interrupted)))
-    {
-        "stopped"
-    } else {
-        "finished"
-    };
-    match views {
-        [one] => format!("Delegated task \u{201c}{}\u{201d} {outcome}", one.title),
-        many => format!(
-            "{} delegated tasks {outcome}: {}",
-            many.len(),
-            many.iter()
-                .map(|v| v.title.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
+    let tasks: Vec<(&str, Option<zeron_proto::DelegationStatus>)> =
+        views.iter().map(|v| (v.title.as_ref(), v.status)).collect();
+    zeron_proto::transcript::wake_summary(&tasks)
 }
 
 /// A spawn chip: same card as [`tool_chip`], but the WHOLE card is the
@@ -17440,6 +17114,7 @@ mod tests {
                             lines: vec!["cat /workspace/src/main.rs".into()],
                             truncated_by: 0,
                         },
+                        None,
                         None,
                         "probe",
                         &theme,
@@ -22442,56 +22117,6 @@ mod tests {
             },
         ];
         assert_eq!(tool_group_summary(&tools), "Read 1 file · searched 2 times");
-    }
-
-    #[test]
-    fn subagent_tab_titles() {
-        // The tab is the BARE task — the "Agent:" genus is stripped.
-        let named = ToolCall::Unknown {
-            name: "Agent: scan repo".into(),
-            input: None,
-        };
-        assert_eq!(subagent_tab_title(&named).as_ref(), "scan repo");
-        // A bare "Task"/"Agent" digs the description out of the call input
-        // (which sheds any genus of its own).
-        let bare = ToolCall::Unknown {
-            name: "Task".into(),
-            input: Some(serde_json::json!({
-                "description": "Agent: audit the auth flow",
-                "prompt": "very long instructions…",
-            })),
-        };
-        assert_eq!(subagent_tab_title(&bare).as_ref(), "audit the auth flow");
-        // Word boundaries only — a name that merely STARTS with the genus
-        // keeps itself.
-        let compound = ToolCall::Unknown {
-            name: "Taskmaster".into(),
-            input: None,
-        };
-        assert_eq!(subagent_tab_title(&compound).as_ref(), "Taskmaster");
-        // Nothing to derive → the generic label.
-        let blank = ToolCall::Unknown {
-            name: "agent".into(),
-            input: None,
-        };
-        assert_eq!(subagent_tab_title(&blank).as_ref(), "Subagent");
-        // Absurd lengths cap with an ellipsis; multiline prompts keep only
-        // their first line.
-        let long = ToolCall::Unknown {
-            name: "x".repeat(120),
-            input: None,
-        };
-        let title = subagent_tab_title(&long);
-        assert_eq!(title.chars().count(), SUBAGENT_TITLE_MAX + 1);
-        assert!(title.ends_with('…'));
-        // Non-spawn-shaped calls stay generic.
-        assert_eq!(
-            subagent_tab_title(&ToolCall::Exec {
-                command: "ls".into()
-            })
-            .as_ref(),
-            "Subagent"
-        );
     }
 
     #[test]

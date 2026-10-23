@@ -1,162 +1,12 @@
 use super::*;
 
+use zeron_proto::picker::{self, ProfileDrift, savable};
 use zeron_proto::{AgentProfile, AgentProfileDraft};
 
 use crate::agent_profiles::{
     ProfileWrite, brand_badge, draft_summary, expand_toggle, folded_row, in_pairs, mode_label,
     summary, token_count,
 };
-
-#[derive(Clone, Debug, PartialEq)]
-pub(super) struct ProfilePick {
-    profile_id: String,
-    harness: HarnessId,
-    model: Option<String>,
-    reasoning: Option<ReasoningLevel>,
-    permission_mode: Option<PermissionMode>,
-    model_options: serde_json::Map<String, serde_json::Value>,
-    instructions: String,
-    disabled_tools: Vec<String>,
-}
-
-impl ProfilePick {
-    fn of(profile: &AgentProfile) -> Self {
-        Self {
-            profile_id: profile.id.clone(),
-            harness: profile.harness,
-            model: profile.model.clone(),
-            reasoning: profile.reasoning,
-            permission_mode: profile.permission_mode,
-            model_options: profile.model_options.clone(),
-            instructions: profile.instructions.clone(),
-            disabled_tools: profile.disabled_tools.clone(),
-        }
-    }
-
-    pub(super) fn write(&self, config: &mut ChatConfig) {
-        if config.harness != self.harness {
-            config.harness = self.harness;
-            config.model = None;
-            config.model_options.clear();
-        }
-        if let Some(model) = &self.model {
-            config.model = Some(model.clone());
-        }
-        if let Some(level) = self.reasoning {
-            config.reasoning = Some(level);
-        }
-        if let Some(mode) = self.permission_mode {
-            config.permission_mode = mode;
-        }
-        if !self.model_options.is_empty() {
-            config.model_options = self.model_options.clone();
-        }
-        config.instructions = self.instructions.clone();
-        config.disabled_tools = self.disabled_tools.clone();
-        config.profile_id = Some(self.profile_id.clone());
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(super) enum Drift {
-    Harness,
-    Model,
-    Effort,
-    Mode,
-    Options(Vec<String>),
-    Tools,
-    Instructions,
-}
-
-fn option_drifts(profile: &AgentProfile, current: &ResolvedRunConfig) -> Vec<String> {
-    profile
-        .model_options
-        .iter()
-        .filter(|(key, value)| current.model_options.get(*key) != Some(value))
-        .map(|(key, _)| key.clone())
-        .collect()
-}
-
-fn tools_drift(profile: &AgentProfile, current: &ResolvedRunConfig) -> bool {
-    use std::collections::BTreeSet;
-    profile.disabled_tools.iter().collect::<BTreeSet<_>>()
-        != current.disabled_tools.iter().collect::<BTreeSet<_>>()
-}
-
-pub(super) fn profile_drift(profile: &AgentProfile, current: &ResolvedRunConfig) -> Vec<Drift> {
-    if current
-        .harness
-        .is_some_and(|harness| harness != profile.harness)
-    {
-        return vec![Drift::Harness];
-    }
-    let mut drift = Vec::new();
-    if profile
-        .model
-        .as_ref()
-        .is_some_and(|model| current.model.as_ref() != Some(model))
-    {
-        drift.push(Drift::Model);
-    }
-    if profile
-        .reasoning
-        .is_some_and(|level| current.reasoning != Some(level))
-    {
-        drift.push(Drift::Effort);
-    }
-    if profile
-        .permission_mode
-        .is_some_and(|mode| current.permission_mode != mode)
-    {
-        drift.push(Drift::Mode);
-    }
-    let options = option_drifts(profile, current);
-    if !options.is_empty() {
-        drift.push(Drift::Options(options));
-    }
-    if tools_drift(profile, current) {
-        drift.push(Drift::Tools);
-    }
-    if profile.instructions != current.instructions {
-        drift.push(Drift::Instructions);
-    }
-    drift
-}
-
-fn absorb_current(profile: &AgentProfile, current: &ResolvedRunConfig) -> AgentProfileDraft {
-    let mut draft = crate::agent_profiles::draft_of(profile);
-    let harness_moved = current
-        .harness
-        .is_some_and(|harness| harness != profile.harness);
-    if let Some(harness) = current.harness {
-        draft.harness = harness;
-    }
-    if profile.model.is_some() || harness_moved {
-        draft.model = current.model.clone();
-    }
-    if profile.reasoning.is_some() {
-        draft.reasoning = current.reasoning;
-    }
-    if profile.permission_mode.is_some() {
-        draft.permission_mode = Some(current.permission_mode);
-    }
-    draft.model_options = if harness_moved {
-        Default::default()
-    } else {
-        profile
-            .model_options
-            .keys()
-            .filter_map(|key| {
-                current
-                    .model_options
-                    .get(key)
-                    .map(|value| (key.clone(), value.clone()))
-            })
-            .collect()
-    };
-    draft.disabled_tools = current.disabled_tools.clone();
-    draft
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EditField {
@@ -247,7 +97,7 @@ impl Pickers {
         }
     }
 
-    pub(super) fn applied_profile(&self, cx: &App) -> Option<(AgentProfile, Vec<Drift>)> {
+    pub(super) fn applied_profile(&self, cx: &App) -> Option<(AgentProfile, Vec<ProfileDrift>)> {
         let id = self.effective_profile_id(cx)?;
         let profile = self.profiles.ready()?.iter().find(|p| p.id == id)?.clone();
         let mut current = self.resolved(cx);
@@ -258,7 +108,7 @@ impl Pickers {
                 .entry(option.id.clone())
                 .or_insert_with(|| serde_json::Value::String(option.default_choice.clone()));
         }
-        let drift = profile_drift(&profile, &current);
+        let drift = profile.drift(&current.config_on(current.harness.unwrap_or(profile.harness)));
         Some((profile, drift))
     }
 
@@ -283,7 +133,10 @@ impl Pickers {
         let target = self.space_target(cx).map(serde_json::Value::String);
         let write = ProfileWrite::Upsert {
             profile_id: Some(profile.id.clone()),
-            draft: absorb_current(profile, &self.resolved(cx)),
+            draft: {
+                let resolved = self.resolved(cx);
+                profile.absorb(&resolved.config_on(resolved.harness.unwrap_or(profile.harness)))
+            },
         };
         self.profiles_task = Some(cx.spawn(async move |this, cx| {
             let result = crate::agent_profiles::write(&engine, write, target).await;
@@ -302,67 +155,27 @@ impl Pickers {
     fn drift_line(
         &self,
         profile: &AgentProfile,
-        drift: &[Drift],
+        drift: &[ProfileDrift],
         resolved: &ResolvedRunConfig,
     ) -> String {
-        drift
-            .iter()
-            .map(|change| match change {
-                Drift::Harness => format!(
-                    "{} → {}",
-                    harness_display_name(profile.harness),
-                    resolved
-                        .harness
-                        .map(harness_display_name)
-                        .unwrap_or_default()
-                ),
-                Drift::Model => format!(
-                    "{} → {}",
-                    profile
-                        .model
-                        .as_deref()
-                        .map(|model| self.profile_model_label(profile.harness, model))
-                        .unwrap_or_default(),
-                    resolved
-                        .model
-                        .as_deref()
-                        .map(|model| self.profile_model_label(profile.harness, model))
-                        .unwrap_or_default()
-                ),
-                Drift::Effort => format!(
-                    "effort {} → {}",
-                    profile.reasoning.map(reasoning_label).unwrap_or_default(),
-                    resolved.reasoning.map(reasoning_label).unwrap_or_default()
-                ),
-                Drift::Mode => format!(
-                    "{} → {}",
-                    profile.permission_mode.map(mode_label).unwrap_or_default(),
-                    mode_label(resolved.permission_mode)
-                ),
-                Drift::Options(keys) => {
-                    let options = resolved
-                        .harness
-                        .zip(resolved.model.as_deref())
-                        .and_then(|(harness, model)| self.profile_catalog_model(harness, model))
-                        .map(|model| model.options.clone())
-                        .unwrap_or_default();
-                    let names = keys
-                        .iter()
-                        .map(|key| {
-                            options
-                                .iter()
-                                .find(|option| option.id == *key)
-                                .map_or(key.as_str(), |option| option.label.as_str())
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("{names} changed")
-                }
-                Drift::Tools => "tools changed".to_string(),
-                Drift::Instructions => "instructions changed".to_string(),
-            })
-            .collect::<Vec<_>>()
-            .join(" · ")
+        let options = resolved
+            .harness
+            .zip(resolved.model.as_deref())
+            .and_then(|(harness, model)| self.profile_catalog_model(harness, model))
+            .map(|model| model.options.clone())
+            .unwrap_or_default();
+        profile.drift_line(
+            drift,
+            &resolved.config_on(resolved.harness.unwrap_or(profile.harness)),
+            |model| self.profile_model_label(profile.harness, model),
+            |key| {
+                options
+                    .iter()
+                    .find(|option| option.id == key)
+                    .map_or(key, |option| option.label.as_str())
+                    .to_string()
+            },
+        )
     }
 
     fn profile_catalog_model(&self, harness: HarnessId, model: &str) -> Option<&Model> {
@@ -390,7 +203,7 @@ impl Pickers {
     }
 
     pub(super) fn apply_profile(&mut self, profile: &AgentProfile, cx: &mut Context<Self>) {
-        let pick = ProfilePick::of(profile);
+        let pick = profile.clone();
         self.ensure_models(pick.harness, false, cx);
         if self.chat_id(cx).is_some() {
             let current_harness = self.effective_harness(cx);
@@ -434,7 +247,7 @@ impl Pickers {
                 cx.notify();
                 return;
             }
-            self.update_chat_config(cx, None, move |config| pick.write(config));
+            self.update_chat_config(cx, None, move |config| pick.apply_to(config));
         } else {
             if self.effective_harness(cx) != Some(pick.harness) {
                 self.pick_harness(pick.harness, cx);
@@ -465,7 +278,7 @@ impl Pickers {
             }
             self.config.instructions = pick.instructions.clone();
             self.config.disabled_tools = pick.disabled_tools.clone();
-            self.config.profile_id = Some(pick.profile_id.clone());
+            self.config.profile_id = Some(pick.id.clone());
             if self.detached {
                 if !pick.model_options.is_empty() {
                     self.config.model_options = Some(pick.model_options);
@@ -681,15 +494,12 @@ impl Pickers {
                 .as_ref()
                 .filter(|drift| !drift.is_empty())
                 .map(|drift| self.drift_line(profile, drift, &resolved));
-            let savable = can_save
-                && drift
-                    .as_ref()
-                    .is_some_and(|drift| drift.iter().any(|change| *change != Drift::Instructions));
+            let savable = can_save && drift.as_ref().is_some_and(|drift| savable(drift));
             let edited = drift.as_ref().is_some_and(|drift| !drift.is_empty());
             let switches =
                 drift.is_none() && switching.is_some_and(|harness| harness != profile.harness);
             let edit_id = profile.id.clone();
-            let edit_draft = crate::agent_profiles::draft_of(profile);
+            let edit_draft = profile.draft();
             let revert_profile = profile.clone();
             let save_profile = profile.clone();
             let row_hover = SharedString::from(format!("profile-row-{ix}"));
@@ -755,7 +565,7 @@ impl Pickers {
                                         let (label, tint) = if drift.is_empty() {
                                             ("Active", theme.accent)
                                         } else {
-                                            ("Edited", theme.warning)
+                                            (picker::EDITED, theme.warning)
                                         };
                                         el.child(
                                             div()
@@ -786,7 +596,7 @@ impl Pickers {
                                             .child(
                                                 profile_row_button(
                                                     ("profile-revert", ix),
-                                                    "Revert",
+                                                    picker::REVERT,
                                                     &theme,
                                                 )
                                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -798,7 +608,7 @@ impl Pickers {
                                                 el.child(
                                                     profile_row_button(
                                                         ("profile-save", ix),
-                                                        "Save",
+                                                        picker::SAVE,
                                                         &theme,
                                                     )
                                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -982,14 +792,14 @@ impl Pickers {
                             .text_size(crate::typography::ui_rems(12.5))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child("No profile"),
+                            .child(picker::NO_PROFILE),
                     )
                     .child(
                         div()
                             .truncate()
                             .text_size(crate::typography::ui_rems(11.0))
                             .text_color(theme.text_muted)
-                            .child("Keeps the model, drops instructions"),
+                            .child(picker::NO_PROFILE_NOTE),
                     ),
             )
             .when(selected, |el| {
@@ -1027,7 +837,7 @@ impl Pickers {
                 .collect(),
             EditField::Mode => {
                 std::iter::once(("Keep current".into(), draft.permission_mode.is_none()))
-                    .chain(PERMISSION_MODES.iter().map(|mode| {
+                    .chain(PermissionMode::ALL.iter().map(|mode| {
                         (
                             SharedString::from(mode_label(*mode)),
                             draft.permission_mode == Some(*mode),
@@ -1137,7 +947,7 @@ impl Pickers {
             EditField::Mode => {
                 let mode = ix
                     .checked_sub(1)
-                    .and_then(|ix| PERMISSION_MODES.get(ix).copied());
+                    .and_then(|ix| PermissionMode::ALL.get(ix).copied());
                 self.edit_profile_draft(cx, |draft| draft.permission_mode = mode);
             }
             EditField::Effort => {
@@ -1662,144 +1472,5 @@ mod tests {
         assert_eq!(names(""), ["Reviewer", "UI"]);
         assert_eq!(names("LAYOUT"), ["UI"]);
         assert_eq!(names("rev"), ["Reviewer"]);
-    }
-
-    #[test]
-    fn a_pick_only_overrides_what_the_profile_sets() {
-        let mut config = ChatConfig {
-            harness: HarnessId::ClaudeCode,
-            model: Some("opus".into()),
-            reasoning: Some(ReasoningLevel::High),
-            model_options: serde_json::json!({ "context": "1m" })
-                .as_object()
-                .cloned()
-                .unwrap(),
-            sandbox: SandboxLevel::WorkspaceWrite,
-            permission_mode: PermissionMode::Full,
-            instructions: String::new(),
-            profile_id: None,
-            instance_id: None,
-            disabled_tools: Vec::new(),
-        };
-        let mut same = profile("Same", "");
-        same.harness = HarnessId::ClaudeCode;
-        same.permission_mode = Some(PermissionMode::Ask);
-        ProfilePick::of(&same).write(&mut config);
-        assert_eq!(config.model.as_deref(), Some("opus"));
-        assert_eq!(config.reasoning, Some(ReasoningLevel::High));
-        assert_eq!(config.permission_mode, PermissionMode::Ask);
-        assert_eq!(config.model_options["context"], "1m");
-
-        let mut codex = profile("Codex", "");
-        codex.model = Some("gpt-5.6".into());
-        ProfilePick::of(&codex).write(&mut config);
-        assert_eq!(config.harness, HarnessId::Codex);
-        assert_eq!(config.model.as_deref(), Some("gpt-5.6"));
-        assert!(config.model_options.is_empty());
-        assert_eq!(config.reasoning, Some(ReasoningLevel::High));
-        assert_eq!(config.profile_id.as_deref(), Some("codex"));
-    }
-
-    #[test]
-    fn drift_compares_only_what_the_profile_sets() {
-        let mut planner = profile("Planner", "");
-        planner.harness = HarnessId::ClaudeCode;
-        planner.reasoning = Some(ReasoningLevel::High);
-        planner.model_options = serde_json::json!({ "context": "1m" })
-            .as_object()
-            .cloned()
-            .unwrap();
-        let mut current = ResolvedRunConfig {
-            harness: Some(HarnessId::ClaudeCode),
-            instance_id: None,
-            model: Some("opus".into()),
-            reasoning: Some(ReasoningLevel::High),
-            model_options: serde_json::json!({ "context": "1m", "fast": "on" })
-                .as_object()
-                .cloned()
-                .unwrap(),
-            permission_mode: PermissionMode::Full,
-            instructions: String::new(),
-            profile_id: Some("planner".into()),
-            disabled_tools: Vec::new(),
-        };
-        assert!(profile_drift(&planner, &current).is_empty());
-
-        current.reasoning = Some(ReasoningLevel::Max);
-        current.model_options.remove("context");
-        assert_eq!(
-            profile_drift(&planner, &current),
-            [Drift::Effort, Drift::Options(vec!["context".into()])]
-        );
-        let saved = absorb_current(&planner, &current);
-        assert_eq!(saved.reasoning, Some(ReasoningLevel::Max));
-        assert!(saved.model.is_none());
-        assert!(saved.permission_mode.is_none());
-        assert!(saved.model_options.is_empty());
-
-        current.harness = Some(HarnessId::Codex);
-        assert_eq!(profile_drift(&planner, &current), [Drift::Harness]);
-    }
-
-    fn tools(names: &[&str]) -> Vec<String> {
-        names.iter().map(|name| name.to_string()).collect()
-    }
-
-    #[test]
-    fn a_pick_replaces_the_tool_set_even_when_empty() {
-        let mut config = ChatConfig {
-            harness: HarnessId::ClaudeCode,
-            model: None,
-            reasoning: None,
-            model_options: Default::default(),
-            sandbox: SandboxLevel::WorkspaceWrite,
-            permission_mode: PermissionMode::Full,
-            instructions: String::new(),
-            profile_id: None,
-            instance_id: None,
-            disabled_tools: tools(&["WebFetch"]),
-        };
-        let mut lean = profile("Lean", "");
-        lean.harness = HarnessId::ClaudeCode;
-        lean.disabled_tools = tools(&["mcp__xcode", "mcp__zeron__delegate_task"]);
-        ProfilePick::of(&lean).write(&mut config);
-        assert_eq!(
-            config.disabled_tools,
-            tools(&["mcp__xcode", "mcp__zeron__delegate_task"])
-        );
-
-        let mut full = profile("Full", "");
-        full.harness = HarnessId::ClaudeCode;
-        ProfilePick::of(&full).write(&mut config);
-        assert!(config.disabled_tools.is_empty());
-
-        lean.harness = HarnessId::Codex;
-        ProfilePick::of(&lean).write(&mut config);
-        assert_eq!(config.disabled_tools, lean.disabled_tools);
-    }
-
-    #[test]
-    fn drift_compares_tool_sets_and_save_absorbs_them() {
-        let mut lean = profile("Lean", "");
-        lean.harness = HarnessId::ClaudeCode;
-        lean.disabled_tools = tools(&["WebFetch", "mcp__xcode"]);
-        let mut current = ResolvedRunConfig {
-            harness: Some(HarnessId::ClaudeCode),
-            permission_mode: PermissionMode::Full,
-            profile_id: Some("lean".into()),
-            disabled_tools: tools(&["mcp__xcode", "WebFetch"]),
-            ..Default::default()
-        };
-        assert!(profile_drift(&lean, &current).is_empty());
-
-        current.disabled_tools.push("NotebookEdit".into());
-        assert_eq!(profile_drift(&lean, &current), [Drift::Tools]);
-        let saved = absorb_current(&lean, &current);
-        assert_eq!(saved.disabled_tools, current.disabled_tools);
-
-        current.disabled_tools.clear();
-        assert_eq!(profile_drift(&lean, &current), [Drift::Tools]);
-        lean.disabled_tools.clear();
-        assert!(profile_drift(&lean, &current).is_empty());
     }
 }

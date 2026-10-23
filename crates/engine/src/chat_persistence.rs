@@ -8,6 +8,9 @@ use zeron_doc::SessionDoc;
 use zeron_sync::DocsStore;
 
 const SAVE_INTERVAL: Duration = Duration::from_secs(1);
+// With a durable outbox the snapshot is a cache (commits replay from `chat_outbox`, rows from the cursor), so big docs save less often.
+const OUTBOX_BACKED_BYTES_PER_SEC: u64 = 128 * 1024;
+const MAX_SAVE_INTERVAL: Duration = Duration::from_secs(30);
 
 pub(crate) struct ChatPersistence {
     doc: Weak<SessionDoc>,
@@ -18,6 +21,7 @@ pub(crate) struct ChatPersistence {
     saved: AtomicU64,
     snapshot_bytes: AtomicUsize,
     urgent: AtomicBool,
+    outbox_backed: bool,
     write: Mutex<()>,
     wake: Option<mpsc::Sender<()>>,
     pub(crate) initial_cursor_verified: bool,
@@ -33,6 +37,7 @@ impl ChatPersistence {
         store: Arc<DocsStore>,
         chat_id: String,
         cursor: u64,
+        outbox_backed: bool,
     ) -> Arc<Self> {
         let verified = store.snapshot_cursor_verified(&chat_id).unwrap_or(false);
         let runtime = tokio::runtime::Handle::try_current().ok();
@@ -48,6 +53,7 @@ impl ChatPersistence {
             saved: AtomicU64::new(0),
             snapshot_bytes: AtomicUsize::new(0),
             urgent: AtomicBool::new(false),
+            outbox_backed,
             write: Mutex::new(()),
             wake: runtime.as_ref().map(|_| tx),
             initial_cursor_verified: verified,
@@ -72,6 +78,14 @@ impl ChatPersistence {
 
     pub(crate) fn snapshot_bytes(&self) -> usize {
         self.snapshot_bytes.load(Ordering::Relaxed)
+    }
+
+    fn save_interval(&self) -> Duration {
+        if !self.outbox_backed {
+            return SAVE_INTERVAL;
+        }
+        Duration::from_secs(self.snapshot_bytes() as u64 / OUTBOX_BACKED_BYTES_PER_SEC)
+            .clamp(SAVE_INTERVAL, MAX_SAVE_INTERVAL)
     }
 
     pub(crate) fn applied(&self, cursor: u64, immediate: bool) {
@@ -100,7 +114,9 @@ impl ChatPersistence {
 
     async fn run(weak: Weak<Self>, mut rx: mpsc::Receiver<()>) {
         while rx.recv().await.is_some() {
-            let deadline = tokio::time::Instant::now() + SAVE_INTERVAL;
+            let Some(this) = weak.upgrade() else { return };
+            let deadline = tokio::time::Instant::now() + this.save_interval();
+            drop(this);
             loop {
                 let Some(this) = weak.upgrade() else { return };
                 let urgent = this.urgent.swap(false, Ordering::AcqRel);
@@ -207,7 +223,7 @@ mod tests {
         let doc = Arc::new(SessionDoc::from_doc(raw));
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(DocsStore::open(dir.path()).unwrap());
-        let persistence = ChatPersistence::new(&doc, store.clone(), "whale".into(), 0);
+        let persistence = ChatPersistence::new(&doc, store.clone(), "whale".into(), 0, false);
         let worst = Arc::new(AtomicU64::new(0));
         let beats = Arc::new(AtomicUsize::new(0));
         let mut heartbeat_tasks = Vec::new();
@@ -274,8 +290,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(DocsStore::open(dir.path()).unwrap());
         let doc = Arc::new(SessionDoc::init("whale").unwrap());
-        let persistence = ChatPersistence::new(&doc, store.clone(), "whale".into(), 0);
+        let persistence = ChatPersistence::new(&doc, store.clone(), "whale".into(), 0, false);
         (dir, doc, store, persistence)
+    }
+
+    #[test]
+    fn only_outbox_backed_docs_stretch_the_save_interval_with_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::init("whale").unwrap());
+        let cached = ChatPersistence::new(&doc, store.clone(), "a".into(), 0, true);
+        let sole_copy = ChatPersistence::new(&doc, store, "b".into(), 0, false);
+        for (bytes, cached_secs) in [(0, 1), (512 * 1024, 4), (6 * 1024 * 1024, 30)] {
+            cached.snapshot_bytes.store(bytes, Ordering::Relaxed);
+            sole_copy.snapshot_bytes.store(bytes, Ordering::Relaxed);
+            assert_eq!(cached.save_interval(), Duration::from_secs(cached_secs));
+            assert_eq!(sole_copy.save_interval(), SAVE_INTERVAL);
+        }
     }
 
     #[tokio::test]

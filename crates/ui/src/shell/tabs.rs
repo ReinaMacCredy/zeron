@@ -1686,6 +1686,7 @@ impl Shell {
             }
             None => groups.push(task_id.to_owned()),
         }
+        self.mark_onboarded(super::intros::MISSION_TABS, cx);
         self.schedule_save(cx);
         cx.notify();
     }
@@ -1900,7 +1901,11 @@ impl Shell {
                             .flex_none()
                             .text_color(tone),
                     )
-                    .child(div().text_color(theme.text_muted).child("Mission page")),
+                    .child(
+                        div()
+                            .text_color(theme.text_muted)
+                            .child(zeron_proto::mission::MISSION_PAGE),
+                    ),
             );
         for id in ids {
             let Some((label, harness, status)) = tabs.get(id).cloned() else {

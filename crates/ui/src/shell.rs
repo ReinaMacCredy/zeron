@@ -94,7 +94,7 @@ mod file_mutations;
 mod files_panel;
 mod handoff;
 mod harness_updates;
-mod mission_intro;
+mod intros;
 mod mission_strip;
 mod navigation_focus;
 #[cfg(test)]
@@ -1566,7 +1566,7 @@ struct SidebarSessionSlide {
 impl SidebarSessionSlide {
     fn current(&self) -> f32 {
         let progress = TAB_SLIDE
-            .progress(self.started.elapsed().as_secs_f32() / TAB_SLIDE.total().as_secs_f32());
+            .progress(motion::since(self.started).as_secs_f32() / TAB_SLIDE.total().as_secs_f32());
         motion::lerp(self.from, self.to, progress)
     }
 
@@ -1577,7 +1577,7 @@ impl SidebarSessionSlide {
         self.from = self.current();
         self.to = target;
         self.epoch = self.epoch.wrapping_add(1);
-        self.started = std::time::Instant::now();
+        self.started = motion::now();
     }
 }
 
@@ -1749,7 +1749,7 @@ impl WidthTween {
         Self {
             from,
             to,
-            started: std::time::Instant::now(),
+            started: motion::now(),
             duration: RESIZE.total().mul_f32(motion::speed_scale()),
             curve: RESIZE.curve,
         }
@@ -2418,20 +2418,12 @@ fn btw_tab_title(
     chat: &zeron_proto::Chat,
     now: chrono::DateTime<Utc>,
 ) -> SharedString {
-    let title = state
-        .first_prompt_of(&chat.id)
-        .or_else(|| {
-            (!state.unstarted_sidechat(chat, now))
-                .then(|| chat.last_message_preview.clone())
-                .flatten()
-        })
-        .and_then(|text| {
-            text.lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .map(str::to_string)
-        });
-    title.unwrap_or_else(|| "New btw".to_string()).into()
+    let prompt = state.first_prompt_of(&chat.id).or_else(|| {
+        (!state.unstarted_sidechat(chat, now))
+            .then(|| chat.last_message_preview.clone())
+            .flatten()
+    });
+    zeron_proto::sidechat::sidechat_tab_title(prompt.as_deref()).into()
 }
 
 /// Sidebar render identity lets transcript/caret frames reuse its GPUI scene.
@@ -2479,6 +2471,9 @@ impl Render for SidebarPane {
         let inner = shell.update(cx, |shell, cx| {
             shell.sidebar_windowing = !window.is_a11y_active();
             let theme = Theme::of(cx).clone();
+            if shell.whats_new_card_animates(cx) && window.is_window_active() {
+                window.request_animation_frame();
+            }
             shell.render_chat_sidebar(&theme, cx)
         });
         div().size_full().child(inner).into_any_element()
@@ -2790,7 +2785,8 @@ pub struct Shell {
     /// Synara's one-time AppSnap introduction: shown on desktop until the
     /// user dismisses it or follows it into Settings → Appshots.
     appshot_welcome: bool,
-    mission_intro: mission_intro::MissionIntro,
+    intro: intros::Intro,
+    since_pending: bool,
     whats_new_card: Option<whats_new::WhatsNewCard>,
     whats_new_dialog: Option<whats_new::WhatsNewDialog>,
     /// The fork/rewind confirmation, centered like the delete dialog.
@@ -3210,6 +3206,7 @@ impl Shell {
                 }
                 ComposerEvent::OpenChat(chat_id) => this.open_chat(chat_id.clone(), cx),
                 ComposerEvent::StartMission(start) => this.start_mission(start.clone(), cx),
+                ComposerEvent::PlanFirst => this.on_plan_first(cx),
                 ComposerEvent::OpenTaskCenter(task_id) => {
                     this.open_task_center(task_id.clone(), cx)
                 }
@@ -3507,10 +3504,7 @@ impl Shell {
             home_view: None,
             home_raise: None,
             chat_work_focus: [cx.focus_handle(), cx.focus_handle()],
-            chat_work_slide: (
-                1,
-                motion::IndicatorSlide::at(1.0, std::time::Instant::now()),
-            ),
+            chat_work_slide: (1, motion::IndicatorSlide::at(1.0, motion::now())),
             _home_events: None,
             appearance_page: None,
             files_settings_page: None,
@@ -3541,9 +3535,8 @@ impl Shell {
             chat_rename: None,
             delete_confirm: None,
             appshot_welcome,
-            mission_intro: mission_intro::MissionIntro::at_boot(
-                settings.mission_intro_acknowledged,
-            ),
+            intro: intros::Intro::at_boot(),
+            since_pending: !intros::since_pages(&settings.onboarding_seen).is_empty(),
             whats_new_card,
             whats_new_dialog: None,
             branch_modal: None,
@@ -3805,7 +3798,7 @@ impl Shell {
         self.refresh_harness_update_watch(cx);
         self.advance_update_all(cx);
         self.sync_search_warm(cx);
-        self.resolve_mission_intro(cx);
+        self.resolve_intros(cx);
         if state.read(cx).engine().is_none() {
             self.side_chats.clear();
             self.side_chat_creating = false;
@@ -6553,7 +6546,7 @@ impl Shell {
                         tracing::warn!(%err, "ContinueInNewThread failed");
                         shell.show_notice(
                             crate::toast::ToastKind::Error,
-                            format!("Couldn't continue in a new thread: {err}"),
+                            zeron_proto::handoff::handoff_failed_message(&err),
                             cx,
                         );
                         cx.notify();
@@ -7290,7 +7283,8 @@ impl Shell {
             | ComposerEvent::OpenChat(_)
             | ComposerEvent::OpenChanges
             | ComposerEvent::StartMission(_)
-            | ComposerEvent::OpenTaskCenter(_) => {}
+            | ComposerEvent::OpenTaskCenter(_)
+            | ComposerEvent::PlanFirst => {}
             ComposerEvent::OpenSubagent {
                 chat_id,
                 doc_id,
@@ -7971,6 +7965,9 @@ impl Shell {
             if let Some(page) = self.pull_requests_page.as_ref().cloned() {
                 page.update(cx, |page, cx| page.on_hidden(cx));
             }
+        }
+        if route == Route::Tasks {
+            self.mark_onboarded(intros::TASKS_HOME, cx);
         }
         self.route = route;
         if !was_pull_requests && will_show_pull_requests {
@@ -9401,9 +9398,7 @@ impl Shell {
             surface,
             input,
             focus_pending: true,
-            reveal_until: Some(
-                std::time::Instant::now() + motion::COLLAPSE.total() + CHAT_RENAME_REVEAL_GRACE,
-            ),
+            reveal_until: Some(motion::now() + motion::COLLAPSE.total() + CHAT_RENAME_REVEAL_GRACE),
             _events: events,
             _blur: None,
         });
@@ -9490,7 +9485,7 @@ impl Shell {
         self.chat_rename
             .as_ref()
             .and_then(|rename| rename.reveal_until)
-            .is_some_and(|until| std::time::Instant::now() < until)
+            .is_some_and(|until| motion::now() < until)
     }
 
     /// The inline title editor for `chat_id`'s row on `surface`, if one is open.
@@ -10896,7 +10891,7 @@ impl Shell {
         if let Some(now) = self.test_time {
             return now;
         }
-        std::time::Instant::now()
+        motion::now()
     }
 
     fn panel_tween(&self, from: f32, to: f32) -> WidthTween {
@@ -12107,7 +12102,7 @@ impl Shell {
         branch: Option<SharedString>,
         change_request: Option<zeron_proto::ChangeRequestSummary>,
         // Every harness the chat ran on, current last
-        // (`pickers::chat_harness_marks`); empty hides the mark.
+        // (`Chat::harness_marks`); empty hides the mark.
         harnesses: Vec<crate::provider_instances::InstanceIcon>,
         // Title of the chat whose agent opened this one (thread tools); the
         // row names it on its metadata line.
@@ -12286,11 +12281,11 @@ impl Shell {
         let working =
             status == zeron_proto::ChatIndicator::Working && !queued && !undelivered && !expired;
         let ring =
-            crate::composer::background::sidebar_ring(status, self.state.read(cx).session_for(&id))
+            zeron_proto::background::sidebar_ring(status, self.state.read(cx).session_for(&id))
                 .filter(|_| !queued && !undelivered && !expired);
         let work_label = ring.filter(|_| working).and_then(|_| {
             let state = self.state.read(cx);
-            crate::composer::background::ring_label(&state.session_for(&id)?.background_tasks)
+            zeron_proto::background::ring_label(&state.session_for(&id)?.background_tasks)
         });
         let status_label: Option<SharedString> = match work_label {
             Some(label) => Some(label.into()),
@@ -13006,6 +13001,9 @@ impl Shell {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
+                if crate::tasks::tab_members(this.state.read(cx)).contains_key(&lead_id) {
+                    this.mark_onboarded(intros::SIDEBAR_MISSION, cx);
+                }
                 this.toggle_sidebar_lead(&lead_id, cx);
             }))
             .tooltip(crate::settings::widgets::text_tooltip_above(label))
@@ -13068,11 +13066,11 @@ impl Shell {
         let settled_state = queued || undelivered || expired;
         let working = status == Status::Working && !settled_state;
         let ring =
-            crate::composer::background::sidebar_ring(status, self.state.read(cx).session_for(&id))
+            zeron_proto::background::sidebar_ring(status, self.state.read(cx).session_for(&id))
                 .filter(|_| !settled_state);
         let work_label = ring.filter(|_| working).and_then(|_| {
             let state = self.state.read(cx);
-            crate::composer::background::ring_label(&state.session_for(&id)?.background_tasks)
+            zeron_proto::background::ring_label(&state.session_for(&id)?.background_tasks)
         });
         let (status_label, status_icon, status_color): (Option<SharedString>, &str, gpui::Hsla) =
             if expired {
@@ -15877,8 +15875,8 @@ impl Shell {
             self.acknowledge_appshot_welcome(cx);
             return true;
         }
-        if self.mission_intro_visible() {
-            self.close_mission_intro(cx);
+        if self.intro_visible() {
+            self.close_intro(cx);
             return true;
         }
         if self.cancel_device_rename(cx) {
@@ -15980,7 +15978,7 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
-        if self.mission_intro_visible()
+        if self.intro_visible()
             && !event.keystroke.modifiers.modified()
             && let Some(delta) = match event.keystroke.key.as_str() {
                 "left" => Some(-1),
@@ -15988,7 +15986,7 @@ impl Shell {
                 _ => None,
             }
         {
-            self.page_mission_intro(delta, cx);
+            self.page_intro(delta, cx);
             cx.stop_propagation();
             return;
         }
@@ -16584,10 +16582,10 @@ impl Shell {
                 20.0,
             ));
         }
-        if self.mission_intro_visible() {
-            overlays.push(self.render_mission_intro(viewport, &theme, window, cx));
+        if self.intro_visible() {
+            overlays.push(self.render_intro(viewport, &theme, window, cx));
         }
-        if let Some(dialog) = self.render_whats_new_dialog(viewport, &theme, cx) {
+        if let Some(dialog) = self.render_whats_new_dialog(viewport, &theme, window, cx) {
             overlays.push(dialog);
         }
 
@@ -16677,32 +16675,17 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let excerpt = if modal.excerpt.is_empty() {
-            String::new()
+        let rewind = matches!(modal.kind, BranchKind::Rewind);
+        let zeron_proto::transcript::BranchCopy {
+            title,
+            context,
+            option,
+            detail,
+        } = zeron_proto::transcript::branch_copy(rewind, &modal.excerpt);
+        let (glyph, danger) = if rewind {
+            (icons::RESTART, true)
         } else {
-            let mut text: String = modal.excerpt.chars().take(72).collect();
-            if modal.excerpt.chars().count() > 72 {
-                text.push('\u{2026}');
-            }
-            format!("\u{201C}{text}\u{201D}")
-        };
-        let (title, context, option, detail, glyph, danger) = match modal.kind {
-            BranchKind::Fork => (
-                "Fork chat from here",
-                format!("After {excerpt}"),
-                "Fork in this workspace",
-                "New chat with the conversation through this reply. This chat stays as is.",
-                icons::GIT_BRANCH,
-                false,
-            ),
-            BranchKind::Rewind => (
-                "Rewind to here",
-                format!("Before {excerpt}"),
-                "Restore conversation",
-                "Removes this prompt and everything after it and puts the prompt back in the composer. Files on disk stay as they are.",
-                icons::RESTART,
-                true,
-            ),
+            (icons::GIT_BRANCH, false)
         };
         let option_row = popover::menu_row(theme, false, "branch-modal-option")
             .id("branch-modal-option")
@@ -16998,7 +16981,7 @@ impl Shell {
             .as_ref()
             .map(|background| background.adjustment)
             .unwrap_or_default();
-        let frame_time = self.render_time.unwrap_or_else(std::time::Instant::now);
+        let frame_time = self.render_time.unwrap_or_else(motion::now);
         // Prewarm even in an established thread. Decode/effect work is not
         // contingent on a hero measurement or a navigation gesture.
         let artwork = new_thread_background_setting
@@ -17982,9 +17965,9 @@ impl Shell {
                                 .text_size(crate::typography::ui_rems(11.0))
                                 .text_color(theme.text_muted)
                                 .truncate()
-                                .child(SharedString::from(format!(
-                                    "Sidechat of {source_title} · source transcript copied as reference-only context"
-                                ))),
+                                .child(SharedString::from(
+                                    zeron_proto::sidechat::sidechat_context_line(&source_title),
+                                )),
                         )
                         .child(div().flex_1().min_h_0().child(transcript))
                         .child(div().flex_none().child(composer))
@@ -18129,7 +18112,7 @@ impl Shell {
                             row(
                                 "surface-card-sidechat",
                                 icons::CHAT_ROUND_LINE,
-                                "New sidechat",
+                                zeron_proto::sidechat::NEW_SIDECHAT,
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if let Some(source) = this.sidechat_source_chat(cx) {
@@ -18803,7 +18786,9 @@ impl Shell {
                                             .size(px(13.0))
                                             .text_color(theme.text_muted),
                                     )
-                                    .child(SharedString::from("New sidechat")),
+                                    .child(SharedString::from(
+                                        zeron_proto::sidechat::NEW_SIDECHAT,
+                                    )),
                             )
                         })
                         .when(git_surfaces, |menu| {
@@ -19389,6 +19374,7 @@ fn nav_history_button(
             .debug_selector(move || id.to_owned())
             .role(gpui::Role::Button)
             .aria_label(label)
+            .aria_disabled(true)
             .size(px(24.0))
             .flex_none()
             .flex()
@@ -20461,7 +20447,7 @@ impl Render for Shell {
                     self.state.read(cx).selected_chat.is_some(),
                     (self.sidebar_now(), main_target_width),
                     on_chat && !self.reduced_motion,
-                    self.render_time.unwrap_or_else(std::time::Instant::now),
+                    self.render_time.unwrap_or_else(motion::now),
                 );
                 if panel_handoff {
                     self.motion_active.set(true);
@@ -20821,6 +20807,7 @@ impl Render for Shell {
         };
         // Toasts float over every phase and route.
         let root = root.children(crate::toast::render_toaster(window, cx));
+        let root = root.children(crate::ui_driver::record_tap(window));
 
         // A manually-driven tween is mid-flight: keep frames coming (the same
         // scheduling `with_animation` would have requested). Hover color fades

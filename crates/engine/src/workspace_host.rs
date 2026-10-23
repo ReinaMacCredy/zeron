@@ -75,6 +75,8 @@ const RELAY_PROBE_INTERVAL_MS: u64 = 30_000;
 const RELAY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Debounce window for local snapshot saves after a change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
+/// Liveness touches and server frames (re-sent from the saved cursor) save lazily: each save rewrites the whole registry.
+const LAZY_SNAPSHOT_MS: u64 = 30_000;
 
 /// Initial-join retry backoff (base, cap). A first registry-room join that
 /// fails must not strand the device offline until an app restart — retry until
@@ -220,6 +222,7 @@ struct WorkspaceHostInner {
     /// warm-up clock (`peer_liveness`): a just-joined room hasn't heard
     /// anyone's heartbeat yet, and that silence must not read as "offline".
     room_joined_at: std::sync::atomic::AtomicI64,
+    save_urgent: std::sync::atomic::AtomicBool,
 }
 
 /// "This peer is alive" callback (device id) — see `WorkspaceHost::set_peer_alive_hook`.
@@ -373,6 +376,7 @@ impl WorkspaceHost {
                 peer_alive: Mutex::new(None),
                 presence_watch: Mutex::new(PresenceWatch::default()),
                 room_joined_at: std::sync::atomic::AtomicI64::new(0),
+                save_urgent: std::sync::atomic::AtomicBool::new(false),
             }),
         };
         // Persist immediately: after this boot the migration source is never
@@ -708,6 +712,13 @@ impl WorkspaceHost {
     /// Run a mutation under the registry lock, then wake the publish/persist
     /// task and push the write to the room.
     fn mutate<R>(&self, f: impl FnOnce(&mut RegistryDoc) -> R) -> R {
+        self.inner
+            .save_urgent
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.mutate_lazy(f)
+    }
+
+    fn mutate_lazy<R>(&self, f: impl FnOnce(&mut RegistryDoc) -> R) -> R {
         let result = f(&mut lock(&self.inner.reg));
         self.inner.bump_changed();
         if let Some(room) = lock(&self.inner.room).as_ref() {
@@ -995,6 +1006,12 @@ impl WorkspaceHost {
     pub fn record_session(&self, session: &Session) {
         if let Err(err) = self.mutate(|doc| doc.upsert_session(session)) {
             tracing::warn!(chat = %session.chat_id, error = %err, "registry session write failed");
+        }
+    }
+
+    pub fn touch_session(&self, session: &Session) {
+        if let Err(err) = self.mutate_lazy(|doc| doc.upsert_session(session)) {
+            tracing::warn!(chat = %session.chat_id, error = %err, "registry session touch failed");
         }
     }
 
@@ -1843,6 +1860,8 @@ impl WorkspaceHostInner {
             match doc.reconcile_sidebar_pins(registry_synced && owns_sidebar) {
                 Ok(true) => {
                     // Persist and transmit cleanup just like a user mutation.
+                    self.save_urgent
+                        .store(true, std::sync::atomic::Ordering::Release);
                     self.bump_changed();
                     if let Some(room) = lock(&self.room).as_ref() {
                         room.nudge();
@@ -2190,11 +2209,15 @@ async fn workspace_task(weak: Weak<WorkspaceHostInner>, mut changed_rx: watch::R
                 }
                 let Some(inner) = weak.upgrade() else { break };
                 inner.publish();
-                if save_deadline.is_none() {
-                    save_deadline = Some(
-                        tokio::time::Instant::now()
-                            + std::time::Duration::from_millis(SNAPSHOT_DEBOUNCE_MS),
-                    );
+                let window = if inner.save_urgent.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                    SNAPSHOT_DEBOUNCE_MS
+                } else {
+                    LAZY_SNAPSHOT_MS
+                };
+                let deadline =
+                    tokio::time::Instant::now() + std::time::Duration::from_millis(window);
+                if save_deadline.is_none_or(|current| deadline < current) {
+                    save_deadline = Some(deadline);
                 }
             }
             _ = tokio::time::sleep_until(sleep_until), if save_deadline.is_some() => {
@@ -2670,6 +2693,56 @@ mod tests {
             host.record_session(&running_session(Utc::now() + chrono::Duration::seconds(i)));
         }
         assert_eq!(host.read(|doc| doc.pending_len()), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn liveness_touch_saves_lazily_and_a_status_write_saves_promptly() {
+        use super::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = WorkspaceHost::open(
+            store.clone(),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "macos".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+                local_only: true,
+                settle_after_days: zeron_proto::SETTLE_AFTER_DAYS_DEFAULT,
+            },
+        )
+        .unwrap();
+        let saved_at = || {
+            let bytes = store.load_snapshot(REGISTRY_DOC_ID).unwrap().unwrap();
+            RegistryDoc::from_bytes(&bytes, "test-device")
+                .unwrap()
+                .read_sessions()
+                .unwrap()
+                .first()
+                .map(|session| session.updated_at.timestamp_millis())
+        };
+        async fn settle(ms: u64) {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            for _ in 0..50 {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                tokio::task::yield_now().await;
+            }
+        }
+        let start = Utc::now();
+        let touched = start + chrono::Duration::seconds(10);
+
+        host.record_session(&running_session(start));
+        settle(1_500).await;
+        assert_eq!(saved_at(), Some(start.timestamp_millis()));
+
+        host.touch_session(&running_session(touched));
+        settle(5_000).await;
+        assert_eq!(saved_at(), Some(start.timestamp_millis()));
+        settle(LAZY_SNAPSHOT_MS).await;
+        assert_eq!(saved_at(), Some(touched.timestamp_millis()));
     }
 
     #[tokio::test]

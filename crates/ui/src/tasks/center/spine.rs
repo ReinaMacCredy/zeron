@@ -1,7 +1,7 @@
 use super::*;
 use crate::motion::Fold;
 use crate::tasks::thread_tree::{NodeKind, TreeNode};
-use crate::tasks::tree::{self, Dot, Link, NodeIn, Status};
+use crate::tasks::tree::{self, Dot, Link, NodeIn, Status, StatusTone};
 
 pub(super) struct SpineMission<'a> {
     pub task: &'a zeron_proto::Task,
@@ -147,7 +147,7 @@ impl TaskCenter {
     pub(super) fn sync_drawer(&mut self, open: bool, cx: &App) {
         if self.drawer_open != open {
             self.drawer_open = open;
-            let now = Instant::now();
+            let now = motion::now();
             self.drawer.retarget(
                 f32::from(u8::from(open)),
                 DRAWER,
@@ -169,7 +169,7 @@ impl TaskCenter {
 
     fn toggle_overview(&mut self, cx: &mut Context<Self>) {
         self.overview_open = !self.overview_open;
-        let now = Instant::now();
+        let now = motion::now();
         self.overview_turn.retarget(
             f32::from(u8::from(!self.overview_open)),
             tree::CHEVRON,
@@ -181,7 +181,7 @@ impl TaskCenter {
 
     pub(super) fn toggle_steps(&mut self, cx: &mut Context<Self>) {
         self.folded = !self.folded;
-        let now = Instant::now();
+        let now = motion::now();
         self.fold_turn.retarget(
             f32::from(u8::from(self.folded)),
             tree::CHEVRON,
@@ -192,7 +192,7 @@ impl TaskCenter {
     }
 
     fn toggle_pop(&mut self, kind: Status, cx: &mut Context<Self>) {
-        let now = Instant::now();
+        let now = motion::now();
         self.pop = match &self.pop {
             Some(pop) if pop.kind == kind => None,
             _ => {
@@ -438,7 +438,7 @@ impl TaskCenter {
         theme: &Theme,
     ) -> gpui::Div {
         let phase =
-            (live && !reduced).then(|| tree::amount::phase(self.shimmer_since, Instant::now()));
+            (live && !reduced).then(|| tree::amount::phase(self.shimmer_since, motion::now()));
         div()
             .flex_1()
             .min_w_0()
@@ -548,7 +548,7 @@ impl TaskCenter {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let now = Instant::now();
+        let now = motion::now();
         let (brand, agent) = {
             let state = self.state.read(cx);
             let chat = linked_chat(&state.chats, task);
@@ -563,7 +563,7 @@ impl TaskCenter {
         let line = if planning {
             "The lead is planning".to_string()
         } else {
-            Self::lead_line(task, plan)
+            zeron_doc::tree::lead_line(task, plan)
         };
         let shimmer = self.shimmer(
             task.completed_at.is_none() && plan.lead == Some(ChatIndicator::Working),
@@ -1638,9 +1638,14 @@ impl TaskCenter {
         let crumb = self.back_crumb(theme, cx);
         let done = task.completed_at.is_some();
         let mission = crate::tasks::is_mission(task, plan);
+        let ready = !done && plan.needs == Some(zeron_proto::NeedsYou::Review);
+        let asks_you = |row: &BarRow| row.status == Status::Waiting && !(ready && row.id == LEAD);
         let steps: Vec<&BarRow> = facts.rows.iter().filter(|row| row.id != LEAD).collect();
         let count = |kind: Status| facts.rows.iter().filter(|row| row.status == kind).count();
-        let (waiting, failed) = (count(Status::Waiting), count(Status::Failed));
+        let (waiting, failed) = (
+            facts.rows.iter().filter(|row| asks_you(row)).count(),
+            count(Status::Failed),
+        );
         let running = steps
             .iter()
             .filter(|row| row.status == Status::Running)
@@ -1670,9 +1675,7 @@ impl TaskCenter {
                 let asking: Vec<&BarRow> = facts
                     .rows
                     .iter()
-                    .filter(|row| {
-                        row.status == Status::Waiting && !(row.id == LEAD && row.text.is_some())
-                    })
+                    .filter(|row| asks_you(row) && !(row.id == LEAD && row.text.is_some()))
                     .collect();
                 let mut parts = Vec::new();
                 if review {
@@ -1745,7 +1748,7 @@ impl TaskCenter {
         };
         let primary = if done || (!mission && plan.lead != Some(ChatIndicator::AwaitingInput)) {
             None
-        } else if let Some(row) = facts.rows.iter().find(|row| row.status == Status::Waiting) {
+        } else if let Some(row) = facts.rows.iter().find(|row| asks_you(row)) {
             if row.id == LEAD && row.text.is_some() {
                 Some(
                     button(
@@ -1837,7 +1840,11 @@ impl TaskCenter {
         let toggle = button(
             toggle_label.into(),
             "task-center-toggle-done",
-            widgets::ActionTone::Filled,
+            if ready {
+                widgets::ActionTone::Solid
+            } else {
+                widgets::ActionTone::Filled
+            },
         )
         .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
             cx.emit(TaskCenterEvent::Update {
@@ -2380,7 +2387,7 @@ impl TaskCenter {
             self.pop = None;
         }
         if self.leaving.as_ref().is_some_and(|leave| {
-            leave.grow.settled_at(Instant::now()) && leave.fade.settled_at(Instant::now())
+            leave.grow.settled_at(motion::now()) && leave.fade.settled_at(motion::now())
         }) {
             self.leaving = None;
         }
@@ -3370,7 +3377,7 @@ impl TaskCenter {
             .gap(px(6.0))
             .min_h(px(20.0))
             .child(self.amount(tokens, live, time, reduced, theme))
-            .children((kids > 0).then(|| self.fold_button(kids, Instant::now(), theme, cx)));
+            .children((kids > 0).then(|| self.fold_button(kids, motion::now(), theme, cx)));
         self.card(selected, theme)
             .gap(px(7.0))
             .id("task-center-lead")

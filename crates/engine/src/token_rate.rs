@@ -7,11 +7,8 @@ const MIN_TOKENS: f64 = 200.0;
 const MIN_TIME_MS: f64 = 4_000.0;
 const HIDDEN_DECAY: f64 = 0.8;
 const HIDDEN_PRIOR_MS: f64 = 10_000.0;
-const CHARS_PER_TOKEN: f64 = 4.0;
-
-pub fn estimated_tokens(chars: usize) -> u64 {
-    (chars as f64 / CHARS_PER_TOKEN).ceil() as u64
-}
+use zeron_proto::transcript::CHARS_PER_TOKEN;
+pub use zeron_proto::transcript::estimated_tokens;
 
 #[derive(Clone, Copy, Default)]
 struct Sums {

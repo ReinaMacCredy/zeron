@@ -143,6 +143,9 @@ impl Shell {
             SupervisorEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             SupervisorEvent::WatchDoc(doc) => self.set_supervisor_doc(doc.clone(), cx),
             SupervisorEvent::Discuss(text) => self.discuss_with_supervisor(text.clone(), cx),
+            SupervisorEvent::ConversationOpened => {
+                self.mark_onboarded(super::intros::SUPERVISOR_CONVERSATION, cx)
+            }
         }
     }
 
@@ -161,7 +164,7 @@ impl Shell {
     }
 
     fn looking_at_needs_you(&self, row: &NeedsYouRow, cx: &App) -> bool {
-        let (task_id, raiser) = crate::supervisor::row_origin(row);
+        let (task_id, raiser) = row.origin();
         match self.route {
             Route::Supervisor => true,
             Route::TaskCenter => {
@@ -177,7 +180,7 @@ impl Shell {
     }
 
     pub(super) fn supervisor_badge_pop(&mut self, count: usize, cx: &App) -> Option<f32> {
-        let now = std::time::Instant::now();
+        let now = crate::motion::now();
         let reduced = crate::motion::reduced_motion(cx);
         let (seen, pop) = self
             .supervisor
@@ -205,7 +208,7 @@ impl Shell {
         let since = self.last_interaction.as_ref().map(|(_, at)| at.elapsed());
         for row in fresh {
             let looking = self.looking_at_needs_you(&row, cx);
-            let title = crate::supervisor::row_title(&row);
+            let title = row.title();
             match crate::supervisor::needs_you_route(looking, focused, since) {
                 NeedsYouRoute::Quiet => {}
                 NeedsYouRoute::InApp => crate::toast::show(

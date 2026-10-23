@@ -100,6 +100,9 @@ pub struct SessionSnapshot {
     pub working: bool,
     /// Run start of the live turn, when the host reported one.
     pub working_since_ms: Option<i64>,
+    pub token_rate: Option<u32>,
+    pub limits_rev: u64,
+    pub compaction: Option<(zeron_proto::transcript::CompactionWait, i64)>,
     /// This device's unadopted sends, oldest first. Their echo entries are
     /// `entries[transcript_len..]` (same order, same ids).
     pub pending: Vec<PendingSend>,
@@ -199,6 +202,39 @@ pub struct QueueItem {
     pub gate: Option<QueueGate>,
     /// A Send-now / Remove is awaiting the host's acknowledgement.
     pub action_pending: bool,
+    pub from_label: Option<String>,
+    /// What the row's send button does; `None` while it cannot deliver.
+    pub primary_action: Option<QueuePrimaryAction>,
+    /// The first image attachment, for the row's thumbnail.
+    pub image: Option<String>,
+}
+
+/// The desktop queue row's primary action (`crates/ui/src/queue.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueuePrimaryAction {
+    /// Text into the live turn, which keeps running.
+    Steer,
+    /// Text at the next turn: this agent cannot steer mid-turn.
+    SendNext,
+    /// Attachments need a fresh request, so the live turn is interrupted.
+    SendNow,
+}
+
+impl QueuePrimaryAction {
+    pub fn resolve(
+        blocked: bool,
+        host_supports_actions: bool,
+        has_attachments: bool,
+        steers_mid_turn: bool,
+    ) -> Option<Self> {
+        (!blocked && host_supports_actions).then_some(if has_attachments {
+            Self::SendNow
+        } else if steers_mid_turn {
+            Self::Steer
+        } else {
+            Self::SendNext
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,6 +304,9 @@ pub struct LiveStatus {
     pub streaming: bool,
     /// Stop is meaningful (working, awaiting input, or streaming).
     pub can_interrupt: bool,
+    /// Nothing runs and the last turn stopped short: an empty composer's
+    /// send button resumes it.
+    pub resumable: bool,
 }
 
 /// The chat room's transport state (live mode; demo is always connected).
@@ -303,4 +342,12 @@ pub struct ComposerState {
     /// The last message this device submitted (scroll-to-own-send target).
     pub last_submitted_message_id: Option<String>,
     pub context_usage: Option<ContextUsage>,
+    pub limit: Option<zeron_proto::LimitResume>,
+    pub compacting: bool,
+    pub compact_blocked: Option<String>,
+    pub resume_compaction: Option<zeron_proto::compaction::ResumeCompaction>,
+    pub prediction: Option<String>,
+    pub review: Option<super::ReviewChip>,
+    pub staged_comments: Vec<zeron_proto::comments::ReviewComment>,
+    pub review_revision: u64,
 }

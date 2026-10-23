@@ -57,21 +57,7 @@ impl HarnessInfo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelOptionChoice {
-    pub id: String,
-    pub label: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelOption {
-    pub id: String,
-    pub label: String,
-    pub choices: Vec<ModelOptionChoice>,
-    pub default_choice: String,
-}
+pub use zeron_proto::{ModelOption, ModelOptionChoice};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,6 +71,33 @@ pub struct ModelInfo {
     pub reasoning_levels: Vec<String>,
     #[serde(default)]
     pub options: Vec<ModelOption>,
+    #[serde(skip)]
+    pub is_new: bool,
+}
+
+pub fn decode_models(value: serde_json::Value) -> serde_json::Result<Vec<ModelInfo>> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Reply {
+        Catalog {
+            models: Vec<ModelInfo>,
+            #[serde(default, rename = "newIds")]
+            new_ids: Vec<String>,
+        },
+        List(Vec<ModelInfo>),
+    }
+    Ok(match serde_json::from_value(value)? {
+        Reply::List(models) => models,
+        Reply::Catalog {
+            mut models,
+            new_ids,
+        } => {
+            for model in &mut models {
+                model.is_new = new_ids.contains(&model.id);
+            }
+            models
+        }
+    })
 }
 
 fn model(
@@ -100,65 +113,24 @@ fn model(
         description: Some(description.into()),
         reasoning_levels: ladder.iter().map(|s| (*s).to_owned()).collect(),
         options,
+        is_new: false,
     }
 }
 
-fn option(id: &str, label: &str, choices: &[(&str, &str)], default: &str) -> ModelOption {
+fn context_window(default: &str) -> ModelOption {
     ModelOption {
-        id: id.into(),
-        label: label.into(),
-        choices: choices
-            .iter()
+        id: "contextWindow".into(),
+        label: "Context Window".into(),
+        choices: [("200k", "200K"), ("1m", "1M")]
+            .into_iter()
             .map(|(id, label)| ModelOptionChoice {
-                id: (*id).into(),
-                label: (*label).into(),
+                id: id.into(),
+                label: label.into(),
             })
             .collect(),
         default_choice: default.into(),
     }
 }
-
-fn toggle(id: &str, label: &str) -> ModelOption {
-    option(id, label, &[("off", "Off"), ("on", "On")], "off")
-}
-
-fn context_window(default: &str) -> ModelOption {
-    option(
-        "contextWindow",
-        "Context Window",
-        &[("200k", "200K"), ("1m", "1M")],
-        default,
-    )
-}
-
-fn auto_compact() -> ModelOption {
-    option(
-        "autoCompact",
-        "Auto-compact",
-        &[
-            ("auto", "Auto"),
-            ("300k", "300K"),
-            ("400k", "400K"),
-            ("600k", "600K"),
-            ("800k", "800K"),
-        ],
-        "auto",
-    )
-}
-
-const FULL_LADDER: &[&str] = &[
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-    "max",
-    "ultracode",
-    "ultrathink",
-];
-const CLAUDE_XHIGH: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultrathink"];
-const CODEX_ULTRA: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
-const CODEX_MAX: &[&str] = &["low", "medium", "high", "xhigh", "max"];
-const CODEX_XHIGH: &[&str] = &["low", "medium", "high", "xhigh"];
 
 /// Static fallback = the engine's `default_enabled()` pair. ACP agents
 /// appear only through a device's live catalog (opt-in per device).
@@ -171,32 +143,15 @@ pub fn fallback_harnesses() -> Vec<HarnessInfo> {
 
 /// Display name for any harness id the fleet can produce.
 pub fn harness_label(id: &str) -> String {
-    match id {
-        "claude-code" => "Claude Code",
-        "codex" => "Codex",
-        "devin" => "Devin",
-        "grok" => "Grok",
-        "hermes" => "Hermes",
-        "pi" => "Pi",
-        "cursor" => "Cursor",
-        "opencode" => "OpenCode",
-        "antigravity" => "Antigravity",
-        "mock" => "Mock",
-        other => return other.to_owned(),
-    }
-    .to_owned()
+    serde_json::from_value::<zeron_proto::HarnessId>(serde_json::Value::String(id.to_owned()))
+        .map_or_else(
+            |_| id.to_owned(),
+            |harness| harness.display_name().to_owned(),
+        )
 }
 
 /// Curated static models for a harness (first row = default).
 pub fn fallback_models(harness: &str) -> Vec<ModelInfo> {
-    let service_tier = || {
-        vec![option(
-            "serviceTier",
-            "Service Tier",
-            &[("default", "Standard"), ("fast", "Fast")],
-            "default",
-        )]
-    };
     match harness {
         "grok" => vec![model(
             "grok-4.5",
@@ -290,132 +245,15 @@ pub fn fallback_models(harness: &str) -> Vec<ModelInfo> {
                 vec![],
             ),
         ],
-        // As Codex 0.163 reports them.
-        "codex" => vec![
-            model(
-                "gpt-6.1-sol",
-                "GPT-6.1-Sol",
-                "Latest workhorse model for coding and everyday work.",
-                CODEX_ULTRA,
-                service_tier(),
-            ),
-            model(
-                "gpt-6-astra",
-                "GPT-6-Astra",
-                "Frontier intelligence for the most demanding work.",
-                CODEX_ULTRA,
-                service_tier(),
-            ),
-            model(
-                "gpt-6-sol",
-                "GPT-6-Sol",
-                "Previous generation workhorse model.",
-                CODEX_ULTRA,
-                service_tier(),
-            ),
-            model(
-                "gpt-6-luna",
-                "GPT-6-Luna",
-                "Fast and affordable model for easier tasks.",
-                CODEX_MAX,
-                service_tier(),
-            ),
-            model(
-                "gpt-5.6-sol",
-                "GPT-5.6-Sol",
-                "Older generation workhorse model.",
-                CODEX_ULTRA,
-                service_tier(),
-            ),
-            model(
-                "gpt-5.6-terra",
-                "GPT-5.6-Terra",
-                "Older balanced model for straightforward work.",
-                CODEX_ULTRA,
-                service_tier(),
-            ),
-            model(
-                "gpt-5.6-luna",
-                "GPT-5.6-Luna",
-                "Older fast and efficient model.",
-                CODEX_MAX,
-                service_tier(),
-            ),
-            model(
-                "gpt-daybreak-blue-latest",
-                "Daybreak Blue",
-                "Latest frontier agentic coding model for broad defensive cybersecurity work.",
-                CODEX_ULTRA,
-                vec![],
-            ),
-        ],
-        // claude-code (mock shares it), as Claude Code 2.1.307 reports them.
-        _ => vec![
-            model(
-                "claude-opus-5-5",
-                "Opus 5.5",
-                "Best for everyday, complex tasks",
-                FULL_LADDER,
-                vec![context_window("200k"), toggle("fastMode", "Fast Mode")],
-            ),
-            model(
-                "claude-fable-5-1",
-                "Fable 5.1",
-                "Most intelligent model for building agents",
-                FULL_LADDER,
-                vec![context_window("1m"), auto_compact()],
-            ),
-            model(
-                "claude-sonnet-5-5",
-                "Sonnet 5.5",
-                "Most efficient for simpler tasks",
-                FULL_LADDER,
-                vec![],
-            ),
-            model(
-                "claude-haiku-5-5",
-                "Haiku 5.5",
-                "Fastest for quick answers",
-                FULL_LADDER,
-                vec![],
-            ),
-            model(
-                "claude-fable-5",
-                "Fable 5",
-                "Previous generation Fable",
-                FULL_LADDER,
-                vec![context_window("1m"), auto_compact()],
-            ),
-            model(
-                "claude-opus-5",
-                "Opus 5",
-                "Previous generation Opus",
-                FULL_LADDER,
-                vec![context_window("1m"), auto_compact()],
-            ),
-            model(
-                "claude-opus-4-8",
-                "Opus 4.8",
-                "Older generation Opus",
-                FULL_LADDER,
-                vec![toggle("fastMode", "Fast Mode")],
-            ),
-            model(
-                "claude-sonnet-5",
-                "Sonnet 5",
-                "Previous generation Sonnet",
-                CLAUDE_XHIGH,
-                vec![context_window("1m"), auto_compact()],
-            ),
-            model(
-                "claude-haiku-4-5",
-                "Haiku 4.5",
-                "Previous generation Haiku",
-                &[],
-                vec![toggle("thinking", "Thinking")],
-            ),
-        ],
+        "codex" => curated(zeron_proto::model_catalog::codex::static_models()),
+        _ => curated(zeron_proto::model_catalog::claude::static_models()),
     }
+}
+
+fn curated(models: Vec<zeron_proto::Model>) -> Vec<ModelInfo> {
+    serde_json::to_value(models)
+        .and_then(serde_json::from_value)
+        .expect("proto Model decodes as ModelInfo")
 }
 
 /// pickers.rs — High when available, then Medium, then the first level.
@@ -433,24 +271,14 @@ pub fn default_reasoning(model: &ModelInfo) -> Option<String> {
 }
 
 pub fn reasoning_label(level: &str) -> String {
-    match level {
-        "minimal" => "Minimal".into(),
-        "low" => "Low".into(),
-        "medium" => "Medium".into(),
-        "high" => "High".into(),
-        "xhigh" => "X-High".into(),
-        "max" => "Max".into(),
-        "ultra" => "Ultra".into(),
-        "ultracode" => "Ultracode".into(),
-        "ultrathink" => "Ultrathink".into(),
-        other => {
-            let mut chars = other.chars();
-            chars
-                .next()
-                .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
-                .unwrap_or_default()
-        }
+    if let Ok(level) = serde_json::from_value::<zeron_proto::ReasoningLevel>(level.into()) {
+        return level.label().into();
     }
+    let mut chars = level.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
+        .unwrap_or_default()
 }
 
 fn stripped_1m(id: &str) -> Option<&str> {
@@ -669,9 +497,18 @@ mod tests {
 
     #[test]
     fn labels_resolve_curated_and_unknown_models() {
-        assert_eq!(model_label("claude-code", "claude-opus-5"), "Opus 5");
-        assert_eq!(model_label("claude-code", "claude-opus-5[1m]"), "Opus 5");
+        assert_eq!(model_label("claude-code", "claude-opus-5-5"), "Opus 5.5");
+        assert_eq!(
+            model_label("claude-code", "claude-opus-5-5[1m]"),
+            "Opus 5.5"
+        );
         assert_eq!(model_label("codex", "gpt-5.6-terra"), "GPT-5.6-Terra");
+        assert!(
+            fallback_models("claude-code")[0]
+                .reasoning_levels
+                .contains(&"ultrathink".to_owned())
+        );
+        assert_eq!(fallback_models("codex")[0].options[0].id, "serviceTier");
         assert_eq!(model_label("codex", "some-new-model"), "some-new-model");
         assert_eq!(harness_label("opencode"), "OpenCode");
     }
@@ -699,15 +536,28 @@ mod tests {
     }
 
     #[test]
+    fn list_models_reply_decodes_catalog_object_and_bare_array() {
+        let row = serde_json::json!({"id": "claude-haiku-5-5", "label": "Haiku 5.5", "reasoningLevels": ["high"]});
+        let object = serde_json::json!({"models": [row, {"id": "claude-opus-5-5", "label": "Opus 5.5"}], "newIds": ["claude-haiku-5-5"], "announceIds": []});
+        let models = decode_models(object).unwrap();
+        assert_eq!(models.len(), 2);
+        assert!(models[0].is_new);
+        assert!(!models[1].is_new);
+        let bare = decode_models(serde_json::json!([row])).unwrap();
+        assert_eq!(bare[0].id, "claude-haiku-5-5");
+        assert!(!bare[0].is_new);
+    }
+
+    #[test]
     fn normalize_folds_1m_variants() {
         let live = vec![
-            model("claude-opus-5[1m]", "Opus 5 (1M)", "x", &[], vec![]),
+            model("claude-opus-5-5[1m]", "Opus 5.5 (1M)", "x", &[], vec![]),
             model("default", "Default", "x", &[], vec![]),
         ];
         let out = normalize_models("claude-code", live);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].id, "claude-opus-5");
-        assert_eq!(out[0].label, "Opus 5");
+        assert_eq!(out[0].id, "claude-opus-5-5");
+        assert_eq!(out[0].label, "Opus 5.5");
         assert!(out[0].options.iter().any(|o| o.id == "contextWindow"));
     }
 

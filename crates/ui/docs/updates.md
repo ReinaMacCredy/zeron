@@ -57,3 +57,19 @@ The question-mark button in the app rail (**Help**) opens a menu with:
 - **Keybindings**: opens [Settings > Shortcuts](zeron://settings/shortcuts).
 - **Docs**: opens these help pages. See [Getting around](zeron://docs/getting-around).
 - **Mission Control intro**: shows the [Mission Control](zeron://docs/mission-control) introduction again.
+- **New since 0.2.114**: shows the introduction to what changed since 0.2.114 again.
+
+## Introductions
+
+When a release brings something you have not used yet, Zeron introduces it once in a sheet over the window, with a picture on each page, page dots, **Not now** and **Next**. The left and right arrow keys turn the pages and Escape closes the sheet.
+
+**New since 0.2.114** has four pages: **Tasks is home for missions**, **A mission's tabs travel together**, **Missions on the sidebar**, and **Ask the Supervisor about any thread**. **Open Tasks** on its last page opens [Tasks](zeron://docs/tasks).
+
+![The New since 0.2.114 sheet](updates-new-since.jpg)
+
+An introduction stays out of your way:
+
+- Once you close it, with **Not now** or its last button, it does not come back on its own. The **Help** menu above shows it again.
+- A page about something you have already used is left out. Opening Tasks, folding a mission's tab group, opening a mission's steps on the sidebar, and opening the Supervisor's **Conversation** each count. When every page is covered, the sheet does not appear at all.
+- A new install skips the introductions to earlier releases, since everything is new to it.
+- At most one introduction appears each time Zeron starts, and only after sign-in and sync are done. Another one waits for the next start.

@@ -66,13 +66,7 @@ impl PastedText {
     }
 }
 
-pub(crate) fn pill_label(index: u32, lines: Option<usize>) -> String {
-    match lines {
-        Some(1) => format!("Pasted text {index} · 1 line"),
-        Some(lines) => format!("Pasted text {index} · {lines} lines"),
-        None => format!("Pasted text {index}"),
-    }
-}
+pub(crate) use zeron_proto::attachment_mentions::pasted_text_pill_label as pill_label;
 
 pub(crate) fn chip_preview(bytes: &[u8]) -> Option<SharedString> {
     use unicode_segmentation::UnicodeSegmentation as _;
@@ -205,8 +199,7 @@ pub(crate) fn overlay(
     let close_on_key = on_close.clone();
     let close_on_scrim = on_close.clone();
     let subtitle = match &text {
-        Some(text) if text.lines == 1 => "1 line".to_owned(),
-        Some(text) => format!("{} lines", text.lines),
+        Some(text) => zeron_proto::attachment_mentions::pasted_text_lines_label(text.lines),
         None if preview.failed => "Couldn't load the pasted text".to_owned(),
         None => "Loading…".to_owned(),
     };

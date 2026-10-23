@@ -10,38 +10,6 @@ const WIDE_ROW: f32 = 124.0;
 const WIDE_INTERVENTION: f32 = 330.0;
 const WIDE_FOOTER: f32 = 440.0;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Dest {
-    Lead,
-    Step,
-    Supervisor,
-    Thread,
-}
-
-impl Dest {
-    fn word(self) -> &'static str {
-        match self {
-            Dest::Lead => "the Lead",
-            Dest::Step => "the step",
-            Dest::Thread => "the thread",
-            Dest::Supervisor => "the Supervisor",
-        }
-    }
-}
-
-pub(super) fn dest(row: &NeedsYouRow) -> Dest {
-    match row {
-        NeedsYouRow::Item(item) if item.task_id.is_some() => Dest::Lead,
-        NeedsYouRow::Item(_) => Dest::Supervisor,
-        NeedsYouRow::Input(input) => match input.asker {
-            InputAsker::Lead => Dest::Lead,
-            InputAsker::Step => Dest::Step,
-            InputAsker::Thread => Dest::Thread,
-            InputAsker::Supervisor => Dest::Supervisor,
-        },
-    }
-}
-
 pub(super) fn sheet_row(entry: &Entry) -> Option<&NeedsYouRow> {
     match entry {
         Entry::Needs(row @ NeedsYouRow::Item(_)) => Some(row),
@@ -84,7 +52,7 @@ fn item_quote(item: &SupervisorItem, mission: Option<&str>) -> String {
     };
     let mut quote = vec![
         format!("Needs you: {}", item.title),
-        format!("{meta} · {}", why_label(item.why)),
+        format!("{meta} · {}", item.why.label()),
     ];
     if !item.detail.trim().is_empty() {
         quote.push(item.detail.trim().to_owned());
@@ -97,7 +65,7 @@ fn item_quote(item: &SupervisorItem, mission: Option<&str>) -> String {
 
 fn input_quote(input: &NeedsYouInput, who: &str) -> String {
     let mut quote = vec![
-        format!("Needs you: {}", input_title(&input.questions)),
+        format!("Needs you: {}", input.title()),
         format!("Asked by {who}"),
     ];
     for question in &input.questions {
@@ -582,7 +550,7 @@ impl SupervisorPage {
             .filter(|row| {
                 !self
                     .replies
-                    .get(&row_key(row))
+                    .get(&row.key())
                     .is_some_and(|reply| !reply.failed())
             })
             .collect();
@@ -914,7 +882,7 @@ impl SupervisorPage {
         let who = asker_name(input, self.state.read(cx), Utc::now());
         let quote = input_quote(input, &who);
         let thread = (input.asker != InputAsker::Supervisor).then(|| input.chat_id.clone());
-        let title = strip_mission(&input_title(&input.questions), mission);
+        let title = strip_mission(&input.title(), mission);
         let approval = input.questions.iter().any(|question| question.approval);
         if sheet_row(&shown.entry).is_none() {
             let chat_id = input.chat_id.clone();
@@ -1082,8 +1050,8 @@ impl SupervisorPage {
     ) -> AnyElement {
         let key = row.key.clone();
         let sel = format!("supervisor-answered-{}", sel_of(&key));
-        let title = strip_mission(&row_title(needs), mission);
-        let to = dest(needs).word();
+        let title = strip_mission(&needs.title(), mission);
+        let to = needs.dest().word();
         let fade = {
             let total = CONFIRM.total().mul_f32(motion::speed_scale()).as_secs_f32();
             let raw = now.saturating_duration_since(reply.flipped).as_secs_f32() / total.max(0.001);
@@ -1173,7 +1141,7 @@ impl SupervisorPage {
         let picked: usize = sheet
             .iter()
             .map(|row| {
-                let key = row_key(row);
+                let key = row.key();
                 match row {
                     NeedsYouRow::Item(_) => usize::from(!self.staged(&key, "").is_empty()),
                     NeedsYouRow::Input(input) => input
@@ -1188,10 +1156,10 @@ impl SupervisorPage {
             .iter()
             .filter(|row| self.ready(row).is_some())
             .collect();
-        let dests: Vec<Dest> = if ready.is_empty() {
-            sheet.iter().map(|row| dest(row)).collect()
+        let dests: Vec<SendDest> = if ready.is_empty() {
+            sheet.iter().map(|row| row.dest()).collect()
         } else {
-            ready.iter().map(|row| dest(row)).collect()
+            ready.iter().map(|row| row.dest()).collect()
         };
         let to = dests
             .first()
@@ -1270,6 +1238,7 @@ impl SupervisorPage {
                     .debug_selector(move || selector.clone())
                     .role(gpui::Role::Button)
                     .aria_label(label.clone())
+                    .aria_disabled(!enabled)
                     .flex_none()
                     .flex()
                     .items_center()
@@ -1710,11 +1679,11 @@ impl SupervisorPage {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let key = row_key(&answered.row);
-        let (task_id, _) = row_origin(&answered.row);
+        let key = answered.row.key();
+        let (task_id, _) = answered.row.origin();
         let state = self.state.read(cx);
         let mission = mission_title(state, task_id);
-        let title = strip_mission(&row_title(&answered.row), mission.as_deref());
+        let title = strip_mission(&answered.row.title(), mission.as_deref());
         let decided = |id: &str| {
             state
                 .supervisor

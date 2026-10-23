@@ -158,6 +158,17 @@ pub enum ClassifierVerdict {
     Failed,
 }
 
+impl ClassifierVerdict {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::New => "New task",
+            Self::Carry => "Carry over",
+            Self::Continue => "Same task",
+            Self::Failed => "No answer",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DecidedBy {
@@ -168,6 +179,18 @@ pub enum DecidedBy {
     #[default]
     #[serde(other)]
     Stage1,
+}
+
+impl DecidedBy {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stage1 => "First look",
+            Self::Stage2 => "Second look",
+            Self::Streak => "Three same-task verdicts in a row",
+            Self::Ceiling => "Context near the window, not asked",
+            Self::AgentNote => "Agent note, compacted without asking",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

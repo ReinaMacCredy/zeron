@@ -18,10 +18,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::lock;
 
-/// Body used when a message has only attachments.
-pub const ATTACHMENT_ONLY_TEXT: &str = "See the attached image(s).";
-/// Body the desktop uses when any attachment is not an image.
-pub const FILE_ATTACHMENT_ONLY_TEXT: &str = "See the attached file(s).";
+pub use zeron_proto::attachment_mentions::{
+    ATTACHMENT_ONLY_TEXT, FILE_ATTACHMENT_ONLY_TEXT, attachment_only_text, is_attachment_only_text,
+};
 /// The trailer marker line.
 pub const ATTACHMENT_MARKER: &str = "Attached images (local files — open them to view):";
 /// Appshot context marker: everything after it is untrusted observed content.
@@ -41,7 +40,7 @@ pub fn with_attachments(text: &str, paths: &[String]) -> String {
         return text.to_owned();
     }
     let body = if text.trim().is_empty() {
-        ATTACHMENT_ONLY_TEXT
+        attachment_only_text(paths)
     } else {
         text
     };
@@ -206,7 +205,7 @@ pub fn parse_user_message(content: &str) -> ParsedUserMessage {
     let body = lines[..marker - 1].join("\n");
     let visible = visible_text(body.trim()).to_owned();
     ParsedUserMessage {
-        text: if visible == ATTACHMENT_ONLY_TEXT || visible == FILE_ATTACHMENT_ONLY_TEXT {
+        text: if is_attachment_only_text(&visible) {
             String::new()
         } else {
             visible
@@ -222,7 +221,7 @@ pub fn queue_visible_text(text: &str, attachments: &[String]) -> String {
     }
     let parsed = parse_user_message(text);
     if parsed.text.is_empty() {
-        ATTACHMENT_ONLY_TEXT.to_owned()
+        attachment_only_text(attachments).to_owned()
     } else {
         parsed.text
     }
@@ -306,6 +305,9 @@ mod tests {
             "{FILE_ATTACHMENT_ONLY_TEXT}\n\n{ATTACHMENT_MARKER}\n- /tmp/ab12cd34-notes.zip"
         );
         assert_eq!(parse_user_message(&files).text, "");
+        let paste = vec![pending_ref("u2", "Pasted_text_1.txt")];
+        assert!(with_attachments(" ", &paste).starts_with(FILE_ATTACHMENT_ONLY_TEXT));
+        assert_eq!(queue_visible_text(&with_attachments("", &paste), &paste), FILE_ATTACHMENT_ONLY_TEXT);
     }
 
     #[test]

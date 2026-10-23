@@ -41,6 +41,8 @@ protocol RowViewDelegate: AnyObject {
     func rowView(_ view: RowView, visualFor id: String) -> UIView?
     /// A row's button (`sign-in` on an error card).
     func rowView(_ view: RowView, perform action: String)
+    func rowView(_ view: RowView, pageFor id: String, deviceId: String, path: String) -> UIView?
+    func rowView(_ view: RowView, expandPage title: String, deviceId: String, path: String)
 }
 
 /// A reusable transcript row: canvas + horizontal scrollers + native widgets.
@@ -58,7 +60,7 @@ final class RowView: UIView {
             textElement?.accessibilityFrameInContainerSpace = bounds
             // Controls and links first: accessibility hit-testing takes the
             // first match, and the row's text element spans the whole row.
-            return widgetViews.filter { $0 is UIControl || $0 is VisualView || $0.gestureRecognizers?.isEmpty == false }
+            return widgetViews.filter { $0 is UIControl || $0 is VisualView || $0 is HtmlPageView || $0.gestureRecognizers?.isEmpty == false }
                 + positionedLinkElements()
                 + (textElement.map { [$0] } ?? [])
         }
@@ -169,6 +171,7 @@ final class RowView: UIView {
         case .working: "row-working"
         case .card: "row-card"
         case .visual: "row-visual"
+        case .html: "row-html"
         }
         element.accessibilityTraits = .staticText
         element.accessibilityFrameInContainerSpace = bounds
@@ -257,8 +260,8 @@ final class RowView: UIView {
                 view = iv
             case .spinner:
                 view = StatusGlyph(.spinner)
-            case let .working(sinceMs, streaming):
-                view = WorkingIndicatorView(since: sinceMs.map { Date(timeIntervalSince1970: Double($0) / 1000) }, streaming: streaming)
+            case let .working(sinceMs, word, rate, divider):
+                view = WorkingIndicatorView(since: sinceMs.map { Date(timeIntervalSince1970: Double($0) / 1000) }, word: word, rate: rate, divider: divider)
             case let .detail(title):
                 let b = UIControl()
                 b.accessibilityLabel = "\(title) details"
@@ -274,7 +277,10 @@ final class RowView: UIView {
             case let .icon(name, color):
                 // Desktop icon assets (tool-*, fileicon-*), else an SF symbol.
                 let iv: UIImageView
-                if let asset = RowView.asset(name) {
+                if name.hasPrefix("mark-") {
+                    iv = UIImageView(image: BrandMarks.image(for: String(name.dropFirst(5)), side: rect.height))
+                    iv.contentMode = .scaleAspectFit
+                } else if let asset = RowView.asset(name) {
                     iv = UIImageView(image: asset)
                     iv.contentMode = .scaleAspectFit
                 } else {
@@ -330,6 +336,20 @@ final class RowView: UIView {
             case let .visual(id):
                 view = delegate?.rowView(self, visualFor: id) ?? UIView()
                 (view as? VisualView)?.active = !isHidden
+            case let .htmlRender(id, deviceId, path, scrolls):
+                view = delegate?.rowView(self, pageFor: id, deviceId: deviceId, path: path) ?? UIView()
+                (view as? HtmlPageView)?.scrolls = scrolls
+            case let .htmlExpand(_, deviceId, path, title):
+                let b = UIButton(type: .system)
+                b.setImage(TaskGlyph.asset("tool-expand-arrows", side: 13), for: .normal)
+                b.tintColor = Palette.tertiary
+                b.accessibilityLabel = "Expand page"
+                b.accessibilityIdentifier = "html-render-expand"
+                b.addAction(UIAction { [weak self] _ in
+                    guard let self else { return }
+                    self.delegate?.rowView(self, expandPage: title, deviceId: deviceId, path: path)
+                }, for: .touchUpInside)
+                view = b
             }
             view.frame = rect
             host.addSubview(view)
@@ -446,12 +466,7 @@ final class CardButtonControl: UIControl {
 
     static func identifier(_ action: CardAction) -> String {
         switch action {
-        case let .consent(_, _, answer):
-            switch answer {
-            case "Allow": "computer-consent-allow"
-            case "Deny": "computer-consent-decline"
-            default: "computer-consent-always"
-            }
+        case let .consent(_, _, _, identifier): identifier
         case .enableComputer: "computer-denied-enable"
         }
     }
@@ -495,21 +510,34 @@ final class ToolStatusView: UIView {
 /// Tail-of-turn indicator, as the desktop transcript trailer: the 3×3
 /// gradient spinner + "Working…" in muted text, elapsed time fainter.
 final class WorkingIndicatorView: UIView {
-    private let grid = StatusGlyph(.trailer)
+    private let grid: StatusGlyph
     private let label = UILabel()
+    private let rules = [UIView(), UIView()]
     private let since: Date?
     private let word: String
+    private let rate: String?
+    private let divider: Bool
     private var timer: Timer?
 
-    init(since: Date?, streaming: Bool) {
+    init(since: Date?, word: String, rate: String?, divider: Bool) {
         self.since = since
-        self.word = streaming ? "Writing" : "Working"
+        self.word = word
+        self.rate = rate
+        self.divider = divider
+        grid = StatusGlyph(divider ? .spinner : .trailer)
         super.init(frame: .zero)
         isUserInteractionEnabled = false
-        label.font = Fonts.ui(.sansMedium, UIFontMetrics(forTextStyle: .body).scaledValue(for: 13.5))
+        label.font = Fonts.ui(divider ? .sans : .sansMedium, UIFontMetrics(forTextStyle: .body).scaledValue(for: divider ? 11.5 : 13.5))
         label.textColor = Palette.secondary
+        label.lineBreakMode = .byTruncatingTail
         addSubview(grid)
         addSubview(label)
+        if divider {
+            for rule in rules {
+                rule.backgroundColor = Palette.hairline
+                addSubview(rule)
+            }
+        }
         tick()
     }
 
@@ -517,9 +545,15 @@ final class WorkingIndicatorView: UIView {
 
     private func tick() {
         let secs = since.map { max(0, Int(Date().timeIntervalSince($0))) } ?? 0
-        let text = NSMutableAttributedString(string: "\(word)…", attributes: [.font: label.font as Any, .foregroundColor: Palette.secondary])
-        if secs > 0 {
+        let text = NSMutableAttributedString(string: divider ? word : "\(word)…", attributes: [.font: label.font as Any, .foregroundColor: Palette.secondary])
+        if divider, since != nil {
+            text.append(NSAttributedString(string: " · \(StatusPill.elapsed(secs))", attributes: [.font: label.font as Any, .foregroundColor: Palette.tertiary]))
+        } else if secs > 0 {
             text.append(NSAttributedString(string: "  \(StatusPill.elapsed(secs))", attributes: [.font: label.font as Any, .foregroundColor: Palette.tertiary]))
+        }
+        if let rate {
+            let small = Fonts.ui(.sans, UIFontMetrics(forTextStyle: .body).scaledValue(for: 11))
+            text.append(NSAttributedString(string: "  \(rate)", attributes: [.font: small, .foregroundColor: Palette.tertiary.withAlphaComponent(0.8)]))
         }
         label.attributedText = text
         label.sizeToFit()
@@ -536,8 +570,20 @@ final class WorkingIndicatorView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        grid.frame = CGRect(x: 0, y: (bounds.height - 14) / 2, width: 14, height: 14)
-        label.frame = CGRect(x: 22, y: (bounds.height - label.bounds.height) / 2, width: label.bounds.width, height: label.bounds.height)
+        guard divider else {
+            grid.frame = CGRect(x: 0, y: (bounds.height - 14) / 2, width: 14, height: 14)
+            label.frame = CGRect(x: 22, y: (bounds.height - label.bounds.height) / 2, width: label.bounds.width, height: label.bounds.height)
+            return
+        }
+        let side: CGFloat = 12, gap: CGFloat = 10, glyph: CGFloat = 12
+        let textW = min(label.bounds.width, bounds.width * 0.9 - glyph - 6)
+        let content = glyph + 6 + textW
+        let x = (bounds.width - content) / 2
+        let mid = bounds.height / 2
+        grid.frame = CGRect(x: x, y: mid - glyph / 2, width: glyph, height: glyph)
+        label.frame = CGRect(x: x + glyph + 6, y: mid - label.bounds.height / 2, width: textW, height: label.bounds.height)
+        rules[0].frame = CGRect(x: 0, y: mid, width: max(side, x - gap), height: 1)
+        rules[1].frame = CGRect(x: min(bounds.width - side, x + content + gap), y: mid, width: max(side, bounds.width - x - content - gap), height: 1)
     }
 }
 

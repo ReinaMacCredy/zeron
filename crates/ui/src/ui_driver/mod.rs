@@ -1,15 +1,20 @@
 mod audit;
 mod capture;
+mod clock;
+mod compare;
 mod frames;
 #[cfg(debug_assertions)]
 mod input;
+mod record;
 mod selector;
-#[cfg(unix)]
 mod server;
 mod tree;
+#[cfg(target_os = "macos")]
+pub(crate) mod web;
 
-#[cfg(unix)]
 pub(crate) use server::start;
+
+pub(crate) use record::tap as record_tap;
 
 use crate::shell::{Route, Shell};
 use gpui::{AnyWindowHandle, App, AsyncApp};
@@ -98,6 +103,8 @@ struct Request {
 enum Action {
     Observe(Observe),
     Drive(Drive),
+    #[cfg(debug_assertions)]
+    Clock(clock::Clock),
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -119,12 +126,14 @@ enum Observe {
     Tree(tree::View),
     Audit,
     Snapshot {
-        rect: Option<capture::Rect>,
+        rect: Option<tree::Bounds>,
         path: Option<PathBuf>,
     },
     Wait(Until),
     Frames(frames::Frames),
     Track(frames::Track),
+    Record(record::Record),
+    Compare(compare::Compare),
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -190,7 +199,20 @@ fn parse(raw: Value) -> Result<Request, String> {
             DRIVE.join(", ")
         ));
     }
+    if raw.pointer("/during/action") == Some(&json!("clock")) {
+        return Err("`during` cannot be `clock`; send `clock` before the measurement".into());
+    }
     let invalid = |error: serde_json::Error| format!("invalid `{name}` request: {error}");
+    #[cfg(debug_assertions)]
+    if name == "clock" {
+        let Windowed { window, action } =
+            serde_json::from_value::<Windowed<clock::Clock>>(raw).map_err(invalid)?;
+        action.check()?;
+        return Ok(Request {
+            window,
+            action: Action::Clock(action),
+        });
+    }
     if drives {
         let Windowed { window, action } = serde_json::from_value(raw).map_err(invalid)?;
         return Ok(Request {
@@ -251,6 +273,8 @@ async fn run(raw: Value, cancel: Cancel, cx: &mut AsyncApp) -> Result<Value, Str
     let Request { window, action } = parse(raw)?;
     let observe = match action {
         Action::Drive(action) => return drive(window, action, cancel, cx).await,
+        #[cfg(debug_assertions)]
+        Action::Clock(clock) => return clock::run(window, clock, cx).await,
         Action::Observe(observe) => observe,
     };
     match observe {
@@ -261,7 +285,7 @@ async fn run(raw: Value, cancel: Cancel, cx: &mut AsyncApp) -> Result<Value, Str
         }
         Observe::Audit => {
             let handle = cx.update(|cx| target_window(window, cx))?;
-            let tree = tree::read(handle, cx).await?;
+            let tree = tree::read_native(handle, cx).await?;
             let focus_held = cx
                 .update(|cx| handle.update(cx, |_, window, cx| window.focused(cx).is_some()))
                 .map_err(|error| format!("window is gone: {error}"))?;
@@ -280,6 +304,8 @@ async fn run(raw: Value, cancel: Cancel, cx: &mut AsyncApp) -> Result<Value, Str
         Observe::Wait(until) => wait(window, until, cx).await,
         Observe::Frames(request) => frames::frames(window, request, cancel, cx).await,
         Observe::Track(request) => frames::track(window, request, cancel, cx).await,
+        Observe::Record(record) => record::run(window, record, cx).await,
+        Observe::Compare(request) => compare::run(window, request, cx).await,
     }
 }
 
@@ -346,6 +372,7 @@ fn state(cx: &mut App) -> Result<Value, String> {
         "route": route,
         "frames": frames_json(),
         "motionScale": crate::motion::speed_scale(),
+        "clock": clock::json(),
         "theme": theme_json(cx),
     }))
 }
@@ -551,7 +578,16 @@ mod tests {
         }
         assert_eq!(variants::<Observe>(), sorted(OBSERVE));
         #[cfg(debug_assertions)]
-        assert_eq!(variants::<Drive>(), sorted(DRIVE));
+        assert_eq!(
+            variants::<Drive>(),
+            sorted(
+                &DRIVE
+                    .iter()
+                    .copied()
+                    .filter(|&name| name != "clock")
+                    .collect::<Vec<_>>()
+            )
+        );
     }
 
     #[cfg(not(debug_assertions))]
@@ -799,6 +835,40 @@ mod tests {
         );
         assert!(parse(json!({ "action": "set", "size": [900, 700], "motionScale": 5 })).is_ok());
         assert!(parse(json!({ "action": "set", "theme": "sepia" })).is_err());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn parses_clock() {
+        let clock = |raw: Value| match parse(raw).map(|request| request.action) {
+            Ok(Action::Clock(clock)) => Ok(clock),
+            Ok(other) => panic!("not a clock request: {other:?}"),
+            Err(error) => Err(error),
+        };
+        assert_eq!(
+            clock(json!({ "action": "clock", "do": "pause" })),
+            Ok(clock::Clock::Pause)
+        );
+        assert_eq!(
+            clock(json!({ "action": "clock", "do": "advance", "ms": 50, "window": 3 })),
+            Ok(clock::Clock::Advance { ms: 50 })
+        );
+        for bad in [
+            json!({ "action": "clock" }),
+            json!({ "action": "clock", "do": "advance" }),
+            json!({ "action": "clock", "do": "rewind" }),
+        ] {
+            let error = clock(bad.clone()).unwrap_err();
+            assert!(
+                error.starts_with("invalid `clock` request"),
+                "{bad}: {error}"
+            );
+        }
+        let error = clock(json!({ "action": "clock", "do": "advance", "ms": MAX_WAIT_MS + 1 }));
+        assert!(error.unwrap_err().starts_with("`ms` must be at most"));
+        let error =
+            parse(json!({ "action": "frames", "during": { "action": "clock", "do": "pause" } }));
+        assert!(error.unwrap_err().starts_with("`during` cannot be `clock`"));
     }
 
     #[cfg(debug_assertions)]

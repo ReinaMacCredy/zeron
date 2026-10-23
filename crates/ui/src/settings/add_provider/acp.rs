@@ -85,7 +85,7 @@ fn distribution_label(agent: &AcpRegistryAgent) -> Option<&'static str> {
     agent
         .distributions
         .first()
-        .map(|distribution| provider_instances::distribution_name(*distribution))
+        .map(|distribution| zeron_proto::distribution_name(*distribution))
 }
 
 fn about_url(agent: &AcpRegistryAgent) -> Option<String> {
@@ -922,7 +922,7 @@ impl AddProviderDialog {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let added = provider_instances::uses_registry_agent(&self.instances, &agent.id);
+        let added = zeron_proto::uses_registry_agent(&self.instances, &agent.id);
         let preparing = self.registry.preparing.as_deref() == Some(agent.id.as_str());
         let can_add = self.registry.preparing.is_none() && !added;
         let distribution = distribution_label(agent);
@@ -1135,7 +1135,7 @@ impl AddProviderDialog {
                                 .child(SharedString::from(format!(
                                     "v{} · {}",
                                     agent.version,
-                                    provider_instances::distribution_name(selected.distribution)
+                                    zeron_proto::distribution_name(selected.distribution)
                                 ))),
                         ),
                 )
@@ -1197,7 +1197,7 @@ impl AddProviderDialog {
                         None,
                         readonly_value(
                             theme,
-                            provider_instances::distribution_name(*distribution).to_string(),
+                            zeron_proto::distribution_name(*distribution).to_string(),
                         ),
                         true,
                     ));

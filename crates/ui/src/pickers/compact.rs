@@ -653,7 +653,7 @@ impl Pickers {
             .selected_model(cx)?
             .options
             .iter()
-            .find_map(|o| fast_mode_values(o).map(|(on, off)| (o, on, off)))?;
+            .find_map(|o| model_options::fast_mode_values(o).map(|(on, off)| (o, on, off)))?;
         let options = self.explicit_options(cx);
         let fast = options
             .get(&option.id)
@@ -674,7 +674,7 @@ impl Pickers {
         self.selected_model(cx)?
             .options
             .iter()
-            .find(|o| fast_mode_values(o).is_some())
+            .find(|o| model_options::fast_mode_values(o).is_some())
             .map(|o| o.id.clone())
     }
 
@@ -839,7 +839,7 @@ impl Pickers {
         let (height, moving) = ScalarTransition::sample(
             &mut self.compact_motion.height,
             target,
-            std::time::Instant::now(),
+            motion::now(),
             cx.reduce_motion(),
         );
         self.compact_motion.frame_height = height;
@@ -850,7 +850,7 @@ impl Pickers {
             CompactPage::Models => self.render_harness_model_popover(window, cx),
             CompactPage::Panel => self.render_compact_model_panel(window, cx),
         };
-        let now = std::time::Instant::now();
+        let now = motion::now();
         if self.compact_motion.page.is_some_and(|last| last != page) {
             self.compact_motion.reveal = Some(ScalarTransition {
                 from: 0.0,
@@ -952,7 +952,7 @@ impl Pickers {
             ..
         } = self.compact_effort(cx)?;
         let effort = levels.get(selected).cloned().unwrap_or_default();
-        let now = std::time::Instant::now();
+        let now = motion::now();
         let reduced = cx.reduce_motion();
         // Fast mode alone brings the fill to life: a sheen and speed streaks
         // racing toward the thumb, and a breathing glow.
@@ -1124,7 +1124,7 @@ impl Pickers {
             .unwrap_or_else(|| "Default".into());
         let model_accessible: SharedString =
             format!("{} · {} · Change model", effort, label).into();
-        let now = std::time::Instant::now();
+        let now = motion::now();
         let reduced = cx.reduce_motion();
         // The effort titles the model's name as one button filling the row
         // up to fast mode, its text on the rail's and option rows' edge; fast

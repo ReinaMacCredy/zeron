@@ -29,7 +29,7 @@ use zeron_engine::registry::{HarnessDescriptor, descriptor_enabled};
 
 use zeron_proto::{
     HarnessId, HarnessUpdatePhase, HarnessUpdatePolicy, HarnessUpdateStatus, InstanceConfig,
-    ProviderInstance,
+    ProviderInstance, cli_name,
 };
 
 use zeron_rpc::methods;
@@ -117,61 +117,8 @@ fn install_params(harness: HarnessId, target: &Option<String>) -> serde_json::Va
 }
 
 /// The CLI named in the not-installed hint.
-pub fn cli_name(harness: HarnessId) -> &'static str {
-    match harness {
-        HarnessId::ClaudeCode => "claude",
-        HarnessId::Codex => "codex",
-        HarnessId::Cursor => "cursor-agent",
-        HarnessId::Devin => "devin",
-        HarnessId::Grok => "grok",
-        HarnessId::Hermes => "hermes",
-        HarnessId::Pi => "pi",
-        HarnessId::Opencode => "opencode",
-        HarnessId::Antigravity => "Antigravity",
-        HarnessId::Acp => "acp",
-        HarnessId::Mock => "mock",
-    }
-}
-
-/// A provider's version line: the installed version, plus only what the
-/// Update button doesn't already say (progress, a failure), all in one muted
-/// tone. Up-to-date providers, checks in flight and providers whose updates
-/// aren't monitored show just the version, so rows don't flash through
-/// states while checks run.
 fn harness_update_label(status: &HarnessUpdateStatus, theme: &Theme) -> (SharedString, gpui::Hsla) {
-    let installed = status
-        .installed_version
-        .as_deref()
-        .map(|version| format!("v{version}"));
-    let with = |detail: &str| match &installed {
-        Some(version) => format!("{version} · {detail}"),
-        None => detail.to_owned(),
-    };
-    let version_only = || installed.clone().unwrap_or_default();
-    let label = match status.phase {
-        HarnessUpdatePhase::Dormant
-        | HarnessUpdatePhase::Checking
-        | HarnessUpdatePhase::Current => version_only(),
-        // The row's Update button already says it; one Zeron can only
-        // describe (a command to run yourself) is just the version too.
-        HarnessUpdatePhase::Available | HarnessUpdatePhase::ManualActionRequired
-            if status.can_apply =>
-        {
-            version_only()
-        }
-        HarnessUpdatePhase::Available => match status.latest_version.as_deref() {
-            Some(latest) => with(&format!("v{latest} available")),
-            None => with("Update available"),
-        },
-        HarnessUpdatePhase::ManualActionRequired => version_only(),
-        HarnessUpdatePhase::WaitingForIdle => with("Waiting for agent to be idle"),
-        HarnessUpdatePhase::Preparing => with("Preparing update…"),
-        HarnessUpdatePhase::Downloading => with("Downloading…"),
-        HarnessUpdatePhase::Installing => with("Installing…"),
-        HarnessUpdatePhase::Verifying => with("Verifying…"),
-        HarnessUpdatePhase::Updated => with("Updated"),
-        HarnessUpdatePhase::Failed => with("Couldn't check for updates"),
-    };
+    let label = status.version_line();
     let color = match status.phase {
         HarnessUpdatePhase::Failed => theme.danger_muted,
         _ => theme.text_muted.opacity(0.75),
@@ -454,7 +401,7 @@ impl HarnessesPage {
             .ready()
             .into_iter()
             .flatten()
-            .filter(|instance| provider_instances::has_own_login(instance))
+            .filter(|instance| zeron_proto::has_own_login(instance))
             .cloned()
             .collect();
         self.instance_accounts
@@ -634,15 +581,13 @@ impl HarnessesPage {
                                 .child(SharedString::from(id.clone()))
                                 .into_any_element(),
                         )
-                        .chain(
-                            provider_instances::acp_source_summary(instance).map(|summary| {
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .child(SharedString::from(summary))
-                                    .into_any_element()
-                            }),
-                        )
+                        .chain(zeron_proto::acp_source_summary(instance).map(|summary| {
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .child(SharedString::from(summary))
+                                .into_any_element()
+                        }))
                         .collect(),
                     )),
             )

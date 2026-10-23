@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::json;
-use zeron_proto::computer::ComputerAvailability;
+use zeron_proto::computer::{ComputerAvailability, host_runs_computer_use};
 use zeron_rpc::ComputerHost;
 
 use super::approval_gate::ComputerApprovalGate;
@@ -58,7 +58,7 @@ pub struct ComputerService {
 
 fn unavailable_backend(platform: &str) -> UnavailableComputerBackend {
     let (message, availability) = match platform {
-        "macos" => (
+        platform if host_runs_computer_use(platform) => (
             NO_HOST_MESSAGE.to_owned(),
             ComputerAvailability::BackendUnavailable {
                 message: NO_HOST_MESSAGE.to_owned(),

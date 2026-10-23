@@ -43,13 +43,13 @@ impl Wire {
         if lit != self.lit {
             self.from = self.lit;
             self.lit = lit;
-            self.since = animate.then(Instant::now);
+            self.since = animate.then(crate::motion::now);
         }
     }
 
     fn progress(&self) -> f32 {
         self.since.map_or(1.0, |since| {
-            (since.elapsed().as_secs_f32() / DRAW.as_secs_f32()).min(1.0)
+            (crate::motion::since(since).as_secs_f32() / DRAW.as_secs_f32()).min(1.0)
         })
     }
 }

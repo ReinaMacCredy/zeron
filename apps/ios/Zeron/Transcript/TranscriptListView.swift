@@ -93,6 +93,9 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     /// Agent visuals by id: one live view each, moved between reused rows so
     /// its painted state survives row reconfigures.
     private var visuals: [String: VisualView] = [:]
+    private var pages: [(id: String, view: HtmlPageView)] = []
+    private let maxPages = 6
+    var htmlLoader: ((_ deviceId: String, _ path: String) async -> String?)?
     private var memoryObserver: NSObjectProtocol?
     private var mathObserver: NSObjectProtocol?
 
@@ -124,8 +127,16 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     var onDistanceFromBottom: ((CGFloat) -> Void)?
     var imageLoader: ((String, UIImageView) -> Void)?
     var onCardAction: ((CardAction) -> Void)?
+    var branchBlocked: ((Bool) async -> String?)?
+    var onBranch: ((BranchOffer) -> Void)?
+    var onSkill: ((_ name: String, _ path: String?) -> Void)?
+    var onLimit: ((_ chatId: String) -> Void)?
+    var onPullRequest: ((_ url: String) -> Void)?
+    var onQuote: ((String) -> Void)?
     /// An attachment's picture, for an image chip opened full size.
     var imageFetcher: ((String) async -> UIImage?)?
+    var onLink: ((URL) -> Bool)?
+    var textFetcher: ((String) async -> String?)?
 
     // MARK: Runway (desktop transcript.rs `OwnTurnAnchor`)
     //
@@ -680,16 +691,67 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     }
 
     func rowView(_ view: RowView, open url: URL) {
-        guard let vc = findViewController() else { return }
+        guard let vc = findViewController(), onLink?(url) != true else { return }
         // An image chip opens its upload full size, as its thumbnail did.
         if url.scheme == "zeron-preview" {
             guard let reference = URLComponents(url: url, resolvingAgainstBaseURL: false)?
                 .queryItems?.first(where: { $0.name == "ref" })?.value
             else { return }
+            if url.host == "text" {
+                Task { @MainActor [weak self, weak vc] in
+                    guard let vc else { return }
+                    guard let text = await self?.textFetcher?(reference) else {
+                        return Toast.show("Couldn't load the pasted text", in: vc.view.window)
+                    }
+                    PastedTextPreviewer.present(text: text, reference: reference, from: vc)
+                }
+                return
+            }
             Task { @MainActor [weak self, weak view, weak vc] in
                 guard let image = await self?.imageFetcher?(reference), let view, let vc else { return }
                 vc.present(ImageViewer(image: image, source: view), animated: true)
             }
+            return
+        }
+        if url.scheme == "zeron-badge" {
+            guard let i = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "i" })?.value.flatMap(UInt32.init),
+                  let card = current?.badge(key: view.key, index: i)
+            else { return }
+            let sheet = UINavigationController(rootViewController: BadgeCardViewController(card: card))
+            if let s = sheet.sheetPresentationController { s.detents = [.medium(), .large()]; s.prefersGrabberVisible = true }
+            vc.present(sheet, animated: true)
+            return
+        }
+        if url.scheme == "zeron-blob" {
+            guard let ref = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "ref" })?.value
+            else { return }
+            engine.fetchBlob(blobRef: ref)
+            return
+        }
+        if url.scheme == "zeron-limit" {
+            guard let id = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "chat" })?.value
+            else { return }
+            onLimit?(id)
+            return
+        }
+        if url.scheme == "zeron-skill" {
+            let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            guard let name = items.first(where: { $0.name == "name" })?.value else { return }
+            onSkill?(name, items.first(where: { $0.name == "path" })?.value)
+            return
+        }
+        if url.scheme == "zeron-chat" {
+            guard let id = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "id" })?.value
+            else { return }
+            (window?.rootViewController as? AppRouter)?.openSession(id)
+            return
+        }
+        if let link = pullRequestLink(url: url.absoluteString), let onPullRequest {
+            onPullRequest(link.url)
             return
         }
         if url.scheme == "http" || url.scheme == "https" {
@@ -721,6 +783,39 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
         return live
     }
 
+    func rowView(_ view: RowView, pageFor id: String, deviceId: String, path: String) -> UIView? {
+        if let i = pages.firstIndex(where: { $0.id == id }) {
+            let live = pages.remove(at: i)
+            pages.append(live)
+            return live.view
+        }
+        let loader = htmlLoader
+        let page = HtmlPageView { await loader?(deviceId, path) }
+        page.onHeight = { [weak self] height in self?.engine.setHtmlHeight(id: id, height: Float(height)) }
+        page.openURL = { [weak self, weak page] url in
+            guard let self, let row = page?.superview as? RowView else { return }
+            self.rowView(row, open: url)
+        }
+        pages.append((id, page))
+        if pages.count > maxPages, let i = pages.firstIndex(where: { $0.view.superview == nil || $0.view.superview?.isHidden == true }) {
+            pages.remove(at: i)
+        }
+        return page
+    }
+
+    func rowView(_ view: RowView, expandPage title: String, deviceId: String, path: String) {
+        guard let vc = findViewController() else { return }
+        let loader = htmlLoader
+        let sheet = HtmlSheetViewController(title: title, html: { await loader?(deviceId, path) }) { [weak self, weak view] url in
+            guard let self, let view else { return }
+            self.rowView(view, open: url)
+        }
+        let nav = UINavigationController(rootViewController: sheet)
+        nav.modalPresentationStyle = .pageSheet
+        nav.sheetPresentationController?.prefersGrabberVisible = true
+        vc.present(nav, animated: true)
+    }
+
     fileprivate func row(at point: CGPoint) -> RowView? {
         visible.values.first { !$0.isHidden && $0.frame.contains(point) }
     }
@@ -745,10 +840,32 @@ extension TranscriptListView: UIContextMenuInteractionDelegate {
                 })
             }
             let selectable = frame.messageText(index: index) ?? block
+            if !selectable.isEmpty, let onQuote = self.onQuote {
+                actions.append(UIAction(title: "Quote in reply", image: UIImage(systemName: "text.quote")) { _ in
+                    onQuote(selectable)
+                })
+            }
             if !selectable.isEmpty {
                 actions.append(UIAction(title: "Select Text", image: UIImage(systemName: "character.cursor.ibeam")) { [weak self] _ in
                     self?.presentSelection(selectable)
                 })
+            }
+            if let offer = frame.branch(index: index) {
+                let blocked = self.branchBlocked
+                let perform = self.onBranch
+                let item = UIDeferredMenuElement.uncached { complete in
+                    Task { @MainActor in
+                        let reason = await blocked?(offer.rewind)
+                        let action = UIAction(
+                            title: offer.title,
+                            subtitle: reason,
+                            image: UIImage(systemName: offer.rewind ? "arrow.counterclockwise" : "arrow.triangle.branch"),
+                            attributes: reason != nil ? .disabled : (offer.rewind ? .destructive : [])
+                        ) { _ in perform?(offer) }
+                        complete([action])
+                    }
+                }
+                actions.append(UIMenu(options: .displayInline, children: [item]))
             }
             return actions.isEmpty ? nil : UIMenu(children: actions)
         }
@@ -765,6 +882,7 @@ extension TranscriptListView: UIContextMenuInteractionDelegate {
     private func presentSelection(_ text: String) {
         guard let vc = findViewController() else { return }
         let sheet = SelectTextViewController(text: text)
+        sheet.onQuote = onQuote
         vc.present(UINavigationController(rootViewController: sheet), animated: true)
     }
 }
@@ -781,15 +899,17 @@ extension UIView {
 }
 
 /// Full-text selection for a message (the transcript itself is paint-only).
-final class SelectTextViewController: UIViewController {
+final class SelectTextViewController: UIViewController, UITextViewDelegate {
     private let text: String
     private let mono: Bool
+    var onQuote: ((String) -> Void)?
 
-    init(text: String, title: String = "Select Text", mono: Bool = false) {
+    init(text: String, title: String = "Select Text", subtitle: String? = nil, mono: Bool = false) {
         self.text = text
         self.mono = mono
         super.init(nibName: nil, bundle: nil)
         self.title = title
+        navigationItem.subtitle = subtitle
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -806,10 +926,102 @@ final class SelectTextViewController: UIViewController {
         tv.textContainerInset = UIEdgeInsets(top: 16, left: 14, bottom: 32, right: 14)
         tv.frame = view.bounds
         tv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        tv.delegate = self
         view.addSubview(tv)
         navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak self] _ in
             self?.dismiss(animated: true)
         })
         if !mono { DispatchQueue.main.async { tv.selectAll(nil) } }
+    }
+
+    func textView(_ textView: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
+        guard let onQuote, range.length > 0 else { return nil }
+        let selected = (textView.text as NSString).substring(with: range)
+        let quote = UIAction(title: "Quote in reply", image: UIImage(systemName: "text.quote")) { [weak self] _ in
+            onQuote(selected)
+            self?.dismiss(animated: true)
+        }
+        return UIMenu(children: [quote] + suggestedActions)
+    }
+}
+
+enum PastedTextPreviewer {
+    static func present(text: String, reference: String, from vc: UIViewController) {
+        let info = pastedTextPreview(reference: reference, text: text)
+        let sheet = SelectTextViewController(text: text, title: info.title, subtitle: info.subtitle, mono: true)
+        vc.present(UINavigationController(rootViewController: sheet), animated: true)
+    }
+}
+
+final class BadgeCardViewController: UIViewController {
+    private let card: BadgeCard
+
+    init(card: BadgeCard) {
+        self.card = card
+        super.init(nibName: nil, bundle: nil)
+        title = card.title
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = Palette.background
+        let scroll = UIScrollView()
+        scroll.frame = view.bounds
+        scroll.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(scroll)
+        let stack = UIStackView()
+        stack.axis = .vertical
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        scroll.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 12),
+            stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -24),
+            stack.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 14),
+            stack.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -14),
+        ])
+        for row in card.details { stack.addArrangedSubview(Self.row(row)) }
+        navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak self] _ in
+            self?.dismiss(animated: true)
+        })
+    }
+
+    private static func row(_ row: BadgeCardRow) -> UIView {
+        let box = UIView()
+        box.backgroundColor = Palette.chip
+        box.layer.cornerRadius = 8
+        let rule = UIView()
+        rule.backgroundColor = Palette.accent.withAlphaComponent(0.35)
+        rule.layer.cornerRadius = 1
+        let location = UILabel()
+        location.font = Fonts.ui(.mono, 11)
+        location.textColor = Palette.tertiary
+        location.lineBreakMode = .byTruncatingMiddle
+        location.text = row.tag.map { "\(row.location)  \($0)" } ?? row.location
+        let body = UILabel()
+        body.font = Fonts.ui(.sans, UIFontMetrics(forTextStyle: .body).scaledValue(for: 14))
+        body.textColor = Palette.text
+        body.numberOfLines = 0
+        body.text = row.body
+        for v in [rule, location, body] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            box.addSubview(v)
+        }
+        NSLayoutConstraint.activate([
+            rule.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
+            rule.topAnchor.constraint(equalTo: box.topAnchor, constant: 8),
+            rule.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -8),
+            rule.widthAnchor.constraint(equalToConstant: 2),
+            location.leadingAnchor.constraint(equalTo: rule.trailingAnchor, constant: 8),
+            location.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -10),
+            location.topAnchor.constraint(equalTo: box.topAnchor, constant: 8),
+            body.leadingAnchor.constraint(equalTo: location.leadingAnchor),
+            body.trailingAnchor.constraint(equalTo: location.trailingAnchor),
+            body.topAnchor.constraint(equalTo: location.bottomAnchor, constant: 4),
+            body.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -8),
+        ])
+        return box
     }
 }

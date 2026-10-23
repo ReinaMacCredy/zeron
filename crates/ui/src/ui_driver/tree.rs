@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 const LEASE: Duration = Duration::from_secs(60);
 const REAP_EVERY: Duration = Duration::from_secs(5);
 const TEXT_CAP: usize = 80;
-const GENERIC: &[&str] = &["GenericContainer", "Unknown", "Group", "Section", "Pane"];
+pub(super) const GENERIC: &[&str] = &["GenericContainer", "Unknown", "Group", "Section", "Pane"];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
 pub(super) struct Bounds {
@@ -53,6 +53,8 @@ pub(super) struct Node {
     pub(super) expanded: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) toggled: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(super) disabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) view: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -62,10 +64,12 @@ pub(super) struct Node {
     pub(super) depth: usize,
     #[serde(skip)]
     pub(super) parent: Option<usize>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(super) web: bool,
 }
 
 impl Node {
-    fn named(&self) -> bool {
+    pub(super) fn named(&self) -> bool {
         [&self.label, &self.value, &self.description]
             .into_iter()
             .any(|text| text.as_deref().is_some_and(|text| !text.trim().is_empty()))
@@ -121,7 +125,7 @@ impl Refs {
     }
 }
 
-static REFS: LazyLock<Mutex<Refs>> = LazyLock::new(Mutex::default);
+pub(super) static REFS: LazyLock<Mutex<Refs>> = LazyLock::new(Mutex::default);
 
 #[derive(Deserialize)]
 struct Dump {
@@ -170,6 +174,8 @@ struct Aria {
     selected: Option<bool>,
     expanded: Option<bool>,
     toggled: Option<String>,
+    #[serde(default)]
+    disabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -252,11 +258,13 @@ pub(super) fn parse_dump(dump: &str, window: u64, refs: &mut Refs) -> Result<Tre
             selected: aria.selected,
             expanded: aria.expanded,
             toggled: aria.toggled.map(|toggled| toggled.to_lowercase()),
+            disabled: aria.disabled,
             view: raw.view,
             element_id: raw.element_id,
             source: raw.source_location,
             depth,
             parent,
+            web: false,
         });
     }
     Ok(tree)
@@ -303,8 +311,14 @@ pub(super) fn line(node: &Node) -> String {
     if let Some(toggled) = &node.toggled {
         out += &format!(" toggled={toggled}");
     }
+    if node.disabled {
+        out += " disabled";
+    }
     if !node.actions.is_empty() {
         out += &format!(" [{}]", node.actions.join(","));
+    }
+    if node.web {
+        out += " web";
     }
     out
 }
@@ -448,6 +462,10 @@ fn touch(window: u64, forced_after: Option<Option<u64>>, cx: &mut App) -> Option
     prior
 }
 
+pub(super) fn hold(window: u64, cx: &mut App) {
+    touch(window, None, cx);
+}
+
 static LEASES: LazyLock<Mutex<HashMap<u64, Lease>>> = LazyLock::new(Mutex::default);
 static REAPING: AtomicBool = AtomicBool::new(false);
 
@@ -482,6 +500,20 @@ async fn reap(cx: &mut AsyncApp) {
 }
 
 pub(super) async fn read(handle: AnyWindowHandle, cx: &mut AsyncApp) -> Result<Tree, String> {
+    let tree = read_native(handle, cx).await?;
+    #[cfg(target_os = "macos")]
+    let tree = {
+        let mut tree = tree;
+        super::web::splice(&mut tree, handle, cx).await;
+        tree
+    };
+    Ok(tree)
+}
+
+pub(super) async fn read_native(
+    handle: AnyWindowHandle,
+    cx: &mut AsyncApp,
+) -> Result<Tree, String> {
     let id = handle.window_id().as_u64();
     let gone = |error: anyhow::Error| format!("window is gone: {error}");
     let prior = cx
@@ -685,7 +717,7 @@ pub(super) mod tests {
                     "accesskit_id": "901",
                     "bounds": { "x": 1.0, "y": 2.0, "w": 3.0, "h": 4.0 },
                     "source_location": "crates/ui/src/shell.rs:10:5",
-                    "aria": { "role": "Button", "label": "Go", "on_action": ["Click", "ScrollIntoView"], "toggled": "True" }
+                    "aria": { "role": "Button", "label": "Go", "on_action": ["Click", "ScrollIntoView"], "toggled": "True", "disabled": true }
                 },
                 "c": { "accesskit_id": "902", "aria": { "role": "TextInput", "value": "hi" } },
             },
@@ -700,8 +732,10 @@ pub(super) mod tests {
         assert_eq!(tree.nodes[2].actions, ["click", "scrollIntoView"]);
         assert_eq!(
             line(&tree.nodes[2]),
-            "e3 Button \"Go\" @1,2 3x4 toggled=true [click,scrollIntoView]"
+            "e3 Button \"Go\" @1,2 3x4 toggled=true disabled [click,scrollIntoView]"
         );
+        assert_eq!(json!(tree.nodes[2])["disabled"], true);
+        assert!(json!(tree.nodes[1]).get("disabled").is_none());
         assert_eq!((tree.frame, tree.tab_stops), (7, 4));
         let again = parse_dump(&dump.to_string(), 5, &mut refs).unwrap();
         assert_eq!(again.nodes[2].id, "e3");

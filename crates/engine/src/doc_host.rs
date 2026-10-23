@@ -1964,6 +1964,7 @@ impl DocHost {
                 self.inner.store.clone(),
                 chat_id.to_string(),
                 chat2_cursor,
+                self.inner.config.edge.is_some(),
             )
         });
         let changed_persistence = persistence.clone();
@@ -5271,9 +5272,7 @@ impl DocHost {
             && item.task_steps.is_empty()
             && item.text != zeron_proto::RESUME_PROMPT;
         if !self.missing_row_attachments(item).is_empty() {
-            return Err(EngineError::Other(
-                "this message's images are still uploading".into(),
-            ));
+            return Err(EngineError::Other("its images are still uploading".into()));
         }
         let computer_control = self.computer_control_for(
             &sessions,

@@ -37,29 +37,7 @@ use crate::theme::Theme;
 // Pure: usage meters + labels
 // ---------------------------------------------------------------------------
 
-pub const USAGE_WARN_FRACTION: f32 = 0.80;
-pub const USAGE_CRITICAL_FRACTION: f32 = 0.95;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UsageLevel {
-    /// < 80% — indigo.
-    Normal,
-    /// ≥ 80% — amber.
-    Warn,
-    /// ≥ 95% — red.
-    Critical,
-}
-
-/// Threshold classification of a usage fraction. Pure.
-pub fn usage_level(fraction: f32) -> UsageLevel {
-    if fraction >= USAGE_CRITICAL_FRACTION {
-        UsageLevel::Critical
-    } else if fraction >= USAGE_WARN_FRACTION {
-        UsageLevel::Warn
-    } else {
-        UsageLevel::Normal
-    }
-}
+pub use zeron_proto::account_usage::{UsageLevel, usage_level};
 
 /// Usage meter columns: window label, reset time, and the meters' overall
 /// measure — long enough to read at a glance, short of a full-width gauge.
@@ -113,29 +91,11 @@ pub fn force_usage_for(trigger: LoadTrigger) -> bool {
     }
 }
 
-/// Whether a login URL may be opened. Remote logins relay their URL from
-/// another device (or from a CLI's output there), so only web sign-in pages
-/// and loopback callbacks pass — never `file://` or custom schemes. Pure.
-pub fn is_openable_login_url(url: &str) -> bool {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return false;
-    };
-    match scheme.to_ascii_lowercase().as_str() {
-        "https" => true,
-        "http" => {
-            let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-            let authority = authority
-                .rsplit_once('@')
-                .map_or(authority, |(_, host)| host);
-            let host = match authority.strip_prefix('[') {
-                Some(v6) => v6.split(']').next().unwrap_or(""),
-                None => authority.split(':').next().unwrap_or(""),
-            };
-            matches!(host, "localhost" | "127.0.0.1" | "::1")
-        }
-        _ => false,
-    }
-}
+pub use zeron_proto::account_usage::{
+    LoginOption, PROVIDERS, add_account_label, add_option_label, is_openable_login_url,
+    keeps_one_login, login_copy, login_options, provider_accounts, provider_name, provider_note,
+    reports_usage, sidebar_accounts, signs_in, switches_accounts,
+};
 
 pub(crate) fn open_login_url(url: &str, cx: &mut gpui::App) {
     if is_openable_login_url(url) {
@@ -178,55 +138,6 @@ pub(crate) fn usage_resets(
         .join(" · ")
 }
 
-pub use zeron_proto::providers::{
-    LoginOption, PROVIDERS, add_account_label, add_option_label, keeps_one_login, login_options,
-    provider_name, provider_note, reports_usage, signs_in, switches_accounts,
-};
-
-/// What the sign-in dialog says while the browser finishes — one sentence
-/// per provider, same shape. Pure.
-fn login_copy(harness: HarnessId, provider: Option<&str>) -> &'static str {
-    match (harness, provider) {
-        (HarnessId::ClaudeCode, _) => {
-            "Finish signing in to Claude in your browser. The new login is saved next to \
-             your current one — nothing changes until you switch."
-        }
-        (HarnessId::Codex, _) => {
-            "Finish signing in to ChatGPT in your browser. The new login is saved next to \
-             your current one — nothing changes until you switch."
-        }
-        (HarnessId::Cursor, _) => {
-            "Finish signing in to Cursor in your browser. This mints a zeron-named API key \
-             you can revoke any time from Cursor's dashboard."
-        }
-        (HarnessId::Antigravity, _) => {
-            "Finish signing in to Google in your browser. Antigravity keeps one login on \
-             this device; if it is already signed in, this just confirms it."
-        }
-        (HarnessId::Grok, _) => {
-            "Finish signing in to Grok in your browser — approve the code shown below. The \
-             new login is saved next to your current one — nothing changes until you switch."
-        }
-        (HarnessId::Devin, _) => {
-            "Finish signing in to Devin in your browser. The new login is saved next to your \
-             current one — nothing changes until you switch."
-        }
-        (HarnessId::Opencode, Some("github-copilot")) => {
-            "Finish signing in to GitHub in your browser — enter the code shown below. The \
-             new login is saved next to your current one — nothing changes until you switch."
-        }
-        (HarnessId::Opencode | HarnessId::Pi, _) => {
-            "Finish signing in to ChatGPT in your browser. The agent gets its own login, saved \
-             next to any current one — nothing changes until you switch."
-        }
-        (HarnessId::Hermes, _) => {
-            "Finish signing in in your browser — enter the code shown below. Hermes adds the \
-             login to its own credential pool and rotates through it itself."
-        }
-        _ => "Finish signing in in your browser.",
-    }
-}
-
 /// [`login_copy`] for a sign-in stored for Cloud. Pure.
 fn cloud_login_copy(harness: HarnessId) -> &'static str {
     match harness {
@@ -249,37 +160,6 @@ pub fn cloud_api_key(harness: HarnessId) -> Option<(VaultProvider, &'static str)
         HarnessId::Codex => Some((VaultProvider::OpenaiKey, "OpenAI API key")),
         _ => None,
     }
-}
-
-/// Accounts of one provider, in the engine's order (slot creation). No
-/// active-first re-sort: switching accounts must not move the switched-to
-/// card — the Active badge already says which one is live, and a list that
-/// reshuffles under the click reads as broken. Pure.
-pub fn provider_accounts(
-    snapshot: &AgentAccountsSnapshot,
-    harness: HarnessId,
-) -> Vec<&AgentAccount> {
-    snapshot
-        .accounts
-        .iter()
-        .filter(|a| a.harness == harness)
-        .collect()
-}
-
-/// The accounts the sidebar user row summarizes (docs/research/usage-mini):
-/// per provider in [`PROVIDERS`] order, the active account, and only when a
-/// usage probe has landed — a cold engine cache draws nothing rather than a
-/// row of "0%". Pure.
-pub fn sidebar_accounts(snapshot: &AgentAccountsSnapshot) -> Vec<&AgentAccount> {
-    PROVIDERS
-        .iter()
-        .filter_map(|(harness, _, _)| {
-            snapshot
-                .accounts
-                .iter()
-                .find(|a| a.harness == *harness && a.active && !a.usage_windows.is_empty())
-        })
-        .collect()
 }
 
 /// The 5px usage track with its level-coloured fill (shared by the settings

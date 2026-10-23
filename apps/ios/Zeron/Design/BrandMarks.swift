@@ -59,8 +59,9 @@ enum BrandMark {
         }
     }
 
-    static func forHarness(_ harness: String) -> BrandMark {
+    static func forHarness(_ harness: String) -> BrandMark? {
         switch harness {
+        case "claude-code", "mock": return .claude
         case "codex": return .openai
         case "cursor": return .cursor
         case "devin": return .devin
@@ -69,7 +70,7 @@ enum BrandMark {
         case "pi": return .pi
         case "opencode": return .opencode
         case "antigravity": return .antigravity
-        default: return .claude  // claude-code + mock share the mark, like the desktop
+        default: return nil
         }
     }
 
@@ -377,12 +378,36 @@ enum SVGPathParser {
 enum BrandMarks {
     private static var cache: [String: UIImage] = [:]
 
+    static func stack(_ harnesses: [String], side: CGFloat, tint: UIColor, current: UIImage? = nil) -> UIImage? {
+        var marks: [String] = []
+        for h in harnesses where marks.last.map({ BrandMark.forHarness($0) != BrandMark.forHarness(h) }) ?? true {
+            marks.append(h)
+        }
+        let images = marks.enumerated().map { ix, h in ix == marks.count - 1 ? current ?? image(for: h, side: side) : image(for: h, side: side) }
+        guard images.count > 1 else { return images.first ?? nil }
+        let step = side * 0.65
+        let size = CGSize(width: side + step * CGFloat(images.count - 1), height: side)
+        return UIGraphicsImageRenderer(size: size).image { _ in
+            for (ix, mark) in images.enumerated() {
+                guard let mark else { continue }
+                let rect = CGRect(x: step * CGFloat(ix), y: 0, width: side, height: side)
+                if mark.renderingMode == .alwaysTemplate { mark.withTintColor(tint).draw(in: rect) } else { mark.draw(in: rect) }
+            }
+        }
+    }
+
     static func image(for harness: String?, side: CGFloat = 15) -> UIImage? {
         guard let harness, !harness.isEmpty else { return nil }
         let key = "\(harness)@\(side)"
         if let hit = cache[key] { return hit }
-        let mark = BrandMark.forHarness(harness)
         let rect = CGRect(x: 0, y: 0, width: side, height: side)
+        guard let mark = BrandMark.forHarness(harness) else {
+            let bot = UIImage(named: "tool-bot").map { asset in
+                UIGraphicsImageRenderer(size: rect.size).image { _ in asset.draw(in: rect) }.withRenderingMode(.alwaysTemplate)
+            }
+            cache[key] = bot
+            return bot
+        }
         let path = BrandMarkShape(mark: mark).path(in: rect).cgPath
         let tint = BrandMark.brandTint(for: harness)
         let image = UIGraphicsImageRenderer(size: rect.size).image { ctx in

@@ -28,23 +28,9 @@ const SETTINGS_FILE: &str = "computer-settings.json";
 const EVENT_BUFFER: usize = 256;
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
 
-pub const COMPUTER_ESCAPE_STOP_NOTICE: &str = "Computer use stopped: Escape was pressed";
-pub const COMPUTER_DESKTOP_REVOKED_NOTE: &str = "Desktop access revoked by you";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RevokeSource {
-    Escape,
-    Stop,
-}
-
-impl RevokeSource {
-    pub fn hint(self) -> &'static str {
-        match self {
-            Self::Escape => "Esc",
-            Self::Stop => "Stop",
-        }
-    }
-}
+pub use zeron_proto::computer::cards::{
+    COMPUTER_DESKTOP_REVOKED_NOTE, COMPUTER_ESCAPE_STOP_NOTICE, RevokeSource,
+};
 
 pub struct ComputerRuntime {
     data_dir: PathBuf,

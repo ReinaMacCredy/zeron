@@ -9,35 +9,15 @@ use gpui::Hsla;
 pub const MIN_HEIGHT: f32 = zeron_proto::html_render::MIN_HEIGHT as f32;
 pub const MAX_HEIGHT: f32 = zeron_proto::html_render::MAX_HEIGHT as f32;
 
+pub use zeron_proto::html_render::{frame_height, overflows, scrolls_inside};
+use zeron_proto::html_render::SIZE_SCRIPT;
+
 pub fn clamp_height(height: f32) -> f32 {
     if height.is_finite() {
         height.round().clamp(MIN_HEIGHT, MAX_HEIGHT)
     } else {
         MIN_HEIGHT
     }
-}
-
-/// The frame fits the page so it never scrolls inside the thread and takes
-/// the reader's scroll. The agent's height caps it only when it is below the
-/// page's own height (the agent asked for a scrolling frame).
-pub fn frame_height(agent_height: f32, content_height: Option<f32>) -> f32 {
-    clamp_height(match content_height {
-        Some(content) if !overflows(agent_height, content) => content,
-        Some(_) | None => agent_height,
-    })
-}
-
-/// A page previewed at another width wraps a little taller here; that drift
-/// is not a request to scroll.
-pub fn overflows(agent_height: f32, content_height: f32) -> bool {
-    content_height > agent_height + FIT_DRIFT
-}
-
-const FIT_DRIFT: f32 = 64.0;
-
-/// Whether the page is taller than its frame and scrolls inside it.
-pub fn scrolls_inside(frame: f32, content_height: Option<f32>) -> bool {
-    content_height.is_some_and(|content| content > frame + 1.0)
 }
 
 fn css_color(color: Hsla) -> String {
@@ -209,10 +189,6 @@ pub fn theme_css(theme: &Theme, font_size: f32, inline: bool) -> String {
     css
 }
 
-/// Reports the page's content height to the host as it changes (t3's
-/// measure: the document's scroll height when it overflows, else its box).
-const SIZE_SCRIPT: &str = r#"(function(){var h,z=function(){var r=document.documentElement,v=Math.ceil(r.scrollHeight>r.clientHeight?r.scrollHeight:r.getBoundingClientRect().height);if(v===h||!window.ipc)return;h=v;window.ipc.postMessage(JSON.stringify({height:v}));};if(window.ResizeObserver){var o=new ResizeObserver(z);o.observe(document.documentElement);document.addEventListener("DOMContentLoaded",function(){if(document.body)o.observe(document.body);});}document.addEventListener("DOMContentLoaded",z);window.addEventListener("load",z);})();"#;
-
 // The host hands the wheel back to the transcript once the page is scrolled to that edge.
 const EDGE_SCRIPT: &str = r#"(function(){var l=-1,e=function(){var s=document.scrollingElement||document.documentElement,y=s.scrollTop,v=(y<=0?1:0)|(y+s.clientHeight>=s.scrollHeight-1?2:0);if(v===l||!window.ipc)return;l=v;window.ipc.postMessage(JSON.stringify({edges:v}));};window.addEventListener("scroll",e,{passive:true});window.addEventListener("resize",e);window.addEventListener("load",e);document.addEventListener("DOMContentLoaded",e);if(window.ResizeObserver)new ResizeObserver(e).observe(document.documentElement);})();"#;
 
@@ -237,185 +213,16 @@ pub fn retheme_script(theme: &Theme, font_size: f32, inline: bool) -> String {
     )
 }
 
-fn bootstrap_markup(scan: &str, theme: &Theme, font_size: f32, inline: bool) -> String {
-    let mut markup = String::new();
-    let head = &scan[..scan.floor_char_boundary(4096)];
-    if !(contains_ci(head, "<meta") && contains_ci(head, "charset")) {
-        markup.push_str("<meta charset=\"utf-8\">");
-    }
-    if !contains_ci(scan, "name=\"viewport\"") && !contains_ci(scan, "name=viewport") {
-        markup.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-    }
-    markup.push_str("<style id=\"zeron-theme\">");
-    markup.push_str(&theme_css(theme, font_size, inline).replace("</", "<\\/"));
-    markup.push_str("</style><script>");
-    markup.push_str(&attributes_script(theme));
-    if inline {
-        markup.push_str(SIZE_SCRIPT);
-        markup.push_str(EDGE_SCRIPT);
-        markup.push_str(ACTIVITY_SCRIPT);
-    }
-    markup.push_str("</script>");
-    markup
-}
-
-fn contains_ci(haystack: &str, needle: &str) -> bool {
-    find_ci(haystack.as_bytes(), needle.as_bytes(), 0).is_some()
-}
-
-fn find_ci(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return None;
-    }
-    (from..=haystack.len() - needle.len())
-        .find(|&at| haystack[at..at + needle.len()].eq_ignore_ascii_case(needle))
-}
-
-/// The tag starting at `at` (`<name`) is a real open tag of `name`: the name
-/// is followed by whitespace, `>`, `/` or the end.
-fn tag_at(scan: &[u8], at: usize, name: &[u8]) -> bool {
-    let end = at + 1 + name.len();
-    scan.len() >= end
-        && scan[at] == b'<'
-        && scan[at + 1..end].eq_ignore_ascii_case(name)
-        && scan
-            .get(end)
-            .is_none_or(|c| c.is_ascii_whitespace() || *c == b'>' || *c == b'/')
-}
-
-/// `</name` at `at`, followed by whitespace, `>`, `/` or the end.
-fn close_tag_at(scan: &[u8], at: usize, name: &[u8]) -> bool {
-    scan.get(at..at + 2) == Some(b"</".as_slice())
-        && scan
-            .get(at + 2..at + 2 + name.len())
-            .is_some_and(|found| found.eq_ignore_ascii_case(name))
-        && scan
-            .get(at + 2 + name.len())
-            .is_none_or(|c| c.is_ascii_whitespace() || *c == b'>' || *c == b'/')
-}
-
-fn tag_end(scan: &[u8], at: usize) -> usize {
-    scan[at..]
-        .iter()
-        .position(|&c| c == b'>')
-        .map_or(scan.len(), |p| at + p + 1)
-}
-
-const RAW_TEXT: [&[u8]; 9] = [
-    b"script",
-    b"style",
-    b"textarea",
-    b"title",
-    b"xmp",
-    b"iframe",
-    b"noembed",
-    b"noframes",
-    b"noscript",
-];
-
-/// Comments, raw text, and template contents blanked to spaces of the same
-/// byte length, so offsets still line up and inert tags cannot receive the
-/// bootstrap.
-fn blank_non_markup(html: &str) -> Vec<u8> {
-    let mut scan = html.as_bytes().to_vec();
-    let len = scan.len();
-    let blank = |scan: &mut Vec<u8>, from: usize, to: usize| {
-        for byte in &mut scan[from..to.min(len)] {
-            *byte = b' ';
-        }
-    };
-    let mut at = 0;
-    while at < len {
-        if scan[at] != b'<' {
-            at += 1;
-            continue;
-        }
-        if scan[at..].starts_with(b"<!--") {
-            let end = find_ci(&scan, b"-->", at + 4).map_or(len, |p| p + 3);
-            blank(&mut scan, at, end);
-            at = end;
-            continue;
-        }
-        if tag_at(&scan, at, b"plaintext") {
-            blank(&mut scan, at, len);
-            break;
-        }
-        if let Some(name) = RAW_TEXT.iter().find(|name| tag_at(&scan, at, name)) {
-            let mut close = Vec::with_capacity(name.len() + 2);
-            close.extend_from_slice(b"</");
-            close.extend_from_slice(name);
-            let mut search = at + 1 + name.len();
-            let end = loop {
-                match find_ci(&scan, &close, search) {
-                    Some(p) if close_tag_at(&scan, p, name) => {
-                        break tag_end(&scan, p);
-                    }
-                    Some(p) => search = p + 1,
-                    None => break len,
-                }
-            };
-            blank(&mut scan, at, end);
-            at = end;
-            continue;
-        }
-        if tag_at(&scan, at, b"template") {
-            let mut depth = 0usize;
-            let mut cursor = at;
-            let end = loop {
-                let Some(next) = scan[cursor..]
-                    .iter()
-                    .position(|&c| c == b'<')
-                    .map(|offset| cursor + offset)
-                else {
-                    break len;
-                };
-                if tag_at(&scan, next, b"template") {
-                    depth += 1;
-                    cursor = tag_end(&scan, next);
-                } else if close_tag_at(&scan, next, b"template") {
-                    depth -= 1;
-                    cursor = tag_end(&scan, next);
-                    if depth == 0 {
-                        break cursor;
-                    }
-                } else {
-                    cursor = next + 1;
-                }
-            };
-            blank(&mut scan, at, end);
-            at = end;
-            continue;
-        }
-        at += 1;
-    }
-    scan
-}
-
 /// Inserts the theme bootstrap at the start of the document head, so a
 /// page's own styles and scripts come after it and win.
 pub fn inject_bootstrap(html: &str, theme: &Theme, font_size: f32, inline: bool) -> String {
-    let scan = blank_non_markup(html);
-    let scan_text = String::from_utf8_lossy(&scan);
-    let markup = bootstrap_markup(&scan_text, theme, font_size, inline);
-    let find_open = |name: &[u8]| (0..scan.len()).find(|&p| tag_at(&scan, p, name));
-    if let Some(head) = find_open(b"head") {
-        let at = tag_end(&scan, head);
-        return format!("{}{markup}{}", &html[..at], &html[at..]);
+    let mut script = attributes_script(theme);
+    if inline {
+        script.push_str(SIZE_SCRIPT);
+        script.push_str(EDGE_SCRIPT);
+        script.push_str(ACTIVITY_SCRIPT);
     }
-    if let Some(open) = find_open(b"html") {
-        let at = tag_end(&scan, open);
-        return format!("{}<head>{markup}</head>{}", &html[..at], &html[at..]);
-    }
-    let trimmed = html.trim_start();
-    if trimmed
-        .get(..9)
-        .is_some_and(|start| start.eq_ignore_ascii_case("<!doctype"))
-    {
-        let start = html.len() - trimmed.len();
-        let at = tag_end(&scan, start);
-        return format!("{}<head>{markup}</head>{}", &html[..at], &html[at..]);
-    }
-    format!("<!doctype html><head>{markup}</head>{html}")
+    zeron_proto::html_render::inject_bootstrap(html, &theme_css(theme, font_size, inline), &script)
 }
 
 #[cfg(test)]
@@ -450,28 +257,6 @@ mod tests {
         assert!(out.starts_with("<html lang=en><head><meta charset"));
         let out = inject_bootstrap("  <!DOCTYPE html><body>x</body>", &theme(), 16.0, false);
         assert!(out.starts_with("  <!DOCTYPE html><head>"));
-    }
-
-    #[test]
-    fn templates_close_and_never_swallow_the_rest_of_the_page() {
-        let page = "<body><template><p>a</p><template>b</template></template><head>c";
-        let scan = String::from_utf8(blank_non_markup(page)).unwrap();
-        assert!(scan.starts_with("<body>  "));
-        assert!(scan.ends_with("<head>c"), "{scan}");
-        let many = "<template>x</template>".repeat(20_000) + "<p>end</p>";
-        let started = std::time::Instant::now();
-        let scan = String::from_utf8(blank_non_markup(&many)).unwrap();
-        assert!(scan.ends_with("<p>end</p>"));
-        assert!(started.elapsed() < std::time::Duration::from_secs(2));
-    }
-
-    #[test]
-    fn raw_text_ends_at_its_own_closing_tag() {
-        let page = "<script>var a = '</scripts>';</script><p>x</p><style>p{}</STYLE ><p>y</p>";
-        let scan = String::from_utf8(blank_non_markup(page)).unwrap();
-        assert!(scan.contains("<p>x</p>"));
-        assert!(scan.ends_with("<p>y</p>"));
-        assert!(!scan.contains("var a"));
     }
 
     #[test]
@@ -556,19 +341,5 @@ mod tests {
         assert!(large.contains("--font-size-xs:13.75px;"));
         assert!(large.contains("--font-size-code:12.5px;"));
         assert!(large.contains("font-size:14px;line-height:1.5"));
-    }
-
-    #[test]
-    fn frames_fit_the_page_unless_the_agent_asked_for_less() {
-        assert_eq!(frame_height(600.0, None), 600.0);
-        assert_eq!(frame_height(600.0, Some(420.0)), 420.0);
-        assert_eq!(frame_height(600.0, Some(900.0)), 600.0);
-        assert_eq!(frame_height(600.0, Some(640.0)), 640.0);
-        assert_eq!(frame_height(1200.0, Some(900.0)), 900.0);
-        assert_eq!(frame_height(2400.0, Some(5000.0)), MAX_HEIGHT);
-        assert_eq!(frame_height(600.0, Some(10.0)), MIN_HEIGHT);
-        assert_eq!(clamp_height(f32::NAN), MIN_HEIGHT);
-        assert!(scrolls_inside(600.0, Some(900.0)));
-        assert!(!scrolls_inside(420.0, Some(420.0)));
     }
 }

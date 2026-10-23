@@ -92,6 +92,59 @@ pub fn pasted_text_index_from_name(name: &str) -> Option<u32> {
     digits.parse().ok().filter(|index| *index > 0)
 }
 
+pub const PASTED_TEXT_MIN_CHARS: usize = 5_000;
+
+/// A leading skill command's arguments stay inline, however long.
+pub fn pastes_as_file(pasted: &str, draft: &str) -> bool {
+    pasted.chars().count() >= PASTED_TEXT_MIN_CHARS
+        && attachment_mentions(pasted).is_empty()
+        && !crate::invocation::leading_command(&crate::invocation::invocation_prompt(draft))
+            .is_some_and(|(name, _)| crate::invocation::valid_skill_command_name(name))
+}
+
+pub fn next_pasted_text_name<'a>(staged: impl IntoIterator<Item = &'a str>) -> String {
+    let last = staged
+        .into_iter()
+        .filter_map(pasted_text_index_from_name)
+        .max()
+        .unwrap_or(0);
+    pasted_text_label(last + 1)
+}
+
+pub fn pasted_text_pill_label(index: u32, lines: Option<usize>) -> String {
+    match lines {
+        Some(lines) => format!("Pasted text {index} · {}", pasted_text_lines_label(lines)),
+        None => format!("Pasted text {index}"),
+    }
+}
+
+pub fn pasted_text_lines_label(lines: usize) -> String {
+    if lines == 1 {
+        "1 line".to_owned()
+    } else {
+        format!("{lines} lines")
+    }
+}
+
+/// The body used for image-only sends.
+pub const ATTACHMENT_ONLY_TEXT: &str = "See the attached image(s).";
+/// The body used when any attachment is not an image.
+pub const FILE_ATTACHMENT_ONLY_TEXT: &str = "See the attached file(s).";
+
+/// Whether `text` is the placeholder body of an attachments-only send.
+pub fn is_attachment_only_text(text: &str) -> bool {
+    text == ATTACHMENT_ONLY_TEXT || text == FILE_ATTACHMENT_ONLY_TEXT
+}
+
+/// The placeholder body for an attachments-only send of `paths`.
+pub fn attachment_only_text(paths: &[String]) -> &'static str {
+    if paths.iter().all(|path| is_image_path(path)) {
+        ATTACHMENT_ONLY_TEXT
+    } else {
+        FILE_ATTACHMENT_ONLY_TEXT
+    }
+}
+
 /// Whether an attachment ref names an image, as opposed to any other file.
 /// The same extensions the desktop decodes (`format_by_extension`), so every
 /// client shows a given attachment the same way.
@@ -336,6 +389,34 @@ mod tests {
         ] {
             assert_eq!(pasted_text_index_from_name(name), index, "{name}");
         }
+        assert_eq!(next_pasted_text_name([]), "Pasted text 1.txt");
+        assert_eq!(
+            next_pasted_text_name(["Pasted text 3.txt", "Image 1.jpg", "Pasted text 1.txt"]),
+            "Pasted text 4.txt"
+        );
+    }
+
+    #[test]
+    fn only_long_plain_pastes_outside_a_skill_command_stage_as_files() {
+        let long = "x".repeat(PASTED_TEXT_MIN_CHARS);
+        assert!(pastes_as_file(&long, ""));
+        assert!(pastes_as_file(&long, "Review this:"));
+        assert!(!pastes_as_file(&long[1..], ""));
+        assert!(!pastes_as_file(
+            &format!("{long} {}", attachment_mention_link(1, None)),
+            ""
+        ));
+        assert!(!pastes_as_file(&long, "/review "));
+    }
+
+    #[test]
+    fn a_files_only_send_says_files_not_images() {
+        let image = vec!["/u/ab12cd34-Image_1.jpg".to_owned()];
+        let mixed = vec![image[0].clone(), "/u/ab12cd34-Pasted_text_1.txt".to_owned()];
+        assert_eq!(attachment_only_text(&image), ATTACHMENT_ONLY_TEXT);
+        assert_eq!(attachment_only_text(&mixed), FILE_ATTACHMENT_ONLY_TEXT);
+        assert_eq!(pasted_text_pill_label(2, Some(1)), "Pasted text 2 · 1 line");
+        assert_eq!(pasted_text_pill_label(2, Some(40)), "Pasted text 2 · 40 lines");
     }
 
     #[test]

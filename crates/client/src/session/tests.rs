@@ -151,6 +151,34 @@ fn run_steer_and_queue_rows_carry_the_chats_computer_generation() {
 }
 
 #[test]
+fn a_run_carries_the_chats_permission_mode() {
+    let (client, _dir) = demo(false);
+    let session = client.open_session("chat-blog").unwrap();
+    let mut config = client.session_config("chat-blog").unwrap();
+    config.permission_mode = zeron_proto::PermissionMode::Ask;
+    client.set_session_config("chat-blog", &config).unwrap();
+    wait_for("the config", || {
+        client
+            .session_config("chat-blog")
+            .is_some_and(|c| c.permission_mode == zeron_proto::PermissionMode::Ask)
+    });
+    session.send(SendRequest::text("hello")).unwrap();
+    let run = session
+        .core
+        .doc()
+        .read_commands()
+        .unwrap()
+        .into_iter()
+        .find_map(|command| match command.payload {
+            SessionCommandPayload::Run { request, .. } => Some(request),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(run.permission_mode, zeron_proto::PermissionMode::Ask);
+    assert!(!run.auto_approve);
+}
+
+#[test]
 fn a_consent_answer_settles_the_card_once() {
     let (client, _dir) = demo(false);
     let session = client.open_session("chat-computer").unwrap();
@@ -212,5 +240,270 @@ fn still_frames_come_from_an_online_host_only() {
     assert_eq!(
         runtime.block_on(session.computer_still_frame()).unwrap(),
         None
+    );
+}
+
+#[test]
+fn needs_you_lists_each_ask_once_until_answered_here() {
+    use crate::workspace::NeedsYouKind;
+    let (client, _dir) = demo(false);
+    let inputs = |client: &Client| -> Vec<(String, String, bool, bool)> {
+        client
+            .needs_you()
+            .into_iter()
+            .filter_map(|entry| match entry.kind {
+                NeedsYouKind::Input {
+                    chat_id,
+                    request_id,
+                    approval,
+                    destructive,
+                    ..
+                } => Some((chat_id, request_id, approval, destructive)),
+                _ => None,
+            })
+            .collect()
+    };
+    wait_for("the awaiting chats", || {
+        inputs(&client).iter().all(|(_, request, ..)| !request.is_empty())
+            && inputs(&client).len() == 4
+    });
+    let mut asks = inputs(&client);
+    asks.sort();
+    let asks: Vec<(&str, &str, bool, bool)> = asks
+        .iter()
+        .map(|(chat, request, approval, destructive)| {
+            (chat.as_str(), request.as_str(), *approval, *destructive)
+        })
+        .collect();
+    assert_eq!(
+        asks,
+        [
+            ("chat-approve-push", "req-approve", true, true),
+            ("chat-approve-test", "req-approve", true, false),
+            ("chat-picker", "req-1", false, false),
+            ("chat-shelf-4", "req-shelf", false, false),
+        ]
+    );
+
+    let picker = client.session("chat-picker").expect("opened by needs_you");
+    picker
+        .respond_input(
+            "req-1",
+            vec![zeron_proto::UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec!["Local device".into()],
+            }],
+        )
+        .unwrap();
+    wait_for("the answered ask to leave", || {
+        !inputs(&client).iter().any(|(chat, ..)| chat == "chat-picker")
+    });
+}
+
+fn park_on_background_agent(session: &SessionHandle, held_by_subagents: bool) {
+    let chat_id = session.core.chat_id.clone();
+    let host = session.composer().host.device_id.clone();
+    session
+        .core
+        .client()
+        .unwrap()
+        .registry_write(|doc| {
+            doc.upsert_session(&zeron_proto::Session {
+                last_completed_turn: None,
+                running_subagents: 1,
+                compact_plan: None,
+                classifying: None,
+                chat_id,
+                device_id: host,
+                status: zeron_proto::SessionStatus::Working,
+                started_at: Some(chrono::Utc::now()),
+                updated_at: chrono::Utc::now(),
+                held_by_subagents,
+                compacting: false,
+                background_tasks: Vec::new(),
+                last_turn_outcome: None,
+                terminal_activity: None,
+            })
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_turn_parked_on_a_background_agent_takes_a_send_not_a_queue_row() {
+    let (client, _dir) = demo(false);
+    let session = client.open_session("chat-deploy").unwrap();
+    wait_for("the host", || session.composer().host.online);
+    park_on_background_agent(&session, true);
+    wait_for("the Working dot", || {
+        session.composer().live.indicator == zeron_proto::ChatIndicator::Working
+    });
+    assert!(
+        !session.snapshot().working,
+        "no Working… row for a parked turn"
+    );
+    assert!(!session.composer().live.turn_running);
+    let outcome = session.send(SendRequest::text("next")).unwrap();
+    assert!(
+        matches!(outcome, crate::SendOutcome::Started { .. }),
+        "the desktop sends into a parked turn: {outcome:?}"
+    );
+    assert!(session.core.doc().read_queue().unwrap().is_empty());
+
+    let (client, _dir) = demo(false);
+    let session = client.open_session("chat-deploy").unwrap();
+    wait_for("the host", || session.composer().host.online);
+    park_on_background_agent(&session, false);
+    wait_for("the running turn", || session.composer().live.turn_running);
+    wait_for("the Working… row", || session.snapshot().working);
+    let outcome = session.send(SendRequest::text("next")).unwrap();
+    assert!(
+        matches!(outcome, crate::SendOutcome::Queued { .. }),
+        "a live turn still queues: {outcome:?}"
+    );
+}
+
+fn revoked_notes(session: &SessionHandle) -> usize {
+    session
+        .snapshot()
+        .transcript()
+        .iter()
+        .filter(|entry| {
+            entry.message.parts.iter().any(|part| {
+                matches!(part, MessagePart::Text { text, .. } if text == zeron_proto::computer::cards::COMPUTER_DESKTOP_REVOKED_NOTE)
+            })
+        })
+        .count()
+}
+
+#[test]
+fn stop_revokes_this_chat_once_and_ends_its_preview() {
+    let runtime = crate::runtime::shared();
+    let (client, _dir) = demo(true);
+    let session = client.open_session("chat-computer").unwrap();
+    wait_for("the host", || session.composer().host.online);
+    wait_for("the fixture", || session.snapshot().transcript_len > 0);
+    let before = revoked_notes(&session);
+    assert!(runtime.block_on(session.computer_stop()).unwrap());
+    assert!(
+        !runtime.block_on(session.computer_stop()).unwrap(),
+        "nothing left to revoke"
+    );
+    wait_for("the revoked note", || revoked_notes(&session) == before + 1);
+    assert_eq!(
+        runtime.block_on(session.computer_still_frame()).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn the_mac_page_stop_revokes_every_live_chat_on_that_mac() {
+    let runtime = crate::runtime::shared();
+    let (client, _dir) = demo(true);
+    let session = client.open_session("chat-computer").unwrap();
+    wait_for("the host", || session.composer().host.online);
+    let host = session.composer().host.device_id.clone();
+    let page = runtime.block_on(client.host_page(&host, "mac")).unwrap();
+    let stop = page
+        .sections
+        .iter()
+        .flat_map(|s| &s.rows)
+        .find(|row| row.id == "stop-computer")
+        .expect("the Stop row");
+    assert_eq!(
+        stop.kind,
+        crate::host_settings::RowKind::Action { destructive: true }
+    );
+    let confirm = stop.actions.iter().find(|a| a.id == stop.id).unwrap();
+    assert_eq!(
+        confirm.confirm,
+        Some(format!("Stop computer use on {}?", page.title))
+    );
+    assert!(
+        runtime
+            .block_on(session.computer_still_frame())
+            .unwrap()
+            .is_some()
+    );
+    runtime
+        .block_on(client.host_action(&host, "mac", "stop-computer", None))
+        .unwrap();
+    assert_eq!(
+        runtime.block_on(session.computer_still_frame()).unwrap(),
+        None
+    );
+    assert!(
+        !runtime.block_on(session.computer_stop()).unwrap(),
+        "the Mac page already revoked this chat"
+    );
+    let linux = client
+        .workspace()
+        .devices
+        .iter()
+        .find(|d| d.platform == "linux")
+        .map(|d| d.id.clone())
+        .expect("the demo has a Linux host");
+    let page = runtime.block_on(client.host_page(&linux, "mac")).unwrap();
+    assert!(
+        page.sections
+            .iter()
+            .flat_map(|s| &s.rows)
+            .all(|row| row.id != "stop-computer"),
+        "a host that cannot run computer use offers no Stop"
+    );
+}
+
+#[test]
+fn terminals_and_project_actions_come_from_the_chats_host() {
+    use zeron_proto::TerminalColor;
+    let runtime = crate::runtime::shared();
+    let (client, _dir) = demo(false);
+    let session = client.open_session("chat-computer").unwrap();
+    wait_for("the host", || session.composer().host.online);
+    let terminals = runtime.block_on(session.list_terminals()).unwrap();
+    assert_eq!(terminals.len(), 1);
+    let screen = runtime
+        .block_on(session.read_terminal(&terminals[0].id))
+        .unwrap();
+    assert_eq!(screen.lines.len(), screen.styled_lines.len());
+    assert!(
+        screen
+            .styled_lines
+            .iter()
+            .flatten()
+            .any(|run| run.bold && run.fg == Some(TerminalColor::Indexed(1))),
+        "the host's colours travel with the text"
+    );
+
+    let actions = runtime
+        .block_on(session.list_project_actions())
+        .unwrap()
+        .expect("chat-computer has a project");
+    let names: Vec<&str> = actions.actions.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, ["Dev server", "Test", "Lint"]);
+    let run = runtime
+        .block_on(session.run_project_action("act-lint", 120, 32))
+        .unwrap();
+    assert_eq!(run.action_name, "Lint");
+    let newest = |session: &SessionHandle| {
+        runtime
+            .block_on(session.list_terminals())
+            .unwrap()
+            .remove(0)
+    };
+    let tab = newest(&session);
+    assert_eq!(
+        (tab.id.as_str(), tab.title.as_deref()),
+        (run.terminal.id.as_str(), Some("Lint"))
+    );
+    assert_eq!(tab.exit_code, None, "a run starts out running");
+    wait_for("the run to exit", || newest(&session).exit_code == Some(1));
+
+    let other = client.open_session("chat-veil").unwrap();
+    wait_for("the host", || other.composer().host.online);
+    assert!(
+        runtime
+            .block_on(other.read_terminal(&terminals[0].id))
+            .is_err(),
+        "a terminal belongs to its chat"
     );
 }

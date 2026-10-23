@@ -4,7 +4,7 @@ use chrono::{TimeZone, Utc};
 use gpui::{
     AnyElement, App, Context, ElementId, Hsla, Render, SharedString, Window, div, prelude::*, px,
 };
-pub(crate) use zeron_engine::routing::target_of;
+pub(crate) use zeron_proto::route_preview::{same_model, target_of};
 use zeron_proto::{Chat, ChildRoute, RouteTarget};
 
 use crate::theme::Theme;
@@ -64,10 +64,6 @@ pub(crate) fn fell_back_tint(theme: &Theme) -> Hsla {
     theme.terminal.ansi[6]
 }
 
-pub(crate) fn same_model(a: &RouteTarget, b: &RouteTarget) -> bool {
-    a.harness == b.harness && a.model == b.model
-}
-
 pub(crate) fn clock(ms: i64) -> Option<String> {
     let at = Utc.timestamp_millis_opt(ms).single()?;
     crate::settings::accounts::format_reset(Some(at), Utc::now())
@@ -75,14 +71,7 @@ pub(crate) fn clock(ms: i64) -> Option<String> {
 }
 
 fn short_reason(route: &ChildRoute) -> String {
-    let reason = route.reason.as_deref().unwrap_or("route unavailable");
-    let short = match reason.strip_suffix(" out of quota") {
-        Some(harness) => format!("{harness} quota"),
-        None => match reason.strip_suffix(" is not available") {
-            Some(harness) => format!("{harness} unavailable"),
-            None => reason.to_string(),
-        },
-    };
+    let short = zeron_proto::transcript::route_short_reason(route);
     match route.resets_at.and_then(clock) {
         Some(at) => format!("{short}, resets {at}"),
         None => short,

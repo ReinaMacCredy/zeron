@@ -19,7 +19,7 @@ pub(super) enum Selector {
     },
 }
 
-fn role_name(word: &str) -> Option<String> {
+pub(super) fn role_name(word: &str) -> Option<String> {
     (0..=u8::MAX)
         .filter_map(Role::n)
         .map(|role| format!("{role:?}"))
@@ -30,18 +30,23 @@ impl Selector {
     pub(super) fn parse(raw: &str) -> Result<Self, String> {
         let bad = |why: &str| {
             format!(
-                "bad selector `{raw}`: {why}; expected `#e12`, `Role`, `\"text\"` or `Role \"text\"`"
+                "bad selector `{raw}`: {why}; expected `#e12`, `#w1-3`, `Role`, `\"text\"` or `Role \"text\"`"
             )
         };
         let raw = raw.trim();
         if let Some(id) = raw.strip_prefix('#') {
-            let valid = id
-                .strip_prefix('e')
-                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-            return if valid {
+            let digits = |n: &str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
+            let native = id.strip_prefix('e').is_some_and(digits);
+            let web = id
+                .strip_prefix('w')
+                .and_then(|rest| rest.split_once('-'))
+                .is_some_and(|(view, n)| digits(view) && digits(n));
+            return if native || web {
                 Ok(Selector::Ref(id.to_owned()))
             } else {
-                Err(bad("a ref is `#e` and a number"))
+                Err(bad(
+                    "a ref is `#e` and a number, or a web ref such as `#w1-3`",
+                ))
             };
         }
         let (word, rest) = raw.split_at(raw.find('"').unwrap_or(raw.len()));
@@ -104,7 +109,7 @@ impl Selector {
             &|node| contains(&node.value, &text),
             &|node| contains(&node.placeholder, &text) || contains(&node.description, &text),
         ];
-        tiers
+        let mut hits = tiers
             .iter()
             .map(|tier| {
                 candidates
@@ -114,7 +119,12 @@ impl Selector {
                     .collect::<Vec<_>>()
             })
             .find(|hits| !hits.is_empty())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Page text is the page's to choose, so it never shadows the app's own control.
+        if hits.iter().any(|&i| !nodes[i].web) {
+            hits.retain(|&i| !nodes[i].web);
+        }
+        hits
     }
 
     fn near(&self, nodes: &[Node]) -> Vec<usize> {
@@ -232,6 +242,22 @@ impl Element {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub(super) enum Keys {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Keys {
+    pub(super) fn strokes(&self) -> Vec<&str> {
+        match self {
+            Keys::One(keys) => keys.split_whitespace().collect(),
+            Keys::Many(keys) => keys.iter().flat_map(|k| k.split_whitespace()).collect(),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "for", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub(super) enum Seen {
@@ -274,7 +300,7 @@ impl Seen {
     }
 }
 
-fn check(seen: &Seen, tree: &Tree) -> Result<Value, String> {
+pub(super) fn check(seen: &Seen, tree: &Tree) -> Result<Value, String> {
     match seen {
         Seen::Select { element, .. } => element
             .find(tree)
@@ -385,11 +411,15 @@ mod tests {
             }
         );
         assert_eq!(sel("#e12"), Selector::Ref("e12".into()));
+        assert_eq!(sel("#w1-3"), Selector::Ref("w1-3".into()));
         for bad in [
             "",
             "#12",
             "#e",
             "#e1x",
+            "#w1",
+            "#w-3",
+            "#w1-",
             "Buton",
             "Button New",
             "Button \"open",
@@ -421,6 +451,49 @@ mod tests {
         ];
         assert_eq!(sel("Switch \"compact MODE\"").hits(&switches), vec![1]);
         assert_eq!(sel("Switch \"compact\"").hits(&switches), vec![0, 1]);
+    }
+
+    #[test]
+    fn a_web_node_never_shadows_a_native_one_in_the_same_tier() {
+        let web = |id: &str, label: &str| {
+            let mut node = node(id, "Button", Some(label));
+            node.web = true;
+            node
+        };
+        let tree = tree_of(&[
+            (0, node("e1", "Window", None)),
+            (1, web("w1-0", "page")),
+            (2, web("w1-3", "Save")),
+            (1, node("e2", "Button", Some("Save"))),
+            (1, node("e3", "Button", Some("Save draft"))),
+            (2, web("w1-4", "Option B")),
+        ]);
+        let found = |select: &str| {
+            Element::Select {
+                select: select.into(),
+                nth: None,
+            }
+            .find(&tree)
+            .map(|node| node.id.clone())
+        };
+        assert_eq!(found("Button \"Save\""), Ok("e2".into()));
+        assert_eq!(found("Button \"Option B\""), Ok("w1-4".into()));
+        assert_eq!(
+            found("Button \"save d\""),
+            Ok("e3".into()),
+            "a native substring hit beats nothing"
+        );
+        assert_eq!(sel("\"save\"").hits(&tree.nodes), vec![3]);
+        assert_eq!(sel("#w1-3").hits(&tree.nodes), vec![2]);
+        let mut only_web = tree.clone();
+        only_web
+            .nodes
+            .retain(|node| node.id != "e2" && node.id != "e3");
+        assert_eq!(
+            sel("Button \"Save\"").hits(&only_web.nodes),
+            vec![2],
+            "with no native match the page's node resolves"
+        );
     }
 
     #[test]

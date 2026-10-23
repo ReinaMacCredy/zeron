@@ -1,0 +1,35 @@
+{
+  "name": "composer-typing",
+  "steps": [
+    {
+      "select": "Button \"Home\"",
+      "ui": "click"
+    },
+    {
+      "select": "MultilineTextInput \"What's on your mind?\"",
+      "for": "select",
+      "ui": "wait"
+    },
+    {
+      "select": "MultilineTextInput \"What's on your mind?\"",
+      "ui": "click"
+    },
+    {
+      "text": "hello",
+      "ui": "type"
+    },
+    {
+      "keys": [
+        "cmd-a",
+        "backspace"
+      ],
+      "ui": "key"
+    },
+    {
+      "select": "Button \"Customize\"",
+      "dx": 0.0,
+      "dy": -120.0,
+      "ui": "scroll"
+    }
+  ]
+}

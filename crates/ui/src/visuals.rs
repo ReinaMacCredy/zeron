@@ -250,7 +250,7 @@ impl VisualFrame {
             error: None,
             link_ui: None,
             local: Rc::default(),
-            started: Instant::now(),
+            started: crate::motion::now(),
             _tasks: tasks,
         }
     }
@@ -341,7 +341,7 @@ impl VisualFrame {
     }
 
     fn time(&self) -> f64 {
-        self.started.elapsed().as_secs_f64()
+        crate::motion::since(self.started).as_secs_f64()
     }
 }
 
@@ -1524,7 +1524,7 @@ impl VisualFrame {
             if let Some(orbit) = this.local.borrow_mut().cameras.get_mut(key)
                 && orbit.drag.take().is_some()
             {
-                orbit.spin_epoch = Instant::now();
+                orbit.spin_epoch = crate::motion::now();
             }
         };
         el = el
@@ -1534,7 +1534,7 @@ impl VisualFrame {
                 cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                     cx.stop_propagation();
                     if let Some(orbit) = this.local.borrow_mut().cameras.get_mut(&down_key) {
-                        orbit.yaw += spin * orbit.spin_epoch.elapsed().as_secs_f32();
+                        orbit.yaw += spin * crate::motion::since(orbit.spin_epoch).as_secs_f32();
                         orbit.drag = Some((event.position, orbit.yaw, orbit.pitch));
                     }
                     cx.notify();
@@ -1591,12 +1591,12 @@ impl VisualFrame {
             .or_insert(Orbit {
                 yaw: node.yaw,
                 pitch: node.pitch,
-                spin_epoch: Instant::now(),
+                spin_epoch: crate::motion::now(),
                 drag: None,
             });
         let yaw = match orbit.drag {
             Some(_) => orbit.yaw,
-            None => orbit.yaw + spin * orbit.spin_epoch.elapsed().as_secs_f32(),
+            None => orbit.yaw + spin * crate::motion::since(orbit.spin_epoch).as_secs_f32(),
         };
         let moving = animate || (spin != 0.0 && orbit.drag.is_none());
         let mut el = div()
@@ -1828,12 +1828,12 @@ impl VisualFrame {
             .or_insert(Orbit {
                 yaw: node.yaw,
                 pitch: node.pitch,
-                spin_epoch: Instant::now(),
+                spin_epoch: crate::motion::now(),
                 drag: None,
             });
         let yaw = match orbit.drag {
             Some(_) => orbit.yaw,
-            None => orbit.yaw + spin * orbit.spin_epoch.elapsed().as_secs_f32(),
+            None => orbit.yaw + spin * crate::motion::since(orbit.spin_epoch).as_secs_f32(),
         };
         let camera = zeron_visual::Camera {
             yaw,

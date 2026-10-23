@@ -485,6 +485,8 @@ pub struct SessionRow {
     /// Wire harness id (`claude-code`).
     pub harness: Option<String>,
     pub harness_label: Option<String>,
+    pub harness_marks: Vec<String>,
+    pub instance_id: Option<String>,
     pub model: Option<String>,
     pub model_label: Option<String>,
     /// Wire effort (`xhigh`).
@@ -497,6 +499,9 @@ pub struct SessionRow {
     pub host_indicator: ChatIndicator,
     /// Run start of the live turn while Working/AwaitingInput.
     pub working_since_ms: Option<i64>,
+    pub held_by_subagents: bool,
+    pub background_ring: Option<u32>,
+    pub background_label: Option<String>,
     pub last_activity_ms: i64,
     /// `now` / `34m` / `4h` / `2d` at derive time.
     pub time_label: String,
@@ -509,6 +514,11 @@ pub struct SessionRow {
     /// Oldest unadopted send from this device (open sessions only).
     pub send_state: Option<SendState>,
     pub parent_chat_id: Option<String>,
+    /// On the Settled shelf (its host's `settle_after_days`, or a Settle).
+    pub settled: bool,
+    pub sidechat_of: Option<String>,
+    pub sidechat_expired: bool,
+    pub sidechats: Vec<String>,
     /// 2 = chat2; 1 = legacy (not dialable).
     pub room_gen: u32,
 }
@@ -532,6 +542,8 @@ impl From<&zc::SessionRow> for SessionRow {
             is_cloud: r.is_cloud,
             harness: r.harness.clone(),
             harness_label: r.harness_label.clone(),
+            harness_marks: r.harness_marks.clone(),
+            instance_id: r.instance_id.clone(),
             model: r.model.clone(),
             model_label: r.model_label.clone(),
             reasoning: r.reasoning.clone(),
@@ -540,6 +552,9 @@ impl From<&zc::SessionRow> for SessionRow {
             indicator: r.indicator.into(),
             host_indicator: r.host_indicator.into(),
             working_since_ms: r.working_since_ms,
+            held_by_subagents: r.held_by_subagents,
+            background_ring: r.background_ring,
+            background_label: r.background_label.clone(),
             last_activity_ms: r.last_activity_ms,
             time_label: r.time_label.clone(),
             created_at_ms: r.created_at_ms,
@@ -550,6 +565,10 @@ impl From<&zc::SessionRow> for SessionRow {
             pull_request: r.pull_request.as_ref().map(PullRequest::from),
             send_state: r.send_state.map(Into::into),
             parent_chat_id: r.parent_chat_id.clone(),
+            settled: r.settled,
+            sidechat_of: r.sidechat_of.clone(),
+            sidechat_expired: r.sidechat_expired,
+            sidechats: r.sidechats.clone(),
             room_gen: r.room_gen,
         }
     }
@@ -575,8 +594,65 @@ pub struct FrontPage {
     pub pinned: Vec<SessionRow>,
     /// User sections ("folders"), each in recency order.
     pub sections: Vec<SectionView>,
-    /// Everything else, by recency.
+    /// Everything else unsettled, in the view's order.
     pub recent: Vec<SessionRow>,
+    /// `recent` by project or by device; empty when the view is one list.
+    pub groups: Vec<FrontGroup>,
+    /// The Settled shelf (Inbox only), newest settle first.
+    pub settled: Vec<SessionRow>,
+    /// Step threads and agent-opened chats, by the lead or creator they draw under.
+    pub nested: HashMap<String, Vec<SessionRow>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum SidebarOrganization {
+    ByProject,
+    ByDevice,
+    InOneList,
+    Inbox,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum SidebarSort {
+    LastUpdated,
+    Created,
+}
+
+impl From<SidebarOrganization> for zc::SidebarOrganization {
+    fn from(o: SidebarOrganization) -> Self {
+        match o {
+            SidebarOrganization::ByProject => Self::ByProject,
+            SidebarOrganization::ByDevice => Self::ByDevice,
+            SidebarOrganization::InOneList => Self::InOneList,
+            SidebarOrganization::Inbox => Self::Inbox,
+        }
+    }
+}
+
+impl From<SidebarSort> for zc::SidebarSort {
+    fn from(s: SidebarSort) -> Self {
+        match s {
+            SidebarSort::LastUpdated => Self::LastUpdated,
+            SidebarSort::Created => Self::Created,
+        }
+    }
+}
+
+#[uniffi::export]
+pub fn shelf_visible(shown: u32, total: u32) -> u32 {
+    zeron_proto::sidebar_view::shelf_visible(shown as usize, total as usize) as u32
+}
+
+#[uniffi::export]
+pub fn shelf_next(shown: u32) -> u32 {
+    zeron_proto::sidebar_view::shelf_next(shown as usize) as u32
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FrontGroup {
+    pub id: String,
+    pub name: String,
+    pub sessions: Vec<SessionRow>,
 }
 
 impl From<&zc::FrontPage> for FrontPage {
@@ -594,6 +670,21 @@ impl From<&zc::FrontPage> for FrontPage {
                 })
                 .collect(),
             recent: rows(&f.recent),
+            groups: f
+                .groups
+                .iter()
+                .map(|g| FrontGroup {
+                    id: g.id.clone(),
+                    name: g.name.clone(),
+                    sessions: rows(&g.sessions),
+                })
+                .collect(),
+            settled: rows(&f.settled),
+            nested: f
+                .nested
+                .iter()
+                .map(|(lead, children)| (lead.clone(), rows(children)))
+                .collect(),
         }
     }
 }
@@ -783,6 +874,46 @@ pub struct ChatConfig {
     /// Model option id → choice id (`contextWindow` → `1m`).
     pub model_options: HashMap<String, String>,
     pub sandbox: SandboxLevel,
+    #[uniffi(default = None)]
+    pub profile_id: Option<String>,
+    /// None runs the harness's default instance.
+    #[uniffi(default = None)]
+    pub instance_id: Option<String>,
+    /// None keeps the chat's current mode (Full for a new chat).
+    #[uniffi(default = None)]
+    pub permission_mode: Option<PermissionMode>,
+    /// A new chat's profile instructions; an existing chat keeps its own.
+    #[uniffi(default = "")]
+    pub instructions: String,
+    #[uniffi(default = [])]
+    pub disabled_tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum PermissionMode {
+    Ask,
+    Auto,
+    Full,
+}
+
+impl From<zeron_proto::PermissionMode> for PermissionMode {
+    fn from(mode: zeron_proto::PermissionMode) -> Self {
+        match mode {
+            zeron_proto::PermissionMode::Ask => Self::Ask,
+            zeron_proto::PermissionMode::Auto => Self::Auto,
+            zeron_proto::PermissionMode::Full => Self::Full,
+        }
+    }
+}
+
+impl From<PermissionMode> for zeron_proto::PermissionMode {
+    fn from(mode: PermissionMode) -> Self {
+        match mode {
+            PermissionMode::Ask => Self::Ask,
+            PermissionMode::Auto => Self::Auto,
+            PermissionMode::Full => Self::Full,
+        }
+    }
 }
 
 fn wire<T: serde::Serialize>(value: &T) -> String {
@@ -819,6 +950,11 @@ impl From<&zc::ChatConfig> for ChatConfig {
                 zeron_proto::SandboxLevel::WorkspaceWrite => SandboxLevel::WorkspaceWrite,
                 zeron_proto::SandboxLevel::DangerFullAccess => SandboxLevel::DangerFullAccess,
             },
+            profile_id: c.profile_id.clone(),
+            instance_id: c.instance_id.clone(),
+            permission_mode: Some(c.permission_mode.into()),
+            instructions: c.instructions.clone(),
+            disabled_tools: c.disabled_tools.clone(),
         }
     }
 }
@@ -845,24 +981,27 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
                 SandboxLevel::WorkspaceWrite => zeron_proto::SandboxLevel::WorkspaceWrite,
                 SandboxLevel::DangerFullAccess => zeron_proto::SandboxLevel::DangerFullAccess,
             },
-            permission_mode: Default::default(),
-            instructions: String::new(),
-            profile_id: None,
-            instance_id: None,
-            disabled_tools: Vec::new(),
+            permission_mode: c.permission_mode.map(Into::into).unwrap_or_default(),
+            instructions: c.instructions,
+            profile_id: c.profile_id,
+            instance_id: c.instance_id,
+            disabled_tools: c.disabled_tools,
         })
     }
 }
 
 impl ChatConfig {
     pub(crate) fn over(self, existing: Option<zc::ChatConfig>) -> CoreResult<zc::ChatConfig> {
+        let keep_mode = self.permission_mode.is_none();
         let mut config: zc::ChatConfig = self.try_into()?;
         if let Some(existing) = existing {
-            config.permission_mode = existing.permission_mode;
+            if keep_mode {
+                config.permission_mode = existing.permission_mode;
+            }
             config.instructions = existing.instructions;
-            config.profile_id = existing.profile_id;
-            if existing.harness == config.harness {
-                config.instance_id = existing.instance_id;
+            config.disabled_tools = existing.disabled_tools;
+            if existing.harness != config.harness && config.instance_id == existing.instance_id {
+                config.instance_id = None;
             }
         }
         Ok(config)
@@ -966,12 +1105,15 @@ pub struct ModelInfo {
     pub options: Vec<ModelOption>,
     /// The picker's default effort for this model.
     pub default_reasoning: Option<String>,
+    #[uniffi(default = false)]
+    pub is_new: bool,
 }
 
 impl From<zc::catalog::ModelInfo> for ModelInfo {
     fn from(m: zc::catalog::ModelInfo) -> Self {
         Self {
             default_reasoning: zc::catalog::default_reasoning(&m),
+            is_new: m.is_new,
             id: m.id,
             label: m.label,
             description: m.description,
@@ -1138,15 +1280,33 @@ mod tests {
             instructions: "Plan only.".into(),
             profile_id: Some("planner".into()),
             instance_id: None,
-            disabled_tools: Vec::new(),
+            disabled_tools: vec!["mcp__zeron__computer".into()],
         };
         let mut edit = ChatConfig::from(&existing);
         edit.reasoning = Some("high".into());
-        let written = edit.over(Some(existing)).unwrap();
+        let written = edit.clone().over(Some(existing.clone())).unwrap();
         assert_eq!(written.reasoning, Some(zeron_proto::ReasoningLevel::High));
         assert_eq!(written.permission_mode, zeron_proto::PermissionMode::Ask);
         assert_eq!(written.instructions, "Plan only.");
         assert_eq!(written.profile_id.as_deref(), Some("planner"));
+        assert_eq!(written.disabled_tools, existing.disabled_tools);
+
+        let legacy = ChatConfig {
+            profile_id: None,
+            permission_mode: None,
+            ..edit.clone()
+        };
+        let kept = legacy.over(Some(existing.clone())).unwrap();
+        assert_eq!(kept.permission_mode, zeron_proto::PermissionMode::Ask);
+
+        let changed = ChatConfig {
+            profile_id: Some("reviewer".into()),
+            permission_mode: Some(PermissionMode::Full),
+            ..edit
+        };
+        let changed = changed.over(Some(existing)).unwrap();
+        assert_eq!(changed.profile_id.as_deref(), Some("reviewer"));
+        assert_eq!(changed.permission_mode, zeron_proto::PermissionMode::Full);
     }
 
     #[test]

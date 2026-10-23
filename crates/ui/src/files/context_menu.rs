@@ -228,6 +228,7 @@ impl FilesSurface {
                     .id(gpui::SharedString::from(format!("tree-menu-{index}")))
                     .role(gpui::Role::MenuItem)
                     .aria_label(label.clone())
+                    .aria_disabled(!enabled)
                     .when(index == 3, |row| row.text_color(theme.danger))
                     .when(index == 1, |row| {
                         row.tooltip(move |_, cx| {

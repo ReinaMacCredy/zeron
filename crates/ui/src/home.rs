@@ -11,7 +11,7 @@ use zeron_proto::change_request_assessment::{CiState, check_failed, check_status
 use zeron_proto::{
     ChangeRequestDetail, ChangeRequestFilter, ChangeRequestListItem, ChangeRequestPage,
     ChangeRequestReviewDecision, Chat, ChatIndicator, GitActivity, GitActivityRequest,
-    ListeningServices, ListeningServicesRequest, PlanProgress, StepStatus, SystemStats, TaskStatus,
+    ListeningServices, ListeningServicesRequest, PlanProgress, SystemStats, TaskStatus,
 };
 use zeron_rpc::methods;
 
@@ -19,7 +19,6 @@ use crate::icons::{self, icon};
 use crate::popover;
 use crate::settings::HomeWidgets as Toggles;
 use crate::state::AppState;
-use crate::tasks::PlanPhase;
 use crate::theme::Theme;
 
 const GRID_MAX_WIDTH: f32 = 880.0;
@@ -329,7 +328,7 @@ impl HomeView {
     }
 
     fn toggle_collapsed(&mut self, cx: &mut Context<Self>) {
-        self.collapse_since = Some(Instant::now());
+        self.collapse_since = Some(crate::motion::now());
         crate::settings::update_home_widgets(cx, |widgets| widgets.collapsed = !widgets.collapsed);
         cx.notify();
     }
@@ -370,7 +369,7 @@ impl HomeView {
         }
         let total =
             crate::motion::SIDECAR_LAYOUT.total().as_secs_f32() * crate::motion::speed_scale();
-        let raw = since.elapsed().as_secs_f32() / total.max(f32::EPSILON);
+        let raw = crate::motion::since(since).as_secs_f32() / total.max(f32::EPSILON);
         if raw < 1.0 {
             window.request_animation_frame();
         }
@@ -489,6 +488,9 @@ impl HomeView {
                 let id: SharedString = format!("home-pr-project-{index}").into();
                 popover::menu_row(theme, selected, id.clone())
                     .id(id)
+                    .role(gpui::Role::MenuItemRadio)
+                    .aria_label(name.clone())
+                    .aria_toggled(selected.into())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.pr_pick = Some(pick.clone());
                         this.close_pr_menu(cx);
@@ -560,12 +562,7 @@ fn local_git_projects(state: &AppState) -> Vec<String> {
 }
 
 pub(crate) fn chat_title(chat: &Chat) -> String {
-    chat.title
-        .as_deref()
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .unwrap_or("New session")
-        .to_owned()
+    chat.display_title()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -659,7 +656,7 @@ pub(crate) async fn load_home_prs(
                 Err(error) => {
                     prs.error.get_or_insert_with(|| {
                         let error = crate::pull_requests::map_rpc_error(&error, "This device");
-                        crate::pull_requests::error_copy(&error).0
+                        error.copy().0
                     });
                 }
             }
@@ -693,26 +690,10 @@ pub(crate) fn composer_pr_scope(prs: &HomePrs, state: &AppState) -> PrScope {
         .unwrap_or_else(|| PrScope::Unlinked(space.display_name().to_owned()))
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct MissionRow {
-    pub task_id: String,
-    pub title: String,
-    pub progress: PlanProgress,
-    pub status: TaskStatus,
-    pub label: String,
-    pub current: Option<String>,
-}
+pub(crate) use zeron_proto::mission::MissionRow;
 
 pub(crate) fn mission_rows(state: &AppState, now: DateTime<Utc>) -> Vec<MissionRow> {
-    let mut tasks: Vec<&zeron_proto::Task> = state
-        .tasks
-        .iter()
-        .filter(|task| task.has_plan() && !task.deleted && task.completed_at.is_none())
-        .collect();
-    tasks.sort_by(|a, b| {
-        (&a.order_key, a.created_at, &a.id).cmp(&(&b.order_key, b.created_at, &b.id))
-    });
-    let mut rows: Vec<MissionRow> = tasks
+    let mut rows: Vec<MissionRow> = zeron_proto::mission::open_missions(&state.tasks)
         .into_iter()
         .map(|task| mission_row_of(state, task, now))
         .collect();
@@ -722,19 +703,7 @@ pub(crate) fn mission_rows(state: &AppState, now: DateTime<Utc>) -> Vec<MissionR
 
 pub(crate) fn done_today_rows(state: &AppState, now: DateTime<Utc>) -> Vec<MissionRow> {
     let today = now.with_timezone(&chrono::Local).date_naive();
-    let mut tasks: Vec<&zeron_proto::Task> = state
-        .tasks
-        .iter()
-        .filter(|task| {
-            task.has_plan()
-                && !task.deleted
-                && task
-                    .completed_at
-                    .is_some_and(|at| at.with_timezone(&chrono::Local).date_naive() == today)
-        })
-        .collect();
-    tasks.sort_by_key(|task| std::cmp::Reverse(task.completed_at));
-    tasks
+    zeron_proto::mission::missions_done_on(&state.tasks, today, &chrono::Local)
         .into_iter()
         .map(|task| mission_row_of(state, task, now))
         .collect()
@@ -742,50 +711,8 @@ pub(crate) fn done_today_rows(state: &AppState, now: DateTime<Utc>) -> Vec<Missi
 
 fn mission_row_of(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> MissionRow {
     let plan = crate::tasks::rollup(state, task, now);
-    let phase = plan.phase(task);
-    let (word, status) = plan.label(task);
     let held = crate::supervisor::approval_held(state, &task.id, now);
-    let current = plan
-        .steps
-        .iter()
-        .position(|row| !matches!(row.status, StepStatus::Done | StepStatus::Skipped))
-        .or_else(|| {
-            plan.steps
-                .iter()
-                .rposition(|row| row.status != StepStatus::Skipped)
-        })
-        .or(plan.steps.len().checked_sub(1));
-    let label = match phase {
-        PlanPhase::PlanReady => "Needs you · plan review".to_owned(),
-        _ if held => crate::supervisor::HELD_APPROVAL.to_owned(),
-        PlanPhase::Planning => "Planning".to_owned(),
-        PlanPhase::Status(TaskStatus::NeedsYou) => plan
-            .steps
-            .iter()
-            .position(|row| matches!(row.status, StepStatus::NeedsYou | StepStatus::Failed))
-            .map(|index| format!("Needs you · step {}", index + 1))
-            .unwrap_or_else(|| word.to_owned()),
-        _ => match current {
-            Some(ix) => format!("Step {}/{} · {word}", ix + 1, plan.steps.len()),
-            None => word.to_owned(),
-        },
-    };
-    MissionRow {
-        task_id: task.id.clone(),
-        title: task.title.clone(),
-        progress: plan.progress,
-        status: if held { TaskStatus::Working } else { status },
-        label,
-        current: current.map(|ix| {
-            let row = &plan.steps[ix];
-            format!(
-                "Step {} of {} · {}",
-                ix + 1,
-                plan.steps.len(),
-                row.step.title
-            )
-        }),
-    }
+    zeron_proto::mission::mission_row(task, &plan, held)
 }
 
 fn failing_prs(prs: &HomePrs) -> Vec<&ChangeRequestListItem> {
@@ -1007,7 +934,7 @@ impl HomeView {
                 .into_iter()
                 .map(|(chat, started)| {
                     let shell =
-                        crate::composer::background::shell_tasks(state.session_for(&chat.id))
+                        zeron_proto::background::shell_tasks(state.session_for(&chat.id))
                             .into_iter()
                             .next()
                             .map(|task| task.label);
@@ -1046,10 +973,13 @@ impl HomeView {
                 .take(4)
                 .map(|(chat_id, title, detail, mark, started, model)| {
                     let elapsed =
-                        crate::composer::background::elapsed_label((now - started).num_seconds());
+                        zeron_proto::background::elapsed_label((now - started).num_seconds());
                     let id: SharedString = format!("home-working-{chat_id}").into();
                     div()
                         .id(id.clone())
+                        .role(gpui::Role::Button)
+                        .aria_label(title.clone())
+                        .aria_description(elapsed.clone())
                         .flex()
                         .flex_col()
                         .px(px(6.0))
@@ -1141,6 +1071,8 @@ impl HomeView {
                 div()
                     .id("home-mission-more")
                     .debug_selector(|| "home-mission-more".into())
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("+{} more · Open Tasks", count - MISSION_ROWS))
                     .py(px(4.0))
                     .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_faint)
@@ -1340,6 +1272,9 @@ impl HomeView {
                         let id: SharedString = format!("home-git-project-{index}").into();
                         popover::menu_row(theme, selected, id.clone())
                             .id(id)
+                            .role(gpui::Role::MenuItemRadio)
+                            .aria_label(name.clone())
+                            .aria_toggled(selected.into())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.select_git_project(space_id.clone(), cx)
                             }))
@@ -1446,6 +1381,9 @@ impl HomeView {
         let hovered = self.meter_hover == Some(label);
         div()
             .id(SharedString::from(format!("home-meter-{label}")))
+            .role(gpui::Role::Meter)
+            .aria_label(label)
+            .aria_value(detail.clone())
             .relative()
             .flex_1()
             .flex()
@@ -1546,6 +1484,9 @@ impl HomeView {
                         let url = format!("http://localhost:{}", service.port);
                         div()
                             .id(SharedString::from(format!("home-service-{}", service.port)))
+                            .role(gpui::Role::Link)
+                            .aria_label(label.clone())
+                            .aria_description(format!(":{} {right}", service.port))
                             .h(px(ROW_HEIGHT))
                             .flex()
                             .items_center()
@@ -1618,6 +1559,8 @@ impl HomeView {
                     let chat_id = area.chat_id.clone();
                     div()
                         .id(SharedString::from(format!("home-recent-{index}")))
+                        .role(gpui::Role::Button)
+                        .aria_label(area.label.clone())
                         .h(px(ROW_HEIGHT))
                         .flex()
                         .items_center()
@@ -1682,6 +1625,9 @@ impl HomeView {
                             let url = item.url.clone();
                             div()
                                 .id(SharedString::from(format!("home-ci-{}", item.url)))
+                                .role(gpui::Role::Button)
+                                .aria_label(check.clone())
+                                .aria_description(format!("{repo}#{}", item.number))
                                 .h(px(ROW_HEIGHT))
                                 .flex()
                                 .items_center()
@@ -1773,6 +1719,9 @@ fn pr_row(
     };
     div()
         .id(SharedString::from(format!("home-pr-{}", item.url)))
+        .role(gpui::Role::Button)
+        .aria_label(item.title.clone())
+        .aria_description(format!("{repo}#{} · {right}", item.number))
         .h(px(ROW_HEIGHT))
         .flex()
         .items_center()
@@ -1849,6 +1798,9 @@ fn mission_row(theme: &Theme, row: MissionRow, cx: &mut Context<HomeView>) -> An
     div()
         .id(id.clone())
         .debug_selector(move || id.to_string())
+        .role(gpui::Role::Button)
+        .aria_label(row.title.clone())
+        .aria_description(row.label.clone())
         .h(px(ROW_HEIGHT))
         .flex()
         .items_center()
@@ -2061,6 +2013,9 @@ fn filter_trigger(
     div()
         .id(id)
         .debug_selector(move || id.to_string())
+        .role(gpui::Role::Button)
+        .aria_label(label.clone())
+        .aria_expanded(open)
         .flex()
         .items_center()
         .gap(px(4.0))
@@ -2100,6 +2055,10 @@ fn card(
     body: Vec<AnyElement>,
 ) -> AnyElement {
     div()
+        .id(SharedString::from(format!("home-card-{title}")))
+        .role(gpui::Role::Group)
+        .aria_label(title)
+        .when_some(count.clone(), |el, count| el.aria_description(count))
         .w_full()
         .flex()
         .flex_col()
@@ -2523,7 +2482,7 @@ mod tests {
             labels,
             [
                 ("review", "Needs you · plan review"),
-                ("stuck", "Needs you · step 2"),
+                ("stuck", "Step 2 failed"),
                 ("working", "Step 4/5 · Working"),
             ]
         );

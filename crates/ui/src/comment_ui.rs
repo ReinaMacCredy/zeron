@@ -150,7 +150,7 @@ pub(crate) fn render_finding_card<T: 'static>(
     fix: fn(&mut T, &str, &mut Context<T>),
     dismiss: fn(&mut T, &str, &mut Context<T>),
 ) -> AnyElement {
-    let (tint, _) = severity.colors(theme);
+    let (tint, _) = crate::review::severity_colors(severity, theme);
     let (_, title, detail) = crate::review::split_finding(&comment.body);
     let title = title.to_string();
     let action = |label: &'static str, primary: bool, run: fn(&mut T, &str, &mut Context<T>)| {
@@ -235,8 +235,8 @@ pub(crate) fn render_finding_card<T: 'static>(
                                 .text_color(theme.text)
                                 .child(SharedString::from(title.clone())),
                         )
-                        .child(action("Fix", true, fix))
-                        .child(action("Dismiss", false, dismiss)),
+                        .child(action(crate::review::FIX, true, fix))
+                        .child(action(crate::review::DISMISS, false, dismiss)),
                 )
                 .when(!detail.is_empty(), |el| {
                     el.child(

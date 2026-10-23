@@ -672,6 +672,7 @@ impl ShortcutsPage {
             .id("appshots-restore-defaults")
             .role(gpui::Role::Button)
             .aria_label("Restore Appshot defaults")
+            .aria_disabled(restore_disabled)
             .when(!restore_disabled, |el| {
                 el.tab_index(0)
                     .focus_visible(move |style| style.border_2().border_color(accent))

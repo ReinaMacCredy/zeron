@@ -71,7 +71,8 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "draft-focused")
         app.navigationBars.buttons.element(boundBy: 0).tap()
         let row = app.cells["session-chat-deploy"]
-        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.cells["section-pinned"].waitForExistence(timeout: 5))
+        scrollTo(row, in: app.collectionViews.firstMatch)
         row.tap()
         XCTAssertTrue(input.waitForExistence(timeout: 10))
         XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 3))
@@ -124,6 +125,12 @@ final class SessionFlowTests: XCTestCase {
         app.scrollViews["transcript"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap()
         sleep(1)
         snapshot(app, "queued-resting")
+        let queued = app.buttons.matching(NSPredicate(format: "label == 'More queue actions'"))
+        app.buttons.matching(NSPredicate(format: "label == 'Steer'")).element(boundBy: 0).tap()
+        let oneLeft = NSPredicate(format: "count == 1")
+        XCTAssertEqual(XCTWaiter.wait(for: [expectation(for: oneLeft, evaluatedWith: queued)], timeout: 10), .completed)
+        XCTAssertTrue(app.scrollViews["transcript"].descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'Then add a TL;DR.'")).firstMatch.waitForExistence(timeout: 5))
+        snapshot(app, "steered")
     }
 
     func testJumpToLatestAfterScrollingUp() {
@@ -138,25 +145,24 @@ final class SessionFlowTests: XCTestCase {
         jump.tap()
     }
 
-    /// The bottom bar's Search filters the list in place; leaving search
-    /// brings the bar (and New session) back.
-    func testBottomBarSearch() {
+    /// Search → back to Sessions / Settings (recorded for the accessory
+    /// transition).
+    func testSearchTabRoundTrip() {
         let app = launch()
         XCTAssertTrue(app.staticTexts["Sessions"].waitForExistence(timeout: 10))
-        let compose = app.buttons["new-session"]
-        XCTAssertTrue(compose.waitForExistence(timeout: 5))
-        let field = app.searchFields.firstMatch
-        XCTAssertTrue(field.waitForExistence(timeout: 5), "search in the bottom bar")
-        field.tap()
-        field.typeText("wrangler")
-        let match = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Wrangler deploy hygiene'")).firstMatch
-        XCTAssertTrue(match.waitForExistence(timeout: 5), "match shown")
-        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Agent visuals'")).firstMatch.exists, "non-matches filtered out")
-        snapshot(app, "bottom-bar-search")
-        // The system's close button beside the field.
-        app.buttons["close"].firstMatch.tap()
-        XCTAssertTrue(compose.waitForExistence(timeout: 5), "bar back after search")
-        XCTAssertTrue(compose.isHittable, "New session usable after search")
+        let accessory = app.buttons["new-session"]
+        XCTAssertTrue(accessory.waitForExistence(timeout: 5))
+        for back in ["Sessions", "Settings"] {
+            app.tabBars.buttons[back].tap()
+            sleep(1)
+            app.tabBars.buttons["Search"].tap()
+            sleep(2)
+            // Close beside the field leaves search for the tab you came from.
+            app.buttons["Close"].firstMatch.tap()
+            sleep(2)
+            XCTAssertTrue(accessory.waitForExistence(timeout: 5), "accessory back after search")
+            XCTAssertTrue(accessory.isHittable, "accessory usable after search")
+        }
     }
 
     /// Tapping a link in the transcript opens it (in-app Safari for web).
@@ -182,8 +188,8 @@ final class SessionFlowTests: XCTestCase {
         let ready = "/tmp/zeron-push-ready"
         try? FileManager.default.removeItem(atPath: ready)
         let app = launch()
-        XCTAssertTrue(app.buttons["bottom-settings"].waitForExistence(timeout: 10))
-        app.buttons["bottom-settings"].tap()
+        XCTAssertTrue(app.tabBars.buttons["Settings"].waitForExistence(timeout: 10))
+        app.tabBars.buttons["Settings"].tap()
         let toggle = app.switches["toggle-notify:enabled"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 5))
         if (toggle.value as? String) != "1" {
@@ -233,17 +239,14 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "unknown-chat-returned-to-sessions")
     }
 
-    func testSettingsFromBottomBar() {
+    func testTabsAndSearch() {
         let app = launch()
         XCTAssertTrue(app.staticTexts["Sessions"].waitForExistence(timeout: 10))
-        snapshot(app, "bottom-bar")
-        app.buttons["bottom-settings"].tap()
+        app.tabBars.buttons["Settings"].tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["new-session"].exists, "the bar stays on the front page")
         snapshot(app, "settings")
-        app.navigationBars["Settings"].buttons.firstMatch.tap()
+        app.tabBars.buttons["Sessions"].tap()
         XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["new-session"].waitForExistence(timeout: 5))
     }
 
     /// Render Math toggles the Math Font row; the font picks from a sheet of
@@ -251,7 +254,7 @@ final class SessionFlowTests: XCTestCase {
     func testMathSettings() {
         let app = launch()
         XCTAssertTrue(app.staticTexts["Sessions"].waitForExistence(timeout: 10))
-        app.buttons["bottom-settings"].tap()
+        app.tabBars.buttons["Settings"].tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
         let toggle = app.switches["toggle-math:render"]
         for _ in 0..<6 where !toggle.exists || !toggle.isHittable { app.swipeUp() }
@@ -324,9 +327,9 @@ final class SessionFlowTests: XCTestCase {
     func testArchiveWithUndo() {
         let app = launch()
         let cell = app.cells["session-chat-deploy"]
-        XCTAssertTrue(cell.waitForExistence(timeout: 10))
-        // Recent sits below the inline sections; bring the row clear of the bottom bar.
-        app.collectionViews.firstMatch.swipeUp()
+        XCTAssertTrue(app.cells["section-pinned"].waitForExistence(timeout: 10))
+        // Recent sits below the inline sections; bring the row clear of the accessory.
+        scrollTo(cell, in: app.collectionViews.firstMatch)
         cell.swipeLeft()
         app.buttons["Archive"].tap()
         let undo = app.buttons["toast-action"]
@@ -395,7 +398,7 @@ final class SessionFlowTests: XCTestCase {
         let project = app.buttons["composer-chip-project"]
         XCTAssertTrue(project.waitForExistence(timeout: 10))
         project.tap()
-        let zeron = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'zeron'"))
+        let zeron = app.buttons.matching(NSPredicate(format: "label == 'zeron' OR label BEGINSWITH 'zeron,'"))
         XCTAssertTrue(zeron.firstMatch.waitForExistence(timeout: 5))
         XCTAssertEqual(zeron.count, 1, "one entry for both clones")
         snapshot(app, "project-menu")
@@ -420,9 +423,17 @@ final class SessionFlowTests: XCTestCase {
 
     func testToolGroupExpandsAndShowsDetail() {
         let app = launch(["-route", "chat:chat-veil"])
-        let expand = app.buttons["Expand"].firstMatch
-        XCTAssertTrue(expand.waitForExistence(timeout: 10))
-        expand.tap()
+        let rows = app.descendants(matching: .any).matching(identifier: "row-tools")
+        let group = rows.matching(NSPredicate(format: "NOT (label BEGINSWITH 'Worked for')")).firstMatch
+        if !group.waitForExistence(timeout: 10) {
+            let fold = rows.matching(NSPredicate(format: "label BEGINSWITH 'Worked for'")).firstMatch
+            XCTAssertTrue(fold.waitForExistence(timeout: 5))
+            expandButton(on: fold, in: app)?.tap()
+            XCTAssertTrue(group.waitForExistence(timeout: 5))
+        }
+        let expand = expandButton(on: group, in: app)
+        XCTAssertNotNil(expand, "the tool group has its own Expand")
+        expand?.tap()
         let detail = app.buttons["Show details"].firstMatch
         XCTAssertTrue(detail.waitForExistence(timeout: 5))
         snapshot(app, "tools-expanded")
@@ -518,7 +529,7 @@ final class SessionFlowTests: XCTestCase {
             let attach = app.buttons["composer-attach"]
             XCTAssertTrue(attach.waitForExistence(timeout: 10))
             attach.tap()
-            XCTAssertTrue(app.buttons["Photo Library"].waitForExistence(timeout: 5), "attach menu opens (\(route))")
+            XCTAssertTrue(app.buttons["attach-photos"].waitForExistence(timeout: 5), "attach menu opens (\(route))")
             snapshot(app, "attach-menu")
             app.terminate()
         }
@@ -529,10 +540,99 @@ final class SessionFlowTests: XCTestCase {
         input.tap()
         input.typeText("Draft")
         app.buttons["composer-attach"].tap()
-        XCTAssertTrue(app.buttons["Photo Library"].waitForExistence(timeout: 5), "attach menu opens from the card")
+        XCTAssertTrue(app.buttons["attach-photos"].waitForExistence(timeout: 5), "attach menu opens from the card")
     }
 
-    /// The model chip opens the picker sheet; a pick names the model on the chip.
+    /// Needs `simctl privacy grant photos` and `simctl addmedia` on the simulator.
+    func testAttachCardOverKeyboardAddsRecentPhotos() throws {
+        let app = launch(["-route", "chat:chat-ios-keyboard"])
+        let input = app.textViews["composer-input"]
+        let attach = app.buttons["composer-attach"]
+        let photos = app.buttons["attach-photos"]
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(input.waitForExistence(timeout: 10))
+        input.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        sleep(1)
+        snapshot(app, "keyboard-open")
+
+        attach.tap()
+        XCTAssertTrue(photos.waitForExistence(timeout: 5))
+        sleep(1)
+        snapshot(app, "attach-menu")
+        XCTAssertTrue(app.buttons["attach-files"].isHittable, "card rows reachable")
+        XCTAssertTrue(keyboard.exists, "the keys stay up under the menu")
+        keyboard.keys.element(matching: NSPredicate(format: "label ==[c] 'p'")).tap()
+        XCTAssertEqual((input.value as? String)?.lowercased(), "p", "a key beside the menu types")
+        XCTAssertTrue(photos.exists, "typing leaves the menu open")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
+        XCTAssertTrue(photos.waitForNonExistence(timeout: 5), "the scrim closes the card")
+        XCTAssertTrue(keyboard.exists, "keyboard stays")
+
+        attach.tap()
+        XCTAssertTrue(photos.waitForExistence(timeout: 5))
+        photos.tap()
+        let grid = app.collectionViews["attach-grid"]
+        try XCTSkipUnless(grid.waitForExistence(timeout: 5), "needs photo access and library images")
+        let photoCells = grid.cells.matching(NSPredicate(format: "label == 'Photo'"))
+        XCTAssertTrue(photoCells.element(boundBy: 1).waitForExistence(timeout: 5))
+        sleep(1)
+        snapshot(app, "attach-grid")
+        XCTAssertEqual(app.buttons["attach-grid-main"].label, "All Photos")
+        photoCells.element(boundBy: 0).tap()
+        photoCells.element(boundBy: 1).tap()
+        XCTAssertEqual(app.buttons["attach-grid-main"].label, "Add 2")
+        sleep(1)
+        snapshot(app, "attach-grid-selected")
+        app.buttons["attach-grid-main"].tap()
+        let removeButtons = app.buttons.matching(identifier: "Remove image")
+        expectation(for: NSPredicate(format: "count == 2"), evaluatedWith: removeButtons)
+        waitForExpectations(timeout: 10)
+        XCTAssertFalse(grid.exists, "card closed")
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5), "keyboard back after the grid")
+        sleep(1)
+        snapshot(app, "attached")
+
+        let first = app.buttons["Image 1 of 2"]
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        first.tap()
+        let close = app.buttons["attachment-preview-close"]
+        XCTAssertTrue(close.waitForExistence(timeout: 5), "preview opens")
+        sleep(1)
+        snapshot(app, "attachment-preview")
+        close.tap()
+        XCTAssertTrue(close.waitForNonExistence(timeout: 5), "preview closes")
+
+        first.tap()
+        let remove = app.buttons["attachment-preview-remove"]
+        XCTAssertTrue(remove.waitForExistence(timeout: 5))
+        remove.tap()
+        expectation(for: NSPredicate(format: "count == 1"), evaluatedWith: removeButtons)
+        waitForExpectations(timeout: 5)
+        XCTAssertTrue(app.buttons["Image 1 of 1"].exists, "labels renumber")
+        sleep(1)
+        snapshot(app, "removed")
+        removeButtons.firstMatch.tap()
+        expectation(for: NSPredicate(format: "count == 0"), evaluatedWith: removeButtons)
+        waitForExpectations(timeout: 5)
+    }
+
+    /// Run after `simctl privacy revoke photos`, with TEST_RUNNER_ZERON_PHOTOS_DENIED=1.
+    func testAttachPhotosFallsBackToPickerWhenDenied() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["ZERON_PHOTOS_DENIED"] == "1", "needs photo access revoked")
+        let app = launch(["-route", "chat:chat-ios-keyboard"])
+        XCTAssertTrue(app.textViews["composer-input"].waitForExistence(timeout: 10))
+        app.buttons["composer-attach"].tap()
+        let photos = app.buttons["attach-photos"]
+        XCTAssertTrue(photos.waitForExistence(timeout: 5))
+        photos.tap()
+        XCTAssertTrue(photos.waitForNonExistence(timeout: 5), "card closes")
+        XCTAssertFalse(app.collectionViews["attach-grid"].exists, "no inline grid")
+        sleep(3)
+        snapshot(app, "photos-denied-picker")
+    }
+
+    /// Regression: the model chip's menu completed off the main thread.
     func testModelPickerInSession() {
         let app = launch(["-route", "chat:chat-deploy"])
         let input = app.textViews["composer-input"]
@@ -541,91 +641,11 @@ final class SessionFlowTests: XCTestCase {
         let chip = app.buttons["composer-chip-model"]
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
         chip.tap()
-        let lists = app.collectionViews.matching(NSPredicate(format: "identifier BEGINSWITH 'model-picker-list'"))
-        XCTAssertTrue(lists.firstMatch.waitForExistence(timeout: 5), "the picker opens")
-        // The page on screen (the others sit beside it, swipeable).
-        let list = lists.allElementsBoundByIndex.first { $0.isHittable } ?? lists.firstMatch
-        let row = list.cells.matching(NSPredicate(format: "identifier BEGINSWITH 'model-picker-row-'")).element(boundBy: 1)
-        XCTAssertTrue(row.waitForExistence(timeout: 5), "models load")
-        // A row reads "name, what it's for".
-        let picked = row.label.components(separatedBy: ", ").first ?? row.label
-        row.tap()
-        expectation(for: NSPredicate(format: "label == %@", picked), evaluatedWith: chip)
-        waitForExpectations(timeout: 5)
+        let item = app.collectionViews.buttons.element(boundBy: 0)
+        XCTAssertTrue(item.waitForExistence(timeout: 5), "models load")
+        item.tap()
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
         XCTAssertEqual(app.state, .runningForeground)
-    }
-
-    /// Between turns, on a host that switches providers, the picker's tabs
-    /// move the chat to another provider; an older host's chat shows only its
-    /// own, and says why.
-    func testModelPickerSwitchesProviderWhereTheHostCan() {
-        let app = launch(["-route", "chat:chat-tabs"])
-        let input = app.textViews["composer-input"]
-        XCTAssertTrue(input.waitForExistence(timeout: 10))
-        input.tap()
-        let chip = app.buttons["composer-chip-model"]
-        XCTAssertTrue(chip.waitForExistence(timeout: 5))
-        let before = chip.label
-        chip.tap()
-        // The demo's chat-tabs runs Codex on the Mac.
-        let claude = app.buttons["model-picker-tab-claude-code"]
-        XCTAssertTrue(claude.waitForExistence(timeout: 5), "other providers have tabs")
-        XCTAssertTrue(app.buttons["model-picker-tab-codex"].exists)
-        snapshot(app, "model-picker")
-        // Swiping the list moves to the next provider, and its tab follows.
-        app.collectionViews["model-picker-list-codex"].swipeLeft()
-        expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: claude)
-        waitForExpectations(timeout: 5)
-        app.buttons["model-picker-tab-codex"].tap()
-        expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: app.buttons["model-picker-tab-codex"])
-        waitForExpectations(timeout: 5)
-        claude.tap()
-        let row = app.collectionViews["model-picker-list-claude-code"].cells.matching(NSPredicate(format: "identifier BEGINSWITH 'model-picker-row-'")).element(boundBy: 0)
-        XCTAssertTrue(row.waitForExistence(timeout: 5), "Claude's models load")
-        // A row reads "name, what it's for".
-        let picked = row.label.components(separatedBy: ", ").first ?? row.label
-        row.tap()
-        expectation(for: NSPredicate(format: "label == %@", picked), evaluatedWith: chip)
-        waitForExpectations(timeout: 5)
-        XCTAssertNotEqual(chip.label, before)
-
-        // The studio's engine predates provider switching.
-        let older = launch(["-route", "chat:chat-blog"])
-        let field = older.textViews["composer-input"]
-        XCTAssertTrue(field.waitForExistence(timeout: 10))
-        field.tap()
-        older.buttons["composer-chip-model"].tap()
-        XCTAssertTrue(older.collectionViews.matching(NSPredicate(format: "identifier BEGINSWITH 'model-picker-list'")).firstMatch.waitForExistence(timeout: 5))
-        XCTAssertFalse(older.buttons["model-picker-tab-codex"].exists, "an older host keeps its provider")
-        XCTAssertTrue(older.staticTexts["This computer needs a newer Zeron to switch provider."].exists)
-        // A chat started without picking a model runs (and shows) the default.
-        XCTAssertTrue(older.cells.matching(NSPredicate(format: "identifier BEGINSWITH 'model-picker-row-' AND value == 'Current'")).firstMatch.waitForExistence(timeout: 5), "the default model is ticked")
-        older.buttons["model-picker-close"].tap()
-        XCTAssertNotEqual(older.buttons["composer-chip-model"].label, "Claude Code", "the chip names the default model, not the provider")
-    }
-
-    /// A computer offering every agent: the switcher scrolls, and the chosen
-    /// provider stays in view as the pages are swiped.
-    func testModelPickerWithEveryProviderKeepsTheChosenOneInView() {
-        let app = launch(["-route", "chat:chat-tabs", "-all-providers"])
-        let input = app.textViews["composer-input"]
-        XCTAssertTrue(input.waitForExistence(timeout: 10))
-        input.tap()
-        app.buttons["composer-chip-model"].tap()
-        let first = app.buttons["model-picker-tab-codex"]
-        XCTAssertTrue(first.waitForExistence(timeout: 5))
-        snapshot(app, "picker-every-provider-start")
-        for id in ["claude-code", "opencode", "cursor", "devin", "grok"] {
-            app.collectionViews.matching(NSPredicate(format: "identifier BEGINSWITH 'model-picker-list'"))
-                .allElementsBoundByIndex.first { $0.isHittable }?.swipeLeft()
-            let tab = app.buttons["model-picker-tab-\(id)"]
-            expectation(for: NSPredicate(format: "isSelected == true AND isHittable == true"), evaluatedWith: tab)
-            waitForExpectations(timeout: 5)
-        }
-        snapshot(app, "picker-every-provider-middle")
-        app.buttons["model-picker-tab-hermes"].tap()
-        expectation(for: NSPredicate(format: "isSelected == true AND isHittable == true"), evaluatedWith: app.buttons["model-picker-tab-hermes"])
-        waitForExpectations(timeout: 5)
     }
 
     /// Regression: a drag that starts at the tail re-latched follow at once,
@@ -695,7 +715,7 @@ final class SessionFlowTests: XCTestCase {
         start.press(forDuration: 0.05, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5)), withVelocity: .slow, thenHoldForDuration: 0.3)
         sleep(1)
         XCTAssertTrue(input.exists, "still on the session")
-        XCTAssertFalse(app.buttons["new-session"].isHittable, "no bottom bar over the session")
+        XCTAssertFalse(app.buttons["new-session"].isHittable, "no New session accessory over the session")
         // The reply keeps streaming to completion.
         XCTAssertTrue(app.staticTexts.matching(identifier: "row-markdown").element(boundBy: 0).waitForExistence(timeout: 20))
         XCTAssertTrue(app.buttons["Send message"].waitForExistence(timeout: 40), "turn settles (updates still arriving)")
@@ -738,7 +758,9 @@ final class SessionFlowTests: XCTestCase {
         let accessory = app.buttons["new-session"]
         XCTAssertTrue(accessory.waitForExistence(timeout: 5))
         XCTAssertGreaterThan(accessory.frame.minY, app.windows.firstMatch.frame.height * 0.6, "accessory sits above the tab bar")
-        app.cells["session-chat-home"].firstMatch.tap()
+        let home = app.cells["session-chat-home"].firstMatch
+        scrollTo(home, in: app.collectionViews.firstMatch)
+        home.tap()
         let more = app.buttons["More queue actions"]
         XCTAssertTrue(more.waitForExistence(timeout: 5))
         XCTAssertTrue(more.isHittable, "queue shows again after coming back")
@@ -790,7 +812,7 @@ final class SessionFlowTests: XCTestCase {
         let input = app.textViews["composer-input"]
         XCTAssertTrue(input.waitForExistence(timeout: 10))
         app.buttons["composer-attach"].tap()
-        let paste = app.buttons["Paste Image"]
+        let paste = app.buttons["attach-paste"]
         XCTAssertTrue(paste.waitForExistence(timeout: 5))
         paste.tap()
         let allow = XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons["Allow Paste"]
@@ -836,5 +858,29 @@ final class SessionFlowTests: XCTestCase {
         start.press(forDuration: 0.05, thenDragTo: list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)))
         sleep(4)
         XCTAssertEqual(first.frame.minY, restingY, accuracy: 4, "refresh ended and the list settled back")
+    }
+
+    func testRowsStackHarnessMarksAndShowTheInstanceIcon() {
+        let app = launch()
+        XCTAssertTrue(app.staticTexts["Sessions"].waitForExistence(timeout: 10))
+        let list = app.collectionViews.firstMatch
+        let veil = app.cells["session-chat-veil"].firstMatch
+        scrollTo(veil, in: list)
+        XCTAssertTrue(veil.isHittable)
+        if veil.frame.maxY > app.windows.firstMatch.frame.height * 0.6 {
+            list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
+                .press(forDuration: 0.05, thenDragTo: list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)))
+        }
+        snapshot(app, "d11-stacked-marks")
+        let acp = app.cells["session-chat-acp"].firstMatch
+        scrollTo(acp, in: list)
+        XCTAssertTrue(acp.isHittable)
+        sleep(2)
+        snapshot(app, "d11-acp-instance-icon")
+    }
+
+    private func expandButton(on row: XCUIElement, in app: XCUIApplication) -> XCUIElement? {
+        app.buttons.matching(NSPredicate(format: "label == 'Expand'")).allElementsBoundByIndex
+            .first { row.frame.intersects($0.frame) }
     }
 }

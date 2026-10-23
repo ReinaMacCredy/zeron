@@ -412,7 +412,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "tasks",
-            "description": "Manage the person's Tasks list, the Tasks page in the rail: to-dos the person or an agent writes down, each of which can be assigned to a thread that works on it. A task's status follows its thread (To do, Working, Needs you) until someone marks it done. `list` returns the open tasks in the person's order (`includeDone` adds finished ones), with notes cut to 500 characters; `taskId` returns one task whole. A task carries `sendError` when the last send to its thread failed. `create` adds one: `title` is required, `notes` and `dueOn` (YYYY-MM-DD) are optional, and it lands in this chat's project unless `projectId` names another (an id from list_projects, or \"\" for none). `update` changes `title`, `notes`, `dueOn` (\"\" clears it) or `completed`. `assign` hands a task to a thread: `threadId` is a thread on this device, or omit it for this chat itself; with `send` (default true, except for this chat) the task's title and notes are sent to that thread as a message, steering its running turn; `send: false` only links the task, so it follows that thread. A task has one thread; assigning it again moves it. `unassign` drops the link and `delete` removes the task. A Mission Control task (`mode` orchestrated) has a lead thread and steps, each run on its own thread that the lead opens with create_thread and the step's `taskStepId`: `list` gives it `progress` (steps done of steps not skipped), `planPending` while the person has not approved its plan, and with `taskId` its `plan` (the overview), `planDoc` (true when the person asked for a plan doc: an overview plus a spec in each step's notes), `context` (the threadIds of chats the person gave the lead to read before it planned) and its `steps` with their status (planned, working, needsYou, failed, done, skipped) and `threadId`. Only the task's lead uses `plan` and `step`. `plan` writes the plan for `taskId` as `steps` [{title, notes, threadId}] and an optional `overview`: steps that have not started are replaced, the rest are kept, and the new ones follow them. A step's optional `threadId` hands it to a thread the lead already started with create_thread or delegate_task, which then runs that step; a sidechat, a fork, another chat's thread or one that already runs an open step is refused. A replaced step's images go to the new step with the same title, or else to the overview, and `imagesMoved` in the reply says where; a plan whose images would not fit on the overview is refused. `plan` also takes `resources`, what the mission needs to itself while it runs: `port:<n>` for a port its servers listen on, `slot:<name>` for a quiet CPU (slot:benchmark for timing runs), `path:<path inside the project>` for files it rewrites; it replaces the declared list, `[]` clears it, and the Supervisor checks them against other missions. `step` marks `stepId` with `state` done or skipped, or open to clear that mark. Run a step with create_thread and its `taskStepId`. `escalate`, for a task's lead, puts a decision only the person can make in their Needs you list: `title`, `why` (goal, spend or decision), `detail` and one to three `options`. It returns the `itemId` at once; keep working on what does not depend on it, and the person's choice reaches you as a message.",
+            "description": "Manage the person's Tasks list, the Tasks page in the rail: to-dos the person or an agent writes down, each of which can be assigned to a thread that works on it. A task's status follows its thread (To do, Working, Needs you) until someone marks it done. `list` returns the open tasks in the person's order (`includeDone` adds finished ones), with notes cut to 500 characters; `taskId` returns one task whole. A task carries `sendError` when the last send to its thread failed. `create` adds one: `title` is required, `notes` and `dueOn` (YYYY-MM-DD) are optional, and it lands in this chat's project unless `projectId` names another (an id from list_projects, or \"\" for none). `update` changes `title`, `notes`, `dueOn` (\"\" clears it) or `completed`. `assign` hands a task to a thread: `threadId` is a thread on this device, or omit it for this chat itself; with `send` (default true, except for this chat) the task's title and notes are sent to that thread as a message, steering its running turn; `send: false` only links the task, so it follows that thread. A task has one thread; assigning it again moves it. `unassign` drops the link and `delete` removes the task. A Mission Control task (`mode` orchestrated) has a lead thread and steps, each run on its own thread that the lead opens with create_thread and the step's `taskStepId`: `list` gives it `progress` (steps done of steps not skipped), `planPending` while the person has not approved its plan, and with `taskId` its `plan` (the overview), `planDoc` (true when the person asked for a plan doc: an overview plus a spec in each step's notes), `context` (the threadIds of chats the person gave the lead to read before it planned) and its `steps` with their status (planned, working, needsYou, failed, done, skipped) and `threadId`; a step is done only once the lead marks it, and a step whose thread finished its turn reads planned until then. Only the task's lead uses `plan` and `step`. `plan` writes the plan for `taskId` as `steps` [{title, notes, threadId}] and an optional `overview`: steps that have not started are replaced, the rest are kept, and the new ones follow them. A step's optional `threadId` hands it to a thread the lead already started with create_thread or delegate_task, which then runs that step; a sidechat, a fork, another chat's thread or one that already runs an open step is refused. A replaced step's images go to the new step with the same title, or else to the overview, and `imagesMoved` in the reply says where; a plan whose images would not fit on the overview is refused. `plan` also takes `resources`, what the mission needs to itself while it runs: `port:<n>` for a port its servers listen on, `slot:<name>` for a quiet CPU (slot:benchmark for timing runs), `path:<path inside the project>` for files it rewrites; it replaces the declared list, `[]` clears it, and the Supervisor checks them against other missions. `step` marks `stepId` with `state` done or skipped, or open to clear that mark. Run a step with create_thread and its `taskStepId`. `escalate`, for a task's lead, puts a decision only the person can make in their Needs you list: `title`, `why` (goal, spend or decision), `detail` and one to three `options`. It returns the `itemId` at once; keep working on what does not depend on it, and the person's choice reaches you as a message.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -494,15 +494,20 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "html_preview",
-            "description": format!("Lay out an HTML page in Zeron's own web engine (the one that shows it in the thread) and get back a PNG screenshot, contentHeight (the height the page needs at this width), and its console output: log, info, warning, error, and uncaught exceptions. console.log is a fine way to report your own checks. Use it to check and iterate on a page before html_render. Needs the Zeron desktop app open on this machine. {} The page gets the theme variables and layout described in html_render.", html_render::PAGE_RULES),
+            "description": format!("Lay out an HTML page in Zeron's own web engine (the one that shows it in the thread) and get back a PNG screenshot, contentHeight (the height the page needs at this width), and its console output: log, info, warning, error, and uncaught exceptions. console.log is a fine way to report your own checks. Use it to check and iterate on a page before html_render. Pass `html`, or `path` for an .html file in this thread's folder. `tree: true` adds the page's elements as UI driver tree lines (refs w1-<n>, every line marked `web` because the page wrote it). `rect` or `select` crops the screenshot. `steps` acts on the page in UI driver syntax and returns a screenshot and tree after each step; a failed step stops the rest. Steps act through the DOM, so events they fire have isTrusted false. Needs the Zeron desktop app open on this machine. {} The page gets the theme variables and layout described in html_render.", html_render::PAGE_RULES),
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "html": { "type": "string", "maxLength": html_render::MAX_HTML_BYTES, "description": "A complete, self-contained HTML document." },
+                    "html": { "type": "string", "maxLength": html_render::MAX_HTML_BYTES, "description": "A complete, self-contained HTML document. Give this or `path`." },
+                    "path": { "type": "string", "description": "An .html or .htm file inside this thread's folder, relative to it or absolute. Files outside it are refused." },
+                    "tree": { "type": "boolean", "description": "Also return the page's elements as tree lines." },
+                    "rect": { "type": "object", "properties": { "x": { "type": "number", "minimum": 0 }, "y": { "type": "number", "minimum": 0 }, "w": { "type": "number", "minimum": 1 }, "h": { "type": "number", "minimum": 1 } }, "required": ["x", "y", "w", "h"], "additionalProperties": false, "description": "Crop the screenshot to this region, in CSS pixels from the page's top-left." },
+                    "select": { "type": "string", "description": "Crop the screenshot to the element this UI driver selector names, e.g. `Button \"Save\"`." },
+                    "nth": { "type": "integer", "minimum": 0, "description": "Which match of `select`, 0-based, when it matches several." },
+                    "steps": { "type": "array", "maxItems": html_render::MAX_PREVIEW_STEPS, "items": { "type": "object", "properties": { "action": { "type": "string", "enum": ["click", "type", "key", "wait"] } }, "required": ["action"] }, "description": "In order: {action:\"click\", select|ref, nth?}, {action:\"type\", text, select|ref?}, {action:\"key\", keys:\"enter\"}, {action:\"wait\", for:\"ms\", ms} or for:\"select\"|\"text\"|\"gone\" as in ui_driver wait." },
                     "width": { "type": "integer", "minimum": html_render::MIN_PREVIEW_WIDTH, "maximum": html_render::MAX_PREVIEW_WIDTH, "description": format!("Viewport width in CSS pixels. Defaults to {}, the reply column; use about 390 to check phones.", html_render::COLUMN_WIDTH) },
                     "appearance": { "type": "string", "enum": ["dark", "light"], "description": "Theme to preview. Defaults to dark." }
                 },
-                "required": ["html"],
                 "additionalProperties": false
             },
             "annotations": { "title": "Preview HTML", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true }
@@ -726,12 +731,49 @@ impl ThreadTools {
             .lock()
             .unwrap()
             .insert(key.clone(), cancel);
+        let call = async {
+            match self.compare_page(tool, args).await {
+                Ok(args) => ui_driver::mcp_result(tool, &args, self.ipc_port).await,
+                Err(text) => {
+                    json!({ "content": [{ "type": "text", "text": text }], "isError": true })
+                }
+            }
+        };
         let result = tokio::select! {
-            result = ui_driver::mcp_result(tool, args, self.ipc_port) => Some(result),
+            result = call => Some(result),
             _ = cancelled => None,
         };
         self.ui_driver_calls.lock().unwrap().remove(&key);
         result
+    }
+
+    async fn compare_page(&self, tool: ui_driver::Tool, args: &Value) -> Result<Value, String> {
+        let Some(map) = args
+            .as_object()
+            .filter(|_| tool == ui_driver::Tool::Observe)
+        else {
+            return Ok(args.clone());
+        };
+        let Some(path) = ui_driver::compare_path(map)? else {
+            return Ok(args.clone());
+        };
+        let secret = self
+            .run_secret
+            .as_deref()
+            .ok_or("ui_driver `compare` reads `path` only in a live Zeron run; pass `html`")?;
+        let page = self
+            .call_engine(
+                methods::READ_WORKSPACE_PAGE,
+                json!({ "chatId": self.chat_id, "runSecret": secret, "path": path }),
+            )
+            .await?;
+        let html = page["html"]
+            .as_str()
+            .ok_or_else(|| format!("{}: no `html` in {page}", methods::READ_WORKSPACE_PAGE))?;
+        let mut map = map.clone();
+        map.remove("path");
+        map.insert("html".into(), json!(html));
+        Ok(Value::Object(map))
     }
 
     async fn tools(&self) -> Value {
@@ -1825,9 +1867,18 @@ impl ThreadTools {
                 .run_secret
                 .as_deref()
                 .ok_or("html_preview needs a live Zeron run")?;
-            let html = args["html"].as_str().ok_or("html must be a string")?;
-            let mut params = json!({ "chatId": self.chat_id, "runSecret": secret, "html": html });
-            for key in ["width", "appearance"] {
+            let mut params = json!({ "chatId": self.chat_id, "runSecret": secret });
+            for key in [
+                "html",
+                "path",
+                "width",
+                "appearance",
+                "tree",
+                "rect",
+                "select",
+                "nth",
+                "steps",
+            ] {
                 if let Some(value) = args.get(key).filter(|value| !value.is_null()) {
                     params[key] = value.clone();
                 }
@@ -1837,15 +1888,45 @@ impl ThreadTools {
         .await;
         match result {
             Ok(mut preview) => {
-                let png = preview
-                    .as_object_mut()
-                    .and_then(|preview| preview.remove("png"))
-                    .unwrap_or_default();
+                let mut summary = preview.clone();
+                let take = |value: &mut Value, key: &str| {
+                    value.as_object_mut().and_then(|value| value.remove(key))
+                };
+                let png = take(&mut preview, "png").unwrap_or_default();
+                let tree = take(&mut summary, "tree");
+                take(&mut summary, "png");
+                let mut content = vec![
+                    Value::Null,
+                    json!({ "type": "image", "data": png, "mimeType": "image/png" }),
+                ];
+                if let Some(Value::String(tree)) = tree {
+                    content.push(json!({ "type": "text", "text": tree }));
+                }
+                let steps = match summary.get_mut("steps") {
+                    Some(Value::Array(steps)) => steps.iter_mut().collect(),
+                    _ => Vec::new(),
+                };
+                for (i, step) in steps.into_iter().enumerate() {
+                    let png = take(step, "png");
+                    let tree = take(step, "tree");
+                    content
+                        .push(json!({ "type": "text", "text": format!("step {}: {step}", i + 1) }));
+                    if let Some(png) = png {
+                        content
+                            .push(json!({ "type": "image", "data": png, "mimeType": "image/png" }));
+                    }
+                    if let Some(Value::String(tree)) = tree {
+                        content.push(json!({ "type": "text", "text": tree }));
+                    }
+                }
+                if let Some(Value::Array(steps)) = preview.get_mut("steps") {
+                    for step in steps {
+                        take(step, "png");
+                    }
+                }
+                content[0] = json!({ "type": "text", "text": summary.to_string() });
                 json!({
-                    "content": [
-                        { "type": "text", "text": preview.to_string() },
-                        { "type": "image", "data": png, "mimeType": "image/png" },
-                    ],
+                    "content": content,
                     "structuredContent": preview,
                     "isError": false,
                 })
@@ -2302,7 +2383,11 @@ impl ThreadTools {
                     .and_then(|id| chats.iter().find(|chat| chat.id == id));
                 let indicator = thread.map(|chat| {
                     let session = sessions.iter().find(|s| s.chat_id == chat.id);
-                    zeron_proto::view::display_status(chat, session, now)
+                    zeron_proto::view::task_thread_status(
+                        zeron_proto::view::display_status(chat, session, now),
+                        session,
+                        now,
+                    )
                 });
                 let status = zeron_proto::step_status(&step, thread, indicator);
                 (step, status)
@@ -3899,11 +3984,21 @@ mod tests {
                             "html_preview needs the Zeron desktop app open on this machine".into(),
                         ));
                     }
-                    Ok(RpcReply::Value(json!({
+                    let mut preview = json!({
                         "width": 736, "contentHeight": 310, "capturedHeight": 310,
                         "consoleMessages": [{ "level": "error", "text": "x is not defined" }],
                         "png": "iVBORw0KGgo",
-                    })))
+                    });
+                    if params["tree"] == true {
+                        preview["tree"] = json!(
+                            "page \"T\" 736x310 nodes=1/1 focus=none\nw1-0 WebView \"T\" web"
+                        );
+                        preview["steps"] = json!([
+                            { "step": params["steps"][0], "png": "c3RlcA", "tree": "w1-3 Button \"B\" web" },
+                            { "step": params["steps"][1], "error": "no element matches `Button \"Z\"`" },
+                        ]);
+                    }
+                    Ok(RpcReply::Value(preview))
                 }
                 methods::GET_TOOL_SETTINGS if params["chatId"] == "a" => Ok(RpcReply::Value(
                     json!({ "settings": {}, "disabled": self.disabled }),
@@ -5303,10 +5398,49 @@ mod tests {
             .call(json!(2), "html_preview", json!({ "html": "<p>broken</p>" }))
             .await;
         assert_eq!(failed["result"]["isError"], true);
+        let steps = json!([
+            { "action": "click", "select": "Button \"B\"" },
+            { "action": "click", "select": "Button \"Z\"" },
+        ]);
+        let stepped = pipe
+            .call(
+                json!(3),
+                "html_preview",
+                json!({ "path": "mock/a.html", "tree": true, "select": "Button", "steps": steps }),
+            )
+            .await;
+        let content = stepped["result"]["content"].as_array().unwrap();
+        let kinds: Vec<&str> = content
+            .iter()
+            .map(|c| c["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            ["text", "image", "text", "text", "image", "text", "text"]
+        );
+        assert!(content[2]["text"].as_str().unwrap().starts_with("page "));
+        assert_eq!(content[4]["data"], "c3RlcA");
+        assert!(
+            content[6]["text"]
+                .as_str()
+                .unwrap()
+                .contains("no element matches")
+        );
+        let summary = content[0]["text"].as_str().unwrap();
+        assert!(!summary.contains("c3RlcA") && !summary.contains("WebView"));
+        assert!(
+            stepped["result"]["structuredContent"]["steps"][0]
+                .get("png")
+                .is_none()
+        );
         let sent = logged(&rig.calls, methods::HTML_PREVIEW);
         assert_eq!(sent[0]["width"], 390);
         assert_eq!(sent[0]["appearance"], "light");
         assert_eq!(sent[0]["runSecret"], "live");
+        assert_eq!(sent[2]["path"], "mock/a.html");
+        assert!(sent[2].get("html").is_none());
+        assert_eq!(sent[2]["select"], "Button");
+        assert_eq!(sent[2]["steps"], steps);
     }
 
     #[tokio::test]

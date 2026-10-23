@@ -580,8 +580,8 @@ impl zeron_rpc::RpcService for HostService {
                  "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": true, "canInstall": false},
             ]),
             m::LIST_MODELS => json!([
-                {"id": "claude-opus-5", "label": "claude-opus-5", "reasoningLevels": ["high"], "options": []},
-                {"id": "claude-opus-5[1m]", "label": "Opus 5 (1M)", "reasoningLevels": ["high"], "options": []},
+                {"id": "claude-opus-5-5", "label": "claude-opus-5-5", "reasoningLevels": ["high"], "options": []},
+                {"id": "claude-opus-5-5[1m]", "label": "Opus 5.5 (1M)", "reasoningLevels": ["high"], "options": []},
             ]),
             m::LIST_REFS => {
                 json!([{ "name": "main", "current": true }, { "name": "feature/live", "current": false, "worktreePath": "/wt/live" }])
@@ -692,7 +692,7 @@ async fn host_rpcs_ride_the_device_relay() {
             .await
             .unwrap();
     assert_eq!(models.len(), 1, "[1m] variant folded: {models:?}");
-    assert_eq!(models[0].label, "Opus 5");
+    assert_eq!(models[0].label, "Opus 5.5");
 
     let c = client.clone();
     let refs =

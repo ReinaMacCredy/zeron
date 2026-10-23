@@ -374,6 +374,7 @@ pub mod methods {
     /// `html_preview`: lay a page out in the desktop app and return a
     /// screenshot (run-secret gated, never relay-forwarded).
     pub const HTML_PREVIEW: &str = "HtmlPreview";
+    pub const READ_WORKSPACE_PAGE: &str = "ReadWorkspacePage";
     /// The desktop app's stream of pages to preview, and its answers.
     pub const WATCH_HTML_PREVIEW_HOST: &str = "WatchHtmlPreviewHost";
     pub const RESPOND_HTML_PREVIEW: &str = "RespondHtmlPreview";
@@ -591,15 +592,7 @@ pub mod methods {
     pub const LIST_CLOUD_BRANCHES: &str = "ListCloudBranches";
 }
 
-/// Stable capability error codes transported without provider stderr.
-pub mod capability_errors {
-    pub const PULL_REQUESTS_CLI_UNAVAILABLE: &str = "pull_requests.cli_unavailable";
-    pub const PULL_REQUESTS_AUTHENTICATION: &str = "pull_requests.authentication";
-    pub const PULL_REQUESTS_RATE_LIMITED: &str = "pull_requests.rate_limited";
-    pub const PULL_REQUESTS_TIMEOUT: &str = "pull_requests.timeout";
-    pub const PULL_REQUESTS_DECODE: &str = "pull_requests.decode";
-    pub const PULL_REQUESTS_COMMAND_FAILED: &str = "pull_requests.command_failed";
-}
+pub use zeron_proto::capability_errors;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RpcError {

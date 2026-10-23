@@ -10,7 +10,7 @@ use regex::Regex;
 use sha2::{Digest, Sha256};
 use zeron_proto::html_render::{
     HtmlPreview, HtmlPreviewRequest, HtmlRenderRef, MAX_HTML_BYTES, MAX_IMAGE_BYTES,
-    MAX_PAGE_BYTES, MAX_TITLE_CHARS, PreviewAppearance, clamp_height,
+    MAX_PAGE_BYTES, MAX_TITLE_CHARS, PreviewAppearance, PreviewInspect, clamp_height,
 };
 
 use crate::uploads::Uploads;
@@ -418,6 +418,7 @@ impl PreviewHost {
         html: String,
         width: u32,
         appearance: PreviewAppearance,
+        inspect: PreviewInspect,
     ) -> PreviewReply {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -429,6 +430,7 @@ impl PreviewHost {
                 html,
                 width,
                 appearance,
+                inspect,
             };
             if live.items.send(request).is_err() {
                 return Err(NO_PREVIEW_HOST.into());
@@ -463,14 +465,18 @@ impl Drop for PreviewRegistration {
     }
 }
 
+pub use zeron_proto::html_render::workspace_page;
+
 /// Inlines what images it can and lays the page out in the desktop app.
 pub async fn preview(
     host: &PreviewHost,
     html: String,
     width: Option<u32>,
     appearance: Option<PreviewAppearance>,
+    inspect: PreviewInspect,
 ) -> Result<HtmlPreview, String> {
     validate(&html, "preview").map_err(|e| e.to_string())?;
+    inspect.validate()?;
     let (page, missing) = tokio::task::spawn_blocking(move || inline_local_images(&html, false))
         .await
         .map_err(|e| e.to_string())?
@@ -480,6 +486,7 @@ pub async fn preview(
             page,
             zeron_proto::html_render::preview_width(width),
             appearance.unwrap_or_default(),
+            inspect,
         )
         .await?;
     preview.missing_images = missing;
@@ -608,7 +615,7 @@ mod tests {
         use futures::StreamExt;
         let host = std::sync::Arc::new(PreviewHost::default());
         assert_eq!(
-            preview(&host, "<p>x</p>".into(), None, None).await,
+            preview(&host, "<p>x</p>".into(), None, None, Default::default()).await,
             Err(NO_PREVIEW_HOST.into())
         );
         let first = host.register().unwrap();
@@ -630,6 +637,9 @@ mod tests {
                         console_messages: vec![],
                         missing_images: vec![],
                         png: "iVBOR".into(),
+                        tree: None,
+                        crop: None,
+                        steps: vec![],
                     }),
                 );
                 second
@@ -640,6 +650,7 @@ mod tests {
             r#"<img src="/nope/a.png">"#.into(),
             Some(10_000),
             None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -649,13 +660,95 @@ mod tests {
         let pending = {
             let host = host.clone();
             tokio::spawn(async move {
-                host.preview("<p>y</p>".into(), 400, PreviewAppearance::Light)
-                    .await
+                host.preview(
+                    "<p>y</p>".into(),
+                    400,
+                    PreviewAppearance::Light,
+                    Default::default(),
+                )
+                .await
             })
         };
         tokio::task::yield_now().await;
         drop(second);
         assert_eq!(pending.await.unwrap(), Err(PREVIEW_HOST_LOST.into()));
+    }
+
+    #[test]
+    fn a_workspace_page_never_reads_past_the_chat_folder() {
+        use zeron_proto::html_render::{CHAT_FOLDER, CURRENT_FOLDER};
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("repo");
+        std::fs::create_dir_all(root.join("mock")).unwrap();
+        std::fs::write(root.join("mock/a.html"), "<p>a</p>").unwrap();
+        std::fs::write(root.join("notes.txt"), "secret").unwrap();
+        std::fs::write(outer.path().join("b.html"), "<p>b</p>").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outer.path().join("b.html"), root.join("link.html")).unwrap();
+        let page = |home: Option<&std::path::Path>, path: &str| {
+            workspace_page(&root, home, CHAT_FOLDER, path)
+        };
+        assert_eq!(page(None, "mock/a.html").unwrap(), "<p>a</p>");
+        let abs = root.join("mock/a.html");
+        assert_eq!(page(None, abs.to_str().unwrap()).unwrap(), "<p>a</p>");
+        for outside in ["../b.html", outer.path().join("b.html").to_str().unwrap()] {
+            assert!(
+                page(None, outside)
+                    .unwrap_err()
+                    .contains("outside this chat's folder")
+            );
+        }
+        assert!(
+            workspace_page(&root, None, CURRENT_FOLDER, "../b.html")
+                .unwrap_err()
+                .contains("outside the current folder")
+        );
+        #[cfg(unix)]
+        assert!(
+            page(None, "link.html").unwrap_err().contains("outside"),
+            "a link out of the folder is outside it"
+        );
+        assert!(page(None, "notes.txt").is_err());
+        assert!(page(None, "mock").is_err());
+        assert!(page(None, "nope.html").is_err());
+        assert!(
+            page(Some(&root), "mock/a.html")
+                .unwrap_err()
+                .contains("this chat's folder is your home folder")
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_inspection_is_checked_before_the_app_sees_it() {
+        let host = PreviewHost::default();
+        let inspect = PreviewInspect {
+            steps: vec![
+                serde_json::json!({"wait": 1});
+                zeron_proto::html_render::MAX_PREVIEW_STEPS + 1
+            ],
+            ..Default::default()
+        };
+        assert!(
+            preview(&host, "<p>x</p>".into(), None, None, inspect)
+                .await
+                .unwrap_err()
+                .contains("at most")
+        );
+        let inspect = PreviewInspect {
+            rect: Some(zeron_proto::html_render::PreviewRect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 5.0,
+            }),
+            ..Default::default()
+        };
+        assert!(
+            preview(&host, "<p>x</p>".into(), None, None, inspect)
+                .await
+                .unwrap_err()
+                .contains("rect")
+        );
     }
 
     #[test]

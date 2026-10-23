@@ -51,6 +51,7 @@ impl EngineChatSink {
             store.clone(),
             chat_id.clone(),
             cursor,
+            false,
         );
         Self {
             doc: Arc::downgrade(doc),
@@ -106,7 +107,7 @@ impl EngineChatSink {
         RowImportOutcome::Applied
     }
 
-    /// Checkpoint/ACK boundaries bypass the debounce but still queue the
+    /// Checkpoint boundaries bypass the debounce but still queue the
     /// export and transaction off the networking runtime.
     fn persist_with_cursor(&self, cursor: u64) {
         self.persistence.applied(cursor, true);
@@ -226,8 +227,9 @@ impl ChatDocSink for EngineChatSink {
         doc.doc().oplog_vv().includes_vv(&vv)
     }
 
+    // An own-write ack changes no content and the room re-sends from the saved cursor.
     fn advance_cursor(&self, cursor: u64) {
-        self.persist_with_cursor(cursor);
+        self.persistence.applied(cursor, false);
     }
 }
 

@@ -434,7 +434,7 @@ impl Element for Overscroll {
             state.viewport = f32::from(bounds.size.height);
             if !enabled {
                 state.reset();
-            } else if state.tick(Instant::now()) {
+            } else if state.tick(crate::motion::now()) {
                 window.request_animation_frame();
             }
             state.offset
@@ -474,7 +474,7 @@ impl Element for Overscroll {
                 };
                 let mut band = band.borrow_mut();
                 let before = (band.offset, band.spring.is_some());
-                let now = Instant::now();
+                let now = crate::motion::now();
                 // A drag maps the pointer through unshifted bounds, so it never
                 // stretches the band; the gesture's start and end still count.
                 let consumed = if !cx.has_active_drag() && hitbox.should_handle_scroll(window) {

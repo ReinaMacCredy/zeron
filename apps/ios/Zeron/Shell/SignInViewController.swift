@@ -133,7 +133,9 @@ final class WorkOSSignIn: NSObject, ASWebAuthenticationPresentationContextProvid
                 cont.resume(returning: url ?? URL(string: "zeron://callback?failed=1"))
             }
             s.presentationContextProvider = self
-            s.prefersEphemeralWebBrowserSession = false
+            // A shared session keeps the WorkOS cookie, so after a rejected account
+            // (no organization) every retry silently signs that account in again.
+            s.prefersEphemeralWebBrowserSession = true
             session = s
             if !s.start() { cont.resume(returning: nil) }
         }
@@ -147,6 +149,17 @@ final class WorkOSSignIn: NSObject, ASWebAuthenticationPresentationContextProvid
             try await app.signIn(code: code) { [weak self] orgs in await self?.pickOrg(orgs) }
             return nil
         } catch {
+            return Self.message(for: error)
+        }
+    }
+
+    private static func message(for error: Error) -> String {
+        switch error as? CoreError {
+        case let .Auth(message), let .Network(message), let .HostError(message), let .Internal(message),
+             let .NotFound(message), let .InvalidArgument(message), let .HostUnavailable(message),
+             let .Unsupported(message), let .Storage(message), let .NotImplemented(message):
+            return message
+        case .Closed, nil:
             return error.localizedDescription
         }
     }

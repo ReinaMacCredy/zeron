@@ -8,8 +8,8 @@ use gpui::{
 };
 
 use super::Selection;
-use super::thread_tree::{self, Group, NodeKind};
-use super::tree::{self, Dot, Link, NodeIn, StatsCache, Status, TreeMotion};
+use super::thread_tree::{self, NodeKind};
+use super::tree::{self, Dot, Link, NodeIn, StatsCache, Status, StatusTone, TreeMotion};
 use crate::icons::{self, icon};
 use crate::motion::{self, Tween};
 use crate::popover::{self, Popup};
@@ -136,7 +136,7 @@ impl StripTree {
         host: TreeHost,
         cx: &mut Context<Self>,
     ) -> Self {
-        let now = Instant::now();
+        let now = motion::now();
         Self {
             _state: cx.observe(&state, |_, _, cx| cx.notify()),
             state,
@@ -191,7 +191,7 @@ impl StripTree {
             target,
             tree::FOLD,
             motion::reduced_motion(cx),
-            Instant::now(),
+            motion::now(),
         );
         cx.notify();
     }
@@ -237,10 +237,7 @@ impl StripTree {
         let mut at: Vec<usize> = Vec::with_capacity(nodes.len());
         for node in &nodes {
             if let Some(group) = node.group {
-                let label = match group {
-                    Group::Steps(n) => format!("Steps \u{a0}{n}"),
-                    Group::Agents(n) => format!("Outside the plan \u{a0}{n}"),
-                };
+                let label = group.label();
                 rows.push(Row {
                     id: format!("label-{}", node.id),
                     parent: None,
@@ -332,7 +329,7 @@ impl StripTree {
     }
 
     pub fn band(&mut self, cx: &mut Context<Self>) -> (f32, bool) {
-        let now = Instant::now();
+        let now = motion::now();
         let Some(rows) = self.rows(cx) else {
             return (0.0, false);
         };
@@ -349,7 +346,7 @@ impl StripTree {
         if folded {
             self.folded.insert(id.to_string());
         }
-        let now = Instant::now();
+        let now = motion::now();
         let reduced = motion::reduced_motion(cx);
         self.chevrons
             .entry(id.to_string())
@@ -415,7 +412,7 @@ impl StripTree {
                 } else {
                     item(
                         "strip-tree-menu-open",
-                        "Open mission page",
+                        zeron_proto::mission::OPEN_MISSION_PAGE,
                         icons::LUCIDE_CHEVRON_RIGHT,
                     )
                 }
@@ -458,7 +455,7 @@ impl StripTree {
 
 impl Render for StripTree {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let now = Instant::now();
+        let now = motion::now();
         let reduced = motion::reduced_motion(cx);
         let theme = match self.host {
             TreeHost::Strip | TreeHost::Intro => Theme::of(cx).for_popup(),

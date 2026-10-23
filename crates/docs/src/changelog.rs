@@ -18,6 +18,8 @@ pub struct Entry {
     pub date: String,
     #[serde(default)]
     pub hero: Option<String>,
+    #[serde(default)]
+    pub hero_visual: Option<String>,
     pub features: Vec<Feature>,
 }
 
@@ -29,6 +31,8 @@ pub struct Feature {
     pub description: String,
     #[serde(default)]
     pub image: Option<String>,
+    #[serde(default)]
+    pub visual: Option<String>,
     #[serde(default)]
     pub details: Option<String>,
 }
@@ -62,4 +66,98 @@ pub fn entry_for<'a>(entries: &'a [Entry], version: &str) -> Option<&'a Entry> {
     entries
         .iter()
         .find(|entry| entry.version.trim_start_matches('v') == version)
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Resolution<'a> {
+    Show(&'a Entry),
+    Advance,
+    Noop,
+}
+
+pub fn resolve<'a>(entries: &'a [Entry], current: &str, last_seen: Option<&str>) -> Resolution<'a> {
+    let Some(last_seen) = last_seen else {
+        return Resolution::Advance;
+    };
+    if !version_newer(current, last_seen) {
+        return Resolution::Noop;
+    }
+    entries
+        .iter()
+        .filter(|entry| {
+            version_newer(&entry.version, last_seen) && !version_newer(&entry.version, current)
+        })
+        .reduce(|newest, entry| {
+            if version_newer(&entry.version, &newest.version) {
+                entry
+            } else {
+                newest
+            }
+        })
+        .map_or(Resolution::Advance, Resolution::Show)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(version: &str) -> Entry {
+        Entry {
+            version: version.into(),
+            date: "Oct 17".into(),
+            hero: None,
+            hero_visual: None,
+            features: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn fresh_install_records_the_current_version_silently() {
+        let entries = [entry("0.2.113")];
+        assert_eq!(resolve(&entries, "0.2.113", None), Resolution::Advance);
+    }
+
+    #[test]
+    fn same_or_older_version_does_nothing() {
+        let entries = [entry("0.2.113")];
+        assert_eq!(
+            resolve(&entries, "0.2.113", Some("0.2.113")),
+            Resolution::Noop
+        );
+        assert_eq!(
+            resolve(&entries, "0.2.112", Some("0.2.113")),
+            Resolution::Noop
+        );
+    }
+
+    #[test]
+    fn upgrade_with_an_entry_shows_it() {
+        let entries = [entry("0.2.112"), entry("0.2.113")];
+        assert_eq!(
+            resolve(&entries, "0.2.113", Some("0.2.99")),
+            Resolution::Show(&entries[1])
+        );
+        assert_eq!(
+            resolve(&entries, "0.2.113", Some("0.0.0")),
+            Resolution::Show(&entries[1])
+        );
+    }
+
+    #[test]
+    fn upgrade_without_an_entry_advances_silently() {
+        let entries = [entry("0.2.112")];
+        assert_eq!(
+            resolve(&entries, "0.2.113", Some("0.2.112")),
+            Resolution::Advance
+        );
+    }
+
+    #[test]
+    fn upgrade_past_an_unseen_entry_shows_the_newest_unseen_one() {
+        let entries = [entry("0.2.115"), entry("0.2.113"), entry("0.2.112")];
+        assert_eq!(
+            resolve(&entries, "0.2.114", Some("0.2.112")),
+            Resolution::Show(&entries[1])
+        );
+    }
 }

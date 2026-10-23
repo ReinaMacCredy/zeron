@@ -7,9 +7,7 @@ final class Toast: UIView {
     private let glass = Glass.surface()
     private var dismissWork: DispatchWorkItem?
 
-    /// `above`: a view of the screen's own (the composer) to float over
-    /// instead of the tab chrome.
-    static func show(_ text: String, action: String? = nil, in window: UIWindow?, above anchor: UIView? = nil, handler: (() -> Void)? = nil) {
+    static func show(_ text: String, action: String? = nil, in window: UIWindow?, above anchor: UIView? = nil, atTop: Bool = false, handler: (() -> Void)? = nil) {
         guard let window else { return }
         current?.dismiss(animated: false)
         let toast = Toast(text: text, action: action, handler: handler)
@@ -25,7 +23,9 @@ final class Toast: UIView {
         }
         NSLayoutConstraint.activate([
             toast.centerXAnchor.constraint(equalTo: window.centerXAnchor),
-            toast.bottomAnchor.constraint(equalTo: window.topAnchor, constant: top - gap),
+            atTop
+                ? toast.topAnchor.constraint(equalTo: window.safeAreaLayoutGuide.topAnchor, constant: gap)
+                : toast.bottomAnchor.constraint(equalTo: window.topAnchor, constant: top - gap),
             toast.widthAnchor.constraint(lessThanOrEqualTo: window.widthAnchor, constant: -48),
         ])
         current = toast
@@ -41,9 +41,9 @@ final class Toast: UIView {
         }
         if let tabs, !tabs.tabBar.isHidden, tabs.tabBar.window != nil {
             top = min(top, tabs.tabBar.convert(tabs.tabBar.bounds, to: window).minY)
-        }
-        if let bar = (tabs as? MainTabController)?.bottomBarFrame(in: window) {
-            top = min(top, bar.minY)
+            if let accessory = (tabs as? MainTabController)?.accessoryFrame(in: window) {
+                top = min(top, accessory.minY)
+            }
         }
         // A pushed screen's own bottom bar (e.g. the composer) isn't tab
         // chrome; keep clear of the keyboard / home indicator either way.

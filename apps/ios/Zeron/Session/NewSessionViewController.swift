@@ -12,6 +12,11 @@ struct NewSessionDraft: Equatable, Codable {
     var effort: String?
     /// Run on its own Cloud machine (optional: drafts saved before Cloud).
     var cloud: Bool?
+    var modelOptions: [String: String]?
+    var permission: String?
+    var profileId: String?
+    var instructions: String?
+    var disabledTools: [String]?
 }
 
 /// Options the pickers offer (from the core's workspace + host catalogs).
@@ -62,6 +67,12 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     private let mark = UIImageView()
     private var draft: NewSessionDraft
     private var models: [ModelChoice] = []
+    private var invocationCatalogs: [String: InvocationCatalog] = [:]
+    private var mission = false
+    private var missionReview = true
+    private var missionPlanDoc = true
+    private var profiles: [ProfileRow] = []
+    private var profilesFor: (device: String, config: ChatConfig)?
 
     /// Embedded in the iPad split's main column (no sheet chrome).
     private let embedded: Bool
@@ -145,23 +156,35 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         view.addSubview(heroStack)
 
         composer.translatesAutoresizingMaskIntoConstraints = false
-        composer.placeholder = "Describe the task"
         composer.chipsAlwaysVisible = true
-        composer.attachMenu = { [weak self] in
-            guard let self else { return UIMenu() }
-            return AttachmentPicker.menu(host: self, limit: 8 - self.composer.images.count) { [weak self] in self?.composer.addImages($0) }
-        }
-        // The model chip opens the picker sheet (tabs per provider).
         composer.onChipTap = { [weak self] id, _ in
-            guard let self, id == "model" else { return }
-            self.present(self.modelPicker(), animated: true)
+            guard let self, id == "mission" else { return }
+            self.mission.toggle()
+            self.refreshChips()
         }
         composer.mentionSearch = { [weak self] q in
             guard let self, let p = self.project else { return [] }
             return await self.app.searchFiles(deviceId: p.device, spaceId: p.id, query: q)
         }
+        composer.threadSearch = { [weak self] q in
+            guard let self, let p = self.project else { return [] }
+            return self.app.threadMentions(deviceId: p.device, spaceId: p.id, query: q)
+        }
+        composer.invocationCatalog = { [weak self] skill in
+            guard let self, let client = self.app.client, !self.deviceId.isEmpty else { return nil }
+            let key = "\(self.deviceId)|\(self.project?.id ?? "")|\(self.draft.harness)|\(skill)"
+            if let hit = self.invocationCatalogs[key] { return hit }
+            let found = await client.invocationCatalog(deviceId: self.deviceId, harness: self.draft.harness, chatId: nil, spaceId: self.project?.id, skill: skill)
+            if found.warning == nil { self.invocationCatalogs[key] = found }
+            return found
+        }
         composer.onSend = { [weak self] text, images, _ in
-            self?.create(text: text, images: images) ?? false ? .sent : .kept
+            guard let self else { return .kept }
+            if self.mission {
+                self.startMission(text: text, images: images)
+                return .kept
+            }
+            return self.create(text: text, images: images) ? .sent : .kept
         }
         view.addSubview(composer)
         heroStack.leadingAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 24).isActive = true
@@ -306,7 +329,11 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     }
 
     private func refreshChips() {
-        var chips: [ComposerChip] = []
+        let labels = missionComposerLabels(fromChat: false)
+        var chips = [ComposerChip(id: "mission", title: labels.start, symbol: "target", tint: mission ? Palette.accent : nil)]
+        if mission {
+            chips.append(ComposerChip(id: "mission-plan", title: missionPlanDoc ? labels.planDoc : labels.stepsOnly, symbol: missionReview ? "checklist" : "doc.text"))
+        }
         if let p = project, runsOnCloud {
             // On its own Cloud machine, from a branch of the repository.
             chips.append(ComposerChip(id: "project", title: p.groupName, symbol: nil, icon: ProjectTile.image(name: p.groupName, colorIndex: p.colorIndex)))
@@ -328,18 +355,91 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         // Never the harness name in place of a model: a model this host
         // hasn't listed still gets its catalog label.
         let modelTitle = model?.label ?? draft.model.map { modelLabel(harness: draft.harness, model: $0) } ?? fallbackModels(harness: draft.harness).first?.label ?? HarnessNames.label(draft.harness)
-        chips.append(ComposerChip(id: "model", title: modelTitle, symbol: nil, icon: BrandMarks.image(for: draft.harness, side: 13)))
+        let profile = profiles.first(where: \.active).map { "\($0.name)\($0.drift == nil ? "" : " •") · \(modelTitle)" }
+        chips.append(ComposerChip(id: "model", title: profile ?? modelTitle, symbol: nil, icon: BrandMarks.image(for: draft.harness, side: 13)))
         if let efforts = model?.efforts, !efforts.isEmpty {
-            chips.append(ComposerChip(id: "effort", title: (draft.effort ?? efforts[efforts.count / 2]).capitalized, symbol: "gauge.with.dots.needle.67percent"))
+            chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: draft.effort ?? efforts[efforts.count / 2]), symbol: "gauge.with.dots.needle.67percent"))
         }
+        composer.placeholder = mission ? labels.placeholder : "Describe the task"
         composer.chips = chips
         composer.chipMenus = [
             "project": { [weak self] in self?.projectMenu() },
             "host": { [weak self] in self?.hostMenu() },
             "branch": { [weak self] in self?.branchMenu() },
+            "model": { [weak self] in self?.modelMenu() },
             "effort": { [weak self] in self?.effortMenu() },
+            "mission-plan": { [weak self] in self?.missionPlanMenu() },
         ]
         mark.image = BrandMarks.image(for: draft.harness, side: 34)
+        loadProfiles()
+    }
+
+    private func loadProfiles() {
+        let device = deviceId
+        let config = draft.config
+        guard let client = app.client, !device.isEmpty, profilesFor?.device != device || profilesFor?.config != config else { return }
+        profilesFor = (device, config)
+        Task { @MainActor [weak self] in
+            let rows = await client.draftProfileRows(deviceId: device, config: config)
+            guard let self, self.profilesFor?.device == device, self.profilesFor?.config == config, rows != self.profiles else { return }
+            self.profiles = rows
+            self.refreshChips()
+        }
+    }
+
+    private func profileSection() -> UIMenu? {
+        guard !profiles.isEmpty else { return nil }
+        let labels = profileMenuLabels()
+        var items: [UIMenuElement] = profiles.map { p in
+            let image = UIImage(systemName: "person.crop.circle")
+            guard p.active, let drift = p.drift else {
+                return UIAction(title: p.name, subtitle: p.line, image: image, state: p.active ? .on : .off) { [weak self] _ in
+                    self?.applyProfile(p.id)
+                }
+            }
+            var actions = [UIAction(title: labels.revert, image: UIImage(systemName: "arrow.uturn.backward")) { [weak self] _ in self?.applyProfile(p.id) }]
+            if p.savable {
+                actions.append(UIAction(title: labels.save, image: UIImage(systemName: "square.and.arrow.down")) { [weak self] _ in self?.saveProfile(p.id) })
+            }
+            return UIMenu(title: "\(p.name) · \(labels.edited)", subtitle: drift, image: image, children: actions)
+        }
+        let none = !profiles.contains(where: \.active)
+        items.append(UIAction(title: labels.none, subtitle: labels.noneNote, image: UIImage(systemName: "person.crop.circle.badge.xmark"), state: none ? .on : .off) { [weak self] _ in
+            guard let self, !none, let config = try? detachDraftProfile(config: self.draft.config) else { return }
+            self.draft.adopt(config)
+            self.refreshChips()
+        })
+        return UIMenu(title: labels.title, options: .displayInline, children: items)
+    }
+
+    private func applyProfile(_ id: String) {
+        guard let client = app.client else { return }
+        let device = deviceId
+        let config = draft.config
+        Task { @MainActor [weak self] in
+            do {
+                let applied = try await client.applyDraftProfile(deviceId: device, config: config, profileId: id)
+                self?.draft.adopt(applied)
+                self?.refreshChips()
+            } catch {
+                Toast.show("\(error)", in: self?.view.window)
+            }
+        }
+    }
+
+    private func saveProfile(_ id: String) {
+        guard let client = app.client else { return }
+        let device = deviceId
+        let config = draft.config
+        Task { @MainActor [weak self] in
+            do {
+                try await client.saveDraftIntoProfile(deviceId: device, config: config, profileId: id)
+                self?.profilesFor = nil
+                self?.refreshChips()
+            } catch {
+                Toast.show("\(error)", in: self?.view.window)
+            }
+        }
     }
 
     /// One entry per project — checkouts of one repository, on any device,
@@ -492,27 +592,6 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         ])
     }
 
-    /// A tab per provider the target runs (the draft's first), each listing
-    /// the models already loaded for it.
-    private func modelPicker() -> UIViewController {
-        var order: [String] = [draft.harness]
-        for m in models where !order.contains(m.harness) { order.append(m.harness) }
-        let tabs = order.compactMap { h -> ModelPickerTab? in
-            let choices = models.filter { $0.harness == h }
-            guard let first = choices.first else { return nil }
-            let rows = choices.map { ModelPickerRow(id: $0.id, label: $0.label, detail: $0.detail) }
-            return ModelPickerTab(harness: h, label: first.harnessLabel) { rows }
-        }
-        let host = runsOnCloud ? (name: "Cloud", symbol: "cloud") : (name: app.deviceName(deviceId), symbol: "desktopcomputer")
-        return ModelPickerViewController.sheet(tabs: tabs, harness: draft.harness, model: draft.model, host: host) { [weak self] harness, model in
-            guard let self else { return }
-            if harness != self.draft.harness { self.draft.effort = nil }
-            self.draft.harness = harness
-            self.draft.model = model.id
-            self.refreshChips()
-        }
-    }
-
     /// The draft's own model when it names one (even one this list lacks:
     /// it's what gets sent, so its label and efforts are its own); the
     /// provider's default only when it names none.
@@ -522,14 +601,74 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             : models.first { $0.harness == draft.harness && $0.id == draft.model }
     }
 
+    private func modelMenu() -> UIMenu {
+        let byHarness = Dictionary(grouping: models, by: \.harness)
+        return UIMenu(children: [profileSection()].compactMap { $0 } + byHarness.keys.sorted().map { h in
+            UIMenu(title: byHarness[h]!.first!.harnessLabel, options: .displayInline, children: byHarness[h]!.map { m in
+                UIAction(title: m.label, image: BrandMarks.image(for: h, side: 16), state: m.harness == draft.harness && m.id == draft.model ? .on : .off) { [weak self] _ in
+                    self?.draft.harness = m.harness
+                    self?.draft.model = m.id
+                    self?.draft.effort = nil
+                    self?.refreshChips()
+                }
+            })
+        })
+    }
+
     private func effortMenu() -> UIMenu {
         let model = draftModel
         return UIMenu(title: "Reasoning effort", children: (model?.efforts ?? []).map { e in
-            UIAction(title: e.capitalized, state: e == draft.effort ? .on : .off) { [weak self] _ in
+            UIAction(title: reasoningLabel(level: e), state: e == draft.effort ? .on : .off) { [weak self] _ in
                 self?.draft.effort = e
                 self?.refreshChips()
             }
         })
+    }
+
+    private func missionPlanMenu() -> UIMenu {
+        let labels = missionComposerLabels(fromChat: false)
+        return UIMenu(title: labels.start, children: [
+            UIMenu(options: .displayInline, children: [(true, labels.planDoc), (false, labels.stepsOnly)].map { planDoc, title in
+                UIAction(title: title, state: planDoc == missionPlanDoc ? .on : .off) { [weak self] _ in
+                    self?.missionPlanDoc = planDoc
+                    self?.refreshChips()
+                }
+            }),
+            UIAction(title: labels.reviewPlanFirst, state: missionReview ? .on : .off) { [weak self] _ in
+                self?.missionReview.toggle()
+                self?.refreshChips()
+            },
+        ])
+    }
+
+    private func startMission(text: String, images: [StagedImage]) {
+        let device = deviceId
+        let pictures = images.filter(\.isImage)
+        if let error = missionStagedError(images: UInt32(pictures.count), otherFile: nil) {
+            return Toast.show(error, in: view.window)
+        }
+        guard !device.isEmpty else { return showCreateFailed() }
+        app.lastDraft = draft
+        let brief = missionText(text: text, pasted: images.filter { !$0.isImage }.map { String(decoding: $0.data, as: UTF8.self) })
+        let options = MissionOptions(approvePlan: missionReview, sameAgents: false, planDoc: missionPlanDoc)
+        let host = (presentingViewController as? UITabBarController)?.selectedViewController ?? self
+        Task { @MainActor [weak self] in
+            guard let self, await MissionStart.run(app: self.app, deviceId: device, text: brief, spaceId: self.project?.id, images: pictures, config: self.draft.config, options: options, from: host) != nil else { return }
+            self.created = true
+            self.app.newSessionText = ""
+            self.app.newSessionImages = []
+            self.composer.text = ""
+            self.composer.images = []
+            self.mission = false
+            self.refreshChips()
+            if !self.embedded { self.dismiss(animated: true) }
+        }
+    }
+
+    private func showCreateFailed() {
+        let alert = UIAlertController(title: "Couldn't start the session", message: "Choose a project or a host that can run it.", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
     }
 
     /// False when the session couldn't be created (the prompt stays put).
@@ -540,9 +679,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             return false
         }
         guard let chatId = app.createSession(draft: draft, text: text, images: images) else {
-            let alert = UIAlertController(title: "Couldn't start the session", message: "Choose a project or a host that can run it.", preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "OK", style: .default))
-            present(alert, animated: true)
+            showCreateFailed()
             return false
         }
         created = true

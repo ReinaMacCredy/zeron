@@ -14,7 +14,7 @@
 mod chart;
 mod layout;
 mod paint;
-mod palette;
+pub(crate) mod palette;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

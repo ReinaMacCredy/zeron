@@ -67,6 +67,9 @@ pub(super) fn audit(tree: &Tree, focus_held: bool) -> Value {
             continue;
         }
         interactive_count += 1;
+        if node.disabled {
+            continue;
+        }
         if unnamed(node) {
             unlabeled += 1;
             issues.push(issue(node, "unlabeled"));
@@ -143,6 +146,9 @@ mod tests {
         described.description = Some("Close".into());
         let mut div = node("e5", "GenericContainer", None);
         div.actions = vec!["click".into()];
+        let mut inert = node("e11", "Button", None);
+        inert.disabled = true;
+        inert.bounds.as_mut().unwrap().x = 900.0;
         let mut offscreen = node("e6", "Link", Some("Docs"));
         offscreen.bounds = Some(Bounds {
             x: 900.0,
@@ -161,6 +167,7 @@ mod tests {
             (2, node("e8", "Tab", Some("Chat"))),
             (2, node("e9", "Button", Some("Chat"))),
             (1, node("e10", "Tab", Some("Chat"))),
+            (1, inert),
         ]);
         let report = audit(&tree, true);
         assert_eq!(
@@ -178,7 +185,7 @@ mod tests {
         assert_eq!(report["issues"][0]["source"], "crates/ui/src/shell.rs:42:9");
         assert_eq!(
             report["counts"],
-            json!({ "nodes": 10, "interactive": 7, "tabStops": 3, "unlabeledInteractive": 1 })
+            json!({ "nodes": 11, "interactive": 8, "tabStops": 3, "unlabeledInteractive": 1 })
         );
         let mut focused = tree.clone();
         focused.nodes[3].focused = true;

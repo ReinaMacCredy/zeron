@@ -1582,6 +1582,48 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
     None
 }
 
+/// The last turn stopped short: the user's prompt is the trailing entry with
+/// no reply behind it, or the reply was aborted, or the harness failed
+/// mid-reply (the engine finishes that entry `Complete`, so the trailing
+/// `Error` part is the only mark it left).
+pub fn turn_stopped(last: &SessionMessageEntry) -> bool {
+    last.role == MessageRole::User
+        || last.status == Some(MessageStatus::Aborted)
+        || (last.status != Some(MessageStatus::Streaming)
+            && matches!(last.parts.last(), Some(MessagePart::Error { .. })))
+}
+
+pub fn boundary_compaction<'a, I>(transcript: I) -> Option<(u64, bool)>
+where
+    I: IntoIterator<Item = &'a SessionMessageEntry>,
+    I::IntoIter: DoubleEndedIterator,
+{
+    let entry = transcript
+        .into_iter()
+        .rev()
+        .find(|entry| entry.role != MessageRole::User)?;
+    entry.parts.iter().find_map(|part| match part {
+        MessagePart::Classifier { record, .. } => match record.verdict {
+            crate::parts::ClassifierVerdict::New => Some((record.context_tokens, false)),
+            crate::parts::ClassifierVerdict::Carry => Some((record.context_tokens, true)),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+/// The streaming reply's advisor call is still out: the one tool that takes
+/// minutes with nothing streaming, so the working trailer names that wait.
+pub fn consulting_advisor(last: &SessionMessageEntry) -> bool {
+    last.status == Some(MessageStatus::Streaming)
+        && last.parts.iter().any(|part| {
+            matches!(
+                part,
+                MessagePart::Tool { call, resolved: false, .. } if call.is_advisor()
+            )
+        })
+}
+
 /// Render-time continuation join at the entry level (`joinContinuations` in TS):
 /// concatenate continuation entries' parts onto their root, in list order.
 pub fn join_continuation_entries(entries: Vec<SessionMessageEntry>) -> Vec<SessionMessageEntry> {

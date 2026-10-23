@@ -5,9 +5,8 @@ use gpui::{
     AnyElement, Bounds, Context, Hsla, IntoElement, PathBuilder, SharedString, canvas, div, point,
     prelude::*, px, size,
 };
-use zeron_proto::{ChatIndicator, DelegationStatus, SessionStats, SessionStatus, StepStatus};
+use zeron_proto::{ChatIndicator, SessionStats, SessionStatus};
 
-use super::StepRow;
 use crate::icons::{self, icon};
 use crate::motion::{self, CubicBezier, MotionSpec, Tween};
 use crate::state::AppState;
@@ -41,52 +40,15 @@ pub(crate) const DOT_RADIUS: f32 = 3.25;
 const STATS_POLL: Duration = Duration::from_secs(10);
 const STATS_SETTLE: Duration = Duration::from_secs(2);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Status {
-    Queued,
-    Running,
-    Waiting,
-    Done,
-    Failed,
-    Stopped,
+pub(crate) use zeron_doc::tree::{TreeStatus as Status, lead_status};
+
+pub(crate) trait StatusTone {
+    fn tone(self, theme: &Theme) -> Hsla;
+    fn opacity(self) -> f32;
 }
 
-impl Status {
-    pub fn of_step(row: &StepRow, delegation: Option<DelegationStatus>) -> (Self, &'static str) {
-        match row.status {
-            StepStatus::Done => (Self::Done, "Done"),
-            StepStatus::Skipped => (Self::Stopped, "Skipped"),
-            StepStatus::Planned => (Self::Queued, "Planned"),
-            StepStatus::Working => (Self::Running, "Working"),
-            StepStatus::Failed => (Self::Failed, "Failed"),
-            StepStatus::NeedsYou => {
-                let stopped = delegation.is_none()
-                    && row.step.turn.as_ref().map(|turn| turn.ended)
-                        == Some(zeron_proto::StepTurnEnd::Stopped);
-                match delegation {
-                    _ if row.indicator == Some(ChatIndicator::AwaitingInput) => {
-                        (Self::Waiting, "Needs you")
-                    }
-                    Some(DelegationStatus::Cancelled) => (Self::Failed, "Stopped"),
-                    Some(DelegationStatus::Interrupted) => (Self::Failed, "Interrupted"),
-                    Some(DelegationStatus::Failed) => (Self::Failed, "Failed"),
-                    _ if stopped => (Self::Failed, "Stopped"),
-                    _ if row.indicator == Some(ChatIndicator::Errored) => (Self::Failed, "Failed"),
-                    _ => (Self::Waiting, "Needs you"),
-                }
-            }
-        }
-    }
-
-    pub fn muted(self) -> bool {
-        matches!(self, Self::Queued | Self::Stopped)
-    }
-
-    pub fn live(self) -> bool {
-        matches!(self, Self::Running | Self::Waiting)
-    }
-
-    pub fn tone(self, theme: &Theme) -> Hsla {
+impl StatusTone for Status {
+    fn tone(self, theme: &Theme) -> Hsla {
         let tone = |indicator| crate::shell::chat_status_tone(indicator, theme).2;
         match self {
             Self::Running => tone(ChatIndicator::Working),
@@ -99,34 +61,6 @@ impl Status {
 
     fn opacity(self) -> f32 {
         if self.muted() { MUTED_OPACITY } else { 1.0 }
-    }
-}
-
-pub(crate) fn lead_status(
-    task: &zeron_proto::Task,
-    plan: &super::Rollup,
-) -> (Status, &'static str) {
-    if task.completed_at.is_some() {
-        return (Status::Done, "Done");
-    }
-    if let Some(indicator) = plan.lead.filter(|_| !super::is_mission(task, plan)) {
-        let status = match indicator {
-            ChatIndicator::Working => Status::Running,
-            ChatIndicator::Errored => Status::Failed,
-            ChatIndicator::AwaitingInput | ChatIndicator::Completed | ChatIndicator::Idle => {
-                Status::Waiting
-            }
-        };
-        return (status, super::TasksPage::linked_label(indicator));
-    }
-    match plan.lead {
-        None => (Status::Queued, "Not started"),
-        _ if plan.phase(task) == super::PlanPhase::Planning => (Status::Running, "Planning"),
-        Some(ChatIndicator::Working) => (Status::Running, "Working"),
-        Some(ChatIndicator::Errored) => (Status::Failed, "Failed"),
-        _ if super::TaskCenter::lead_waits(task, plan).is_some() => (Status::Waiting, "Needs you"),
-        _ if plan.count(StepStatus::Working) > 0 => (Status::Running, "Working"),
-        _ => (Status::Queued, "Idle"),
     }
 }
 
@@ -521,7 +455,7 @@ fn cap(window: &mut gpui::Window, at: gpui::Point<gpui::Pixels>, width: f32, col
 
 fn spin_epoch() -> Instant {
     static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    *EPOCH.get_or_init(Instant::now)
+    *EPOCH.get_or_init(motion::now)
 }
 
 fn arc(
@@ -569,7 +503,7 @@ pub(crate) fn spinner(diameter: f32, color: Hsla, reduced: bool) -> impl IntoEle
                 0.0
             } else {
                 let period = SPIN.mul_f32(motion::speed_scale()).as_secs_f32();
-                let elapsed = Instant::now().saturating_duration_since(spin_epoch());
+                let elapsed = motion::now().saturating_duration_since(spin_epoch());
                 (elapsed.as_secs_f32() / period).fract()
             };
             let center = bounds.center();
@@ -607,7 +541,7 @@ pub(crate) fn kind_badge(mission: bool, theme: &Theme) -> AnyElement {
     } else {
         (
             icons::LUCIDE_LIST_TREE,
-            "Tree",
+            zeron_doc::tree::BADGE,
             theme.text_muted,
             theme.wash(0.07),
         )
@@ -692,11 +626,7 @@ pub(crate) fn shimmer_text(
 pub(crate) mod amount {
     use super::*;
 
-    pub fn of(stats: Option<&SessionStats>) -> Option<u64> {
-        stats
-            .map(SessionStats::total_tokens)
-            .filter(|tokens| *tokens > 0)
-    }
+    pub use zeron_doc::tree::{tokens_of as of, tokens_text as text};
 
     pub fn branch(
         own: Option<u64>,
@@ -706,10 +636,6 @@ pub(crate) mod amount {
             .chain(children)
             .flatten()
             .reduce(|a, b| a + b)
-    }
-
-    pub fn text(tokens: u64) -> String {
-        format!("{} tokens", crate::session_stats::tokens(tokens))
     }
 
     pub fn shine(theme: &Theme) -> Hsla {
@@ -755,30 +681,7 @@ pub(crate) mod amount {
     }
 }
 
-pub(crate) fn fmt_time(ms: u64) -> String {
-    let secs = ms / 1000;
-    match secs {
-        0..60 => format!("{secs}s"),
-        60..3600 => format!("{}m {:02}s", secs / 60, secs % 60),
-        _ => format!("{}h {:02}m", secs / 3600, secs % 3600 / 60),
-    }
-}
-
-pub(crate) fn thread_time(
-    status: Status,
-    since: Option<chrono::DateTime<chrono::Utc>>,
-    stats: Option<&SessionStats>,
-) -> Option<String> {
-    if status.live()
-        && let Some(since) = since
-    {
-        let ms = (chrono::Utc::now() - since).num_milliseconds().max(0) as u64;
-        return Some(fmt_time(ms));
-    }
-    let stats = stats?;
-    let ms = stats.llm_ms + stats.tool_ms;
-    (ms > 0).then(|| fmt_time(ms))
-}
+pub(crate) use zeron_doc::tree::{fmt_time, thread_time};
 
 #[derive(Default)]
 pub(crate) struct StatsCache {

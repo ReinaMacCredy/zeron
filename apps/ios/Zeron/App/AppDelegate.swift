@@ -9,6 +9,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     ) -> Bool {
         // Before launch finishes, so a tap that launched the app is delivered.
         UNUserNotificationCenter.current().delegate = PushNotifications.shared
+        KeyboardWindow.observe()
         return true
     }
 

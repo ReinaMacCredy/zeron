@@ -644,10 +644,11 @@ impl Terminals {
         terminal_id: &str,
         chat_id: &str,
         max_lines: usize,
+        styled: bool,
     ) -> Result<TerminalScreen, EngineError> {
         let session = self.chat_session(terminal_id, chat_id)?;
         let session = lock(&session);
-        let text = session.screen.text(max_lines);
+        let text = session.screen.text(max_lines, styled);
         Ok(TerminalScreen {
             terminal: info(terminal_id, &session),
             cols: text.cols,
@@ -657,6 +658,7 @@ impl Terminals {
             cursor_col: text.cursor_col,
             lines: text.lines,
             truncated: text.truncated,
+            styled_lines: text.styled_lines,
         })
     }
 
@@ -1481,7 +1483,7 @@ mod agent_tests {
     ) -> TerminalScreen {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let screen = terminals.read(id, chat, 50).unwrap();
+                let screen = terminals.read(id, chat, 50, false).unwrap();
                 if screen.lines.iter().any(|line| line.contains(needle)) {
                     return screen;
                 }
@@ -1522,7 +1524,7 @@ mod agent_tests {
         assert_eq!((screen.cols, screen.rows), (60, 10));
         assert!(!screen.alt_screen);
 
-        assert!(terminals.read(&session.id, "chat-b", 50).is_err());
+        assert!(terminals.read(&session.id, "chat-b", 50, false).is_err());
         assert!(
             terminals
                 .send_input(&session.id, "chat-b", Some("x"), &[])
@@ -1547,7 +1549,13 @@ mod agent_tests {
         assert_eq!(terminals.list_for_chat("chat-a")[0].selection, None);
 
         terminals.resize(&session.id, 90, 12).unwrap();
-        assert_eq!(terminals.read(&session.id, "chat-a", 5).unwrap().cols, 90);
+        assert_eq!(
+            terminals
+                .read(&session.id, "chat-a", 5, false)
+                .unwrap()
+                .cols,
+            90
+        );
 
         terminals
             .send_input(&session.id, "chat-a", Some("exit 3\n"), &[])

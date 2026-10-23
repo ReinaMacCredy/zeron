@@ -1,29 +1,38 @@
 # What's New entries, one per release. Images live in assets/whats_new/ and
-# must be listed in whats_new.rs IMAGES. Order does not matter.
+# must be listed in crates/docs/src/images.rs IMAGES. Order does not matter.
 
 [[entry]]
 version = "0.2.118"
 date = "Oct 23"
 hero = "tasks-card.jpg"
+hero_visual = "tasks-home"
 
 [[entry.features]]
 id = "tasks-replace-mission-control"
 title = "Tasks takes over from Mission Control"
 description = "Every task and mission now opens as a task page, with a Plan first switch that has the lead plan before it works. All, Missions, Trees and Needs you chips sort the list."
 image = "tasks-card.jpg"
-details = "A mission's tabs gather into one group in the titlebar, and the selected tab in a group stands out like a folder tab."
+visual = "tasks-home"
+
+[[entry.features]]
+id = "mission-tabs"
+title = "A mission's tabs travel together"
+description = "A mission's tabs gather into one group in the titlebar, and the selected tab in a group stands out like a folder tab."
+visual = "mission-tabs"
 
 [[entry.features]]
 id = "sidebar-mission-row"
 title = "A mission on one sidebar row"
 description = "A mission's sidebar row carries a progress ring and its live steps, then folds the rest into N more steps."
 image = "mission-control-strip.jpg"
+visual = "sidebar-mission"
 
 [[entry.features]]
 id = "supervisor-conversation"
 title = "The Supervisor's conversation over its feed"
 description = "Open Conversation on the Supervisor page and it opens over the feed. Mention a thread to the Supervisor and it watches that thread's tree; watched trees show an eye."
 image = "supervisor-feed.jpg"
+visual = "supervisor-conversation"
 
 [[entry.features]]
 id = "spine-wide"
@@ -94,7 +103,7 @@ details = "Settled turns fold under Worked for, delegate chips show the agent, m
 id = "upstream-0-2-118"
 title = "From upstream Zeron"
 description = "First-run setup for new installs, a background engine that keeps sessions running after you quit the app, and desktop notifications posted by the engine. Error cards say when an agent is signed out or out of usage and offer Log in, Claude sign-in falls back to its credentials file when the Keychain refuses, and long transcripts no longer drop the engine connection."
-details = "Zeron Cloud and Billing pages appear for accounts that are offered Cloud. Your existing provider switch stays: the model picker keeps the fork's confirm dialog instead of upstream's in-picker switch."
+details = "Zeron Cloud and Billing pages appear for accounts that are offered Cloud. Your existing provider switch stays: the model picker keeps the fork's confirm dialog instead of upstream's in-picker switch. On iPhone, delete a session from the list or its … menu, a Log in button on an error card signs that agent in, and the composer sits right on foldable phones; the iPhone keeps the tab bar and model menu shown above."
 
 [[entry]]
 version = "0.2.114"

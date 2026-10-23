@@ -69,11 +69,13 @@ enum Command {
     },
     /// Inspect and drive a running Zeron app through its UI driver:
     /// `zeron ui list`, `zeron ui <action> ['<json args>'] [--target <t>]`,
-    /// or `zeron ui scenario <file.json> [--target <t>] [--out <dir>]`.
+    /// `zeron ui scenario <file.json> [--target <t>] [--out <dir>]`,
+    /// `zeron ui launch [--n N] [--mock] [--name <app>] [-- <app args>]`, `zeron ui quit --target <t>`,
+    /// or `zeron ui record start|stop [--path <file.json>] --target <t>`.
     Ui {
-        /// `list`, `scenario`, or a driver action such as state, tree, snapshot, wait, click or key.
+        /// `list`, `scenario`, `launch`, `quit`, `record`, or a driver action such as state, tree, snapshot, wait, click or key.
         action: String,
-        /// The action's arguments as one JSON object, such as '{"keys":"cmd-k"}'; for `scenario`, the scenario file.
+        /// The action's arguments as one JSON object, such as '{"keys":"cmd-k"}'; for `scenario`, the scenario file; for `record`, `start` or `stop`.
         args: Option<String>,
         /// A pid or label from `zeron ui list` (exact, or a unique substring), or a socket path.
         #[arg(long)]
@@ -81,6 +83,21 @@ enum Command {
         /// For `scenario`: the report directory (default ~/.zeron/run/scenarios/<name>-<time>).
         #[arg(long)]
         out: Option<std::path::PathBuf>,
+        /// For `launch`: the Dev number 60-99 (bundle target/macos-dev<N>, port 49800+N); defaults to the lowest free one.
+        #[arg(long)]
+        n: Option<u16>,
+        /// For `launch`: run the app with the mock harness.
+        #[arg(long)]
+        mock: bool,
+        /// For `launch`: the app name (default `Zeron Dev <N>`).
+        #[arg(long)]
+        name: Option<String>,
+        /// For `snapshot` and `record stop`: the absolute file to write; for `compare`: the mockup .html file in the current folder.
+        #[arg(long)]
+        path: Option<std::path::PathBuf>,
+        /// For `launch`: arguments passed to the app.
+        #[arg(last = true)]
+        app_args: Vec<String>,
     },
     /// Cloud sleep handshake: ask the running engine to start no new work.
     /// Exits 0 when quiesced, 75 when busy (a turn in flight, a message
@@ -190,6 +207,11 @@ fn main() -> anyhow::Result<()> {
             args,
             target,
             out,
+            n,
+            mock,
+            name,
+            path,
+            app_args,
         }) => {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -213,7 +235,23 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
             }
-            runtime.block_on(ui_cli(action, args, target))
+            let mut flags = serde_json::Map::new();
+            if let Some(n) = n {
+                flags.insert("n".into(), n.into());
+            }
+            if mock {
+                flags.insert("mock".into(), true.into());
+            }
+            if let Some(name) = name {
+                flags.insert("name".into(), name.into());
+            }
+            if let Some(path) = path {
+                flags.insert("path".into(), path.to_string_lossy().into_owned().into());
+            }
+            if !app_args.is_empty() {
+                flags.insert("appArgs".into(), app_args.into());
+            }
+            runtime.block_on(ui_cli(action, args, target, flags))
         }
         Some(Command::Quiesce) => {
             let runtime = tokio::runtime::Runtime::new()?;
@@ -312,7 +350,14 @@ async fn ui_cli(
     action: String,
     args: Option<String>,
     target: Option<String>,
+    flags: serde_json::Map<String, serde_json::Value>,
 ) -> anyhow::Result<()> {
+    let args = match args.as_deref() {
+        Some(step @ ("start" | "stop")) if action == "record" => {
+            Some(serde_json::json!({ "do": step }).to_string())
+        }
+        _ => args,
+    };
     let parsed = args.as_deref().map(serde_json::from_str).transpose();
     let mut request =
         match parsed.map_err(|e| anyhow::anyhow!("the action's arguments are not JSON: {e}"))? {
@@ -320,6 +365,7 @@ async fn ui_cli(
             Some(serde_json::Value::Object(args)) => args,
             Some(_) => anyhow::bail!("the action's arguments must be one JSON object"),
         };
+    request.extend(flags);
     request.insert("action".into(), action.into());
     if let Some(target) = target {
         request.insert("target".into(), target.into());

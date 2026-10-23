@@ -657,7 +657,7 @@ final class AccountCell: UITableViewCell {
         self.onSwitch = onSwitch
         meters.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for window in usage.prefix(3) {
-            meters.addArrangedSubview(UsageMeter(window: window))
+            meters.addArrangedSubview(UsageWindowMeter(window: window))
         }
         if let note {
             let label = UILabel()
@@ -721,7 +721,7 @@ final class AccountCell: UITableViewCell {
 }
 
 /// "Session  ▓▓▓░░░  34% · 3h" (time until the window resets).
-final class UsageMeter: UIView {
+final class UsageWindowMeter: UIView {
     init(window: UsageWindowInfo) {
         super.init(frame: .zero)
         let label = UILabel()

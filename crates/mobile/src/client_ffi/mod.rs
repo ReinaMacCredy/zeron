@@ -14,9 +14,15 @@
 mod cloud;
 mod providers;
 pub use providers::UsageWindowInfo;
+mod git;
+mod review;
+mod composer;
 mod session;
+mod settings;
 mod voice;
 pub use voice::*;
+mod tasks;
+mod today;
 mod types;
 
 use std::sync::Arc;
@@ -25,6 +31,7 @@ use zeron_client as zc;
 
 pub use cloud::*;
 pub use session::*;
+use tasks::NeedsYouEntry;
 pub use types::*;
 
 /// Receives coalesced change events (at most one burst per display frame).
@@ -231,6 +238,23 @@ impl CoreClient {
         Ok(self.client.unarchive_session(&chat_id)?)
     }
 
+    pub fn set_session_settled(&self, chat_id: String, settled: bool) -> CoreResult<()> {
+        Ok(self.client.set_session_settled(&chat_id, settled)?)
+    }
+
+    pub fn set_sidebar_view(
+        &self,
+        organization: SidebarOrganization,
+        sort: SidebarSort,
+        active_first: bool,
+    ) {
+        self.client.set_sidebar_view(zc::SidebarView {
+            organization: organization.into(),
+            sort: sort.into(),
+            active_first,
+        });
+    }
+
     pub fn rename_session(&self, chat_id: String, title: String) -> CoreResult<()> {
         Ok(self.client.rename_session(&chat_id, &title)?)
     }
@@ -289,6 +313,15 @@ impl CoreClient {
         Ok(self.client.delete_section(&section_id)?)
     }
 
+    pub fn move_section(
+        &self,
+        section_id: String,
+        after: Option<String>,
+        before: Option<String>,
+    ) -> CoreResult<()> {
+        Ok(self.client.move_section(&section_id, after, before)?)
+    }
+
     pub fn set_section_collapsed(&self, section_id: String, collapsed: bool) -> CoreResult<()> {
         Ok(self.client.set_section_collapsed(&section_id, collapsed)?)
     }
@@ -332,6 +365,29 @@ impl CoreClient {
         Ok(self.client.delete_project(&space_id)?)
     }
 
+    pub async fn chat_usage(
+        &self,
+        chat_id: String,
+    ) -> CoreResult<Option<crate::layout::UsageMeter>> {
+        let client = self.client.clone();
+        let usage = on_runtime(async move { client.chat_usage(&chat_id).await }).await?;
+        Ok(usage.map(|(label, fraction)| crate::layout::UsageMeter::new(label, fraction)))
+    }
+
+    pub fn limit_card(&self, chat_id: String) -> Option<crate::layout::LimitCard> {
+        crate::layout::limit_card(&self.client, &chat_id)
+    }
+
+    pub async fn resolve_limit_offer(&self, chat_id: String, choice: String) -> CoreResult<bool> {
+        let client = self.client.clone();
+        on_runtime(async move { client.resolve_limit_offer(&chat_id, &choice).await }).await
+    }
+
+    pub async fn set_limit_resume(&self, chat_id: String, auto_resume: bool) -> CoreResult<bool> {
+        let client = self.client.clone();
+        on_runtime(async move { client.set_limit_resume(&chat_id, auto_resume).await }).await
+    }
+
     /// Mid-session ref switch (worktree retarget or `git checkout`).
     pub async fn switch_session_ref(&self, chat_id: String, reference: RepoRef) -> CoreResult<()> {
         let client = self.client.clone();
@@ -358,6 +414,10 @@ impl CoreClient {
     /// Warm the most relevant sessions (capped).
     pub fn preload_sessions(&self) {
         self.client.preload_sessions();
+    }
+
+    pub fn needs_you(&self) -> Vec<NeedsYouEntry> {
+        self.client.needs_you().iter().map(Into::into).collect()
     }
 
     // ── host RPC ───────────────────────────────────────────────────────────
@@ -413,7 +473,11 @@ impl CoreClient {
                 .register_push_target(
                     &token,
                     &environment,
-                    zc::PushPrefs { done: prefs.done, input: prefs.input, failed: prefs.failed },
+                    zc::PushPrefs {
+                        done: prefs.done,
+                        input: prefs.input,
+                        failed: prefs.failed,
+                    },
                 )
                 .await
         })
@@ -447,7 +511,12 @@ impl CoreClient {
         query: String,
     ) -> CoreResult<Vec<FileMatch>> {
         let client = self.client.clone();
-        let files = on_runtime(async move { client.search_files(&device_id, chat_id, space_id, &query).await }).await?;
+        let files = on_runtime(async move {
+            client
+                .search_files(&device_id, chat_id, space_id, &query)
+                .await
+        })
+        .await?;
         Ok(files
             .into_iter()
             .map(|f| FileMatch {
@@ -626,6 +695,11 @@ pub fn fallback_models(harness: String) -> Vec<ModelInfo> {
         .into_iter()
         .map(Into::into)
         .collect()
+}
+
+#[uniffi::export]
+pub fn resume_prompt() -> String {
+    zeron_proto::RESUME_PROMPT.to_owned()
 }
 
 #[uniffi::export]

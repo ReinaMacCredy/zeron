@@ -2,7 +2,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-pub const COMPUTER_USE_SLASH_COMMAND: &str = "computer-use";
+pub const COMPUTER_USE_SLASH_COMMAND: &str = zeron_proto::app_commands::COMPUTER_USE_COMMAND;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComputerControlMode {
