@@ -425,12 +425,7 @@ final class CardButtonControl: UIControl {
 
     static func identifier(_ action: CardAction) -> String {
         switch action {
-        case let .consent(_, _, answer):
-            switch answer {
-            case "Allow": "computer-consent-allow"
-            case "Deny": "computer-consent-decline"
-            default: "computer-consent-always"
-            }
+        case let .consent(_, _, _, identifier): identifier
         case .enableComputer: "computer-denied-enable"
         }
     }

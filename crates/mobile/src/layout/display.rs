@@ -81,6 +81,7 @@ pub enum CardAction {
         request_id: String,
         question_id: String,
         answer: String,
+        identifier: String,
     },
     EnableComputer,
 }

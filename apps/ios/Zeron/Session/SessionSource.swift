@@ -39,6 +39,7 @@ struct SessionChrome: Equatable {
 
     var title = ""
     var subtitle = ""
+    var hostName: String?
     var running = false
     var resumable = false
     var canSteer = false
@@ -51,7 +52,7 @@ struct SessionChrome: Equatable {
     var limitPill: LimitPill?
 
     static func == (a: SessionChrome, b: SessionChrome) -> Bool {
-        a.title == b.title && a.subtitle == b.subtitle && a.running == b.running && a.canSteer == b.canSteer
+        a.title == b.title && a.subtitle == b.subtitle && a.hostName == b.hostName && a.running == b.running && a.canSteer == b.canSteer
             && a.placeholder == b.placeholder && a.chips == b.chips && a.banner == b.banner
             && a.questions?.requestId == b.questions?.requestId && a.questions?.items == b.questions?.items
             && a.queue == b.queue && a.error == b.error && a.limitPill == b.limitPill
@@ -74,6 +75,11 @@ protocol SessionSource: AnyObject {
     func answer(requestId: String, answers: [(questionId: String, labels: [String])])
     func answerConsent(requestId: String, questionId: String, answer: String)
     func computerStill() async -> (sequence: UInt64, image: UIImage)?
+    func computerStop() async throws -> Bool
+    func terminals() async throws -> [TerminalTab]
+    func terminal(_ id: String, dark: Bool) async throws -> TerminalView
+    func projectActions() async throws -> ProjectActions?
+    func runProjectAction(_ id: String) async throws -> String
     func queueAction(_ id: String, _ action: QueueAction)
     func retryDelivery()
     /// Lease a queued message for editing; returns its text when acquired.
@@ -209,6 +215,11 @@ final class FixtureSessionSource: SessionSource {
 
     func answerConsent(requestId: String, questionId: String, answer: String) {}
     func computerStill() async -> (sequence: UInt64, image: UIImage)? { nil }
+    func computerStop() async throws -> Bool { false }
+    func terminals() async throws -> [TerminalTab] { [] }
+    func terminal(_ id: String, dark: Bool) async throws -> TerminalView { throw CancellationError() }
+    func projectActions() async throws -> ProjectActions? { nil }
+    func runProjectAction(_ id: String) async throws -> String { throw CancellationError() }
 
     func queueAction(_ id: String, _ action: QueueAction) {
         update { chrome in

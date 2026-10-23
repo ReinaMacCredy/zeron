@@ -10,6 +10,10 @@ use std::sync::Arc;
 
 use zeron_doc::parts::{MessagePart, SubagentStatus};
 use zeron_markdown::parser::{Block, BlockTree, IncrementalParser, InlineRun, InlineStyle};
+use zeron_proto::computer::presentation::{
+    computer_action_label, computer_call, computer_call_app, computer_call_js_actions, computer_call_rows, computer_group_segment,
+    computer_js_action_label, computer_output_hidden,
+};
 use zeron_proto::device_tools::device_call;
 use zeron_proto::{ChildRoute, DelegationStatus, HarnessId, ToolCall};
 use zeron_text::WhiteSpace;
@@ -126,13 +130,18 @@ pub(crate) struct DiffRowP {
 // MARK: - Summary / invocation / detail (desktop ports)
 
 /// Desktop summary: thought segment first, then the shared tool summary.
-fn group_summary(thoughts: usize, calls: &[(ToolCall, bool)], advisor_out: bool) -> String {
+fn group_summary(thoughts: usize, calls: &[(ToolCall, bool)], computer_apps: &[&str], advisor_out: bool) -> String {
     let mut segments: Vec<String> = Vec::new();
     match thoughts {
         0 => {}
         1 => segments.push("thought process".into()),
         n => segments.push(format!("thought {n} times")),
     }
+    let computer_actions = calls.iter().filter(|(call, _)| computer_call(call).is_some()).count();
+    if computer_actions > 0 {
+        segments.push(computer_group_segment(computer_apps, computer_actions));
+    }
+    let calls: Vec<(ToolCall, bool)> = calls.iter().filter(|(call, _)| computer_call(call).is_none()).cloned().collect();
     let devices = calls.iter().filter(|(call, _)| device_call(call).is_some()).count();
     if devices > 0 {
         segments.push(zeron_proto::device_tools::device_group_label(devices));
@@ -153,6 +162,23 @@ fn group_summary(thoughts: usize, calls: &[(ToolCall, bool)], advisor_out: bool)
         out.replace_range(0..1, &up);
     }
     out
+}
+
+fn computer_app_of(part: &MessagePart) -> Option<String> {
+    match part {
+        MessagePart::Tool { call, output, .. } => computer_call(call).and_then(|c| computer_call_app(c.tool, c.args, output.as_deref())),
+        _ => None,
+    }
+}
+
+fn computer_apps<'a>(parts: impl Iterator<Item = &'a MessagePart>) -> Vec<String> {
+    let mut apps: Vec<String> = Vec::new();
+    for app in parts.filter_map(computer_app_of) {
+        if !apps.contains(&app) {
+            apps.push(app);
+        }
+    }
+    apps
 }
 
 fn tool_icon(call: &ToolCall) -> &'static str {
@@ -885,7 +911,10 @@ impl RowBuilder {
         let thoughts = parts.iter().filter(|p| matches!(p, MessagePart::Reasoning { .. })).count();
         let text = match worked_secs {
             Some(secs) => format!("Worked for {}", zeron_proto::transcript::format_elapsed(secs)),
-            None => group_summary(thoughts, &calls, false),
+            None => {
+                let apps = computer_apps(parts.iter());
+                group_summary(thoughts, &calls, &apps.iter().map(String::as_str).collect::<Vec<_>>(), false)
+            }
         };
         let size = 12.0 * T;
         let label = ctx.typo.style(Family::Sans, Weight::Regular, false, size);
@@ -915,6 +944,19 @@ impl RowBuilder {
         own: Option<&ChatRef>,
     ) -> RowCore {
         let key = row_key(id);
+        let mut parts: Vec<&MessagePart> = parts.to_vec();
+        if parts.iter().all(|p| matches!(p, MessagePart::Tool { call, .. } if computer_call(call).is_some())) {
+            let mut apps: Vec<Option<String>> = Vec::new();
+            for part in &parts {
+                let app = computer_app_of(part);
+                if !apps.contains(&app) {
+                    apps.push(app);
+                }
+            }
+            parts.sort_by_key(|part| apps.iter().position(|app| *app == computer_app_of(part)));
+        }
+        let computer_apps = computer_apps(parts.iter().copied());
+        let computer_apps: Vec<&str> = computer_apps.iter().map(String::as_str).collect();
         let calls: Vec<(ToolCall, bool)> = parts
             .iter()
             .filter_map(|p| match p {
@@ -944,7 +986,7 @@ impl RowBuilder {
         let small = ctx.typo.style(Family::Sans, Weight::Regular, false, 11.0 * T);
         let small_lh = ctx.typo.px(AGENT_SUB * T);
         let advisor_out = parts.iter().any(|p| matches!(p, MessagePart::Tool { call, resolved: false, .. } if call.is_advisor()));
-        let summary = prepare_plain(ctx, &group_summary(thoughts, &calls, advisor_out), st.label, st.lh, ColorRole::TextSecondary, WhiteSpace::Pre);
+        let summary = prepare_plain(ctx, &group_summary(thoughts, &calls, &computer_apps, advisor_out), st.label, st.lh, ColorRole::TextSecondary, WhiteSpace::Pre);
         let mut lines = Vec::new();
         if expanded {
             let last = parts.len().saturating_sub(1);
@@ -957,11 +999,13 @@ impl RowBuilder {
                         lines.push(delegate_line(ctx, &st, medium, call, subagent_ref.as_deref(), delegate_route.as_ref(), dkey, chats, own));
                     }
                     MessagePart::Tool { call, is_error, resolved, output, subagent_ref, subagent_status, .. } => {
-                        // Computer calls show their title only: arguments can hold typed text.
-                        let computer = zeron_client::computer::computer_tool(call);
+                        let computer = computer_call(call);
                         let device = device_call(call);
-                        let (label, detail): (Cow<str>, String) = match (computer, device) {
-                            (Some(tool), _) => (zeron_client::computer::tool_title(tool).into(), String::new()),
+                        let (label, detail): (Cow<str>, String) = match (&computer, device) {
+                            (Some(c), _) => {
+                                let app = computer_call_app(c.tool, c.args, output.as_deref());
+                                (computer_action_label(c.tool, c.args, app.as_deref(), *resolved).into(), String::new())
+                            }
                             (None, Some(device)) => (
                                 zeron_proto::device_tools::device_call_label(device, *resolved, *is_error).into(),
                                 zeron_proto::device_tools::device_call_detail(device, output.as_deref().unwrap_or("")).unwrap_or_default(),
@@ -1008,6 +1052,16 @@ impl RowBuilder {
                         });
                         let open = !agents && skill.is_none() && self.detail_open.get(&dkey).copied().unwrap_or(false);
                         let mut body = Vec::new();
+                        if open && let Some(c) = &computer {
+                            body.extend(lines_block(ctx, &st, &computer_call_rows(c.tool, c.args).join("\n"), Some(CALL_WRAP_COLS)));
+                            let js_actions = computer_call_js_actions(c, output.as_deref());
+                            if !js_actions.is_empty() {
+                                let labels: Vec<String> = js_actions.iter().map(|action| computer_js_action_label(action, true)).collect();
+                                body.extend(lines_block(ctx, &st, &labels.join("\n"), None));
+                            } else if !computer_output_hidden(c.tool, c.args) {
+                                body.extend(result_block(ctx, &st, part));
+                            }
+                        }
                         if open && computer.is_none() {
                             body.extend(lines_block(ctx, &st, &call_text(call), Some(CALL_WRAP_COLS)));
                             let (full, offer) = self.full_result(ctx, &st, part);
@@ -1024,7 +1078,7 @@ impl RowBuilder {
                             open: None,
                         });
                         lines.push(ToolLine {
-                            icon: match (computer, agents) {
+                            icon: match (&computer, agents) {
                                 (Some(_), _) => "cursorarrow".to_owned(),
                                 (None, false) if device.is_some() => "tool-smartphone".to_owned(),
                                 (None, true) if subagent_ref.is_some() => brand_icon(self.harness, call.subagent_model()),
@@ -1579,8 +1633,8 @@ mod tests {
             (ToolCall::ReadFile { path: "a.rs".into() }, false),
             (ToolCall::Exec { command: "x".into() }, true),
         ];
-        assert_eq!(group_summary(0, &calls, false), "Ran 2 commands · read 1 file · 1 failed");
-        assert_eq!(group_summary(1, &calls, false), "Thought process · ran 2 commands · read 1 file · 1 failed");
-        assert_eq!(group_summary(3, &[], false), "Thought 3 times");
+        assert_eq!(group_summary(0, &calls, &[], false), "Ran 2 commands · read 1 file · 1 failed");
+        assert_eq!(group_summary(1, &calls, &[], false), "Thought process · ran 2 commands · read 1 file · 1 failed");
+        assert_eq!(group_summary(3, &[], &[], false), "Thought 3 times");
     }
 }

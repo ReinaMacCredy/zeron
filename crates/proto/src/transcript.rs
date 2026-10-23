@@ -242,10 +242,7 @@ pub fn handoff_message_count(packet: &str) -> usize {
 }
 
 pub fn handoff_size_label(chars: usize) -> String {
-    format!(
-        "~{} tokens",
-        crate::usage::format_tokens(estimated_tokens(chars))
-    )
+    format!("~{} tokens", crate::usage::format_tokens(estimated_tokens(chars)))
 }
 
 pub fn handoff_context_label(packet: &str, pointer: bool) -> String {

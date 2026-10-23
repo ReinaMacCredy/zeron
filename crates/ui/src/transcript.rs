@@ -50,15 +50,17 @@ use zeron_proto::device_tools::{
 use crate::route_badge::{self, RouteInfo};
 
 use crate::computer::cards::{
-    ApprovalCard, CardAction, CardTone, ComputerNotice, ComputerRequest, ConsentChoice,
-    ConsentOutcome, approval_card, computer_card, computer_event_row, computer_notice,
-    consent_answers, consent_app, consent_card_title, consent_choice_key, consent_choices,
-    consent_detail, consent_event_label, consent_outcome, consent_question, consent_scope,
-    elevated_risk, is_control_denied, left_open_app, missing_computer_permissions, revoked_label,
+    ApprovalCard, COMPUTER_DENIED_ACTION, COMPUTER_DENIED_HINT, COMPUTER_DENIED_TITLE, CardAction,
+    CardTone, ComputerNotice, ComputerRequest, ConsentChoice, ConsentOutcome, approval_card,
+    computer_card, computer_event_row, computer_notice, consent_answers, consent_app,
+    consent_card_title, consent_choice_key, consent_choices, consent_detail, consent_event_label,
+    consent_outcome, consent_question, consent_scope, elevated_risk, is_control_denied,
+    left_open_app, missing_computer_permissions, revoked_label,
 };
 use crate::computer::presentation::{
     ComputerCall, computer_action_label, computer_call, computer_call_app, computer_call_rows,
-    computer_js_action_label, computer_js_actions, computer_output_hidden,
+    computer_call_js_actions, computer_group_segment, computer_js_action_label,
+    computer_output_hidden,
 };
 use crate::markdown::mermaid_cache::{self, MermaidCache};
 use crate::markdown::parser::{
@@ -1871,18 +1873,7 @@ pub fn rows_for_entry(
                     .is_some_and(|c| computer_output_hidden(c.tool, c.args));
                 let js_actions = computer
                     .as_ref()
-                    .filter(|computer| computer.tool == "computer")
-                    .map(|computer| {
-                        let badge = computer.args.and_then(|args| {
-                            let actions = args.get("actions")?;
-                            Some(serde_json::json!({ "appName": args.get("app"), "actions": actions }).to_string())
-                        });
-                        badge
-                            .as_deref()
-                            .or(output.as_deref())
-                            .map(computer_js_actions)
-                            .unwrap_or_default()
-                    })
+                    .map(|computer| computer_call_js_actions(computer, output.as_deref()))
                     .unwrap_or_default();
                 let detail = if output_hidden {
                     None
@@ -2044,7 +2035,7 @@ pub fn rows_for_entry(
                         turn_start: false,
                         kind: RowKind::ComputerNotice {
                             notice: ComputerNotice::ControlDenied,
-                            text: "Computer is off for ordinary turns".into(),
+                            text: COMPUTER_DENIED_TITLE.into(),
                             hint: None,
                         },
                         entry_id: entry_id.clone(),
@@ -2763,17 +2754,7 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
         n => segments.push(format!("wrote {n} notes")),
     }
     if computer_actions > 0 {
-        let apps = if computer_apps.is_empty() {
-            "the desktop".to_owned()
-        } else {
-            computer_apps.join(", ")
-        };
-        let actions = if computer_actions == 1 {
-            "1 action".to_owned()
-        } else {
-            format!("{computer_actions} actions")
-        };
-        segments.push(format!("used {apps} · {actions}"));
+        segments.push(computer_group_segment(&computer_apps, computer_actions));
     }
     if device_calls > 0 {
         segments.push(device_group_label(device_calls));
@@ -12943,11 +12924,8 @@ impl Transcript {
         approval_card(
             ApprovalCard {
                 icon: app.and_then(|app| crate::appshots::running_app_icon(None, None, Some(app))),
-                title: format!("Bring {} to the front?", app.unwrap_or("the app")).into(),
-                detail: Some(
-                    "Zeron needs it in front to type. It will cover your screen until the turn ends."
-                        .into(),
-                ),
+                title: crate::computer::cards::foreground_title(app).into(),
+                detail: Some(crate::computer::cards::COMPUTER_FOREGROUND_DETAIL.into()),
                 risk: None,
                 disclosure: false,
                 actions,
@@ -13032,13 +13010,10 @@ impl Transcript {
                 CardTone::Warning,
                 icon,
                 text,
-                vec![
-                    "Send this request with /computer-use to let the agent use the desktop once."
-                        .into(),
-                ],
+                vec![COMPUTER_DENIED_HINT.into()],
                 vec![CardAction {
                     id: format!("{row_id}-enable").into(),
-                    label: "Use for this request".into(),
+                    label: COMPUTER_DENIED_ACTION.into(),
                     primary: false,
                     on_click: Box::new(cx.listener(|_, _, _, cx| {
                         cx.emit(TranscriptEvent::Computer {

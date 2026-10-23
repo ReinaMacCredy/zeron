@@ -670,6 +670,8 @@ struct ReadTerminalParams {
     chat_id: String,
     #[serde(default)]
     lines: Option<usize>,
+    #[serde(default)]
+    styled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6123,6 +6125,7 @@ impl RpcService for EngineRpc {
                         &p.terminal_id,
                         &p.chat_id,
                         p.lines.unwrap_or(80).clamp(1, 2000),
+                        p.styled,
                     )
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&screen)

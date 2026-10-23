@@ -41,5 +41,6 @@ serde_json.workspace = true
 chrono.workspace = true
 similar.workspace = true
 zeron-syntax.workspace = true
+zeron-theme.workspace = true
 zatex = { workspace = true, features = ["bundled"] }
 thiserror.workspace = true

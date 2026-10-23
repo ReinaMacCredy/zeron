@@ -1,5 +1,5 @@
+use crate::ToolCall;
 use serde_json::{Map, Value};
-use zeron_proto::ToolCall;
 
 pub const COMPUTER_TOOL_TITLES: &[(&str, &str)] = &[
     ("computer_screenshot", "Take a screenshot"),
@@ -255,7 +255,7 @@ fn keyboard_shortcut(value: &str) -> String {
         .join(" + ")
 }
 
-pub(crate) fn app_name(value: Option<&str>) -> Option<String> {
+pub fn app_name(value: Option<&str>) -> Option<String> {
     let name = value?.trim();
     if name.is_empty() {
         return None;
@@ -817,6 +817,24 @@ pub fn computer_js_actions(output: &str) -> Vec<ComputerJsAction> {
         .collect()
 }
 
+pub fn computer_call_js_actions(
+    computer: &ComputerCall<'_>,
+    output: Option<&str>,
+) -> Vec<ComputerJsAction> {
+    if computer.tool != "computer" {
+        return Vec::new();
+    }
+    let badge = computer.args.and_then(|args| {
+        let actions = args.get("actions")?;
+        Some(serde_json::json!({ "appName": args.get("app"), "actions": actions }).to_string())
+    });
+    badge
+        .as_deref()
+        .or(output)
+        .map(computer_js_actions)
+        .unwrap_or_default()
+}
+
 pub fn computer_js_action_label(action: &ComputerJsAction, done: bool) -> String {
     let key = match action.tool {
         "computer_set_value" => "value",
@@ -873,6 +891,20 @@ pub fn computer_output_hidden(tool: &str, args: Option<&Map<String, Value>>) -> 
                             .is_some_and(|kind| carries_text(&format!("computer_{kind}")))
                     })
                 }))
+}
+
+pub fn computer_group_segment(apps: &[&str], actions: usize) -> String {
+    let apps = if apps.is_empty() {
+        "the desktop".to_owned()
+    } else {
+        apps.join(", ")
+    };
+    let actions = if actions == 1 {
+        "1 action".to_owned()
+    } else {
+        format!("{actions} actions")
+    };
+    format!("used {apps} · {actions}")
 }
 
 #[cfg(test)]

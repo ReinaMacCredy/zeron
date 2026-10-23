@@ -3,18 +3,26 @@ import UIKit
 final class ComputerStillPreview: UIView {
     static let pollInterval: Duration = .seconds(1)
     static let maxSize = CGSize(width: 168, height: 120)
+    static let completionFlash: Duration = .milliseconds(1_600)
+    static let hideAll = Notification.Name("ComputerStillPreview.hideAll")
 
     var fetch: (() async -> (sequence: UInt64, image: UIImage)?)?
     var working = false {
         didSet {
             guard working != oldValue else { return }
+            let finished = !working && alpha > 0.5 && !dismissed
             if !working { dismissed = false }
+            if finished { return complete() }
             restart()
         }
     }
+    private(set) var receiving = false
 
     private let imageView = UIImageView()
     private let hide = UIButton(type: .custom)
+    private let live = UILabel()
+    private let check = UIImageView(image: UIImage(systemName: "checkmark.circle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 30, weight: .semibold)))
+    private var hideAllObserver: NSObjectProtocol?
     private var width: NSLayoutConstraint!
     private var height: NSLayoutConstraint!
     private var sequence: UInt64?
@@ -50,8 +58,40 @@ final class ComputerStillPreview: UIView {
         hide.addSubview(mark)
         hide.accessibilityLabel = "Hide Computer preview"
         hide.accessibilityIdentifier = "computer-still-hide"
-        hide.addAction(UIAction { [weak self] _ in self?.dismiss() }, for: .touchUpInside)
+        hide.showsMenuAsPrimaryAction = true
+        hide.menu = UIMenu(children: [
+            UIAction(title: "Hide for this task", image: UIImage(systemName: "eye.slash")) { [weak self] _ in self?.dismiss() },
+            UIAction(title: "Hide for all active tasks", image: UIImage(systemName: "rectangle.stack.badge.minus")) { _ in
+                NotificationCenter.default.post(name: Self.hideAll, object: nil)
+            },
+        ])
         addSubview(hide)
+
+        live.text = "Live"
+        live.font = Fonts.ui(.sansSemibold, 10)
+        live.textColor = .white
+        live.textAlignment = .center
+        live.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+        live.layer.cornerRadius = 8
+        live.layer.masksToBounds = true
+        live.accessibilityIdentifier = "computer-still-live"
+        addSubview(live)
+
+        check.tintColor = .white
+        check.layer.shadowOpacity = 0.4
+        check.layer.shadowRadius = 4
+        check.layer.shadowOffset = .zero
+        check.alpha = 0
+        check.isAccessibilityElement = true
+        check.accessibilityLabel = "Computer use finished"
+        check.accessibilityIdentifier = "computer-still-done"
+        addSubview(check)
+        hideAllObserver = NotificationCenter.default.addObserver(forName: Self.hideAll, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.working else { return }
+                self.dismiss()
+            }
+        }
 
         alpha = 0
         isHidden = true
@@ -63,6 +103,10 @@ final class ComputerStillPreview: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         hide.frame = CGRect(x: bounds.maxX - 33, y: -11, width: 44, height: 44)
+        let pill = live.intrinsicContentSize
+        live.frame = CGRect(x: 6, y: bounds.maxY - 22, width: pill.width + 12, height: 16)
+        check.sizeToFit()
+        check.center = CGPoint(x: bounds.midX, y: bounds.midY)
     }
 
     // The hide button hangs over the corner, outside the image's bounds.
@@ -78,6 +122,8 @@ final class ComputerStillPreview: UIView {
     private func restart() {
         poll?.cancel()
         poll = nil
+        check.alpha = 0
+        live.isHidden = false
         guard working, window != nil else { return show(nil) }
         poll = Task { @MainActor [weak self] in
             while !Task.isCancelled {
@@ -91,6 +137,7 @@ final class ComputerStillPreview: UIView {
     }
 
     private func show(_ still: (sequence: UInt64, image: UIImage)?) {
+        receiving = still != nil
         guard let still else {
             sequence = nil
             return setVisible(false)
@@ -109,6 +156,21 @@ final class ComputerStillPreview: UIView {
         guard image.width > 0, image.height > 0 else { return maxSize }
         let scale = min(maxSize.width / image.width, maxSize.height / image.height)
         return CGSize(width: (image.width * scale).rounded(), height: (image.height * scale).rounded())
+    }
+
+    private func complete() {
+        poll?.cancel()
+        poll = nil
+        receiving = false
+        live.isHidden = true
+        let reveal = { self.check.alpha = 1 }
+        if UIAccessibility.isReduceMotionEnabled { reveal() } else { UIView.animate(withDuration: 0.18, animations: reveal) }
+        poll = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.completionFlash)
+            guard !Task.isCancelled, let self else { return }
+            self.poll = nil
+            self.restart()
+        }
     }
 
     private func dismiss() {

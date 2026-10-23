@@ -65,7 +65,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             let route = args[i + 1]
             DispatchQueue.main.async { [app] in
                 let needs = route.hasSuffix("/needs-you") || route == "needs-you"
-                let chat = route.hasPrefix("chat:") ? String(route.dropFirst(5)).replacingOccurrences(of: "/needs-you", with: "") : nil
+                let chat = route.hasPrefix("chat:") ? String(route.dropFirst(5).prefix { $0 != "/" }) : nil
                 if let chat { router.openSession(chat) }
                 if needs {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
@@ -92,8 +92,9 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                         if route.hasPrefix("doc:") {
                             return nav.pushViewController(DocArticleViewController(id: String(route.dropFirst(4)), title: "Docs"), animated: false)
                         }
-                        guard let host = app.hostOptions.first else { return }
-                        let page = String(route.dropFirst(5))
+                        let spec = route.dropFirst(5).split(separator: "@", maxSplits: 1).map(String.init)
+                        let page = spec.first ?? "mac"
+                        guard let host = spec.count > 1 ? app.hostOptions.first(where: { $0.name == spec[1] }) : app.hostOptions.first else { return }
                         nav.pushViewController(HostPageViewController(app: app, deviceId: host.id, page: "mac", title: host.name), animated: false)
                         if page != "mac" { nav.pushViewController(HostPageViewController(app: app, deviceId: host.id, page: page, title: ""), animated: false) }
                     }
