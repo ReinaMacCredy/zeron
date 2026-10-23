@@ -510,6 +510,18 @@ impl ClientInner {
         }
     }
 
+    pub(crate) async fn host_first(
+        self: &Arc<Self>,
+        device_id: &str,
+        method: &'static str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        match self.backend() {
+            Backend::Demo(demo) => demo.host_rpc(device_id, method, params).await,
+            Backend::Live(live) => live.relay.first(device_id, method, params).await,
+        }
+    }
+
     /// Fresh socket for the chat's room (retry delivery).
     pub(crate) fn kick_room(&self, chat_id: &str) {
         if let Some(room) = self.session_core(chat_id).and_then(|c| c.room()) {
@@ -570,7 +582,7 @@ impl ClientInner {
 /// One signed-in account (or Demo mode). Cheap to clone.
 #[derive(Clone)]
 pub struct Client {
-    inner: Arc<ClientInner>,
+    pub(crate) inner: Arc<ClientInner>,
 }
 
 impl std::fmt::Debug for Client {
@@ -2009,8 +2021,7 @@ impl Client {
                     )
                     .await
                     .and_then(|v| {
-                        serde_json::from_value::<Vec<ModelInfo>>(v)
-                            .map_err(|e| ClientError::HostError(e.to_string()))
+                        catalog::decode_models(v).map_err(|e| ClientError::HostError(e.to_string()))
                     });
                 match reply {
                     Ok(list) if !list.is_empty() => {

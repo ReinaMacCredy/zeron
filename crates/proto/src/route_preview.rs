@@ -1,92 +1,6 @@
-use serde::{Deserialize, Serialize};
-
 use crate::{Chat, ChatConfig, ChildRoute, RouteTarget, TaskStep};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Role {
-    Worker,
-    Validator,
-    Research,
-    Design,
-    General,
-}
-
-impl Role {
-    pub const ALL: [Role; 5] = [
-        Role::Worker,
-        Role::Validator,
-        Role::Research,
-        Role::Design,
-        Role::General,
-    ];
-
-    pub fn parse(name: &str) -> Option<Role> {
-        Some(match name.trim().to_ascii_lowercase().as_str() {
-            "worker" | "implementation" => Role::Worker,
-            "validator" | "review" | "test" => Role::Validator,
-            "research" => Role::Research,
-            "design" => Role::Design,
-            "general" => Role::General,
-            _ => return None,
-        })
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Role::Worker => "worker",
-            Role::Validator => "validator",
-            Role::Research => "research",
-            Role::Design => "design",
-            Role::General => "general",
-        }
-    }
-
-    pub fn names() -> String {
-        Role::ALL.map(Role::name).join(", ")
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct QuotaState {
-    pub known: bool,
-    pub used_fraction: Option<f64>,
-    pub resets_at: Option<i64>,
-    pub exhausted: bool,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct Fallback {
-    pub target: Option<RouteTarget>,
-    pub native: bool,
-    pub reason: String,
-    pub resets_at: Option<i64>,
-    pub multiplier: Option<f64>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct Row {
-    pub role: String,
-    pub source: String,
-    pub target: Option<RouteTarget>,
-    pub multiplier: Option<f64>,
-    pub quota: QuotaState,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fallback: Option<Fallback>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct Preview {
-    pub base: Option<RouteTarget>,
-    pub rows: Vec<Row>,
-    pub guidance: String,
-}
+pub use crate::routing::{Fallback, Preview, QuotaState, Role, Row, multiplier_text};
 
 pub fn target_of(config: &ChatConfig) -> RouteTarget {
     RouteTarget {
@@ -259,12 +173,6 @@ pub fn plan_lines(
             line
         })
         .collect()
-}
-
-pub fn multiplier_text(multiplier: f64) -> String {
-    let text = format!("{multiplier:.2}");
-    let text = text.trim_end_matches('0').trim_end_matches('.');
-    format!("{text}x")
 }
 
 pub struct Totals {

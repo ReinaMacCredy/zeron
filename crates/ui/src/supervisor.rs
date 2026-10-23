@@ -135,7 +135,7 @@ pub(crate) fn no_effect_yet(row: &SupervisorIntervention, now: DateTime<Utc>) ->
     matches!(row.chips.as_slice(), [InterventionChip::Sent]) && now > no_effect_since(row.at)
 }
 
-pub(crate) use zeron_proto::mission::{ApprovalState, HELD_APPROVAL};
+pub(crate) use zeron_proto::mission::ApprovalState;
 
 pub(crate) fn approval_state(
     row: &SupervisorIntervention,

@@ -2,86 +2,13 @@ pub mod guidance;
 pub mod preview;
 pub mod quota;
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 use zeron_proto::{ChildRoute, HarnessId, ReasoningLevel, RouteTarget};
 
-pub use zeron_proto::route_preview::{QuotaState, Role, target_of};
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum RoleRoute {
-    #[default]
-    Off,
-    SameAsParent,
-    Target(RouteTarget),
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum OutOfQuota {
-    #[default]
-    Native,
-    NextInList,
-    Wait,
-    Ask,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum MidRun {
-    Ask,
-    After10s,
-    #[default]
-    After30s,
-}
-
-impl MidRun {
-    pub fn delay_ms(self) -> Option<i64> {
-        match self {
-            MidRun::Ask => None,
-            MidRun::After10s => Some(10_000),
-            MidRun::After30s => Some(30_000),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum NativePolicy {
-    #[default]
-    SameModelOnly,
-    Always,
-    Off,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct RoutingSettings {
-    pub roles: BTreeMap<Role, RoleRoute>,
-    pub out_of_quota: OutOfQuota,
-    pub fallback: Vec<RouteTarget>,
-    pub mid_run: MidRun,
-    pub native: NativePolicy,
-}
-
-impl RoutingSettings {
-    pub fn route(&self, role: Role) -> &RoleRoute {
-        static OFF: RoleRoute = RoleRoute::Off;
-        self.roles.get(&role).unwrap_or(&OFF)
-    }
-
-    pub fn targets(&self) -> impl Iterator<Item = &RouteTarget> {
-        self.roles
-            .values()
-            .filter_map(|route| match route {
-                RoleRoute::Target(target) => Some(target),
-                _ => None,
-            })
-            .chain(&self.fallback)
-    }
-}
+pub use zeron_proto::route_preview::target_of;
+pub use zeron_proto::routing::{
+    MidRun, NativePolicy, OutOfQuota, QuotaState, Role, RoleRoute, RoutingSettings,
+};
 
 pub fn check_target(target: &RouteTarget, known: impl Fn(HarnessId) -> bool) -> Result<(), String> {
     if target.harness == HarnessId::Acp || !known(target.harness) {

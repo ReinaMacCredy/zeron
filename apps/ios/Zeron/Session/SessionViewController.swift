@@ -38,6 +38,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = Palette.background
+        wallpaper.behindChat = true
+        view.addSubview(wallpaper)
         // The app can be killed in the background: the draft goes to disk first.
         backgroundObserver = NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
             self?.saveDraft()
@@ -521,8 +523,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
 
     private let bottomFade = EdgeFadeOverlay()
 
+    private let wallpaper = WallpaperView()
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        wallpaper.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: min(view.bounds.height * 0.72, 760))
         let covered = view.bounds.maxY - bottom.frame.minY + 8
         let inset = max(0, covered - view.safeAreaInsets.bottom)
         if abs(list.contentInset.bottom - inset) > 0.5 {

@@ -99,7 +99,7 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             last_ago_ms: 2 * MIN,
             created_ago_ms: 2 * HOUR,
             seen: false,
-            model: "claude-opus-5",
+            model: "claude-opus-5-5",
             ..chat(
                 "chat-picker",
                 Some("space-zeron"),
@@ -1133,58 +1133,6 @@ pub(crate) fn today_reply(device_id: &str, method: &str, now_ms: i64) -> Option<
                 "waits": [],
             }))
         }
-        m::LIST_AGENT_ACCOUNTS => {
-            let at = |ms: i64| chrono::DateTime::from_timestamp_millis(now_ms + ms);
-            let primary = match device_id {
-                MAC => Some((
-                    "claude-code",
-                    json!([
-                        { "label": "5h", "usedFraction": 0.38, "resetsAt": at(125 * min) },
-                        { "label": "Week", "usedFraction": 0.21, "resetsAt": at(3 * 24 * 60 * min) },
-                    ]),
-                )),
-                MINI => Some((
-                    "codex",
-                    json!([
-                        { "label": "5h", "usedFraction": 0.12, "resetsAt": at(200 * min) },
-                        { "label": "Week", "usedFraction": 0.30, "resetsAt": at(5 * 24 * 60 * min) },
-                    ]),
-                )),
-                _ => None,
-            };
-            let mut accounts: Vec<serde_json::Value> = primary
-                .iter()
-                .map(|(harness, windows)| {
-                    json!({
-                        "id": format!("{device_id}-{harness}"),
-                        "harness": harness,
-                        "email": null,
-                        "planLabel": "Max",
-                        "active": true,
-                        "switchable": true,
-                        "usageWindows": windows,
-                    })
-                })
-                .collect();
-            let others = ["claude-code", "codex", "devin", "grok", "hermes"]
-                .into_iter()
-                .filter(|harness| primary.as_ref().is_none_or(|(p, _)| p != harness));
-            accounts.extend(others.enumerate().map(|(i, harness)| {
-                json!({
-                    "id": format!("{device_id}-{harness}"),
-                    "harness": harness,
-                    "email": "dev@zeron.sh",
-                    "planLabel": "Max",
-                    "active": true,
-                    "usageWindows": [
-                        { "label": "5h", "usedFraction": 0.04 + 0.02 * i as f32, "resetsAt": null },
-                        { "label": "Week", "usedFraction": 0.08, "resetsAt": null },
-                    ],
-                })
-            }));
-            Some(json!({ "accounts": accounts, "warnings": [] }))
-        }
         _ => None,
     }
 }
-

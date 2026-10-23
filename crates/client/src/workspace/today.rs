@@ -159,7 +159,7 @@ pub(crate) fn derive(
             harness_name: harness.display_name().to_owned(),
             window: window.label.clone(),
             used_fraction: window.used_fraction.clamp(0.0, 1.0),
-            resets_in: window.resets_at.and_then(|at| today::resets_in(at, cx.now)),
+            resets_in: window.resets_at.and_then(|at| zeron_proto::account_usage::resets_in(at, cx.now)),
             host: host(device),
         });
 

@@ -1314,6 +1314,7 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
                 .sum(),
             PBlock::Table(t) => t.cells.iter().flatten().map(|c| c.p.heap_bytes() + math_bytes(c)).sum(),
             PBlock::Rule => 0,
+            PBlock::Image { reference, .. } => reference.len(),
         }
     }
     match content {

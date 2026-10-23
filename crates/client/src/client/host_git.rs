@@ -15,7 +15,7 @@ use super::Client;
 use crate::error::{ClientError, Result};
 
 impl Client {
-    async fn host_call<T: DeserializeOwned>(
+    pub(crate) async fn host_call<T: DeserializeOwned>(
         &self,
         device_id: &str,
         method: &'static str,

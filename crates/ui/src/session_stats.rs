@@ -255,23 +255,7 @@ fn rows(stats: &SessionStats, cache: Option<Cache>) -> Vec<(&'static str, String
     rows
 }
 
-pub(crate) use zeron_proto::transcript::token_count as tokens;
-
-pub(crate) fn usd(x: f64) -> String {
-    if x < 1.0 {
-        return format!("${x:.3}");
-    }
-    let fixed = format!("{x:.2}");
-    let (whole, cents) = fixed.split_once('.').unwrap_or((&fixed, "00"));
-    let mut grouped = String::new();
-    for (i, ch) in whole.chars().enumerate() {
-        if i > 0 && (whole.len() - i) % 3 == 0 {
-            grouped.push(',');
-        }
-        grouped.push(ch);
-    }
-    format!("${grouped}.{cents}")
-}
+pub(crate) use zeron_proto::usage::{format_tokens as tokens, format_usd as usd};
 
 fn cost_headline(stats: &SessionStats) -> Option<String> {
     match stats.cost_usd() {

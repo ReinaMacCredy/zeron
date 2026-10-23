@@ -6,9 +6,10 @@ use gpui::{
     AnyElement, ClickEvent, Context, Entity, EventEmitter, IntoElement, Render, SharedString,
     Subscription, Task, Window, div, prelude::*, px, relative,
 };
+use zeron_proto::account_usage::resets_in;
 use zeron_proto::change_request_assessment::AttentionReason;
 use zeron_proto::today::{
-    self, Part, day_slots, digest, header_line, is_overdue, resets_in, today_tasks, work_day,
+    self, Part, day_slots, digest, header_line, is_overdue, today_tasks, work_day,
     work_day_start,
 };
 use zeron_proto::{

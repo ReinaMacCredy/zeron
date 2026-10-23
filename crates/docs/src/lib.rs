@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 use serde::Deserialize;
 
 pub mod changelog;
+pub mod images;
 
 pub const INDEX: &str = include_str!("../../ui/docs/index.toml");
 

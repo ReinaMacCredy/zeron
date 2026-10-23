@@ -2183,30 +2183,6 @@ pub struct AgentUsageWindow {
     pub resets_at: Option<DateTime<Utc>>,
 }
 
-pub const USAGE_WARN_FRACTION: f32 = 0.80;
-pub const USAGE_CRITICAL_FRACTION: f32 = 0.95;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UsageLevel {
-    /// < 80% — indigo.
-    Normal,
-    /// ≥ 80% — amber.
-    Warn,
-    /// ≥ 95% — red.
-    Critical,
-}
-
-/// Threshold classification of a usage fraction. Pure.
-pub fn usage_level(fraction: f32) -> UsageLevel {
-    if fraction >= USAGE_CRITICAL_FRACTION {
-        UsageLevel::Critical
-    } else if fraction >= USAGE_WARN_FRACTION {
-        UsageLevel::Warn
-    } else {
-        UsageLevel::Normal
-    }
-}
-
 impl AgentAccountsSnapshot {
     pub fn busiest_window(&self, harness: HarnessId) -> Option<(&str, f32)> {
         self.accounts
@@ -2312,6 +2288,30 @@ pub struct AgentProfileDraft {
 #[serde(rename_all = "camelCase")]
 pub struct AgentProfilesSnapshot {
     pub profiles: Vec<AgentProfile>,
+}
+
+/// "Claude Code · Opus 5.5 · Auto · High · 2 tools off" under a profile's name.
+pub fn profile_line(
+    harness_name: &str,
+    model: Option<&str>,
+    mode: Option<PermissionMode>,
+    reasoning: Option<ReasoningLevel>,
+    tools_off: usize,
+) -> String {
+    let mut parts = vec![harness_name.to_string()];
+    if let Some(model) = model {
+        parts.push(model.to_string());
+    }
+    if let Some(mode) = mode {
+        parts.push(mode.short_label().to_string());
+    }
+    if let Some(level) = reasoning {
+        parts.push(level.label().to_string());
+    }
+    if tools_off > 0 {
+        parts.push(format!("{tools_off} tools off"));
+    }
+    parts.join(" · ")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

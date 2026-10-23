@@ -13,6 +13,7 @@
 
 mod git;
 mod session;
+mod settings;
 mod voice;
 pub use voice::*;
 mod tasks;

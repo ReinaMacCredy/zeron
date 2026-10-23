@@ -596,6 +596,7 @@ class SessionsViewController: SessionListController {
         let options = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: optionsMenu())
         options.accessibilityIdentifier = "sessions-options"
         navigationItem.rightBarButtonItems = [options, pulls]
+        WhatsNewCardView.install(on: self)
     }
 
     override func viewWillAppear(_ animated: Bool) {

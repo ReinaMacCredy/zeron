@@ -851,6 +851,41 @@ pub struct ChatConfig {
     /// Model option id → choice id (`contextWindow` → `1m`).
     pub model_options: HashMap<String, String>,
     pub sandbox: SandboxLevel,
+    #[uniffi(default = None)]
+    pub profile_id: Option<String>,
+    /// None runs the harness's default instance.
+    #[uniffi(default = None)]
+    pub instance_id: Option<String>,
+    /// None keeps the chat's current mode (Full for a new chat).
+    #[uniffi(default = None)]
+    pub permission_mode: Option<PermissionMode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum PermissionMode {
+    Ask,
+    Auto,
+    Full,
+}
+
+impl From<zeron_proto::PermissionMode> for PermissionMode {
+    fn from(mode: zeron_proto::PermissionMode) -> Self {
+        match mode {
+            zeron_proto::PermissionMode::Ask => Self::Ask,
+            zeron_proto::PermissionMode::Auto => Self::Auto,
+            zeron_proto::PermissionMode::Full => Self::Full,
+        }
+    }
+}
+
+impl From<PermissionMode> for zeron_proto::PermissionMode {
+    fn from(mode: PermissionMode) -> Self {
+        match mode {
+            PermissionMode::Ask => Self::Ask,
+            PermissionMode::Auto => Self::Auto,
+            PermissionMode::Full => Self::Full,
+        }
+    }
 }
 
 fn wire<T: serde::Serialize>(value: &T) -> String {
@@ -887,6 +922,9 @@ impl From<&zc::ChatConfig> for ChatConfig {
                 zeron_proto::SandboxLevel::WorkspaceWrite => SandboxLevel::WorkspaceWrite,
                 zeron_proto::SandboxLevel::DangerFullAccess => SandboxLevel::DangerFullAccess,
             },
+            profile_id: c.profile_id.clone(),
+            instance_id: c.instance_id.clone(),
+            permission_mode: Some(c.permission_mode.into()),
         }
     }
 }
@@ -913,10 +951,10 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
                 SandboxLevel::WorkspaceWrite => zeron_proto::SandboxLevel::WorkspaceWrite,
                 SandboxLevel::DangerFullAccess => zeron_proto::SandboxLevel::DangerFullAccess,
             },
-            permission_mode: Default::default(),
+            permission_mode: c.permission_mode.map(Into::into).unwrap_or_default(),
             instructions: String::new(),
-            profile_id: None,
-            instance_id: None,
+            profile_id: c.profile_id,
+            instance_id: c.instance_id,
             disabled_tools: Vec::new(),
         })
     }
@@ -924,13 +962,16 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
 
 impl ChatConfig {
     pub(crate) fn over(self, existing: Option<zc::ChatConfig>) -> CoreResult<zc::ChatConfig> {
+        let keep_mode = self.permission_mode.is_none();
         let mut config: zc::ChatConfig = self.try_into()?;
         if let Some(existing) = existing {
-            config.permission_mode = existing.permission_mode;
+            if keep_mode {
+                config.permission_mode = existing.permission_mode;
+            }
             config.instructions = existing.instructions;
-            config.profile_id = existing.profile_id;
-            if existing.harness == config.harness {
-                config.instance_id = existing.instance_id;
+            config.disabled_tools = existing.disabled_tools;
+            if existing.harness != config.harness && config.instance_id == existing.instance_id {
+                config.instance_id = None;
             }
         }
         Ok(config)
@@ -1034,12 +1075,15 @@ pub struct ModelInfo {
     pub options: Vec<ModelOption>,
     /// The picker's default effort for this model.
     pub default_reasoning: Option<String>,
+    #[uniffi(default = false)]
+    pub is_new: bool,
 }
 
 impl From<zc::catalog::ModelInfo> for ModelInfo {
     fn from(m: zc::catalog::ModelInfo) -> Self {
         Self {
             default_reasoning: zc::catalog::default_reasoning(&m),
+            is_new: m.is_new,
             id: m.id,
             label: m.label,
             description: m.description,
@@ -1206,15 +1250,33 @@ mod tests {
             instructions: "Plan only.".into(),
             profile_id: Some("planner".into()),
             instance_id: None,
-            disabled_tools: Vec::new(),
+            disabled_tools: vec!["mcp__zeron__computer".into()],
         };
         let mut edit = ChatConfig::from(&existing);
         edit.reasoning = Some("high".into());
-        let written = edit.over(Some(existing)).unwrap();
+        let written = edit.clone().over(Some(existing.clone())).unwrap();
         assert_eq!(written.reasoning, Some(zeron_proto::ReasoningLevel::High));
         assert_eq!(written.permission_mode, zeron_proto::PermissionMode::Ask);
         assert_eq!(written.instructions, "Plan only.");
         assert_eq!(written.profile_id.as_deref(), Some("planner"));
+        assert_eq!(written.disabled_tools, existing.disabled_tools);
+
+        let legacy = ChatConfig {
+            profile_id: None,
+            permission_mode: None,
+            ..edit.clone()
+        };
+        let kept = legacy.over(Some(existing.clone())).unwrap();
+        assert_eq!(kept.permission_mode, zeron_proto::PermissionMode::Ask);
+
+        let changed = ChatConfig {
+            profile_id: Some("reviewer".into()),
+            permission_mode: Some(PermissionMode::Full),
+            ..edit
+        };
+        let changed = changed.over(Some(existing)).unwrap();
+        assert_eq!(changed.profile_id.as_deref(), Some("reviewer"));
+        assert_eq!(changed.permission_mode, zeron_proto::PermissionMode::Full);
     }
 
     #[test]

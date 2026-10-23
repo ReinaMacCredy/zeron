@@ -13,6 +13,7 @@ mod fixtures;
 mod git;
 mod missions;
 mod png;
+mod settings;
 mod transcripts;
 mod pages;
 mod visuals;
@@ -90,6 +91,7 @@ pub(crate) struct DemoHost {
     rng: Mutex<Rng>,
     cancel: Mutex<Option<CancellationToken>>,
     git: Mutex<git::GitDemo>,
+    settings: Mutex<settings::HostSettings>,
 }
 
 fn doc_err(err: zeron_doc::DocError) -> ClientError {
@@ -114,6 +116,7 @@ impl DemoHost {
             rng: Mutex::new(Rng(0x9e37_79b9_7f4a_7c15)),
             cancel: Mutex::new(None),
             git: Mutex::new(git::GitDemo::new()),
+            settings: Mutex::new(settings::HostSettings::new()),
         })
     }
 
@@ -876,6 +879,10 @@ impl DemoHost {
         if let Some(reply) = lock(&self.git).handle(method, &params) {
             return reply;
         }
+        let plan_estimate = method == m::PREVIEW_ROUTES && params.get("roles").is_some();
+        if settings::HostSettings::handles(method) && !plan_estimate {
+            return lock(&self.settings).call(device_id, method, &params);
+        }
         if let Some(reply) = fixtures::today_reply(device_id, method, now_ms()) {
             return Ok(reply);
         }
@@ -1109,21 +1116,32 @@ impl DemoHost {
                 enabled: Some(true),
             });
         }
+        let disabled = lock(&self.settings).disabled_harnesses.clone();
+        for harness in &mut list {
+            if disabled.contains(&harness.id) {
+                harness.enabled = Some(false);
+            }
+        }
         list
     }
 
     pub(crate) async fn list_models(&self, harness: &str) -> Vec<ModelInfo> {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        match harness {
+        let mut models = match harness {
             "cursor" | "acp" => vec![ModelInfo {
                 id: "default".into(),
                 label: "Agent default".into(),
                 description: None,
                 reasoning_levels: Vec::new(),
                 options: Vec::new(),
+                is_new: false,
             }],
             _ => catalog::fallback_models(harness),
+        };
+        for model in &mut models {
+            model.is_new = model.id == "claude-sonnet-5-5";
         }
+        models
     }
 
     fn seeded_refs(path: &str) -> Vec<RepoRef> {

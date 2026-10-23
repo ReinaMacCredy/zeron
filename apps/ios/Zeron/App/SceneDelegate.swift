@@ -84,6 +84,20 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                 if route.hasPrefix("tasks"), let shell = router as? MainTabController {
                     shell.showTasks(String(route.dropFirst(6)))
                 }
+                if route.hasPrefix("page:") || route.hasPrefix("doc:") || route == "whatsnew" {
+                    router.showSettings()
+                    DispatchQueue.main.async { [app = self.app] in
+                        guard let nav = (router as? UITabBarController)?.selectedViewController as? UINavigationController else { return }
+                        if route == "whatsnew" { return WhatsNewViewController.present(from: nav) }
+                        if route.hasPrefix("doc:") {
+                            return nav.pushViewController(DocArticleViewController(id: String(route.dropFirst(4)), title: "Docs"), animated: false)
+                        }
+                        guard let host = app.hostOptions.first else { return }
+                        let page = String(route.dropFirst(5))
+                        nav.pushViewController(HostPageViewController(app: app, deviceId: host.id, page: "mac", title: host.name), animated: false)
+                        if page != "mac" { nav.pushViewController(HostPageViewController(app: app, deviceId: host.id, page: page, title: ""), animated: false) }
+                    }
+                }
             }
         }
     }

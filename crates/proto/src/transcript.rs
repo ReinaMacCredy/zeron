@@ -43,32 +43,6 @@ pub fn format_kb(bytes: u64) -> String {
     }
 }
 
-pub fn token_count(n: u64) -> String {
-    let trim = |s: String| {
-        if s.contains('.') {
-            s.trim_end_matches('0').trim_end_matches('.').to_string()
-        } else {
-            s
-        }
-    };
-    let n = n as f64;
-    if n >= 1e10 {
-        format!("{}B", trim(format!("{:.1}", n / 1e9)))
-    } else if n >= 999_500_000.0 {
-        format!("{}B", trim(format!("{:.2}", n / 1e9)))
-    } else if n >= 1e7 {
-        format!("{}M", trim(format!("{:.1}", n / 1e6)))
-    } else if n >= 999_500.0 {
-        format!("{}M", trim(format!("{:.2}", n / 1e6)))
-    } else if n >= 1e5 {
-        format!("{:.0}K", n / 1e3)
-    } else if n >= 1e3 {
-        format!("{}K", trim(format!("{:.1}", n / 1e3)))
-    } else {
-        format!("{n}")
-    }
-}
-
 pub fn delegate_status_text(status: Option<DelegationStatus>) -> &'static str {
     use DelegationStatus::*;
     match status {
@@ -268,7 +242,10 @@ pub fn handoff_message_count(packet: &str) -> usize {
 }
 
 pub fn handoff_size_label(chars: usize) -> String {
-    format!("~{} tokens", token_count(estimated_tokens(chars)))
+    format!(
+        "~{} tokens",
+        crate::usage::format_tokens(estimated_tokens(chars))
+    )
 }
 
 pub fn handoff_context_label(packet: &str, pointer: bool) -> String {

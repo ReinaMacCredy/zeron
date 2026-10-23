@@ -17,7 +17,7 @@ pub struct PreviewParams {
     pub steps: bool,
 }
 
-pub use zeron_proto::route_preview::{Fallback, Preview, Row};
+pub use zeron_proto::routing::{Fallback, Preview, Row};
 
 pub struct Inputs<'a> {
     pub settings: &'a RoutingSettings,
