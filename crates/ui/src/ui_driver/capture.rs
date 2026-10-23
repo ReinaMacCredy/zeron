@@ -69,8 +69,8 @@ fn grab(window: &mut gpui::Window) -> Result<RgbaImage, String> {
     use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
     use windows_sys::Win32::Foundation::{HWND, RECT};
     use windows_sys::Win32::Graphics::Gdi::{
-        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
-        DIB_RGB_COLORS, DeleteDC, DeleteObject, GdiFlush, GetDC, ReleaseDC, SelectObject,
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
+        DeleteDC, DeleteObject, GdiFlush, GetDC, ReleaseDC, SelectObject,
     };
     use windows_sys::Win32::Storage::Xps::{PW_CLIENTONLY, PrintWindow};
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetClientRect, PW_RENDERFULLCONTENT};
@@ -112,8 +112,7 @@ fn grab(window: &mut gpui::Window) -> Result<RgbaImage, String> {
         ..info.bmiHeader
     };
     let mut bits = std::ptr::null_mut();
-    // SAFETY: every GDI object made here is selected out and freed before the block ends, and
-    // the DIB's bits are copied out while the bitmap is still alive.
+    // SAFETY: the DIB's bits are copied out before every GDI object made here is freed.
     let bgra = unsafe {
         let screen = GetDC(hwnd);
         let dc = CreateCompatibleDC(screen);
@@ -126,8 +125,7 @@ fn grab(window: &mut gpui::Window) -> Result<RgbaImage, String> {
             0,
         );
         let previous = SelectObject(dc, bitmap);
-        // PW_RENDERFULLCONTENT is what makes PrintWindow read DirectComposition content; BitBlt
-        // of the window DC returns black for it.
+        // Without PW_RENDERFULLCONTENT, DirectComposition content captures as black.
         let printed = !bitmap.is_null()
             && !bits.is_null()
             && PrintWindow(hwnd, dc, PW_CLIENTONLY | PW_RENDERFULLCONTENT) != 0;
@@ -224,12 +222,7 @@ fn to_points(image: RgbaImage, scale: f32) -> RgbaImage {
     }
     let size = |pixels: u32| ((pixels as f32 / scale).round() as u32).max(1);
     let (width, height) = (size(image.width()), size(image.height()));
-    image::imageops::resize(
-        &image,
-        width,
-        height,
-        image::imageops::FilterType::Triangle,
-    )
+    image::imageops::resize(&image, width, height, image::imageops::FilterType::Triangle)
 }
 
 fn check_path(path: &Path) -> Result<(), String> {
