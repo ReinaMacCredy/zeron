@@ -19,8 +19,8 @@ use zeron_proto::{CheckoutChangeRequestStatus, SidebarPreferences, TaskStep};
 
 pub use tasks::{
     ApprovalView, Brief, BriefMessage, ContextChat, EstimateLine, HostRef, ItemSend,
-    MissionOptions, MissionStrip, NeedsYouEntry, NeedsYouKind, PlanEstimate, StepView,
-    SupervisorHost, SupervisorPage, TaskDetail, TaskDraft, TaskRow, TasksPage, WakeEntry,
+    MissionFromChat, MissionOptions, MissionStrip, NeedsYouEntry, NeedsYouKind, PlanEstimate,
+    StepView, SupervisorHost, SupervisorPage, TaskDetail, TaskDraft, TaskRow, TasksPage, WakeEntry,
     WatchState,
 };
 pub(crate) use tasks::{

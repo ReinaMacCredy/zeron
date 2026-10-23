@@ -947,6 +947,70 @@ fn the_model_menu_lists_instances_and_applies_profiles() {
 }
 
 #[test]
+fn an_open_chat_leads_its_mission_or_a_new_lead_reads_it() {
+    let (client, _dir) = demo(fast());
+    let rt = zeron_client::runtime::shared();
+    let link = |id: &str| zeron_proto::chat_mentions::chat_mention_link(id, id).unwrap();
+    let draft = || zeron_client::TaskDraft {
+        title: "Fix scrolling".into(),
+        notes: format!(
+            "See {} and {}",
+            link("chat-ios-keyboard"),
+            link("chat-deploy")
+        ),
+        ..Default::default()
+    };
+    let context = |task_id: &str| {
+        client.task_detail(task_id).map(|detail| {
+            detail
+                .context
+                .iter()
+                .map(|c| c.chat_id.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+
+    let reads = rt
+        .block_on(client.start_mission_from_chat(
+            "chat-ios-scroll",
+            draft(),
+            zeron_client::MissionOptions::default(),
+            false,
+        ))
+        .unwrap();
+    wait_for("new lead started", Duration::from_secs(5), || {
+        client.task_detail(&reads.task_id).is_some_and(|detail| {
+            detail.row.mission
+                && detail
+                    .row
+                    .lead_chat_id
+                    .as_deref()
+                    .is_some_and(|lead| lead != "chat-ios-scroll")
+        })
+    });
+    assert_eq!(
+        context(&reads.task_id).unwrap(),
+        ["chat-ios-scroll", "chat-ios-keyboard"],
+        "the source first, then mentioned chats on its host"
+    );
+
+    let led = rt
+        .block_on(client.start_mission_from_chat(
+            "chat-ios-scroll",
+            draft(),
+            zeron_client::MissionOptions::default(),
+            true,
+        ))
+        .unwrap();
+    wait_for("chat leads", Duration::from_secs(5), || {
+        client.task_detail(&led.task_id).is_some_and(|detail| {
+            detail.row.mission && detail.row.lead_chat_id.as_deref() == Some("chat-ios-scroll")
+        })
+    });
+    assert_eq!(context(&led.task_id).unwrap(), ["chat-ios-keyboard"]);
+}
+
+#[test]
 fn phone_starts_edits_and_watches_missions() {
     let (client, _dir) = demo(fast());
     let rt = zeron_client::runtime::shared();

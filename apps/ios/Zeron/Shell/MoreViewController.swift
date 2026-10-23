@@ -226,6 +226,12 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             Row(id: "groupByProject", title: "Group by Project", subtitle: "Sessions outside your sections, under their project", symbol: "square.stack.3d.up", accessory: .toggle(app.groupByProject)),
             Row(id: "archived", title: "Archived Sessions", symbol: "archivebox"),
         ])
+        let mission = chatMissionLabels()
+        s.appendSections([mission.title])
+        s.appendItems([
+            Row(id: "chatMission:lead", title: mission.lead, subtitle: mission.detail, symbol: "target", accessory: .check(ChatMission.lead)),
+            Row(id: "chatMission:newMission", title: mission.newMission, symbol: "plus.bubble", accessory: .check(!ChatMission.lead)),
+        ])
         s.appendSections([" "])
         s.appendItems([Row(id: "signout", title: "Sign Out", symbol: "rectangle.portrait.and.arrow.right", accessory: .none, destructive: true)])
         dataSource.apply(s, animatingDifferences: false)
@@ -236,6 +242,9 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         guard let row = dataSource.itemIdentifier(for: path) else { return }
         switch row.id {
         case "voice": navigationController?.pushViewController(VoiceViewController(app: app), animated: true)
+        case let id where id.hasPrefix("chatMission:"):
+            ChatMission.lead = id == "chatMission:lead"
+            reload()
         case let id where id.hasPrefix("appearance:"):
             let style = Int(id.dropFirst(11)) ?? 0
             UserDefaults.standard.set(style, forKey: "appearance")

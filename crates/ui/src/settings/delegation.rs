@@ -128,8 +128,11 @@ impl DelegationCard {
             theme,
             "chat-mission",
             &[
-                (ChatMission::Lead, "This chat leads"),
-                (ChatMission::NewMission, "New mission reads this chat"),
+                (ChatMission::Lead, zeron_proto::mission::CHAT_MISSION_LEAD),
+                (
+                    ChatMission::NewMission,
+                    zeron_proto::mission::CHAT_MISSION_NEW,
+                ),
             ],
             crate::settings::current(cx).chat_mission,
             |choice, _, cx| {
@@ -143,8 +146,8 @@ impl DelegationCard {
         Self::row(
             theme,
             true,
-            "In a chat, Mission Control",
-            "Start mission in an open chat makes it the lead, or starts a new lead that reads it.",
+            zeron_proto::mission::CHAT_MISSION_TITLE,
+            zeron_proto::mission::CHAT_MISSION_DETAIL,
             control.into_any_element(),
         )
     }

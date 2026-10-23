@@ -1,5 +1,12 @@
 import UIKit
 
+enum ChatMission {
+    static var lead: Bool {
+        get { UserDefaults.standard.string(forKey: "chatMission") != "newMission" }
+        set { UserDefaults.standard.set(newValue ? "lead" : "newMission", forKey: "chatMission") }
+    }
+}
+
 enum MissionStart {
     static func upload(_ images: [StagedImage], to deviceId: String, client: CoreClient) async throws -> [String] {
         var paths: [String] = []

@@ -115,6 +115,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 self.endEdit(commit: text)
                 return .replaced
             }
+            if self.mission {
+                self.startMission(text: text, images: images)
+                return .kept
+            }
             // An immediate send (new turn, steer, stop-and-send) gets the
             // desktop runway; a message queued behind a live turn keeps the
             // live turn's runway and just follows.
@@ -143,7 +147,12 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         composer.onHeightChange = { [weak self] in self?.view.setNeedsLayout() }
         composer.onActionChange = { [weak self] in self?.render(animated: true) }
         composer.onChipTap = { [weak self] id, _ in
-            guard let self, let sheet = self.source.chipSheet(id) else { return }
+            guard let self else { return }
+            if id == "mission" {
+                self.mission.toggle()
+                return self.render(animated: true)
+            }
+            guard let sheet = self.source.chipSheet(id) else { return }
             self.present(sheet, animated: true)
         }
         questions.onSubmit = { [weak self] answers in
@@ -234,6 +243,9 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private var hostsToken: AnyObject?
     private var missionToken: AnyObject?
     private let missionStrip = UIButton(configuration: .gray())
+    private var mission = false
+    private var missionReview = true
+    private var missionPlanDoc = true
 
     deinit {
         if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }
@@ -550,12 +562,24 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         composer.running = c.running
         still.working = c.running
         composer.canSteer = c.canSteer
-        composer.placeholder = c.placeholder
-        composer.prediction = editingQueueId == nil ? c.prediction : nil
-        composer.chips = c.chips
-        composer.chipMenus = Dictionary(uniqueKeysWithValues: c.chips.map { chip in
+        let labels = missionComposerLabels(fromChat: true)
+        let missionAvailable = app.row(chatId)?.sidechatOf == nil
+        if !missionAvailable { mission = false }
+        var chips = c.chips
+        if missionAvailable {
+            chips.append(ComposerChip(id: "mission", title: labels.start, symbol: "target", tint: mission ? Palette.accent : nil))
+        }
+        if mission {
+            chips.append(ComposerChip(id: "mission-plan", title: missionPlanDoc ? labels.planDoc : labels.stepsOnly, symbol: missionReview ? "checklist" : "doc.text"))
+        }
+        composer.placeholder = mission ? labels.placeholder : c.placeholder
+        composer.prediction = editingQueueId == nil && !mission ? c.prediction : nil
+        composer.chips = chips
+        var menus = Dictionary(uniqueKeysWithValues: c.chips.map { chip in
             (chip.id, { [weak self] in self?.source.chipMenu(chip.id) })
         })
+        menus["mission-plan"] = { [weak self] in self?.missionPlanMenu() }
+        composer.chipMenus = menus
         let changes = {
             let asking = c.questions != nil
             self.questions.isHidden = !asking
@@ -628,6 +652,48 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         title.font = Fonts.ui(.sansMedium, 13)
         missionStrip.configuration?.attributedTitle = title
         missionStrip.isHidden = false
+    }
+
+    private func missionPlanMenu() -> UIMenu {
+        let labels = missionComposerLabels(fromChat: true)
+        return UIMenu(title: labels.start, children: [
+            UIMenu(options: .displayInline, children: [(true, labels.planDoc), (false, labels.stepsOnly)].map { planDoc, title in
+                UIAction(title: title, state: planDoc == missionPlanDoc ? .on : .off) { [weak self] _ in
+                    self?.missionPlanDoc = planDoc
+                    self?.render(animated: true)
+                }
+            }),
+            UIAction(title: labels.reviewPlanFirst, state: missionReview ? .on : .off) { [weak self] _ in
+                self?.missionReview.toggle()
+                self?.render(animated: true)
+            },
+        ])
+    }
+
+    private func startMission(text: String, images: [StagedImage]) {
+        let pictures = images.filter(\.isImage)
+        if let error = missionStagedError(images: UInt32(pictures.count), otherFile: nil) {
+            return Toast.show(error, in: view.window)
+        }
+        guard let client = app.client, let host = app.row(chatId)?.deviceId else { return }
+        let brief = missionText(text: text, pasted: images.filter { !$0.isImage }.map { String(decoding: $0.data, as: UTF8.self) })
+        let options = MissionOptions(approvePlan: missionReview, sameAgents: false, planDoc: missionPlanDoc)
+        let chat = chatId
+        Task { @MainActor [weak self] in
+            do {
+                let paths = try await MissionStart.upload(pictures, to: host, client: client)
+                let started = try await client.startMissionFromChat(chatId: chat, draft: MissionStart.draft(text: brief, spaceId: nil, images: paths), options: options, lead: ChatMission.lead)
+                guard let self else { return }
+                if let notice = started.notice { Toast.show(notice, in: self.view.window) }
+                self.composer.text = ""
+                self.composer.images = []
+                self.mission = false
+                self.render(animated: true)
+                (self.tabBarController as? MainTabController)?.showTasks("mission:\(started.taskId)")
+            } catch {
+                Toast.show(TasksErrors.message(error), in: self?.view.window)
+            }
+        }
     }
 
     private func openMission() {

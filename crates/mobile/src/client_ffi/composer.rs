@@ -793,6 +793,56 @@ pub fn mission_composer_labels(from_chat: bool) -> MissionComposerLabels {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ChatMissionLabels {
+    pub title: String,
+    pub detail: String,
+    pub lead: String,
+    pub new_mission: String,
+}
+
+#[uniffi::export]
+pub fn chat_mission_labels() -> ChatMissionLabels {
+    use zeron_proto::mission as m;
+    ChatMissionLabels {
+        title: m::CHAT_MISSION_TITLE.into(),
+        detail: m::CHAT_MISSION_DETAIL.into(),
+        lead: m::CHAT_MISSION_LEAD.into(),
+        new_mission: m::CHAT_MISSION_NEW.into(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MissionFromChat {
+    pub task_id: String,
+    pub notice: Option<String>,
+}
+
+#[uniffi::export]
+impl CoreClient {
+    pub async fn start_mission_from_chat(
+        &self,
+        chat_id: String,
+        draft: super::tasks::TaskDraft,
+        options: super::tasks::MissionOptions,
+        lead: bool,
+    ) -> CoreResult<MissionFromChat> {
+        let client = self.client.clone();
+        let started = on_runtime(async move {
+            client
+                .start_mission_from_chat(&chat_id, draft.into(), options.into(), lead)
+                .await
+        })
+        .await?;
+        Ok(MissionFromChat {
+            task_id: started.task_id,
+            notice: started
+                .capped
+                .then(|| zeron_proto::mission::mission_context_capped(zeron_doc::TASK_CONTEXT_MAX)),
+        })
+    }
+}
+
 #[uniffi::export]
 pub fn mission_staged_error(images: u32, other_file: Option<String>) -> Option<String> {
     zeron_proto::mission::mission_staged_error(

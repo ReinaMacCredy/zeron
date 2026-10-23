@@ -96,29 +96,6 @@ impl TaskOrigin {
     }
 }
 
-fn mission_context(
-    state: &crate::state::AppState,
-    source: Option<&str>,
-    text: &str,
-    lead: Option<&str>,
-) -> Vec<String> {
-    let local = state.local_device_id.as_deref();
-    let mentioned = zeron_proto::chat_mentions::chat_mention_links(text)
-        .into_iter()
-        .map(|link| link.chat_id);
-    let mut context: Vec<String> = Vec::new();
-    for id in source.map(str::to_owned).into_iter().chain(mentioned) {
-        let readable = state
-            .chats
-            .iter()
-            .any(|chat| chat.id == id && Some(chat.device_id.as_str()) == local);
-        if readable && Some(id.as_str()) != lead && !state.is_draft(&id) && !context.contains(&id) {
-            context.push(id);
-        }
-    }
-    context
-}
-
 impl Shell {
     fn task_engine(&mut self, cx: &mut Context<Self>) -> Option<crate::state::EngineHandle> {
         let engine = self.state.read(cx).engine().cloned();
@@ -191,33 +168,38 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let task_id = uuid::Uuid::new_v4().to_string();
-        let (title, mut notes) = start.title_notes();
+        let (title, notes) = start.title_notes();
         let lead = start
             .chat_id
             .clone()
             .filter(|_| settings::current(cx).chat_mission == settings::ChatMission::Lead);
         let source = start.chat_id.as_deref().filter(|_| lead.is_none());
-        let mut context =
-            mission_context(self.state.read(cx), source, &start.text, lead.as_deref());
-        if context.len() > zeron_doc::TASK_CONTEXT_MAX {
-            context.truncate(zeron_doc::TASK_CONTEXT_MAX);
+        let state = self.state.read(cx);
+        let local = state.local_device_id.as_deref();
+        let zeron_proto::mission::MissionReads {
+            context,
+            capped,
+            notes,
+        } = zeron_proto::mission::mission_reads(
+            source,
+            lead.as_deref(),
+            &start.text,
+            notes,
+            zeron_doc::TASK_CONTEXT_MAX,
+            |id| {
+                state
+                    .chats
+                    .iter()
+                    .any(|chat| chat.id == id && Some(chat.device_id.as_str()) == local)
+                    && !state.is_draft(id)
+            },
+        );
+        if capped {
             self.show_notice(
                 crate::toast::ToastKind::Info,
-                format!(
-                    "A mission reads at most {} chats, so the later ones were left out",
-                    zeron_doc::TASK_CONTEXT_MAX
-                ),
+                zeron_proto::mission::mission_context_capped(zeron_doc::TASK_CONTEXT_MAX),
                 cx,
             );
-        }
-        if let Some(chat_id) = source.filter(|id| context.first().map(String::as_str) != Some(id)) {
-            let read = format!(
-                "Before you plan, read the chat this mission came from with read_thread, threadId \"{chat_id}\"."
-            );
-            notes = match notes.as_str() {
-                "" => read,
-                notes => format!("{notes}\n\n{read}"),
-            };
         }
         let mut create =
             Self::create_task_params(&task_id, &title, &notes, start.space_id.clone(), None);
@@ -1652,49 +1634,4 @@ pub(super) fn tree_key(state: &crate::state::AppState, id: &str) -> String {
         .find(|task| task.id == id && !task.deleted)
         .and_then(|task| task.chat_id.clone())
         .unwrap_or_else(|| id.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_mission_lifts_readable_chat_chips_after_its_source_chat() {
-        let chat = |id: &str, device: &str| -> zeron_proto::Chat {
-            serde_json::from_value(serde_json::json!({
-                "id": id, "title": id, "deviceId": device, "archived": false,
-                "createdAt": "2026-10-18T00:00:00Z",
-            }))
-            .unwrap()
-        };
-        let mut state = crate::state::AppState::new();
-        state.local_device_id = Some("mac".into());
-        state.chats = ["src", "a", "b", "c", "d", "e", "f"]
-            .iter()
-            .map(|id| chat(id, "mac"))
-            .chain([chat("far", "pc")])
-            .collect();
-        let link = |id: &str| zeron_proto::chat_mentions::chat_mention_link(id, id).unwrap();
-        let text = format!(
-            "Fix it\nUse {} {} {} and {}",
-            link("src"),
-            link("far"),
-            link("a"),
-            link("a")
-        );
-        assert_eq!(
-            mission_context(&state, None, &text, Some("src")),
-            ["a"],
-            "the lead and other devices' chats are left out"
-        );
-        assert_eq!(
-            mission_context(&state, Some("src"), &text, None),
-            ["src", "a"]
-        );
-        let many: String = ["a", "b", "c", "d", "e", "f"].map(link).join(" ");
-        assert_eq!(
-            mission_context(&state, Some("src"), &many, None),
-            ["src", "a", "b", "c", "d", "e", "f"]
-        );
-    }
 }

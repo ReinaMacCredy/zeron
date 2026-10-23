@@ -25,7 +25,8 @@ use crate::live::LiveBackend;
 use crate::rpc::{FolderListing, ProgressFn, QUEUED_ATTACHMENTS_MIN, RepoRef, capability};
 use crate::session::{HostCapabilities, OutgoingAttachment, RoomState, SessionCore, SessionHandle};
 use crate::workspace::{
-    ItemSend, MissionOptions, SearchHit, TaskDetail, TaskDraft, WorkspaceSnapshot, WorkspaceStore,
+    ItemSend, MissionFromChat, MissionOptions, SearchHit, TaskDetail, TaskDraft, WorkspaceSnapshot,
+    WorkspaceStore,
 };
 use crate::{lock, now_ms, read, write};
 
@@ -1018,17 +1019,29 @@ impl Client {
             .chat(chat_id)
             .map(|chat| chat.device_id)
             .ok_or_else(|| ClientError::NotFound(chat_id.to_owned()))?;
+        self.assign_task_on(&host, task_id, chat_id, send, None)
+            .await
+    }
+
+    async fn assign_task_on(
+        &self,
+        host: &str,
+        task_id: &str,
+        chat_id: &str,
+        send: bool,
+        mission: Option<MissionOptions>,
+    ) -> Result<()> {
         self.mutate(
-            &host,
+            host,
             serde_json::json!({
                 "op": "assignTask",
                 "taskId": task_id,
                 "chatId": chat_id,
                 "send": send,
-                "orchestrate": false,
-                "approvePlan": true,
-                "sameAgents": false,
-                "planDoc": false,
+                "orchestrate": mission.is_some(),
+                "approvePlan": mission.is_none_or(|m| m.approve_plan),
+                "sameAgents": mission.is_some_and(|m| m.same_agents),
+                "planDoc": mission.is_some_and(|m| m.plan_doc),
                 "attachPlan": false,
             }),
         )
@@ -1047,16 +1060,75 @@ impl Client {
         let started = self
             .start_task(&task_id, device_id, Some(space_id), config, Some(options))
             .await;
+        self.keep_task_if(device_id, task_id, started).await
+    }
+
+    async fn keep_task_if<T>(
+        &self,
+        host: &str,
+        task_id: String,
+        started: Result<T>,
+    ) -> Result<String> {
         if let Err(err) = started {
             let _ = self
                 .mutate(
-                    device_id,
+                    host,
                     serde_json::json!({ "op": "deleteTask", "taskId": task_id }),
                 )
                 .await;
             return Err(err);
         }
         Ok(task_id)
+    }
+
+    pub async fn start_mission_from_chat(
+        &self,
+        chat_id: &str,
+        draft: TaskDraft,
+        options: MissionOptions,
+        lead: bool,
+    ) -> Result<MissionFromChat> {
+        let chat = self
+            .inner
+            .workspace
+            .chat(chat_id)
+            .ok_or_else(|| ClientError::NotFound(chat_id.to_owned()))?;
+        let host = chat.device_id;
+        let (state, _) = self.inner.workspace.state();
+        let text = format!("{}\n{}", draft.title, draft.notes);
+        let reads = zeron_proto::mission::mission_reads(
+            (!lead).then_some(chat_id),
+            lead.then_some(chat_id),
+            &text,
+            draft.notes,
+            zeron_doc::TASK_CONTEXT_MAX,
+            |id| {
+                state
+                    .chats
+                    .iter()
+                    .any(|c| c.id == id && c.device_id == host)
+            },
+        );
+        let draft = TaskDraft {
+            notes: reads.notes,
+            context: reads.context,
+            space_id: chat.space_id,
+            ..draft
+        };
+        let task_id = if lead {
+            let task_id = self.create_task(&host, draft).await?;
+            let assigned = self
+                .assign_task_on(&host, &task_id, chat_id, true, Some(options))
+                .await;
+            self.keep_task_if(&host, task_id, assigned).await?
+        } else {
+            self.start_mission(&host, draft, chat.config, options)
+                .await?
+        };
+        Ok(MissionFromChat {
+            task_id,
+            capped: reads.capped,
+        })
     }
 
     pub async fn edit_task_plan(
