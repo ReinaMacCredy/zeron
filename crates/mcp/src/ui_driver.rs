@@ -117,7 +117,7 @@ pub fn tool(tool: Tool) -> Value {
         (drive, "holdMs", field("integer", "For `drag`: how long to hold the button at `to` before releasing.")),
         (drive, "do", field("string", "For `press`: the accessibility action to perform, such as click (default), focus, setValue, increment, decrement, expand, collapse, showContextMenu or scrollIntoView.")),
         (drive, "value", field("string", "For `press` with `do: setValue`: the new value.")),
-        (observe, "do", json!({ "type": "string", "enum": ["start", "stop"], "description": "For `record`: start taps the window's real clicks, keys, typing and scrolls; stop writes them as a `zeron ui scenario` file under ~/.zeron/run/recordings and returns {path, steps, fallbacks}." })),
+        (observe, "do", json!({ "type": "string", "enum": ["start", "stop"], "description": "For `record`: start taps the window's real clicks, keys, typing and scrolls; stop writes them as a `zeron ui scenario` file under ~/.zeron/run/recordings and returns {path, steps, fallbacks, redacted}. Text typed into a key, token, secret, password or API field is written as `<redacted>`. Never records the app serving this chat; ask the user to run `zeron ui record` there." })),
         (observe, "includeDriven", field("boolean", "For `record` start, debug builds only: also record input that `ui_driver_drive` injects.")),
         (observe, "full", field("boolean", "For `tree`: show every node, without hoisting unnamed containers.")),
         (drive, "during", field("object", "For `frames` and `track`, required: a drive request such as {\"action\": \"click\", \"select\": \"Button \\\"Settings\\\"\"} that runs once recording has started.")),
