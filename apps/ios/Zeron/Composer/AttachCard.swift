@@ -217,8 +217,8 @@ final class AttachCard: UIView {
         } else {
             UIView.animate(withDuration: 0.52, delay: 0, usingSpringWithDamping: 0.84, initialSpringVelocity: 0, options: [.allowUserInteraction, .beginFromCurrentState]) {
                 self.place(target, radius: radius)
-            } completion: { _ in done() }
-            UIView.animate(withDuration: 0.16, delay: 0, options: [.beginFromCurrentState]) { hidden.alpha = 0 }
+            }
+            UIView.animate(withDuration: 0.16, delay: 0, options: [.beginFromCurrentState]) { hidden.alpha = 0 } completion: { _ in done() }
             UIView.animate(withDuration: 0.26, delay: 0.12, options: [.beginFromCurrentState, .allowUserInteraction]) { shown.alpha = 1 }
         }
         UIAccessibility.post(notification: .screenChanged, argument: shown)
@@ -252,7 +252,7 @@ final class AttachCard: UIView {
             } completion: { _ in finish() }
             return
         }
-        UIView.animate(withDuration: 0.14, delay: 0, options: [.beginFromCurrentState]) { contents.forEach { $0.alpha = 0 } }
+        UIView.animate(withDuration: 0.14, delay: 0, options: [.beginFromCurrentState]) { contents.forEach { $0.alpha = 0 } } completion: { _ in self.dropGridHost() }
         UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0, options: [.beginFromCurrentState]) {
             self.place(self.anchorRect, radius: nil)
             self.card.effect = nil
