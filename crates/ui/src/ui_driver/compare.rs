@@ -416,7 +416,7 @@ pub(super) async fn run(
     let drawn = super::fresh_frame(handle, Duration::from_millis(500), cx).await?;
     let tree = super::tree::read(handle, cx).await?;
     let area = locate(&region, &tree)?;
-    let native_image = cx.update(|cx| native(handle, &area, cx))?;
+    let native_image = cx.update(|cx| super::capture::region(handle, Some(area), cx))?;
     let native_items = items(&tree.nodes, &area);
     let mock_area = Bounds {
         x: 0.0,
@@ -510,42 +510,6 @@ async fn mock(
             LOAD_TIMEOUT.as_secs()
         )),
     }
-}
-
-#[cfg(target_os = "macos")]
-fn native(
-    handle: gpui::AnyWindowHandle,
-    area: &Bounds,
-    cx: &mut gpui::App,
-) -> Result<image::RgbaImage, String> {
-    use crate::window_capture;
-    let number = handle
-        .update(cx, |_, window, _| window_capture::window_number(window))
-        .map_err(|error| format!("window is gone: {error}"))?
-        .ok_or("this window has no window-server id")?;
-    let frame = window_capture::capture_window_number(number)
-        .ok_or_else(|| format!("the window server returned no image for window {number}"))?;
-    let clamp = |v: f32, max: u32| (v.round().max(0.0) as u32).min(max);
-    let (x0, y0) = (clamp(area.x, frame.width), clamp(area.y, frame.height));
-    let (x1, y1) = (
-        clamp(area.x + area.w, frame.width),
-        clamp(area.y + area.h, frame.height),
-    );
-    if x1 <= x0 || y1 <= y0 {
-        return Err(format!(
-            "the region lies outside the {}x{} window image",
-            frame.width, frame.height
-        ));
-    }
-    let mut rgba = Vec::with_capacity(((x1 - x0) * (y1 - y0) * 4) as usize);
-    for row in y0..y1 {
-        let start = ((row * frame.width + x0) * 4) as usize;
-        for px in frame.bgra[start..start + ((x1 - x0) * 4) as usize].chunks_exact(4) {
-            rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
-        }
-    }
-    image::RgbaImage::from_raw(x1 - x0, y1 - y0, rgba)
-        .ok_or_else(|| "captured pixels do not fit".into())
 }
 
 #[cfg(test)]

@@ -1,21 +1,13 @@
+use super::tree::Bounds;
 use gpui::{AnyWindowHandle, App};
 use image::RgbaImage;
-use serde::Deserialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-pub(super) struct Rect {
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-}
-
 pub(super) fn snapshot(
     handle: AnyWindowHandle,
-    rect: Option<Rect>,
+    rect: Option<Bounds>,
     path: Option<PathBuf>,
     cx: &mut App,
 ) -> Result<Value, String> {
@@ -34,11 +26,8 @@ pub(super) fn snapshot(
                 SEQ.fetch_add(1, Ordering::Relaxed) + 1
             )),
     };
-    let frame = handle
-        .update(cx, |_, window, _| grab(window))
-        .map_err(|error| format!("window is gone: {error}"))??;
-    let (x, y, w, h) = crop(frame.width(), frame.height(), rect)?;
-    let image = image::imageops::crop_imm(&frame, x, y, w, h).to_image();
+    let image = region(handle, rect, cx)?;
+    let (w, h) = image.dimensions();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
     }
@@ -46,6 +35,18 @@ pub(super) fn snapshot(
         .save_with_format(&path, image::ImageFormat::Png)
         .map_err(|error| format!("{}: {error}", path.display()))?;
     Ok(serde_json::json!({ "path": path, "width": w, "height": h }))
+}
+
+pub(super) fn region(
+    handle: AnyWindowHandle,
+    rect: Option<Bounds>,
+    cx: &mut App,
+) -> Result<RgbaImage, String> {
+    let frame = handle
+        .update(cx, |_, window, _| grab(window))
+        .map_err(|error| format!("window is gone: {error}"))??;
+    let (x, y, w, h) = crop(frame.width(), frame.height(), rect)?;
+    Ok(image::imageops::crop_imm(&frame, x, y, w, h).to_image())
 }
 
 #[cfg(target_os = "macos")]
@@ -247,7 +248,7 @@ fn check_path(path: &Path) -> Result<(), String> {
     }
 }
 
-fn crop(width: u32, height: u32, rect: Option<Rect>) -> Result<(u32, u32, u32, u32), String> {
+fn crop(width: u32, height: u32, rect: Option<Bounds>) -> Result<(u32, u32, u32, u32), String> {
     let Some(rect) = rect else {
         return Ok((0, 0, width, height));
     };

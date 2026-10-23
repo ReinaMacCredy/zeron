@@ -126,7 +126,7 @@ enum Observe {
     Tree(tree::View),
     Audit,
     Snapshot {
-        rect: Option<capture::Rect>,
+        rect: Option<tree::Bounds>,
         path: Option<PathBuf>,
     },
     Wait(Until),
