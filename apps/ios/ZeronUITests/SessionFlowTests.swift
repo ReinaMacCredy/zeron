@@ -344,7 +344,9 @@ final class SessionFlowTests: XCTestCase {
     func testSessionMenuHeaderAndDelete() {
         let app = launch()
         let cell = app.cells["session-chat-cjk"]
-        XCTAssertTrue(cell.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.cells["section-pinned"].waitForExistence(timeout: 10))
+        scrollTo(cell, in: app.collectionViews.firstMatch)
+        XCTAssertTrue(cell.waitForExistence(timeout: 5))
         cell.press(forDuration: 1.0)
         XCTAssertTrue(app.buttons["Delete"].waitForExistence(timeout: 5), "Delete in the list's menu")
         snapshot(app, "list-menu-delete")

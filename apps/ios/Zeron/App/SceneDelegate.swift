@@ -67,6 +67,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         if let router = window.rootViewController as? AppRouter, let i = args.firstIndex(of: "-route"), i + 1 < args.count {
             let route = args[i + 1]
             DispatchQueue.main.async { [app] in
+                let tabs = router as? MainTabController ?? (router as? UISplitViewController)?.viewController(for: .compact) as? MainTabController
                 let needs = route.hasSuffix("/needs-you") || route == "needs-you"
                 let chat = route.hasPrefix("chat:") ? String(route.dropFirst(5).prefix { $0 != "/" }) : nil
                 if let chat { router.openSession(chat) }
@@ -88,13 +89,13 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                 if route == "git" { router.showPullRequests(git: true, history: false) }
                 if route == "git-history" { router.showPullRequests(git: true, history: true) }
                 if route.hasPrefix("pr:") { router.openPullRequest(url: String(route.dropFirst(3)), deviceId: nil) }
-                if route.hasPrefix("tasks"), let shell = router as? MainTabController {
-                    shell.showTasks(String(route.dropFirst(6)))
+                if route.hasPrefix("tasks"), let tabs {
+                    tabs.showTasks(String(route.dropFirst(6)))
                 }
                 if route.hasPrefix("page:") || route.hasPrefix("doc:") || route == "whatsnew" {
                     router.showSettings()
                     DispatchQueue.main.async { [app = self.app] in
-                        guard let nav = (router as? UITabBarController)?.selectedViewController as? UINavigationController else { return }
+                        guard let nav = tabs?.selectedViewController as? UINavigationController else { return }
                         if route == "whatsnew" { return WhatsNewViewController.present(from: nav) }
                         if route.hasPrefix("doc:") {
                             return nav.pushViewController(DocArticleViewController(id: String(route.dropFirst(4)), title: "Docs"), animated: false)
