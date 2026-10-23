@@ -1793,6 +1793,7 @@ impl DocHost {
                 self.inner.store.clone(),
                 chat_id.to_string(),
                 chat2_cursor,
+                self.inner.config.edge.is_some(),
             )
         });
         let changed_persistence = persistence.clone();

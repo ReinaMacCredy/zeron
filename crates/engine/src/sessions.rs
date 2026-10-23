@@ -4484,7 +4484,7 @@ impl Inner {
             session
         };
         if let Some(ws) = self.workspace() {
-            ws.record_session(&session);
+            ws.touch_session(&session);
         }
     }
 
