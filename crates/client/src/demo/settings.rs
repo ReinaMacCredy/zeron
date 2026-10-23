@@ -37,7 +37,7 @@ impl HostSettings {
             "fallback": [{ "harness": "claude-code" }]
         }))
         .expect("demo routing decodes");
-        let profiles = serde_json::from_value(json!({ "profiles": [
+        let mut profiles: AgentProfilesSnapshot = serde_json::from_value(json!({ "profiles": [
             { "id": "ui-work", "name": "UI work", "harness": "claude-code", "model": "claude-opus-5-5",
               "permissionMode": "auto", "reasoning": "high",
               "instructions": "Match the kit; prove UI with a screenshot.",
@@ -50,6 +50,19 @@ impl HostSettings {
               "permissionMode": "full", "reasoning": "low" }
         ]}))
         .expect("demo profiles decode");
+        profiles.profiles.splice(0..0, super::composer::profiles());
+        let instances: Vec<Value> = super::composer::instances()
+            .into_iter()
+            .map(|instance| json!(instance))
+            .chain([
+                json!({ "id": "claude-work", "driver": "claude-code", "label": "Work",
+                  "accent": "#3e9cf0",
+                  "config": { "kind": "native", "homeDir": { "kind": "managed" } } }),
+                json!({ "id": "acp_gemini_cli", "driver": "acp", "label": "Gemini CLI",
+                  "config": { "kind": "acp", "source": { "kind": "registry",
+                    "agentId": "gemini", "version": "0.9.1", "distribution": "npx" } } }),
+            ])
+            .collect();
         Self {
             accounts: HashMap::new(),
             tools,
@@ -58,14 +71,7 @@ impl HostSettings {
             profiles,
             system_prompt: String::new(),
             disabled_harnesses: Vec::new(),
-            instances: json!({ "instances": [
-                { "id": "claude-work", "driver": "claude-code", "label": "Work",
-                  "accent": "#3e9cf0",
-                  "config": { "kind": "native", "homeDir": { "kind": "managed" } } },
-                { "id": "acp_gemini_cli", "driver": "acp", "label": "Gemini CLI",
-                  "config": { "kind": "acp", "source": { "kind": "registry",
-                    "agentId": "gemini", "version": "0.9.1", "distribution": "npx" } } }
-            ]}),
+            instances: json!({ "instances": instances }),
             updates: json!([
                 { "harness": "claude-code", "installedVersion": "2.1.3", "latestVersion": "2.1.4",
                   "phase": "available", "canApply": true },

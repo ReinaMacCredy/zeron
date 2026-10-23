@@ -230,7 +230,7 @@ impl<'a> Walk<'a> {
                 depth,
                 kind: NodeKind::Native,
                 group: None,
-                title: crate::transcript::subagent_tab_title(call).to_string(),
+                title: call.subagent_title(),
                 status,
                 word,
                 brand: Some(crate::pickers::agent_brand_icon(harness, model)),

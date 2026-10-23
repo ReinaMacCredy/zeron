@@ -333,6 +333,92 @@ impl ApprovalState {
 
 pub const HELD_APPROVAL: &str = "Plan approved · can take back";
 
+pub const START_MISSION: &str = "Start mission";
+pub const REVIEW_PLAN_FIRST: &str = "Review plan first";
+pub const PLAN_DOC: &str = "plan.md";
+pub const STEPS_ONLY: &str = "Steps only";
+
+pub fn mission_placeholder(from_chat: bool) -> &'static str {
+    if from_chat {
+        "Turn this chat into a mission: what should the team build?"
+    } else {
+        "Describe the mission. A lead plans it and runs each step on its own thread."
+    }
+}
+
+pub const CHAT_MISSION_TITLE: &str = "In a chat, Mission Control";
+pub const CHAT_MISSION_DETAIL: &str =
+    "Start mission in an open chat makes it the lead, or starts a new lead that reads it.";
+pub const CHAT_MISSION_LEAD: &str = "This chat leads";
+pub const CHAT_MISSION_NEW: &str = "New mission reads this chat";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissionReads {
+    pub context: Vec<String>,
+    pub capped: bool,
+    pub notes: String,
+}
+
+pub fn mission_reads(
+    source: Option<&str>,
+    lead: Option<&str>,
+    text: &str,
+    notes: String,
+    max: usize,
+    readable: impl Fn(&str) -> bool,
+) -> MissionReads {
+    let mentioned = crate::chat_mentions::chat_mention_links(text)
+        .into_iter()
+        .map(|link| link.chat_id);
+    let mut context: Vec<String> = Vec::new();
+    for id in source.map(str::to_owned).into_iter().chain(mentioned) {
+        if Some(id.as_str()) != lead && !context.contains(&id) && readable(&id) {
+            context.push(id);
+        }
+    }
+    let capped = context.len() > max;
+    context.truncate(max);
+    let notes = match source.filter(|id| context.first().map(String::as_str) != Some(id)) {
+        Some(chat_id) => {
+            let read = format!(
+                "Before you plan, read the chat this mission came from with read_thread, threadId \"{chat_id}\"."
+            );
+            match notes.as_str() {
+                "" => read,
+                notes => format!("{notes}\n\n{read}"),
+            }
+        }
+        None => notes,
+    };
+    MissionReads {
+        context,
+        capped,
+        notes,
+    }
+}
+
+pub fn mission_context_capped(max: usize) -> String {
+    format!("A mission reads at most {max} chats, so the later ones were left out")
+}
+
+pub fn mission_staged_error(images: usize, max: usize, other_file: Option<&str>) -> Option<String> {
+    if let Some(name) = other_file {
+        return Some(format!(
+            "A mission takes images and pasted text; remove {name}."
+        ));
+    }
+    (images > max).then(|| format!("A mission holds up to {max} images."))
+}
+
+/// Phone pastes are staged files with no mention, and a mission carries only images.
+pub fn mission_text(text: &str, pasted: &[String]) -> String {
+    std::iter::once(text.trim())
+        .chain(pasted.iter().map(|paste| paste.trim()))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 pub fn approval_state(
     row: &SupervisorIntervention,
     steps: &[TaskStep],
@@ -465,5 +551,73 @@ impl<'a, B, F: Fn(&Task) -> Rollup<B>> Names<'a, F> {
                 None => "Lead".into(),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_mission_names_the_file_it_cannot_take_before_the_image_cap() {
+        assert_eq!(mission_staged_error(12, 12, None), None);
+        assert_eq!(
+            mission_staged_error(13, 12, None).as_deref(),
+            Some("A mission holds up to 12 images.")
+        );
+        assert_eq!(
+            mission_staged_error(13, 12, Some("log.zip")).as_deref(),
+            Some("A mission takes images and pasted text; remove log.zip.")
+        );
+    }
+
+    #[test]
+    fn a_mission_lifts_readable_chat_chips_after_its_source_chat() {
+        let readable = |id: &str| id != "far";
+        let link = |id: &str| crate::chat_mentions::chat_mention_link(id, id).unwrap();
+        let text = format!(
+            "Fix it\nUse {} {} {} and {}",
+            link("src"),
+            link("far"),
+            link("a"),
+            link("a")
+        );
+        let reads = |source, lead, text: &str| {
+            mission_reads(source, lead, text, String::new(), 3, readable)
+        };
+        assert_eq!(
+            reads(None, Some("src"), &text).context,
+            ["a"],
+            "the lead and unreadable chats are left out"
+        );
+        let from_chat = reads(Some("src"), None, &text);
+        assert_eq!(from_chat.context, ["src", "a"]);
+        assert_eq!(
+            from_chat.notes, "",
+            "a source the context carries needs no note"
+        );
+        let many: String = ["a", "b", "c", "d"].map(link).join(" ");
+        let capped = reads(Some("src"), None, &many);
+        assert_eq!(
+            (capped.context, capped.capped),
+            (vec!["src".into(), "a".into(), "b".into()], true)
+        );
+    }
+
+    #[test]
+    fn a_source_chat_the_context_cannot_carry_is_named_in_the_notes() {
+        let reads = mission_reads(
+            Some("far"),
+            None,
+            "Fix it",
+            "Keep it small".into(),
+            3,
+            |_| false,
+        );
+        assert!(reads.context.is_empty());
+        assert_eq!(
+            reads.notes,
+            "Keep it small\n\nBefore you plan, read the chat this mission came from with read_thread, threadId \"far\"."
+        );
     }
 }

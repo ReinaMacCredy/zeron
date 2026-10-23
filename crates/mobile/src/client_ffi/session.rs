@@ -283,6 +283,10 @@ pub struct ComposerState {
     pub last_submitted_message_id: Option<String>,
     pub context_usage: Option<ContextUsage>,
     pub limit_pill: Option<crate::layout::LimitPill>,
+    pub compacting: bool,
+    pub compact_blocked: Option<String>,
+    pub resume_compaction: Option<super::composer::ResumeOffer>,
+    pub prediction: Option<String>,
 }
 
 impl From<&zc::ComposerState> for ComposerState {
@@ -364,6 +368,15 @@ impl From<&zc::ComposerState> for ComposerState {
                 window: u.window,
             }),
             limit_pill: c.limit.as_ref().map(crate::layout::limit_pill),
+            compacting: c.compacting,
+            compact_blocked: c.compact_blocked.clone(),
+            resume_compaction: c
+                .resume_compaction
+                .map(|offer| super::composer::ResumeOffer {
+                    title: zeron_proto::compaction::RESUME_COMPACTION_TITLE.into(),
+                    body: offer.body(),
+                }),
+            prediction: c.prediction.clone(),
         }
     }
 }

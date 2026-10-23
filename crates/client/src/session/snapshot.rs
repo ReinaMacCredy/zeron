@@ -308,4 +308,8 @@ pub struct ComposerState {
     pub last_submitted_message_id: Option<String>,
     pub context_usage: Option<ContextUsage>,
     pub limit: Option<zeron_proto::LimitResume>,
+    pub compacting: bool,
+    pub compact_blocked: Option<String>,
+    pub resume_compaction: Option<zeron_proto::compaction::ResumeCompaction>,
+    pub prediction: Option<String>,
 }

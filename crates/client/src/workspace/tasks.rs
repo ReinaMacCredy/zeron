@@ -224,6 +224,12 @@ pub struct TaskDraft {
     pub context: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissionFromChat {
+    pub task_id: String,
+    pub capped: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MissionOptions {
     pub approve_plan: bool,

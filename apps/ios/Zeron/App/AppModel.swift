@@ -523,11 +523,13 @@ final class AppModel {
             prNumber: r.pullRequest?.number,
             status: status(r.indicator),
             timeLabel: r.timeLabel,
+            backgroundRing: r.backgroundRing,
+            background: r.backgroundLabel,
             unseen: r.unseen,
             pinned: r.pinned,
             sendFailed: r.sendState == .failed,
             settled: r.settled,
-            expired: r.expired
+            expired: r.sidechatExpired
         )
     }
 
@@ -707,6 +709,10 @@ final class AppModel {
         return (try? await client.searchFiles(deviceId: deviceId, chatId: nil, spaceId: spaceId, query: query)) ?? []
     }
 
+    func threadMentions(deviceId: String, spaceId: String, query: String) -> [ThreadMention] {
+        client?.threadMentions(deviceId: deviceId, spaceId: spaceId, exclude: nil, query: query) ?? []
+    }
+
     func refs(projectId: String) async -> [String] {
         guard let client, let p = rawProjects.first(where: { $0.id == projectId }) else { return [] }
         let refs = (try? await client.listRefs(deviceId: p.deviceId, repoPath: p.path)) ?? []
@@ -741,11 +747,39 @@ final class AppModel {
 }
 
 extension NewSessionDraft {
-    var config: ChatConfig { ChatConfig(harness: harness, model: model, reasoning: effort, modelOptions: [:], sandbox: .workspaceWrite) }
+    var config: ChatConfig {
+        ChatConfig(harness: harness, model: model, reasoning: effort, modelOptions: modelOptions ?? [:], sandbox: .workspaceWrite, profileId: profileId, permissionMode: permission.flatMap(Self.permissionMode), instructions: instructions ?? "", disabledTools: disabledTools ?? [])
+    }
+
+    mutating func adopt(_ config: ChatConfig) {
+        harness = config.harness
+        model = config.model
+        effort = config.reasoning
+        modelOptions = config.modelOptions
+        permission = config.permissionMode.map { mode in
+            switch mode {
+            case .ask: "ask"
+            case .auto: "auto"
+            case .full: "full"
+            }
+        }
+        profileId = config.profileId
+        instructions = config.instructions
+        disabledTools = config.disabledTools
+    }
+
+    private static func permissionMode(_ wire: String) -> PermissionMode? {
+        switch wire {
+        case "ask": .ask
+        case "auto": .auto
+        case "full": .full
+        default: nil
+        }
+    }
 }
 
 extension StagedImage {
-    var outgoing: OutgoingAttachment { OutgoingAttachment(name: name, mimeType: "image/jpeg", data: data) }
+    var outgoing: OutgoingAttachment { OutgoingAttachment(name: name, mimeType: mimeType, data: data) }
 }
 
 /// Core events arrive on Rust runtime threads; hop to main.

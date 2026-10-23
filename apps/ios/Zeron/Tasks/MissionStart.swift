@@ -1,5 +1,12 @@
 import UIKit
 
+enum ChatMission {
+    static var lead: Bool {
+        get { UserDefaults.standard.string(forKey: "chatMission") != "newMission" }
+        set { UserDefaults.standard.set(newValue ? "lead" : "newMission", forKey: "chatMission") }
+    }
+}
+
 enum MissionStart {
     static func upload(_ images: [StagedImage], to deviceId: String, client: CoreClient) async throws -> [String] {
         var paths: [String] = []
@@ -78,10 +85,10 @@ final class NewTaskViewController: UIViewController {
         hostButton.accessibilityIdentifier = "new-task-host"
         imagesButton.addAction(UIAction { [weak self] _ in
             guard let self else { return }
-            AttachmentPicker(host: self) { [weak self] picked in
+            AttachmentPicker(host: self, limit: 12 - images.count) { [weak self] picked in
                 self?.images += picked
                 self?.sync()
-            }.presentPhotos(limit: max(1, 12 - images.count))
+            }.presentPhotos()
         }, for: .primaryActionTriggered)
         mission.onTintColor = Palette.accent
         mission.accessibilityIdentifier = "new-task-mission"

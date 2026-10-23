@@ -6197,7 +6197,7 @@ impl Transcript {
                         if !tool.call.is_delegate_task() {
                             return Some(SubagentSummary {
                                 chat_id: chat_id.clone(),
-                                title: subagent_tab_title(&tool.call),
+                                title: tool.call.subagent_title().into(),
                                 status: tool.subagent_status,
                                 delegated: false,
                                 harness,
@@ -12020,7 +12020,7 @@ impl Transcript {
                 }
                 if let Some(doc_id) = tool.subagent_ref.clone().filter(|_| is_spawn_link(tool)) {
                     let chat_id = self.chat_id.clone().unwrap_or_default();
-                    let title = subagent_tab_title(&tool.call);
+                    let title: SharedString = tool.call.subagent_title().into();
                     let frozen = matches!(
                         tool.subagent_status,
                         Some(
@@ -14025,67 +14025,6 @@ pub(crate) fn spawn_agent_type(call: &ToolCall) -> Option<SharedString> {
         .map(str::trim)
         .filter(|kind| !kind.is_empty())
         .map(|kind| SharedString::from(kind.to_owned()))
-}
-
-/// Max chars a subagent tab title keeps. The strip chip is fixed-width and
-/// truncates visually, but the derived title also rides drag ghosts and any
-/// future pickers — cap it at the source.
-const SUBAGENT_TITLE_MAX: usize = 40;
-
-/// First line of `text`, trimmed, capped at `max` chars with an ellipsis.
-fn title_line(text: &str, max: usize) -> Option<String> {
-    let line = text.lines().find(|l| !l.trim().is_empty())?.trim();
-    let mut out: String = line.chars().take(max).collect();
-    if line.chars().count() > max {
-        out.push('…');
-    }
-    Some(out)
-}
-
-/// Drop a leading "Agent"/"Task" genus (with its `:` and spacing) from a
-/// spawn-title candidate. Only a real word boundary strips — "Taskmaster"
-/// keeps its name. A bare "Agent"/"Task" strips to "" (no context at all).
-fn strip_spawn_prefix(text: &str) -> &str {
-    let t = text.trim();
-    for prefix in ["agent", "task"] {
-        if t.len() >= prefix.len()
-            && t.is_char_boundary(prefix.len())
-            && t[..prefix.len()].eq_ignore_ascii_case(prefix)
-        {
-            let rest = &t[prefix.len()..];
-            if rest.is_empty() {
-                return "";
-            }
-            if rest.starts_with(':') || rest.starts_with(char::is_whitespace) {
-                return rest.trim_start_matches(':').trim();
-            }
-        }
-    }
-    t
-}
-
-/// Tab title for a spawn chip's subagent surface: the BARE task description
-/// ("verify the marker pipeline"). The chip keeps the tool's fuller name —
-/// a fixed-width tab spent on "Agent: " never shows the task, so the genus
-/// is stripped here and the call input's description/prompt fields back up
-/// a bare name (older docs); "Subagent" only as the last resort.
-pub(crate) fn subagent_tab_title(call: &ToolCall) -> SharedString {
-    let (name, input) = match call {
-        ToolCall::Unknown { name, input } => (name.as_str(), input.as_ref()),
-        ToolCall::Mcp { tool, input, .. } => (tool.as_str(), input.as_ref()),
-        _ => return "Subagent".into(),
-    };
-    let candidates = [
-        Some(name),
-        input.and_then(|i| i.get("description")?.as_str()),
-        input.and_then(|i| i.get("prompt")?.as_str()),
-    ];
-    for text in candidates.into_iter().flatten() {
-        if let Some(title) = title_line(strip_spawn_prefix(text), SUBAGENT_TITLE_MAX) {
-            return title.into();
-        }
-    }
-    "Subagent".into()
 }
 
 /// Clip one newly appended task row to its committed height. Fade and lift are
@@ -21788,56 +21727,6 @@ mod tests {
             },
         ];
         assert_eq!(tool_group_summary(&tools), "Read 1 file · searched 2 times");
-    }
-
-    #[test]
-    fn subagent_tab_titles() {
-        // The tab is the BARE task — the "Agent:" genus is stripped.
-        let named = ToolCall::Unknown {
-            name: "Agent: scan repo".into(),
-            input: None,
-        };
-        assert_eq!(subagent_tab_title(&named).as_ref(), "scan repo");
-        // A bare "Task"/"Agent" digs the description out of the call input
-        // (which sheds any genus of its own).
-        let bare = ToolCall::Unknown {
-            name: "Task".into(),
-            input: Some(serde_json::json!({
-                "description": "Agent: audit the auth flow",
-                "prompt": "very long instructions…",
-            })),
-        };
-        assert_eq!(subagent_tab_title(&bare).as_ref(), "audit the auth flow");
-        // Word boundaries only — a name that merely STARTS with the genus
-        // keeps itself.
-        let compound = ToolCall::Unknown {
-            name: "Taskmaster".into(),
-            input: None,
-        };
-        assert_eq!(subagent_tab_title(&compound).as_ref(), "Taskmaster");
-        // Nothing to derive → the generic label.
-        let blank = ToolCall::Unknown {
-            name: "agent".into(),
-            input: None,
-        };
-        assert_eq!(subagent_tab_title(&blank).as_ref(), "Subagent");
-        // Absurd lengths cap with an ellipsis; multiline prompts keep only
-        // their first line.
-        let long = ToolCall::Unknown {
-            name: "x".repeat(120),
-            input: None,
-        };
-        let title = subagent_tab_title(&long);
-        assert_eq!(title.chars().count(), SUBAGENT_TITLE_MAX + 1);
-        assert!(title.ends_with('…'));
-        // Non-spawn-shaped calls stay generic.
-        assert_eq!(
-            subagent_tab_title(&ToolCall::Exec {
-                command: "ls".into()
-            })
-            .as_ref(),
-            "Subagent"
-        );
     }
 
     #[test]

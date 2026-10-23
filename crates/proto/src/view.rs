@@ -780,3 +780,64 @@ mod checkout_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Search ranking
+// ---------------------------------------------------------------------------
+
+/// Match rank of a label against a query: `0` prefix match, `1` substring,
+/// `None` no match. Case-insensitive; an empty query matches everything at
+/// rank 1 (input order preserved).
+pub fn match_rank(query: &str, label: &str) -> Option<usize> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Some(1);
+    }
+    let label = label.to_lowercase();
+    if label.starts_with(&query) {
+        Some(0)
+    } else if label.contains(&query) {
+        Some(1)
+    } else {
+        None
+    }
+}
+
+/// Filter + rank labels for a search query: prefix matches first, then
+/// substring matches, stable within each rank. Returns indices into `labels`.
+pub fn filter_indices<S: AsRef<str>>(query: &str, labels: &[S]) -> Vec<usize> {
+    let mut ranked: Vec<(usize, usize)> = labels
+        .iter()
+        .enumerate()
+        .filter_map(|(ix, label)| match_rank(query, label.as_ref()).map(|rank| (rank, ix)))
+        .collect();
+    ranked.sort_by_key(|&(rank, ix)| (rank, ix));
+    ranked.into_iter().map(|(_, ix)| ix).collect()
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn filter_ranks_prefix_before_substring() {
+        let labels = ["main", "feature/main-sync", "master", "dev"];
+        // Prefix matches ("main", "master") come before the substring match.
+        assert_eq!(filter_indices("ma", &labels), vec![0, 2, 1]);
+        // Case-insensitive.
+        assert_eq!(filter_indices("MA", &labels), vec![0, 2, 1]);
+        // No matches → empty.
+        assert!(filter_indices("zzz", &labels).is_empty());
+        // Empty / whitespace query keeps input order.
+        assert_eq!(filter_indices("", &labels), vec![0, 1, 2, 3]);
+        assert_eq!(filter_indices("   ", &labels), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn match_rank_kinds() {
+        assert_eq!(match_rank("re", "release"), Some(0));
+        assert_eq!(match_rank("lease", "release"), Some(1));
+        assert_eq!(match_rank("x", "release"), None);
+        assert_eq!(match_rank("", "anything"), Some(1));
+    }
+}

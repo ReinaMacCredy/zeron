@@ -495,6 +495,9 @@ pub struct SessionRow {
     pub host_indicator: ChatIndicator,
     /// Run start of the live turn while Working/AwaitingInput.
     pub working_since_ms: Option<i64>,
+    pub held_by_subagents: bool,
+    pub background_ring: Option<u32>,
+    pub background_label: Option<String>,
     pub last_activity_ms: i64,
     /// `now` / `34m` / `4h` / `2d` at derive time.
     pub time_label: String,
@@ -509,7 +512,9 @@ pub struct SessionRow {
     pub parent_chat_id: Option<String>,
     /// On the Settled shelf (its host's `settle_after_days`, or a Settle).
     pub settled: bool,
-    pub expired: bool,
+    pub sidechat_of: Option<String>,
+    pub sidechat_expired: bool,
+    pub sidechats: Vec<String>,
     /// 2 = chat2; 1 = legacy (not dialable).
     pub room_gen: u32,
 }
@@ -540,6 +545,9 @@ impl From<&zc::SessionRow> for SessionRow {
             indicator: r.indicator.into(),
             host_indicator: r.host_indicator.into(),
             working_since_ms: r.working_since_ms,
+            held_by_subagents: r.held_by_subagents,
+            background_ring: r.background_ring,
+            background_label: r.background_label.clone(),
             last_activity_ms: r.last_activity_ms,
             time_label: r.time_label.clone(),
             created_at_ms: r.created_at_ms,
@@ -551,7 +559,9 @@ impl From<&zc::SessionRow> for SessionRow {
             send_state: r.send_state.map(Into::into),
             parent_chat_id: r.parent_chat_id.clone(),
             settled: r.settled,
-            expired: r.expired,
+            sidechat_of: r.sidechat_of.clone(),
+            sidechat_expired: r.sidechat_expired,
+            sidechats: r.sidechats.clone(),
             room_gen: r.room_gen,
         }
     }
@@ -859,6 +869,11 @@ pub struct ChatConfig {
     /// None keeps the chat's current mode (Full for a new chat).
     #[uniffi(default = None)]
     pub permission_mode: Option<PermissionMode>,
+    /// A new chat's profile instructions; an existing chat keeps its own.
+    #[uniffi(default = "")]
+    pub instructions: String,
+    #[uniffi(default = [])]
+    pub disabled_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -925,6 +940,8 @@ impl From<&zc::ChatConfig> for ChatConfig {
             profile_id: c.profile_id.clone(),
             instance_id: c.instance_id.clone(),
             permission_mode: Some(c.permission_mode.into()),
+            instructions: c.instructions.clone(),
+            disabled_tools: c.disabled_tools.clone(),
         }
     }
 }
@@ -952,10 +969,10 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
                 SandboxLevel::DangerFullAccess => zeron_proto::SandboxLevel::DangerFullAccess,
             },
             permission_mode: c.permission_mode.map(Into::into).unwrap_or_default(),
-            instructions: String::new(),
+            instructions: c.instructions,
             profile_id: c.profile_id,
             instance_id: c.instance_id,
-            disabled_tools: Vec::new(),
+            disabled_tools: c.disabled_tools,
         })
     }
 }

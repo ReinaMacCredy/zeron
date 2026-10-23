@@ -65,14 +65,6 @@ pub(crate) fn to_effort(
     Some(base)
 }
 
-pub fn context_window_tokens(choice_id: &str) -> Option<u64> {
-    match choice_id {
-        "200k" => Some(200_000),
-        "1m" => Some(1_000_000),
-        _ => None,
-    }
-}
-
 /// The built-ins a chat may run without, grouped as a person thinks of
 /// them; names from the CLI's `init` frame (2.1.293). Bash, Read, Edit,
 /// Write and ToolSearch stay on: a coding chat without them cannot work.
@@ -150,41 +142,6 @@ pub(crate) fn builtin_tool_groups() -> Vec<zeron_proto::tools::BuiltinToolGroup>
         },
     )
     .collect()
-}
-
-/// The CLI compacts this far below the chosen window (live-probed on 2.1.293).
-pub const AUTO_COMPACT_HEADROOM: u64 = 33_000;
-
-/// Where a chat with these picks compacts; a custom window applies on 1M only.
-pub fn compact_threshold(window_choice: &str, compact_choice: &str) -> Option<u64> {
-    let window = context_window_tokens(window_choice)?;
-    let chosen = auto_compact_tokens(compact_choice)
-        .filter(|_| window > 200_000)
-        .map_or(window, |tokens| tokens.min(window));
-    Some(chosen.saturating_sub(AUTO_COMPACT_HEADROOM))
-}
-
-/// The CLI reports the model's whole window, never the smaller one the chat's picks set.
-pub fn chat_budget(config: &zeron_proto::ChatConfig) -> Option<u64> {
-    if config.harness != zeron_proto::HarnessId::ClaudeCode {
-        return None;
-    }
-    let pick = |id: &str| config.model_options.get(id).and_then(|v| v.as_str());
-    let window = pick("contextWindow").and_then(context_window_tokens);
-    let compact = pick("autoCompact")
-        .and_then(auto_compact_tokens)
-        .filter(|_| window != Some(200_000));
-    compact.or(window)
-}
-
-pub fn auto_compact_tokens(choice_id: &str) -> Option<u64> {
-    match choice_id {
-        "300k" => Some(300_000),
-        "400k" => Some(400_000),
-        "600k" => Some(600_000),
-        "800k" => Some(800_000),
-        _ => None,
-    }
 }
 
 /// The curated model list, mirroring claude.ts's `claudeEffortsFor` /
@@ -374,11 +331,12 @@ mod tests {
     #[test]
     fn context_window_tokens_covers_every_choice() {
         for choice in context_window().choices {
-            assert!(context_window_tokens(&choice.id).is_some(), "{}", choice.id);
+            assert!(
+                zeron_proto::model_options::context_window_tokens(&choice.id).is_some(),
+                "{}",
+                choice.id
+            );
         }
-        assert_eq!(context_window_tokens("200k"), Some(200_000));
-        assert_eq!(context_window_tokens("1m"), Some(1_000_000));
-        assert_eq!(context_window_tokens("standard"), None);
     }
 
     #[test]

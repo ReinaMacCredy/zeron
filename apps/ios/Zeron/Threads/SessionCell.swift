@@ -26,6 +26,8 @@ struct SessionRowVM: Hashable {
     var prNumber: UInt64?
     var status: Status
     var timeLabel: String
+    var backgroundRing: UInt32?
+    var background: String?
     var unseen: Bool
     var pinned: Bool
     var sendFailed: Bool
@@ -111,6 +113,13 @@ final class SessionCell: UICollectionViewListCell {
     static func corner(_ vm: SessionRowVM) -> (word: String, color: UIColor, glyph: StatusGlyph.Kind)? {
         if vm.expired { return ("Expired", StatusTone.time, .dot(StatusTone.idle)) }
         if vm.sendFailed { return ("Failed", Palette.danger, .dot(Palette.danger)) }
+        if let ring = vm.backgroundRing {
+            switch vm.status {
+            case .working: return (vm.background ?? "Working", StatusTone.working, .ring(Palette.accent))
+            case .completed where vm.unseen: return ("Done", StatusTone.done, .ring(Palette.accent))
+            default: return (ring > 0 ? "\(ring) · \(vm.timeLabel)" : vm.timeLabel, StatusTone.time, .ring(Palette.accent))
+            }
+        }
         switch vm.status {
         case .working: return ("Working", StatusTone.working, .spinner)
         case .awaiting: return ("Input", StatusTone.input, .dot(StatusTone.input))

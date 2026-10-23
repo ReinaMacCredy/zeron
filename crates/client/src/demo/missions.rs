@@ -529,8 +529,8 @@ pub(crate) fn host_call(
 ) -> Option<Result<Value>> {
     use zeron_rpc::methods as m;
     Some(match method {
+        m::MUTATE if params["op"] == "setChatConfig" => return None,
         m::MUTATE => mutate(client, refused, device_id, params).map(|()| json!({})),
-        m::LIST_AGENT_PROFILES => Ok(json!({ "profiles": [] })),
         m::PREVIEW_ROUTES => Ok(route_preview(params)),
         m::ENSURE_SUPERVISOR => {
             let chat_id = format!("{}{}", zeron_proto::supervisor::CHAT_PREFIX, device_id);
@@ -720,11 +720,15 @@ fn mutate(
         }
         "assignTask" => {
             let task_id = id("taskId");
-            let patch = TaskPatch {
+            let mut patch = TaskPatch {
                 chat_id: Some(Some(id("chatId"))),
                 completed: Some(false),
                 ..Default::default()
             };
+            if params["orchestrate"].as_bool().unwrap_or(false) {
+                patch.mode = Some(zeron_proto::TaskMode::Orchestrated);
+                patch.plan_pending = Some(params["approvePlan"].as_bool().unwrap_or(true));
+            }
             client.registry_write(|doc| doc.update_task(&task_id, &patch, now))?;
         }
         "editTaskPlan" => {

@@ -1,12 +1,19 @@
 import PhotosUI
 import UIKit
 
-/// An image staged in the composer before sending.
+/// An image, or a long paste as `Pasted text N.txt`, staged in the composer before sending.
 struct StagedImage: Identifiable, Equatable {
     let id: String
     let name: String
     let data: Data
     let thumbnail: UIImage
+    var mimeType = "image/jpeg"
+
+    var isImage: Bool { mimeType.hasPrefix("image/") }
+
+    static func pastedText(_ text: String, name: String) -> StagedImage {
+        StagedImage(id: UUID().uuidString, name: name, data: Data(text.utf8), thumbnail: UIImage(systemName: "doc.text") ?? UIImage(), mimeType: "text/plain")
+    }
 }
 
 /// How a message sent during a running turn is delivered.
@@ -63,21 +70,26 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     var onChipTap: ((String, UIView) -> Void)?
     var onHeightChange: (() -> Void)?
     var onFocusChange: ((Bool) -> Void)?
+    var onActionChange: (() -> Void)?
     /// `@` file search (nil disables mentions).
     var mentionSearch: ((String) async -> [FileMatch])?
+    var threadSearch: ((String) -> [ThreadMention])?
+    var invocationCatalog: ((Bool) async -> InvocationCatalog?)?
 
     // State
     var running = false { didSet { if running != oldValue { refreshAction(animated: true) } } }
     var resumable = false { didSet { if resumable != oldValue { refreshAction(animated: true) } } }
     var canSteer = false { didSet { refreshAction(animated: false) } }
     var preferredDelivery: DeliveryMode = .queue { didSet { refreshAction(animated: false) } }
-    var placeholder = "Message" { didSet { placeholderLabel.text = placeholder } }
+    var placeholder = "Message" { didSet { refreshPlaceholder() } }
+    var prediction: String? { didSet { if prediction != oldValue { refreshPlaceholder() } } }
     var chips: [ComposerChip] = [] { didSet { if chips != oldValue { rebuildChips() } } }
     /// Chips with a menu open it on tap (native, glassy, lazily loaded).
     var chipMenus: [String: () -> UIMenu?] = [:] { didSet { applyChipMenus() } }
     /// Stay in the card state even when idle (new-session canvas).
     var chipsAlwaysVisible = false { didSet { updateMode(animated: false) } }
     var images: [StagedImage] = [] { didSet { rebuildThumbs(); refreshAction(animated: true); updateMode(animated: true) } }
+    var quotes: [String] = [] { didSet { rebuildThumbs(); refreshAction(animated: true); updateMode(animated: true) } }
 
     var text: String {
         get { textView.text }
@@ -91,6 +103,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     let textView = UITextView()
     private let glass = Glass.surface(interactive: false, radius: 25)
     private let placeholderLabel = UILabel()
+    private let acceptBadge = UIButton(type: .system)
     private let attachButton = UIButton(type: .system)
     private let actionButton = UIButton(type: .system)
     private let thumbs = UIStackView()
@@ -105,8 +118,10 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     private var cardConstraints: [NSLayoutConstraint] = []
     private(set) var isCard = false
     private var currentAction: Action = .send
+    var isQueueing: Bool { currentAction == .queue }
     private var mentions = MentionIndex()
     private let suggestions = MentionSuggestions()
+    private var suggestionsShown = false
     private var mentionQuery: (range: NSRange, query: String)?
     private var mentionTask: Task<Void, Never>?
     private var attachCard: AttachCard?
@@ -178,7 +193,29 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         placeholderLabel.text = placeholder
         placeholderLabel.isUserInteractionEnabled = false
         placeholderLabel.translatesAutoresizingMaskIntoConstraints = false
+        placeholderLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        placeholderLabel.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(acceptPrediction)))
+        placeholderLabel.accessibilityIdentifier = "composer-placeholder"
         content.addSubview(placeholderLabel)
+
+        var badge = UIButton.Configuration.filled()
+        badge.title = "Accept"
+        badge.baseBackgroundColor = Palette.chip
+        badge.baseForegroundColor = Palette.secondary
+        badge.cornerStyle = .capsule
+        badge.contentInsets = NSDirectionalEdgeInsets(top: 1, leading: 6, bottom: 1, trailing: 6)
+        badge.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attrs in
+            var attrs = attrs
+            attrs.font = .systemFont(ofSize: 11, weight: .semibold)
+            return attrs
+        }
+        acceptBadge.configuration = badge
+        acceptBadge.isHidden = true
+        acceptBadge.accessibilityIdentifier = "composer-accept-prediction"
+        acceptBadge.translatesAutoresizingMaskIntoConstraints = false
+        acceptBadge.setContentCompressionResistancePriority(.required, for: .horizontal)
+        acceptBadge.addTarget(self, action: #selector(acceptPrediction), for: .touchUpInside)
+        content.addSubview(acceptBadge)
 
         toolbar.translatesAutoresizingMaskIntoConstraints = false
         toolbar.clipsToBounds = true
@@ -231,6 +268,9 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             placeholderLabel.leadingAnchor.constraint(equalTo: textView.leadingAnchor),
             placeholderLabel.trailingAnchor.constraint(lessThanOrEqualTo: textView.trailingAnchor),
             placeholderLabel.topAnchor.constraint(equalTo: textView.topAnchor, constant: 14),
+            acceptBadge.leadingAnchor.constraint(equalTo: placeholderLabel.trailingAnchor, constant: 6),
+            acceptBadge.trailingAnchor.constraint(lessThanOrEqualTo: textView.trailingAnchor),
+            acceptBadge.centerYAnchor.constraint(equalTo: placeholderLabel.centerYAnchor),
 
             attachButton.widthAnchor.constraint(equalToConstant: c),
             attachButton.heightAnchor.constraint(equalToConstant: c),
@@ -269,7 +309,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         chipScroll.alpha = 0
         suggestions.isHidden = true
         suggestions.translatesAutoresizingMaskIntoConstraints = false
-        suggestions.onPick = { [weak self] file in self?.insertMention(file) }
+        suggestions.onPick = { [weak self] pick in self?.insertMention(pick) }
         refreshAction(animated: false)
     }
 
@@ -304,6 +344,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             suggestions.leadingAnchor.constraint(equalTo: leadingAnchor),
             suggestions.trailingAnchor.constraint(equalTo: trailingAnchor),
             suggestions.bottomAnchor.constraint(equalTo: topAnchor, constant: -8),
+            suggestions.topAnchor.constraint(greaterThanOrEqualTo: root.safeAreaLayoutGuide.topAnchor, constant: 8),
         ])
     }
 
@@ -312,7 +353,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     /// The card is for composing: focused, holding photos, or pinned open
     /// (new-session canvas). An unfocused draft rests as the capsule.
     private var wantsCard: Bool {
-        chipsAlwaysVisible || textView.isFirstResponder || !images.isEmpty
+        chipsAlwaysVisible || textView.isFirstResponder || !images.isEmpty || !quotes.isEmpty
     }
 
     private func updateMode(animated: Bool) {
@@ -342,40 +383,66 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     // MARK: Mentions
 
     private func updateMentionQuery() {
-        guard mentionSearch != nil else { return }
-        mentionQuery = MentionIndex.activeQuery(in: textView.text, cursor: textView.selectedRange.location)
+        guard mentionSearch != nil || threadSearch != nil || invocationCatalog != nil else { return }
         mentionTask?.cancel()
+        if let catalog = invocationCatalog, let q = MentionIndex.invocationQuery(in: textView.text, cursor: textView.selectedRange.location) {
+            mentionQuery = (q.range, q.query)
+            mentionTask = Task { [weak self] in
+                guard let found = await catalog(q.skill), !Task.isCancelled, let self, self.mentionQuery?.query == q.query else { return }
+                let matches = filterInvocations(catalog: found, query: q.query)
+                self.suggestions.show(invocations: matches.entries, note: matches.note)
+                self.setSuggestionsVisible(!self.suggestions.isEmpty)
+            }
+            return
+        }
+        guard mentionSearch != nil || threadSearch != nil else {
+            mentionQuery = nil
+            setSuggestionsVisible(false)
+            return
+        }
+        mentionQuery = MentionIndex.activeQuery(in: textView.text, cursor: textView.selectedRange.location)
         guard let q = mentionQuery else {
             setSuggestionsVisible(false)
             return
         }
+        let threads = threadSearch?(q.query) ?? []
+        suggestions.show(threads: threads, files: suggestions.files)
+        setSuggestionsVisible(!suggestions.isEmpty)
         mentionTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(120))
             guard !Task.isCancelled, let self, let search = self.mentionSearch else { return }
             let files = await search(q.query)
             guard !Task.isCancelled, self.mentionQuery?.query == q.query else { return }
-            self.suggestions.show(files)
-            self.setSuggestionsVisible(!files.isEmpty)
+            self.suggestions.show(threads: threads, files: files)
+            self.setSuggestionsVisible(!self.suggestions.isEmpty)
         }
     }
 
     private func setSuggestionsVisible(_ visible: Bool) {
-        guard suggestions.isHidden == visible else { return }
+        guard suggestionsShown != visible else { return }
+        suggestionsShown = visible
+        if visible && suggestions.isHidden {
+            suggestions.alpha = 0
+            suggestions.transform = CGAffineTransform(translationX: 0, y: 8)
+        }
         suggestions.isHidden = false
-        suggestions.alpha = visible ? 0 : 1
-        suggestions.transform = visible ? CGAffineTransform(translationX: 0, y: 8) : .identity
         UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
             self.suggestions.alpha = visible ? 1 : 0
             self.suggestions.transform = visible ? .identity : CGAffineTransform(translationX: 0, y: 8)
         } completion: { _ in
-            if !visible { self.suggestions.isHidden = true }
+            if !self.suggestionsShown { self.suggestions.isHidden = true }
         }
     }
 
-    private func insertMention(_ file: FileMatch) {
+    private func insertMention(_ pick: MentionPick) {
         guard let q = mentionQuery else { return }
         UISelectionFeedbackGenerator().selectionChanged()
-        let token = mentions.token(for: file) + " "
+        let token: String
+        switch pick {
+        case .file(let file): token = mentions.token(for: file) + " "
+        case .thread(let thread): token = mentions.token(for: thread) + " "
+        case .invocation(let entry): token = mentions.token(for: entry) + " "
+        }
         let ns = textView.text as NSString
         textView.text = ns.replacingCharacters(in: q.range, with: token)
         textView.selectedRange = NSRange(location: q.range.location + (token as NSString).length, length: 0)
@@ -506,8 +573,33 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
 
     private func rebuildThumbs() {
         thumbs.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        thumbs.alignment = .center
+        if !quotes.isEmpty {
+            var q = UIButton.Configuration.filled()
+            q.title = quoteChipLabel(count: UInt32(quotes.count))
+            q.image = UIImage(systemName: "text.quote", withConfiguration: UIImage.SymbolConfiguration(pointSize: 11.5, weight: .semibold))
+            q.imagePadding = 6
+            q.baseForegroundColor = Palette.text
+            q.baseBackgroundColor = Palette.controlFill
+            q.cornerStyle = .capsule
+            q.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 11, bottom: 7, trailing: 11)
+            q.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attrs in
+                var a = attrs
+                a.font = Fonts.ui(.sansMedium, 13.5)
+                return a
+            }
+            let chip = UIButton(configuration: q)
+            chip.accessibilityIdentifier = "composer-quotes"
+            let previews = quotes.map { UIAction(title: $0, attributes: .disabled) { _ in } }
+            let remove = UIAction(title: "Remove", image: UIImage(systemName: "xmark"), attributes: .destructive) { [weak self] _ in
+                self?.quotes = []
+            }
+            chip.menu = UIMenu(children: [UIMenu(options: .displayInline, children: previews), remove])
+            chip.showsMenuAsPrimaryAction = true
+            thumbs.addArrangedSubview(chip)
+        }
         for img in images {
-            let iv = UIImageView(image: img.thumbnail)
+            let iv = img.isImage ? UIImageView(image: img.thumbnail) : pastedTextTile(img)
             iv.contentMode = .scaleAspectFill
             iv.clipsToBounds = true
             iv.layer.cornerRadius = 14
@@ -516,7 +608,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             iv.layer.borderColor = Palette.hairline.resolvedColor(with: window?.traitCollection ?? traitCollection).cgColor
             iv.isUserInteractionEnabled = true
             iv.translatesAutoresizingMaskIntoConstraints = false
-            iv.widthAnchor.constraint(equalToConstant: 56).isActive = true
+            iv.widthAnchor.constraint(equalToConstant: img.isImage ? 56 : 168).isActive = true
             iv.heightAnchor.constraint(equalToConstant: 56).isActive = true
             var x = UIButton.Configuration.filled()
             x.image = UIImage(systemName: "xmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 8, weight: .bold))
@@ -525,7 +617,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             x.cornerStyle = .capsule
             x.contentInsets = .zero
             let remove = UIButton(configuration: x)
-            remove.accessibilityLabel = "Remove image"
+            remove.accessibilityLabel = img.isImage ? "Remove image" : "Remove pasted text"
             remove.translatesAutoresizingMaskIntoConstraints = false
             remove.addAction(UIAction { [weak self] _ in
                 UIView.animate(withDuration: 0.25) { self?.images.removeAll { $0.id == img.id } }
@@ -539,13 +631,61 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             ])
             thumbs.addArrangedSubview(iv)
         }
-        thumbsHeight.constant = images.isEmpty ? 0 : 68
+        thumbsHeight.constant = !images.isEmpty ? 68 : quotes.isEmpty ? 0 : 46
         thumbs.layoutMargins = UIEdgeInsets(top: 12, left: 0, bottom: 0, right: 0)
         thumbs.isLayoutMarginsRelativeArrangement = true
         onHeightChange?()
     }
 
+    private func pastedTextTile(_ item: StagedImage) -> UIImageView {
+        let text = String(decoding: item.data, as: UTF8.self)
+        let info = pastedTextPreview(reference: item.name, text: text)
+        let tile = UIImageView()
+        tile.backgroundColor = Palette.controlFill
+        tile.accessibilityIdentifier = "composer-pasted-text"
+        tile.accessibilityLabel = info.title
+        let icon = UIImageView(image: UIImage(systemName: "doc.text", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .medium)))
+        icon.tintColor = Palette.secondary
+        let title = UILabel()
+        title.text = info.title
+        title.font = Fonts.ui(.sansMedium, 13.5)
+        title.textColor = Palette.text
+        let subtitle = UILabel()
+        subtitle.text = info.subtitle
+        subtitle.font = Fonts.ui(.sans, 12)
+        subtitle.textColor = Palette.tertiary
+        let labels = UIStackView(arrangedSubviews: [title, subtitle])
+        labels.axis = .vertical
+        labels.spacing = 1
+        let row = UIStackView(arrangedSubviews: [icon, labels])
+        row.alignment = .center
+        row.spacing = 9
+        row.isUserInteractionEnabled = false
+        row.translatesAutoresizingMaskIntoConstraints = false
+        tile.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 12),
+            row.trailingAnchor.constraint(lessThanOrEqualTo: tile.trailingAnchor, constant: -26),
+            row.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
+        ])
+        tile.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(previewPastedText(_:))))
+        tile.tag = images.firstIndex(of: item) ?? 0
+        return tile
+    }
+
+    @objc private func previewPastedText(_ tap: UITapGestureRecognizer) {
+        guard let index = tap.view?.tag, images.indices.contains(index), let vc = findViewController() else { return }
+        let item = images[index]
+        PastedTextPreviewer.present(text: String(decoding: item.data, as: UTF8.self), reference: item.name, from: vc)
+    }
+
     // MARK: Text
+
+    func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
+        guard images.count < 8, pastesAsFile(pasted: text, draft: textView.text) else { return true }
+        images.append(.pastedText(text, name: nextPastedTextName(staged: images.map(\.name))))
+        return false
+    }
 
     func textViewDidChange(_ textView: UITextView) {
         textChanged()
@@ -577,8 +717,22 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         textHeight.constant = preview ? max(minHeight, fitting) : min(max(minHeight, fitting), maxHeight)
     }
 
-    private func textChanged() {
+    private func refreshPlaceholder() {
+        let ghost = predictionPlaceholder(prediction: prediction, text: textView.text)
+        placeholderLabel.text = ghost ?? placeholder
         placeholderLabel.isHidden = !textView.text.isEmpty
+        placeholderLabel.isUserInteractionEnabled = ghost != nil
+        acceptBadge.isHidden = ghost == nil
+    }
+
+    @objc private func acceptPrediction() {
+        guard let prediction else { return }
+        text = prediction
+        textView.becomeFirstResponder()
+    }
+
+    private func textChanged() {
+        refreshPlaceholder()
         let before = textHeight.constant
         updateMode(animated: true)
         recomputeTextHeight()
@@ -601,7 +755,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     // MARK: Action button
 
     private var hasContent: Bool {
-        !textView.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty
+        !textView.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty || !quotes.isEmpty
     }
 
     private func refreshAction(animated: Bool) {
@@ -655,6 +809,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         case .stop: actionButton.accessibilityLabel = "Stop response"
         case .resume: actionButton.accessibilityLabel = "Resume"
         }
+        if changed { onActionChange?() }
         // Long-press offers the other delivery modes mid-turn.
         if action == .queue {
             var items: [UIMenuElement] = [
@@ -689,7 +844,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     private func send(_ mode: DeliveryMode) {
         guard hasContent else { return }
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        let body = mentions.encode(textView.text.trimmingCharacters(in: .whitespacesAndNewlines))
+        let body = withQuotes(text: mentions.encode(textView.text.trimmingCharacters(in: .whitespacesAndNewlines)), quotes: quotes)
         let staged = images
         let result = onSend?(body, staged, mode) ?? .sent
         guard result != .kept else { return }
@@ -699,6 +854,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         mentions.reset()
         textView.text = ""
         images = []
+        quotes = []
         textChanged()
     }
 

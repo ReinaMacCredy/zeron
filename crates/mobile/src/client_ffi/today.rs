@@ -1,6 +1,7 @@
 use zeron_client as zc;
 
-use super::{CoreClient, CoreResult, HostRef, on_runtime};
+use super::tasks::HostRef;
+use super::{CoreClient, CoreResult, on_runtime};
 
 #[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
 pub struct TodayPage {

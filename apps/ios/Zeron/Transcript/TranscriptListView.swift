@@ -130,9 +130,11 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     var onSkill: ((_ name: String, _ path: String?) -> Void)?
     var onLimit: ((_ chatId: String) -> Void)?
     var onPullRequest: ((_ url: String) -> Void)?
+    var onQuote: ((String) -> Void)?
     /// An attachment's picture, for an image chip opened full size.
     var imageFetcher: ((String) async -> UIImage?)?
     var onLink: ((URL) -> Bool)?
+    var textFetcher: ((String) async -> String?)?
 
     // MARK: Runway (desktop transcript.rs `OwnTurnAnchor`)
     //
@@ -677,6 +679,16 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
             guard let reference = URLComponents(url: url, resolvingAgainstBaseURL: false)?
                 .queryItems?.first(where: { $0.name == "ref" })?.value
             else { return }
+            if url.host == "text" {
+                Task { @MainActor [weak self, weak vc] in
+                    guard let vc else { return }
+                    guard let text = await self?.textFetcher?(reference) else {
+                        return Toast.show("Couldn't load the pasted text", in: vc.view.window)
+                    }
+                    PastedTextPreviewer.present(text: text, reference: reference, from: vc)
+                }
+                return
+            }
             Task { @MainActor [weak self, weak view, weak vc] in
                 guard let image = await self?.imageFetcher?(reference), let view, let vc else { return }
                 vc.present(ImageViewer(image: image, source: view), animated: true)
@@ -797,6 +809,11 @@ extension TranscriptListView: UIContextMenuInteractionDelegate {
                 })
             }
             let selectable = frame.messageText(index: index) ?? block
+            if !selectable.isEmpty, let onQuote = self.onQuote {
+                actions.append(UIAction(title: "Quote in reply", image: UIImage(systemName: "text.quote")) { _ in
+                    onQuote(selectable)
+                })
+            }
             if !selectable.isEmpty {
                 actions.append(UIAction(title: "Select Text", image: UIImage(systemName: "character.cursor.ibeam")) { [weak self] _ in
                     self?.presentSelection(selectable)
@@ -834,6 +851,7 @@ extension TranscriptListView: UIContextMenuInteractionDelegate {
     private func presentSelection(_ text: String) {
         guard let vc = findViewController() else { return }
         let sheet = SelectTextViewController(text: text)
+        sheet.onQuote = onQuote
         vc.present(UINavigationController(rootViewController: sheet), animated: true)
     }
 }
@@ -850,15 +868,17 @@ extension UIView {
 }
 
 /// Full-text selection for a message (the transcript itself is paint-only).
-final class SelectTextViewController: UIViewController {
+final class SelectTextViewController: UIViewController, UITextViewDelegate {
     private let text: String
     private let mono: Bool
+    var onQuote: ((String) -> Void)?
 
-    init(text: String, title: String = "Select Text", mono: Bool = false) {
+    init(text: String, title: String = "Select Text", subtitle: String? = nil, mono: Bool = false) {
         self.text = text
         self.mono = mono
         super.init(nibName: nil, bundle: nil)
         self.title = title
+        navigationItem.subtitle = subtitle
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -875,11 +895,30 @@ final class SelectTextViewController: UIViewController {
         tv.textContainerInset = UIEdgeInsets(top: 16, left: 14, bottom: 32, right: 14)
         tv.frame = view.bounds
         tv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        tv.delegate = self
         view.addSubview(tv)
         navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak self] _ in
             self?.dismiss(animated: true)
         })
         if !mono { DispatchQueue.main.async { tv.selectAll(nil) } }
+    }
+
+    func textView(_ textView: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
+        guard let onQuote, range.length > 0 else { return nil }
+        let selected = (textView.text as NSString).substring(with: range)
+        let quote = UIAction(title: "Quote in reply", image: UIImage(systemName: "text.quote")) { [weak self] _ in
+            onQuote(selected)
+            self?.dismiss(animated: true)
+        }
+        return UIMenu(children: [quote] + suggestedActions)
+    }
+}
+
+enum PastedTextPreviewer {
+    static func present(text: String, reference: String, from vc: UIViewController) {
+        let info = pastedTextPreview(reference: reference, text: text)
+        let sheet = SelectTextViewController(text: text, title: info.title, subtitle: info.subtitle, mono: true)
+        vc.present(UINavigationController(rootViewController: sheet), animated: true)
     }
 }
 

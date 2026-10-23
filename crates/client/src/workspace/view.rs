@@ -91,6 +91,12 @@ pub struct SessionRow {
     pub held_by_subagents: bool,
     /// Run start of the live turn while Working/AwaitingInput.
     pub working_since_ms: Option<i64>,
+    /// The desktop sidebar's ring: the host's own background work, with its
+    /// task count (0 while a turn is held on subagents).
+    pub background_ring: Option<u32>,
+    /// "2 subagents · 1 shell", in place of the status while Working.
+    pub background_label: Option<String>,
+    pub compacting: bool,
     /// `last_message_at`, falling back to `created_at` (the sort key).
     pub last_activity_ms: i64,
     /// [`relative_time_label`] of `last_activity_ms` at derive time (the 1 Hz
@@ -107,10 +113,12 @@ pub struct SessionRow {
     pub parent_chat_id: Option<String>,
     /// On the Settled shelf by its host's `settle_after_days` or a Settle.
     pub settled: bool,
-    pub expired: bool,
+    pub sidechat_of: Option<String>,
+    /// Fixed 24 h from creation; an expired sidechat takes no more sends.
+    pub sidechat_expired: bool,
+    pub sidechats: Vec<String>,
     /// Sync room generation (2 = chat2; 1 = legacy, not dialable).
     pub room_gen: u32,
-    pub compacting: bool,
     pub classifying: Option<zeron_proto::Classifying>,
 }
 
@@ -378,6 +386,8 @@ pub(crate) struct DeriveContext<'a> {
     pub steps: &'a [zeron_proto::TaskStep],
     pub supervisors:
         &'a std::collections::BTreeMap<String, zeron_proto::supervisor::SupervisorSnapshot>,
+    /// Each host's own sessions, carrying the background work the registry lacks.
+    pub host_sessions: &'a std::collections::BTreeMap<String, Vec<Session>>,
     pub item_sends: &'a HashMap<String, super::ItemSend>,
     pub asks: &'a HashMap<String, super::Ask>,
     /// Oldest-unadopted-send state per chat (open sessions only).
@@ -524,6 +534,9 @@ fn hash_row(row: &SessionRow) -> u64 {
     attention_rank(row.host_indicator).hash(&mut h);
     row.held_by_subagents.hash(&mut h);
     row.working_since_ms.hash(&mut h);
+    row.background_ring.hash(&mut h);
+    row.background_label.hash(&mut h);
+    row.compacting.hash(&mut h);
     row.last_activity_ms.hash(&mut h);
     row.time_label.hash(&mut h);
     row.created_at_ms.hash(&mut h);
@@ -540,9 +553,10 @@ fn hash_row(row: &SessionRow) -> u64 {
     row.send_state.hash(&mut h);
     row.parent_chat_id.hash(&mut h);
     row.settled.hash(&mut h);
-    row.expired.hash(&mut h);
+    row.sidechat_of.hash(&mut h);
+    row.sidechat_expired.hash(&mut h);
+    row.sidechats.hash(&mut h);
     row.room_gen.hash(&mut h);
-    row.compacting.hash(&mut h);
     row.classifying
         .as_ref()
         .map(|c| (c.harness, &c.model))
@@ -555,8 +569,10 @@ struct RowContext<'a> {
     spaces: HashMap<&'a str, &'a Space>,
     devices: HashMap<&'a str, &'a Device>,
     sessions: HashMap<&'a str, &'a Session>,
+    host_sessions: HashMap<&'a str, &'a Session>,
     pinned: HashSet<&'a str>,
     section_of: HashMap<&'a str, &'a str>,
+    sidechats: HashMap<&'a str, Vec<&'a Chat>>,
 }
 
 fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<SessionRow> {
@@ -565,6 +581,14 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
     let send_state = cx.send_states.get(&chat.id).copied();
     let host_indicator = display_status(chat, session, cx.now);
     let indicator = host_indicator;
+    let ring = rc
+        .host_sessions
+        .get(chat.id.as_str())
+        .filter(|_| send_state.is_none() && !chat.sidechat_expired(cx.now))
+        .and_then(|s| zeron_proto::background::sidebar_ring(indicator, Some(s)).map(|n| (s, n)));
+    let background_label = ring
+        .filter(|_| indicator == ChatIndicator::Working)
+        .and_then(|(s, _)| zeron_proto::background::ring_label(&s.background_tasks));
     let working_since_ms = match indicator {
         ChatIndicator::Working | ChatIndicator::AwaitingInput => session
             .and_then(|s| s.started_at)
@@ -630,8 +654,12 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         cwd: chat.cwd.clone(),
         indicator,
         host_indicator,
-        held_by_subagents: session.is_some_and(|s| s.held_by_subagents),
+        held_by_subagents: host_indicator == ChatIndicator::Working
+            && session.is_some_and(|s| s.held_by_subagents),
         working_since_ms,
+        background_ring: ring.map(|(_, n)| n as u32),
+        background_label,
+        compacting: session.is_some_and(|s| s.compacting),
         last_activity_ms: sort_key(chat).timestamp_millis(),
         time_label: relative_time_label(sort_key(chat).timestamp_millis(), now_ms),
         created_at_ms: chat.created_at.timestamp_millis(),
@@ -643,9 +671,14 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         send_state,
         parent_chat_id: chat.created_by_chat_id.clone(),
         settled: cx.settled_at(chat, indicator).is_some(),
-        expired: chat.sidechat_expired(cx.now),
+        sidechat_of: chat.sidechat_source_chat_id.clone(),
+        sidechat_expired: chat.sidechat_expired(cx.now),
+        sidechats: rc
+            .sidechats
+            .get(chat.id.as_str())
+            .map(|list| list.iter().map(|c| c.id.clone()).collect())
+            .unwrap_or_default(),
         room_gen: chat.room_gen.unwrap_or(1),
-        compacting: session.is_some_and(|s| s.compacting),
         classifying: session.and_then(|s| s.classifying.clone()),
     };
     row.revision = hash_row(&row);
@@ -657,6 +690,13 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         return previous.clone();
     }
     Arc::new(row)
+}
+
+/// The host mints a sidechat when the btw sheet opens; it lists only once used.
+fn unstarted_sidechat(chat: &Chat, cx: &DeriveContext<'_>) -> bool {
+    chat.sidechat_source_chat_id.is_some()
+        && chat.last_message_at.is_none()
+        && !cx.send_states.contains_key(&chat.id)
 }
 
 /// Build the whole snapshot. Pure given its inputs.
@@ -683,8 +723,26 @@ pub(crate) fn derive(
             .iter()
             .map(|s| (s.chat_id.as_str(), s))
             .collect(),
+        host_sessions: cx
+            .host_sessions
+            .values()
+            .flatten()
+            .map(|s| (s.chat_id.as_str(), s))
+            .collect(),
         pinned: pinned_order.iter().map(String::as_str).collect(),
         section_of,
+        sidechats: {
+            let mut by_source: HashMap<&str, Vec<&Chat>> = HashMap::new();
+            for chat in &state.chats {
+                if let Some(source) = chat.live_sidechat_source(cx.now) {
+                    by_source.entry(source).or_default().push(chat);
+                }
+            }
+            for list in by_source.values_mut() {
+                list.sort_by_key(|c| c.created_at);
+            }
+            by_source
+        },
     };
 
     let rows: HashMap<String, Arc<SessionRow>> = state
@@ -698,6 +756,7 @@ pub(crate) fn derive(
         .chats
         .iter()
         .filter(|c| !c.archived && c.is_top_level())
+        .filter(|c| !unstarted_sidechat(c, cx))
         .filter(|c| {
             c.space_id
                 .as_deref()

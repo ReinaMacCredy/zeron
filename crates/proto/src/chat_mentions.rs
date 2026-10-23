@@ -126,6 +126,66 @@ pub fn chat_mention_prompt(text: &str) -> String {
     out
 }
 
+pub const THREAD_MENTION_LIMIT: usize = 6;
+
+/// The sidebar title as the chip label; an untitled chat mentions as the
+/// same placeholder the sidebar shows for it.
+pub fn chat_mention_title(chat: &crate::Chat) -> String {
+    crate::view::single_line(chat.title.as_deref().unwrap_or("New session"))
+}
+
+/// Where the prompt will run and read from: the device `read_thread`
+/// resolves ids on, the project whose threads list first, and the chat
+/// being composed for (which can't mention itself).
+pub struct MentionScope<'a> {
+    pub device_id: &'a str,
+    pub space_id: Option<&'a str>,
+    pub exclude: Option<&'a str>,
+}
+
+/// Threads whose title contains the query (case-insensitive) or whose id
+/// starts with it, on the scope's device, minus the composed-for chat and
+/// drafts (nothing to read). The scope's own project lists first, then the
+/// rest, each in sidebar (recency) order. An empty query lists the first few.
+pub fn thread_matches<'a>(
+    chats: impl Iterator<Item = &'a crate::Chat>,
+    query: &str,
+    scope: MentionScope<'_>,
+    is_draft: impl Fn(&str) -> bool,
+) -> Vec<(&'a crate::Chat, String)> {
+    let query = query.trim().to_lowercase();
+    let mut matches: Vec<(bool, String, &crate::Chat)> = chats
+        .filter(|chat| {
+            chat.device_id == scope.device_id
+                && Some(chat.id.as_str()) != scope.exclude
+                && !is_draft(&chat.id)
+        })
+        .filter_map(|chat| {
+            let title = chat_mention_title(chat);
+            (query.is_empty()
+                || title.to_lowercase().contains(&query)
+                || chat.id.to_lowercase().starts_with(&query))
+            .then(|| (chat.space_id.as_deref() != scope.space_id, title, chat))
+        })
+        .collect();
+    matches.sort_by_key(|(other_project, _, _)| *other_project);
+    matches
+        .into_iter()
+        .take(THREAD_MENTION_LIMIT)
+        .map(|(_, title, chat)| (chat, title))
+        .collect()
+}
+
+pub fn thread_status_label(status: crate::ChatIndicator) -> Option<&'static str> {
+    match status {
+        crate::ChatIndicator::Working => Some("Working"),
+        crate::ChatIndicator::AwaitingInput => Some("Input"),
+        crate::ChatIndicator::Errored => Some("Failed"),
+        crate::ChatIndicator::Completed => Some("Done"),
+        crate::ChatIndicator::Idle => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -57,21 +57,7 @@ impl HarnessInfo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelOptionChoice {
-    pub id: String,
-    pub label: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelOption {
-    pub id: String,
-    pub label: String,
-    pub choices: Vec<ModelOptionChoice>,
-    pub default_choice: String,
-}
+pub use zeron_proto::{ModelOption, ModelOptionChoice};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

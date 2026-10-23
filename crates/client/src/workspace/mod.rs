@@ -18,13 +18,13 @@ use zeron_doc::{RegistryDoc, WorkspaceState};
 use zeron_proto::supervisor::SupervisorSnapshot;
 use zeron_proto::{
     AgentAccountsSnapshot, ChangeRequestListItem, CheckoutChangeRequestStatus, LimitResume,
-    LimitResumes, SidebarPreferences, TaskStep, TodayRuns,
+    LimitResumes, Session, SidebarPreferences, TaskStep, TodayRuns,
 };
 
 pub use tasks::{
     ApprovalView, Brief, BriefMessage, ContextChat, EstimateLine, HostRef, ItemSend,
-    MissionOptions, MissionStrip, NeedsYouEntry, NeedsYouKind, PlanEstimate, StepView,
-    SupervisorHost, SupervisorPage, TaskDetail, TaskDraft, TaskRow, TasksPage, WakeEntry,
+    MissionFromChat, MissionOptions, MissionStrip, NeedsYouEntry, NeedsYouKind, PlanEstimate,
+    StepView, SupervisorHost, SupervisorPage, TaskDetail, TaskDraft, TaskRow, TasksPage, WakeEntry,
     WatchState,
 };
 pub(crate) use tasks::{
@@ -55,6 +55,7 @@ pub(crate) struct WorkspaceStore {
     limits: Mutex<HashMap<String, LimitResumes>>,
     limits_rev: AtomicU64,
     supervisors: Mutex<BTreeMap<String, SupervisorSnapshot>>,
+    host_sessions: Mutex<BTreeMap<String, Vec<Session>>>,
     item_sends: Mutex<HashMap<String, ItemSend>>,
     settle_days: Mutex<HashMap<String, u32>>,
     sidebar: Mutex<SidebarView>,
@@ -77,6 +78,7 @@ impl WorkspaceStore {
             limits: Mutex::new(HashMap::new()),
             limits_rev: AtomicU64::new(0),
             supervisors: Mutex::new(BTreeMap::new()),
+            host_sessions: Mutex::new(BTreeMap::new()),
             item_sends: Mutex::new(HashMap::new()),
             settle_days: Mutex::new(HashMap::new()),
             sidebar: Mutex::new(SidebarView::default()),
@@ -268,8 +270,23 @@ impl WorkspaceStore {
         refresh.failed = !loaded;
     }
 
-    pub(crate) fn drop_supervisor(&self, device_id: &str) -> bool {
-        lock(&self.supervisors).remove(device_id).is_some()
+    /// A host's stream also carries other devices' registry copies, whose
+    /// background work is always empty: only its own chats are kept.
+    pub(crate) fn put_host_sessions(&self, device_id: &str, sessions: Vec<Session>) -> bool {
+        let own: Vec<Session> = sessions
+            .into_iter()
+            .filter(|s| s.device_id == device_id)
+            .collect();
+        let mut all = lock(&self.host_sessions);
+        if all.get(device_id) == Some(&own) {
+            return false;
+        }
+        all.insert(device_id.to_owned(), own);
+        true
+    }
+
+    pub(crate) fn drop_host_sessions(&self, device_id: &str) -> bool {
+        lock(&self.host_sessions).remove(device_id).is_some()
     }
 
     pub(crate) fn supervisors(&self) -> BTreeMap<String, SupervisorSnapshot> {
@@ -301,6 +318,7 @@ impl WorkspaceStore {
         let presence = self.presence();
         let change_requests = lock(&self.change_requests).clone();
         let supervisors = self.supervisors();
+        let host_sessions = lock(&self.host_sessions).clone();
         let item_sends = lock(&self.item_sends).clone();
         let settle_days = lock(&self.settle_days).clone();
         let today_runs = lock(&self.today_runs).clone();
@@ -319,6 +337,7 @@ impl WorkspaceStore {
                 change_requests: &change_requests,
                 steps: &steps,
                 supervisors: &supervisors,
+                host_sessions: &host_sessions,
                 item_sends: &item_sends,
                 send_states,
                 asks,

@@ -184,8 +184,8 @@ final class TaskSheetViewController: UIViewController, UICollectionViewDelegate 
         case "unassign":
             run { try await client.unassignTask(taskId: id) }
         case "add-image":
-            AttachmentPicker(host: self) { [weak self] picked in self?.addImages(picked) }
-                .presentPhotos(limit: max(1, 12 - (detail?.images.count ?? 0)))
+            AttachmentPicker(host: self, limit: 12 - (detail?.images.count ?? 0)) { [weak self] picked in self?.addImages(picked) }
+                .presentPhotos()
         case let image where image.hasPrefix("image:"):
             let path = String(image.dropFirst("image:".count))
             let sheet = UIAlertController(title: row.title, message: nil, preferredStyle: .actionSheet)

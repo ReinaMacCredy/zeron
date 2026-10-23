@@ -147,20 +147,6 @@ pub fn mode_label(mode: zeron_proto::PermissionMode) -> &'static str {
     mode.short_label()
 }
 
-pub fn draft_of(profile: &AgentProfile) -> AgentProfileDraft {
-    AgentProfileDraft {
-        name: profile.name.clone(),
-        harness: profile.harness,
-        model: profile.model.clone(),
-        reasoning: profile.reasoning,
-        permission_mode: profile.permission_mode,
-        model_options: profile.model_options.clone(),
-        notes: profile.notes.clone(),
-        instructions: profile.instructions.clone(),
-        disabled_tools: profile.disabled_tools.clone(),
-    }
-}
-
 pub fn blank_draft(harness: HarnessId) -> AgentProfileDraft {
     AgentProfileDraft {
         name: String::new(),
@@ -278,9 +264,9 @@ mod tests {
         profile.reasoning = None;
         profile.permission_mode = None;
         assert_eq!(summary(&profile, "Codex", None), "Codex");
-        assert_eq!(draft_of(&profile).name, "Reviewer");
+        assert_eq!(profile.draft().name, "Reviewer");
         assert_eq!(
-            draft_summary(&draft_of(&profile), "Codex", None),
+            draft_summary(&profile.draft(), "Codex", None),
             "Reviewer · Codex"
         );
         assert_eq!(token_count("ừ ok", 2000).as_ref(), "~1 / 500 tokens");

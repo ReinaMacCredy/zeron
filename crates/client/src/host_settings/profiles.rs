@@ -43,20 +43,6 @@ fn parse<T: serde::de::DeserializeOwned>(value: &str) -> Option<T> {
     serde_json::from_value(serde_json::Value::String(value.to_owned())).ok()
 }
 
-fn draft_of(profile: &AgentProfile) -> AgentProfileDraft {
-    AgentProfileDraft {
-        name: profile.name.clone(),
-        harness: profile.harness,
-        model: profile.model.clone(),
-        reasoning: profile.reasoning,
-        permission_mode: profile.permission_mode,
-        model_options: profile.model_options.clone(),
-        notes: profile.notes.clone(),
-        instructions: profile.instructions.clone(),
-        disabled_tools: profile.disabled_tools.clone(),
-    }
-}
-
 fn model_label(models: &[ModelInfo], id: Option<&str>) -> Option<String> {
     let id = id?;
     Some(
@@ -194,7 +180,7 @@ pub(super) async fn act(
         .iter()
         .find(|p| p.id == id)
         .ok_or_else(|| ClientError::NotFound(id.to_owned()))?;
-    let mut draft = draft_of(profile);
+    let mut draft = profile.draft();
     if let Some(field) = field.filter(|f| f.starts_with("tools")) {
         let on = value.as_deref() == Some("true");
         super::profile_tools::act(

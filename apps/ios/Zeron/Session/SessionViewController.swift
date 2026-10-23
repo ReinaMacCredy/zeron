@@ -71,6 +71,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         list.imageLoader = { [weak self] ref, iv in self?.source.loadImage(ref, into: iv) }
         list.imageFetcher = { [weak self] ref in await self?.source.image(ref) }
         list.htmlLoader = { [weak self] device, path in await self?.source.htmlPage(deviceId: device, path: path) }
+        list.textFetcher = { [weak self] ref in await self?.source.attachmentText(ref) }
         // Hidden while following (the runway glide and tail spring travel).
         list.onDistanceFromBottom = { [weak self] d in
             guard let self else { return }
@@ -84,6 +85,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         list.onPullRequest = { [weak self] url in
             guard let self else { return }
             (self.view.window?.rootViewController as? AppRouter)?.openPullRequest(url: url, deviceId: self.app.row(self.chatId)?.deviceId)
+        }
+        list.onQuote = { [weak self] text in
+            guard let self else { return }
+            self.composer.quotes.append(text)
+            self.composer.becomeFirstResponder()
         }
         view.addSubview(list)
         still.translatesAutoresizingMaskIntoConstraints = false
@@ -125,9 +131,23 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 self.endEdit(commit: text)
                 return .replaced
             }
+            if self.mission {
+                self.startMission(text: text, images: images)
+                return .kept
+            }
             // An immediate send (new turn, steer, stop-and-send) gets the
             // desktop runway; a message queued behind a live turn keeps the
             // live turn's runway and just follows.
+            if let command = compactCommand(text: text) {
+                self.source.compact(focus: command.focus)
+                DispatchQueue.main.async { self.composer.resignFirstResponder() }
+                return .sent
+            }
+            if let command = sidechatCommand(text: text) {
+                DispatchQueue.main.async { self.composer.resignFirstResponder() }
+                self.presentSidechats()?.openSidechat(prompt: command.prompt)
+                return .sent
+            }
             let queued = self.shown.running && mode == .queue
             guard self.source.send(text: text, images: images, mode: mode) else { return .kept }
             // Sending puts the keyboard away (the composer rests as the capsule).
@@ -138,7 +158,19 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         composer.onStop = { [weak self] in self?.source.stop() }
         composer.text = Drafts.load(chatId)
         composer.mentionSearch = { [weak self] q in await self?.source.searchFiles(q) ?? [] }
+        composer.threadSearch = { [weak self] q in self?.source.threadMentions(q) ?? [] }
+        composer.invocationCatalog = { [weak self] skill in await self?.source.invocationCatalog(skill: skill) }
         composer.onHeightChange = { [weak self] in self?.view.setNeedsLayout() }
+        composer.onActionChange = { [weak self] in self?.render(animated: true) }
+        composer.onChipTap = { [weak self] id, _ in
+            guard let self else { return }
+            if id == "mission" {
+                self.mission.toggle()
+                return self.render(animated: true)
+            }
+            guard let sheet = self.source.chipSheet(id) else { return }
+            self.present(sheet, animated: true)
+        }
         questions.onSubmit = { [weak self] answers in
             guard let self, let id = self.shown.questions?.requestId else { return }
             self.source.answer(requestId: id, answers: answers)
@@ -153,6 +185,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             if self.editingQueueId != nil { self.endEdit(commit: nil) }
             if case .notDelivered = self.shown.banner { self.source.retryDelivery() }
             if case .limit = self.shown.banner { self.limitActions() }
+            if case let .offer(title, body) = self.shown.banner { self.offerCompaction(title: title, body: body) }
         }
 
         bottom.axis = .vertical
@@ -208,6 +241,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         ])
 
         source.onChange = { [weak self] in self?.render(animated: true) }
+        source.onPresent = { [weak self] vc in self?.present(vc, animated: true) }
         source.attach(engine)
         render(animated: false)
         pendingToken = app.observeNeedsYou { [weak self] in self?.syncNeedsYou(animated: true) }
@@ -221,6 +255,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         // Coming back on screen (e.g. after a second copy of this chat was
         // popped and detached it): live again.
         if hasAppeared { source.reattach() }
+        composer.preferredDelivery = UserDefaults.standard.string(forKey: "followUpBehavior") == "steer" ? .steer : .queue
+        if hasAppeared { render(animated: false) }
     }
 
     private var hasAppeared = false
@@ -230,6 +266,9 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private var hostsToken: AnyObject?
     private var missionToken: AnyObject?
     private let missionStrip = UIButton(configuration: .gray())
+    private var mission = false
+    private var missionReview = true
+    private var missionPlanDoc = true
 
     deinit {
         if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }
@@ -640,6 +679,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             composer.images = []
             composer.text = text
             composer.placeholder = "Edit queued message"
+            composer.prediction = nil
             pill.banner = .editing
             pill.superview?.isHidden = false
             composer.becomeFirstResponder()
@@ -688,7 +728,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     }
 
     private func render(animated: Bool) {
-        let c = source.chrome
+        var c = source.chrome
+        if c.banner == .none, let notice = followUpNotice(queueing: composer.isQueueing, steer: composer.preferredDelivery == .steer, canSteer: c.canSteer) {
+            c.banner = .notice(notice)
+        }
         let old = shown
         shown = c
         titleView.set(title: c.title, subtitle: c.subtitle)
@@ -697,11 +740,24 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         composer.resumable = c.resumable
         still.working = c.running
         composer.canSteer = c.canSteer
-        composer.placeholder = c.placeholder
-        composer.chips = c.chips
-        composer.chipMenus = Dictionary(uniqueKeysWithValues: c.chips.map { chip in
+        let labels = missionComposerLabels(fromChat: true)
+        let missionAvailable = app.row(chatId)?.sidechatOf == nil
+        if !missionAvailable { mission = false }
+        var chips = c.chips
+        if missionAvailable {
+            chips.append(ComposerChip(id: "mission", title: labels.start, symbol: "target", tint: mission ? Palette.accent : nil))
+        }
+        if mission {
+            chips.append(ComposerChip(id: "mission-plan", title: missionPlanDoc ? labels.planDoc : labels.stepsOnly, symbol: missionReview ? "checklist" : "doc.text"))
+        }
+        composer.placeholder = mission ? labels.placeholder : c.placeholder
+        composer.prediction = editingQueueId == nil && !mission ? c.prediction : nil
+        composer.chips = chips
+        var menus = Dictionary(uniqueKeysWithValues: c.chips.map { chip in
             (chip.id, { [weak self] in self?.source.chipMenu(chip.id) })
         })
+        menus["mission-plan"] = { [weak self] in self?.missionPlanMenu() }
+        composer.chipMenus = menus
         let changes = {
             let asking = c.questions != nil
             self.questions.isHidden = !asking
@@ -762,6 +818,38 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         }
     }
 
+    private func compactAction() -> UIAction {
+        let blocked = source.compactBlocked
+        let action = UIAction(title: "Compact Context", subtitle: blocked, image: UIImage(systemName: "arrow.down.right.and.arrow.up.left")) { [weak self] _ in
+            self?.source.compact(focus: nil)
+        }
+        if blocked != nil { action.attributes = .disabled }
+        return action
+    }
+
+    private func offerCompaction(title: String, body: String) {
+        let sheet = UIAlertController(title: title, message: body, preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "Compact", style: .default) { [weak self] _ in self?.source.compact(focus: nil) })
+        sheet.addAction(UIAlertAction(title: "Keep full history", style: .cancel) { [weak self] _ in self?.source.keepFullHistory() })
+        sheet.popoverPresentationController?.sourceView = pill
+        present(sheet, animated: true)
+    }
+
+    private func sidechatAction() -> UIAction? {
+        guard app.row(chatId)?.sidechatOf == nil else { return nil }
+        return UIAction(title: newSidechatLabel(), image: UIImage(systemName: "bubble.left.and.bubble.right")) { [weak self] _ in
+            self?.presentSidechats()
+        }
+    }
+
+    @discardableResult
+    private func presentSidechats() -> SidechatSheetViewController? {
+        guard let client = app.client else { return nil }
+        let sheet = SidechatSheetViewController(app: app, client: client, sourceId: chatId, sourceTitle: app.row(chatId)?.title ?? "")
+        present(sheet.wrapped, animated: true)
+        return sheet
+    }
+
     private func syncMission() {
         guard let strip = app.client?.missionStrip(chatId: chatId) else {
             missionStrip.isHidden = true
@@ -771,6 +859,48 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         title.font = Fonts.ui(.sansMedium, 13)
         missionStrip.configuration?.attributedTitle = title
         missionStrip.isHidden = false
+    }
+
+    private func missionPlanMenu() -> UIMenu {
+        let labels = missionComposerLabels(fromChat: true)
+        return UIMenu(title: labels.start, children: [
+            UIMenu(options: .displayInline, children: [(true, labels.planDoc), (false, labels.stepsOnly)].map { planDoc, title in
+                UIAction(title: title, state: planDoc == missionPlanDoc ? .on : .off) { [weak self] _ in
+                    self?.missionPlanDoc = planDoc
+                    self?.render(animated: true)
+                }
+            }),
+            UIAction(title: labels.reviewPlanFirst, state: missionReview ? .on : .off) { [weak self] _ in
+                self?.missionReview.toggle()
+                self?.render(animated: true)
+            },
+        ])
+    }
+
+    private func startMission(text: String, images: [StagedImage]) {
+        let pictures = images.filter(\.isImage)
+        if let error = missionStagedError(images: UInt32(pictures.count), otherFile: nil) {
+            return Toast.show(error, in: view.window)
+        }
+        guard let client = app.client, let host = app.row(chatId)?.deviceId else { return }
+        let brief = missionText(text: text, pasted: images.filter { !$0.isImage }.map { String(decoding: $0.data, as: UTF8.self) })
+        let options = MissionOptions(approvePlan: missionReview, sameAgents: false, planDoc: missionPlanDoc)
+        let chat = chatId
+        Task { @MainActor [weak self] in
+            do {
+                let paths = try await MissionStart.upload(pictures, to: host, client: client)
+                let started = try await client.startMissionFromChat(chatId: chat, draft: MissionStart.draft(text: brief, spaceId: nil, images: paths), options: options, lead: ChatMission.lead)
+                guard let self else { return }
+                if let notice = started.notice { Toast.show(notice, in: self.view.window) }
+                self.composer.text = ""
+                self.composer.images = []
+                self.mission = false
+                self.render(animated: true)
+                (self.tabBarController as? MainTabController)?.showTasks("mission:\(started.taskId)")
+            } catch {
+                Toast.show(TasksErrors.message(error), in: self?.view.window)
+            }
+        }
     }
 
     private func openMission() {
@@ -810,7 +940,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             let stop = self.still.receiving
                 ? [UIAction(title: "Stop Computer Use", image: UIImage(systemName: "stop.circle"), attributes: .destructive) { _ in self.confirmComputerStop() }]
                 : []
-            done(self.missionItems() + stop + [
+            let items: [UIMenuElement?] = [
                 UIAction(title: pinned ? "Unpin" : "Pin", image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(self.chatId, !pinned) },
                 UIAction(title: "Session Info", image: UIImage(systemName: "info.circle")) { _ in self.openInfo() },
                 UIAction(title: "Terminal", image: UIImage(systemName: "apple.terminal")) { _ in self.openTerminal(nil) },
@@ -818,6 +948,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = self.engine.frame().plainText()
                 },
+                self.source.agentsAction { [weak self] id in self?.router?.openSession(id) },
+                self.sidechatAction(),
+                self.source.handoffMenu { [weak self] id in self?.router?.openSession(id) },
+                self.compactAction(),
                 UIAction(title: "Archive", image: UIImage(systemName: "archivebox"), attributes: .destructive) { _ in
                     self.app.archive(self.chatId)
                     // Beside the iPad sidebar there's nothing to pop back to.
@@ -827,7 +961,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                         self.navigationController?.popViewController(animated: true)
                     }
                 },
-            ])
+            ]
+            done(self.missionItems() + stop + items.compactMap { $0 })
         }])
     }
 }
@@ -885,6 +1020,7 @@ final class StatusPill: UIControl {
         addSubview(glass)
         label.font = Fonts.ui(.sansMedium, 13)
         label.textColor = Palette.secondary
+        label.numberOfLines = 2
         for v in [grid, label] {
             v.translatesAutoresizingMaskIntoConstraints = false
             glass.contentView.addSubview(v)
@@ -894,7 +1030,7 @@ final class StatusPill: UIControl {
             glass.bottomAnchor.constraint(equalTo: bottomAnchor),
             glass.leadingAnchor.constraint(equalTo: leadingAnchor),
             glass.trailingAnchor.constraint(equalTo: trailingAnchor),
-            heightAnchor.constraint(equalToConstant: 30),
+            heightAnchor.constraint(greaterThanOrEqualToConstant: 30),
             grid.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 11),
             grid.centerYAnchor.constraint(equalTo: glass.contentView.centerYAnchor),
             grid.widthAnchor.constraint(equalToConstant: 12),
@@ -902,7 +1038,11 @@ final class StatusPill: UIControl {
             label.leadingAnchor.constraint(equalTo: grid.trailingAnchor, constant: 8),
             label.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -12),
             label.centerYAnchor.constraint(equalTo: glass.contentView.centerYAnchor),
+            label.topAnchor.constraint(greaterThanOrEqualTo: glass.contentView.topAnchor, constant: 6),
         ])
+        let compact = heightAnchor.constraint(equalToConstant: 30)
+        compact.priority = .defaultLow
+        compact.isActive = true
         addAction(UIAction { [weak self] _ in self?.onTap?() }, for: .touchUpInside)
     }
 
@@ -943,6 +1083,12 @@ final class StatusPill: UIControl {
         case let .limit(text):
             grid.kind = .dot(Palette.warning)
             label.text = text
+        case let .notice(message):
+            grid.kind = .dot(StatusTone.idle)
+            label.text = message
+        case let .offer(title, body):
+            grid.kind = .dot(StatusTone.input)
+            label.text = "\(title) · \(body)"
         }
     }
 

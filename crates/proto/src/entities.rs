@@ -461,7 +461,14 @@ impl DelegationDelivery {
 impl Chat {
     pub fn sidechat_expired(&self, now: DateTime<Utc>) -> bool {
         self.sidechat_source_chat_id.is_some()
-            && now.signed_duration_since(self.created_at) >= chrono::Duration::hours(24)
+            && now.signed_duration_since(self.created_at)
+                >= chrono::Duration::hours(crate::sidechat::SIDECHAT_LIFETIME_HOURS)
+    }
+
+    pub fn live_sidechat_source(&self, now: DateTime<Utc>) -> Option<&str> {
+        self.sidechat_source_chat_id
+            .as_deref()
+            .filter(|_| !self.archived && !self.sidechat_expired(now))
     }
 
     /// A session the user sees in chat lists: neither a delegated child nor a

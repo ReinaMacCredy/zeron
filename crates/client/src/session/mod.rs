@@ -9,10 +9,14 @@
 //!
 //! The host writes all transcript entries and command outcomes.
 
+mod background;
+mod compaction;
+mod prediction;
 mod snapshot;
 #[cfg(test)]
 mod tests;
 pub(crate) mod transcript;
+mod host_watch;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,6 +33,7 @@ use zeron_proto::{
     WorktreeSpec, transcript::CompactionWait,
 };
 
+pub use background::BackgroundRoster;
 pub use snapshot::{
     AppendHint, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest, LiveStatus,
     LocalEcho, PendingKind, PendingSend, QueueGate, QueueItem, RoomState, SessionSnapshot,
@@ -188,6 +193,12 @@ struct CoreState {
     composer_revision: u64,
     token_rate: Option<u32>,
     compaction: Option<(CompactionWait, i64)>,
+    /// This device's own `CompactChat` is in flight.
+    compacting: bool,
+    kept_full_history: Option<i64>,
+    prediction: Option<zeron_proto::prediction::ComposerPrediction>,
+    session: Option<zeron_proto::Session>,
+    shell_output: Option<(String, Vec<String>)>,
 }
 
 pub(crate) struct SessionCore {
@@ -211,6 +222,9 @@ pub(crate) struct SessionCore {
     recompute_gate: Mutex<()>,
     view_attached: AtomicBool,
     rate_watch: Mutex<Option<tokio_util::sync::CancellationToken>>,
+    prediction_watch: Mutex<Option<tokio_util::sync::CancellationToken>>,
+    session_watch: Mutex<Option<tokio_util::sync::CancellationToken>>,
+    output_watch: Mutex<Option<tokio_util::sync::CancellationToken>>,
     /// Last open/attach/detach (warm-set eviction order).
     touched_ms: std::sync::atomic::AtomicI64,
 }
@@ -263,12 +277,20 @@ impl SessionCore {
                 composer_revision: 0,
                 token_rate: None,
                 compaction: None,
+                compacting: false,
+                kept_full_history: None,
+                prediction: None,
+                session: None,
+                shell_output: None,
             }),
             transcript_tx,
             composer: RwLock::new(composer),
             recompute_gate: Mutex::new(()),
             view_attached: AtomicBool::new(false),
             rate_watch: Mutex::new(None),
+            prediction_watch: Mutex::new(None),
+            session_watch: Mutex::new(None),
+            output_watch: Mutex::new(None),
             touched_ms: std::sync::atomic::AtomicI64::new(now_ms()),
         });
         // Coalesced republish for remote imports (a backfill of N rows costs
@@ -580,6 +602,18 @@ impl SessionCore {
         let parked = row.as_ref().is_some_and(|r| r.held_by_subagents);
         let turn_running =
             (host_indicator == ChatIndicator::Working && !parked) || snapshot.streaming;
+        let compacting = st.compacting || row.as_ref().is_some_and(|r| r.compacting);
+        let compact_blocked = compaction::compact_blocked(compacting, busy || snapshot.streaming);
+        let resume_compaction = compact_blocked
+            .is_none()
+            .then(|| {
+                compaction::resume_offer(
+                    row.as_deref(),
+                    st.context_usage.and_then(|u| u.tokens),
+                    st.kept_full_history,
+                )
+            })
+            .flatten();
         let mut next = ComposerState {
             chat_id: self.chat_id.clone(),
             revision: 0,
@@ -633,6 +667,10 @@ impl SessionCore {
             last_submitted_message_id: st.last_submitted.clone(),
             context_usage: st.context_usage,
             limit: client.workspace.limit(&self.chat_id),
+            compacting,
+            compact_blocked,
+            resume_compaction,
+            prediction: st.prediction.as_ref().map(|p| p.text.clone()),
         };
         let current = self.composer();
         next.revision = current.revision;
@@ -790,6 +828,10 @@ fn empty_composer(chat_id: &str) -> ComposerState {
         last_submitted_message_id: None,
         context_usage: None,
         limit: None,
+        compacting: false,
+        compact_blocked: None,
+        resume_compaction: None,
+        prediction: None,
     }
 }
 
@@ -1134,6 +1176,10 @@ impl SessionHandle {
         self.core.composer()
     }
 
+    pub fn session_stats(&self) -> Option<zeron_proto::SessionStats> {
+        self.core.doc().session_stats()
+    }
+
     /// Tell the client whether a transcript view is on screen (marks seen on
     /// attach; prioritizes this room's sync in live mode).
     pub fn set_view_attached(&self, attached: bool) {
@@ -1150,6 +1196,24 @@ impl SessionHandle {
         }
         if attached && !was {
             self.mark_seen();
+            *lock(&self.core.prediction_watch) = prediction::start(&self.core);
+            *lock(&self.core.session_watch) = background::start(&self.core);
+        }
+        if !attached && was {
+            for watch in [
+                &self.core.prediction_watch,
+                &self.core.session_watch,
+                &self.core.output_watch,
+            ] {
+                if let Some(watch) = lock(watch).take() {
+                    watch.cancel();
+                }
+            }
+            self.core.update_state(|st| {
+                st.prediction = None;
+                st.session = None;
+                st.shell_output = None;
+            });
         }
         if attached != was {
             self.core.follow_token_rate(attached);
@@ -1211,7 +1275,7 @@ impl SessionHandle {
         {
             let text = if refs.is_empty() || caps.clean_attachment_text {
                 if prompt_text.is_empty() {
-                    attachments::ATTACHMENT_ONLY_TEXT.to_owned()
+                    attachments::attachment_only_text(&refs).to_owned()
                 } else {
                     prompt_text.clone()
                 }
@@ -1247,7 +1311,7 @@ impl SessionHandle {
                     model_options: config.map(|c| c.model_options.clone()).unwrap_or_default(),
                     cwd: chat.cwd.clone().unwrap_or_else(|| "~".into()),
                     sandbox: config.map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox),
-                    auto_approve: true,
+                    auto_approve: false,
                     resume: None,
                     attachments: refs.clone(),
                     worktree: request.worktree.clone(),
@@ -1255,7 +1319,7 @@ impl SessionHandle {
                     branch: None,
                     forked_at: None,
                     computer_control: false,
-                    permission_mode: Default::default(),
+                    permission_mode: config.map(|c| c.permission_mode).unwrap_or_default(),
                     disabled_tools: config.map(|c| c.disabled_tools.clone()).unwrap_or_default(),
                 };
                 self.core.queue_command(
@@ -1273,6 +1337,7 @@ impl SessionHandle {
             let id = message_id.clone();
             self.core.update_state(|st| st.last_submitted = Some(id));
         }
+        self.core.update_state(|st| st.prediction = None);
         client.after_command(&self.core, !refs.is_empty());
         Ok(outcome)
     }

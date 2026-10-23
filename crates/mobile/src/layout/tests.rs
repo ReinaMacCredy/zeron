@@ -547,6 +547,18 @@ fn bundled_doc_images_lay_out_as_sized_blocks_and_others_stay_links() {
 }
 
 #[test]
+fn quoted_selections_render_as_a_pill_not_the_block() {
+    let mut w = worker(390.0);
+    let text = zeron_proto::quotes::with_quotes("why this?", &[zeron_proto::quotes::Quote::new("the retry budget")]);
+    w.input = debug_input(vec![DebugEntry { id: "u".into(), user: true, text, streaming: false }], false);
+    let frame = w.pass();
+    let d = frame.display(0).unwrap();
+    assert!(d.text.contains("why this?") && d.text.contains("1 selection"), "{}", d.text);
+    assert!(!d.text.contains("Selected text") && !d.text.contains("retry budget"), "{}", d.text);
+    assert!(d.widgets.iter().any(|w| matches!(&w.kind, display::WidgetKind::Icon { name, .. } if name == "text.quote")));
+}
+
+#[test]
 fn synced_file_attachments_render_as_chips_and_name_pills() {
     // A desktop send mixing an image and ZIPs (one still a queued-upload ref),
     // with composer chips in the prompt. Chipped attachments show as their
@@ -573,6 +585,26 @@ fn synced_file_attachments_render_as_chips_and_name_pills() {
     assert!(!d.text.contains("zeron-image") && !d.text.contains("zeron-attachment"), "{}", d.text);
     let links: Vec<&str> = d.links.iter().map(|l| l.url.as_str()).collect();
     assert_eq!(links, ["zeron-preview://image?ref=%2Ftmp%2Fuploads%2Fab12cd34-Image_1.png"]);
+}
+
+#[test]
+fn pasted_text_reads_as_a_tappable_pill_chipped_or_not() {
+    let mut w = worker(390.0);
+    let text = "Read [Pasted text 1.txt](zeron-attachment:1)\n\nAttached images (local files — open them to view):\n- /tmp/uploads/ab12cd34-Pasted_text_1.txt\n- pending://up-2/Pasted_text_2.txt".to_owned();
+    w.input = debug_input(vec![DebugEntry { id: "u".into(), user: true, text, streaming: false }], false);
+    let frame = w.pass();
+    let d = frame.display(0).unwrap();
+    assert!(d.text.contains("Read Pasted text 1") && d.text.contains("Pasted text 2"), "{}", d.text);
+    assert!(!d.text.contains(".txt"), "{}", d.text);
+    let mut links: Vec<&str> = d.links.iter().map(|l| l.url.as_str()).collect();
+    links.sort();
+    assert_eq!(
+        links,
+        [
+            "zeron-preview://text?ref=%2Ftmp%2Fuploads%2Fab12cd34-Pasted_text_1.txt",
+            "zeron-preview://text?ref=pending%3A%2F%2Fup-2%2FPasted_text_2.txt",
+        ]
+    );
 }
 
 #[test]

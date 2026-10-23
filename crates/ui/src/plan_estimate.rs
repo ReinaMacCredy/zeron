@@ -407,7 +407,7 @@ pub(crate) fn plan_card(card: PlanCard, theme: &Theme, cx: &App) -> AnyElement {
     let start_label = if has_fallback {
         "Start with fallback"
     } else {
-        "Start mission"
+        zeron_proto::mission::START_MISSION
     };
     let start = task.plan_pending.then(|| {
         div()

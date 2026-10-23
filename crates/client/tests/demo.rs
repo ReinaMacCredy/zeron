@@ -87,7 +87,7 @@ fn front_page_mirrors_the_desktop_sidebar() {
     );
     assert_eq!(ids(&ws.archived), ["chat-oklch", "chat-presence"]);
     assert_eq!(ids(ws.children("chat-veil")), ["chat-side"]);
-    assert!(ws.session("chat-btw").unwrap().expired);
+    assert!(ws.session("chat-btw").unwrap().sidechat_expired);
 
     let veil = ws.session("chat-veil").unwrap();
     assert_eq!(veil.indicator, ChatIndicator::Working);
@@ -403,7 +403,7 @@ fn send_streams_a_reply_and_adopts_the_echo() {
     session.set_view_attached(true);
     let before = session.snapshot();
     assert!(before.hydrated);
-    assert_eq!(before.transcript_len, 2);
+    assert_eq!(before.transcript_len, 5);
     let first_message = before.entries[0].message.clone();
 
     let outcome = session
@@ -446,7 +446,7 @@ fn send_streams_a_reply_and_adopts_the_echo() {
     let after = session.snapshot();
     assert!(rx.try_iter().count() > 0, "watch follows the stream");
     assert!(after.pending.is_empty());
-    assert_eq!(after.transcript_len, 4);
+    assert_eq!(after.transcript_len, 7);
     // Settled entries keep their shared message across every update.
     assert!(Arc::ptr_eq(&after.entries[0].message, &first_message));
     let reply = after.transcript().last().unwrap();
@@ -800,6 +800,47 @@ fn sends_to_an_offline_host_park_as_queued_not_working() {
 }
 
 #[test]
+fn a_model_switch_on_a_read_chat_asks_then_marks_the_transcript() {
+    let (client, _dir) = demo(fast());
+    let session = client.open_session("chat-home").unwrap();
+    session.set_view_attached(true);
+    wait_for("hydrated", Duration::from_secs(5), || {
+        session.snapshot().hydrated
+    });
+    let config = client.session_config("chat-home").unwrap();
+    let current = config.model.clone().unwrap_or_default();
+    assert!(
+        client
+            .model_switch_prompt("chat-home", &current, "A", "A")
+            .is_none()
+    );
+    let prompt = client
+        .model_switch_prompt("chat-home", "demo-next", "Opus", "Sonnet")
+        .expect("a chat with history asks first");
+    assert_eq!(prompt.title, "Switch model?");
+    let mut next = config.clone();
+    next.model = Some("demo-next".into());
+    zeron_client::runtime::shared()
+        .block_on(client.set_session_config_noted(
+            "chat-home",
+            &next,
+            &prompt.note,
+            &prompt.note_hint,
+        ))
+        .unwrap();
+    assert_eq!(
+        client.session_config("chat-home").unwrap().model.as_deref(),
+        Some("demo-next")
+    );
+    wait_for("the switch note", Duration::from_secs(5), || {
+        session.snapshot().transcript().last().is_some_and(|entry| {
+            entry.role() == MessageRole::System
+                && format!("{:?}", entry.parts()).contains("Model changed from Opus to Sonnet.")
+        })
+    });
+}
+
+#[test]
 fn tasks_and_supervisors_merge_across_macs() {
     let (client, _dir) = demo(fast());
     let ws = client.workspace();
@@ -894,6 +935,306 @@ fn needs_you_keeps_a_failed_send_with_its_reason_until_it_goes_through() {
     wait_for("settle item resolved", Duration::from_secs(5), || {
         settle(&client).is_none()
     });
+}
+
+#[test]
+fn a_large_idle_claude_chat_offers_compaction_until_it_compacts() {
+    let (client, _dir) = demo(fast());
+    let session = client.open_session("chat-home").unwrap();
+    session.set_view_attached(true);
+    wait_for("the resume offer", Duration::from_secs(5), || {
+        session.composer().resume_compaction.is_some()
+    });
+    assert_eq!(session.composer().compact_blocked, None);
+    let notice = zeron_client::runtime::shared()
+        .block_on(session.compact(Some("auth".into())))
+        .unwrap();
+    assert_eq!(notice, None);
+    wait_for("the boundary entry", Duration::from_secs(5), || {
+        session.snapshot().transcript().last().is_some_and(|entry| {
+            entry.role() == MessageRole::System
+                && format!("{:?}", entry.parts()).contains("Context compacted")
+        })
+    });
+    wait_for("the offer to go", Duration::from_secs(5), || {
+        let composer = session.composer();
+        composer.resume_compaction.is_none() && !composer.compacting
+    });
+}
+
+#[test]
+fn the_demo_catalog_offers_zeron_commands_and_skills_apart() {
+    let (client, _dir) = demo(fast());
+    let session = client.open_session("chat-home").unwrap();
+    let host = session.composer().host.device_id.clone();
+    let rt = zeron_client::runtime::shared();
+    let commands = rt.block_on(client.invocation_catalog(
+        &host,
+        "claude-code",
+        Some("chat-home"),
+        None,
+        false,
+    ));
+    let names: Vec<&str> = commands.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(
+        &names[..4],
+        ["btw", "sidechat", "compact", "computer-use"],
+        "Zeron's own commands ride first"
+    );
+    assert!(names.contains(&"review") && !names.contains(&"pdf"));
+    assert!(commands.warning.is_none());
+    let skills = rt.block_on(client.invocation_catalog(&host, "claude-code", None, None, true));
+    assert!(!skills.entries.is_empty());
+    assert!(skills.entries.iter().all(|e| e.invocation.prefix() == '$'));
+}
+
+#[test]
+fn an_open_chat_predicts_the_next_message_only_while_on_screen() {
+    let (client, _dir) = demo(fast());
+    let session = client.open_session("chat-home").unwrap();
+    assert_eq!(session.composer().prediction, None);
+    session.set_view_attached(true);
+    assert_eq!(
+        session.composer().prediction.as_deref(),
+        Some("Run the iOS layout tests on the simulator")
+    );
+    session.set_view_attached(false);
+    assert_eq!(session.composer().prediction, None);
+}
+
+#[test]
+fn continuing_in_a_new_thread_lands_on_the_picked_agent() {
+    let (client, _dir) = demo(fast());
+    let session = client.open_session("chat-home").unwrap();
+    session.set_view_attached(true);
+    wait_for("hydrated", Duration::from_secs(5), || {
+        session.snapshot().hydrated
+    });
+    assert!(!session.handoff_blocked());
+    let rt = zeron_client::runtime::shared();
+    let id = rt
+        .block_on(client.continue_in_new_thread("chat-home", Some(("codex", "gpt-5.5")), None))
+        .unwrap();
+    assert_ne!(id, "chat-home");
+    let config = client.session_config(&id).expect("the new chat is listed");
+    assert_eq!(config.harness, zeron_proto::HarnessId::Codex);
+    assert_eq!(config.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(
+        client.session_config("chat-home").unwrap().harness,
+        zeron_proto::HarnessId::ClaudeCode
+    );
+}
+
+#[test]
+fn a_bare_btw_reopens_the_live_sidechat_and_a_prompt_starts_a_new_one() {
+    let (client, _dir) = demo(fast());
+    let rt = zeron_client::runtime::shared();
+    let first = rt
+        .block_on(client.open_sidechat("chat-home", None))
+        .unwrap();
+    assert_eq!(
+        rt.block_on(client.open_sidechat("chat-home", None))
+            .unwrap(),
+        first
+    );
+    let second = rt
+        .block_on(client.open_sidechat("chat-home", Some("Why 2ⁿ and not jitter?".into())))
+        .unwrap();
+    assert_ne!(second, first);
+    let rows = client.sidechats_of("chat-home");
+    assert_eq!(
+        rows.iter().map(|r| r.chat_id.as_str()).collect::<Vec<_>>(),
+        [&first, &second]
+    );
+    assert!(rows[0].time_left.ends_with("left of 24 h"));
+    let sent = client.open_session(&second).unwrap();
+    wait_for("the prompt is sent", Duration::from_secs(5), || {
+        let snapshot = sent.snapshot();
+        snapshot.pending.iter().any(|p| p.text.contains("jitter"))
+            || snapshot
+                .entries
+                .iter()
+                .any(|e| e.role() == zeron_doc::MessageRole::User)
+    });
+    assert!(rt.block_on(client.create_sidechat(&second)).is_err());
+}
+
+#[test]
+fn the_roster_lists_subagents_and_shells_and_stops_them() {
+    use zeron_proto::background::RunState;
+    let (client, _dir) = demo(fast());
+    let session = client.open_session("chat-home").unwrap();
+    session.set_view_attached(true);
+    wait_for("hydrated", Duration::from_secs(5), || {
+        session.snapshot().hydrated
+    });
+    let roster = session.background_roster();
+    let runs: Vec<_> = roster
+        .agents
+        .iter()
+        .map(|run| (run.title.as_str(), run.state))
+        .collect();
+    assert_eq!(
+        runs,
+        [
+            ("Check the sheet layout", RunState::Completed),
+            ("Audit the composer pickers", RunState::Working),
+            ("Trace the draft restore path", RunState::Working),
+        ]
+    );
+    assert_eq!(roster.harness, Some(zeron_proto::HarnessId::ClaudeCode));
+    let compact = session.compact_section(0).unwrap();
+    assert_eq!(compact.heading, "Idle compaction");
+    assert_eq!(compact.rows.last().unwrap().0, "Compacts at");
+    let shell = roster.shells[0].id.clone();
+    assert_eq!(roster.shells[0].label, "cargo test -p zeron-mobile");
+    session.watch_shell_output(Some(shell.clone()));
+    assert!(
+        session
+            .shell_output(&shell)
+            .iter()
+            .any(|line| line.contains("running 214 tests"))
+    );
+
+    let rt = zeron_client::runtime::shared();
+    rt.block_on(session.stop_background_run("spawn-pickers", false))
+        .unwrap();
+    wait_for("the subagent settles", Duration::from_secs(5), || {
+        session.background_roster().agents[1].state == RunState::Stopped
+    });
+    rt.block_on(session.stop_background_run(&shell, false))
+        .unwrap();
+    assert!(session.background_roster().shells.is_empty());
+
+    session.set_view_attached(false);
+    assert!(session.shell_output(&shell).is_empty());
+}
+
+#[test]
+fn the_model_menu_lists_instances_and_applies_profiles() {
+    use zeron_client::model_menu::InstanceCatalog;
+    let (client, _dir) = demo(fast());
+    let session = client.open_session("chat-home").unwrap();
+    session.set_view_attached(true);
+    wait_for("hydrated", Duration::from_secs(5), || {
+        session.snapshot().hydrated
+    });
+    let rt = zeron_client::runtime::shared();
+    let device = client
+        .workspace()
+        .session("chat-home")
+        .unwrap()
+        .device_id
+        .clone();
+    let instances = rt
+        .block_on(client.list_provider_instances(&device))
+        .unwrap();
+    let labels: Vec<_> = instances.iter().map(|i| i.label.as_str()).collect();
+    assert_eq!(labels, ["Claude · Personal", "Codex · Work", "Work", "Gemini CLI"]);
+    assert_eq!(
+        rt.block_on(client.list_instance_models(&device, "codex", "codex_work", true)),
+        InstanceCatalog::Failed("timed out after 20s".into())
+    );
+    let InstanceCatalog::Ready(models) =
+        rt.block_on(client.list_instance_models(&device, "claude-code", "claude_personal", false))
+    else {
+        panic!("a working instance lists its models");
+    };
+    assert!(!models.is_empty());
+
+    let rows = rt.block_on(client.profile_rows("chat-home")).unwrap();
+    let reviewer = &rows[0];
+    assert_eq!(reviewer.name, "iOS reviewer");
+    assert!(reviewer.active && reviewer.savable);
+    assert_eq!(reviewer.drift.as_deref(), Some("effort High → Medium"));
+    assert!(!rows[1].active && rows[1].drift.is_none());
+
+    rt.block_on(client.save_chat_into_profile("chat-home", "ios-reviewer"))
+        .unwrap();
+    let rows = rt.block_on(client.profile_rows("chat-home")).unwrap();
+    assert_eq!(rows[0].drift, None);
+
+    let prompt = rt
+        .block_on(client.profile_switch_prompt("chat-home", "planner"))
+        .unwrap()
+        .expect("a chat with history confirms a harness move");
+    assert_eq!(prompt.title, "Switch provider?");
+    rt.block_on(client.apply_agent_profile("chat-home", "planner", None))
+        .unwrap();
+    let config = client.session_config("chat-home").unwrap();
+    assert_eq!(config.harness, zeron_proto::HarnessId::Codex);
+    assert_eq!(config.profile_id.as_deref(), Some("planner"));
+    assert_eq!(config.instructions, "Plan first; do not edit files.");
+    client.detach_agent_profile("chat-home").unwrap();
+    let config = client.session_config("chat-home").unwrap();
+    assert_eq!(
+        (config.profile_id, config.instructions),
+        (None, String::new())
+    );
+}
+
+#[test]
+fn an_open_chat_leads_its_mission_or_a_new_lead_reads_it() {
+    let (client, _dir) = demo(fast());
+    let rt = zeron_client::runtime::shared();
+    let link = |id: &str| zeron_proto::chat_mentions::chat_mention_link(id, id).unwrap();
+    let draft = || zeron_client::TaskDraft {
+        title: "Fix scrolling".into(),
+        notes: format!(
+            "See {} and {}",
+            link("chat-ios-keyboard"),
+            link("chat-deploy")
+        ),
+        ..Default::default()
+    };
+    let context = |task_id: &str| {
+        client.task_detail(task_id).map(|detail| {
+            detail
+                .context
+                .iter()
+                .map(|c| c.chat_id.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+
+    let reads = rt
+        .block_on(client.start_mission_from_chat(
+            "chat-ios-scroll",
+            draft(),
+            zeron_client::MissionOptions::default(),
+            false,
+        ))
+        .unwrap();
+    wait_for("new lead started", Duration::from_secs(5), || {
+        client.task_detail(&reads.task_id).is_some_and(|detail| {
+            detail.row.mission
+                && detail
+                    .row
+                    .lead_chat_id
+                    .as_deref()
+                    .is_some_and(|lead| lead != "chat-ios-scroll")
+        })
+    });
+    assert_eq!(
+        context(&reads.task_id).unwrap(),
+        ["chat-ios-scroll", "chat-ios-keyboard"],
+        "the source first, then mentioned chats on its host"
+    );
+
+    let led = rt
+        .block_on(client.start_mission_from_chat(
+            "chat-ios-scroll",
+            draft(),
+            zeron_client::MissionOptions::default(),
+            true,
+        ))
+        .unwrap();
+    wait_for("chat leads", Duration::from_secs(5), || {
+        client.task_detail(&led.task_id).is_some_and(|detail| {
+            detail.row.mission && detail.row.lead_chat_id.as_deref() == Some("chat-ios-scroll")
+        })
+    });
+    assert_eq!(context(&led.task_id).unwrap(), ["chat-ios-keyboard"]);
 }
 
 #[test]
@@ -1235,13 +1576,13 @@ fn profiles_reorder_and_tool_switches_write_the_profile() {
 
     assert_eq!(
         order(&page("profiles")),
-        ["ui-work", "reviewer", "quick-fix"]
+        ["ios-reviewer", "planner", "ui-work", "reviewer", "quick-fix"]
     );
     rt.block_on(client.host_action(&host, "profiles", "down:ui-work", None))
         .unwrap();
     assert_eq!(
         order(&page("profiles")),
-        ["reviewer", "ui-work", "quick-fix"]
+        ["ios-reviewer", "planner", "reviewer", "ui-work", "quick-fix"]
     );
 
     let tools = page("profile:ui-work:tools");
@@ -1274,4 +1615,53 @@ fn profiles_reorder_and_tool_switches_write_the_profile() {
     .unwrap();
     let editor = rows(&page("profile:ui-work"));
     assert!(editor.contains(&("tools".into(), Some("2 tools off".into()))));
+}
+
+#[test]
+fn a_row_names_the_background_work_its_host_reports() {
+    let (client, _dir) = demo(fast());
+    let ws = client.workspace();
+    let ring = |id: &str| {
+        let row = &ws.sessions[id];
+        (row.background_ring, row.background_label.as_deref())
+    };
+    assert_eq!(ring("chat-home"), (Some(1), None));
+    assert_eq!(ring("chat-veil"), (Some(1), Some("1 shell")));
+    assert_eq!(ring("chat-ios-scroll"), (None, None));
+}
+
+#[test]
+fn a_new_chat_draft_takes_and_drops_a_profile() {
+    let (client, _dir) = demo(fast());
+    let rt = zeron_client::runtime::shared();
+    let device = client.workspace().sessions["chat-home"].device_id.clone();
+    let draft = zeron_proto::ChatConfig {
+        harness: zeron_proto::HarnessId::ClaudeCode,
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+        permission_mode: Default::default(),
+        instructions: String::new(),
+        profile_id: None,
+        instance_id: None,
+        disabled_tools: Vec::new(),
+    };
+    let rows = rt
+        .block_on(client.draft_profile_rows(&device, draft.clone()))
+        .unwrap();
+    assert!(rows.iter().all(|row| !row.active));
+
+    let planned = rt
+        .block_on(client.apply_draft_profile(&device, draft, "planner"))
+        .unwrap();
+    assert_eq!(planned.harness, zeron_proto::HarnessId::Codex);
+    assert_eq!(planned.profile_id.as_deref(), Some("planner"));
+    assert_eq!(planned.instructions, "Plan first; do not edit files.");
+    assert_eq!(planned.permission_mode, zeron_proto::PermissionMode::Ask);
+    let rows = rt
+        .block_on(client.draft_profile_rows(&device, planned))
+        .unwrap();
+    let planner = rows.iter().find(|row| row.id == "planner").unwrap();
+    assert!(planner.active && planner.drift.is_none());
 }

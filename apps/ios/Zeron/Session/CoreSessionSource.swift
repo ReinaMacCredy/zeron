@@ -5,6 +5,7 @@ import UIKit
 final class CoreSessionSource: SessionSource {
     private(set) var chrome = SessionChrome()
     var onChange: (() -> Void)?
+    var onPresent: ((UIViewController) -> Void)?
     private weak var app: AppModel?
     private let client: CoreClient
     private let handle: SessionHandle
@@ -15,6 +16,12 @@ final class CoreSessionSource: SessionSource {
         didSet { if hostDevice != oldValue { connectVisuals() } }
     }
     private weak var engine: TranscriptView?
+    private var models: [ModelInfo] = []
+    private var modelsKey = ""
+    private var profiles: [ProfileRow] = []
+    private var profilesFor: ChatConfig?
+    private var invocationCatalogs: [String: InvocationCatalog] = [:]
+    private weak var contextSheet: ContextSheetViewController?
 
     init(app: AppModel, client: CoreClient, handle: SessionHandle, chatId: String) {
         self.app = app
@@ -61,11 +68,21 @@ final class CoreSessionSource: SessionSource {
         next.canSteer = c.host.capabilities.midTurnSteering ?? false
         next.placeholder = "Message \(row?.harnessLabel ?? "the agent")"
         var chips: [ComposerChip] = []
+        let config = client.sessionConfig(chatId: chatId)
+        loadProfiles(config)
         if let model = row?.modelLabel ?? row?.harnessLabel {
-            chips.append(ComposerChip(id: "model", title: model, symbol: nil, icon: BrandMarks.image(for: row?.harness ?? "claude-code", side: 13)))
+            let title = profiles.first(where: \.active).map { "\($0.name)\($0.drift == nil ? "" : " •") · \(model)" } ?? model
+            chips.append(ComposerChip(id: "model", title: title, symbol: nil, icon: BrandMarks.image(for: row?.harness ?? "claude-code", side: 13)))
         }
+        loadModels(harness: row?.harness ?? "claude-code")
+        let model = currentModel
         if let r = row?.reasoning, !r.isEmpty {
-            chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: r), symbol: "gauge.with.dots.needle.67percent"))
+            let fast = model.flatMap { m in config.map { fastModeOn(model: m, config: $0) } } ?? false
+            chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: r), symbol: fast ? "bolt.fill" : "gauge.with.dots.needle.67percent"))
+        }
+        let mode = config?.permissionMode ?? .full
+        if let info = permissionModes().first(where: { $0.mode == mode }) {
+            chips.append(ComposerChip(id: "permission", title: info.shortLabel, symbol: Self.permissionSymbol(mode), tint: mode == .full ? Palette.warning : nil))
         }
         if let pr = row?.pullRequest {
             let state: SessionRowVM.PR = switch pr.state { case .open: .open; case .merged: .merged; case .closed: .closed }
@@ -75,18 +92,22 @@ final class CoreSessionSource: SessionSource {
         }
         if let usage = c.contextUsage, let tokens = usage.tokens, let window = usage.window, window > 0 {
             let fraction = Double(tokens) / Double(window)
-            if fraction >= 0.5 {
-                chips.append(ComposerChip(
-                    id: "context",
-                    title: "\(Int((fraction * 100).rounded()))% context",
-                    symbol: fraction >= 0.85 ? "exclamationmark.circle" : "circle.lefthalf.filled",
-                    tint: fraction >= 0.85 ? Palette.warning : nil
-                ))
-            }
+            chips.append(ComposerChip(
+                id: "context",
+                title: "\(Int((fraction * 100).rounded()))% context",
+                symbol: fraction >= 0.85 ? "exclamationmark.circle" : "circle.lefthalf.filled",
+                tint: fraction >= 0.85 ? Palette.warning : nil
+            ))
+        } else if contextContent() != .init() {
+            chips.append(ComposerChip(id: "context", title: "Context", symbol: "circle.lefthalf.filled"))
         }
         next.chips = chips
         if let sendFailure {
             next.banner = .failed(sendFailure)
+        } else if let compactNotice {
+            next.banner = .notice(compactNotice)
+        } else if c.compacting {
+            next.banner = .working(since: nil, word: "Compacting context")
         } else if c.sendState == .failed {
             next.banner = .notDelivered
         } else if c.sendState == .queued {
@@ -101,7 +122,11 @@ final class CoreSessionSource: SessionSource {
             next.banner = .limit(pill.text)
         }
         next.limitPill = c.limitPill
+        if next.banner == .none, let offer = c.resumeCompaction {
+            next.banner = .offer(title: offer.title, body: offer.body)
+        }
         next.uploadProgress = c.transferProgress
+        next.prediction = c.prediction
         // Working state is shown at the transcript tail (layout engine), not here.
         if let input = c.openInput {
             next.questions = (input.requestId, input.questions.map {
@@ -121,6 +146,63 @@ final class CoreSessionSource: SessionSource {
             chrome = next
             onChange?()
         }
+        contextSheet?.reload()
+    }
+
+    private func loadModels(harness: String) {
+        let key = "\(hostDevice)|\(harness)"
+        guard key != modelsKey, !hostDevice.isEmpty else { return }
+        modelsKey = key
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let models = await self.client.listModels(deviceId: self.hostDevice, harness: harness)
+            guard self.modelsKey == key else { return }
+            self.models = models
+            self.refresh()
+        }
+    }
+
+    private func loadProfiles(_ config: ChatConfig?) {
+        guard config != profilesFor else { return }
+        profilesFor = config
+        guard config?.profileId != nil || !profiles.isEmpty else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let rows = await self.client.profileRows(chatId: self.chatId)
+            guard self.profilesFor == config, rows != self.profiles else { return }
+            self.profiles = rows
+            self.refresh()
+        }
+    }
+
+    private var currentModel: ModelInfo? {
+        let id = app?.row(chatId)?.model
+        return models.first { $0.id == id } ?? models.first
+    }
+
+    private func contextContent() -> ContextSheetViewController.Content {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let stats = handle.statsView(nowMs: now)
+        let compact = handle.compactSection(nowMs: now)
+        guard let model = currentModel, let config = client.sessionConfig(chatId: chatId) else { return .init(stats: stats, compact: compact) }
+        return .init(card: contextCard(model: model, config: config, tokens: handle.composer().contextUsage?.tokens), stats: stats, compact: compact)
+    }
+
+    func chipSheet(_ id: String) -> UIViewController? {
+        guard id == "context" else { return nil }
+        let sheet = ContextSheetViewController(
+            content: { [weak self] in self?.contextContent() ?? .init() },
+            toggleLong: { [weak self] in
+                guard let self, let model = self.currentModel else { return }
+                self.setConfig { $0 = toggleLongContext(model: model, config: $0) }
+            },
+            pick: { [weak self] position in
+                guard let self, let model = self.currentModel else { return }
+                self.setConfig { $0 = pickContext(model: model, config: $0, position: position) }
+            }
+        )
+        contextSheet = sheet
+        return sheet.wrapped
     }
 
     /// False when the core refused the message (it stays in the composer).
@@ -131,6 +213,7 @@ final class CoreSessionSource: SessionSource {
             _ = try handle.send(request: SendRequest(text: text, attachments: images.map(\.outgoing), worktree: nil, busy: mode == .steer ? .steer : .queue))
             app?.noteDeliveryActivity()
             sendFailure = nil
+            compactNotice = nil
             return true
         } catch {
             // Kept across refreshes (which rebuild the chrome) until the next send.
@@ -141,6 +224,26 @@ final class CoreSessionSource: SessionSource {
     }
 
     private var sendFailure: String?
+    private var compactNotice: String?
+
+    var compactBlocked: String? { handle.composer().compactBlocked }
+
+    func compact(focus: String?) {
+        compactNotice = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                self.compactNotice = try await self.handle.compact(focus: focus)
+            } catch {
+                self.compactNotice = "Compaction failed: \(error)"
+            }
+            self.refresh()
+        }
+    }
+
+    func keepFullHistory() {
+        handle.keepFullHistory()
+    }
 
     func stop() {
         try? handle.interrupt()
@@ -234,30 +337,38 @@ final class CoreSessionSource: SessionSource {
         let harness = row.harness ?? "claude-code"
         switch id {
         case "model":
-            return UIMenu(title: "Model", children: [UIDeferredMenuElement { [weak self] done in
+            return UIMenu(title: "Model", children: [UIDeferredMenuElement.uncached { [weak self] done in
                 guard let self else { return done([]) }
-                Task { @MainActor in
-                    let models = (try? await self.client.listModels(deviceId: self.hostDevice, harness: harness)) ?? fallbackModels(harness: harness)
-                    done(models.map { m in
-                        UIAction(title: m.label, subtitle: m.description, state: m.id == row.model ? .on : .off) { [weak self] _ in
-                            self?.setConfig { $0.model = m.id }
-                        }
-                    })
-                }
+                Task { @MainActor in done(await self.modelMenu(row: row, harness: harness)) }
             }])
         case "effort":
-            return UIMenu(title: "Reasoning effort", children: [UIDeferredMenuElement { [weak self] done in
+            return UIMenu(title: "Effort", children: [UIDeferredMenuElement { [weak self] done in
                 guard let self else { return done([]) }
                 Task { @MainActor in
                     let models = (try? await self.client.listModels(deviceId: self.hostDevice, harness: harness)) ?? fallbackModels(harness: harness)
-                    let levels = models.first { $0.id == row.model }?.reasoningLevels ?? models.first?.reasoningLevels ?? []
-                    done(levels.map { l in
+                    let model = models.first { $0.id == row.model } ?? models.first
+                    var items: [UIMenuElement] = (model?.reasoningLevels ?? []).map { l in
                         UIAction(title: reasoningLabel(level: l), state: l == row.reasoning ? .on : .off) { [weak self] _ in
                             self?.setConfig { $0.reasoning = l }
                         }
-                    })
+                    }
+                    if let model, let config = self.client.sessionConfig(chatId: self.chatId), let fast = speedToggle(model: model, config: config) {
+                        items.append(UIMenu(options: .displayInline, children: [
+                            UIAction(title: "Fast", image: UIImage(systemName: fast ? "bolt.fill" : "bolt"), state: fast ? .on : .off) { [weak self] _ in
+                                self?.setConfig { $0 = toggleSpeed(model: model, config: $0) }
+                            },
+                        ]))
+                    }
+                    done(items)
                 }
             }])
+        case "permission":
+            let current = client.sessionConfig(chatId: chatId)?.permissionMode ?? .full
+            return UIMenu(title: "Approve agent actions", children: permissionModes().map { m in
+                UIAction(title: m.label, subtitle: m.description, image: UIImage(systemName: Self.permissionSymbol(m.mode)), state: m.mode == current ? .on : .off) { [weak self] _ in
+                    self?.setConfig { $0.permissionMode = m.mode }
+                }
+            })
         case "pr":
             guard let url = row.pullRequest.flatMap({ URL(string: $0.url) }) else { return nil }
             let device = hostDevice
@@ -276,10 +387,278 @@ final class CoreSessionSource: SessionSource {
         }
     }
 
+    static func permissionSymbol(_ mode: PermissionMode) -> String {
+        switch mode {
+        case .ask: "checklist"
+        case .auto: "wand.and.sparkles"
+        case .full: "exclamationmark.triangle"
+        }
+    }
+
     private func setConfig(_ change: (inout ChatConfig) -> Void) {
+        try? client.setSessionConfig(chatId: chatId, config: changedConfig(change))
+    }
+
+    private func changedConfig(_ change: (inout ChatConfig) -> Void) -> ChatConfig {
         var config = client.sessionConfig(chatId: chatId) ?? ChatConfig(harness: app?.row(chatId)?.harness ?? "claude-code", model: nil, reasoning: nil, modelOptions: [:], sandbox: .workspaceWrite)
         change(&config)
-        try? client.setSessionConfig(chatId: chatId, config: config)
+        return config
+    }
+
+    private struct Provider {
+        let harness: String
+        let instanceId: String?
+        let label: String
+    }
+
+    @MainActor
+    private func modelMenu(row: SessionRow, harness: String) async -> [UIMenuElement] {
+        let device = hostDevice
+        async let profileRows = client.profileRows(chatId: chatId)
+        async let instances = client.listProviderInstances(deviceId: device)
+        let config = client.sessionConfig(chatId: chatId)
+        let current = Provider(
+            harness: harness,
+            instanceId: config?.instanceId,
+            label: (await instances).first { $0.id == config?.instanceId }?.label ?? row.harnessLabel ?? harness)
+        var providers = [current]
+        if current.instanceId != nil {
+            providers.append(Provider(harness: harness, instanceId: nil, label: row.harnessLabel ?? harness))
+        }
+        providers += await instances.filter { $0.id != current.instanceId }.map { Provider(harness: $0.harness, instanceId: $0.id, label: $0.label) }
+        let catalogs = await withTaskGroup(of: (Int, InstanceModels).self) { group in
+            for (i, provider) in providers.enumerated() {
+                group.addTask { [client] in
+                    guard let id = provider.instanceId else {
+                        return (i, InstanceModels(models: await client.listModels(deviceId: device, harness: provider.harness), error: nil))
+                    }
+                    return (i, await client.listInstanceModels(deviceId: device, harness: provider.harness, instanceId: id, force: false))
+                }
+            }
+            var out = [Int: InstanceModels]()
+            for await (i, catalog) in group { out[i] = catalog }
+            return out
+        }
+        profiles = await profileRows
+        var sections: [UIMenuElement] = []
+        if !profiles.isEmpty { sections.append(profileSection(profiles)) }
+        let labels = profileMenuLabels()
+        for (i, provider) in providers.enumerated() {
+            guard let catalog = catalogs[i] else { continue }
+            let children: [UIMenuElement]
+            if let error = catalog.error, let id = provider.instanceId {
+                children = [
+                    UIAction(title: provider.label, subtitle: error, image: UIImage(systemName: "exclamationmark.triangle"), attributes: .disabled) { _ in },
+                    UIAction(title: labels.retry, image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in self?.retryInstance(provider.label, harness: provider.harness, id: id) },
+                ]
+            } else if i == 0 {
+                children = catalog.models.map { m in
+                    UIAction(title: m.label, subtitle: m.description, state: m.id == row.model ? .on : .off) { [weak self] _ in
+                        self?.pickModel(m, among: catalog.models)
+                    }
+                }
+            } else {
+                children = catalog.models.map { m in
+                    UIAction(title: m.label, subtitle: m.description) { [weak self] _ in
+                        self?.pickProvider(provider, model: m, from: current, row: row)
+                    }
+                }
+            }
+            sections.append(UIMenu(title: provider.label, options: .displayInline, children: children))
+        }
+        return sections
+    }
+
+    private func profileSection(_ rows: [ProfileRow]) -> UIMenu {
+        let labels = profileMenuLabels()
+        var items: [UIMenuElement] = rows.map { p in
+            let image = UIImage(systemName: "person.crop.circle")
+            guard p.active, let drift = p.drift else {
+                return UIAction(title: p.name, subtitle: p.line, image: image, state: p.active ? .on : .off) { [weak self] _ in
+                    self?.applyProfile(p.id)
+                }
+            }
+            var actions = [UIAction(title: labels.revert, image: UIImage(systemName: "arrow.uturn.backward")) { [weak self] _ in self?.applyProfile(p.id) }]
+            if p.savable {
+                actions.append(UIAction(title: labels.save, image: UIImage(systemName: "square.and.arrow.down")) { [weak self] _ in self?.saveProfile(p.id) })
+            }
+            return UIMenu(title: "\(p.name) · \(labels.edited)", subtitle: drift, image: image, children: actions)
+        }
+        let none = !rows.contains(where: \.active)
+        items.append(UIAction(title: labels.none, subtitle: labels.noneNote, image: UIImage(systemName: "person.crop.circle.badge.xmark"), state: none ? .on : .off) { [weak self] _ in
+            guard let self, !none else { return }
+            self.reportFailure { try self.client.detachAgentProfile(chatId: self.chatId) }
+        })
+        return UIMenu(title: labels.title, options: .displayInline, children: items)
+    }
+
+    private func applyProfile(_ id: String) {
+        let chat = chatId
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                guard let prompt = try await self.client.profileSwitchPrompt(chatId: chat, profileId: id) else {
+                    return try await self.client.applyAgentProfile(chatId: chat, profileId: id, note: nil, hint: nil)
+                }
+                self.confirm(prompt) { [weak self] in
+                    try await self?.client.applyAgentProfile(chatId: chat, profileId: id, note: prompt.note, hint: prompt.noteHint)
+                }
+            } catch {
+                self.alert("\(error)")
+            }
+        }
+    }
+
+    private func saveProfile(_ id: String) {
+        let chat = chatId
+        Task { @MainActor [weak self] in
+            do {
+                try await self?.client.saveChatIntoProfile(chatId: chat, profileId: id)
+                self?.profilesFor = nil
+                self?.refresh()
+            } catch {
+                self?.alert("\(error)")
+            }
+        }
+    }
+
+    private func retryInstance(_ label: String, harness: String, id: String) {
+        let device = hostDevice
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let catalog = await self.client.listInstanceModels(deviceId: device, harness: harness, instanceId: id, force: true)
+            if let error = catalog.error { self.alert("\(label): \(error)") }
+        }
+    }
+
+    private func pickProvider(_ provider: Provider, model: ModelInfo, from current: Provider, row: SessionRow) {
+        let prompt = client.providerSwitchPrompt(
+            chatId: chatId,
+            fromProvider: current.label,
+            toProvider: provider.label,
+            fromModel: row.modelLabel ?? row.model ?? "",
+            toModel: model.label)
+        confirmSwitch(prompt) {
+            if $0.harness != provider.harness {
+                $0.reasoning = nil
+                $0.modelOptions = [:]
+            }
+            $0.harness = provider.harness
+            $0.instanceId = provider.instanceId
+            $0.model = model.id
+        }
+    }
+
+    private func reportFailure(_ body: () throws -> Void) {
+        do { try body() } catch { alert("\(error)") }
+    }
+
+    private func alert(_ message: String) {
+        let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        onPresent?(alert)
+    }
+
+    private func pickModel(_ model: ModelInfo, among models: [ModelInfo]) {
+        let current = client.sessionConfig(chatId: chatId)?.model
+        let from = models.first { $0.id == current }?.label ?? current ?? ""
+        confirmSwitch(client.modelSwitchPrompt(chatId: chatId, toModel: model.id, fromLabel: from, toLabel: model.label)) { $0.model = model.id }
+    }
+
+    private func confirmSwitch(_ prompt: ModelSwitchPrompt?, _ change: @escaping (inout ChatConfig) -> Void) {
+        guard let prompt else { return setConfig(change) }
+        let chat = chatId
+        confirm(prompt) { [weak self] in
+            guard let self else { return }
+            try await self.client.setSessionConfigNoted(chatId: chat, config: self.changedConfig(change), note: prompt.note, hint: prompt.noteHint)
+        }
+    }
+
+    private func confirm(_ prompt: ModelSwitchPrompt, then apply: @escaping @MainActor () async throws -> Void) {
+        let alert = UIAlertController(title: prompt.title, message: "\(prompt.lead).\n\n\(prompt.body)", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: prompt.cancel, style: .cancel))
+        alert.addAction(UIAlertAction(title: prompt.confirm, style: .default) { _ in
+            Task { @MainActor in try? await apply() }
+        })
+        alert.preferredAction = alert.actions.last
+        onPresent?(alert)
+    }
+
+    func agentsAction(open: @escaping (String) -> Void) -> UIAction? {
+        let roster = handle.backgroundRoster(nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+        guard let summary = roster.summary else { return nil }
+        return UIAction(title: roster.title, subtitle: summary, image: UIImage(systemName: "person.2")) { [weak self] _ in
+            guard let self else { return }
+            self.onPresent?(AgentsSheetViewController(handle: self.handle, open: open).wrapped)
+        }
+    }
+
+    func handoffMenu(open: @escaping (String) -> Void) -> UIMenuElement? {
+        let labels = handoffLabels()
+        let image = UIImage(systemName: "arrow.left.arrow.right")
+        guard !handle.handoffBlocked() else {
+            return UIAction(title: labels.title, image: image, attributes: .disabled) { _ in }
+        }
+        return UIMenu(title: labels.title, image: image, children: [UIDeferredMenuElement.uncached { [weak self] done in
+            guard let self else { return done([]) }
+            let device = self.hostDevice
+            Task { @MainActor [weak self] in
+                let targets = await self?.client.handoffTargets(deviceId: device) ?? []
+                done(self?.handoffSections(targets, labels: labels, open: open) ?? [])
+            }
+        }])
+    }
+
+    private func handoffSections(_ targets: [HandoffTarget], labels: HandoffLabels, open: @escaping (String) -> Void) -> [UIMenuElement] {
+        let row = app?.row(chatId)
+        let current = client.sessionConfig(chatId: chatId)?.harness ?? row?.harness
+        let title = { (t: HandoffTarget) in "\(t.name) · \(t.modelLabel)" }
+        var sections: [UIMenuElement] = []
+        let inPlace = targets.filter { $0.harness != current }.map { t in
+            UIAction(title: title(t)) { [weak self] _ in self?.handOffInPlace(t, from: row) }
+        }
+        if !inPlace.isEmpty { sections.append(UIMenu(title: labels.thisThread, options: .displayInline, children: inPlace)) }
+        let fresh = targets.map { t in
+            UIAction(title: title(t)) { [weak self] _ in self?.continueInNewThread(harness: t.harness, model: t.model, spaceId: nil, open: open) }
+        }
+        if !fresh.isEmpty { sections.append(UIMenu(title: labels.newThread, options: .displayInline, children: fresh)) }
+        if let row, row.project == nil {
+            let projects = (app?.projectOptions ?? []).filter { $0.device == row.deviceId }.map { p in
+                UIAction(title: p.name, image: UIImage(systemName: "folder")) { [weak self] _ in self?.continueInNewThread(harness: nil, model: nil, spaceId: p.id, open: open) }
+            }
+            if !projects.isEmpty { sections.append(UIMenu(title: labels.project, options: .displayInline, children: projects)) }
+        }
+        return sections
+    }
+
+    private func handOffInPlace(_ target: HandoffTarget, from row: SessionRow?) {
+        let prompt = client.providerSwitchPrompt(
+            chatId: chatId,
+            fromProvider: row?.harnessLabel ?? row?.harness ?? "",
+            toProvider: target.name,
+            fromModel: row?.modelLabel ?? row?.model ?? "",
+            toModel: target.modelLabel)
+        confirmSwitch(prompt) {
+            $0.harness = target.harness
+            $0.model = target.model
+            $0.reasoning = nil
+            $0.modelOptions = [:]
+            $0.profileId = nil
+        }
+    }
+
+    private func continueInNewThread(harness: String?, model: String?, spaceId: String?, open: @escaping (String) -> Void) {
+        let source = chatId
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                open(try await self.client.continueInNewThread(sourceChatId: source, harness: harness, model: model, targetSpaceId: spaceId))
+            } catch {
+                let alert = UIAlertController(title: nil, message: handoffFailedMessage(err: "\(error)"), preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: "OK", style: .default))
+                self.onPresent?(alert)
+            }
+        }
     }
 
     func searchFiles(_ query: String) async -> [FileMatch] {
@@ -318,6 +697,19 @@ final class CoreSessionSource: SessionSource {
         _ = try await client.setLimitResume(chatId: chatId, autoResume: auto)
     }
 
+    func threadMentions(_ query: String) -> [ThreadMention] {
+        client.threadMentions(deviceId: hostDevice, spaceId: app?.row(chatId)?.project?.id, exclude: chatId, query: query)
+    }
+
+    func invocationCatalog(skill: Bool) async -> InvocationCatalog? {
+        let harness = app?.row(chatId)?.harness ?? "claude-code"
+        let key = "\(hostDevice)|\(harness)|\(skill)"
+        if let hit = invocationCatalogs[key] { return hit }
+        let found = await client.invocationCatalog(deviceId: hostDevice, harness: harness, chatId: chatId, spaceId: nil, skill: skill)
+        if found.warning == nil { invocationCatalogs[key] = found }
+        return found
+    }
+
     private static let images = NSCache<NSString, UIImage>()
     private static let pages = NSCache<NSString, NSString>()
 
@@ -339,6 +731,11 @@ final class CoreSessionSource: SessionSource {
         else { return nil }
         Self.images.setObject(image, forKey: reference as NSString)
         return image
+    }
+
+    func attachmentText(_ reference: String) async -> String? {
+        guard let data = try? await client.readAttachment(deviceId: hostDevice, path: reference) else { return nil }
+        return String(decoding: data, as: UTF8.self)
     }
 
     func loadImage(_ reference: String, into view: UIImageView) {

@@ -9,6 +9,7 @@
 //! id), streaming replies through `SegmentWriter`, flipping session status
 //! rows, draining the queue, and answering relay RPCs.
 
+mod composer;
 mod fixtures;
 mod git;
 mod missions;
@@ -158,6 +159,20 @@ impl DemoHost {
                 client.workspace.put_supervisor(device, snapshot);
             }
         }
+        if let Some(held) = composer::background_session("chat-home") {
+            let idle = Session {
+                status: SessionStatus::Idle,
+                held_by_subagents: false,
+                ..held.clone()
+            };
+            let veil = Session {
+                chat_id: "chat-veil".into(),
+                ..held
+            };
+            client
+                .workspace
+                .put_host_sessions(fixtures::MAC, vec![idle, veil]);
+        }
         self.beat_presence(client);
         Ok(())
     }
@@ -222,6 +237,21 @@ impl DemoHost {
         lock(&self.cancel).clone().unwrap_or_default()
     }
 
+    pub(crate) fn prediction(
+        &self,
+        chat_id: &str,
+    ) -> Option<zeron_proto::prediction::ComposerPrediction> {
+        composer::prediction(chat_id)
+    }
+
+    pub(crate) fn background_session(&self, chat_id: &str) -> Option<Session> {
+        composer::background_session(chat_id)
+    }
+
+    pub(crate) fn shell_output(&self, task_id: &str) -> Vec<String> {
+        composer::shell_output(task_id)
+    }
+
     fn host_of(&self, client: &ClientInner, chat_id: &str) -> String {
         client
             .workspace
@@ -260,6 +290,7 @@ impl DemoHost {
         for entry in &entries {
             doc.push_message(entry).map_err(doc_err)?;
         }
+        composer::seed_meta(chat_id, &doc, now_ms()).map_err(doc_err)?;
         Ok(doc)
     }
 
@@ -926,6 +957,18 @@ impl DemoHost {
         if let Some(reply) = fixtures::today_reply(device_id, method, now_ms()) {
             return Ok(reply);
         }
+        if let Some(catalog) = composer::invocation_catalog(method) {
+            return Ok(catalog);
+        }
+        if method == m::CONTINUE_IN_NEW_THREAD {
+            return composer::continue_in_new_thread(&client, &params);
+        }
+        if method == m::CREATE_SIDECHAT {
+            return composer::create_sidechat(&client, &params);
+        }
+        if let Some(reply) = composer::instance_models(method, &params) {
+            return reply;
+        }
         if let Some(reply) = missions::host_call(
             &client,
             &self.supervisor_settings,
@@ -941,6 +984,9 @@ impl DemoHost {
         let core = client
             .session_core(&chat_id)
             .ok_or_else(|| ClientError::NotFound(chat_id.clone()))?;
+        if method == m::STOP_BACKGROUND_TASK {
+            return composer::stop_background_task(&core, &params);
+        }
         let row = core
             .doc()
             .read_queue()
@@ -1107,6 +1153,49 @@ impl DemoHost {
                     .unwrap_or_default();
                 let removed = core.write(|doc| doc.truncate_from(entry_id))?;
                 serde_json::json!({ "prompt": prompt, "removed": removed })
+            }
+            m::MUTATE if params["op"] == "setChatConfig" => {
+                let config: zeron_proto::ChatConfig =
+                    serde_json::from_value(params["config"].clone())
+                        .map_err(|err| ClientError::InvalidArgument(err.to_string()))?;
+                client.registry_write(|doc| doc.set_chat_config(&chat_id, &config))?;
+                if let Some(note) = params["note"]["text"].as_str() {
+                    let mut parts = vec![transcripts::text("t0", note)];
+                    parts.extend(
+                        params["note"]["hint"]
+                            .as_str()
+                            .map(|hint| transcripts::text("t1", hint)),
+                    );
+                    let host = self.host_of(&client, &chat_id);
+                    let entry = transcripts::entry(
+                        &crate::new_id(),
+                        zeron_doc::MessageRole::System,
+                        &host,
+                        now,
+                        parts,
+                    );
+                    core.write(|doc| doc.push_message(&entry))?;
+                }
+                serde_json::json!({})
+            }
+            m::COMPACT_CHAT => {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                let host = self.host_of(&client, &chat_id);
+                let entry = transcripts::entry(
+                    &crate::new_id(),
+                    zeron_doc::MessageRole::System,
+                    &host,
+                    now,
+                    vec![transcripts::text(
+                        "t0",
+                        "Context compacted · 184.3k → 21.0k tokens",
+                    )],
+                );
+                core.write(|doc| {
+                    doc.push_message(&entry)?;
+                    doc.update_context_usage(Some(21_000), None)
+                })?;
+                serde_json::json!({ "compacted": true })
             }
             m::REMOVE_QUEUED_MESSAGE => {
                 let removed = core.write(|doc| doc.remove_queued(&id))?;

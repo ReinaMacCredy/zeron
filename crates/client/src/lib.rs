@@ -33,12 +33,19 @@ pub mod config;
 pub mod connectivity;
 mod demo;
 pub mod error;
+pub mod handoff;
 pub mod events;
 pub mod host_settings;
+pub mod invocations;
 mod live;
+pub mod model_picks;
+pub mod model_menu;
+pub mod model_switch;
 pub mod rpc;
 pub mod runtime;
 pub mod session;
+pub mod sidechat;
+pub mod thread_mentions;
 pub mod workspace;
 
 pub use client::{
@@ -58,10 +65,10 @@ pub use session::{
 };
 pub use workspace::{
     ApprovalView, Brief, BriefMessage, ContextChat, DeviceView, EstimateLine, FrontGroup, FrontPage,
-    HostRef, ItemSend, MissionOptions, MissionStrip, NeedsYouEntry, NeedsYouKind, PlanEstimate,
-    ProjectRef, ProjectView, PullRequestGroups, SearchField, SearchHit, SectionView, SessionRow,
-    SidebarView, StepView, SupervisorHost, SupervisorPage, TaskDetail, TaskDraft, TaskRow,
-    TasksPage, TodayPage, TodayPart, TodayPullRequests, TodaySlot, TodayTask, TodayUsage,
+    HostRef, ItemSend, MissionFromChat, MissionOptions, MissionStrip, NeedsYouEntry, NeedsYouKind,
+    PlanEstimate, ProjectRef, ProjectView, PullRequestGroups, SearchField, SearchHit, SectionView,
+    SessionRow, SidebarView, StepView, SupervisorHost, SupervisorPage, TaskDetail, TaskDraft,
+    TaskRow, TasksPage, TodayPage, TodayPart, TodayPullRequests, TodaySlot, TodayTask, TodayUsage,
     WakeEntry, WatchState, WorkspaceSnapshot, project_color_index, relative_time_label,
 };
 
