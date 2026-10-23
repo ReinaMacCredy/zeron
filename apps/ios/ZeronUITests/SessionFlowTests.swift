@@ -71,7 +71,8 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "draft-focused")
         app.navigationBars.buttons.element(boundBy: 0).tap()
         let row = app.cells["session-chat-deploy"]
-        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.cells["section-pinned"].waitForExistence(timeout: 5))
+        scrollTo(row, in: app.collectionViews.firstMatch)
         row.tap()
         XCTAssertTrue(input.waitForExistence(timeout: 10))
         XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 3))
@@ -320,9 +321,9 @@ final class SessionFlowTests: XCTestCase {
     func testArchiveWithUndo() {
         let app = launch()
         let cell = app.cells["session-chat-deploy"]
-        XCTAssertTrue(cell.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.cells["section-pinned"].waitForExistence(timeout: 10))
         // Recent sits below the inline sections; bring the row clear of the accessory.
-        app.collectionViews.firstMatch.swipeUp()
+        scrollTo(cell, in: app.collectionViews.firstMatch)
         cell.swipeLeft()
         app.buttons["Archive"].tap()
         let undo = app.buttons["toast-action"]
@@ -360,7 +361,7 @@ final class SessionFlowTests: XCTestCase {
         let project = app.buttons["composer-chip-project"]
         XCTAssertTrue(project.waitForExistence(timeout: 10))
         project.tap()
-        let zeron = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'zeron'"))
+        let zeron = app.buttons.matching(NSPredicate(format: "label == 'zeron' OR label BEGINSWITH 'zeron,'"))
         XCTAssertTrue(zeron.firstMatch.waitForExistence(timeout: 5))
         XCTAssertEqual(zeron.count, 1, "one entry for both clones")
         snapshot(app, "project-menu")
