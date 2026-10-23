@@ -278,6 +278,15 @@ async fn run_in(
             targets(&live)
         ));
     }
+    if tool.is_some() && action == "record" && own_port == Some(app.ipc_port) {
+        return Err(format!(
+            "{TOOL} does not record {} (pid {}): it serves this chat's engine on port {}, so a recording would capture what the user types here. Ask the user to run `zeron ui record` themselves, or pass a Zeron Dev bundle as `target`.\n{}",
+            app.label,
+            app.pid,
+            app.ipc_port,
+            targets(&live)
+        ));
+    }
     if action == "quit" {
         return launch::quit(dir, app).await;
     }
@@ -855,6 +864,19 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.starts_with("`quit` needs a `target`"), "{error}");
+        let record = json!({ "action": "record", "do": "start" });
+        let mut aimed_record = record.clone();
+        aimed_record["target"] = json!("Zeron Dev 7");
+        for request in [&record, &aimed_record] {
+            let error = run_in(dir.path(), request, Some(27654), Some(Tool::Observe))
+                .await
+                .unwrap_err();
+            assert!(
+                error.starts_with("ui_driver does not record Zeron Dev 7")
+                    && error.contains("`zeron ui record`"),
+                "{error}"
+            );
+        }
         let other_chat = run_in(dir.path(), &aimed, Some(49880), Some(Tool::Drive)).await;
         assert_eq!(other_chat, Ok(json!("drawn")));
         let state = json!({ "action": "state" });
