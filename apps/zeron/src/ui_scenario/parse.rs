@@ -349,6 +349,14 @@ mod tests {
                 "journal-replay.json",
                 include_str!("../../../../scripts/scenarios/journal-replay.json"),
             ),
+            (
+                "recorded/settings-compact-mode.json",
+                include_str!("recorded/settings-compact-mode.json"),
+            ),
+            (
+                "recorded/composer-typing.json",
+                include_str!("recorded/composer-typing.json"),
+            ),
         ] {
             let value: Value = serde_json::from_str(raw).unwrap_or_else(|e| panic!("{file}: {e}"));
             let scenario = parse_scenario(&value).unwrap_or_else(|e| panic!("{file}: {e}"));

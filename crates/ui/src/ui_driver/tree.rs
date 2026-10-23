@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 const LEASE: Duration = Duration::from_secs(60);
 const REAP_EVERY: Duration = Duration::from_secs(5);
 const TEXT_CAP: usize = 80;
-const GENERIC: &[&str] = &["GenericContainer", "Unknown", "Group", "Section", "Pane"];
+pub(super) const GENERIC: &[&str] = &["GenericContainer", "Unknown", "Group", "Section", "Pane"];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
 pub(super) struct Bounds {
@@ -65,7 +65,7 @@ pub(super) struct Node {
 }
 
 impl Node {
-    fn named(&self) -> bool {
+    pub(super) fn named(&self) -> bool {
         [&self.label, &self.value, &self.description]
             .into_iter()
             .any(|text| text.as_deref().is_some_and(|text| !text.trim().is_empty()))
@@ -121,7 +121,7 @@ impl Refs {
     }
 }
 
-static REFS: LazyLock<Mutex<Refs>> = LazyLock::new(Mutex::default);
+pub(super) static REFS: LazyLock<Mutex<Refs>> = LazyLock::new(Mutex::default);
 
 #[derive(Deserialize)]
 struct Dump {
@@ -446,6 +446,10 @@ fn touch(window: u64, forced_after: Option<Option<u64>>, cx: &mut App) -> Option
         cx.spawn(async move |cx| reap(cx).await).detach();
     }
     prior
+}
+
+pub(super) fn hold(window: u64, cx: &mut App) {
+    touch(window, None, cx);
 }
 
 static LEASES: LazyLock<Mutex<HashMap<u64, Lease>>> = LazyLock::new(Mutex::default);
