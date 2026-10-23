@@ -4025,7 +4025,8 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     };
     assert_eq!(
         status(&steps[0].id),
-        (Some(first.clone()), zeron_proto::StepStatus::Done)
+        (Some(first.clone()), zeron_proto::StepStatus::Planned),
+        "a finished turn waits for the lead to mark the step"
     );
     assert_eq!(
         status(&steps[1].id),
@@ -4518,7 +4519,7 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
     );
     assert_eq!(
         status(&planned[0].id),
-        (Some(child.clone()), zeron_proto::StepStatus::Done),
+        (Some(child.clone()), zeron_proto::StepStatus::Planned),
         "a child bound after its turn ended reads that turn"
     );
     let err = refused(mutate(attach(&child)).await);

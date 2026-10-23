@@ -834,12 +834,12 @@ pub fn step_status(
     if let Some(delegation) = &thread.delegation {
         return match delegation.status {
             DelegationStatus::Running => StepStatus::Working,
-            DelegationStatus::Completed => StepStatus::Done,
+            DelegationStatus::Completed => StepStatus::Planned,
             _ => StepStatus::NeedsYou,
         };
     }
     match step.turn.as_ref().map(|turn| turn.ended) {
-        Some(StepTurnEnd::Completed) => StepStatus::Done,
+        Some(StepTurnEnd::Completed) => StepStatus::Planned,
         Some(StepTurnEnd::Failed) => StepStatus::Failed,
         Some(StepTurnEnd::Stopped) => StepStatus::NeedsYou,
         None => StepStatus::Working,
@@ -2638,7 +2638,7 @@ mod tests {
         );
         let cases = [
             (DelegationStatus::Running, StepStatus::Working),
-            (DelegationStatus::Completed, StepStatus::Done),
+            (DelegationStatus::Completed, StepStatus::Planned),
             (DelegationStatus::Failed, StepStatus::NeedsYou),
             (DelegationStatus::Cancelled, StepStatus::NeedsYou),
             (DelegationStatus::Interrupted, StepStatus::NeedsYou),
@@ -2662,7 +2662,7 @@ mod tests {
         let thread = child(None);
         let ended = [
             (None, StepStatus::Working),
-            (Some(StepTurnEnd::Completed), StepStatus::Done),
+            (Some(StepTurnEnd::Completed), StepStatus::Planned),
             (Some(StepTurnEnd::Failed), StepStatus::Failed),
             (Some(StepTurnEnd::Stopped), StepStatus::NeedsYou),
         ];

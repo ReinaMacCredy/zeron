@@ -11,7 +11,7 @@ use gpui::{
 use zeron_proto::supervisor::NeedsYouRow;
 use zeron_proto::{
     ChatIndicator, NeedsYou, PlanProgress, StepStatus, TaskPatch, TaskStatus, needs_you,
-    plan_progress, step_status, task_status,
+    plan_progress, step_status, task_status, view::task_thread_status,
 };
 
 use crate::composer::{ComposerInput, ComposerInputEvent, MentionTab};
@@ -1702,25 +1702,21 @@ pub(crate) fn step_chat<'a>(
 }
 
 pub(crate) fn rollup(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> Rollup {
-    let lead = linked_chat(&state.chats, task).map(|chat| {
-        let status = state.display_status_for(chat, now);
-        let backgrounded = matches!(status, ChatIndicator::Idle | ChatIndicator::Completed)
-            && state
-                .session_for(&chat.id)
-                .is_some_and(|session| !session.background_tasks.is_empty());
-        if backgrounded {
-            ChatIndicator::Working
-        } else {
-            status
-        }
-    });
+    let thread_status = |chat: &zeron_proto::Chat| {
+        task_thread_status(
+            state.display_status_for(chat, now),
+            state.session_for(&chat.id),
+            now,
+        )
+    };
+    let lead = linked_chat(&state.chats, task).map(thread_status);
     let steps: Vec<StepRow> = state
         .task_steps
         .iter()
         .filter(|step| step.task_id == task.id && !step.deleted)
         .map(|step| {
             let chat = step_chat(&state.chats, step);
-            let indicator = chat.map(|chat| state.display_status_for(chat, now));
+            let indicator = chat.map(thread_status);
             StepRow {
                 step: step.clone(),
                 status: step_status(step, chat, indicator),

@@ -80,6 +80,24 @@ pub fn display_status(chat: &Chat, session: Option<&Session>, now: DateTime<Utc>
     crate::chat_indicator(chat, live)
 }
 
+pub fn task_thread_status(
+    status: ChatIndicator,
+    session: Option<&Session>,
+    now: DateTime<Utc>,
+) -> ChatIndicator {
+    let backgrounded = matches!(status, ChatIndicator::Idle | ChatIndicator::Completed)
+        && session
+            .filter(|s| {
+                now.signed_duration_since(s.updated_at).num_milliseconds() <= SESSION_STALE_MS
+            })
+            .is_some_and(|s| !s.background_tasks.is_empty());
+    if backgrounded {
+        ChatIndicator::Working
+    } else {
+        status
+    }
+}
+
 /// Attention bucket for the sidebar's Active list — lower is more urgent.
 pub fn attention_rank(status: ChatIndicator) -> u8 {
     match status {

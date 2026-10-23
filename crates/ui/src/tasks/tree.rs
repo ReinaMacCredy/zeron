@@ -56,6 +56,11 @@ impl Status {
         match row.status {
             StepStatus::Done => (Self::Done, "Done"),
             StepStatus::Skipped => (Self::Stopped, "Skipped"),
+            StepStatus::Planned
+                if row.step.turn.is_some() || delegation == Some(DelegationStatus::Completed) =>
+            {
+                (Self::Queued, "Waiting on lead")
+            }
             StepStatus::Planned => (Self::Queued, "Planned"),
             StepStatus::Working => (Self::Running, "Working"),
             StepStatus::Failed => (Self::Failed, "Failed"),
