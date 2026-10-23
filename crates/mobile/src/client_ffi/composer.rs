@@ -743,6 +743,7 @@ pub struct ProviderInstanceRow {
     pub id: String,
     pub harness: String,
     pub label: String,
+    pub icon_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -920,6 +921,7 @@ impl CoreClient {
             .unwrap_or_default()
             .into_iter()
             .map(|instance| ProviderInstanceRow {
+                icon_path: instance.icon_path().map(str::to_owned),
                 id: instance.id,
                 harness: zeron_client::model_menu::harness_wire(instance.driver),
                 label: instance.label,

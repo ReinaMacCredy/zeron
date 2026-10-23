@@ -1419,7 +1419,7 @@ impl DemoHost {
         if let Some(bytes) = visuals::read(path) {
             return Ok(Arc::new(bytes));
         }
-        if let Some(bytes) = pages::read(path) {
+        if let Some(bytes) = pages::read(path).or_else(|| composer::icon(path)) {
             return Ok(Arc::new(bytes));
         }
         transcripts::DEMO_IMAGES

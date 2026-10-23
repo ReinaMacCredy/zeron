@@ -12,6 +12,7 @@ mod client_ffi;
 pub mod docs;
 pub mod layout;
 pub mod caption;
+pub mod icon;
 pub mod orb;
 pub mod terminal;
 pub mod wallpaper;

@@ -21,6 +21,9 @@ struct SessionRowVM: Hashable {
     var hasProject: Bool
     var colorIndex: Int
     var harness: String?
+    var marks: [String] = []
+    var deviceId = ""
+    var instanceId: String?
     var branch: String?
     var pr: PR?
     var prNumber: UInt64?
@@ -129,9 +132,9 @@ final class SessionCell: UICollectionViewListCell {
         }
     }
 
-    func configure(_ vm: SessionRowVM) {
+    func configure(_ vm: SessionRowVM, instanceIcon: UIImage? = nil) {
         self.vm = vm
-        harness.image = BrandMarks.image(for: vm.harness ?? "claude-code", side: Self.markSide)
+        harness.image = BrandMarks.stack(vm.marks.isEmpty ? [vm.harness ?? "claude-code"] : vm.marks, side: Self.markSide, tint: Palette.text.resolvedColor(with: traitCollection), current: instanceIcon)
         title.text = vm.title
         title.font = Fonts.ui(vm.unseen ? .sansSemibold : .sansMedium, TypeScale.size(16.5))
         title.textColor = vm.unseen || vm.status != .idle ? Palette.text : Palette.text.withAlphaComponent(0.88)
@@ -200,12 +203,13 @@ final class SessionCell: UICollectionViewListCell {
         // line box): titles are mostly lowercase, and centering on the
         // capitals left the mark riding high — the project tile's rule too.
         let mark = Self.markSide
+        let markWidth = max(mark, harness.image?.size.width ?? mark)
         let titleFont = title.font ?? Fonts.ui(.sansMedium, TypeScale.size(16.5))
         let baseline = titleY + (titleH - titleFont.lineHeight) / 2 + titleFont.ascender
-        harness.frame = CGRect(x: left, y: (baseline - titleFont.xHeight / 2 - mark / 2).rounded(), width: mark, height: mark)
+        harness.frame = CGRect(x: left, y: (baseline - titleFont.xHeight / 2 - mark / 2).rounded(), width: markWidth, height: mark)
         disclosure.frame = CGRect(x: left - 18, y: harness.frame.midY - 18, width: 18 + mark, height: 36)
         disclosure.contentHorizontalAlignment = .leading
-        let textX = left + mark + 14
+        let textX = left + markWidth + 14
         let tw = ceil(time.sizeThatFits(CGSize(width: 140, height: 40)).width)
         time.frame = CGRect(x: b.width - right - tw, y: titleY, width: tw, height: titleH)
         var trailing = time.frame.minX - 10

@@ -46,6 +46,15 @@ pub enum InstanceConfig {
     },
 }
 
+impl ProviderInstance {
+    pub fn icon_path(&self) -> Option<&str> {
+        match &self.config {
+            InstanceConfig::Acp { icon_path, .. } => icon_path.as_deref(),
+            InstanceConfig::Native { .. } => None,
+        }
+    }
+}
+
 impl Default for InstanceConfig {
     fn default() -> Self {
         InstanceConfig::Native {

@@ -8922,18 +8922,7 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
         .collect()
 }
 
-/// Every harness a chat has run on, oldest first, the current one last: the
-/// marks a sidebar row or tab stacks. Empty when the row has no config yet.
-pub(crate) fn chat_harness_marks(chat: &zeron_proto::Chat) -> Vec<HarnessId> {
-    let mut marks = chat.previous_harnesses.clone();
-    if let Some(current) = chat.config.as_ref().map(|c| c.harness) {
-        marks.retain(|h| *h != current);
-        marks.push(current);
-    }
-    marks
-}
-
-/// The marks of [`chat_harness_marks`] as one element: a single mark plain,
+/// The marks of [`zeron_proto::Chat::harness_marks`] as one element: a single mark plain,
 /// several overlapping left to right so the current harness sits on top,
 /// the way a group avatar stacks its members.
 pub(crate) fn harness_mark_stack(
@@ -8981,7 +8970,8 @@ pub(crate) fn chat_mark(chat: &zeron_proto::Chat, cx: &App) -> Option<InstanceIc
 }
 
 pub(crate) fn chat_marks(chat: &zeron_proto::Chat, cx: &App) -> Vec<InstanceIcon> {
-    let mut marks: Vec<InstanceIcon> = chat_harness_marks(chat)
+    let mut marks: Vec<InstanceIcon> = chat
+        .harness_marks()
         .into_iter()
         .map(InstanceIcon::harness)
         .collect();
@@ -12234,7 +12224,7 @@ mod tests {
             unsettled_at: None,
         };
         assert_eq!(
-            chat_harness_marks(&chat),
+            chat.harness_marks(),
             vec![HarnessId::ClaudeCode, HarnessId::Codex]
         );
         chat.config = Some(ChatConfig {
@@ -12250,7 +12240,7 @@ mod tests {
             disabled_tools: Vec::new(),
         });
         assert_eq!(
-            chat_harness_marks(&chat),
+            chat.harness_marks(),
             vec![HarnessId::Codex, HarnessId::ClaudeCode]
         );
     }

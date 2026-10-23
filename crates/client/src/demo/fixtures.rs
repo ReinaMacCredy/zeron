@@ -42,6 +42,8 @@ pub(crate) struct DemoChat {
     pub side_of: Option<&'static str>,
     /// (settled, how long ago) of a Settle / Unsettle.
     pub settle: Option<(bool, i64)>,
+    pub previous: &'static [HarnessId],
+    pub instance: Option<&'static str>,
 }
 
 /// Each host's `settle_after_days` (`GetSidebarSettings`); the rest keep the default.
@@ -76,9 +78,12 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         compacting: false,
         side_of: None,
         settle: None,
+        previous: &[],
+        instance: None,
     };
     vec![
         DemoChat {
+            previous: &[Codex],
             branch: Some("veil-fade"),
             pr: Some((90, Open, "Stream pull request status on every client")),
             status: Some(SessionStatus::Working),
@@ -589,6 +594,7 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         DemoChat {
             harness: Acp,
             model: "default",
+            instance: Some(super::composer::ACP_INSTANCE),
             last_ago_ms: 16 * HOUR,
             ..chat(
                 "chat-acp",
@@ -948,7 +954,7 @@ pub(crate) fn seed(
                     permission_mode: Default::default(),
                     instructions: String::new(),
                     profile_id: None,
-                    instance_id: None,
+                    instance_id: demo.instance.map(str::to_owned),
                     disabled_tools: Vec::new(),
                 },
             )),
@@ -963,7 +969,7 @@ pub(crate) fn seed(
             sidechat_source_chat_id: demo.side_of.map(str::to_owned),
             created_by_chat_id: demo.parent.map(str::to_owned),
             forked_from_chat_id: None,
-            previous_harnesses: Vec::new(),
+            previous_harnesses: demo.previous.to_vec(),
             delegation: demo
                 .parent
                 .zip(demo.delegated.clone())

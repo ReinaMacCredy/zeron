@@ -13838,6 +13838,7 @@ version = "0.2.114"
 dependencies = [
  "async-trait",
  "chrono",
+ "resvg",
  "serde",
  "serde_json",
  "similar",

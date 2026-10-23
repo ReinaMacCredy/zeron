@@ -483,6 +483,8 @@ pub struct SessionRow {
     /// Wire harness id (`claude-code`).
     pub harness: Option<String>,
     pub harness_label: Option<String>,
+    pub harness_marks: Vec<String>,
+    pub instance_id: Option<String>,
     pub model: Option<String>,
     pub model_label: Option<String>,
     /// Wire effort (`xhigh`).
@@ -537,6 +539,8 @@ impl From<&zc::SessionRow> for SessionRow {
             device_online: r.device_online,
             harness: r.harness.clone(),
             harness_label: r.harness_label.clone(),
+            harness_marks: r.harness_marks.clone(),
+            instance_id: r.instance_id.clone(),
             model: r.model.clone(),
             model_label: r.model_label.clone(),
             reasoning: r.reasoning.clone(),

@@ -339,6 +339,14 @@ pub(super) fn stop_background_task(
 
 const REVIEWER: &str = "ios-reviewer";
 const FAILING_INSTANCE: &str = "codex_work";
+pub(super) const ACP_INSTANCE: &str = "acp_gemini_cli";
+pub(super) const ACP_ICON: &str = "/demo/registry-icons/gemini.svg";
+
+pub(super) fn icon(path: &str) -> Option<Vec<u8>> {
+    (path == ACP_ICON).then(|| {
+        br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2c.6 5.4 4.6 9.4 10 10-5.4.6-9.4 4.6-10 10-.6-5.4-4.6-9.4-10-10 5.4-.6 9.4-4.6 10-10z"/></svg>"#.to_vec()
+    })
+}
 
 fn reviewer_tools() -> Vec<String> {
     vec!["WebFetch".into(), "NotebookEdit".into()]

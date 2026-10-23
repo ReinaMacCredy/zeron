@@ -78,6 +78,8 @@ pub struct SessionRow {
     pub device_online: bool,
     pub harness: Option<String>,
     pub harness_label: Option<String>,
+    pub harness_marks: Vec<String>,
+    pub instance_id: Option<String>,
     pub model: Option<String>,
     pub model_label: Option<String>,
     pub reasoning: Option<String>,
@@ -526,6 +528,8 @@ fn hash_row(row: &SessionRow) -> u64 {
     row.device_name.hash(&mut h);
     row.device_online.hash(&mut h);
     row.harness.hash(&mut h);
+    row.harness_marks.hash(&mut h);
+    row.instance_id.hash(&mut h);
     row.model.hash(&mut h);
     row.reasoning.hash(&mut h);
     row.branch.hash(&mut h);
@@ -637,6 +641,12 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         device_name: device.and_then(|d| device_display_name(d)),
         device_online: device_online(&chat.device_id, cx.presence, cx.self_device_id, now_ms),
         harness_label: harness.as_deref().map(catalog::harness_label),
+        harness_marks: chat
+            .harness_marks()
+            .into_iter()
+            .filter_map(|h| serde_json::to_value(h).ok()?.as_str().map(str::to_owned))
+            .collect(),
+        instance_id: chat.config.as_ref().and_then(|c| c.instance_id.clone()),
         model_label: match (harness.as_deref(), model.as_deref()) {
             (Some(h), Some(m)) => Some(catalog::model_label(h, m)),
             (None, Some(m)) => Some(m.to_owned()),
