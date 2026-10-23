@@ -116,6 +116,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             c.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 10, leading: 20, bottom: 10, trailing: 20)
             cell.contentConfiguration = c
             cell.accessories = [.disclosureIndicator()]
+            cell.backgroundConfiguration = .clear()
             cell.accessibilityIdentifier = "needs-you-prs"
         }
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { [weak self] cv, path, item in
