@@ -231,6 +231,7 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
 /// Messages waiting for the current turn to end, stacked above the composer.
 final class QueuePanel: UIView {
     var onAction: ((String, QueueAction) -> Void)?
+    var loadImage: ((String, UIImageView) -> Void)?
     private let card = Glass.surface(radius: 20)
     private let stack = UIStackView()
     private(set) var items: [SessionChrome.QueuedItem] = []
@@ -288,7 +289,10 @@ final class QueuePanel: UIView {
         thumb.contentMode = .scaleAspectFill
         thumb.clipsToBounds = true
         thumb.layer.cornerRadius = 6
-        thumb.isHidden = item.thumbnail == nil
+        thumb.backgroundColor = Palette.controlFill
+        let hasThumb = item.thumbnail != nil || item.image != nil
+        thumb.isHidden = !hasThumb
+        if item.thumbnail == nil, let image = item.image { loadImage?(image, thumb) }
         let label = FadingLabel()
         label.text = item.gate.map { "\($0) · \(item.text)" } ?? item.text
         label.font = Fonts.ui(.sans, 15)
@@ -304,8 +308,23 @@ final class QueuePanel: UIView {
         var sendConfig = UIButton.Configuration.plain()
         sendConfig.image = UIImage(systemName: "arrow.up.circle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .regular))
         sendConfig.baseForegroundColor = Palette.text
-        let send = UIButton(configuration: sendConfig, primaryAction: UIAction { [weak self] _ in self?.onAction?(item.id, .sendNow) })
-        send.accessibilityLabel = "Send"
+        let send = UIButton(configuration: sendConfig, primaryAction: UIAction { [weak self] _ in
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            self?.onAction?(item.id, .sendNow)
+        })
+        send.isEnabled = item.action != nil
+        send.accessibilityLabel = switch item.action {
+        case .steer?: "Steer"
+        case .sendNext?: "Send next"
+        case .sendNow?: "Send now"
+        case nil: "Send"
+        }
+        send.accessibilityHint = switch item.action {
+        case .steer?: "Keeps the current work running"
+        case .sendNext?: "Sends when the current turn ends; this agent cannot steer mid-turn"
+        case .sendNow?: "Stops the current turn to send the attachments"
+        case nil: nil
+        }
         var moreConfig = UIButton.Configuration.plain()
         moreConfig.image = UIImage(systemName: "ellipsis", withConfiguration: UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold))
         moreConfig.baseForegroundColor = Palette.secondary
@@ -338,11 +357,13 @@ final class QueuePanel: UIView {
             icon.centerYAnchor.constraint(equalTo: v.centerYAnchor),
             thumb.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
             thumb.centerYAnchor.constraint(equalTo: v.centerYAnchor),
-            thumb.widthAnchor.constraint(equalToConstant: item.thumbnail == nil ? 0 : 26),
+            thumb.widthAnchor.constraint(equalToConstant: hasThumb ? 26 : 0),
             thumb.heightAnchor.constraint(equalToConstant: 26),
-            text.leadingAnchor.constraint(equalTo: thumb.trailingAnchor, constant: item.thumbnail == nil ? 0 : 8),
+            text.leadingAnchor.constraint(equalTo: thumb.trailingAnchor, constant: hasThumb ? 8 : 0),
             text.centerYAnchor.constraint(equalTo: v.centerYAnchor),
-            text.trailingAnchor.constraint(lessThanOrEqualTo: send.leadingAnchor, constant: -4),
+            // Equal, not at-most: every horizontal priority on the text is
+            // low, so at-most let Auto Layout collapse it to zero width.
+            text.trailingAnchor.constraint(equalTo: send.leadingAnchor, constant: -4),
             send.trailingAnchor.constraint(equalTo: more.leadingAnchor),
             send.centerYAnchor.constraint(equalTo: v.centerYAnchor),
             more.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -4),

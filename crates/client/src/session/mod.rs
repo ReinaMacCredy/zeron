@@ -38,8 +38,8 @@ pub use background::BackgroundRoster;
 pub use review::{NextReviewer, ReviewChip, ReviewSnapshot, model_levels};
 pub use snapshot::{
     AppendHint, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest, LiveStatus,
-    LocalEcho, PendingKind, PendingSend, QueueGate, QueueItem, RoomState, SessionSnapshot,
-    SnapshotDelta,
+    LocalEcho, PendingKind, PendingSend, QueueGate, QueueItem, QueuePrimaryAction, RoomState,
+    SessionSnapshot, SnapshotDelta,
 };
 use transcript::{Dirty, Tracker};
 
@@ -595,6 +595,25 @@ impl SessionCore {
         let device = workspace.device(&host_id);
         let capabilities =
             client.host_capabilities(&host_id, row.as_ref().and_then(|r| r.harness.as_deref()));
+        let queue = st
+            .queue
+            .iter()
+            .map(|item| {
+                let mut queued = queue_item(
+                    item,
+                    &client.config.device_id,
+                    &st.queue_actions_pending,
+                    &capabilities,
+                );
+                queued.from_label = zeron_proto::transcript::queue_from_label(
+                    &self.chat_id,
+                    item.from_chat_id.as_deref(),
+                    &item.text,
+                    |id| client.workspace.chat(id).and_then(|chat| chat.title),
+                );
+                queued
+            })
+            .collect();
         let indicator = row.as_ref().map_or(ChatIndicator::Idle, |r| r.indicator);
         let host_indicator = row
             .as_ref()
@@ -646,21 +665,7 @@ impl SessionCore {
                         .last()
                         .is_some_and(|entry| zeron_doc::schema::turn_stopped(&entry.message)),
             },
-            queue: st
-                .queue
-                .iter()
-                .map(|item| {
-                    let mut queued =
-                        queue_item(item, &client.config.device_id, &st.queue_actions_pending);
-                    queued.from_label = zeron_proto::transcript::queue_from_label(
-                        &self.chat_id,
-                        item.from_chat_id.as_deref(),
-                        &item.text,
-                        |id| client.workspace.chat(id).and_then(|chat| chat.title),
-                    );
-                    queued
-                })
-                .collect(),
+            queue,
             pending_sends: st.pending.clone(),
             send_state: oldest_state(&st.pending),
             delivery_degraded: degraded,
@@ -855,7 +860,13 @@ fn oldest_state(pending: &[PendingSend]) -> Option<SendState> {
     })
 }
 
-fn queue_item(item: &QueuedMessage, device_id: &str, pending: &HashSet<String>) -> QueueItem {
+fn queue_item(
+    item: &QueuedMessage,
+    device_id: &str,
+    pending: &HashSet<String>,
+    caps: &HostCapabilities,
+) -> QueueItem {
+    let action_pending = pending.contains(&item.id);
     QueueItem {
         id: item.id.clone(),
         text: item.text.clone(),
@@ -882,8 +893,19 @@ fn queue_item(item: &QueuedMessage, device_id: &str, pending: &HashSet<String>) 
                 owner_device_id: owner_device_id.clone(),
             },
         }),
-        action_pending: pending.contains(&item.id),
+        action_pending,
         from_label: None,
+        primary_action: QueuePrimaryAction::resolve(
+            item.delivery_gate.is_some() || action_pending,
+            caps.queue_actions,
+            !item.attachments.is_empty(),
+            caps.mid_turn_steering == Some(true),
+        ),
+        image: item
+            .attachments
+            .iter()
+            .find(|path| zeron_proto::attachment_mentions::is_image_path(path))
+            .cloned(),
     }
 }
 
@@ -1752,18 +1774,28 @@ impl SessionHandle {
         self.queue_action(id, QueueAction::Steer).await
     }
 
-    /// A row's primary action, as the desktop resolves it: text never
+    /// A row's [`QueuePrimaryAction`], as the desktop resolves it: text never
     /// interrupts the turn (steer / send next); only attachments, which need
     /// a fresh request, send now.
     pub async fn deliver_queued_now(&self, id: &str) -> Result<bool> {
-        let has_attachments = lock(&self.core.state)
+        let action = self
+            .composer()
             .queue
             .iter()
-            .any(|q| q.id == id && !q.attachments.is_empty());
-        if has_attachments {
-            self.send_queued_now(id).await
-        } else {
-            self.steer_queued_now(id).await
+            .find(|q| q.id == id)
+            .map(|q| q.primary_action);
+        match action {
+            None => Ok(false),
+            Some(None) => {
+                let message = "This message can't be sent yet: it is being edited or sent, or its host needs an update.".to_owned();
+                self.core
+                    .update_state(|st| st.queue_error = Some(message.clone()));
+                Err(ClientError::Unsupported(message))
+            }
+            Some(Some(QueuePrimaryAction::SendNow)) => self.send_queued_now(id).await,
+            Some(Some(QueuePrimaryAction::Steer | QueuePrimaryAction::SendNext)) => {
+                self.steer_queued_now(id).await
+            }
         }
     }
 

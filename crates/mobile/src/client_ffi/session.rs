@@ -151,6 +151,27 @@ pub struct QueueItem {
     /// A Send-now / Remove is awaiting the host's acknowledgement.
     pub action_pending: bool,
     pub from_label: Option<String>,
+    /// What the row's send button does; `None` while it cannot deliver.
+    pub primary_action: Option<QueuePrimaryAction>,
+    /// The first image attachment, for the row's thumbnail.
+    pub image: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum QueuePrimaryAction {
+    Steer,
+    SendNext,
+    SendNow,
+}
+
+impl From<zc::QueuePrimaryAction> for QueuePrimaryAction {
+    fn from(a: zc::QueuePrimaryAction) -> Self {
+        match a {
+            zc::QueuePrimaryAction::Steer => Self::Steer,
+            zc::QueuePrimaryAction::SendNext => Self::SendNext,
+            zc::QueuePrimaryAction::SendNow => Self::SendNow,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -351,6 +372,8 @@ impl From<&zc::ComposerState> for ComposerState {
                     }),
                     action_pending: q.action_pending,
                     from_label: q.from_label.clone(),
+                    primary_action: q.primary_action.map(Into::into),
+                    image: q.image.clone(),
                 })
                 .collect(),
             pending_sends: c.pending_sends.iter().map(Into::into).collect(),

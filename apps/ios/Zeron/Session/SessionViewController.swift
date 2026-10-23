@@ -187,6 +187,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             guard let self else { return }
             if action == .edit { self.beginEdit(id) } else { self.source.queueAction(id, action) }
         }
+        queue.loadImage = { [weak self] ref, view in self?.source.loadImage(ref, into: view) }
         pill.onTap = { [weak self] in
             guard let self else { return }
             if self.editingQueueId != nil { self.endEdit(commit: nil) }
@@ -753,6 +754,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         }
         let old = shown
         shown = c
+        if let error = c.error, error != old.error {
+            Toast.show(error, in: view.window)
+            DispatchQueue.main.async { self.source.clearQueueError() }
+        }
         titleView.set(title: c.title, subtitle: c.subtitle)
         list.uploadProgress = c.uploadProgress
         composer.running = c.running

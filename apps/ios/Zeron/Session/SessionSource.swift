@@ -37,6 +37,10 @@ struct SessionChrome: Equatable {
         let thumbnail: UIImage?
         let gate: String?
         var from: String? = nil
+        /// What the row's arrow does; nil while it cannot deliver.
+        var action: QueuePrimaryAction? = nil
+        /// An image attachment's reference, loaded as the row's thumbnail.
+        var image: String? = nil
     }
 
     var title = ""
@@ -94,6 +98,8 @@ protocol SessionSource: AnyObject {
     func projectActions() async throws -> ProjectActions?
     func runProjectAction(_ id: String) async throws -> String
     func queueAction(_ id: String, _ action: QueueAction)
+    /// The queue error was shown; a repeat of it shows again.
+    func clearQueueError()
     func retryDelivery()
     /// Lease a queued message for editing; returns its text when acquired.
     func beginEdit(_ id: String) async -> String?
@@ -132,6 +138,7 @@ protocol SessionSource: AnyObject {
 }
 
 extension SessionSource {
+    func clearQueueError() {}
     func chipSheet(_ id: String) -> UIViewController? { nil }
     func invocationCatalog(skill: Bool) async -> InvocationCatalog? { nil }
     var compactBlocked: String? { nil }
@@ -199,7 +206,7 @@ final class FixtureSessionSource: SessionSource {
 
     func send(text: String, images: [StagedImage], mode: DeliveryMode) -> Bool {
         if chrome.running, mode == .queue {
-            update { $0.queue.append(.init(id: UUID().uuidString, text: text, thumbnail: images.first?.thumbnail, gate: nil)) }
+            update { $0.queue.append(.init(id: UUID().uuidString, text: text, thumbnail: images.first?.thumbnail, gate: nil, action: images.isEmpty ? .steer : .sendNow)) }
             return true
         }
         timer?.invalidate()
