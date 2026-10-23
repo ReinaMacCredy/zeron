@@ -1834,10 +1834,15 @@ impl TaskCenter {
             });
         let task_id = task.id.clone();
         let toggle_label = if done { "Reopen" } else { "Mark as done" };
+        let review = !done && plan.needs == Some(zeron_proto::NeedsYou::Review);
         let toggle = button(
             toggle_label.into(),
             "task-center-toggle-done",
-            widgets::ActionTone::Filled,
+            if review {
+                widgets::ActionTone::Solid
+            } else {
+                widgets::ActionTone::Filled
+            },
         )
         .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
             cx.emit(TaskCenterEvent::Update {

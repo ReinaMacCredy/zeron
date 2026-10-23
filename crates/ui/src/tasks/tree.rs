@@ -126,6 +126,9 @@ pub(crate) fn lead_status(
         Some(ChatIndicator::Errored) => (Status::Failed, "Failed"),
         _ if super::TaskCenter::lead_waits(task, plan).is_some() => (Status::Waiting, "Needs you"),
         _ if plan.count(StepStatus::Working) > 0 => (Status::Running, "Working"),
+        _ if plan.needs == Some(zeron_proto::NeedsYou::Review) => {
+            (Status::Waiting, "Ready to review")
+        }
         _ => (Status::Queued, "Idle"),
     }
 }

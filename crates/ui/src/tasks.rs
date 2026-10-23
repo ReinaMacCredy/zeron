@@ -10,8 +10,8 @@ use gpui::{
 };
 use zeron_proto::supervisor::NeedsYouRow;
 use zeron_proto::{
-    ChatIndicator, PlanProgress, StepStatus, TaskPatch, TaskStatus, plan_progress, step_status,
-    task_status,
+    ChatIndicator, NeedsYou, PlanProgress, StepStatus, TaskPatch, TaskStatus, needs_you,
+    plan_progress, step_status, task_status,
 };
 
 use crate::composer::{ComposerInput, ComposerInputEvent, MentionTab};
@@ -126,6 +126,7 @@ pub(crate) struct Rollup {
     pub lead: Option<ChatIndicator>,
     pub steps: Vec<StepRow>,
     pub status: TaskStatus,
+    pub needs: Option<NeedsYou>,
     pub progress: PlanProgress,
     pub questions: usize,
 }
@@ -162,11 +163,15 @@ impl Rollup {
         }
     }
 
-    pub fn label(&self, task: &zeron_proto::Task) -> (&'static str, TaskStatus) {
+    pub fn label(&self, task: &zeron_proto::Task) -> (String, TaskStatus) {
         match self.phase(task) {
-            PlanPhase::PlanReady => ("Plan ready", TaskStatus::NeedsYou),
-            PlanPhase::Planning => ("Planning", TaskStatus::Working),
-            PlanPhase::Status(status) => (logic::column_title(status), status),
+            PlanPhase::PlanReady => ("Plan ready".into(), TaskStatus::NeedsYou),
+            PlanPhase::Planning => ("Planning".into(), TaskStatus::Working),
+            PlanPhase::Status(status) => (
+                self.needs
+                    .map_or_else(|| logic::column_title(status).into(), NeedsYou::label),
+                status,
+            ),
         }
     }
 }
@@ -744,9 +749,6 @@ impl TasksPage {
             );
         }
         Self::step_counts(&row.plan, theme, fragments);
-        if row.task.send_error.is_some() {
-            fragments.push(Self::not_sent(theme));
-        }
     }
 
     fn meta(row: &Row, today: NaiveDate, theme: &Theme) -> Vec<AnyElement> {
@@ -1700,7 +1702,18 @@ pub(crate) fn step_chat<'a>(
 }
 
 pub(crate) fn rollup(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> Rollup {
-    let lead = linked_chat(&state.chats, task).map(|chat| state.display_status_for(chat, now));
+    let lead = linked_chat(&state.chats, task).map(|chat| {
+        let status = state.display_status_for(chat, now);
+        let backgrounded = matches!(status, ChatIndicator::Idle | ChatIndicator::Completed)
+            && state
+                .session_for(&chat.id)
+                .is_some_and(|session| !session.background_tasks.is_empty());
+        if backgrounded {
+            ChatIndicator::Working
+        } else {
+            status
+        }
+    });
     let steps: Vec<StepRow> = state
         .task_steps
         .iter()
@@ -1733,6 +1746,7 @@ pub(crate) fn rollup(state: &AppState, task: &zeron_proto::Task, now: DateTime<U
     Rollup {
         lead,
         status: task_status(task, lead, &statuses),
+        needs: needs_you(task, lead, &statuses),
         progress: plan_progress(&statuses),
         steps,
         questions,

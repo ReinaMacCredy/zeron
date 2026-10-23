@@ -929,32 +929,79 @@ pub enum TaskStatus {
     Done,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NeedsYou {
+    NotSent,
+    LeadAsks,
+    LeadErrored,
+    StepAsks(usize),
+    StepFailed(usize),
+    PlanReady,
+    Review,
+}
+
+impl NeedsYou {
+    pub fn label(self) -> String {
+        match self {
+            Self::NotSent => "Not sent".into(),
+            Self::LeadAsks => "Lead asks you".into(),
+            Self::LeadErrored => "Lead stopped on an error".into(),
+            Self::StepAsks(step) => format!("Step {step} asks you"),
+            Self::StepFailed(step) => format!("Step {step} failed"),
+            Self::PlanReady => "Plan ready".into(),
+            Self::Review => "Ready to review".into(),
+        }
+    }
+}
+
 /// A stopped linked thread waits on the person until they tick the task.
-pub fn task_status(task: &Task, linked: Option<ChatIndicator>, steps: &[StepStatus]) -> TaskStatus {
+pub fn needs_you(
+    task: &Task,
+    linked: Option<ChatIndicator>,
+    steps: &[StepStatus],
+) -> Option<NeedsYou> {
     if task.completed_at.is_some() {
-        return TaskStatus::Done;
+        return None;
     }
     let lead_working = linked == Some(ChatIndicator::Working);
-    if task.send_error.is_some()
-        || matches!(
-            linked,
-            Some(ChatIndicator::AwaitingInput | ChatIndicator::Errored)
-        )
-        || steps.contains(&StepStatus::NeedsYou)
-        || (steps.contains(&StepStatus::Failed) && !lead_working)
-        || (task.plan_pending && !steps.is_empty() && !lead_working)
-    {
-        return TaskStatus::NeedsYou;
+    let step = |status: StepStatus| steps.iter().position(|s| *s == status).map(|ix| ix + 1);
+    if task.send_error.is_some() {
+        return Some(NeedsYou::NotSent);
+    }
+    match linked {
+        Some(ChatIndicator::AwaitingInput) => return Some(NeedsYou::LeadAsks),
+        Some(ChatIndicator::Errored) => return Some(NeedsYou::LeadErrored),
+        _ => {}
+    }
+    if let Some(step) = step(StepStatus::NeedsYou) {
+        return Some(NeedsYou::StepAsks(step));
+    }
+    if !lead_working {
+        if let Some(step) = step(StepStatus::Failed) {
+            return Some(NeedsYou::StepFailed(step));
+        }
+        if task.plan_pending && !steps.is_empty() {
+            return Some(NeedsYou::PlanReady);
+        }
     }
     let planning = (task.mode == TaskMode::Orchestrated || task.plan_pending)
         && steps.is_empty()
         && linked.is_some();
     if lead_working || planning || steps.contains(&StepStatus::Working) {
-        return TaskStatus::Working;
+        return None;
     }
-    match linked {
-        Some(_) => TaskStatus::NeedsYou,
-        None => TaskStatus::ToDo,
+    linked.map(|_| NeedsYou::Review)
+}
+
+pub fn task_status(task: &Task, linked: Option<ChatIndicator>, steps: &[StepStatus]) -> TaskStatus {
+    if task.completed_at.is_some() {
+        TaskStatus::Done
+    } else if needs_you(task, linked, steps).is_some() {
+        TaskStatus::NeedsYou
+    } else if linked.is_some() || steps.contains(&StepStatus::Working) {
+        TaskStatus::Working
+    } else {
+        TaskStatus::ToDo
     }
 }
 
@@ -2477,6 +2524,20 @@ mod tests {
             TaskStatus::Working,
             "the lead is handling the failed step"
         );
+        assert_eq!(
+            needs_you(&task, lead, &[Done, Skipped]),
+            Some(super::NeedsYou::Review),
+            "a finished plan under an idle lead waits for review"
+        );
+        assert_eq!(
+            needs_you(&task, lead, &[Done, Failed]),
+            Some(super::NeedsYou::StepFailed(2))
+        );
+        assert_eq!(
+            needs_you(&task, Some(ChatIndicator::Working), &[Working, NeedsYou]),
+            Some(super::NeedsYou::StepAsks(2))
+        );
+        assert_eq!(needs_you(&task, lead, &[Done, Working]), None);
         task.plan_pending = true;
         assert_eq!(
             task_status(&task, Some(ChatIndicator::Working), &[Planned]),

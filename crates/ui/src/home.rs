@@ -759,12 +759,7 @@ fn mission_row_of(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>
         PlanPhase::PlanReady => "Needs you · plan review".to_owned(),
         _ if held => crate::supervisor::HELD_APPROVAL.to_owned(),
         PlanPhase::Planning => "Planning".to_owned(),
-        PlanPhase::Status(TaskStatus::NeedsYou) => plan
-            .steps
-            .iter()
-            .position(|row| matches!(row.status, StepStatus::NeedsYou | StepStatus::Failed))
-            .map(|index| format!("Needs you · step {}", index + 1))
-            .unwrap_or_else(|| word.to_owned()),
+        PlanPhase::Status(TaskStatus::NeedsYou) => word.clone(),
         _ => match current {
             Some(ix) => format!("Step {}/{} · {word}", ix + 1, plan.steps.len()),
             None => word.to_owned(),
@@ -2523,7 +2518,7 @@ mod tests {
             labels,
             [
                 ("review", "Needs you · plan review"),
-                ("stuck", "Needs you · step 2"),
+                ("stuck", "Step 2 failed"),
                 ("working", "Step 4/5 · Working"),
             ]
         );
