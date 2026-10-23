@@ -368,6 +368,13 @@ impl ClaudeHarness {
     fn build_command(&self, exe: &PathBuf, request: &RunRequest, hook: Option<&str>) -> Command {
         let mut cmd = Command::new(exe);
         crate::compose_child_path(&mut cmd, exe);
+        // The app can inherit these from the shell that launched it, and they override every chat's own pick.
+        for var in [
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+            "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+        ] {
+            cmd.env_remove(var);
+        }
         self.launch.apply(&mut cmd, Some("CLAUDE_CONFIG_DIR"));
         cmd.args(Self::launch_args(request, hook));
         cmd.args(&self.launch.args);
@@ -1878,6 +1885,11 @@ mod tests {
             let disabled_1m = std
                 .get_envs()
                 .any(|(k, v)| k == "CLAUDE_CODE_DISABLE_1M_CONTEXT" && v.is_some());
+            assert!(
+                std.get_envs()
+                    .any(|(k, v)| k == "CLAUDE_CODE_AUTO_COMPACT_WINDOW" && v.is_none()),
+                "an inherited window would override the chat's autoCompact pick"
+            );
             (model, disabled_1m)
         };
         assert_eq!(
