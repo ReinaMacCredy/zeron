@@ -75,7 +75,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
 
         let sessionReg = UICollectionView.CellRegistration<SessionCell, String> { [weak self] cell, path, id in
             guard let self, let vm = self.sessions[id] else { return }
-            cell.configure(vm)
+            cell.configure(vm, instanceIcon: InstanceIcons.shared.icon(deviceId: vm.deviceId, instanceId: vm.instanceId, client: self.app.client))
             cell.isCurrent = id == self.currentChatId
             cell.accessories = self.reorderable ? [.reorder(displayed: .whenEditing)] : []
             cell.onToggleChildren = { [weak self] in self?.toggleChildren(id) }
@@ -145,6 +145,14 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             }
         }
         token = app.observe { [weak self] in self?.reload(animated: true) }
+        NotificationCenter.default.addObserver(forName: InstanceIcons.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                var s = self.dataSource.snapshot()
+                s.reconfigureItems(s.itemIdentifiers)
+                self.dataSource.apply(s, animatingDifferences: false)
+            }
+        }
         reload(animated: false)
         // Text size changes: fixed row heights change with the category.
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (self: SessionListController, _) in

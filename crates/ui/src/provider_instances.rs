@@ -4,7 +4,7 @@ use gpui::{App, AsyncApp, Context, Task, WeakEntity};
 use serde_json::{Value, json};
 use zeron_proto::{
     AcpAuthMethod, AcpPreparedAgent, AcpRegistryAgent, AgentLoginPoll, AgentLoginStatus, Chat,
-    HarnessId, InstanceConfig, ProviderInstance, ProviderInstancesSnapshot,
+    HarnessId, ProviderInstance, ProviderInstancesSnapshot,
 };
 use zeron_rpc::methods;
 
@@ -270,14 +270,10 @@ pub enum InstanceIcon {
 
 impl InstanceIcon {
     pub fn of(instance: &ProviderInstance) -> Self {
-        if let InstanceConfig::Acp {
-            icon_path: Some(path),
-            ..
-        } = &instance.config
-        {
-            return InstanceIcon::File(path.clone().into());
+        match instance.icon_path() {
+            Some(path) => InstanceIcon::File(path.to_owned().into()),
+            None => Self::harness(instance.driver),
         }
-        Self::harness(instance.driver)
     }
 
     pub fn harness(harness: HarnessId) -> Self {

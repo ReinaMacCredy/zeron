@@ -2,13 +2,16 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use zeron_doc::WorkspaceState;
+use zeron_doc::tree::{self, IndexRows, TreeNode, TreeSource};
+use zeron_doc::{SessionMessageEntry, WorkspaceState};
 use zeron_proto::mission::{self, ApprovalState, PlanPhase, Rollup};
 use zeron_proto::supervisor::{
     InputAsker, ItemWhy, NeedsYouInput, NeedsYouRow, Raiser, SendDest, SupervisorSnapshot,
     SupervisorState, SupervisorWake,
 };
-use zeron_proto::{Chat, ChatIndicator, HarnessId, StepStatus, Task, TaskStatus, TaskStep};
+use zeron_proto::{
+    Chat, ChatIndicator, HarnessId, Session, SessionStats, StepStatus, Task, TaskStatus, TaskStep,
+};
 
 use super::view::{DeriveContext, DeviceView, ProjectRef, SessionRow, project_color_index};
 use crate::session::InputRequest;
@@ -37,6 +40,7 @@ pub struct TaskRow {
     pub host: Option<HostRef>,
     pub progress_done: u32,
     pub progress_total: u32,
+    pub step_bar: Vec<StepStatus>,
     pub mission_label: Option<String>,
     pub current: Option<String>,
     pub questions: u32,
@@ -53,6 +57,7 @@ pub struct TasksPage {
     pub working: Vec<TaskRow>,
     pub to_do: Vec<TaskRow>,
     pub done: Vec<TaskRow>,
+    pub board: Vec<(TaskStatus, Vec<TaskRow>)>,
     pub needs_you_count: u32,
 }
 
@@ -254,10 +259,15 @@ struct Ctx<'a> {
     devices: &'a [DeviceView],
     supervisors: &'a BTreeMap<String, SupervisorSnapshot>,
     item_sends: &'a HashMap<String, ItemSend>,
+    transcripts: &'a HashMap<String, Vec<Arc<SessionMessageEntry>>>,
     now: DateTime<Utc>,
 }
 
 impl Ctx<'_> {
+    fn session(&self, chat_id: &str) -> Option<&Session> {
+        self.state.sessions.iter().find(|s| s.chat_id == chat_id)
+    }
+
     fn indicator(&self, chat: &Chat) -> ChatIndicator {
         self.rows
             .get(&chat.id)
@@ -335,6 +345,7 @@ impl Ctx<'_> {
             host: self.task_device(task).map(|device| self.host(&device)),
             progress_done: plan.progress.done as u32,
             progress_total: plan.progress.total as u32,
+            step_bar: plan.step_bar(),
             mission_label: mission_row.as_ref().map(|row| row.label.clone()),
             current: mission_row.and_then(|row| row.current),
             questions: plan.questions as u32,
@@ -373,12 +384,70 @@ impl Ctx<'_> {
     }
 }
 
+impl TreeSource for Ctx<'_> {
+    type Brand = String;
+
+    fn chats(&self) -> &[Chat] {
+        &self.state.chats
+    }
+
+    fn tasks(&self) -> &[Task] {
+        &self.state.tasks
+    }
+
+    fn steps(&self) -> &[TaskStep] {
+        self.steps
+    }
+
+    fn now(&self) -> DateTime<Utc> {
+        self.now
+    }
+
+    fn indicator(&self, chat: &Chat) -> ChatIndicator {
+        Ctx::indicator(self, chat)
+    }
+
+    fn running_subagents(&self, chat_id: &str) -> usize {
+        zeron_proto::view::running_subagents(self.session(chat_id), self.now) as usize
+    }
+
+    fn started_at(&self, chat_id: &str) -> Option<DateTime<Utc>> {
+        self.session(chat_id).and_then(|session| session.started_at)
+    }
+
+    fn hidden(&self, _: &str) -> bool {
+        false
+    }
+
+    fn brand(&self, harness: Option<HarnessId>, model: Option<&str>) -> String {
+        harness_brand(harness, model).unwrap_or_default()
+    }
+
+    fn rollup(&self, task: &Task) -> Rollup<String> {
+        Ctx::rollup(self, task)
+    }
+
+    fn transcript(&self, chat_id: &str) -> Box<dyn Iterator<Item = &SessionMessageEntry> + '_> {
+        Box::new(
+            self.transcripts
+                .get(chat_id)
+                .into_iter()
+                .flatten()
+                .map(|entry| entry.as_ref()),
+        )
+    }
+}
+
 fn brand(chat: &Chat) -> Option<String> {
     let config = chat.config.as_ref();
-    let harness = HarnessId::brand_of(
+    harness_brand(
         config.map(|c| c.harness),
         config.and_then(|c| c.model.as_deref()),
-    )?;
+    )
+}
+
+fn harness_brand(harness: Option<HarnessId>, model: Option<&str>) -> Option<String> {
+    let harness = HarnessId::brand_of(harness, model)?;
     serde_json::to_value(harness)
         .ok()?
         .as_str()
@@ -408,6 +477,7 @@ pub(crate) fn derive(
         devices,
         supervisors: cx.supervisors,
         item_sends: cx.item_sends,
+        transcripts: &HashMap::new(),
         now: cx.now,
     };
     (
@@ -426,10 +496,14 @@ fn tasks_page(ctx: &Ctx<'_>) -> TasksPage {
     missions.sort_by_key(|row| row.status != TaskStatus::NeedsYou);
     page.missions = missions;
     let (open, done) = mission::split_tasks(&ctx.state.tasks);
+    page.board = mission::COLUMNS.map(|column| (column, Vec::new())).to_vec();
     for task in open {
         let row = ctx.task_row(task);
         if row.status == TaskStatus::NeedsYou {
             page.needs_you_count += 1;
+        }
+        if let Some((_, rows)) = page.board.iter_mut().find(|(c, _)| *c == row.status) {
+            rows.push(row.clone());
         }
         if task.has_plan() {
             continue;
@@ -441,8 +515,11 @@ fn tasks_page(ctx: &Ctx<'_>) -> TasksPage {
             TaskStatus::Done => page.done.push(row),
         }
     }
-    page.done
-        .extend(done.into_iter().map(|task| ctx.task_row(task)));
+    let done: Vec<TaskRow> = done.into_iter().map(|task| ctx.task_row(task)).collect();
+    if let Some((_, rows)) = page.board.last_mut() {
+        rows.extend(done.iter().cloned());
+    }
+    page.done.extend(done);
     page
 }
 
@@ -696,6 +773,7 @@ pub(crate) fn detail(
         devices: &snapshot.devices,
         supervisors,
         item_sends: &HashMap::new(),
+        transcripts: &HashMap::new(),
         now: Utc::now(),
     };
     let plan = ctx.rollup(task);
@@ -778,9 +856,67 @@ pub(crate) fn watch(
         devices: &snapshot.devices,
         supervisors,
         item_sends: &HashMap::new(),
+        transcripts: &HashMap::new(),
         now: Utc::now(),
     }
     .watch(chat_id)
+}
+
+#[derive(Debug, Clone)]
+pub struct OutlineRow {
+    pub node: TreeNode<String>,
+    pub tokens: Option<String>,
+    pub time: Option<String>,
+}
+
+pub(crate) fn trees(
+    state: &WorkspaceState,
+    steps: &[TaskStep],
+    snapshot: &super::WorkspaceSnapshot,
+    supervisors: &BTreeMap<String, SupervisorSnapshot>,
+) -> IndexRows {
+    zeron_doc::tree::tree_index(&Ctx {
+        state,
+        steps,
+        rows: &snapshot.sessions,
+        devices: &snapshot.devices,
+        supervisors,
+        item_sends: &HashMap::new(),
+        transcripts: &HashMap::new(),
+        now: Utc::now(),
+    })
+}
+
+pub(crate) fn outline(
+    state: &WorkspaceState,
+    steps: &[TaskStep],
+    snapshot: &super::WorkspaceSnapshot,
+    supervisors: &BTreeMap<String, SupervisorSnapshot>,
+    stats: &HashMap<String, SessionStats>,
+    transcripts: &HashMap<String, Vec<Arc<SessionMessageEntry>>>,
+    root_chat_id: &str,
+) -> Vec<OutlineRow> {
+    let ctx = Ctx {
+        state,
+        steps,
+        rows: &snapshot.sessions,
+        devices: &snapshot.devices,
+        supervisors,
+        item_sends: &HashMap::new(),
+        transcripts,
+        now: Utc::now(),
+    };
+    zeron_doc::tree::tree_rows(&ctx, root_chat_id, true)
+        .into_iter()
+        .map(|node| {
+            let stats = node.chat_id.as_deref().and_then(|id| stats.get(id));
+            OutlineRow {
+                tokens: tree::tokens_of(stats).map(tree::tokens_text),
+                time: tree::thread_time(node.status, node.since, stats),
+                node,
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn strip(
@@ -797,6 +933,7 @@ pub(crate) fn strip(
         devices: &snapshot.devices,
         supervisors,
         item_sends: &HashMap::new(),
+        transcripts: &HashMap::new(),
         now: Utc::now(),
     };
     let thread = mission::mission_thread(&state.tasks, steps, chat_id, |task| ctx.rollup(task))?;
@@ -833,6 +970,7 @@ pub(crate) fn brief(
         devices: &snapshot.devices,
         supervisors,
         item_sends: &HashMap::new(),
+        transcripts: &HashMap::new(),
         now: Utc::now(),
     };
     let plan = ctx.rollup(task);

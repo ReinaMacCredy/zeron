@@ -143,20 +143,11 @@ pub fn fallback_harnesses() -> Vec<HarnessInfo> {
 
 /// Display name for any harness id the fleet can produce.
 pub fn harness_label(id: &str) -> String {
-    match id {
-        "claude-code" => "Claude Code",
-        "codex" => "Codex",
-        "devin" => "Devin",
-        "grok" => "Grok",
-        "hermes" => "Hermes",
-        "pi" => "Pi",
-        "cursor" => "Cursor",
-        "opencode" => "OpenCode",
-        "antigravity" => "Antigravity",
-        "mock" => "Mock",
-        other => return other.to_owned(),
-    }
-    .to_owned()
+    serde_json::from_value::<zeron_proto::HarnessId>(serde_json::Value::String(id.to_owned()))
+        .map_or_else(
+            |_| id.to_owned(),
+            |harness| harness.display_name().to_owned(),
+        )
 }
 
 /// Curated static models for a harness (first row = default).

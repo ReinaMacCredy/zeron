@@ -384,6 +384,27 @@ pub enum CompactionWait {
 }
 
 impl CompactionWait {
+    pub fn of(
+        compacting: Option<Option<(u64, bool)>>,
+        classifying: Option<&crate::Classifying>,
+        plan: Option<crate::CompactPlan>,
+        idle: bool,
+    ) -> Option<Self> {
+        if let Some(boundary) = compacting {
+            return Some(Self::Compacting(boundary));
+        }
+        let agent = plan == Some(crate::CompactPlan::Agent);
+        if let Some(run) = classifying {
+            return Some(Self::Classifying {
+                harness: run.harness,
+                model: run.model.clone(),
+                agent_note: agent,
+            });
+        }
+        // The agent's compaction runs after its turn settles, with the chat idle.
+        (agent && idle).then_some(Self::Queued)
+    }
+
     pub fn words(&self) -> (String, Option<&'static str>) {
         match self {
             Self::Queued => (

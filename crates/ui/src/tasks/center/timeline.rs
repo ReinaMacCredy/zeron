@@ -3,7 +3,7 @@ use zeron_proto::{TodayRunStatus, TodayRuns, TodayRunsRequest};
 
 use super::*;
 use crate::tasks::thread_tree::{NodeKind, TreeNode};
-use crate::tasks::tree::Status;
+use crate::tasks::tree::{Status, StatusTone};
 
 const AXIS: f32 = 30.0;
 const BAR: f32 = 8.0;

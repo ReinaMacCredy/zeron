@@ -52,8 +52,11 @@ final class NewTaskViewController: UIViewController {
     private var hostId: String?
     private var images: [StagedImage] = []
 
-    init(app: AppModel, opened: @escaping (String, Bool) -> Void) {
+    private let planFirst: Bool
+
+    init(app: AppModel, planFirst: Bool = false, opened: @escaping (String, Bool) -> Void) {
         self.app = app
+        self.planFirst = planFirst
         self.opened = opened
         super.init(nibName: nil, bundle: nil)
         title = "New task"
@@ -92,6 +95,7 @@ final class NewTaskViewController: UIViewController {
         }, for: .primaryActionTriggered)
         mission.onTintColor = Palette.accent
         mission.accessibilityIdentifier = "new-task-mission"
+        mission.isOn = planFirst
         mission.addAction(UIAction { [weak self] _ in self?.sync() }, for: .valueChanged)
         approve.isOn = true
         approve.onTintColor = Palette.accent

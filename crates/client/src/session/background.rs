@@ -48,6 +48,7 @@ impl SessionCore {
     fn set_session(&self, session: Option<Session>) {
         if lock(&self.state).session != session {
             self.update_state(|st| st.session = session);
+            self.schedule_refresh();
         }
     }
 

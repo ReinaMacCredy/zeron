@@ -25,6 +25,14 @@ pub struct Rollup<B> {
 }
 
 impl<B> Rollup<B> {
+    pub fn step_bar(&self) -> Vec<StepStatus> {
+        self.steps
+            .iter()
+            .map(|row| row.status)
+            .filter(|status| *status != StepStatus::Skipped)
+            .collect()
+    }
+
     pub fn count(&self, status: StepStatus) -> usize {
         self.steps.iter().filter(|row| row.status == status).count()
     }
@@ -83,6 +91,24 @@ pub enum PlanPhase {
     Planning,
     Status(TaskStatus),
 }
+
+pub const COLUMNS: [TaskStatus; 4] = [
+    TaskStatus::ToDo,
+    TaskStatus::Working,
+    TaskStatus::NeedsYou,
+    TaskStatus::Done,
+];
+
+/// Only Done is a drop target that writes; the other columns follow the linked chat.
+pub fn drop_completes(from: TaskStatus, to: TaskStatus) -> Option<bool> {
+    match (from, to) {
+        (TaskStatus::Done, TaskStatus::ToDo) => Some(false),
+        (from, TaskStatus::Done) if from != TaskStatus::Done => Some(true),
+        _ => None,
+    }
+}
+
+pub const TASKS_VIEWS: [&str; 2] = ["List", "Kanban"];
 
 pub fn column_title(status: TaskStatus) -> &'static str {
     match status {
@@ -356,6 +382,41 @@ pub const CHAT_MISSION_DETAIL: &str =
 pub const CHAT_MISSION_LEAD: &str = "This chat leads";
 pub const CHAT_MISSION_NEW: &str = "New mission reads this chat";
 
+pub struct IntroPage {
+    pub title: &'static str,
+    pub body: &'static str,
+}
+
+pub const INTRO_PAGES: [IntroPage; 4] = [
+    IntroPage {
+        title: "Start with a goal",
+        body: "Press Shift+Tab in the composer, or turn on Plan first on a task\u{2019}s card, and describe what you want done. Add up to five chats for the lead to read before it plans.",
+    },
+    IntroPage {
+        title: "Approve the plan",
+        body: "A lead agent turns your goal into steps you can edit, reorder and add images to. By default nothing runs until you click Approve and run.",
+    },
+    IntroPage {
+        title: "Watch every step",
+        body: "Each step runs on its own thread, side by side when steps don\u{2019}t depend on each other. The tree on the lead\u{2019}s thread follows them live, and the mission page adds each step\u{2019}s token count.",
+    },
+    IntroPage {
+        title: "A lead and a Supervisor watch",
+        body: "The lead reviews each step\u{2019}s work when it finishes and sends it back if something is missing. The Supervisor gathers what needs you into one sheet per mission, and one Send answers it all.",
+    },
+];
+
+pub const INTRO_START_TOUCH: &str = "Tap Start mission in the composer, or Plan first on a task\u{2019}s sheet, and describe what you want done. Add up to five chats for the lead to read before it plans.";
+pub const INTRO_NEXT: &str = "Next";
+pub const INTRO_DISMISS: &str = "Not now";
+pub const INTRO_TRY: &str = "Try Mission Control";
+
+pub fn intro_due(tasks: &[Task]) -> bool {
+    !tasks
+        .iter()
+        .any(|task| task.mode == crate::TaskMode::Orchestrated)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MissionReads {
     pub context: Vec<String>,
@@ -561,6 +622,22 @@ impl<'a, B, F: Fn(&Task) -> Rollup<B>> Names<'a, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_done_and_back_to_to_do_are_writing_drops() {
+        use TaskStatus::*;
+        for from in [ToDo, Working, NeedsYou] {
+            assert_eq!(drop_completes(from, Done), Some(true), "{from:?}");
+            assert_eq!(drop_completes(from, ToDo), None, "{from:?}");
+        }
+        assert_eq!(drop_completes(Done, ToDo), Some(false));
+        assert_eq!(drop_completes(Done, Done), None);
+        for to in [Working, NeedsYou] {
+            for from in COLUMNS {
+                assert_eq!(drop_completes(from, to), None, "{from:?} -> {to:?}");
+            }
+        }
+    }
 
     #[test]
     fn a_mission_names_the_file_it_cannot_take_before_the_image_cap() {

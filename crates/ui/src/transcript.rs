@@ -9897,23 +9897,15 @@ impl Transcript {
             return None;
         }
         let state = self.state.read(cx);
-        if state.chat_compacting(chat_id) {
-            return Some(CompactionWait::Compacting(
-                zeron_doc::schema::boundary_compaction(&state.transcript),
-            ));
-        }
-        let session = state.session_for(chat_id)?;
-        let agent = session.compact_plan == Some(zeron_proto::CompactPlan::Agent);
-        if let Some(run) = &session.classifying {
-            return Some(CompactionWait::Classifying {
-                harness: run.harness,
-                model: run.model.clone(),
-                agent_note: agent,
-            });
-        }
-        // The agent's compaction runs after its turn settles, with the chat idle.
-        (agent && state.indicator_for(chat_id, now) == crate::state::Indicator::None)
-            .then_some(CompactionWait::Queued)
+        let session = state.session_for(chat_id);
+        CompactionWait::of(
+            state
+                .chat_compacting(chat_id)
+                .then(|| zeron_doc::schema::boundary_compaction(&state.transcript)),
+            session.and_then(|session| session.classifying.as_ref()),
+            session.and_then(|session| session.compact_plan),
+            state.indicator_for(chat_id, now) == crate::state::Indicator::None,
+        )
     }
 
     /// Drawn where the classifier row or compaction note lands, so the result replaces it in place.

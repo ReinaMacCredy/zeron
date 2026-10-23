@@ -762,6 +762,7 @@ pub struct ProviderInstanceRow {
     pub id: String,
     pub harness: String,
     pub label: String,
+    pub icon_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -847,6 +848,43 @@ pub fn mission_labels() -> MissionLabels {
         open_mission_page: m::OPEN_MISSION_PAGE.into(),
         plan_first: m::PLAN_FIRST.into(),
         review_plan: m::REVIEW_PLAN.into(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MissionIntroPage {
+    pub title: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MissionIntro {
+    pub pages: Vec<MissionIntroPage>,
+    pub next: String,
+    pub dismiss: String,
+    pub try_it: String,
+}
+
+#[uniffi::export]
+pub fn mission_intro() -> MissionIntro {
+    use zeron_proto::mission as m;
+    MissionIntro {
+        pages: m::INTRO_PAGES
+            .iter()
+            .enumerate()
+            .map(|(ix, page)| MissionIntroPage {
+                title: page.title.into(),
+                body: if ix == 0 {
+                    m::INTRO_START_TOUCH
+                } else {
+                    page.body
+                }
+                .into(),
+            })
+            .collect(),
+        next: m::INTRO_NEXT.into(),
+        dismiss: m::INTRO_DISMISS.into(),
+        try_it: m::INTRO_TRY.into(),
     }
 }
 
@@ -939,6 +977,7 @@ impl CoreClient {
             .unwrap_or_default()
             .into_iter()
             .map(|instance| ProviderInstanceRow {
+                icon_path: instance.icon_path().map(str::to_owned),
                 id: instance.id,
                 harness: zeron_client::model_menu::harness_wire(instance.driver),
                 label: instance.label,

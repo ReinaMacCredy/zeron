@@ -1,6 +1,12 @@
 import UIKit
 
 enum TaskGlyph {
+    static func asset(_ name: String, side: CGFloat = 20) -> UIImage? {
+        guard let asset = UIImage(named: name) else { return nil }
+        let rect = CGRect(x: 0, y: 0, width: side, height: side)
+        return UIGraphicsImageRenderer(size: rect.size).image { _ in asset.draw(in: rect) }.withRenderingMode(.alwaysTemplate)
+    }
+
     static func kind(_ status: TaskStatus) -> StatusGlyph.Kind {
         switch status {
         case .toDo: .dot(StatusTone.idle)
@@ -58,11 +64,15 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
     private var dataSource: UICollectionViewDiffableDataSource<String, Row>!
     private var appToken: AnyObject?
     private let empty = UILabel()
+    private let board = KanbanBoardView()
+    private static let viewKey = "tasksView"
+    private var kanban: Bool { UserDefaults.standard.string(forKey: Self.viewKey) == "kanban" }
 
     enum Row: Hashable {
         case supervisor(title: String, subtitle: String)
         case mission(TaskRow)
         case task(TaskRow)
+        case tree(TreeIndexRow)
     }
 
     init(app: AppModel) {
@@ -80,6 +90,14 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
         let add = UIBarButtonItem(systemItem: .add, primaryAction: UIAction { [weak self] _ in self?.presentNewTask() })
         add.accessibilityIdentifier = "tasks-add"
         navigationItem.rightBarButtonItem = add
+        let views = UISegmentedControl(items: tasksViewLabels())
+        views.selectedSegmentIndex = kanban ? 1 : 0
+        views.accessibilityIdentifier = "tasks-view"
+        views.addAction(UIAction { [weak self, weak views] _ in
+            UserDefaults.standard.set(views?.selectedSegmentIndex == 1 ? "kanban" : "list", forKey: Self.viewKey)
+            self?.reload()
+        }, for: .valueChanged)
+        navigationItem.leftBarButtonItem = UIBarButtonItem(customView: views)
         var config = UICollectionLayoutListConfiguration(appearance: .insetGrouped)
         config.backgroundColor = .clear
         config.headerMode = .supplementary
@@ -89,6 +107,16 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
         collectionView.delegate = self
         collectionView.accessibilityIdentifier = "tasks-list"
         view.addSubview(collectionView)
+        board.frame = view.bounds
+        board.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        board.onOpen = { [weak self] row in row.mission ? self?.openMission(row.id) : self?.presentTask(row.id) }
+        board.onMove = { [weak self] row, completed in
+            guard let self, let client = self.app.client else { return }
+            Task { @MainActor in
+                do { try await client.setTaskCompleted(taskId: row.id, completed: completed) } catch { Toast.show(TasksErrors.message(error), in: self.view.window) }
+            }
+        }
+        view.addSubview(board)
 
         let cell = UICollectionView.CellRegistration<UICollectionViewListCell, Row> { cell, _, row in
             var c = UIListContentConfiguration.subtitleCell()
@@ -102,7 +130,7 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
             case let .supervisor(title, subtitle):
                 c.text = title
                 c.secondaryText = subtitle
-                c.image = UIImage(systemName: "eye")
+                c.image = TaskGlyph.asset("glyph-supervisor")
                 c.imageProperties.tintColor = Palette.accent
                 cell.accessibilityIdentifier = "tasks-supervisor"
             case let .mission(task):
@@ -116,6 +144,11 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
                 c.secondaryText = Self.taskLine(task)
                 accessories.append(TaskGlyph.leading(TaskGlyph.kind(task.status)))
                 cell.accessibilityIdentifier = "task-\(task.id)"
+            case let .tree(tree):
+                c.text = tree.title
+                c.secondaryText = [treeLabels().badge, tree.line, tree.agents].compactMap { $0 }.joined(separator: " · ")
+                accessories.append(TaskGlyph.leading(TreeOutlineViewController.kind(tree.status)))
+                cell.accessibilityIdentifier = "tree-\(tree.root)"
             }
             accessories.append(.disclosureIndicator())
             cell.accessories = accessories
@@ -210,13 +243,24 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
             snap.appendSections(["Missions"])
             snap.appendItems(page.missions.map(Row.mission))
         }
-        for (name, rows) in [("Needs you", page.needsYou), ("Working", page.working), ("To do", page.toDo), ("Done", page.done)] where !rows.isEmpty {
-            let section = "\(name) · \(rows.count)"
-            snap.appendSections([section])
-            snap.appendItems(rows.map(Row.task))
+        let trees = app.client?.taskTrees() ?? TaskTrees(running: [], doneToday: [])
+        let title = { (status: TaskStatus) in page.board.first { $0.status == status }?.title ?? "" }
+        for (status, rows) in [(TaskStatus.needsYou, page.needsYou), (.working, page.working), (.toDo, page.toDo), (.done, page.done)] {
+            var items = rows.map(Row.task)
+            if status == .working { items += trees.running.map(Row.tree) }
+            if status == .done { items += trees.doneToday.map(Row.tree) }
+            guard !items.isEmpty else { continue }
+            snap.appendSections(["\(title(status)) · \(items.count)"])
+            snap.appendItems(items)
         }
         empty.isHidden = snap.numberOfItems > 0
         dataSource.apply(snap, animatingDifferences: view.window != nil)
+        collectionView.isHidden = kanban
+        board.isHidden = !kanban
+        if kanban {
+            board.show(page.board)
+            empty.isHidden = true
+        }
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
@@ -229,6 +273,8 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
             openMission(task.id)
         case let .task(task):
             presentTask(task.id)
+        case let .tree(tree):
+            navigationController?.pushViewController(TreeOutlineViewController(app: app, rootChatId: tree.root, title: tree.title), animated: true)
         }
     }
 
@@ -253,8 +299,19 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
         present(nav, animated: true)
     }
 
-    func presentNewTask() {
-        let sheet = NewTaskViewController(app: app) { [weak self] taskId, mission in
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard presentedViewController == nil, MissionIntroViewController.due(app: app) else { return }
+        let intro = MissionIntroViewController { [weak self] in self?.presentNewTask(planFirst: true) }
+        if let sheet = intro.sheetPresentationController {
+            sheet.detents = [.medium()]
+            sheet.prefersGrabberVisible = true
+        }
+        present(intro, animated: true)
+    }
+
+    func presentNewTask(planFirst: Bool = false) {
+        let sheet = NewTaskViewController(app: app, planFirst: planFirst) { [weak self] taskId, mission in
             self?.dismiss(animated: true) {
                 mission ? self?.openMission(taskId) : self?.presentTask(taskId)
             }

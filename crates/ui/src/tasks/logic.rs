@@ -1,21 +1,7 @@
 use chrono::{Datelike, NaiveDate};
-use zeron_proto::{Task, TaskStatus, pin_order_key_between};
+use zeron_proto::{Task, pin_order_key_between};
 
-pub(crate) const COLUMNS: [TaskStatus; 4] = [
-    TaskStatus::ToDo,
-    TaskStatus::Working,
-    TaskStatus::NeedsYou,
-    TaskStatus::Done,
-];
-
-/// Only Done is a drop target that writes; the other columns follow the linked chat.
-pub(crate) fn drop_completes(from: TaskStatus, to: TaskStatus) -> Option<bool> {
-    match (from, to) {
-        (TaskStatus::Done, TaskStatus::ToDo) => Some(false),
-        (from, TaskStatus::Done) if from != TaskStatus::Done => Some(true),
-        _ => None,
-    }
-}
+pub(crate) use zeron_proto::mission::{COLUMNS, drop_completes};
 
 pub(crate) fn reorder_key(
     open: &[&Task],
@@ -142,22 +128,6 @@ mod tests {
         let (open, done) = split_tasks(&tasks);
         assert_eq!(ids(&open), ["a", "b", "c"]);
         assert_eq!(ids(&done), ["new-done", "old-done"]);
-    }
-
-    #[test]
-    fn only_done_and_back_to_to_do_are_writing_drops() {
-        use TaskStatus::*;
-        for from in [ToDo, Working, NeedsYou] {
-            assert_eq!(drop_completes(from, Done), Some(true), "{from:?}");
-            assert_eq!(drop_completes(from, ToDo), None, "{from:?}");
-        }
-        assert_eq!(drop_completes(Done, ToDo), Some(false));
-        assert_eq!(drop_completes(Done, Done), None);
-        for to in [Working, NeedsYou] {
-            for from in COLUMNS {
-                assert_eq!(drop_completes(from, to), None, "{from:?} -> {to:?}");
-            }
-        }
     }
 
     #[test]

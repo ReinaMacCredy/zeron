@@ -11536,7 +11536,7 @@ impl Shell {
         branch: Option<SharedString>,
         change_request: Option<zeron_proto::ChangeRequestSummary>,
         // Every harness the chat ran on, current last
-        // (`pickers::chat_harness_marks`); empty hides the mark.
+        // (`Chat::harness_marks`); empty hides the mark.
         harnesses: Vec<crate::provider_instances::InstanceIcon>,
         // Title of the chat whose agent opened this one (thread tools); the
         // row names it on its metadata line.

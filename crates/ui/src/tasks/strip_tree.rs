@@ -8,8 +8,8 @@ use gpui::{
 };
 
 use super::Selection;
-use super::thread_tree::{self, Group, NodeKind};
-use super::tree::{self, Dot, Link, NodeIn, StatsCache, Status, TreeMotion};
+use super::thread_tree::{self, NodeKind};
+use super::tree::{self, Dot, Link, NodeIn, StatsCache, Status, StatusTone, TreeMotion};
 use crate::icons::{self, icon};
 use crate::motion::{self, Tween};
 use crate::popover::{self, Popup};
@@ -237,10 +237,7 @@ impl StripTree {
         let mut at: Vec<usize> = Vec::with_capacity(nodes.len());
         for node in &nodes {
             if let Some(group) = node.group {
-                let label = match group {
-                    Group::Steps(n) => format!("Steps \u{a0}{n}"),
-                    Group::Agents(n) => format!("Outside the plan \u{a0}{n}"),
-                };
+                let label = group.label();
                 rows.push(Row {
                     id: format!("label-{}", node.id),
                     parent: None,

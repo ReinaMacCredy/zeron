@@ -15,6 +15,7 @@ use crate::visual::palette::{Palette, hex};
 const HEADER: f32 = 22.0;
 const HEADER_GAP: f32 = 6.0;
 const ICON: f32 = 13.0;
+const EXPAND: f32 = 22.0;
 
 pub(crate) struct HtmlSlot {
     pub id: String,
@@ -82,6 +83,7 @@ impl HtmlSlot {
 pub(crate) struct HtmlRow {
     pub slot: Arc<HtmlSlot>,
     pub title: PText,
+    pub name: String,
 }
 
 pub(crate) fn html_row(ctx: &mut Ctx, slot: Arc<HtmlSlot>, title: &str) -> HtmlRow {
@@ -90,6 +92,7 @@ pub(crate) fn html_row(ctx: &mut Ctx, slot: Arc<HtmlSlot>, title: &str) -> HtmlR
     let lh = ctx.typo.px(lh);
     HtmlRow {
         title: prepare_plain(ctx, title, style, lh, ColorRole::TextSecondary, WhiteSpace::Normal),
+        name: title.to_owned(),
         slot,
     }
 }
@@ -105,8 +108,32 @@ pub(crate) fn place_html(row: &HtmlRow, frame: f32, px: Px, x: f32, top: f32, cw
             None,
         );
         let tx = x + icon + px.v(6.0);
-        place_text_lines(&row.title, tx, top + (header - row.title.lh) / 2.0, (cw - (tx - x)).max(1.0), 1, px, out);
+        let expand = px.v(EXPAND);
+        place_text_lines(
+            &row.title,
+            tx,
+            top + (header - row.title.lh) / 2.0,
+            (cw - (tx - x) - expand - px.v(6.0)).max(1.0),
+            1,
+            px,
+            out,
+        );
         let slot = &row.slot;
+        out.widget(
+            WidgetKind::HtmlExpand {
+                id: slot.id.clone(),
+                device_id: slot.device_id.clone(),
+                path: slot.path.clone(),
+                title: row.name.clone(),
+            },
+            (
+                x + cw - expand,
+                top + (header - expand) / 2.0,
+                expand,
+                expand,
+            ),
+            None,
+        );
         out.widget(
             WidgetKind::HtmlRender {
                 id: slot.id.clone(),
@@ -212,6 +239,16 @@ pub fn html_render_document(html: String, dark: bool, text_scale: f32) -> String
     script.push_str("window.ipc={postMessage:function(m){window.webkit.messageHandlers.zeron.postMessage(m);}};");
     script.push_str(shared::SIZE_SCRIPT);
     shared::inject_bootstrap(&html, &theme_css(dark, text_scale), &script)
+}
+
+#[uniffi::export]
+pub fn html_render_source(html: String) -> String {
+    shared::source_text(&html)
+}
+
+#[uniffi::export]
+pub fn html_render_file_name(title: String) -> String {
+    shared::page_file_name(&title)
 }
 
 #[cfg(test)]

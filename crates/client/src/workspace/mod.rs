@@ -23,13 +23,13 @@ use zeron_proto::{
 
 pub use tasks::{
     ApprovalView, Brief, BriefMessage, ContextChat, EstimateLine, HostRef, ItemSend,
-    MissionFromChat, MissionOptions, MissionStrip, NeedsYouEntry, NeedsYouKind, PlanEstimate,
-    StepView, SupervisorHost, SupervisorPage, TaskDetail, TaskDraft, TaskRow, TasksPage, WakeEntry,
-    WatchState,
+    MissionFromChat, MissionOptions, MissionStrip, NeedsYouEntry, NeedsYouKind, OutlineRow,
+    PlanEstimate, StepView, SupervisorHost, SupervisorPage, TaskDetail, TaskDraft, TaskRow,
+    TasksPage, WakeEntry, WatchState,
 };
 pub(crate) use tasks::{
-    Ask, brief as task_brief, detail as task_detail, plan_estimate, strip as mission_strip,
-    watch as watch_state,
+    Ask, brief as task_brief, detail as task_detail, outline as task_outline, plan_estimate,
+    strip as mission_strip, trees as task_trees, watch as watch_state,
 };
 pub use today::{TodayPage, TodayPart, TodayPullRequests, TodaySlot, TodayTask, TodayUsage};
 pub(crate) use view::{DeriveContext, TodayRefresh, device_online};

@@ -378,6 +378,24 @@ enum SVGPathParser {
 enum BrandMarks {
     private static var cache: [String: UIImage] = [:]
 
+    static func stack(_ harnesses: [String], side: CGFloat, tint: UIColor, current: UIImage? = nil) -> UIImage? {
+        var marks: [String] = []
+        for h in harnesses where marks.last.map({ BrandMark.forHarness($0) != BrandMark.forHarness(h) }) ?? true {
+            marks.append(h)
+        }
+        let images = marks.enumerated().map { ix, h in ix == marks.count - 1 ? current ?? image(for: h, side: side) : image(for: h, side: side) }
+        guard images.count > 1 else { return images.first ?? nil }
+        let step = side * 0.65
+        let size = CGSize(width: side + step * CGFloat(images.count - 1), height: side)
+        return UIGraphicsImageRenderer(size: size).image { _ in
+            for (ix, mark) in images.enumerated() {
+                guard let mark else { continue }
+                let rect = CGRect(x: step * CGFloat(ix), y: 0, width: side, height: side)
+                if mark.renderingMode == .alwaysTemplate { mark.withTintColor(tint).draw(in: rect) } else { mark.draw(in: rect) }
+            }
+        }
+    }
+
     static func image(for harness: String?, side: CGFloat = 15) -> UIImage? {
         guard let harness, !harness.isEmpty else { return nil }
         let key = "\(harness)@\(side)"

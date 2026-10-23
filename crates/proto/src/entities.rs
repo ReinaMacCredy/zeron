@@ -507,6 +507,17 @@ impl Chat {
             .unwrap_or("New session")
             .to_owned()
     }
+
+    /// Every harness the chat has run on, oldest first, the current one last:
+    /// the marks a session row or tab stacks. Empty before it has a config.
+    pub fn harness_marks(&self) -> Vec<HarnessId> {
+        let mut marks = self.previous_harnesses.clone();
+        if let Some(current) = self.config.as_ref().map(|c| c.harness) {
+            marks.retain(|h| *h != current);
+            marks.push(current);
+        }
+        marks
+    }
 }
 
 impl Chat {

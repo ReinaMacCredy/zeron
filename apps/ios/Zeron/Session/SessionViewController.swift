@@ -105,7 +105,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         missionStrip.configuration?.background.backgroundColor = Palette.elevated.withAlphaComponent(0.85)
         missionStrip.configuration?.background.strokeColor = Palette.hairline
         missionStrip.configuration?.background.strokeWidth = 1
-        missionStrip.configuration?.image = UIImage(systemName: "list.bullet.rectangle")
+        missionStrip.configuration?.image = TaskGlyph.asset("glyph-mission", side: 14)
         missionStrip.configuration?.imagePadding = 6
         missionStrip.configuration?.titleLineBreakMode = .byTruncatingTail
         missionStrip.configuration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 12)
@@ -936,7 +936,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         var items: [UIMenuElement] = []
         let strip = client.missionStrip(chatId: chatId)
         if let strip {
-            items.append(UIAction(title: missionLabels().openMissionPage, image: UIImage(systemName: "list.bullet.rectangle")) { [weak self] _ in self?.openMission() })
+            items.append(UIAction(title: missionLabels().openMissionPage, image: TaskGlyph.asset("glyph-mission")) { [weak self] _ in self?.openMission() })
             items.append(UIAction(title: "Brief", image: UIImage(systemName: "doc.plaintext")) { [weak self] _ in
                 guard let self else { return }
                 self.navigationController?.pushViewController(BriefViewController(app: self.app, taskId: strip.taskId, stepId: strip.stepId), animated: true)

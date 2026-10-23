@@ -1,7 +1,7 @@
 use super::*;
 use crate::motion::Fold;
 use crate::tasks::thread_tree::{NodeKind, TreeNode};
-use crate::tasks::tree::{self, Dot, Link, NodeIn, Status};
+use crate::tasks::tree::{self, Dot, Link, NodeIn, Status, StatusTone};
 
 pub(super) struct SpineMission<'a> {
     pub task: &'a zeron_proto::Task,
@@ -563,7 +563,7 @@ impl TaskCenter {
         let line = if planning {
             "The lead is planning".to_string()
         } else {
-            Self::lead_line(task, plan)
+            zeron_doc::tree::lead_line(task, plan)
         };
         let shimmer = self.shimmer(
             task.completed_at.is_none() && plan.lead == Some(ChatIndicator::Working),

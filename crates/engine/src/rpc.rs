@@ -6317,7 +6317,8 @@ impl RpcService for EngineRpc {
             }
             methods::READ_ATTACHMENT_CHUNK => {
                 let p: ReadAttachmentChunkParams = parse_params(params)?;
-                // Path jail: the uploads dir plus every workspace-known chat cwd.
+                // Path jail: the uploads dir, the ACP registry icons, and every
+                // workspace-known chat cwd.
                 let roots: Vec<std::path::PathBuf> = self
                     .workspace
                     .read_chats()
@@ -6325,6 +6326,11 @@ impl RpcService for EngineRpc {
                     .into_iter()
                     .filter_map(|chat| chat.cwd)
                     .map(std::path::PathBuf::from)
+                    .chain(
+                        self.provider_instances
+                            .as_ref()
+                            .map(|store| store.data_dir().join("registry-icons")),
+                    )
                     .collect();
                 let uploads = self.uploads.clone();
                 let chunk = tokio::task::spawn_blocking(move || {

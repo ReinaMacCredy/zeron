@@ -1062,7 +1062,7 @@ const THREAD_ICON_SIZE: f32 = 14.0;
 /// harness brand, or a plain chat glyph when the chat is not in this
 /// device's list (another device, archived, gone).
 pub(crate) fn thread_chip_icon(chat: Option<&zeron_proto::Chat>) -> (&'static str, Option<Hsla>) {
-    chat.and_then(|chat| crate::pickers::chat_harness_marks(chat).last().copied())
+    chat.and_then(|chat| chat.harness_marks().last().copied())
         .map(crate::pickers::harness_brand_icon)
         .unwrap_or((crate::icons::CHAT_ROUND_LINE, None))
 }

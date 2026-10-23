@@ -22,6 +22,17 @@ impl From<zeron_proto::TaskStatus> for TaskStatus {
     }
 }
 
+impl From<TaskStatus> for zeron_proto::TaskStatus {
+    fn from(s: TaskStatus) -> Self {
+        match s {
+            TaskStatus::ToDo => Self::ToDo,
+            TaskStatus::Working => Self::Working,
+            TaskStatus::NeedsYou => Self::NeedsYou,
+            TaskStatus::Done => Self::Done,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum StepStatus {
     Planned,
@@ -42,6 +53,129 @@ impl From<zeron_proto::StepStatus> for StepStatus {
             zeron_proto::StepStatus::Skipped => Self::Skipped,
             zeron_proto::StepStatus::Failed => Self::Failed,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum TreeStatus {
+    Queued,
+    Running,
+    Waiting,
+    Done,
+    Failed,
+    Stopped,
+}
+
+impl From<zeron_doc::tree::TreeStatus> for TreeStatus {
+    fn from(s: zeron_doc::tree::TreeStatus) -> Self {
+        use zeron_doc::tree::TreeStatus as S;
+        match s {
+            S::Queued => Self::Queued,
+            S::Running => Self::Running,
+            S::Waiting => Self::Waiting,
+            S::Done => Self::Done,
+            S::Failed => Self::Failed,
+            S::Stopped => Self::Stopped,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum TreeNodeKind {
+    Root,
+    Step { n: u32 },
+    Agent,
+    Native,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct TreeNodeRow {
+    pub id: String,
+    pub parent: Option<u32>,
+    pub depth: u32,
+    pub kind: TreeNodeKind,
+    pub group: Option<String>,
+    pub title: String,
+    pub status: TreeStatus,
+    pub muted: bool,
+    pub word: String,
+    pub brand: Option<String>,
+    pub chat_id: Option<String>,
+    pub step_id: Option<String>,
+    pub tokens: Option<String>,
+    pub time: Option<String>,
+}
+
+impl From<&zc::OutlineRow> for TreeNodeRow {
+    fn from(row: &zc::OutlineRow) -> Self {
+        use zeron_doc::tree::NodeKind;
+        let n = &row.node;
+        Self {
+            id: n.id.clone(),
+            parent: n.parent.map(|ix| ix as u32),
+            depth: n.depth as u32,
+            kind: match n.kind {
+                NodeKind::Root => TreeNodeKind::Root,
+                NodeKind::Step(n) => TreeNodeKind::Step { n: n as u32 },
+                NodeKind::Agent => TreeNodeKind::Agent,
+                NodeKind::Native => TreeNodeKind::Native,
+            },
+            group: n.group.map(|group| group.label()),
+            title: n.title.clone(),
+            status: n.status.into(),
+            muted: n.status.muted(),
+            word: n.word.to_owned(),
+            brand: n.brand.clone().filter(|b| !b.is_empty()),
+            chat_id: n.chat_id.clone(),
+            step_id: n.step_id.clone(),
+            tokens: row.tokens.clone(),
+            time: row.time.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct TreeIndexRow {
+    pub root: String,
+    pub title: String,
+    pub status: TreeStatus,
+    pub line: String,
+    pub asks: bool,
+    pub agents: Option<String>,
+    pub segments: Vec<TreeStatus>,
+}
+
+impl From<&zeron_doc::tree::IndexRow> for TreeIndexRow {
+    fn from(r: &zeron_doc::tree::IndexRow) -> Self {
+        Self {
+            root: r.root.clone(),
+            title: r.title.clone(),
+            status: r.status.into(),
+            line: r.line.clone(),
+            asks: r.asks,
+            agents: r.agents_line(),
+            segments: r.segments.iter().copied().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct TaskTrees {
+    pub running: Vec<TreeIndexRow>,
+    pub done_today: Vec<TreeIndexRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct TreeLabels {
+    pub views: Vec<String>,
+    pub badge: String,
+}
+
+#[uniffi::export]
+pub fn tree_labels() -> TreeLabels {
+    TreeLabels {
+        views: zeron_doc::tree::TREE_VIEWS.map(str::to_owned).to_vec(),
+        badge: zeron_doc::tree::BADGE.to_owned(),
     }
 }
 
@@ -115,6 +249,7 @@ pub struct TaskRow {
     pub host: Option<HostRef>,
     pub progress_done: u32,
     pub progress_total: u32,
+    pub step_bar: Vec<StepStatus>,
     pub mission_label: Option<String>,
     pub current: Option<String>,
     pub questions: u32,
@@ -144,6 +279,7 @@ impl From<&zc::TaskRow> for TaskRow {
             host: r.host.as_ref().map(Into::into),
             progress_done: r.progress_done,
             progress_total: r.progress_total,
+            step_bar: r.step_bar.iter().copied().map(Into::into).collect(),
             mission_label: r.mission_label.clone(),
             current: r.current.clone(),
             questions: r.questions,
@@ -166,7 +302,27 @@ pub struct TasksPage {
     pub working: Vec<TaskRow>,
     pub to_do: Vec<TaskRow>,
     pub done: Vec<TaskRow>,
+    pub board: Vec<KanbanColumn>,
     pub needs_you_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct KanbanColumn {
+    pub status: TaskStatus,
+    pub title: String,
+    pub rows: Vec<TaskRow>,
+}
+
+#[uniffi::export]
+pub fn tasks_view_labels() -> Vec<String> {
+    zeron_proto::mission::TASKS_VIEWS
+        .map(str::to_owned)
+        .to_vec()
+}
+
+#[uniffi::export]
+pub fn task_drop_completes(from: TaskStatus, to: TaskStatus) -> Option<bool> {
+    zeron_proto::mission::drop_completes(from.into(), to.into())
 }
 
 impl From<&zc::TasksPage> for TasksPage {
@@ -177,6 +333,15 @@ impl From<&zc::TasksPage> for TasksPage {
             working: task_rows(&p.working),
             to_do: task_rows(&p.to_do),
             done: task_rows(&p.done),
+            board: p
+                .board
+                .iter()
+                .map(|(status, rows)| KanbanColumn {
+                    status: (*status).into(),
+                    title: zeron_proto::mission::column_title(*status).into(),
+                    rows: task_rows(rows),
+                })
+                .collect(),
             needs_you_count: p.needs_you_count,
         }
     }
@@ -642,6 +807,31 @@ impl From<SupervisorSettings> for sv::SupervisorSettings {
 impl CoreClient {
     pub fn tasks_page(&self) -> TasksPage {
         (&self.client.workspace().tasks).into()
+    }
+
+    pub fn mission_intro_due(&self) -> bool {
+        self.client.mission_intro_due()
+    }
+
+    pub fn task_trees(&self) -> TaskTrees {
+        let trees = self.client.task_trees();
+        TaskTrees {
+            running: trees.running.iter().map(Into::into).collect(),
+            done_today: trees.done_today.iter().map(Into::into).collect(),
+        }
+    }
+
+    pub fn task_outline(&self, root_chat_id: String) -> Vec<TreeNodeRow> {
+        self.client
+            .task_outline(&root_chat_id)
+            .iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    pub async fn refresh_outline_stats(&self, root_chat_id: String) -> CoreResult<bool> {
+        let client = self.client.clone();
+        on_runtime(async move { client.refresh_outline_stats(&root_chat_id).await }).await
     }
 
     pub fn supervisor_page(&self) -> SupervisorPage {

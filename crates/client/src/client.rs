@@ -85,6 +85,7 @@ pub(crate) struct ClientInner {
     foreground: AtomicBool,
     synced: AtomicBool,
     harness_catalogs: Mutex<HashMap<String, Vec<HarnessInfo>>>,
+    tree_stats: Mutex<HashMap<String, zeron_proto::SessionStats>>,
 }
 
 impl Drop for ClientInner {
@@ -656,6 +657,7 @@ impl Client {
             foreground: AtomicBool::new(true),
             synced: AtomicBool::new(false),
             harness_catalogs: Mutex::new(HashMap::new()),
+            tree_stats: Mutex::new(HashMap::new()),
             credentials: credentials.clone(),
             config,
         });
@@ -844,6 +846,11 @@ impl Client {
         self.workspace().search(query, limit)
     }
 
+    pub fn mission_intro_due(&self) -> bool {
+        let (state, _) = self.inner.workspace.state();
+        self.workspace().synced && zeron_proto::mission::intro_due(&state.tasks)
+    }
+
     pub fn task_detail(&self, task_id: &str) -> Option<TaskDetail> {
         let (state, _) = self.inner.workspace.state();
         crate::workspace::task_detail(
@@ -853,6 +860,63 @@ impl Client {
             &self.inner.workspace.supervisors(),
             task_id,
         )
+    }
+
+    pub fn task_trees(&self) -> zeron_doc::tree::IndexRows {
+        let (state, _) = self.inner.workspace.state();
+        crate::workspace::task_trees(
+            &state,
+            &self.inner.workspace.steps(),
+            &self.workspace(),
+            &self.inner.workspace.supervisors(),
+        )
+    }
+
+    pub fn task_outline(&self, root_chat_id: &str) -> Vec<crate::workspace::OutlineRow> {
+        let (state, _) = self.inner.workspace.state();
+        let transcripts = self
+            .inner
+            .cores()
+            .into_iter()
+            .map(|core| (core.chat_id.clone(), core.snapshot().transcript_messages()))
+            .collect();
+        crate::workspace::task_outline(
+            &state,
+            &self.inner.workspace.steps(),
+            &self.workspace(),
+            &self.inner.workspace.supervisors(),
+            &crate::lock(&self.inner.tree_stats),
+            &transcripts,
+            root_chat_id,
+        )
+    }
+
+    pub async fn refresh_outline_stats(&self, root_chat_id: &str) -> Result<bool> {
+        let ids: Vec<String> = self
+            .task_outline(root_chat_id)
+            .into_iter()
+            .filter_map(|row| row.node.chat_id)
+            .collect();
+        let (state, _) = self.inner.workspace.state();
+        let Some(device_id) = state
+            .chats
+            .iter()
+            .find(|chat| chat.id == root_chat_id)
+            .map(|chat| chat.device_id.clone())
+        else {
+            return Ok(false);
+        };
+        let stats: HashMap<String, zeron_proto::SessionStats> = self
+            .host_call(
+                &device_id,
+                zeron_rpc::methods::GET_SESSION_STATS,
+                serde_json::json!({ "chatIds": ids }),
+            )
+            .await?;
+        let mut cache = crate::lock(&self.inner.tree_stats);
+        let changed = ids.iter().any(|id| cache.get(id) != stats.get(id));
+        cache.extend(stats);
+        Ok(changed)
     }
 
     pub fn mission_strip(&self, chat_id: &str) -> Option<crate::workspace::MissionStrip> {

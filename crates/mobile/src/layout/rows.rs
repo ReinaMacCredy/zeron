@@ -118,7 +118,12 @@ pub(crate) enum Content {
     Tools(ToolGroup),
     Chip(Chip),
     Image { reference: String },
-    Working { since_ms: Option<i64>, word: String, rate: Option<u32> },
+    Working {
+        since_ms: Option<i64>,
+        word: String,
+        rate: Option<u32>,
+        divider: bool,
+    },
     Card(Card),
     /// An agent visual: its height comes from its worker.
     Visual(Arc<crate::visual::VisualSlot>),
@@ -351,17 +356,23 @@ impl RowBuilder {
                 None if input.streaming => ("Writing".to_owned(), input.working_since_ms, input.token_rate),
                 None => ("Working".to_owned(), input.working_since_ms, input.token_rate),
             };
+            let divider = input.compaction.is_some();
             let stale = self
                 .working
                 .as_ref()
-                .is_none_or(|w| !matches!(&w.content, Content::Working { since_ms: shown_since, word: shown, rate } if *shown_since == since_ms && *shown == word && *rate == token_rate));
+                .is_none_or(|w| !matches!(&w.content, Content::Working { since_ms: shown_since, word: shown, rate, divider: shown_divider } if *shown_since == since_ms && *shown == word && *rate == token_rate && *shown_divider == divider));
             if stale {
                 self.working = Some(Arc::new(RowCore {
                     key: row_key("#working"),
                     version: next_version(),
                     kind: RowKind::Working,
                     entry_id: Arc::from(""),
-                    content: Content::Working { since_ms, word, rate: token_rate },
+                    content: Content::Working {
+                        since_ms,
+                        word,
+                        rate: token_rate,
+                        divider,
+                    },
                     copy_text: String::new(),
                 }));
             }
@@ -1173,7 +1184,12 @@ pub(crate) fn place_row(
             }
             h
         }
-        Content::Working { since_ms, word, rate } => {
+        Content::Working {
+            since_ms,
+            word,
+            rate,
+            divider,
+        } => {
             let h = px.v(WORKING);
             if let Some(out) = out {
                 out.widget(
@@ -1181,6 +1197,7 @@ pub(crate) fn place_row(
                         since_ms: *since_ms,
                         word: word.clone(),
                         rate: rate.map(|rate| format!("· {rate} tok/s")),
+                        divider: *divider,
                     },
                     (x, top, cw, h),
                     None,

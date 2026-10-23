@@ -505,6 +505,9 @@ final class AppModel {
             // Project-less sessions tone like the desktop's "home" tile.
             colorIndex: Int(r.project?.colorIndex ?? projectColorIndex(spacePath: "home")),
             harness: r.harness,
+            marks: r.harnessMarks,
+            deviceId: r.deviceId,
+            instanceId: r.instanceId,
             branch: r.branch,
             pr: r.pullRequest.map { pr in
                 switch pr.state {

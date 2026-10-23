@@ -59,8 +59,9 @@ impl HostSettings {
                 json!({ "id": "claude-work", "driver": "claude-code", "label": "Work",
                   "accent": "#3e9cf0",
                   "config": { "kind": "native", "homeDir": { "kind": "managed" } } }),
-                json!({ "id": "acp_gemini_cli", "driver": "acp", "label": "Gemini CLI",
-                  "config": { "kind": "acp", "source": { "kind": "registry",
+                json!({ "id": super::composer::ACP_INSTANCE, "driver": "acp", "label": "Gemini CLI",
+                  "config": { "kind": "acp", "iconPath": super::composer::ACP_ICON,
+                    "source": { "kind": "registry",
                     "agentId": "gemini", "version": "0.9.1", "distribution": "npx" } } }),
             ])
             .collect();
