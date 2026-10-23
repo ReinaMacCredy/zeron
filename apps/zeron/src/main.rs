@@ -87,7 +87,7 @@ enum Command {
         /// For `launch`: the app name (default `Zeron Dev <N>`).
         #[arg(long)]
         name: Option<String>,
-        /// For `snapshot` and `record stop`: the absolute file to write.
+        /// For `snapshot` and `record stop`: the absolute file to write; for `compare`: the mockup .html file in the current folder.
         #[arg(long)]
         path: Option<std::path::PathBuf>,
         /// For `launch`: arguments passed to the app.

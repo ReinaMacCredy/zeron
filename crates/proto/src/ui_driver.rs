@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const OBSERVE_ACTIONS: &[&str] = &[
-    "state", "tree", "snapshot", "wait", "audit", "frames", "track", "record",
+    "state", "tree", "snapshot", "wait", "audit", "frames", "track", "record", "compare",
 ];
 
 pub const DRIVE_ACTIONS: &[&str] = &[

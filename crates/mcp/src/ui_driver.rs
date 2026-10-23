@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use serde_json::{Map, Value, json};
+use zeron_proto::html_render::workspace_page;
 use zeron_proto::ui_driver::{
     DRAG_STEPS, DRIVE_ACTIONS, MAX_DRIVE_STEPS, MAX_WAIT_MS, OBSERVE_ACTIONS, PROCESS_ACTIONS,
     STEP_CAP_MS, UiDriverBuild, UiDriverDescriptor, descriptor_pid, run_dir, socket_path,
@@ -45,6 +46,13 @@ impl Tool {
                 "`{}` drives the UI, which {TOOL} never does: call {DRIVE_TOOL} with a Zeron Dev bundle as `target`",
                 if during { "during" } else { action }
             )),
+            Tool::Observe
+                if action == "compare" && args.get("path").is_some_and(|path| !path.is_null()) =>
+            {
+                Err(format!(
+                    "{TOOL} `compare` takes the mockup as `html`; only `zeron ui compare` reads it from `path`"
+                ))
+            }
             Tool::Observe if args.get("path").is_some_and(|path| !path.is_null()) => Err(format!(
                 "{TOOL} never writes where the caller picks, so it takes no `path`: a snapshot is saved under ~/.zeron/run/shots and returned inline, or by path with `inline: false`; a recording is saved under ~/.zeron/run/recordings and its path returned. `zeron ui snapshot` and `zeron ui record` take `path`."
             )),
@@ -110,7 +118,10 @@ pub fn tool(tool: Tool) -> Value {
         (drive, "mock", field("boolean", "For `launch`: run the app with the mock harness (ZERON_HARNESS=mock).")),
         (drive, "appArgs", json!({ "type": "array", "items": { "type": "string" }, "description": "For `launch`: arguments passed to the app." })),
         (drive, "args", field("object", "Arguments of the gpui action, for `action`.")),
-        (observe, "rect", field("object", "Crop of a snapshot in window points: {x, y, w, h}.")),
+        (observe, "rect", field("object", "Crop of a snapshot, or the region `compare` checks, in window points: {x, y, w, h}.")),
+        (observe, "html", field("string", "For `compare`: the approved mockup page. It is laid out in the target app's own web engine at the region's size and current theme, and its nodes are matched to the native ones by role and label.")),
+        (observe, "width", field("number", "For `compare`: lay the mockup out at this width instead of the region's.")),
+        (observe, "threshold", field("number", "For `compare`: a matched node whose x, y, w or h differs by more than this many points is listed as moved. Defaults to 4.")),
         (drive, "from", end("start")),
         (drive, "to", end("end")),
         (drive, "steps", field("integer", "For `drag`: pointer moves between `from` and `to`. Defaults to 12.")),
@@ -136,7 +147,7 @@ pub fn tool(tool: Tool) -> Value {
         (observe, "query", field("string", "Keep only `tree` lines that match this text.")),
         (observe, "root", field("string", "Ref the `tree` starts from.")),
         (observe, "depth", field("integer", "Levels of `tree` to print.")),
-        (observe, "json", field("boolean", "`tree` as JSON instead of text lines.")),
+        (observe, "json", field("boolean", "`tree` or `compare` as JSON instead of text lines.")),
         (observe, "inline", field("boolean", "For `snapshot`: false returns only the path, no image. Defaults to true.")),
         (drive, "theme", json!({ "type": "string", "enum": ["light", "dark", "system"], "description": "For `set`: the appearance mode, as Settings > Appearance sets it (saved to the app's settings)." })),
         (drive, "size", json!({ "type": "object", "properties": { "w": { "type": "number" }, "h": { "type": "number" } }, "required": ["w", "h"], "additionalProperties": false, "description": "For `set`: window content size {w, h} in points. The server also takes [w, h]." })),
@@ -252,6 +263,11 @@ async fn run_in(
     if let Some(tool) = tool {
         tool.admits(&action, &args)?;
     }
+    if action == "compare"
+        && let Some(path) = args.remove("path").filter(|path| !path.is_null())
+    {
+        args.insert("html".into(), json!(compare_page(&path, &args)?));
+    }
     if action == "launch" {
         if target.is_some() {
             return Err("`launch` starts a new Zeron Dev bundle, so it takes no `target`".into());
@@ -291,6 +307,21 @@ async fn run_in(
         return launch::quit(dir, app).await;
     }
     request(app, args).await
+}
+
+fn compare_page(path: &Value, args: &Map<String, Value>) -> Result<String, String> {
+    if args.get("html").is_some_and(|html| !html.is_null()) {
+        return Err("give `html` or `path`, one of them".into());
+    }
+    let path = path.as_str().ok_or("`path` must be a string")?;
+    let cwd = std::env::current_dir().map_err(|error| format!("no current folder: {error}"))?;
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    workspace_page(&cwd, home.as_deref(), path).map_err(|error| {
+        format!(
+            "`zeron ui compare` reads `path` from the current folder {}: {error}",
+            cwd.display()
+        )
+    })
 }
 
 pub fn list() -> Vec<UiDriverDescriptor> {
