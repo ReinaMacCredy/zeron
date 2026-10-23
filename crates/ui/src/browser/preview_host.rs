@@ -237,13 +237,36 @@ fn frame(width: u32, height: u32) -> objc2_foundation::NSRect {
     )
 }
 
-async fn render(
-    html: &str,
-    width: u32,
-    inspect: &PreviewInspect,
-    executor: &gpui::BackgroundExecutor,
-    timeout: impl std::future::Future<Output = ()>,
-) -> Result<HtmlPreview, String> {
+pub(crate) struct Loaded {
+    pub(crate) view: Retained<WKWebView>,
+    _policy: Retained<Policy>,
+    loaded: RefCell<Option<futures::channel::oneshot::Receiver<Result<(), String>>>>,
+}
+
+impl Loaded {
+    pub(crate) async fn ready(&self) -> Result<(), String> {
+        let loaded = self
+            .loaded
+            .borrow_mut()
+            .take()
+            .ok_or("The page was already loaded.")?;
+        loaded
+            .await
+            .map_err(|_| "The page did not load.".to_string())?
+    }
+}
+
+impl Drop for Loaded {
+    fn drop(&mut self) {
+        unsafe {
+            self.view.setNavigationDelegate(None);
+            self.view.setUIDelegate(None);
+            self.view.stopLoading();
+        }
+    }
+}
+
+pub(crate) fn load(html: &str, width: u32, height: u32) -> Result<Loaded, String> {
     let mtm = MainThreadMarker::new().ok_or("Previews run on the main thread")?;
     let (done, loaded) = futures::channel::oneshot::channel();
     let policy: Retained<Policy> = {
@@ -268,27 +291,48 @@ async fn render(
             true,
         );
         configuration.userContentController().addUserScript(&script);
-        let view =
-            WKWebView::initWithFrame_configuration(mtm.alloc(), frame(width, 600), &configuration);
+        let view = WKWebView::initWithFrame_configuration(
+            mtm.alloc(),
+            frame(width, height),
+            &configuration,
+        );
         view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*policy)));
         view.setUIDelegate(Some(ProtocolObject::from_ref(&*policy)));
         let origin = objc2_foundation::NSURL::URLWithString(&NSString::from_str(PREVIEW_ORIGIN));
         view.loadHTMLString_baseURL(&NSString::from_str(html), origin.as_deref());
         view
     };
+    Ok(Loaded {
+        view,
+        _policy: policy,
+        loaded: RefCell::new(Some(loaded)),
+    })
+}
+
+pub(crate) async fn settle(view: &WKWebView) -> Result<(), String> {
+    eval(view, SETTLE_SCRIPT).await.map(drop)
+}
+
+async fn render(
+    html: &str,
+    width: u32,
+    inspect: &PreviewInspect,
+    executor: &gpui::BackgroundExecutor,
+    timeout: impl std::future::Future<Output = ()>,
+) -> Result<HtmlPreview, String> {
+    let page = load(html, width, 600)?;
+    let view = &page.view;
     let work = async {
-        loaded
-            .await
-            .map_err(|_| "The page did not load.".to_string())??;
-        let measured = eval(&view, MEASURE_SCRIPT).await?;
+        page.ready().await?;
+        let measured = eval(view, MEASURE_SCRIPT).await?;
         let content_height = measured["height"].as_f64().unwrap_or(0.0).max(1.0).round() as u32;
         let console_messages: Vec<ConsoleMessage> =
             serde_json::from_value(measured["console"].clone()).unwrap_or_default();
         let captured_height = content_height.clamp(1, MAX_CAPTURE_HEIGHT);
         view.setFrame(frame(width, captured_height));
-        eval(&view, SETTLE_SCRIPT).await?;
+        settle(view).await?;
         let page = crate::ui_driver::web::Preview {
-            view: &view,
+            view,
             size: (width as f32, captured_height as f32),
             executor,
         };
@@ -306,15 +350,15 @@ async fn render(
             true => Some(page.tree().await?),
             false => None,
         };
-        let png = snapshot(&view, width, crop).await?;
+        let png = snapshot(view, width, crop).await?;
         let mut steps = Vec::new();
         for step in &inspect.steps {
             let shot = match page.step(step).await {
                 Ok(()) => {
-                    eval(&view, SETTLE_SCRIPT).await?;
+                    settle(view).await?;
                     PreviewShot {
                         step: step.clone(),
-                        png: Some(snapshot(&view, width, crop).await?),
+                        png: Some(snapshot(view, width, crop).await?),
                         tree: Some(page.tree().await?),
                         error: None,
                     }
@@ -345,18 +389,12 @@ async fn render(
         })
     };
     futures::pin_mut!(work, timeout);
-    let result = match futures::future::select(work, timeout).await {
+    match futures::future::select(work, timeout).await {
         futures::future::Either::Left((result, _)) => result,
         futures::future::Either::Right(_) => {
             Err("The page did not finish within 20 seconds; check its scripts.".into())
         }
-    };
-    unsafe {
-        view.setNavigationDelegate(None);
-        view.setUIDelegate(None);
-        view.stopLoading();
     }
-    result
 }
 
 async fn eval(view: &WKWebView, script: &str) -> Result<serde_json::Value, String> {
@@ -378,11 +416,10 @@ fn clip(rect: PreviewRect, width: u32, height: u32) -> Result<PreviewRect, Strin
     Ok(PreviewRect { x, y, w, h })
 }
 
-async fn snapshot(
+pub(crate) async fn capture(
     view: &WKWebView,
-    width: u32,
     crop: Option<PreviewRect>,
-) -> Result<String, String> {
+) -> Result<Vec<u8>, String> {
     let (tx, rx) = futures::channel::oneshot::channel();
     let tx = RefCell::new(Some(tx));
     let completion = block2::RcBlock::new(
@@ -417,9 +454,16 @@ async fn snapshot(
     unsafe {
         view.takeSnapshotWithConfiguration_completionHandler(configuration.as_deref(), &completion)
     };
-    let tiff = rx
-        .await
-        .map_err(|_| "The screenshot was dropped.".to_string())??;
+    rx.await
+        .map_err(|_| "The screenshot was dropped.".to_string())?
+}
+
+async fn snapshot(
+    view: &WKWebView,
+    width: u32,
+    crop: Option<PreviewRect>,
+) -> Result<String, String> {
+    let tiff = capture(view, crop).await?;
     let (tx, rx) = futures::channel::oneshot::channel();
     std::thread::spawn(move || {
         let _ = tx.send(encode_png(&tiff, width));

@@ -414,7 +414,7 @@ pub(crate) struct Preview<'a> {
 }
 
 impl Preview<'_> {
-    async fn read(&self) -> Result<Tree, String> {
+    pub(in crate::ui_driver) async fn read(&self) -> Result<Tree, String> {
         let walk: Walk =
             serde_json::from_value(ask(self.view, json!({ "op": "walk" }), self.executor).await?)
                 .map_err(|e| e.to_string())?;

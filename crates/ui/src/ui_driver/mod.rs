@@ -1,5 +1,6 @@
 mod audit;
 mod capture;
+mod compare;
 mod frames;
 #[cfg(debug_assertions)]
 mod input;
@@ -131,6 +132,7 @@ enum Observe {
     Frames(frames::Frames),
     Track(frames::Track),
     Record(record::Record),
+    Compare(compare::Compare),
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -287,6 +289,7 @@ async fn run(raw: Value, cancel: Cancel, cx: &mut AsyncApp) -> Result<Value, Str
         Observe::Frames(request) => frames::frames(window, request, cancel, cx).await,
         Observe::Track(request) => frames::track(window, request, cancel, cx).await,
         Observe::Record(record) => record::run(window, record, cx).await,
+        Observe::Compare(request) => compare::run(window, request, cx).await,
     }
 }
 
