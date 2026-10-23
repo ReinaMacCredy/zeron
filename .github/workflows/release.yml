@@ -141,9 +141,33 @@ jobs:
             target/package/*.exe
           if-no-files-found: error
 
+  release-notes:
+    runs-on: ubuntu-latest
+    outputs:
+      body: ${{ steps.notes.outputs.body }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: release notes
+        id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="v$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          fi
+          scripts/release-notes.py "$tag" release-notes.md
+          cat release-notes.md >>"$GITHUB_STEP_SUMMARY"
+          {
+            echo 'body<<RELEASE_NOTES_EOF'
+            cat release-notes.md
+            echo RELEASE_NOTES_EOF
+          } >>"$GITHUB_OUTPUT"
+
   publish:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [cursor-compatibility, linux, macos, windows]
+    needs: [cursor-compatibility, linux, macos, windows, release-notes]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -172,9 +196,13 @@ jobs:
               '.files[$name] = {sha256: $sha}' <<<"$manifest")
           done
           printf '%s' "$manifest" > manifest.json
+      - name: release body
+        env:
+          BODY: ${{ needs.release-notes.outputs.body }}
+        run: printf '%s\n' "$BODY" > release-notes.md
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: |
             dist/*
             manifest.json
-          generate_release_notes: true
+          body_path: release-notes.md
