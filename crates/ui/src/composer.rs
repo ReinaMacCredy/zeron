@@ -13379,7 +13379,9 @@ impl Composer {
                     .aria_disabled(!can_advance)
                     .px(px(16.0))
                     .when(!can_advance, |el| el.opacity(0.4))
-                    .on_click(cx.listener(move |this, _, _, cx| this.host_advance(host, cx))),
+                    .when(can_advance, |el| {
+                        el.on_click(cx.listener(move |this, _, _, cx| this.host_advance(host, cx)))
+                    }),
             );
         Some((body, footer))
     }
