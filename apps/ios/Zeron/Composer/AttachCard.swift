@@ -282,7 +282,6 @@ private final class GridHost: UIInputView {
         addSubview(card)
         grid.alpha = 0
         grid.frame = CGRect(x: 0, y: 0, width: keyboard.width - 4, height: keyboard.height - 46)
-        grid.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         card.contentView.addSubview(grid)
     }
 
