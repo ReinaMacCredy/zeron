@@ -785,6 +785,19 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
         return page
     }
 
+    func rowView(_ view: RowView, expandPage title: String, deviceId: String, path: String) {
+        guard let vc = findViewController() else { return }
+        let loader = htmlLoader
+        let sheet = HtmlSheetViewController(title: title, html: { await loader?(deviceId, path) }) { [weak self, weak view] url in
+            guard let self, let view else { return }
+            self.rowView(view, open: url)
+        }
+        let nav = UINavigationController(rootViewController: sheet)
+        nav.modalPresentationStyle = .pageSheet
+        nav.sheetPresentationController?.prefersGrabberVisible = true
+        vc.present(nav, animated: true)
+    }
+
     fileprivate func row(at point: CGPoint) -> RowView? {
         visible.values.first { !$0.isHidden && $0.frame.contains(point) }
     }

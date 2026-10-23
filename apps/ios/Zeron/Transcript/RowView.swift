@@ -40,6 +40,7 @@ protocol RowViewDelegate: AnyObject {
     /// The live view for an agent visual (kept across row reuse).
     func rowView(_ view: RowView, visualFor id: String) -> UIView?
     func rowView(_ view: RowView, pageFor id: String, deviceId: String, path: String) -> UIView?
+    func rowView(_ view: RowView, expandPage title: String, deviceId: String, path: String)
 }
 
 /// A reusable transcript row: canvas + horizontal scrollers + native widgets.
@@ -316,6 +317,17 @@ final class RowView: UIView {
             case let .htmlRender(id, deviceId, path, scrolls):
                 view = delegate?.rowView(self, pageFor: id, deviceId: deviceId, path: path) ?? UIView()
                 (view as? HtmlPageView)?.scrolls = scrolls
+            case let .htmlExpand(_, deviceId, path, title):
+                let b = UIButton(type: .system)
+                b.setImage(TaskGlyph.asset("tool-expand-arrows", side: 13), for: .normal)
+                b.tintColor = Palette.tertiary
+                b.accessibilityLabel = "Expand page"
+                b.accessibilityIdentifier = "html-render-expand"
+                b.addAction(UIAction { [weak self] _ in
+                    guard let self else { return }
+                    self.delegate?.rowView(self, expandPage: title, deviceId: deviceId, path: path)
+                }, for: .touchUpInside)
+                view = b
             }
             view.frame = rect
             host.addSubview(view)

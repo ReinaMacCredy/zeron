@@ -293,6 +293,12 @@ pub enum WidgetKind {
     /// An agent visual; `TranscriptView::visual(id)` is its live session.
     Visual { id: String },
     HtmlRender { id: String, device_id: String, path: String, scrolls: bool },
+    HtmlExpand {
+        id: String,
+        device_id: String,
+        path: String,
+        title: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
