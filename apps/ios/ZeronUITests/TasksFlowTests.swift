@@ -5,9 +5,9 @@ final class TasksFlowTests: XCTestCase {
         continueAfterFailure = false
     }
 
-    private func launch(_ route: String) -> XCUIApplication {
+    private func launch(_ route: String, _ extra: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["-demo", "-fast", "-route", route]
+        app.launchArguments = ["-demo", "-fast", "-route", route] + extra
         app.launch()
         return app
     }
@@ -214,5 +214,60 @@ final class TasksFlowTests: XCTestCase {
         app.buttons["new-task-create"].tap()
         XCTAssertTrue(app.collectionViews["mission-control"].waitForExistence(timeout: 10))
         snapshot(app, "new-mission-control")
+    }
+
+    func testAgentTreesOpenTheirOutline() {
+        let app = launch("tasks", ["-tasksView", "list"])
+        let tree = cell(app, "tree-chat-agents")
+        XCTAssertTrue(app.collectionViews["tasks-list"].waitForExistence(timeout: 15))
+        scrollTo(tree, in: app.collectionViews["tasks-list"])
+        snapshot(app, "trees-list")
+        tree.tap()
+        XCTAssertTrue(app.collectionViews["tree-outline"].waitForExistence(timeout: 10))
+        XCTAssertTrue(cell(app, "tree-node-chat-devin").waitForExistence(timeout: 5))
+        snapshot(app, "tree-outline")
+    }
+
+    func testMissionPageSwitchesToOutline() {
+        let app = launch("tasks:mission:task-settle-shelf")
+        let views = app.segmentedControls["mc-tree-view"]
+        XCTAssertTrue(views.waitForExistence(timeout: 15))
+        views.buttons["Outline"].tap()
+        XCTAssertTrue(app.collectionViews["tree-outline"].waitForExistence(timeout: 10))
+        XCTAssertTrue(cell(app, "tree-node-chat-lead-shelf").waitForExistence(timeout: 5))
+        snapshot(app, "mission-outline")
+        views.buttons["Spine"].tap()
+        XCTAssertTrue(app.collectionViews["mission-control"].isHittable)
+    }
+
+    func testKanbanChoiceSurvivesARelaunch() {
+        var app = launch("tasks")
+        let views = app.segmentedControls["tasks-view"]
+        XCTAssertTrue(views.waitForExistence(timeout: 15))
+        views.buttons["Kanban"].tap()
+        let board = app.descendants(matching: .any)["tasks-kanban"]
+        XCTAssertTrue(board.waitForExistence(timeout: 5))
+        snapshot(app, "tasks-kanban")
+        app.terminate()
+        app = launch("tasks")
+        XCTAssertTrue(app.descendants(matching: .any)["tasks-kanban"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.segmentedControls["tasks-view"].buttons["Kanban"].isSelected)
+        app.segmentedControls["tasks-view"].buttons["List"].tap()
+        XCTAssertTrue(app.collectionViews["tasks-list"].isHittable)
+    }
+
+    func testMissionIntroPagesThrough() {
+        let app = launch("tasks", ["-missionIntro"])
+        XCTAssertTrue(app.descendants(matching: .any)["mission-intro-sheet"].waitForExistence(timeout: 15))
+        snapshot(app, "mission-intro-1")
+        let next = app.buttons["mission-intro-next"]
+        while next.exists {
+            next.tap()
+        }
+        XCTAssertTrue(app.buttons["mission-intro-try"].waitForExistence(timeout: 5))
+        snapshot(app, "mission-intro-last")
+        app.buttons["mission-intro-try"].tap()
+        XCTAssertTrue(app.textFields["new-task-title"].waitForExistence(timeout: 5))
+        snapshot(app, "mission-intro-plan-first")
     }
 }
