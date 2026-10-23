@@ -25,6 +25,7 @@ final class StatusGlyph: UIView {
         case spinner
         case trailer
         case dot(UIColor)
+        case ring(UIColor)
         case check(UIColor)
     }
 
@@ -77,7 +78,7 @@ final class StatusGlyph: UIView {
             for _ in 0..<6 { cells.append(CALayer()) }
         case .trailer:
             for _ in 0..<9 { cells.append(CALayer()) }
-        case .dot:
+        case .dot, .ring:
             cells.append(CALayer())
         case .check:
             checkLayer.isHidden = false
@@ -105,7 +106,7 @@ final class StatusGlyph: UIView {
                 cell.frame = CGRect(x: c.x - side / 2 + CGFloat(i % 3) * (d + gap), y: c.y - side / 2 + CGFloat(i / 3) * (d + gap), width: d, height: d)
                 cell.cornerRadius = d / 2
             }
-        case .dot:
+        case .dot, .ring:
             cells.first?.frame = CGRect(x: c.x - 3.5, y: c.y - 3.5, width: 7, height: 7)
             cells.first?.cornerRadius = 3.5
         case .check:
@@ -140,6 +141,9 @@ final class StatusGlyph: UIView {
             break
         case let .dot(color):
             cells.first?.backgroundColor = color.resolvedColor(with: traitCollection).cgColor
+        case let .ring(color):
+            cells.first?.borderWidth = 1.5
+            cells.first?.borderColor = color.resolvedColor(with: traitCollection).cgColor
         case let .check(color):
             checkLayer.strokeColor = color.resolvedColor(with: traitCollection).cgColor
         case .spinner, .trailer:

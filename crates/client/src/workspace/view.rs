@@ -87,6 +87,11 @@ pub struct SessionRow {
     pub working_since_ms: Option<i64>,
     /// Parked on background subagents: the next prompt is a send, not a queue.
     pub held_by_subagents: bool,
+    /// The desktop sidebar's ring: the host's own background work, with its
+    /// task count (0 while a turn is held on subagents).
+    pub background_ring: Option<u32>,
+    /// "2 subagents · 1 shell", in place of the status while Working.
+    pub background_label: Option<String>,
     pub compacting: bool,
     /// `last_message_at`, falling back to `created_at` (the sort key).
     pub last_activity_ms: i64,
@@ -330,6 +335,8 @@ pub(crate) struct DeriveContext<'a> {
     pub steps: &'a [zeron_proto::TaskStep],
     pub supervisors:
         &'a std::collections::BTreeMap<String, zeron_proto::supervisor::SupervisorSnapshot>,
+    /// Each host's own sessions, carrying the background work the registry lacks.
+    pub host_sessions: &'a std::collections::BTreeMap<String, Vec<Session>>,
     pub item_sends: &'a HashMap<String, super::ItemSend>,
     /// Oldest-unadopted-send state per chat (open sessions only).
     pub send_states: &'a HashMap<String, SendState>,
@@ -410,6 +417,8 @@ fn hash_row(row: &SessionRow) -> u64 {
     attention_rank(row.host_indicator).hash(&mut h);
     row.working_since_ms.hash(&mut h);
     row.held_by_subagents.hash(&mut h);
+    row.background_ring.hash(&mut h);
+    row.background_label.hash(&mut h);
     row.compacting.hash(&mut h);
     row.last_activity_ms.hash(&mut h);
     row.time_label.hash(&mut h);
@@ -438,6 +447,7 @@ struct RowContext<'a> {
     spaces: HashMap<&'a str, &'a Space>,
     devices: HashMap<&'a str, &'a Device>,
     sessions: HashMap<&'a str, &'a Session>,
+    host_sessions: HashMap<&'a str, &'a Session>,
     pinned: HashSet<&'a str>,
     section_of: HashMap<&'a str, &'a str>,
     sidechats: HashMap<&'a str, Vec<&'a Chat>>,
@@ -449,6 +459,14 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
     let send_state = cx.send_states.get(&chat.id).copied();
     let host_indicator = display_status(chat, session, cx.now);
     let indicator = host_indicator;
+    let ring = rc
+        .host_sessions
+        .get(chat.id.as_str())
+        .filter(|_| send_state.is_none() && !chat.sidechat_expired(cx.now))
+        .and_then(|s| zeron_proto::background::sidebar_ring(indicator, Some(s)).map(|n| (s, n)));
+    let background_label = ring
+        .filter(|_| indicator == ChatIndicator::Working)
+        .and_then(|(s, _)| zeron_proto::background::ring_label(&s.background_tasks));
     let working_since_ms = match indicator {
         ChatIndicator::Working | ChatIndicator::AwaitingInput => session
             .and_then(|s| s.started_at)
@@ -517,6 +535,8 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         working_since_ms,
         held_by_subagents: host_indicator == ChatIndicator::Working
             && session.is_some_and(|s| s.held_by_subagents),
+        background_ring: ring.map(|(_, n)| n as u32),
+        background_label,
         compacting: session.is_some_and(|s| s.compacting),
         last_activity_ms: sort_key(chat).timestamp_millis(),
         time_label: relative_time_label(sort_key(chat).timestamp_millis(), now_ms),
@@ -577,6 +597,12 @@ pub(crate) fn derive(
         sessions: state
             .sessions
             .iter()
+            .map(|s| (s.chat_id.as_str(), s))
+            .collect(),
+        host_sessions: cx
+            .host_sessions
+            .values()
+            .flatten()
             .map(|s| (s.chat_id.as_str(), s))
             .collect(),
         pinned: pinned_order.iter().map(String::as_str).collect(),

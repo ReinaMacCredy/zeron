@@ -11,10 +11,7 @@ use zeron_proto::background::{
     AgentRun, RunState, aggregate, agents_label, delegate_runs, elapsed_label, latest_line,
     roster_heading, shell_tasks, shells_label,
 };
-use zeron_proto::{
-    BackgroundTask, BackgroundTaskKind, ChatIndicator, HarnessId, ReasoningLevel, Session,
-    SessionStatus,
-};
+use zeron_proto::{BackgroundTask, HarnessId, ReasoningLevel};
 use zeron_rpc::methods;
 
 use super::{Composer, ComposerEvent};
@@ -173,29 +170,6 @@ pub(crate) fn tool_count(entries: &[SessionMessageEntry]) -> usize {
 
 pub(crate) fn dot_lit(frame: u16, dot: usize) -> bool {
     frame & (1 << (8 - dot)) != 0
-}
-
-pub(crate) fn sidebar_ring(indicator: ChatIndicator, session: Option<&Session>) -> Option<usize> {
-    let session = session?;
-    let held = session.held_by_subagents && indicator == ChatIndicator::Working;
-    let idle = session.status == SessionStatus::Idle
-        && !session.background_tasks.is_empty()
-        && matches!(indicator, ChatIndicator::Idle | ChatIndicator::Completed);
-    (held || idle).then_some(session.background_tasks.len())
-}
-
-pub(crate) fn ring_label(tasks: &[BackgroundTask]) -> Option<String> {
-    let count = |kind: BackgroundTaskKind| tasks.iter().filter(|task| task.kind == kind).count();
-    let parts: Vec<String> = [
-        (count(BackgroundTaskKind::Agent), "subagent"),
-        (count(BackgroundTaskKind::Shell), "shell"),
-        (count(BackgroundTaskKind::Other), "task"),
-    ]
-    .into_iter()
-    .filter(|(n, _)| *n > 0)
-    .map(|(n, noun)| format!("{n} {noun}{}", if n == 1 { "" } else { "s" }))
-    .collect();
-    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 pub(crate) fn sidebar_ring_mark(count: usize, theme: &Theme) -> Div {
@@ -1767,7 +1741,7 @@ impl Render for DotGridView {
 mod tests {
     use super::*;
     use zeron_doc::SubagentStatus;
-    use zeron_proto::ToolCall;
+    use zeron_proto::{BackgroundTaskKind, Session, SessionStatus, ToolCall};
 
     fn entry(
         id: &str,
@@ -1848,46 +1822,6 @@ mod tests {
         }
     }
 
-
-    #[test]
-    fn ring_shows_for_idle_background_work_and_for_held_turns() {
-        let shell = || vec![task("s1", BackgroundTaskKind::Shell)];
-        let idle = session(SessionStatus::Idle, false, shell());
-        assert_eq!(sidebar_ring(ChatIndicator::Idle, Some(&idle)), Some(1));
-        assert_eq!(sidebar_ring(ChatIndicator::Completed, Some(&idle)), Some(1));
-        let quiet = session(SessionStatus::Idle, false, vec![]);
-        assert_eq!(sidebar_ring(ChatIndicator::Idle, Some(&quiet)), None);
-        let working = session(SessionStatus::Working, false, shell());
-        assert_eq!(sidebar_ring(ChatIndicator::Working, Some(&working)), None);
-        let held = session(SessionStatus::Working, true, vec![]);
-        assert_eq!(sidebar_ring(ChatIndicator::Working, Some(&held)), Some(0));
-        assert_eq!(sidebar_ring(ChatIndicator::Errored, Some(&held)), None);
-        assert_eq!(sidebar_ring(ChatIndicator::Idle, None), None);
-    }
-
-    #[test]
-    fn ring_label_counts_background_work_by_kind() {
-        let agents: Vec<_> = (0..4)
-            .map(|ix| task(&format!("a{ix}"), BackgroundTaskKind::Agent))
-            .collect();
-        assert_eq!(ring_label(&agents).as_deref(), Some("4 subagents"));
-        let shells = [
-            task("s1", BackgroundTaskKind::Shell),
-            task("s2", BackgroundTaskKind::Shell),
-        ];
-        assert_eq!(ring_label(&shells).as_deref(), Some("2 shells"));
-        let mixed = [
-            task("a1", BackgroundTaskKind::Agent),
-            task("s1", BackgroundTaskKind::Shell),
-            task("o1", BackgroundTaskKind::Other),
-            task("o2", BackgroundTaskKind::Other),
-        ];
-        assert_eq!(
-            ring_label(&mixed).as_deref(),
-            Some("1 subagent · 1 shell · 2 tasks")
-        );
-        assert_eq!(ring_label(&[]), None);
-    }
 
     fn claude_chat(id: &str) -> zeron_proto::Chat {
         zeron_proto::Chat {

@@ -496,6 +496,8 @@ pub struct SessionRow {
     /// Run start of the live turn while Working/AwaitingInput.
     pub working_since_ms: Option<i64>,
     pub held_by_subagents: bool,
+    pub background_ring: Option<u32>,
+    pub background_label: Option<String>,
     pub last_activity_ms: i64,
     /// `now` / `34m` / `4h` / `2d` at derive time.
     pub time_label: String,
@@ -542,6 +544,8 @@ impl From<&zc::SessionRow> for SessionRow {
             host_indicator: r.host_indicator.into(),
             working_since_ms: r.working_since_ms,
             held_by_subagents: r.held_by_subagents,
+            background_ring: r.background_ring,
+            background_label: r.background_label.clone(),
             last_activity_ms: r.last_activity_ms,
             time_label: r.time_label.clone(),
             created_at_ms: r.created_at_ms,

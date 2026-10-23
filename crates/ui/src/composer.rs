@@ -9693,7 +9693,7 @@ impl Composer {
                         .map_or(zeron_proto::ChatIndicator::Idle, |chat| {
                             state.display_status_for(chat, now)
                         });
-                    let ring = background::sidebar_ring(status, state.session_for(&thread.chat_id));
+                    let ring = zeron_proto::background::sidebar_ring(status, state.session_for(&thread.chat_id));
                     (status, ring)
                 })
                 .collect()

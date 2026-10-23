@@ -134,6 +134,20 @@ impl DemoHost {
                 client.workspace.put_supervisor(device, snapshot);
             }
         }
+        if let Some(held) = composer::background_session("chat-home") {
+            let idle = Session {
+                status: SessionStatus::Idle,
+                held_by_subagents: false,
+                ..held.clone()
+            };
+            let veil = Session {
+                chat_id: "chat-veil".into(),
+                ..held
+            };
+            client
+                .workspace
+                .put_host_sessions(fixtures::MAC, vec![idle, veil]);
+        }
         self.beat_presence(client);
         Ok(())
     }

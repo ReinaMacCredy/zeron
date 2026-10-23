@@ -11718,11 +11718,11 @@ impl Shell {
         let working =
             status == zeron_proto::ChatIndicator::Working && !queued && !undelivered && !expired;
         let ring =
-            crate::composer::background::sidebar_ring(status, self.state.read(cx).session_for(&id))
+            zeron_proto::background::sidebar_ring(status, self.state.read(cx).session_for(&id))
                 .filter(|_| !queued && !undelivered && !expired);
         let work_label = ring.filter(|_| working).and_then(|_| {
             let state = self.state.read(cx);
-            crate::composer::background::ring_label(&state.session_for(&id)?.background_tasks)
+            zeron_proto::background::ring_label(&state.session_for(&id)?.background_tasks)
         });
         let status_label: Option<SharedString> = match work_label {
             Some(label) => Some(label.into()),
@@ -12489,11 +12489,11 @@ impl Shell {
         let settled_state = queued || undelivered || expired;
         let working = status == Status::Working && !settled_state;
         let ring =
-            crate::composer::background::sidebar_ring(status, self.state.read(cx).session_for(&id))
+            zeron_proto::background::sidebar_ring(status, self.state.read(cx).session_for(&id))
                 .filter(|_| !settled_state);
         let work_label = ring.filter(|_| working).and_then(|_| {
             let state = self.state.read(cx);
-            crate::composer::background::ring_label(&state.session_for(&id)?.background_tasks)
+            zeron_proto::background::ring_label(&state.session_for(&id)?.background_tasks)
         });
         let (status_label, status_icon, status_color): (Option<SharedString>, &str, gpui::Hsla) =
             if expired {

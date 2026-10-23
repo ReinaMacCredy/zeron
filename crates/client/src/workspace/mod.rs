@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use zeron_doc::{RegistryDoc, WorkspaceState};
 use zeron_proto::supervisor::SupervisorSnapshot;
-use zeron_proto::{CheckoutChangeRequestStatus, SidebarPreferences, TaskStep};
+use zeron_proto::{CheckoutChangeRequestStatus, Session, SidebarPreferences, TaskStep};
 
 pub use tasks::{
     ApprovalView, Brief, BriefMessage, ContextChat, EstimateLine, HostRef, ItemSend,
@@ -48,6 +48,7 @@ pub(crate) struct WorkspaceStore {
     presence: Mutex<HashMap<String, i64>>,
     change_requests: Mutex<Vec<CheckoutChangeRequestStatus>>,
     supervisors: Mutex<BTreeMap<String, SupervisorSnapshot>>,
+    host_sessions: Mutex<BTreeMap<String, Vec<Session>>>,
     item_sends: Mutex<HashMap<String, ItemSend>>,
     cache: Mutex<Option<StateCache>>,
     snapshot: RwLock<Arc<WorkspaceSnapshot>>,
@@ -62,6 +63,7 @@ impl WorkspaceStore {
             presence: Mutex::new(HashMap::new()),
             change_requests: Mutex::new(Vec::new()),
             supervisors: Mutex::new(BTreeMap::new()),
+            host_sessions: Mutex::new(BTreeMap::new()),
             item_sends: Mutex::new(HashMap::new()),
             cache: Mutex::new(None),
             snapshot: RwLock::new(Arc::new(WorkspaceSnapshot::default())),
@@ -191,6 +193,25 @@ impl WorkspaceStore {
         lock(&self.supervisors).remove(device_id).is_some()
     }
 
+    /// A host's stream also carries other devices' registry copies, whose
+    /// background work is always empty: only its own chats are kept.
+    pub(crate) fn put_host_sessions(&self, device_id: &str, sessions: Vec<Session>) -> bool {
+        let own: Vec<Session> = sessions
+            .into_iter()
+            .filter(|s| s.device_id == device_id)
+            .collect();
+        let mut all = lock(&self.host_sessions);
+        if all.get(device_id) == Some(&own) {
+            return false;
+        }
+        all.insert(device_id.to_owned(), own);
+        true
+    }
+
+    pub(crate) fn drop_host_sessions(&self, device_id: &str) -> bool {
+        lock(&self.host_sessions).remove(device_id).is_some()
+    }
+
     pub(crate) fn supervisors(&self) -> BTreeMap<String, SupervisorSnapshot> {
         lock(&self.supervisors).clone()
     }
@@ -219,6 +240,7 @@ impl WorkspaceStore {
         let presence = self.presence();
         let change_requests = lock(&self.change_requests).clone();
         let supervisors = self.supervisors();
+        let host_sessions = lock(&self.host_sessions).clone();
         let item_sends = lock(&self.item_sends).clone();
         let previous = self.snapshot();
         let mut next = view::derive(
@@ -231,6 +253,7 @@ impl WorkspaceStore {
                 change_requests: &change_requests,
                 steps: &steps,
                 supervisors: &supervisors,
+                host_sessions: &host_sessions,
                 item_sends: &item_sends,
                 send_states,
                 synced,

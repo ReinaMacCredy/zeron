@@ -1207,3 +1207,16 @@ fn plan_estimate_prices_children_against_the_lead() {
     );
     assert!(estimate.baseline.starts_with("vs 6.0x"));
 }
+
+#[test]
+fn a_row_names_the_background_work_its_host_reports() {
+    let (client, _dir) = demo(fast());
+    let ws = client.workspace();
+    let ring = |id: &str| {
+        let row = &ws.sessions[id];
+        (row.background_ring, row.background_label.as_deref())
+    };
+    assert_eq!(ring("chat-home"), (Some(1), None));
+    assert_eq!(ring("chat-veil"), (Some(1), Some("1 shell")));
+    assert_eq!(ring("chat-ios-scroll"), (None, None));
+}

@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
-use zeron_proto::CheckoutChangeRequestStatus;
 use zeron_proto::supervisor::SupervisorSnapshot;
+use zeron_proto::{CheckoutChangeRequestStatus, Session};
 use zeron_rpc::{LinkCache, LinkCacheConfig, PeerLiveness, RpcError, methods};
 
 use super::{Bearer, b64};
@@ -58,6 +58,7 @@ pub(crate) struct Relay {
     unsupported: Mutex<HashSet<String>>,
     supervisors: Mutex<HashMap<String, CancellationToken>>,
     no_supervisor: Mutex<HashSet<String>>,
+    host_sessions: Mutex<HashMap<String, CancellationToken>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -118,6 +119,7 @@ impl Relay {
             unsupported: Mutex::new(HashSet::new()),
             supervisors: Mutex::new(HashMap::new()),
             no_supervisor: Mutex::new(HashSet::new()),
+            host_sessions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -332,83 +334,146 @@ impl Relay {
         for (_, token) in lock(&self.supervisors).drain() {
             token.cancel();
         }
+        for (_, token) in lock(&self.host_sessions).drain() {
+            token.cancel();
+        }
     }
 
-    pub(crate) fn reconcile_supervisors(&self, inner: &Arc<ClientInner>, devices: HashSet<String>) {
+    /// Each execution host's Supervisor and its own sessions (the background
+    /// work rows name, which never reaches the registry).
+    pub(crate) fn reconcile_hosts(&self, inner: &Arc<ClientInner>, devices: HashSet<String>) {
         let skip = lock(&self.no_supervisor).clone();
-        let mut watches = lock(&self.supervisors);
-        watches.retain(|device, token| {
-            let keep = devices.contains(device) && !skip.contains(device);
-            if !keep {
-                token.cancel();
-            }
-            keep
-        });
-        for device in devices {
-            if watches.contains_key(&device) || skip.contains(&device) {
-                continue;
-            }
-            let token = CancellationToken::new();
-            watches.insert(device.clone(), token.clone());
-            spawn_supervisor_watch(Arc::downgrade(inner), device, token);
-        }
+        let supervised = devices
+            .iter()
+            .filter(|d| !skip.contains(*d))
+            .cloned()
+            .collect();
+        reconcile_host_streams(inner, &self.supervisors, supervised, HostStream::Supervisor);
+        reconcile_host_streams(inner, &self.host_sessions, devices, HostStream::Sessions);
     }
 }
 
-fn spawn_supervisor_watch(weak: Weak<ClientInner>, device_id: String, cancel: CancellationToken) {
-    crate::runtime::shared().spawn(async move {
-        let mut backoff = Duration::from_millis(500);
-        loop {
-            if cancel.is_cancelled() {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HostStream {
+    Supervisor,
+    Sessions,
+}
+
+fn reconcile_host_streams(
+    inner: &Arc<ClientInner>,
+    watches: &Mutex<HashMap<String, CancellationToken>>,
+    devices: HashSet<String>,
+    stream: HostStream,
+) {
+    let mut watches = lock(watches);
+    watches.retain(|device, token| {
+        let keep = devices.contains(device);
+        if !keep {
+            token.cancel();
+        }
+        keep
+    });
+    for device in devices {
+        if watches.contains_key(&device) {
+            continue;
+        }
+        let token = CancellationToken::new();
+        watches.insert(device.clone(), token.clone());
+        let weak = Arc::downgrade(inner);
+        crate::runtime::shared().spawn(async move {
+            watch_host(weak.clone(), &device, token, stream).await;
+            if stream == HostStream::Sessions {
+                forget_host_sessions(&weak, &device);
+            }
+        });
+    }
+}
+
+fn forget_host_sessions(weak: &Weak<ClientInner>, device_id: &str) {
+    if let Some(inner) = weak.upgrade()
+        && inner.workspace.drop_host_sessions(device_id)
+    {
+        inner.recompute_workspace();
+    }
+}
+
+async fn watch_host(
+    weak: Weak<ClientInner>,
+    device_id: &str,
+    cancel: CancellationToken,
+    stream: HostStream,
+) {
+    let method = match stream {
+        HostStream::Supervisor => methods::WATCH_SUPERVISOR,
+        HostStream::Sessions => methods::WATCH_SESSIONS,
+    };
+    let mut backoff = Duration::from_millis(500);
+    loop {
+        if cancel.is_cancelled() {
+            return;
+        }
+        let Some(inner) = weak.upgrade() else { return };
+        let Some(live) = inner.live() else { return };
+        let links = live.relay.links.clone();
+        drop(inner);
+        let result = async {
+            let client = links.client(device_id).await?;
+            client.subscribe_checked(method, json!({})).await
+        };
+        let subscription = tokio::select! {
+            _ = cancel.cancelled() => return,
+            result = result => result,
+        };
+        match subscription {
+            Ok(mut items) => loop {
+                let item = tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    item = items.recv() => item,
+                };
+                let Some(item) = item else { break };
+                let Some(inner) = weak.upgrade() else { return };
+                let changed = match stream {
+                    HostStream::Supervisor => {
+                        let Ok(snapshot) = serde_json::from_value::<SupervisorSnapshot>(item)
+                        else {
+                            continue;
+                        };
+                        inner.workspace.put_supervisor(device_id, snapshot);
+                        true
+                    }
+                    HostStream::Sessions => {
+                        let Ok(sessions) = serde_json::from_value::<Vec<Session>>(item) else {
+                            continue;
+                        };
+                        inner.workspace.put_host_sessions(device_id, sessions)
+                    }
+                };
+                backoff = Duration::from_millis(500);
+                if changed {
+                    inner.recompute_workspace();
+                }
+            },
+            Err(RpcError::UnknownMethod(_) | RpcError::Failed(_)) => {
+                if stream == HostStream::Supervisor
+                    && let Some(inner) = weak.upgrade()
+                    && let Some(live) = inner.live()
+                {
+                    lock(&live.relay.no_supervisor).insert(device_id.to_owned());
+                }
                 return;
             }
-            let Some(inner) = weak.upgrade() else { return };
-            let Some(live) = inner.live() else { return };
-            let links = live.relay.links.clone();
-            drop(inner);
-            let result = async {
-                let client = links.client(&device_id).await?;
-                client
-                    .subscribe_checked(methods::WATCH_SUPERVISOR, json!({}))
-                    .await
-            };
-            let subscription = tokio::select! {
-                _ = cancel.cancelled() => return,
-                result = result => result,
-            };
-            match subscription {
-                Ok(mut stream) => loop {
-                    let item = tokio::select! {
-                        _ = cancel.cancelled() => return,
-                        item = stream.recv() => item,
-                    };
-                    let Some(item) = item else { break };
-                    let Ok(snapshot) = serde_json::from_value::<SupervisorSnapshot>(item) else {
-                        continue;
-                    };
-                    backoff = Duration::from_millis(500);
-                    let Some(inner) = weak.upgrade() else { return };
-                    inner.workspace.put_supervisor(&device_id, snapshot);
-                    inner.recompute_workspace();
-                },
-                Err(RpcError::UnknownMethod(_) | RpcError::Failed(_)) => {
-                    if let Some(inner) = weak.upgrade()
-                        && let Some(live) = inner.live()
-                    {
-                        lock(&live.relay.no_supervisor).insert(device_id.clone());
-                    }
-                    return;
-                }
-                Err(RpcError::Closed | RpcError::Transport(_)) => links.invalidate(&device_id),
-                Err(_) => {}
-            }
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                _ = tokio::time::sleep(backoff) => {}
-            }
-            backoff = (backoff * 2).min(Duration::from_secs(5));
+            Err(RpcError::Closed | RpcError::Transport(_)) => links.invalidate(device_id),
+            Err(_) => {}
         }
-    });
+        if stream == HostStream::Sessions {
+            forget_host_sessions(&weak, device_id);
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(backoff) => {}
+        }
+        backoff = (backoff * 2).min(Duration::from_secs(5));
+    }
 }
 
 /// One `WatchCheckoutChangeRequest` stream, retried 0.5s→5s forever (last

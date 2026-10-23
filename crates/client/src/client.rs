@@ -213,8 +213,8 @@ impl ClientInner {
     }
 
     /// PR-status streams for every active chat with a branch (per
-    /// `(device, repo root, branch)`) and every host's Supervisor, only while
-    /// foregrounded.
+    /// `(device, repo root, branch)`) and every host's Supervisor and
+    /// sessions, only while foregrounded.
     pub(crate) fn reconcile_watches(self: &Arc<Self>) {
         let Some(live) = self.live() else { return };
         if !self.foreground.load(Ordering::Acquire) {
@@ -247,7 +247,7 @@ impl ClientInner {
             .filter(|d| d.is_execution_host && !d.is_self)
             .map(|d| d.id.clone())
             .collect();
-        live.relay.reconcile_supervisors(self, hosts);
+        live.relay.reconcile_hosts(self, hosts);
     }
 
     /// Durable wake: retry until the edge accepts it, including after relaunch.

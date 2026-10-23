@@ -475,6 +475,8 @@ final class AppModel {
             prNumber: r.pullRequest?.number,
             status: status(r.indicator),
             timeLabel: r.timeLabel,
+            backgroundRing: r.backgroundRing,
+            background: r.backgroundLabel,
             unseen: r.unseen,
             pinned: r.pinned,
             sendFailed: r.sendState == .failed
