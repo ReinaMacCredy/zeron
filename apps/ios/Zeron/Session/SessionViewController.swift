@@ -905,14 +905,22 @@ final class StatusPill: UIControl {
 enum Drafts {
     private static let key = "drafts"
 
+    /// The demo (and the UI tests on it) keep drafts in memory only: one
+    /// run's leftovers must not seed the next.
+    static let persists = !ProcessInfo.processInfo.arguments.contains("-demo")
+    private static var volatile: [String: String] = [:]
+
+    private static var all: [String: String] {
+        get { persists ? (UserDefaults.standard.dictionary(forKey: key) as? [String: String]) ?? [:] : volatile }
+        set { if persists { UserDefaults.standard.set(newValue, forKey: key) } else { volatile = newValue } }
+    }
+
     static func load(_ chatId: String) -> String {
-        (UserDefaults.standard.dictionary(forKey: key) as? [String: String])?[chatId] ?? ""
+        all[chatId] ?? ""
     }
 
     static func save(_ chatId: String, _ text: String) {
-        var all = (UserDefaults.standard.dictionary(forKey: key) as? [String: String]) ?? [:]
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         all[chatId] = trimmed.isEmpty ? nil : text
-        UserDefaults.standard.set(all, forKey: key)
     }
 }
