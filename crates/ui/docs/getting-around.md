@@ -50,9 +50,9 @@ On a trackpad that supports it, you feel a light tick when the swipe is far enou
 
 ## Session tabs
 
-The titlebar shows a tab for each session open on this device. A tab shows the agent's mark (which changes while the agent works), the title, and a status dot that turns into a close button when you hover the tab or select it.
+The titlebar shows a tab for each session open on this device. A tab shows the agent's mark (which changes while the agent works), the title, and a status dot that turns into a close button when you hover the tab or select it. The tabs of a mission's lead and its steps gather into one group behind a tab with the mission's title; see [Mission Control](zeron://docs/mission-control).
 
-![Session tabs in the titlebar with the tab menu open](getting-around-tabs.jpg)
+![Session tabs in the titlebar, with a mission's tab group and the tab menu open](getting-around-tabs.jpg)
 
 Selecting a session anywhere (the sidebar, the command palette, a notification) opens its tab. A chat you started opens its tab again by itself when it begins a new run, and any chat that starts waiting for your input opens its tab too.
 

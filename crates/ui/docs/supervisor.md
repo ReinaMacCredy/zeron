@@ -43,7 +43,7 @@ The page has two columns. On the left are the header, the inbox and the composer
 The header shows the shield, **Supervisor**, a gear button, and the filter tabs. While either full-authority switch is on, **Full authority** shows next to **Supervisor**. The rail's status card says whether the Supervisor is on, what it last did, and what it checks next:
 
 - **Watching 2 trees**, counting missions and watched trees, with a green dot that breathes, when it has nothing to do but still watches. **Last** names the last wake, its reason and what the Supervisor did about it, for example **14:06 · step failed → messaged the Lead · Lead ran a turn**. **Next** names the next scheduled check, for example **silence check on Checkout at 14:36 if it stays quiet**, a check-in, a stall check on a thread that went quiet, or held events and when they wake it. On the right, **3 of 12 wakes this hour**.
-- **Working on a wake**, with a spinner and how long the turn has run, while it handles a wake (**Woke** names the time, the reason and the mission), or **Working on a message** while it answers you. **Open the conversation** opens the conversation above the composer.
+- **Working on a wake**, with a spinner and how long the turn has run, while it handles a wake (**Woke** names the time, the reason and the mission), or **Working on a message** while it answers you. **Open the conversation** opens the conversation over the inbox.
 - **Stopped by you**, in amber, after you stop its turn. Wakes queue up while it is stopped: **Held** lists their reasons and since when, and the right side counts them. **Resume** sends the waiting wakes; sending it a message resumes it too.
 - **Off** when it has no chat. **Start the Supervisor** starts it.
 - **Couldn't start the Supervisor** with the reason, and **Try again**.
@@ -133,7 +133,7 @@ A contention wakes the Supervisor once, and again only after it has cleared. Zer
 
 ## Watch a tree
 
-Every mission whose lead runs on this Mac is watched from the start. A plain agent tree, a chat that started other threads without a plan, is watched only when you pick it, and so is a lead whose plan has finished. Open the tree from the **Trees** chip on [Tasks](zeron://docs/tasks) and click **Watch** in its header. A sheet opens with what the Supervisor will do: wake when anything in the tree asks, fails or finishes, at any depth, and act inside its authority. It shows the two **Authority** switches it uses, **Decide for me** and **Change a mission's goal or spend**. Both are off by default and apply to everything the Supervisor watches. On a tree without a plan, the second one is greyed out: **Applies once this tree has a plan**. Click **Start watching**. The button turns into **Watched** with a green dot, and the tree joins the rail.
+Every mission whose lead runs on this Mac is watched from the start. A plain agent tree, a chat that started other threads without a plan, is watched only when you pick it, and so is a lead whose plan has finished. Open the tree from the **Trees** chip on [Tasks](zeron://docs/tasks) and click **Watch** in its header. A sheet opens with what the Supervisor will do: wake when anything in the tree asks, fails or finishes, at any depth, and act inside its authority. It shows the two **Authority** switches it uses, **Decide for me** and **Change a mission's goal or spend**. Both are off by default and apply to everything the Supervisor watches. On a tree without a plan, the second one is greyed out: **Applies once this tree has a plan**. Click **Start watching**. The button turns into **Watched** with a green eye, and the tree joins the rail.
 
 ![The Watch sheet on a tree without a plan](supervisor.jpg)
 
@@ -183,6 +183,10 @@ The **Wake log** lists the recent wakes, newest first. Each shows its time, the 
 
 The composer sits under the inbox and has the same model picker as New chat. Type in **Talk to the Supervisor about architecture and direction…** and send.
 
-Once the conversation has a message, a **Conversation** tab sits on the composer's top edge, left of the sidechat tab, with the last message in one line: the last wake, the Supervisor's last reply, or what you last wrote. Click it to open the conversation above the composer; click it again to close it. In the conversation, a wake reads **Wake** and its number of events, so you can tell it from what you wrote.
+Once the conversation has a message, a **Conversation** tab sits on the composer's top edge, left of the sidechat tab, with the last message in one line: the last wake, the Supervisor's last reply, or what you last wrote. Click it to open the conversation over the inbox, under the header; click it again, or the × at the conversation's top right, to close it. In the conversation, a wake reads **Wake** and its number of events, so you can tell it from what you wrote.
+
+Type @ and a thread's name to mention it. When you send a message that mentions a thread, the Supervisor starts watching that thread's tree: the tree joins the rail and its **Watch** button reads **Watched**.
+
+![The Supervisor's conversation open over the inbox, after a message that mentions a tree](supervisor-conversation.jpg)
 
 The page has motion: the blocks rise in when you open it, a new decision slides in and its counts roll, the tab underline slides and the inbox crossfades when you change the filter, an answer confirms and folds away, the status card fades between states, and the rail slides between its widths. Hovering is instant. With **Reduce motion** on in [Settings > Appearance](zeron://settings/appearance), all of it snaps instead.

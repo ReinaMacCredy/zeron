@@ -37,7 +37,11 @@ Right-click a row for the full menu: **Rename**, **Add plan** (on a chat of this
 
 ## Step threads
 
-A [Mission Control](zeron://docs/mission-control) lead shows its step threads indented under its row. Hover the lead and click the chevron at its left edge, Tab to the chevron and press Space, or use the right-click menu, to fold them away. A collapsed lead keeps the chevron showing and sums up its steps, for example **4 · 1 running**: the number of steps, then the most pressing of asking you, failed, or running. When a step needs you, an attention dot appears on the lead. Opening a step, from the mission's page or a link, unfolds its lead again. If you fold a lead while one of its steps is open, the lead row stays shaded to show it holds the open chat. Zeron remembers which leads you collapsed.
+A [Mission Control](zeron://docs/mission-control) lead is one row with a progress ring and its steps done out of all steps, such as **3/7**; click it to open the mission's page. Only the step threads that are running or asking you show indented under it, and a step that asks reads **asks you**. One faint row, such as **5 more steps**, counts the rest; click it to open the mission's page.
+
+![A mission in the sidebar: the lead with its ring, two live steps and 5 more steps](sidebar-mission.jpg)
+
+Hover the lead and click the chevron at its left edge, Tab to the chevron and press Space, or use the right-click menu, to fold the steps away. A collapsed lead keeps the chevron showing and sums up its steps, for example **4 · 1 running**: the number of steps, then the most pressing of asking you, failed, or running. When a step needs you, an attention dot appears on the lead. Opening a step, from the mission's page or a link, unfolds its lead again. If you fold a lead while one of its steps is open, the lead row stays shaded to show it holds the open chat. Zeron remembers which leads you collapsed.
 
 ## Renaming
 

@@ -92,6 +92,10 @@ const IMAGES: &[(&str, &[u8])] = &[
         include_bytes!("../assets/whats_new/sidebar-inbox-shelves.jpg"),
     ),
     (
+        "sidebar-mission.jpg",
+        include_bytes!("../assets/whats_new/sidebar-mission.jpg"),
+    ),
+    (
         "palette-all.jpg",
         include_bytes!("../assets/whats_new/palette-all.jpg"),
     ),
@@ -224,6 +228,10 @@ const IMAGES: &[(&str, &[u8])] = &[
         include_bytes!("../assets/whats_new/tasks-card.jpg"),
     ),
     (
+        "tasks-list.jpg",
+        include_bytes!("../assets/whats_new/tasks-list.jpg"),
+    ),
+    (
         "mission-control-tree.jpg",
         include_bytes!("../assets/whats_new/mission-control-tree.jpg"),
     ),
@@ -238,6 +246,10 @@ const IMAGES: &[(&str, &[u8])] = &[
     (
         "supervisor-authority.jpg",
         include_bytes!("../assets/whats_new/supervisor-authority.jpg"),
+    ),
+    (
+        "supervisor-conversation.jpg",
+        include_bytes!("../assets/whats_new/supervisor-conversation.jpg"),
     ),
     (
         "split-view.jpg",

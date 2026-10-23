@@ -13,6 +13,8 @@ Chips above the list filter it, each with its count:
 - **Trees**, in **List** only: chats that started other threads without a plan. Each row shows the tree's state, its title, a **Tree** badge, what it is doing (**Watching 2 agents**, **Idle**, or **Needs you** and who asks) and how many of its agents are done. Click a row to open the tree's page, described in [Mission Control](zeron://docs/mission-control).
 - **Needs you**: tasks and trees that wait on you.
 
+![The Tasks list with its chips, a mission and a tree](tasks-list.jpg)
+
 ## Add a task
 
 In **List**, type in the last row, **Add a task, or press Tab to add notes and start it**.
