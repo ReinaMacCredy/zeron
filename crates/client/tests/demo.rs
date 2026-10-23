@@ -753,6 +753,38 @@ fn steering_while_busy_sends_a_steer_not_a_queue_row() {
 }
 
 #[test]
+fn queued_row_primary_action_steers_into_the_live_turn() {
+    let (client, _dir) = demo(DemoOptions::default());
+    let session = client.open_session("chat-home").unwrap();
+    let host = session.composer().host.device_id.clone();
+    zeron_client::runtime::shared().block_on(client.list_harnesses(&host));
+    session.send(SendRequest::text("first")).unwrap();
+    wait_for("turn running and steerable", Duration::from_secs(5), || {
+        let composer = session.composer();
+        composer.live.turn_running && composer.host.capabilities.mid_turn_steering == Some(true)
+    });
+    let SendOutcome::Queued { queue_id } = session.send(SendRequest::text("second")).unwrap()
+    else {
+        panic!("a running turn parks the send on the queue");
+    };
+    let row = session.composer().queue[0].clone();
+    assert_eq!(
+        row.primary_action,
+        Some(zeron_client::QueuePrimaryAction::Steer)
+    );
+    assert_eq!(row.image, None);
+    let delivered = zeron_client::runtime::shared()
+        .block_on(session.deliver_queued_now(&queue_id))
+        .unwrap();
+    assert!(delivered);
+    wait_for(
+        "steered row left the queue",
+        Duration::from_secs(10),
+        || session.composer().queue.is_empty() && session.snapshot().entry(&queue_id).is_some(),
+    );
+}
+
+#[test]
 fn queueing_while_busy_at_realistic_speed() {
     let (client, _dir) = demo(DemoOptions::default());
     let session = client.open_session("chat-home").unwrap();

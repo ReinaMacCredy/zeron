@@ -60,8 +60,9 @@ pub use events::{ClientEvent, ClientListener};
 pub use session::{
     AppendHint, BusyPolicy, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest,
     LiveStatus, LocalEcho, OutgoingAttachment, PendingKind, PendingSend, QueueEditAction,
-    QueueEditFinish, QueueEditLease, QueueEditStart, QueueGate, QueueItem, RoomState, SendOutcome,
-    SendRequest, SessionHandle, SessionSnapshot, SkillFile, SnapshotDelta, SnapshotWatch,
+    QueueEditFinish, QueueEditLease, QueueEditStart, QueueGate, QueueItem, QueuePrimaryAction,
+    RoomState, SendOutcome, SendRequest, SessionHandle, SessionSnapshot, SkillFile, SnapshotDelta,
+    SnapshotWatch,
 };
 pub use workspace::{
     ApprovalView, Brief, BriefMessage, ContextChat, DeviceView, EstimateLine, FrontGroup, FrontPage,

@@ -139,7 +139,7 @@ final class CoreSessionSource: SessionSource {
             case .reviewRequired?: "Needs review"
             case nil: q.actionPending ? "Updating" : nil
             }
-            return SessionChrome.QueuedItem(id: q.id, text: q.visibleText, thumbnail: nil, gate: gate, from: q.fromLabel)
+            return SessionChrome.QueuedItem(id: q.id, text: q.visibleText, thumbnail: nil, gate: gate, from: q.fromLabel, action: q.primaryAction, image: q.image)
         }
         next.error = c.queueError
         if next != chrome {
@@ -279,6 +279,8 @@ final class CoreSessionSource: SessionSource {
         case .edit: break // Driven by the view: beginEdit / finishEdit.
         }
     }
+
+    func clearQueueError() { handle.clearQueueError() }
 
     private var lease: QueueEditLease?
     private var renewal: Task<Void, Never>?

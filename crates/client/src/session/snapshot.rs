@@ -203,6 +203,38 @@ pub struct QueueItem {
     /// A Send-now / Remove is awaiting the host's acknowledgement.
     pub action_pending: bool,
     pub from_label: Option<String>,
+    /// What the row's send button does; `None` while it cannot deliver.
+    pub primary_action: Option<QueuePrimaryAction>,
+    /// The first image attachment, for the row's thumbnail.
+    pub image: Option<String>,
+}
+
+/// The desktop queue row's primary action (`crates/ui/src/queue.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueuePrimaryAction {
+    /// Text into the live turn, which keeps running.
+    Steer,
+    /// Text at the next turn: this agent cannot steer mid-turn.
+    SendNext,
+    /// Attachments need a fresh request, so the live turn is interrupted.
+    SendNow,
+}
+
+impl QueuePrimaryAction {
+    pub fn resolve(
+        blocked: bool,
+        host_supports_actions: bool,
+        has_attachments: bool,
+        steers_mid_turn: bool,
+    ) -> Option<Self> {
+        (!blocked && host_supports_actions).then_some(if has_attachments {
+            Self::SendNow
+        } else if steers_mid_turn {
+            Self::Steer
+        } else {
+            Self::SendNext
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
