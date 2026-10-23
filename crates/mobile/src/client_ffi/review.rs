@@ -229,12 +229,14 @@ pub struct ReviewFindingRow {
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ReviewFindingsView {
     pub task_id: String,
+    pub title: String,
     pub summary: Option<String>,
     pub note: Option<String>,
     pub retry_error: Option<String>,
     pub rows: Vec<ReviewFindingRow>,
     pub fix_label: Option<String>,
     pub open_changes: String,
+    pub changes_title: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -378,6 +380,7 @@ impl SessionHandle {
         let fixable = run.fixable().count();
         Some(ReviewFindingsView {
             task_id: run.task_id.clone().unwrap_or_default(),
+            title: review::FINDINGS_TITLE.into(),
             summary: run.pill_suffix(),
             note: run.note.clone(),
             retry_error: run.retry_error.as_deref().map(review::retry_failed),
@@ -407,6 +410,7 @@ impl SessionHandle {
             },
             fix_label: (listed && fixable > 0).then(|| review::fix_remaining(fixable)),
             open_changes: review::OPEN_CHANGES.into(),
+            changes_title: zeron_proto::badges::CHANGES_TITLE.into(),
         })
     }
 

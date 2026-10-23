@@ -17700,23 +17700,27 @@ public func FfiConverterTypeReviewFindingRow_lower(_ value: ReviewFindingRow) ->
 
 public struct ReviewFindingsView: Equatable, Hashable {
     public var taskId: String
+    public var title: String
     public var summary: String?
     public var note: String?
     public var retryError: String?
     public var rows: [ReviewFindingRow]
     public var fixLabel: String?
     public var openChanges: String
+    public var changesTitle: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(taskId: String, summary: String?, note: String?, retryError: String?, rows: [ReviewFindingRow], fixLabel: String?, openChanges: String) {
+    public init(taskId: String, title: String, summary: String?, note: String?, retryError: String?, rows: [ReviewFindingRow], fixLabel: String?, openChanges: String, changesTitle: String) {
         self.taskId = taskId
+        self.title = title
         self.summary = summary
         self.note = note
         self.retryError = retryError
         self.rows = rows
         self.fixLabel = fixLabel
         self.openChanges = openChanges
+        self.changesTitle = changesTitle
     }
 
     
@@ -17736,23 +17740,27 @@ public struct FfiConverterTypeReviewFindingsView: FfiConverterRustBuffer {
         return
             try ReviewFindingsView(
                 taskId: FfiConverterString.read(from: &buf), 
+                title: FfiConverterString.read(from: &buf), 
                 summary: FfiConverterOptionString.read(from: &buf), 
                 note: FfiConverterOptionString.read(from: &buf), 
                 retryError: FfiConverterOptionString.read(from: &buf), 
                 rows: FfiConverterSequenceTypeReviewFindingRow.read(from: &buf), 
                 fixLabel: FfiConverterOptionString.read(from: &buf), 
-                openChanges: FfiConverterString.read(from: &buf)
+                openChanges: FfiConverterString.read(from: &buf), 
+                changesTitle: FfiConverterString.read(from: &buf)
         )
     }
 
     public static func write(_ value: ReviewFindingsView, into buf: inout [UInt8]) {
         FfiConverterString.write(value.taskId, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
         FfiConverterOptionString.write(value.summary, into: &buf)
         FfiConverterOptionString.write(value.note, into: &buf)
         FfiConverterOptionString.write(value.retryError, into: &buf)
         FfiConverterSequenceTypeReviewFindingRow.write(value.rows, into: &buf)
         FfiConverterOptionString.write(value.fixLabel, into: &buf)
         FfiConverterString.write(value.openChanges, into: &buf)
+        FfiConverterString.write(value.changesTitle, into: &buf)
     }
 }
 

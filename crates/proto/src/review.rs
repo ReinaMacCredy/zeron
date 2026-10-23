@@ -36,6 +36,7 @@ pub const THINKING_HEADING: &str = "Thinking";
 pub const NO_MATCHING_COMMITS: &str = "No matching commits";
 pub const REVIEW_OPTIONS: &str = "Review options";
 pub const REVIEW_CHANGES: &str = "Review changes";
+pub const FINDINGS_TITLE: &str = "Findings";
 const REANCHOR_WINDOW: u32 = 40;
 
 pub fn is_commit_id(rev: &str) -> bool {
