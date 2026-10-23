@@ -24,7 +24,7 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
         let sessions = UITab(title: "Sessions", image: UIImage(named: "tab-chat"), identifier: "sessions") { [app] _ in
             Self.nav(SessionsViewController(app: app))
         }
-        let tasks = UITab(title: "Tasks", image: UIImage(systemName: "checklist"), identifier: "tasks") { [app] _ in
+        let tasks = UITab(title: "Tasks", image: UIImage(named: "tab-tasks"), identifier: "tasks") { [app] _ in
             Self.nav(TasksViewController(app: app))
         }
         let more = UITab(title: "Settings", image: UIImage(named: "tab-settings"), identifier: "more") { [app] _ in

@@ -67,7 +67,7 @@ final class TaskSheetViewController: UIViewController, UICollectionViewDelegate 
                 c.imageProperties.maximumSize = CGSize(width: 44, height: 44)
                 c.imageProperties.cornerRadius = 6
             } else if let symbol = row.symbol {
-                c.image = UIImage(systemName: symbol)
+                c.image = UIImage(systemName: symbol) ?? TaskGlyph.asset(symbol)
                 c.imageProperties.tintColor = row.tint == Palette.text ? Palette.secondary : row.tint
             }
             cell.contentConfiguration = c
@@ -130,7 +130,7 @@ final class TaskSheetViewController: UIViewController, UICollectionViewDelegate 
 
         var actions: [Row] = []
         if task.mission {
-            actions.append(Row(id: "mission", title: missionLabels().openMissionPage, symbol: "list.bullet.rectangle", tint: Palette.accent, action: true))
+            actions.append(Row(id: "mission", title: missionLabels().openMissionPage, symbol: "glyph-mission", tint: Palette.accent, action: true))
         }
         if let chat = task.leadChatId {
             actions.append(Row(id: "thread:\(chat)", title: "Open thread", symbol: "bubble.left", tint: Palette.accent, action: true))
@@ -140,7 +140,7 @@ final class TaskSheetViewController: UIViewController, UICollectionViewDelegate 
         } else if task.status != .done {
             actions.append(Row(id: "start", title: "Start in a new chat", symbol: "play", tint: Palette.accent, action: true))
             actions.append(Row(id: "assign", title: "Hand to a thread", symbol: "arrowshape.turn.up.right", tint: Palette.accent, action: true))
-            actions.append(Row(id: "start-mission", title: missionLabels().planFirst, symbol: "list.bullet.rectangle", tint: Palette.accent, action: true))
+            actions.append(Row(id: "start-mission", title: missionLabels().planFirst, symbol: "glyph-mission", tint: Palette.accent, action: true))
         }
         actions.append(task.status == .done
             ? Row(id: "undone", title: "Mark as not done", symbol: "arrow.uturn.backward", tint: Palette.text, action: true)

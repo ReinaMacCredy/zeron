@@ -1,6 +1,12 @@
 import UIKit
 
 enum TaskGlyph {
+    static func asset(_ name: String, side: CGFloat = 20) -> UIImage? {
+        guard let asset = UIImage(named: name) else { return nil }
+        let rect = CGRect(x: 0, y: 0, width: side, height: side)
+        return UIGraphicsImageRenderer(size: rect.size).image { _ in asset.draw(in: rect) }.withRenderingMode(.alwaysTemplate)
+    }
+
     static func kind(_ status: TaskStatus) -> StatusGlyph.Kind {
         switch status {
         case .toDo: .dot(StatusTone.idle)
@@ -102,7 +108,7 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
             case let .supervisor(title, subtitle):
                 c.text = title
                 c.secondaryText = subtitle
-                c.image = UIImage(systemName: "eye")
+                c.image = TaskGlyph.asset("glyph-supervisor")
                 c.imageProperties.tintColor = Palette.accent
                 cell.accessibilityIdentifier = "tasks-supervisor"
             case let .mission(task):

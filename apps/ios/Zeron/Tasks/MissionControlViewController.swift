@@ -338,7 +338,7 @@ final class MissionControlViewController: UIViewController, UICollectionViewDele
                 self?.presentAuthority(watch.host)
             })
         }
-        children.append(UIAction(title: "Open Supervisor", image: UIImage(systemName: "person.badge.shield.checkmark")) { [weak self] _ in
+        children.append(UIAction(title: "Open Supervisor", image: TaskGlyph.asset("glyph-supervisor")) { [weak self] _ in
             guard let self else { return }
             self.navigationController?.pushViewController(SupervisorViewController(app: self.app), animated: true)
         })
