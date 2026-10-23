@@ -348,7 +348,6 @@ pub fn run_app(config: UiConfig) {
                     boot: config.boot(),
                 });
                 open_main_window(state, config.boot(), cx);
-                #[cfg(unix)]
                 ui_driver::start(config.data_dir.clone(), config.ipc_port, cx);
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 start_appshot_service(config.boot().data_dir, cx);
