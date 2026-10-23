@@ -5,9 +5,10 @@
 //! Ordering mirrors the desktop sidebar (`Shell::sidebar_visible_order`,
 //! "In one list" + "Last updated"): pinned sessions in their shared manual
 //! order, then the user's sections (each in its placed order), then everything
-//! else by recency ([`zeron_proto::view::sort_active`] keys). Archived and
-//! child (side/subagent) chats never appear in the active lists, and a chat
-//! pointing at a deleted project is hidden (projectless chats are first-class).
+//! else in Inbox order, with settled chats on their own shelf. Archived and
+//! delegated chats never appear in the active lists, step threads and
+//! agent-opened chats nest under their lead, and a chat pointing at a deleted
+//! project is hidden (projectless chats are first-class).
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -18,7 +19,7 @@ use zeron_doc::WorkspaceState;
 use zeron_proto::view::{attention_rank, display_status, project_key, representative_space};
 use zeron_proto::{
     ChangeRequestState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus,
-    Device, Session, SidebarPreferences, Space,
+    Device, SETTLE_AFTER_DAYS_DEFAULT, Session, SidebarPreferences, Space,
 };
 
 use crate::catalog;
@@ -99,8 +100,13 @@ pub struct SessionRow {
     /// Oldest unadopted send from this device, if any.
     pub send_state: Option<SendState>,
     pub parent_chat_id: Option<String>,
+    /// On the Settled shelf by its host's `settle_after_days` or a Settle.
+    pub settled: bool,
+    pub expired: bool,
     /// Sync room generation (2 = chat2; 1 = legacy, not dialable).
     pub room_gen: u32,
+    pub compacting: bool,
+    pub classifying: Option<zeron_proto::Classifying>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -111,12 +117,27 @@ pub struct SectionView {
     pub sessions: Vec<Arc<SessionRow>>,
 }
 
+/// One "By project" group of [`FrontPage::recent`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrontGroup {
+    pub id: String,
+    pub name: String,
+    pub sessions: Vec<Arc<SessionRow>>,
+}
+
 /// The "Threads" page — the desktop sidebar.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FrontPage {
     pub pinned: Vec<Arc<SessionRow>>,
     pub sections: Vec<SectionView>,
+    /// Unsettled rows in Inbox order (Active first when asked).
     pub recent: Vec<Arc<SessionRow>>,
+    /// `recent` by project, the projectless Chats group first.
+    pub groups: Vec<FrontGroup>,
+    /// Newest settle first.
+    pub settled: Vec<Arc<SessionRow>>,
+    /// Rows drawn under their lead or creator instead of in the lists above.
+    pub nested: HashMap<String, Vec<Arc<SessionRow>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -203,6 +224,10 @@ pub struct WorkspaceSnapshot {
     pub pull_requests: PullRequestGroups,
     pub archived: Vec<Arc<SessionRow>>,
     pub devices: Vec<DeviceView>,
+    pub tasks: super::TasksPage,
+    pub supervisor: super::SupervisorPage,
+    pub needs_you: Vec<super::NeedsYouEntry>,
+    pub today: super::TodayPage,
     /// Every chat row (archived and children included), by id.
     pub sessions: HashMap<String, Arc<SessionRow>>,
     children: HashMap<String, Vec<Arc<SessionRow>>>,
@@ -318,10 +343,32 @@ pub(crate) struct DeriveContext<'a> {
     /// Newest presence heartbeat per device (epoch ms).
     pub presence: &'a HashMap<String, i64>,
     pub change_requests: &'a [CheckoutChangeRequestStatus],
+    pub steps: &'a [zeron_proto::TaskStep],
+    pub supervisors:
+        &'a std::collections::BTreeMap<String, zeron_proto::supervisor::SupervisorSnapshot>,
+    pub item_sends: &'a HashMap<String, super::ItemSend>,
+    pub asks: &'a HashMap<String, super::Ask>,
     /// Oldest-unadopted-send state per chat (open sessions only).
     pub send_states: &'a HashMap<String, SendState>,
     pub synced: bool,
+    /// Each host's `settle_after_days`, where fetched.
+    pub settle_days: &'a HashMap<String, u32>,
+    pub active_first: bool,
+    pub today_runs: &'a HashMap<String, zeron_proto::TodayRuns>,
+    pub accounts: &'a HashMap<String, zeron_proto::AgentAccountsSnapshot>,
+    pub today_prs: &'a HashMap<String, Vec<zeron_proto::ChangeRequestListItem>>,
     pub previous: Option<&'a WorkspaceSnapshot>,
+}
+
+impl DeriveContext<'_> {
+    fn settled_at(&self, chat: &Chat, status: ChatIndicator) -> Option<DateTime<Utc>> {
+        let days = self
+            .settle_days
+            .get(&chat.device_id)
+            .copied()
+            .unwrap_or(SETTLE_AFTER_DAYS_DEFAULT);
+        chat.inbox_settled_at(status, days, self.now)
+    }
 }
 
 /// A device's display name, or `None` when it has none worth showing (blank,
@@ -353,6 +400,53 @@ fn sort_key(chat: &Chat) -> DateTime<Utc> {
 
 fn sort_recency(rows: &mut [&Chat]) {
     rows.sort_by(|a, b| sort_key(b).cmp(&sort_key(a)).then_with(|| a.id.cmp(&b.id)));
+}
+
+/// The desktop Inbox key without its live-turn marks: activity, with an
+/// Unsettle anchoring the chat as fresh.
+fn inbox_key(chat: &Chat) -> DateTime<Utc> {
+    chat.unsettled_at
+        .map_or(sort_key(chat), |at| at.max(sort_key(chat)))
+}
+
+/// One level, as the desktop sidebar: a mission step's thread under its
+/// lead, else an agent-opened chat under its creator, both listed; a parent
+/// that is itself nested keeps its own children as rows.
+fn nest_parents<'a>(
+    listed: &HashSet<&'a str>,
+    state: &'a WorkspaceState,
+    steps: &'a [zeron_proto::TaskStep],
+) -> HashMap<&'a str, &'a str> {
+    let mut parent: HashMap<&str, &str> = HashMap::new();
+    for step in steps.iter().filter(|step| !step.deleted) {
+        let Some(child) = step.chat_id.as_deref() else {
+            continue;
+        };
+        let lead = state
+            .tasks
+            .iter()
+            .find(|task| task.id == step.task_id && !task.deleted)
+            .and_then(|task| task.chat_id.as_deref());
+        if let Some(lead) = lead
+            && lead != child
+            && listed.contains(child)
+            && listed.contains(lead)
+        {
+            parent.entry(child).or_insert(lead);
+        }
+    }
+    for chat in &state.chats {
+        if let Some(creator) = chat.created_by_chat_id.as_deref()
+            && creator != chat.id
+            && listed.contains(chat.id.as_str())
+            && listed.contains(creator)
+        {
+            parent.entry(chat.id.as_str()).or_insert(creator);
+        }
+    }
+    let children: HashSet<&str> = parent.keys().copied().collect();
+    parent.retain(|_, lead| !children.contains(lead));
+    parent
 }
 
 /// desktop `change_request_for_chat`: the latest resolution for the chat's
@@ -411,7 +505,14 @@ fn hash_row(row: &SessionRow) -> u64 {
     }
     row.send_state.hash(&mut h);
     row.parent_chat_id.hash(&mut h);
+    row.settled.hash(&mut h);
+    row.expired.hash(&mut h);
     row.room_gen.hash(&mut h);
+    row.compacting.hash(&mut h);
+    row.classifying
+        .as_ref()
+        .map(|c| (c.harness, &c.model))
+        .hash(&mut h);
     h.finish()
 }
 
@@ -506,7 +607,11 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         pull_request: change_request_for_chat(chat, cx.change_requests).cloned(),
         send_state,
         parent_chat_id: chat.created_by_chat_id.clone(),
+        settled: cx.settled_at(chat, indicator).is_some(),
+        expired: chat.sidechat_expired(cx.now),
         room_gen: chat.room_gen.unwrap_or(1),
+        compacting: session.is_some_and(|s| s.compacting),
+        classifying: session.and_then(|s| s.classifying.clone()),
     };
     row.revision = hash_row(&row);
     // Unchanged rows keep their Arc across snapshots (pointer-equal diffing).
@@ -569,10 +674,33 @@ pub(crate) fn derive(
 
     // Front page.
     let active_ids: HashSet<&str> = active.iter().map(|c| c.id.as_str()).collect();
+    let parent_of = nest_parents(&active_ids, state, cx.steps);
+    let listed: HashSet<&str> = active_ids
+        .iter()
+        .copied()
+        .filter(|id| !parent_of.contains_key(id))
+        .collect();
+    let mut front_order: Vec<&Chat> = active.clone();
+    front_order.sort_by(|a, b| {
+        let live = |c: &Chat| cx.active_first && rows[&c.id].indicator != ChatIndicator::Idle;
+        live(b)
+            .cmp(&live(a))
+            .then_with(|| inbox_key(b).cmp(&inbox_key(a)))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let mut nested: HashMap<String, Vec<Arc<SessionRow>>> = HashMap::new();
+    for chat in &front_order {
+        if let Some(lead) = parent_of.get(chat.id.as_str()) {
+            nested
+                .entry((*lead).to_owned())
+                .or_default()
+                .push(row(chat));
+        }
+    }
     let mut seen: HashSet<&str> = HashSet::new();
     let pinned: Vec<Arc<SessionRow>> = pinned_order
         .iter()
-        .filter(|id| active_ids.contains(id.as_str()) && seen.insert(id.as_str()))
+        .filter(|id| listed.contains(id.as_str()) && seen.insert(id.as_str()))
         .map(|id| rows[id].clone())
         .collect();
     let section_views: Vec<SectionView> = sections
@@ -585,20 +713,50 @@ pub(crate) fn derive(
             sessions: section
                 .session_ids
                 .iter()
-                .filter(|id| active_ids.contains(id.as_str()) && !rc.pinned.contains(id.as_str()))
+                .filter(|id| listed.contains(id.as_str()) && !rc.pinned.contains(id.as_str()))
                 .filter(|id| rc.section_of.get(id.as_str()) == Some(&section.id.as_str()))
                 .filter(|id| seen.insert(id.as_str()))
                 .map(|id| rows[id].clone())
                 .collect(),
         })
         .collect();
-    let recent: Vec<Arc<SessionRow>> = active
+    let (mut settled_chats, unsettled): (Vec<&Chat>, Vec<&Chat>) = front_order
         .iter()
+        .copied()
         .filter(|c| {
-            !rc.pinned.contains(c.id.as_str()) && !rc.section_of.contains_key(c.id.as_str())
+            listed.contains(c.id.as_str())
+                && !rc.pinned.contains(c.id.as_str())
+                && !rc.section_of.contains_key(c.id.as_str())
         })
-        .map(|c| row(c))
-        .collect();
+        .partition(|c| rows[&c.id].settled);
+    let recent: Vec<Arc<SessionRow>> = unsettled.iter().map(|c| row(c)).collect();
+    settled_chats
+        .sort_by_cached_key(|c| std::cmp::Reverse(cx.settled_at(c, rows[&c.id].indicator)));
+    let settled: Vec<Arc<SessionRow>> = settled_chats.iter().map(|c| row(c)).collect();
+    let mut groups: Vec<FrontGroup> = Vec::new();
+    for chat in &unsettled {
+        let (id, name) = match chat.space_id.as_deref().and_then(|id| rc.spaces.get(id)) {
+            Some(space) => (
+                project_key(space),
+                representative_space(&state.spaces, space)
+                    .display_name()
+                    .to_owned(),
+            ),
+            None => ("chats".to_owned(), "Chats".to_owned()),
+        };
+        match groups.iter_mut().find(|g| g.id == id) {
+            Some(group) => group.sessions.push(row(chat)),
+            None => groups.push(FrontGroup {
+                id,
+                name,
+                sessions: vec![row(chat)],
+            }),
+        }
+    }
+    if let Some(at) = groups.iter().position(|g| g.id == "chats") {
+        let chats = groups.remove(at);
+        groups.insert(0, chats);
+    }
 
     // Projects (creation order), sessions by recency.
     let mut spaces: Vec<&Space> = state.spaces.iter().collect();
@@ -712,6 +870,8 @@ pub(crate) fn derive(
             .then_with(|| a.id.cmp(&b.id))
     });
 
+    let (tasks, supervisor, needs_you) = super::tasks::derive(state, &rows, &devices, cx);
+    let today = super::today::derive(state, &rows, &devices, &needs_you, cx);
     let mut snapshot = WorkspaceSnapshot {
         revision: 0,
         computed_at_ms: now_ms,
@@ -721,12 +881,19 @@ pub(crate) fn derive(
             pinned,
             sections: section_views,
             recent,
+            groups,
+            settled,
+            nested,
         },
         projects,
         projectless,
         pull_requests,
         archived,
         devices,
+        tasks,
+        supervisor,
+        needs_you,
+        today,
         sessions: rows,
         children,
         content_hash: 0,
@@ -753,6 +920,18 @@ fn snapshot_hash(s: &WorkspaceSnapshot) -> u64 {
         ids(&mut h, &section.sessions);
     }
     ids(&mut h, &s.front.recent);
+    ids(&mut h, &s.front.settled);
+    for group in &s.front.groups {
+        group.id.hash(&mut h);
+        group.name.hash(&mut h);
+        ids(&mut h, &group.sessions);
+    }
+    let mut nested: Vec<_> = s.front.nested.iter().collect();
+    nested.sort_by_key(|(lead, _)| *lead);
+    for (lead, rows) in nested {
+        lead.hash(&mut h);
+        ids(&mut h, rows);
+    }
     for project in &s.projects {
         project.id.hash(&mut h);
         project.name.hash(&mut h);
@@ -770,6 +949,7 @@ fn snapshot_hash(s: &WorkspaceSnapshot) -> u64 {
     for device in &s.devices {
         device.hash(&mut h);
     }
+    format!("{:?}{:?}{:?}{:?}", s.tasks, s.supervisor, s.needs_you, s.today).hash(&mut h);
     let mut all: Vec<(&String, u64)> = s.sessions.iter().map(|(k, v)| (k, v.revision)).collect();
     all.sort();
     all.hash(&mut h);

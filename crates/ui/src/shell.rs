@@ -16412,32 +16412,17 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let excerpt = if modal.excerpt.is_empty() {
-            String::new()
+        let rewind = matches!(modal.kind, BranchKind::Rewind);
+        let zeron_proto::transcript::BranchCopy {
+            title,
+            context,
+            option,
+            detail,
+        } = zeron_proto::transcript::branch_copy(rewind, &modal.excerpt);
+        let (glyph, danger) = if rewind {
+            (icons::RESTART, true)
         } else {
-            let mut text: String = modal.excerpt.chars().take(72).collect();
-            if modal.excerpt.chars().count() > 72 {
-                text.push('\u{2026}');
-            }
-            format!("\u{201C}{text}\u{201D}")
-        };
-        let (title, context, option, detail, glyph, danger) = match modal.kind {
-            BranchKind::Fork => (
-                "Fork chat from here",
-                format!("After {excerpt}"),
-                "Fork in this workspace",
-                "New chat with the conversation through this reply. This chat stays as is.",
-                icons::GIT_BRANCH,
-                false,
-            ),
-            BranchKind::Rewind => (
-                "Rewind to here",
-                format!("Before {excerpt}"),
-                "Restore conversation",
-                "Removes this prompt and everything after it and puts the prompt back in the composer. Files on disk stay as they are.",
-                icons::RESTART,
-                true,
-            ),
+            (icons::GIT_BRANCH, false)
         };
         let option_row = popover::menu_row(theme, false, "branch-modal-option")
             .id("branch-modal-option")

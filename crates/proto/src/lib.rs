@@ -5,24 +5,44 @@
 
 pub mod agent;
 pub mod attachment_mentions;
+pub mod badges;
+/// Stable capability error codes transported without provider stderr.
+pub mod capability_errors {
+    pub const PULL_REQUESTS_CLI_UNAVAILABLE: &str = "pull_requests.cli_unavailable";
+    pub const PULL_REQUESTS_AUTHENTICATION: &str = "pull_requests.authentication";
+    pub const PULL_REQUESTS_RATE_LIMITED: &str = "pull_requests.rate_limited";
+    pub const PULL_REQUESTS_TIMEOUT: &str = "pull_requests.timeout";
+    pub const PULL_REQUESTS_DECODE: &str = "pull_requests.decode";
+    pub const PULL_REQUESTS_COMMAND_FAILED: &str = "pull_requests.command_failed";
+}
 pub mod change_request_assessment;
 pub mod chat_mentions;
 pub mod computer;
 pub mod device_hub;
 pub mod device_paths;
+pub mod device_tools;
 pub mod entities;
 pub mod file_mentions;
+pub mod git_graph;
+pub mod git_tab;
 pub mod home;
 pub mod html_render;
 pub mod invocation;
+pub mod mission;
 pub mod motion;
+pub mod patch;
 pub mod preview;
 pub mod projectless;
 pub mod provider_instance;
+pub mod pull_request;
+pub mod route_preview;
 pub mod sidebar_pins;
+pub mod sidebar_view;
 pub mod source_control;
 pub mod supervisor;
+pub mod today;
 pub mod tools;
+pub mod transcript;
 pub mod ui_driver;
 pub mod usage;
 pub mod view;

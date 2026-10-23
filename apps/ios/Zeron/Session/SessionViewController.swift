@@ -13,6 +13,9 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private let questions = QuestionPanel()
     private let queue = QueuePanel()
     private let pill = StatusPill()
+    private let needsYou = NeedsYouPill()
+    private var needsYouRow: UIStackView!
+    private var pendingToken: AnyObject?
     private let still = ComputerStillPreview()
     private let bottom = UIStackView()
     private let jump = Glass.circleButton(symbol: "arrow.down", size: 40, pointSize: 15)
@@ -63,12 +66,21 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         list.accessibilityIdentifier = "transcript"
         list.imageLoader = { [weak self] ref, iv in self?.source.loadImage(ref, into: iv) }
         list.imageFetcher = { [weak self] ref in await self?.source.image(ref) }
+        list.htmlLoader = { [weak self] device, path in await self?.source.htmlPage(deviceId: device, path: path) }
         // Hidden while following (the runway glide and tail spring travel).
         list.onDistanceFromBottom = { [weak self] d in
             guard let self else { return }
             self.setJumpVisible(d > 140 && !self.list.following)
         }
         list.onCardAction = { [weak self] action in self?.perform(action) }
+        list.branchBlocked = { [weak self] rewind in await self?.source.branchBlocked(rewind: rewind) }
+        list.onBranch = { [weak self] offer in self?.confirmBranch(offer) }
+        list.onSkill = { [weak self] name, path in self?.openSkill(name, path: path) }
+        list.onLimit = { [weak self] id in self?.openLimitCard(id) }
+        list.onPullRequest = { [weak self] url in
+            guard let self else { return }
+            (self.view.window?.rootViewController as? AppRouter)?.openPullRequest(url: url, deviceId: self.app.row(self.chatId)?.deviceId)
+        }
         view.addSubview(list)
         still.translatesAutoresizingMaskIntoConstraints = false
         still.fetch = { [weak self] in await self?.source.computerStill() }
@@ -77,6 +89,23 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             still.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
             still.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
         ])
+        missionStrip.configuration?.cornerStyle = .capsule
+        missionStrip.configuration?.image = UIImage(systemName: "list.bullet.rectangle")
+        missionStrip.configuration?.imagePadding = 6
+        missionStrip.configuration?.titleLineBreakMode = .byTruncatingTail
+        missionStrip.configuration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 12)
+        missionStrip.accessibilityIdentifier = "mission-strip"
+        missionStrip.isHidden = true
+        missionStrip.translatesAutoresizingMaskIntoConstraints = false
+        missionStrip.addAction(UIAction { [weak self] _ in self?.openMission() }, for: .primaryActionTriggered)
+        view.addSubview(missionStrip)
+        NSLayoutConstraint.activate([
+            missionStrip.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            missionStrip.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+            missionStrip.trailingAnchor.constraint(lessThanOrEqualTo: still.leadingAnchor, constant: -8),
+        ])
+        missionToken = app.observe { [weak self] in self?.syncMission() }
+        syncMission()
         // Tapping the transcript puts the composer (and keyboard) away.
         let dismissTap = UITapGestureRecognizer(target: self, action: #selector(dismissComposer))
         dismissTap.cancelsTouchesInView = false
@@ -123,6 +152,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             guard let self else { return }
             if self.editingQueueId != nil { self.endEdit(commit: nil) }
             if case .notDelivered = self.shown.banner { self.source.retryDelivery() }
+            if case .limit = self.shown.banner { self.limitActions() }
         }
 
         bottom.axis = .vertical
@@ -131,7 +161,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         bottom.translatesAutoresizingMaskIntoConstraints = false
         let pillRow = UIStackView(arrangedSubviews: [pill, UIView()])
         pillRow.axis = .horizontal
-        for v in [pillRow, queue, questions, composer] { bottom.addArrangedSubview(v) }
+        needsYouRow = UIStackView(arrangedSubviews: [needsYou, UIView()])
+        needsYouRow.axis = .horizontal
+        needsYouRow.isHidden = true
+        needsYou.addAction(UIAction { [weak self] _ in self?.openNeedsYou() }, for: .touchUpInside)
+        for v in [needsYouRow!, pillRow, queue, questions, composer] { bottom.addArrangedSubview(v) }
         questions.isHidden = true
         queue.isHidden = true
         // Hidden panels start dematerialized so their first appearance grows in.
@@ -176,6 +210,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         source.onChange = { [weak self] in self?.render(animated: true) }
         source.attach(engine)
         render(animated: false)
+        pendingToken = app.observeNeedsYou { [weak self] in self?.syncNeedsYou(animated: true) }
+        syncNeedsYou(animated: false)
         app.markSeen(chatId)
     }
 
@@ -192,46 +228,26 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private var voiceBar: VoiceBarItem?
     private var voiceToken: AnyObject?
     private var hostsToken: AnyObject?
+    private var missionToken: AnyObject?
+    private let missionStrip = UIButton(configuration: .gray())
 
     deinit {
         if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }
     }
 
-    /// Swap the tab accessory *inside* the push/pop animation so it travels
-    /// with the tab bar instead of snapping ahead of it (no empty glass pill,
-    /// no composer ghosting over the tab bar).
     private func setAccessory(visible: Bool) {
         guard let tabs = tabBarController as? MainTabController else { return }
-        guard let coordinator = transitionCoordinator else {
-            return tabs.setAccessoryVisible(visible, animated: false)
-        }
         // Our bottom glass (composer stack) and the tab bar's glass never
         // overlap: the stack fades opposite to the tab bar, tracking an
         // interactive swipe-back too.
         let bottomStack = bottom
         let jumpButton = jump
-        if visible {
-            bottomStack.alpha = 1
-            tabs.prepareAccessoryForReveal()
-        } else {
-            bottomStack.alpha = 0
-        }
-        coordinator.animate(alongsideTransition: { _ in
-            if visible {
-                tabs.setAccessoryContentAlpha(1)
-                jumpButton.alpha = 0
-            } else {
-                tabs.setAccessoryVisible(false, animated: false)
-            }
+        if transitionCoordinator != nil { bottomStack.alpha = visible ? 1 : 0 }
+        tabs.transitionAccessory(visible: visible, with: transitionCoordinator, alongside: {
+            if visible { jumpButton.alpha = 0 }
             bottomStack.alpha = visible ? 0 : 1
-        }, completion: { context in
-            // An interactive pop that's cancelled keeps the session on screen.
-            // Re-derive the accessory from what's actually on top rather than
-            // flipping: a cancelled pop also re-runs viewWillAppear, and two
-            // flips left "New session" showing over the session.
-            if context.isCancelled { bottomStack.alpha = 1 }
-            tabs.syncAccessory()
-            tabs.setAccessoryContentAlpha(1)
+        }, completion: { cancelled in
+            if cancelled { bottomStack.alpha = 1 }
         })
     }
 
@@ -360,6 +376,126 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             composer.text = computerUseEnablingDraft(draft: composer.text)
             composer.becomeFirstResponder()
         }
+    }
+
+    private func confirmBranch(_ offer: BranchOffer) {
+        let sheet = UIAlertController(title: offer.title, message: "\(offer.context)\n\n\(offer.detail)", preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: offer.option, style: offer.rewind ? .destructive : .default) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    if offer.rewind {
+                        self.composer.text = try await self.source.rewind(to: offer.entryId)
+                        self.composer.becomeFirstResponder()
+                    } else {
+                        let id = try await self.source.fork(from: offer.entryId)
+                        (self.view.window?.rootViewController as? AppRouter)?.openSession(id)
+                    }
+                } catch {
+                    Toast.show(Self.branchFailure(error, rewind: offer.rewind), in: self.view.window)
+                }
+            }
+        })
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        sheet.popoverPresentationController?.sourceView = list
+        present(sheet, animated: true)
+    }
+
+    private func openLimitCard(_ id: String) {
+        let open: () -> Void = { [weak self] in (self?.view.window?.rootViewController as? AppRouter)?.openSession(id) }
+        guard let card = source.limitCard(chatId: id) else {
+            open()
+            return
+        }
+        let sheet = LimitCardViewController(card: card)
+        sheet.onResolve = { [weak self] choice in
+            do {
+                try await self?.source.resolveLimit(chatId: id, choice: choice)
+                return true
+            } catch {
+                Toast.show(Self.hostFailure(error, fallback: "Couldn't reach the host. Try again."), in: self?.view.window)
+                return false
+            }
+        }
+        sheet.onOpenChat = open
+        let nav = UINavigationController(rootViewController: sheet)
+        if let s = nav.sheetPresentationController { s.detents = [.medium(), .large()]; s.prefersGrabberVisible = true }
+        present(nav, animated: true)
+    }
+
+    private func openInfo() {
+        let info = SessionInfoViewController(sources: engine.frame().sources())
+        info.loadUsage = { [weak self] in await self?.source.chatUsage() }
+        info.openSource = { [weak self, weak info] item in
+            Task { @MainActor in
+                guard let self, let info, let image = await self.source.image(item.reference) else {
+                    Toast.show("Couldn't load \(item.name). Try again.", in: self?.view.window)
+                    return
+                }
+                info.present(ImageViewer(image: image, source: info.view), animated: true)
+            }
+        }
+        let nav = UINavigationController(rootViewController: info)
+        if let s = nav.sheetPresentationController { s.detents = [.medium(), .large()]; s.prefersGrabberVisible = true }
+        present(nav, animated: true)
+    }
+
+    private func limitActions() {
+        guard let limit = shown.limitPill else { return }
+        let sheet = UIAlertController(title: limit.text, message: nil, preferredStyle: .actionSheet)
+        let run = { [weak self] (work: @escaping (SessionSource) async throws -> Void) in
+            _ = Task { @MainActor in
+                guard let self else { return }
+                do { try await work(self.source) } catch {
+                    Toast.show(Self.hostFailure(error, fallback: "Couldn't reach the host. Try again."), in: self.view.window)
+                }
+            }
+        }
+        let id = chatId
+        if let model = limit.switchTo {
+            sheet.addAction(UIAlertAction(title: "Switch to \(model)", style: .default) { _ in
+                run { try await $0.resolveLimit(chatId: id, choice: "switch") }
+            })
+        }
+        if let action = limit.action {
+            sheet.addAction(UIAlertAction(title: action, style: .default) { _ in
+                run { try await $0.setLimitResume(chatId: id, auto: !limit.auto) }
+            })
+        }
+        sheet.addAction(UIAlertAction(title: "Close", style: .cancel))
+        sheet.popoverPresentationController?.sourceView = pill
+        present(sheet, animated: true)
+    }
+
+    private static func hostFailure(_ error: Error, fallback: String) -> String {
+        switch error as? CoreError {
+        case let .NotFound(text), let .HostError(text): text
+        default: fallback
+        }
+    }
+
+    private func openSkill(_ name: String, path: String?) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let file = try await self.source.skillFile(name: name, path: path)
+                let sheet = SelectTextViewController(text: file.text, title: name, mono: true)
+                self.present(UINavigationController(rootViewController: sheet), animated: true)
+            } catch {
+                let message: String
+                switch error as? CoreError {
+                case let .NotFound(text), let .HostError(text): message = text
+                default: message = "Couldn't open \(name)'s SKILL.md. Try again."
+                }
+                Toast.show(message, in: self.view.window)
+            }
+        }
+    }
+
+    private static func branchFailure(_ error: Error, rewind: Bool) -> String {
+        if case let .HostError(message) = error as? CoreError { return message }
+        return rewind ? "Couldn't rewind. Try again." : "Couldn't fork. Try again."
     }
 
     @objc private func dismissComposer() {
@@ -502,6 +638,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         titleView.set(title: c.title, subtitle: c.subtitle)
         list.uploadProgress = c.uploadProgress
         composer.running = c.running
+        composer.resumable = c.resumable
         still.working = c.running
         composer.canSteer = c.canSteer
         composer.placeholder = c.placeholder
@@ -540,13 +677,83 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         }
     }
 
+    private func syncNeedsYou(animated: Bool) {
+        let waiting = NeedsYou.waiting(app, excluding: chatId)
+        let show = !waiting.isEmpty
+        if show { needsYou.configure(waiting, app: app) }
+        guard needsYouRow.isHidden == show else { return }
+        let apply = {
+            self.needsYouRow.isHidden = !show
+            self.needsYou.alpha = show ? 1 : 0
+            self.needsYou.transform = show ? .identity : CGAffineTransform(translationX: 0, y: 10).scaledBy(x: 0.92, y: 0.92)
+            self.bottom.layoutIfNeeded()
+            self.view.layoutIfNeeded()
+        }
+        guard animated, view.window != nil, !UIAccessibility.isReduceMotionEnabled else { return apply() }
+        if show {
+            needsYou.alpha = 0
+            needsYou.transform = CGAffineTransform(translationX: 0, y: 10).scaledBy(x: 0.92, y: 0.92)
+        }
+        UIView.animate(withDuration: 0.42, delay: 0, usingSpringWithDamping: 0.72, initialSpringVelocity: 0, options: [.allowUserInteraction, .beginFromCurrentState], animations: apply)
+    }
+
+    private func openNeedsYou() {
+        let editing = composer.textView.isFirstResponder
+        composer.resignFirstResponder()
+        NeedsYou.present(app: app, from: self, excluding: chatId) { [weak self] _ in
+            guard let self, editing, self.view.window != nil, !self.composer.isHidden else { return }
+            self.composer.becomeFirstResponder()
+        }
+    }
+
+    private func syncMission() {
+        guard let strip = app.client?.missionStrip(chatId: chatId) else {
+            missionStrip.isHidden = true
+            return
+        }
+        var title = AttributedString("\(strip.role) · \(strip.title) · \(strip.done)/\(strip.total)")
+        title.font = Fonts.ui(.sansMedium, 13)
+        missionStrip.configuration?.attributedTitle = title
+        missionStrip.isHidden = false
+    }
+
+    private func openMission() {
+        guard let strip = app.client?.missionStrip(chatId: chatId) else { return }
+        navigationController?.pushViewController(MissionControlViewController(app: app, taskId: strip.taskId), animated: true)
+    }
+
+    private func missionItems() -> [UIMenuElement] {
+        guard let client = app.client else { return [] }
+        var items: [UIMenuElement] = []
+        let strip = client.missionStrip(chatId: chatId)
+        if let strip {
+            items.append(UIAction(title: "Mission Control", image: UIImage(systemName: "list.bullet.rectangle")) { [weak self] _ in self?.openMission() })
+            items.append(UIAction(title: "Brief", image: UIImage(systemName: "doc.plaintext")) { [weak self] _ in
+                guard let self else { return }
+                self.navigationController?.pushViewController(BriefViewController(app: self.app, taskId: strip.taskId, stepId: strip.stepId), animated: true)
+            })
+        }
+        if let watch = client.watchState(chatId: chatId), !(watch.mission && strip?.stepId != nil) {
+            let chat = chatId
+            items.append(UIAction(title: watch.everything ? "Watched (everything is on)" : "Watched by the Supervisor", image: UIImage(systemName: "eye"), attributes: watch.everything ? .disabled : [], state: watch.watched ? .on : .off) { [weak self] _ in
+                Task { @MainActor in
+                    do { try await client.setWatched(chatId: chat, watched: !watch.watched) } catch {
+                        Toast.show(TasksErrors.message(error), in: self?.view.window)
+                    }
+                }
+            })
+        }
+        return items.isEmpty ? [] : [UIMenu(options: .displayInline, children: items)]
+    }
+
     private func sessionMenu() -> UIMenu {
         UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
             guard let self else { return done([]) }
             let vm = self.app.session(self.chatId)
             let pinned = vm?.pinned ?? false
-            done([
+            done(self.missionItems() + [
                 UIAction(title: pinned ? "Unpin" : "Pin", image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(self.chatId, !pinned) },
+                UIAction(title: "Session Info", image: UIImage(systemName: "info.circle")) { _ in self.openInfo() },
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = self.engine.frame().plainText()
                 },
@@ -672,6 +879,9 @@ final class StatusPill: UIControl {
         case .editing:
             grid.kind = .dot(StatusTone.input)
             label.text = "Editing queued message · Tap to cancel"
+        case let .limit(text):
+            grid.kind = .dot(Palette.warning)
+            label.text = text
         }
     }
 

@@ -186,13 +186,14 @@ fn thinking_renders_styled_markdown_not_markers() {
         })],
         ..Default::default()
     };
+    w.builder.expanded.insert(rows::row_key("a#work"));
     let folded = w.pass();
-    let key = folded.placement(0).unwrap().key;
+    let key = folded.placement(1).unwrap().key;
     w.builder.expanded.insert(key);
     w.builder.detail_open.insert(rows::row_key("a#g0/r0"), true);
     w.builder.invalidate(key);
     let frame = w.pass();
-    let d = frame.display(0).unwrap();
+    let d = frame.display(1).unwrap();
     assert!(!d.text.contains("**"), "{}", d.text);
     assert!(!d.text.contains("`fix`"), "{}", d.text);
     assert!(!d.text.contains("```"), "{}", d.text);
@@ -229,12 +230,13 @@ fn thinking_renders_styled_markdown_not_markers() {
             })],
             ..Default::default()
         };
-        let key = w.pass().placement(0).unwrap().key;
+        w.builder.expanded.insert(rows::row_key("a#work"));
+        let key = w.pass().placement(1).unwrap().key;
         w.builder.expanded.insert(key);
         w.builder.detail_open.insert(rows::row_key("a#g0/r0"), true);
         w.builder.invalidate(key);
         let frame = w.pass();
-        let d = frame.display(0).unwrap();
+        let d = frame.display(1).unwrap();
         assert!(d.text.contains("• point one"), "width {width}: {}", d.text);
         for run in &d.runs {
             assert!(run.x >= -0.5 && run.x + run.width <= width + 0.5, "width {width}: {run:?}");
@@ -275,6 +277,7 @@ fn streaming_thought_markdown_settles_to_the_fresh_parse() {
         assert!(!frame.display(0).unwrap().text.contains("**"), "mend holds while streaming");
     }
     live.builder.expanded.insert(key);
+    live.builder.expanded.insert(rows::row_key("a#work"));
     live.builder.detail_open.insert(rows::row_key("a#g0/r0"), true);
     live.builder.invalidate(key);
     live.input = TranscriptInput { entries: vec![entry(MessageStatus::Complete, text)], ..Default::default() };
@@ -282,8 +285,9 @@ fn streaming_thought_markdown_settles_to_the_fresh_parse() {
 
     let mut fresh = worker(390.0);
     fresh.input = TranscriptInput { entries: vec![entry(MessageStatus::Complete, text)], ..Default::default() };
+    fresh.builder.expanded.insert(rows::row_key("a#work"));
     let folded = fresh.pass();
-    let fresh_key = folded.placement(0).unwrap().key;
+    let fresh_key = folded.placement(1).unwrap().key;
     assert_eq!(key, fresh_key);
     fresh.builder.expanded.insert(fresh_key);
     fresh.builder.detail_open.insert(rows::row_key("a#g0/r0"), true);
@@ -328,11 +332,12 @@ fn thought_input(text: &str, streaming: bool) -> TranscriptInput {
 fn open_thought(width: f32, text: &str) -> RowDisplay {
     let mut w = worker(width);
     w.input = thought_input(text, false);
-    let key = w.pass().placement(0).unwrap().key;
+    w.builder.expanded.insert(rows::row_key("a#work"));
+    let key = w.pass().placement(1).unwrap().key;
     w.builder.expanded.insert(key);
     w.builder.detail_open.insert(rows::row_key("a#g0/r0"), true);
     w.builder.invalidate(key);
-    w.pass().display(0).unwrap()
+    w.pass().display(1).unwrap()
 }
 
 fn run_text(d: &RowDisplay, r: &display::TextRun) -> String {
@@ -569,9 +574,9 @@ fn folded_user_message_fades_its_last_line() {
 fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
     use zeron_doc::parts::{MessagePart, MessageStatus, SubagentStatus};
     use zeron_doc::schema::{MessageRole, SessionMessageEntry};
-    let spawn = |status: SubagentStatus| MessagePart::Tool {
+    let spawn_with = |status: SubagentStatus, input: Option<serde_json::Value>| MessagePart::Tool {
         id: "k1".into(),
-        call: zeron_proto::ToolCall::Unknown { name: "Agent: scan the repo".into(), input: None },
+        call: zeron_proto::ToolCall::Unknown { name: "Agent: scan the repo".into(), input },
         is_error: false,
         // Eager-done: the spawn call resolved while the subagent still runs.
         resolved: true,
@@ -587,13 +592,14 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
         html_render: None,
         delegate_route: None,
     };
-    let frame_for = |status: SubagentStatus| {
+    let spawn = |status: SubagentStatus| spawn_with(status, None);
+    let frame_with = |part: MessagePart, harness: Option<zeron_proto::HarnessId>| {
         let mut w = worker(390.0);
         w.input = TranscriptInput {
             entries: vec![Arc::new(SessionMessageEntry {
                 id: "a".into(),
                 role: MessageRole::Assistant,
-                parts: vec![spawn(status)],
+                parts: vec![part],
                 created_at: 0,
                 device_id: String::new(),
                 status: Some(MessageStatus::Complete),
@@ -603,15 +609,30 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
                 fork_import: false,
                 answers_request_id: None,
             })],
+            harness,
             ..Default::default()
         };
+        w.builder.expanded.insert(rows::row_key("a#work"));
         w.pass()
     };
-    let spinners = |f: &LayoutFrame| f.display(0).unwrap().widgets.iter().filter(|w| matches!(w.kind, display::WidgetKind::Spinner)).count();
+    let frame_for = |status: SubagentStatus| frame_with(spawn(status), None);
+    let spinners = |f: &LayoutFrame| f.display(1).unwrap().widgets.iter().filter(|w| matches!(w.kind, display::WidgetKind::Spinner)).count();
     assert_eq!(spinners(&frame_for(SubagentStatus::Running)), 1, "running subagent spins");
     assert_eq!(spinners(&frame_for(SubagentStatus::Done)), 0, "finished subagent is quiet");
     let failed = frame_for(SubagentStatus::Failed);
-    assert!(failed.display(0).unwrap().runs.iter().any(|r| r.color == display::ColorRole::Danger), "failed subagent is tinted danger");
+    assert!(failed.display(1).unwrap().runs.iter().any(|r| r.color == display::ColorRole::Danger), "failed subagent is tinted danger");
+
+    let icon = |f: &LayoutFrame| {
+        f.display(1).unwrap().widgets.iter().find_map(|w| match &w.kind {
+            display::WidgetKind::Icon { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+    };
+    let codex = Some(zeron_proto::HarnessId::Codex);
+    let haiku = Some(serde_json::json!({ "model": "claude-haiku-5-5" }));
+    assert_eq!(icon(&frame_with(spawn_with(SubagentStatus::Done, haiku), codex)).as_deref(), Some("mark-claude-code"), "the model's maker wins");
+    assert_eq!(icon(&frame_with(spawn(SubagentStatus::Done), codex)).as_deref(), Some("mark-codex"), "no model: the chat's harness");
+    assert_eq!(icon(&frame_for(SubagentStatus::Done)).as_deref(), Some("tool-bot"), "neither: the bot");
 }
 
 #[test]
@@ -715,7 +736,7 @@ fn actions(frame: &LayoutFrame, row: u32) -> Vec<display::CardAction> {
 }
 
 #[test]
-fn computer_notes_become_cards_and_other_system_text_stays_markdown() {
+fn computer_notes_become_cards_and_other_system_text_is_a_divider() {
     use zeron_client::computer::{CONTROL_ON_DISCLOSURE, ESCAPE_STOP_NOTICE, SETUP_NOTE, UNAVAILABLE_NOTE};
     use zeron_doc::schema::MessageRole::System;
     for (note, hint) in [
@@ -736,7 +757,245 @@ fn computer_notes_become_cards_and_other_system_text_stays_markdown() {
         assert!(actions(&frame, 0).is_empty());
     }
     let other = frame_of(vec![message("n", System, vec![text_part("t0", "Context compacted")])], 390.0);
-    assert_eq!(kinds(&other), [RowKind::Markdown]);
+    assert_eq!(kinds(&other), [RowKind::Chip]);
+    assert_eq!(other.display(0).unwrap().text, "Context compacted");
+}
+
+#[test]
+fn thread_sent_rows_route_by_sender() {
+    use zeron_doc::schema::MessageRole::User;
+    let from = |id: &str, chat: &str, text: &str| {
+        let mut entry = (*message(id, User, vec![text_part("t0", text)])).clone();
+        entry.from_chat_id = Some(chat.into());
+        Arc::new(entry)
+    };
+    let child = seams::ChatRef { title: Some("Fix it".into()), delegated_by: Some("own".into()), ..Default::default() };
+    let peer = seams::ChatRef { title: Some("Peer".into()), ..Default::default() };
+    let mut w = worker(390.0);
+    w.input = TranscriptInput {
+        entries: vec![
+            from("a", "child", "Delegated task child (\"Fix it\") completed."),
+            from("b", "peer", "hello"),
+            from("c", "own", "keep going"),
+            message("d", User, vec![text_part("t0", zeron_proto::RESUME_PROMPT)]),
+        ],
+        chat_id: Some("own".into()),
+        chats: Arc::new([("child".into(), child), ("peer".into(), peer)].into_iter().collect()),
+        ..Default::default()
+    };
+    let frame = w.pass();
+    assert_eq!(kinds(&frame), [RowKind::Chip, RowKind::Chip, RowKind::Markdown, RowKind::Chip, RowKind::User, RowKind::Chip]);
+    let text = |i| frame.display(i).unwrap().text;
+    assert!(text(0).contains("Fix it"), "{}", text(0));
+    assert!(text(1).contains("Peer"), "{}", text(1));
+    assert_eq!(text(5), "Resumed");
+}
+
+#[test]
+fn device_calls_group_apart_with_their_own_wording() {
+    use zeron_doc::schema::MessageRole::Assistant;
+    let call = |id: &str, tool: &str| {
+        let mut part = computer_part(id, "x", None, false, None);
+        if let MessagePart::Tool { call, .. } = &mut part {
+            *call = zeron_proto::ToolCall::Mcp { server: "zeron".into(), tool: tool.into(), input: None };
+        }
+        part
+    };
+    let mut w = worker(390.0);
+    w.input = TranscriptInput {
+        entries: vec![Arc::new(SessionMessageEntry {
+            status: Some(MessageStatus::Streaming),
+            ..(*message("a", Assistant, vec![computer_part("t0", "x", None, false, None), call("t1", "device_open"), call("t2", "device_close")])).clone()
+        })],
+        working: true,
+        streaming: true,
+        ..Default::default()
+    };
+    let frame = w.pass();
+    assert_eq!(kinds(&frame)[..2], [RowKind::Tools, RowKind::Tools]);
+    let devices = frame.display(1).unwrap().text;
+    assert!(devices.contains("Used device controls 2 times"), "{devices}");
+    assert!(devices.contains("Opened a device in the Device panel"), "{devices}");
+}
+
+#[test]
+fn a_file_change_line_carries_its_added_and_deleted_counts() {
+    use zeron_doc::schema::MessageRole::Assistant;
+    let mut part = computer_part("t1", "x", None, false, None);
+    if let MessagePart::Tool { call, diff_stats, .. } = &mut part {
+        *call = zeron_proto::ToolCall::ApplyPatch { path: None };
+        *diff_stats = Some(vec![
+            zeron_doc::parts::ToolDiffStat { path: "a.rs".into(), additions: 2, deletions: 1 },
+            zeron_doc::parts::ToolDiffStat { path: "b.rs".into(), additions: 3, deletions: 2 },
+        ]);
+    }
+    let mut w = worker(390.0);
+    w.input = TranscriptInput {
+        entries: vec![Arc::new(SessionMessageEntry {
+            status: Some(MessageStatus::Streaming),
+            ..(*message("a", Assistant, vec![part])).clone()
+        })],
+        working: true,
+        streaming: true,
+        ..Default::default()
+    };
+    let text = w.pass().display(0).unwrap().text;
+    assert!(text.contains("+5") && text.contains("−3"), "{text}");
+}
+
+#[test]
+fn a_stats_only_change_offers_its_full_diff_and_shows_it_once_fetched() {
+    use zeron_doc::schema::MessageRole::Assistant;
+    let mut part = computer_part("t1", "x", None, false, None);
+    if let MessagePart::Tool { call, diff_stats, .. } = &mut part {
+        *call = zeron_proto::ToolCall::ApplyPatch { path: None };
+        *diff_stats = Some(vec![zeron_doc::parts::ToolDiffStat { path: "a.rs".into(), additions: 1, deletions: 1 }]);
+    }
+    let mut w = worker(390.0);
+    w.input = TranscriptInput {
+        entries: vec![Arc::new(SessionMessageEntry {
+            status: Some(MessageStatus::Streaming),
+            ..(*message("a", Assistant, vec![part])).clone()
+        })],
+        working: true,
+        streaming: true,
+        chat_id: Some("c".into()),
+        ..Default::default()
+    };
+    let key = w.pass().placement(0).unwrap().key;
+    w.builder.expanded.insert(key);
+    w.builder.detail_open.insert(rows::row_key("a#g0/t1"), true);
+    w.builder.invalidate(key);
+    let d = w.pass().display(0).unwrap();
+    assert!(d.text.contains("Show full diff"), "{}", d.text);
+    assert!(d.links.iter().any(|l| l.url.starts_with("zeron-blob://fetch?ref=c") && l.url.ends_with("t1.diff")), "{:?}", d.links);
+    let diff = zeron_proto::ToolDiff { path: "a.rs".into(), old_text: Some("old line\n".into()), new_text: "new line\n".into(), line_offset: None };
+    w.builder.blobs.insert("c/t1.diff".into(), (rows::Blob::Ready(serde_json::to_string(&diff).unwrap().into()), 1));
+    let d = w.pass().display(0).unwrap();
+    assert!(d.text.contains("new line") && !d.text.contains("Show full diff"), "{}", d.text);
+}
+
+#[test]
+fn an_advisor_call_names_the_wait_until_it_answers() {
+    use zeron_doc::schema::MessageRole::Assistant;
+    let frame = |resolved: bool| {
+        let mut entry = (*message("a", Assistant, vec![computer_part("t1", "x", None, false, None)])).clone();
+        entry.status = Some(MessageStatus::Streaming);
+        let MessagePart::Tool { call, resolved: done, .. } = &mut entry.parts[0] else { unreachable!() };
+        *call = zeron_proto::ToolCall::Unknown { name: zeron_proto::ADVISOR_TOOL_NAME.into(), input: None };
+        *done = resolved;
+        let mut w = worker(390.0);
+        w.input = TranscriptInput { entries: vec![Arc::new(entry)], working: true, streaming: true, ..Default::default() };
+        w.pass()
+    };
+    let word = |f: &LayoutFrame| {
+        (0..f.row_count())
+            .find_map(|i| f.display(i).unwrap().widgets.iter().find_map(|w| match &w.kind {
+                display::WidgetKind::Working { word, .. } => Some(word.clone()),
+                _ => None,
+            }))
+            .unwrap()
+    };
+    let out = frame(false);
+    assert_eq!(word(&out), "Consulting advisor");
+    assert!(out.display(0).unwrap().text.contains("onsulting advisor"), "{}", out.display(0).unwrap().text);
+    let answered = frame(true);
+    assert_eq!(word(&answered), "Writing");
+    assert!(answered.display(0).unwrap().text.contains("onsulted advisor"), "{}", answered.display(0).unwrap().text);
+}
+
+#[test]
+fn the_working_row_follows_the_token_rate() {
+    use zeron_doc::schema::MessageRole::Assistant;
+    let mut w = worker(390.0);
+    let rate = |w: &mut Worker, token_rate: Option<u32>| {
+        w.input = TranscriptInput {
+            entries: vec![message("a", Assistant, vec![text_part("t0", "hi")])],
+            working: true,
+            token_rate,
+            ..Default::default()
+        };
+        let f = w.pass();
+        (0..f.row_count())
+            .find_map(|i| f.display(i).unwrap().widgets.iter().find_map(|w| match &w.kind {
+                display::WidgetKind::Working { rate, .. } => Some(rate.clone()),
+                _ => None,
+            }))
+            .unwrap()
+    };
+    assert_eq!(rate(&mut w, None), None);
+    assert_eq!(rate(&mut w, Some(40)).as_deref(), Some("· 40 tok/s"));
+    assert_eq!(rate(&mut w, Some(58)).as_deref(), Some("· 58 tok/s"));
+}
+
+#[test]
+fn an_idle_chat_waiting_on_compaction_shows_the_wait_row() {
+    use zeron_doc::schema::MessageRole::Assistant;
+    use zeron_proto::transcript::CompactionWait;
+    let mut w = worker(390.0);
+    let shown = |w: &mut Worker, compaction: Option<CompactionWait>| {
+        w.input = TranscriptInput {
+            entries: vec![message("a", Assistant, vec![text_part("t0", "hi")])],
+            token_rate: Some(40),
+            compaction: compaction.map(|wait| (wait, 1_000)),
+            ..Default::default()
+        };
+        let f = w.pass();
+        (0..f.row_count()).find_map(|i| {
+            f.display(i).unwrap().widgets.iter().find_map(|w| match &w.kind {
+                display::WidgetKind::Working { word, since_ms, rate } => Some((word.clone(), *since_ms, rate.clone())),
+                _ => None,
+            })
+        })
+    };
+    assert_eq!(shown(&mut w, None), None);
+    assert_eq!(
+        shown(&mut w, Some(CompactionWait::Compacting(Some((120_000, true))))),
+        Some(("Compacting 120.0k, carrying the last turns over".to_owned(), Some(1_000), None))
+    );
+    assert_eq!(
+        shown(&mut w, Some(CompactionWait::Queued)).map(|(word, since, _)| (word, since)),
+        Some(("Compaction queued · starts when the turn settles".to_owned(), None))
+    );
+}
+
+#[test]
+fn structured_user_text_is_markdown_and_prose_stays_plain() {
+    use zeron_doc::schema::MessageRole::User;
+    let mut w = worker(390.0);
+    w.input = TranscriptInput {
+        entries: vec![
+            message("a", User, vec![text_part("t0", "Two things:\n\n- one\n- two")]),
+            message("b", User, vec![text_part("t0", "plain prose")]),
+        ],
+        ..Default::default()
+    };
+    let frame = w.pass();
+    let text = |i| frame.display(i).unwrap().text;
+    assert!(text(0).contains("one") && !text(0).contains("- one"), "{}", text(0));
+    assert_eq!(text(1), "plain prose");
+}
+
+#[test]
+fn a_context_block_becomes_a_pill_that_opens_its_card() {
+    use zeron_doc::schema::MessageRole::User;
+    let sent = format!(
+        "Review this\n\n{}\n> Pull request #7 in acme/zeron: Fix 7\n> Body line\n\n> Checks: 1 of 3 passed",
+        zeron_proto::badges::PR_CONTEXT_HEADER
+    );
+    let mut w = worker(390.0);
+    w.input = TranscriptInput { entries: vec![message("a", User, vec![text_part("t0", &sent)])], ..Default::default() };
+    let frame = w.pass();
+    let row = frame.display(0).unwrap();
+    assert!(row.text.contains("PR context") && row.text.contains("Review this"), "{}", row.text);
+    assert!(!row.text.contains("Pull request #7"), "{}", row.text);
+    let pill = row.links.iter().find(|l| l.url == "zeron-badge://open?i=0").expect("pill hit");
+    assert!(pill.y < row.height / 2.0);
+    let card = frame.badge(row.key, 0).unwrap();
+    assert_eq!(card.title, "PR context");
+    let locations: Vec<&str> = card.details.iter().map(|d| d.location.as_str()).collect();
+    assert_eq!(locations, ["Pull request #7 in acme/zeron: Fix 7", "Checks: 1 of 3 passed"]);
+    assert_eq!(card.details[0].body, "Body line");
 }
 
 #[test]
@@ -787,12 +1046,15 @@ fn capability_denial_adds_one_card_per_tool_after_its_chip() {
         computer_part("c3", "computer_type_text", None, true, Some(denied)),
         computer_part("c4", "computer_click", None, true, Some("approval_denied")),
     ];
-    let frame = frame_of(vec![message("m", Assistant, parts)], 390.0);
-    assert_eq!(kinds(&frame), [RowKind::Tools, RowKind::Card, RowKind::Tools, RowKind::Card, RowKind::Tools]);
-    let card = frame.display(1).unwrap();
+    let mut w = worker(390.0);
+    w.builder.expanded.insert(rows::row_key("m#work"));
+    w.input = TranscriptInput { entries: vec![message("m", Assistant, parts)], ..Default::default() };
+    let frame = w.pass();
+    assert_eq!(kinds(&frame), [RowKind::Tools, RowKind::Tools, RowKind::Card, RowKind::Tools, RowKind::Card, RowKind::Tools]);
+    let card = frame.display(2).unwrap();
     assert!(card.text.starts_with("Computer control is off"));
     assert!(card.text.contains("Turn it on in Settings to let the agent use the desktop."));
-    assert_eq!(actions(&frame, 1), [display::CardAction::EnableComputer]);
+    assert_eq!(actions(&frame, 2), [display::CardAction::EnableComputer]);
 }
 
 #[test]
@@ -801,11 +1063,12 @@ fn computer_tools_show_titles_and_never_their_arguments() {
     let secret = "hunter2-typed-secret";
     let parts = vec![computer_part("c1", "computer_type_text", Some(serde_json::json!({ "text": secret })), false, Some(secret))];
     let mut w = worker(390.0);
+    w.builder.expanded.insert(rows::row_key("m#work"));
     w.builder.expanded.insert(rows::row_key("m#g0"));
     w.builder.detail_open.insert(rows::row_key("m#g0/c1"), true);
     w.input = TranscriptInput { entries: vec![message("m", Assistant, parts)], ..Default::default() };
     let frame = w.pass();
-    let d = frame.display(0).unwrap();
+    let d = frame.display(1).unwrap();
     assert!(d.text.contains("Type"), "{}", d.text);
     assert!(!d.text.contains(secret), "{}", d.text);
     assert!(!d.copy_text.contains(secret));
@@ -1479,4 +1742,80 @@ fn math_tables_keep_a_bounded_canvas() {
     assert!(canvas < 8e6, "table canvas {canvas} pt²");
     let small = rows_of("| a | b |\n|---|---|\n| $x^2$ | $\\frac{1}{2}$ |", 390.0).remove(0);
     assert!(!small.glyphs.is_empty(), "a small math table renders its formulas");
+}
+
+#[test]
+fn page_rows_sit_outside_the_fold_and_take_the_height_their_page_reports() {
+    struct Ping(Mutex<mpsc::Sender<u64>>);
+    impl LayoutListener for Ping {
+        fn frame_ready(&self, revision: u64) {
+            let _ = self.0.lock().unwrap().send(revision);
+        }
+    }
+    let (tx, frames) = mpsc::channel();
+    let view = TranscriptView::new(text_system(), Arc::new(Ping(Mutex::new(tx))));
+    let tool = MessagePart::Tool {
+        id: "h1".into(),
+        call: zeron_proto::ToolCall::Mcp { server: "zeron".into(), tool: "html_render".into(), input: None },
+        is_error: false,
+        resolved: true,
+        output: None,
+        diff: None,
+        output_ref: None,
+        output_bytes: None,
+        diff_ref: None,
+        diff_stats: None,
+        subagent_ref: None,
+        subagent_status: None,
+        subagent_tail: None,
+        html_render: Some(zeron_proto::html_render::HtmlRenderRef { path: "html/a1/page.html".into(), title: "Mockup".into(), height: 600 }),
+        delegate_route: None,
+    };
+    view.set_viewport(390.0, 1.0);
+    view.set_input(TranscriptInput {
+        entries: vec![Arc::new(SessionMessageEntry {
+            id: "a1".into(),
+            role: MessageRole::Assistant,
+            parts: vec![tool, MessagePart::Text { id: "t1".into(), text: "Here it is.".into() }],
+            created_at: 0,
+            device_id: "dev-mac".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+        })],
+        ..Default::default()
+    });
+    let page_frame = |height: f32| {
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let _ = frames.recv_timeout(deadline.saturating_duration_since(Instant::now())).expect("a frame");
+            let frame = view.frame();
+            let kinds: Vec<RowKind> = (0..frame.row_count()).filter_map(|i| frame.placement(i)).map(|p| p.kind).collect();
+            assert_eq!(kinds, [RowKind::Tools, RowKind::Html, RowKind::Markdown]);
+            let row = frame.placement(1).unwrap();
+            let display = frame.display(1).unwrap();
+            let widget = display.widgets.iter().find_map(|w| match &w.kind {
+                display::WidgetKind::HtmlRender { id, device_id, path, scrolls } => Some((w.clone(), id.clone(), device_id.clone(), path.clone(), *scrolls)),
+                _ => None,
+            });
+            let (w, id, device, path, scrolls) = widget.expect("a page widget");
+            if (w.h - height).abs() < 0.5 {
+                assert!((w.y + w.h - row.height).abs() < 0.5, "the page fills the row below its title");
+                assert_eq!((device.as_str(), path.as_str()), ("dev-mac", "html/a1/page.html"));
+                break (id, scrolls);
+            }
+        }
+    };
+    let (id, scrolls) = page_frame(600.0);
+    assert!(!scrolls);
+    view.set_html_height(id.clone(), 420.0);
+    assert_eq!(page_frame(420.0), (id.clone(), false), "a shorter page shrinks its frame");
+    view.set_html_height(id.clone(), 900.0);
+    assert_eq!(page_frame(600.0), (id.clone(), true), "an overflowing page keeps the agent's height and scrolls");
+    view.set_html_height(id.clone(), 300.0);
+    assert_eq!(page_frame(600.0), (id, false), "once capped it stays at the agent's height");
+    view.close();
 }

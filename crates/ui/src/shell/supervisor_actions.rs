@@ -161,7 +161,7 @@ impl Shell {
     }
 
     fn looking_at_needs_you(&self, row: &NeedsYouRow, cx: &App) -> bool {
-        let (task_id, raiser) = crate::supervisor::row_origin(row);
+        let (task_id, raiser) = row.origin();
         match self.route {
             Route::Supervisor => true,
             Route::TaskCenter => {
@@ -205,7 +205,7 @@ impl Shell {
         let since = self.last_interaction.as_ref().map(|(_, at)| at.elapsed());
         for row in fresh {
             let looking = self.looking_at_needs_you(&row, cx);
-            let title = crate::supervisor::row_title(&row);
+            let title = row.title();
             match crate::supervisor::needs_you_route(looking, focused, since) {
                 NeedsYouRoute::Quiet => {}
                 NeedsYouRoute::InApp => crate::toast::show(

@@ -40,7 +40,9 @@ pub mod runtime;
 pub mod session;
 pub mod workspace;
 
-pub use client::{Client, NewSession, PRELOAD_CAP, PushPrefs, SessionTarget, WARM_SESSION_CAP};
+pub use client::{
+    Client, NewSession, PRELOAD_CAP, PushPrefs, SessionTarget, WARM_SESSION_CAP,
+};
 pub use config::{
     AuthTokens, ClientConfig, Credentials, DemoFixture, DemoOptions, StreamSpeed, TranscriptScale,
 };
@@ -51,11 +53,15 @@ pub use session::{
     AppendHint, BusyPolicy, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest,
     LiveStatus, LocalEcho, OutgoingAttachment, PendingKind, PendingSend, QueueEditAction,
     QueueEditFinish, QueueEditLease, QueueEditStart, QueueGate, QueueItem, RoomState, SendOutcome,
-    SendRequest, SessionHandle, SessionSnapshot, SnapshotDelta, SnapshotWatch,
+    SendRequest, SessionHandle, SessionSnapshot, SkillFile, SnapshotDelta, SnapshotWatch,
 };
 pub use workspace::{
-    DeviceView, FrontPage, ProjectRef, ProjectView, PullRequestGroups, SearchField, SearchHit,
-    SectionView, SessionRow, WorkspaceSnapshot, project_color_index, relative_time_label,
+    ApprovalView, Brief, BriefMessage, ContextChat, DeviceView, EstimateLine, FrontGroup, FrontPage,
+    HostRef, ItemSend, MissionOptions, MissionStrip, NeedsYouEntry, NeedsYouKind, PlanEstimate,
+    ProjectRef, ProjectView, PullRequestGroups, SearchField, SearchHit, SectionView, SessionRow,
+    StepView, SupervisorHost, SupervisorPage, TaskDetail, TaskDraft, TaskRow, TasksPage, TodayPage,
+    TodayPart, TodayPullRequests, TodaySlot, TodayTask, TodayUsage, WakeEntry, WatchState,
+    WorkspaceSnapshot, project_color_index, relative_time_label,
 };
 
 /// Re-exported so consumers (the layout engine) name the exact doc types the

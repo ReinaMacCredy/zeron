@@ -12,7 +12,10 @@ mod cards;
 pub mod display;
 mod markdown;
 mod file_icons;
+mod html;
 mod rows;
+mod seams;
+mod strip;
 pub(crate) mod style;
 mod tools;
 
@@ -29,6 +32,7 @@ use zeron_text::WidthCache;
 
 use display::{DisplayBuilder, MathFace, RowDisplay};
 use markdown::{Ctx, MathFailures, MathSettings, Px};
+pub use html::html_render_document;
 pub use rows::{PendingUser, RowKind, TranscriptInput};
 use rows::{Gap, Placed, RowBuilder, RowCore, place_row};
 pub use style::{FaceRole, StyleDesc};
@@ -151,6 +155,123 @@ impl FrameRow {
     }
 }
 
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct BranchOffer {
+    pub entry_id: String,
+    pub rewind: bool,
+    pub title: String,
+    pub context: String,
+    pub option: String,
+    pub detail: String,
+}
+
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct BadgeCard {
+    pub title: String,
+    pub details: Vec<BadgeCardRow>,
+}
+
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct BadgeCardRow {
+    pub location: String,
+    pub tag: Option<String>,
+    pub body: String,
+}
+
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct LimitCard {
+    pub chat_id: String,
+    pub title: String,
+    pub resets: String,
+    pub switch: Option<LimitChoice>,
+    pub wait: LimitChoice,
+    pub preselect_switch: bool,
+    pub act_at_ms: Option<i64>,
+    pub countdown_verb: String,
+}
+
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct LimitChoice {
+    pub title: String,
+    pub detail: String,
+    pub act: String,
+}
+
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct InfoSource {
+    pub name: String,
+    pub reference: String,
+}
+
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageLevel {
+    Normal,
+    Warn,
+    Critical,
+}
+
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct UsageMeter {
+    pub label: String,
+    pub fraction: f32,
+    pub level: UsageLevel,
+}
+
+impl UsageMeter {
+    pub(crate) fn new(label: String, fraction: f32) -> Self {
+        let level = match zeron_proto::usage_level(fraction) {
+            zeron_proto::UsageLevel::Normal => UsageLevel::Normal,
+            zeron_proto::UsageLevel::Warn => UsageLevel::Warn,
+            zeron_proto::UsageLevel::Critical => UsageLevel::Critical,
+        };
+        Self { label, fraction, level }
+    }
+}
+
+#[derive(uniffi::Record, Debug, Clone, PartialEq)]
+pub struct LimitPill {
+    pub text: String,
+    pub action: Option<String>,
+    pub auto: bool,
+    pub switch_to: Option<String>,
+}
+
+pub(crate) fn limit_card(client: &zeron_client::Client, chat_id: &str) -> Option<LimitCard> {
+    let limit = client.limit_resume(chat_id)?;
+    let offer = limit.offer.as_ref()?;
+    let name = client.chat(chat_id).and_then(|c| c.config).map_or("The agent", |c| c.harness.display_name());
+    let reset = limit.resets_at.and_then(seams::clock);
+    let now = chrono::Utc::now().timestamp_millis();
+    let target = offer.to.as_ref().map(|t| seams::side_detail(t.harness, t.model.as_deref()));
+    let copy = zeron_proto::transcript::limit_card_copy(name, reset.as_deref(), limit.resets_at.map(|ms| ms - now), target.as_deref(), limit.auto);
+    let choice = |(title, detail): (String, String), act: zeron_proto::OfferChoice| LimitChoice { title, detail, act: act.act_label().into() };
+    Some(LimitCard {
+        chat_id: chat_id.to_owned(),
+        title: copy.title,
+        resets: copy.resets,
+        switch: copy.switch.map(|(title, detail)| choice((format!("Switch to {title}"), detail), zeron_proto::OfferChoice::Switch)),
+        wait: choice(copy.wait, zeron_proto::OfferChoice::Wait),
+        preselect_switch: offer.preselect == zeron_proto::OfferChoice::Switch,
+        act_at_ms: offer.act_at.filter(|at| *at > now),
+        countdown_verb: offer.preselect.countdown_verb().into(),
+    })
+}
+
+pub(crate) fn limit_pill(limit: &zeron_proto::LimitResume) -> LimitPill {
+    let now = chrono::Utc::now().timestamp_millis();
+    let when = limit.resets_at.and_then(seams::clock);
+    let (text, action) = zeron_proto::transcript::limit_pill_label(when.as_deref(), limit.resets_at.is_some_and(|at| at > now), limit.auto);
+    LimitPill {
+        text,
+        action: action.map(str::to_owned),
+        auto: limit.auto,
+        switch_to: limit.offer.as_ref().and_then(|o| o.to.as_ref()).map(|t| match &t.model {
+            Some(model) => seams::model_label(Some(t.harness), model),
+            None => t.harness.display_name().to_owned(),
+        }),
+    }
+}
+
 /// An immutable, fully measured transcript at one width.
 #[derive(uniffi::Object)]
 pub struct LayoutFrame {
@@ -163,6 +284,7 @@ pub struct LayoutFrame {
     index: OnceLock<HashMap<u64, u32>>,
     /// Worker time for the pass that produced this frame (µs).
     build_micros: u64,
+    entries: Vec<Arc<SessionMessageEntry>>,
 }
 
 #[uniffi::export]
@@ -264,6 +386,60 @@ impl LayoutFrame {
         out
     }
 
+    pub fn badge(&self, key: u64, index: u32) -> Option<BadgeCard> {
+        let row = &self.rows[self.index_of(key)? as usize];
+        let rows::Content::User(user) = &row.core.content else { return None };
+        let badge = user.badges.get(index as usize)?;
+        Some(BadgeCard {
+            title: badge.title.clone(),
+            details: badge
+                .details
+                .iter()
+                .map(|d| BadgeCardRow {
+                    location: d.location.clone(),
+                    tag: d.tag.clone(),
+                    body: d.body.clone(),
+                })
+                .collect(),
+        })
+    }
+
+    pub fn sources(&self) -> Vec<InfoSource> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.role == MessageRole::User)
+            .flat_map(|entry| zeron_client::attachments::parse_user_message(&seams::user_text(entry)).images)
+            .take(8)
+            .map(|image| InfoSource { name: image.name, reference: image.path })
+            .collect()
+    }
+
+    pub fn branch(&self, index: u32) -> Option<BranchOffer> {
+        let entry_id = &self.rows.get(index as usize)?.core.entry_id;
+        let entry = self.entries.iter().find(|e| *e.id == **entry_id)?;
+        let rewind = match entry.role {
+            MessageRole::User => true,
+            MessageRole::Assistant if entry.status != Some(MessageStatus::Streaming) => false,
+            _ => return None,
+        };
+        let excerpt = self
+            .rows
+            .iter()
+            .rev()
+            .find(|r| &r.core.entry_id == entry_id && !r.core.copy_text.is_empty())
+            .map(|r| zeron_proto::view::single_line(&r.core.copy_text))
+            .unwrap_or_default();
+        let copy = zeron_proto::transcript::branch_copy(rewind, &excerpt);
+        Some(BranchOffer {
+            entry_id: entry.id.clone(),
+            rewind,
+            title: copy.title.into(),
+            context: copy.context,
+            option: copy.option.into(),
+            detail: copy.detail.into(),
+        })
+    }
+
     /// Copyable text of the whole message owning `index` (context menus).
     pub fn message_text(&self, index: u32) -> Option<String> {
         let entry = &self.rows.get(index as usize)?.core.entry_id;
@@ -299,6 +475,7 @@ impl LayoutFrame {
             styles: Arc::new(Vec::new()),
             index: OnceLock::new(),
             build_micros: 0,
+            entries: Vec::new(),
         }
     }
 }
@@ -358,6 +535,9 @@ enum Msg {
     ToggleDetail { row: u64, detail: u64, open: bool },
     /// A visual row's height changed (its key), or visuals got a source.
     Visual(Option<u64>),
+    FetchBlob(String, Box<dyn FnOnce() + Send>),
+    Blob(String, rows::Blob),
+    HtmlHeight { id: String, height: f32 },
     Shutdown,
 }
 
@@ -373,6 +553,7 @@ pub struct TranscriptView {
     /// Live session subscription (Rust→Rust; rows never cross FFI).
     watch: Mutex<Option<zeron_client::SnapshotWatch>>,
     visuals: Arc<crate::visual::VisualHub>,
+    client: Mutex<Option<zeron_client::Client>>,
 }
 
 #[uniffi::export]
@@ -404,6 +585,7 @@ impl TranscriptView {
             shared,
             watch: Mutex::new(None),
             visuals,
+            client: Mutex::new(None),
         })
     }
 
@@ -415,6 +597,12 @@ impl TranscriptView {
         }
         self.visuals.set_source(client.client().clone(), device_id, pixel_scale);
         self.send(Msg::Visual(None));
+    }
+
+    pub fn set_html_height(&self, id: String, height: f32) {
+        if height.is_finite() && height >= 0.0 {
+            self.send(Msg::HtmlHeight { id, height });
+        }
     }
 
     /// The live visual behind a `WidgetKind::Visual` (by its visual id).
@@ -429,9 +617,27 @@ impl TranscriptView {
             return false;
         };
         let tx = Mutex::new(self.tx.lock().unwrap().clone());
+        let weak = Arc::downgrade(&client);
         let guard = handle.watch(move |snap| {
+            let client = weak.upgrade();
+            let harness = client.as_ref().and_then(|client| {
+                let wire = client.client.workspace().session(&chat_id)?.harness.clone()?;
+                serde_json::from_value(serde_json::Value::String(wire)).ok()
+            });
+            let entries = snap.transcript_messages();
+            let chats: seams::Chats = client
+                .map(|client| {
+                    std::iter::once(chat_id.clone())
+                        .chain(entries.iter().flat_map(|e| seams::entry_refs(e)))
+                        .filter_map(|id| {
+                            let chat = seams::ChatRef::of(&client.client.chat(&id)?);
+                            Some((id.clone(), seams::ChatRef { limit: client.client.limit_resume(&id), ..chat }))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             let input = TranscriptInput {
-                entries: snap.transcript_messages(),
+                entries,
                 pending: snap
                     .pending
                     .iter()
@@ -442,12 +648,18 @@ impl TranscriptView {
                     .collect(),
                 working: snap.working,
                 working_since_ms: snap.working_since_ms,
+                token_rate: snap.token_rate,
+                compaction: snap.compaction.clone(),
                 streaming: snap.streaming,
                 input_answers: snap.input_answers.clone(),
+                harness,
+                chat_id: Some(chat_id.clone()),
+                chats: Arc::new(chats),
             };
             let _ = tx.lock().unwrap().send(Msg::Input(input));
         });
         *self.watch.lock().unwrap() = Some(guard);
+        *self.client.lock().unwrap() = Some(client.client().clone());
         true
     }
 
@@ -472,6 +684,22 @@ impl TranscriptView {
     /// Flip one tool row's inline detail (`open` = its state as painted).
     pub fn toggle_detail(&self, row: u64, detail: u64, open: bool) {
         self.send(Msg::ToggleDetail { row, detail, open });
+    }
+
+    pub fn fetch_blob(&self, blob_ref: String) {
+        let Some(client) = self.client.lock().unwrap().clone() else { return };
+        let tx = self.tx.lock().unwrap().clone();
+        let key = blob_ref.clone();
+        let start = Box::new(move || {
+            zeron_client::runtime::handle().spawn(async move {
+                let blob = match client.fetch_tool_blob(&key).await {
+                    Ok(text) => rows::Blob::Ready(text.into()),
+                    Err(_) => rows::Blob::Failed,
+                };
+                let _ = tx.send(Msg::Blob(key, blob));
+            });
+        });
+        self.send(Msg::FetchBlob(blob_ref, start));
     }
 
     /// The latest published frame.
@@ -536,8 +764,13 @@ pub(crate) fn debug_input(entries: Vec<DebugEntry>, working: bool) -> Transcript
         pending: Vec::new(),
         working,
         working_since_ms: None,
+        token_rate: None,
+        compaction: None,
         streaming: working,
         input_answers: Default::default(),
+        harness: None,
+        chat_id: None,
+        chats: Default::default(),
     }
 }
 
@@ -621,6 +854,33 @@ impl Worker {
                         }
                         dirty = true;
                     }
+                    Msg::FetchBlob(blob_ref, start) => {
+                        let b = &mut self.builder;
+                        b.blob_clock += 1;
+                        match b.blobs.get_mut(&blob_ref) {
+                            Some((rows::Blob::Loading, _)) => continue,
+                            Some((rows::Blob::Ready(_), order)) => *order = b.blob_clock,
+                            _ => {
+                                b.blobs.insert(blob_ref, (rows::Blob::Loading, b.blob_clock));
+                                start();
+                            }
+                        }
+                        dirty = true;
+                    }
+                    Msg::Blob(blob_ref, blob) => {
+                        if let Some((state, _)) = self.builder.blobs.get_mut(&blob_ref) {
+                            *state = blob;
+                            dirty = true;
+                        }
+                    }
+                    Msg::HtmlHeight { id, height } => {
+                        if let Some(slot) = self.builder.html_slots.get(&id)
+                            && slot.set_content(height)
+                        {
+                            self.heights.remove(&slot.row_key);
+                            dirty = true;
+                        }
+                    }
                     Msg::Toggle(key) => {
                         if !self.builder.expanded.remove(&key) && !self.builder.collapsed.remove(&key) {
                             // First toggle flips the row's default.
@@ -668,6 +928,7 @@ impl Worker {
         self.builder.collapsed = old.collapsed;
         self.builder.detail_open = old.detail_open;
         self.builder.visual_slots = old.visual_slots;
+        self.builder.html_slots = old.html_slots;
         self.heights.clear();
     }
 
@@ -679,6 +940,7 @@ impl Worker {
             .is_some_and(|r| match &r.core.content {
                 rows::Content::Tools(t) => t.expanded,
                 rows::Content::User(u) => u.expanded,
+                rows::Content::Strip(s) => s.open == Some(true),
                 _ => false,
             })
     }
@@ -707,6 +969,10 @@ impl Worker {
                         visuals.ensure(slot, p.core.key, rows::column_width(px, self.width), self.typo.scale);
                     }
                     slot.snapshot()
+                }
+                rows::Content::Html(row) => {
+                    let (epoch, frame) = row.slot.snapshot();
+                    (epoch, Some(frame))
                 }
                 _ => (0, None),
             };
@@ -750,6 +1016,7 @@ impl Worker {
             styles: Arc::new(self.typo.table().to_vec()),
             index: OnceLock::new(),
             build_micros: started.elapsed().as_micros() as u64,
+            entries: self.input.entries.clone(),
         });
         *self.shared.frame.lock().unwrap() = frame.clone();
         if let Some(l) = &self.listener {

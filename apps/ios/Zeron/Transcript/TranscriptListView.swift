@@ -93,6 +93,9 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     /// Agent visuals by id: one live view each, moved between reused rows so
     /// its painted state survives row reconfigures.
     private var visuals: [String: VisualView] = [:]
+    private var pages: [(id: String, view: HtmlPageView)] = []
+    private let maxPages = 6
+    var htmlLoader: ((_ deviceId: String, _ path: String) async -> String?)?
     private var memoryObserver: NSObjectProtocol?
     private var mathObserver: NSObjectProtocol?
 
@@ -122,6 +125,11 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     var onDistanceFromBottom: ((CGFloat) -> Void)?
     var imageLoader: ((String, UIImageView) -> Void)?
     var onCardAction: ((CardAction) -> Void)?
+    var branchBlocked: ((Bool) async -> String?)?
+    var onBranch: ((BranchOffer) -> Void)?
+    var onSkill: ((_ name: String, _ path: String?) -> Void)?
+    var onLimit: ((_ chatId: String) -> Void)?
+    var onPullRequest: ((_ url: String) -> Void)?
     /// An attachment's picture, for an image chip opened full size.
     var imageFetcher: ((String) async -> UIImage?)?
 
@@ -674,6 +682,47 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
             }
             return
         }
+        if url.scheme == "zeron-badge" {
+            guard let i = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "i" })?.value.flatMap(UInt32.init),
+                  let card = current?.badge(key: view.key, index: i)
+            else { return }
+            let sheet = UINavigationController(rootViewController: BadgeCardViewController(card: card))
+            if let s = sheet.sheetPresentationController { s.detents = [.medium(), .large()]; s.prefersGrabberVisible = true }
+            vc.present(sheet, animated: true)
+            return
+        }
+        if url.scheme == "zeron-blob" {
+            guard let ref = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "ref" })?.value
+            else { return }
+            engine.fetchBlob(blobRef: ref)
+            return
+        }
+        if url.scheme == "zeron-limit" {
+            guard let id = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "chat" })?.value
+            else { return }
+            onLimit?(id)
+            return
+        }
+        if url.scheme == "zeron-skill" {
+            let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            guard let name = items.first(where: { $0.name == "name" })?.value else { return }
+            onSkill?(name, items.first(where: { $0.name == "path" })?.value)
+            return
+        }
+        if url.scheme == "zeron-chat" {
+            guard let id = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "id" })?.value
+            else { return }
+            (window?.rootViewController as? AppRouter)?.openSession(id)
+            return
+        }
+        if let link = pullRequestLink(url: url.absoluteString), let onPullRequest {
+            onPullRequest(link.url)
+            return
+        }
         if url.scheme == "http" || url.scheme == "https" {
             let safari = SFSafariViewController(url: url)
             safari.preferredControlTintColor = Palette.accent
@@ -701,6 +750,26 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
         }
         visuals[id] = live
         return live
+    }
+
+    func rowView(_ view: RowView, pageFor id: String, deviceId: String, path: String) -> UIView? {
+        if let i = pages.firstIndex(where: { $0.id == id }) {
+            let live = pages.remove(at: i)
+            pages.append(live)
+            return live.view
+        }
+        let loader = htmlLoader
+        let page = HtmlPageView { await loader?(deviceId, path) }
+        page.onHeight = { [weak self] height in self?.engine.setHtmlHeight(id: id, height: Float(height)) }
+        page.openURL = { [weak self, weak page] url in
+            guard let self, let row = page?.superview as? RowView else { return }
+            self.rowView(row, open: url)
+        }
+        pages.append((id, page))
+        if pages.count > maxPages, let i = pages.firstIndex(where: { $0.view.superview == nil || $0.view.superview?.isHidden == true }) {
+            pages.remove(at: i)
+        }
+        return page
     }
 
     fileprivate func row(at point: CGPoint) -> RowView? {
@@ -731,6 +800,23 @@ extension TranscriptListView: UIContextMenuInteractionDelegate {
                 actions.append(UIAction(title: "Select Text", image: UIImage(systemName: "character.cursor.ibeam")) { [weak self] _ in
                     self?.presentSelection(selectable)
                 })
+            }
+            if let offer = frame.branch(index: index) {
+                let blocked = self.branchBlocked
+                let perform = self.onBranch
+                let item = UIDeferredMenuElement.uncached { complete in
+                    Task { @MainActor in
+                        let reason = await blocked?(offer.rewind)
+                        let action = UIAction(
+                            title: offer.title,
+                            subtitle: reason,
+                            image: UIImage(systemName: offer.rewind ? "arrow.counterclockwise" : "arrow.triangle.branch"),
+                            attributes: reason != nil ? .disabled : (offer.rewind ? .destructive : [])
+                        ) { _ in perform?(offer) }
+                        complete([action])
+                    }
+                }
+                actions.append(UIMenu(options: .displayInline, children: [item]))
             }
             return actions.isEmpty ? nil : UIMenu(children: actions)
         }
@@ -793,5 +879,78 @@ final class SelectTextViewController: UIViewController {
             self?.dismiss(animated: true)
         })
         if !mono { DispatchQueue.main.async { tv.selectAll(nil) } }
+    }
+}
+
+final class BadgeCardViewController: UIViewController {
+    private let card: BadgeCard
+
+    init(card: BadgeCard) {
+        self.card = card
+        super.init(nibName: nil, bundle: nil)
+        title = card.title
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = Palette.background
+        let scroll = UIScrollView()
+        scroll.frame = view.bounds
+        scroll.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(scroll)
+        let stack = UIStackView()
+        stack.axis = .vertical
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        scroll.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 12),
+            stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -24),
+            stack.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 14),
+            stack.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -14),
+        ])
+        for row in card.details { stack.addArrangedSubview(Self.row(row)) }
+        navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak self] _ in
+            self?.dismiss(animated: true)
+        })
+    }
+
+    private static func row(_ row: BadgeCardRow) -> UIView {
+        let box = UIView()
+        box.backgroundColor = Palette.chip
+        box.layer.cornerRadius = 8
+        let rule = UIView()
+        rule.backgroundColor = Palette.accent.withAlphaComponent(0.35)
+        rule.layer.cornerRadius = 1
+        let location = UILabel()
+        location.font = Fonts.ui(.mono, 11)
+        location.textColor = Palette.tertiary
+        location.lineBreakMode = .byTruncatingMiddle
+        location.text = row.tag.map { "\(row.location)  \($0)" } ?? row.location
+        let body = UILabel()
+        body.font = Fonts.ui(.sans, UIFontMetrics(forTextStyle: .body).scaledValue(for: 14))
+        body.textColor = Palette.text
+        body.numberOfLines = 0
+        body.text = row.body
+        for v in [rule, location, body] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            box.addSubview(v)
+        }
+        NSLayoutConstraint.activate([
+            rule.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
+            rule.topAnchor.constraint(equalTo: box.topAnchor, constant: 8),
+            rule.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -8),
+            rule.widthAnchor.constraint(equalToConstant: 2),
+            location.leadingAnchor.constraint(equalTo: rule.trailingAnchor, constant: 8),
+            location.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -10),
+            location.topAnchor.constraint(equalTo: box.topAnchor, constant: 8),
+            body.leadingAnchor.constraint(equalTo: location.leadingAnchor),
+            body.trailingAnchor.constraint(equalTo: location.trailingAnchor),
+            body.topAnchor.constraint(equalTo: location.bottomAnchor, constant: 4),
+            body.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -8),
+        ])
+        return box
     }
 }

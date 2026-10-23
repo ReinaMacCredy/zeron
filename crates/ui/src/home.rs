@@ -11,7 +11,7 @@ use zeron_proto::change_request_assessment::{CiState, check_failed, check_status
 use zeron_proto::{
     ChangeRequestDetail, ChangeRequestFilter, ChangeRequestListItem, ChangeRequestPage,
     ChangeRequestReviewDecision, Chat, ChatIndicator, GitActivity, GitActivityRequest,
-    ListeningServices, ListeningServicesRequest, PlanProgress, StepStatus, SystemStats, TaskStatus,
+    ListeningServices, ListeningServicesRequest, PlanProgress, SystemStats, TaskStatus,
 };
 use zeron_rpc::methods;
 
@@ -19,7 +19,6 @@ use crate::icons::{self, icon};
 use crate::popover;
 use crate::settings::HomeWidgets as Toggles;
 use crate::state::AppState;
-use crate::tasks::PlanPhase;
 use crate::theme::Theme;
 
 const GRID_MAX_WIDTH: f32 = 880.0;
@@ -560,12 +559,7 @@ fn local_git_projects(state: &AppState) -> Vec<String> {
 }
 
 pub(crate) fn chat_title(chat: &Chat) -> String {
-    chat.title
-        .as_deref()
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .unwrap_or("New session")
-        .to_owned()
+    chat.display_title()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -659,7 +653,7 @@ pub(crate) async fn load_home_prs(
                 Err(error) => {
                     prs.error.get_or_insert_with(|| {
                         let error = crate::pull_requests::map_rpc_error(&error, "This device");
-                        crate::pull_requests::error_copy(&error).0
+                        error.copy().0
                     });
                 }
             }
@@ -693,26 +687,10 @@ pub(crate) fn composer_pr_scope(prs: &HomePrs, state: &AppState) -> PrScope {
         .unwrap_or_else(|| PrScope::Unlinked(space.display_name().to_owned()))
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct MissionRow {
-    pub task_id: String,
-    pub title: String,
-    pub progress: PlanProgress,
-    pub status: TaskStatus,
-    pub label: String,
-    pub current: Option<String>,
-}
+pub(crate) use zeron_proto::mission::MissionRow;
 
 pub(crate) fn mission_rows(state: &AppState, now: DateTime<Utc>) -> Vec<MissionRow> {
-    let mut tasks: Vec<&zeron_proto::Task> = state
-        .tasks
-        .iter()
-        .filter(|task| task.has_plan() && !task.deleted && task.completed_at.is_none())
-        .collect();
-    tasks.sort_by(|a, b| {
-        (&a.order_key, a.created_at, &a.id).cmp(&(&b.order_key, b.created_at, &b.id))
-    });
-    let mut rows: Vec<MissionRow> = tasks
+    let mut rows: Vec<MissionRow> = zeron_proto::mission::open_missions(&state.tasks)
         .into_iter()
         .map(|task| mission_row_of(state, task, now))
         .collect();
@@ -722,19 +700,7 @@ pub(crate) fn mission_rows(state: &AppState, now: DateTime<Utc>) -> Vec<MissionR
 
 pub(crate) fn done_today_rows(state: &AppState, now: DateTime<Utc>) -> Vec<MissionRow> {
     let today = now.with_timezone(&chrono::Local).date_naive();
-    let mut tasks: Vec<&zeron_proto::Task> = state
-        .tasks
-        .iter()
-        .filter(|task| {
-            task.has_plan()
-                && !task.deleted
-                && task
-                    .completed_at
-                    .is_some_and(|at| at.with_timezone(&chrono::Local).date_naive() == today)
-        })
-        .collect();
-    tasks.sort_by_key(|task| std::cmp::Reverse(task.completed_at));
-    tasks
+    zeron_proto::mission::missions_done_on(&state.tasks, today, &chrono::Local)
         .into_iter()
         .map(|task| mission_row_of(state, task, now))
         .collect()
@@ -742,50 +708,8 @@ pub(crate) fn done_today_rows(state: &AppState, now: DateTime<Utc>) -> Vec<Missi
 
 fn mission_row_of(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> MissionRow {
     let plan = crate::tasks::rollup(state, task, now);
-    let phase = plan.phase(task);
-    let (word, status) = plan.label(task);
     let held = crate::supervisor::approval_held(state, &task.id, now);
-    let current = plan
-        .steps
-        .iter()
-        .position(|row| !matches!(row.status, StepStatus::Done | StepStatus::Skipped))
-        .or_else(|| {
-            plan.steps
-                .iter()
-                .rposition(|row| row.status != StepStatus::Skipped)
-        })
-        .or(plan.steps.len().checked_sub(1));
-    let label = match phase {
-        PlanPhase::PlanReady => "Needs you · plan review".to_owned(),
-        _ if held => crate::supervisor::HELD_APPROVAL.to_owned(),
-        PlanPhase::Planning => "Planning".to_owned(),
-        PlanPhase::Status(TaskStatus::NeedsYou) => plan
-            .steps
-            .iter()
-            .position(|row| matches!(row.status, StepStatus::NeedsYou | StepStatus::Failed))
-            .map(|index| format!("Needs you · step {}", index + 1))
-            .unwrap_or_else(|| word.to_owned()),
-        _ => match current {
-            Some(ix) => format!("Step {}/{} · {word}", ix + 1, plan.steps.len()),
-            None => word.to_owned(),
-        },
-    };
-    MissionRow {
-        task_id: task.id.clone(),
-        title: task.title.clone(),
-        progress: plan.progress,
-        status: if held { TaskStatus::Working } else { status },
-        label,
-        current: current.map(|ix| {
-            let row = &plan.steps[ix];
-            format!(
-                "Step {} of {} · {}",
-                ix + 1,
-                plan.steps.len(),
-                row.step.title
-            )
-        }),
-    }
+    zeron_proto::mission::mission_row(task, &plan, held)
 }
 
 fn failing_prs(prs: &HomePrs) -> Vec<&ChangeRequestListItem> {

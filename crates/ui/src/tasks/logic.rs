@@ -8,27 +8,6 @@ pub(crate) const COLUMNS: [TaskStatus; 4] = [
     TaskStatus::Done,
 ];
 
-pub(crate) fn column_title(status: TaskStatus) -> &'static str {
-    match status {
-        TaskStatus::ToDo => "To do",
-        TaskStatus::Working => "Working",
-        TaskStatus::NeedsYou => "Needs you",
-        TaskStatus::Done => "Done",
-    }
-}
-
-pub(crate) fn split_tasks(tasks: &[Task]) -> (Vec<&Task>, Vec<&Task>) {
-    let (mut open, mut done): (Vec<&Task>, Vec<&Task>) = tasks
-        .iter()
-        .filter(|task| !task.deleted)
-        .partition(|task| task.completed_at.is_none());
-    open.sort_by(|a, b| {
-        (&a.order_key, a.created_at, &a.id).cmp(&(&b.order_key, b.created_at, &b.id))
-    });
-    done.sort_by(|a, b| b.completed_at.cmp(&a.completed_at).then(a.id.cmp(&b.id)));
-    (open, done)
-}
-
 /// Only Done is a drop target that writes; the other columns follow the linked chat.
 pub(crate) fn drop_completes(from: TaskStatus, to: TaskStatus) -> Option<bool> {
     match (from, to) {
@@ -116,6 +95,7 @@ fn parse_day(value: &str) -> Option<NaiveDate> {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+    use zeron_proto::mission::split_tasks;
     use zeron_proto::valid_pin_order_key;
 
     fn task(id: &str, key: &str, completed: Option<i64>) -> Task {

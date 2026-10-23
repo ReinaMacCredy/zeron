@@ -5,52 +5,9 @@ pub mod quota;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use zeron_proto::{ChatConfig, ChildRoute, HarnessId, ReasoningLevel, RouteTarget};
+use zeron_proto::{ChildRoute, HarnessId, ReasoningLevel, RouteTarget};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Role {
-    Worker,
-    Validator,
-    Research,
-    Design,
-    General,
-}
-
-impl Role {
-    pub const ALL: [Role; 5] = [
-        Role::Worker,
-        Role::Validator,
-        Role::Research,
-        Role::Design,
-        Role::General,
-    ];
-
-    pub fn parse(name: &str) -> Option<Role> {
-        Some(match name.trim().to_ascii_lowercase().as_str() {
-            "worker" | "implementation" => Role::Worker,
-            "validator" | "review" | "test" => Role::Validator,
-            "research" => Role::Research,
-            "design" => Role::Design,
-            "general" => Role::General,
-            _ => return None,
-        })
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Role::Worker => "worker",
-            Role::Validator => "validator",
-            Role::Research => "research",
-            Role::Design => "design",
-            Role::General => "general",
-        }
-    }
-
-    pub fn names() -> String {
-        Role::ALL.map(Role::name).join(", ")
-    }
-}
+pub use zeron_proto::route_preview::{QuotaState, Role, target_of};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -123,23 +80,6 @@ impl RoutingSettings {
                 _ => None,
             })
             .chain(&self.fallback)
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct QuotaState {
-    pub known: bool,
-    pub used_fraction: Option<f64>,
-    pub resets_at: Option<i64>,
-    pub exhausted: bool,
-}
-
-pub fn target_of(config: &ChatConfig) -> RouteTarget {
-    RouteTarget {
-        harness: config.harness,
-        model: config.model.clone(),
-        reasoning: config.reasoning,
     }
 }
 
@@ -291,6 +231,7 @@ pub fn resolve(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use zeron_proto::ChatConfig;
 
     #[test]
     fn roles_parse_their_names_and_the_old_aliases() {

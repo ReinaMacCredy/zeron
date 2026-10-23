@@ -8,11 +8,8 @@ use gpui::{
     Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render,
     SharedString, Subscription, Window, div, prelude::*, px,
 };
-use zeron_proto::supervisor::NeedsYouRow;
-use zeron_proto::{
-    ChatIndicator, PlanProgress, StepStatus, TaskPatch, TaskStatus, plan_progress, step_status,
-    task_status,
-};
+use zeron_proto::mission::column_title;
+use zeron_proto::{ChatIndicator, PlanProgress, StepStatus, TaskPatch, TaskStatus};
 
 use crate::composer::{ComposerInput, ComposerInputEvent, MentionTab};
 use crate::icons::{self, icon};
@@ -115,68 +112,11 @@ struct Linked {
 
 type Brand = (&'static str, Option<Hsla>);
 
-pub(crate) struct StepRow {
-    pub step: zeron_proto::TaskStep,
-    pub status: StepStatus,
-    pub indicator: Option<ChatIndicator>,
-    pub brand: Option<Brand>,
-}
-
-pub(crate) struct Rollup {
-    pub lead: Option<ChatIndicator>,
-    pub steps: Vec<StepRow>,
-    pub status: TaskStatus,
-    pub progress: PlanProgress,
-    pub questions: usize,
-}
-
-impl Rollup {
-    pub fn count(&self, status: StepStatus) -> usize {
-        self.steps.iter().filter(|row| row.status == status).count()
-    }
-
-    pub fn step_label(&self, step_id: &str) -> Option<String> {
-        let ix = self.steps.iter().position(|row| row.step.id == step_id)?;
-        Some(format!("Step {} of {}", ix + 1, self.steps.len()))
-    }
-
-    pub fn phase(&self, task: &zeron_proto::Task) -> PlanPhase {
-        let lead_working = self.lead == Some(ChatIndicator::Working);
-        if task.completed_at.is_none()
-            && task.plan_pending
-            && !self.steps.is_empty()
-            && !lead_working
-        {
-            PlanPhase::PlanReady
-        } else if task.completed_at.is_none()
-            && self.steps.is_empty()
-            && is_mission(task, self)
-            && matches!(
-                self.lead,
-                Some(ChatIndicator::Working | ChatIndicator::Idle | ChatIndicator::Completed)
-            )
-        {
-            PlanPhase::Planning
-        } else {
-            PlanPhase::Status(self.status)
-        }
-    }
-
-    pub fn label(&self, task: &zeron_proto::Task) -> (&'static str, TaskStatus) {
-        match self.phase(task) {
-            PlanPhase::PlanReady => ("Plan ready", TaskStatus::NeedsYou),
-            PlanPhase::Planning => ("Planning", TaskStatus::Working),
-            PlanPhase::Status(status) => (logic::column_title(status), status),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PlanPhase {
-    PlanReady,
-    Planning,
-    Status(TaskStatus),
-}
+pub(crate) type StepRow = zeron_proto::mission::StepRow<Brand>;
+pub(crate) type Rollup = zeron_proto::mission::Rollup<Brand>;
+pub(crate) use zeron_proto::mission::{
+    MissionRole, MissionThread, PlanPhase, is_mission, linked_chat, plan_led_by, step_chat,
+};
 
 struct Row {
     task: zeron_proto::Task,
@@ -184,10 +124,6 @@ struct Row {
     project: Option<SharedString>,
     linked: Option<Linked>,
     plan: Rollup,
-}
-
-pub(crate) fn is_mission(task: &zeron_proto::Task, plan: &Rollup) -> bool {
-    task.has_plan() || task.plan_pending || !plan.steps.is_empty()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,7 +289,7 @@ impl TasksPage {
             return;
         }
         let first = {
-            let (open, _) = logic::split_tasks(&self.state.read(cx).tasks);
+            let (open, _) = zeron_proto::mission::split_tasks(&self.state.read(cx).tasks);
             open.iter()
                 .find(|task| task.chat_id.is_none())
                 .or(open.first())
@@ -545,7 +481,7 @@ impl TasksPage {
     fn reorder(&mut self, task_id: &str, before: Option<&str>, cx: &mut Context<Self>) {
         let key = {
             let state = self.state.read(cx);
-            let (open, _) = logic::split_tasks(&state.tasks);
+            let (open, _) = zeron_proto::mission::split_tasks(&state.tasks);
             logic::reorder_key(&open, task_id, before, &uuid::Uuid::new_v4().to_string())
         };
         if let Some(key) = key {
@@ -569,7 +505,7 @@ impl TasksPage {
     fn rows(&self, cx: &gpui::App) -> (Vec<Row>, Vec<Row>) {
         let state = self.state.read(cx);
         let now = Utc::now();
-        let (open, done) = logic::split_tasks(&state.tasks);
+        let (open, done) = zeron_proto::mission::split_tasks(&state.tasks);
         (
             open.into_iter()
                 .map(|task| row_for(state, task, now))
@@ -1529,7 +1465,7 @@ impl TasksPage {
                     .text_size(ui_rems(12.5))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child(logic::column_title(column)),
+                    .child(column_title(column)),
             )
             .child(
                 div()
@@ -1691,82 +1627,25 @@ pub(crate) fn chat_brand(chat: &zeron_proto::Chat) -> Brand {
     crate::pickers::agent_brand_icon(harness, model)
 }
 
-pub(crate) fn step_chat<'a>(
-    chats: &'a [zeron_proto::Chat],
-    step: &zeron_proto::TaskStep,
-) -> Option<&'a zeron_proto::Chat> {
-    let id = step.chat_id.as_deref()?;
-    chats.iter().find(|chat| chat.id == id)
-}
-
 pub(crate) fn rollup(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> Rollup {
-    let lead = linked_chat(&state.chats, task).map(|chat| state.display_status_for(chat, now));
-    let steps: Vec<StepRow> = state
-        .task_steps
-        .iter()
-        .filter(|step| step.task_id == task.id && !step.deleted)
-        .map(|step| {
-            let chat = step_chat(&state.chats, step);
-            let indicator = chat.map(|chat| state.display_status_for(chat, now));
-            StepRow {
-                step: step.clone(),
-                status: step_status(step, chat, indicator),
-                indicator,
-                brand: chat.map(chat_brand),
-            }
-        })
-        .collect();
-    let statuses: Vec<StepStatus> = steps.iter().map(|row| row.status).collect();
-    let questions = state.supervisor.as_ref().map_or(0, |snapshot| {
-        snapshot
-            .needs_you
+    zeron_proto::mission::rollup(
+        task,
+        &state.chats,
+        &state.task_steps,
+        state
+            .supervisor
             .iter()
-            .filter(|row| {
-                let task_id = match row {
-                    NeedsYouRow::Item(item) => item.task_id.as_deref(),
-                    NeedsYouRow::Input(input) => input.task_id.as_deref(),
-                };
-                task_id == Some(task.id.as_str())
-            })
-            .count()
-    });
-    Rollup {
-        lead,
-        status: task_status(task, lead, &statuses),
-        progress: plan_progress(&statuses),
-        steps,
-        questions,
-    }
+            .flat_map(|snapshot| &snapshot.needs_you),
+        |chat| state.display_status_for(chat, now),
+        chat_brand,
+    )
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum MissionRole {
-    Lead,
-    Step { step_id: String, label: String },
-}
-
-impl MissionRole {
-    pub fn label(&self) -> String {
-        match self {
-            Self::Lead => "Lead".into(),
-            Self::Step { label, .. } => label.clone(),
-        }
+pub(crate) fn mission_selection(role: &MissionRole) -> Selection {
+    match role {
+        MissionRole::Lead => Selection::Lead,
+        MissionRole::Step { step_id, .. } => Selection::Step(step_id.clone()),
     }
-
-    pub fn selection(&self) -> Selection {
-        match self {
-            Self::Lead => Selection::Lead,
-            Self::Step { step_id, .. } => Selection::Step(step_id.clone()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct MissionThread {
-    pub task_id: String,
-    pub title: String,
-    pub role: MissionRole,
-    pub progress: PlanProgress,
 }
 
 pub(crate) fn mission_thread(
@@ -1774,35 +1653,8 @@ pub(crate) fn mission_thread(
     chat_id: &str,
     now: DateTime<Utc>,
 ) -> Option<MissionThread> {
-    let mission = |task: &&zeron_proto::Task| task.has_plan() && !task.deleted;
-    let (task, step_id) = match plan_led_by(&state.tasks, chat_id) {
-        Some(task) => (task, None),
-        None => state
-            .task_steps
-            .iter()
-            .filter(|step| !step.deleted && step.chat_id.as_deref() == Some(chat_id))
-            .find_map(|step| {
-                let task = state
-                    .tasks
-                    .iter()
-                    .filter(mission)
-                    .find(|task| task.id == step.task_id)?;
-                Some((task, Some(step.id.clone())))
-            })?,
-    };
-    let plan = rollup(state, task, now);
-    let role = match step_id {
-        None => MissionRole::Lead,
-        Some(step_id) => MissionRole::Step {
-            label: plan.step_label(&step_id)?,
-            step_id,
-        },
-    };
-    Some(MissionThread {
-        task_id: task.id.clone(),
-        title: task.title.clone(),
-        role,
-        progress: plan.progress,
+    zeron_proto::mission::mission_thread(&state.tasks, &state.task_steps, chat_id, |task| {
+        rollup(state, task, now)
     })
 }
 
@@ -1854,21 +1706,6 @@ pub(crate) fn can_add_plan(state: &AppState, chat: &zeron_proto::Chat) -> bool {
         && zeron_proto::plan_of_chat(&state.tasks, &chat.id).is_none()
 }
 
-/// The open plan, else the one that finished last, so a done lead keeps its strip.
-pub(crate) fn plan_led_by<'a>(
-    tasks: &'a [zeron_proto::Task],
-    chat_id: &str,
-) -> Option<&'a zeron_proto::Task> {
-    zeron_proto::plan_of_chat(tasks, chat_id).or_else(|| {
-        tasks
-            .iter()
-            .filter(|task| {
-                !task.deleted && task.has_plan() && task.chat_id.as_deref() == Some(chat_id)
-            })
-            .max_by_key(|task| task.completed_at)
-    })
-}
-
 /// A plan first, else the task handed to this chat, open before done.
 pub(crate) fn task_led_by<'a>(
     tasks: &'a [zeron_proto::Task],
@@ -1900,15 +1737,6 @@ fn row_for(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> Ro
         linked,
         task: task.clone(),
     }
-}
-
-/// A link whose chat is gone (deleted) reads as no link: the task can start again.
-pub(crate) fn linked_chat<'a>(
-    chats: &'a [zeron_proto::Chat],
-    task: &zeron_proto::Task,
-) -> Option<&'a zeron_proto::Chat> {
-    let id = task.chat_id.as_deref()?;
-    chats.iter().find(|chat| chat.id == id)
 }
 
 fn patched(row: &zeron_proto::Task, patch: &TaskPatch) -> zeron_proto::Task {

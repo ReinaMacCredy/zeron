@@ -119,6 +119,7 @@ pub struct LiveStatus {
     pub streaming: bool,
     /// Stop is meaningful.
     pub can_interrupt: bool,
+    pub resumable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -149,6 +150,7 @@ pub struct QueueItem {
     pub gate: Option<QueueGate>,
     /// A Send-now / Remove is awaiting the host's acknowledgement.
     pub action_pending: bool,
+    pub from_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -218,6 +220,28 @@ pub struct InputRequest {
     pub questions: Vec<UserInputQuestion>,
 }
 
+impl From<&zc::InputRequest> for InputRequest {
+    fn from(i: &zc::InputRequest) -> Self {
+        Self {
+            entry_id: i.entry_id.clone(),
+            request_id: i.request_id.clone(),
+            questions: i
+                .questions
+                .iter()
+                .map(|q| UserInputQuestion {
+                    id: q.id.clone(),
+                    header: q.header.clone(),
+                    question: q.question.clone(),
+                    options: q.options.clone(),
+                    multi_select: q.multi_select,
+                    prefill: q.prefill.clone(),
+                    multiline: q.multiline,
+                })
+                .collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct RoomState {
     pub connected: bool,
@@ -258,6 +282,7 @@ pub struct ComposerState {
     /// Scroll-to-own-send target.
     pub last_submitted_message_id: Option<String>,
     pub context_usage: Option<ContextUsage>,
+    pub limit_pill: Option<crate::layout::LimitPill>,
 }
 
 impl From<&zc::ComposerState> for ComposerState {
@@ -287,6 +312,7 @@ impl From<&zc::ComposerState> for ComposerState {
                 working_since_ms: c.live.working_since_ms,
                 streaming: c.live.streaming,
                 can_interrupt: c.live.can_interrupt,
+                resumable: c.live.resumable,
             },
             queue: c
                 .queue
@@ -318,6 +344,7 @@ impl From<&zc::ComposerState> for ComposerState {
                         }
                     }),
                     action_pending: q.action_pending,
+                    from_label: q.from_label.clone(),
                 })
                 .collect(),
             pending_sends: c.pending_sends.iter().map(Into::into).collect(),
@@ -329,29 +356,14 @@ impl From<&zc::ComposerState> for ComposerState {
                 degraded: c.room.degraded,
             },
             transfer_progress: c.transfer_progress,
-            open_input: c.open_input.as_ref().map(|i| InputRequest {
-                entry_id: i.entry_id.clone(),
-                request_id: i.request_id.clone(),
-                questions: i
-                    .questions
-                    .iter()
-                    .map(|q| UserInputQuestion {
-                        id: q.id.clone(),
-                        header: q.header.clone(),
-                        question: q.question.clone(),
-                        options: q.options.clone(),
-                        multi_select: q.multi_select,
-                        prefill: q.prefill.clone(),
-                        multiline: q.multiline,
-                    })
-                    .collect(),
-            }),
+            open_input: c.open_input.as_ref().map(Into::into),
             queue_error: c.queue_error.clone(),
             last_submitted_message_id: c.last_submitted_message_id.clone(),
             context_usage: c.context_usage.map(|u| ContextUsage {
                 tokens: u.tokens,
                 window: u.window,
             }),
+            limit_pill: c.limit.as_ref().map(crate::layout::limit_pill),
         }
     }
 }
@@ -371,6 +383,13 @@ pub struct TranscriptStatus {
     pub working_since_ms: Option<i64>,
     /// Id of the newest entry (host or echo).
     pub last_entry_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SkillFile {
+    pub path: String,
+    pub text: String,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -662,6 +681,35 @@ impl SessionHandle {
 
     pub fn clear_queue_error(&self) {
         self.inner.clear_queue_error();
+    }
+
+    pub async fn fork_from(&self, entry_id: String) -> CoreResult<String> {
+        let inner = self.inner.clone();
+        on_runtime(async move { inner.fork_from(&entry_id).await }).await
+    }
+
+    pub async fn rewind_to(&self, entry_id: String) -> CoreResult<String> {
+        let inner = self.inner.clone();
+        on_runtime(async move { inner.rewind_to(&entry_id).await }).await
+    }
+
+    pub async fn skill_file(&self, name: String, path: Option<String>) -> CoreResult<SkillFile> {
+        let inner = self.inner.clone();
+        let file =
+            on_runtime(async move { inner.skill_file(&name, path.as_deref()).await }).await?;
+        Ok(SkillFile {
+            path: file.path,
+            text: file.text,
+            truncated: file.truncated,
+        })
+    }
+
+    pub async fn branch_blocked(&self, rewind: bool) -> Option<String> {
+        let inner = self.inner.clone();
+        zc::runtime::run(async move { Ok(inner.branch_blocked(rewind).await) })
+            .await
+            .ok()
+            .flatten()
     }
 
     /// "Not delivered — tap to retry".

@@ -43,6 +43,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         case send
         case queue
         case stop
+        case resume
     }
 
     // Callbacks
@@ -68,6 +69,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
 
     // State
     var running = false { didSet { if running != oldValue { refreshAction(animated: true) } } }
+    var resumable = false { didSet { if resumable != oldValue { refreshAction(animated: true) } } }
     var canSteer = false { didSet { refreshAction(animated: false) } }
     var preferredDelivery: DeliveryMode = .queue { didSet { refreshAction(animated: false) } }
     var placeholder = "Message" { didSet { placeholderLabel.text = placeholder } }
@@ -576,8 +578,8 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     }
 
     private func refreshAction(animated: Bool) {
-        let action: Action = running ? (hasContent ? .queue : .stop) : .send
-        let enabled = action == .stop || hasContent
+        let action: Action = running ? (hasContent ? .queue : .stop) : (resumable && !hasContent ? .resume : .send)
+        let enabled = action == .stop || action == .resume || hasContent
         let steering = action == .queue && preferredDelivery == .steer && canSteer
         var config = UIButton.Configuration.filled()
         config.cornerStyle = .capsule
@@ -600,6 +602,11 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             config.baseBackgroundColor = Palette.text
             config.baseForegroundColor = Palette.background
             config.contentInsets = .zero
+        case .resume:
+            symbol = "play.fill"
+            config.baseBackgroundColor = Palette.accent
+            config.baseForegroundColor = .white
+            config.contentInsets = .zero
         }
         config.image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: action == .stop ? 11 : 15, weight: .bold))
         let changed = currentAction != action
@@ -619,6 +626,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         case .send: actionButton.accessibilityLabel = "Send message"
         case .queue: actionButton.accessibilityLabel = steering ? "Steer" : "Queue message"
         case .stop: actionButton.accessibilityLabel = "Stop response"
+        case .resume: actionButton.accessibilityLabel = "Resume"
         }
         // Long-press offers the other delivery modes mid-turn.
         if action == .queue {
@@ -645,6 +653,9 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             send(.queue)
         case .queue:
             send(canSteer ? preferredDelivery : (preferredDelivery == .steer ? .queue : preferredDelivery))
+        case .resume:
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            _ = onSend?(resumePrompt(), [], .queue)
         }
     }
 

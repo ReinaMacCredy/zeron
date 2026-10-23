@@ -39,6 +39,7 @@ protocol RowViewDelegate: AnyObject {
     func rowView(_ view: RowView, perform action: CardAction)
     /// The live view for an agent visual (kept across row reuse).
     func rowView(_ view: RowView, visualFor id: String) -> UIView?
+    func rowView(_ view: RowView, pageFor id: String, deviceId: String, path: String) -> UIView?
 }
 
 /// A reusable transcript row: canvas + horizontal scrollers + native widgets.
@@ -56,7 +57,7 @@ final class RowView: UIView {
             textElement?.accessibilityFrameInContainerSpace = bounds
             // Controls and links first: accessibility hit-testing takes the
             // first match, and the row's text element spans the whole row.
-            return widgetViews.filter { $0 is UIControl || $0 is VisualView || $0.gestureRecognizers?.isEmpty == false }
+            return widgetViews.filter { $0 is UIControl || $0 is VisualView || $0 is HtmlPageView || $0.gestureRecognizers?.isEmpty == false }
                 + positionedLinkElements()
                 + (textElement.map { [$0] } ?? [])
         }
@@ -166,6 +167,7 @@ final class RowView: UIView {
         case .working: "row-working"
         case .card: "row-card"
         case .visual: "row-visual"
+        case .html: "row-html"
         }
         element.accessibilityTraits = .staticText
         element.accessibilityFrameInContainerSpace = bounds
@@ -254,8 +256,8 @@ final class RowView: UIView {
                 view = iv
             case .spinner:
                 view = StatusGlyph(.spinner)
-            case let .working(sinceMs, streaming):
-                view = WorkingIndicatorView(since: sinceMs.map { Date(timeIntervalSince1970: Double($0) / 1000) }, streaming: streaming)
+            case let .working(sinceMs, word, rate):
+                view = WorkingIndicatorView(since: sinceMs.map { Date(timeIntervalSince1970: Double($0) / 1000) }, word: word, rate: rate)
             case let .detail(title):
                 let b = UIControl()
                 b.accessibilityLabel = "\(title) details"
@@ -271,7 +273,10 @@ final class RowView: UIView {
             case let .icon(name, color):
                 // Desktop icon assets (tool-*, fileicon-*), else an SF symbol.
                 let iv: UIImageView
-                if let asset = RowView.asset(name) {
+                if name.hasPrefix("mark-") {
+                    iv = UIImageView(image: BrandMarks.image(for: String(name.dropFirst(5)), side: rect.height))
+                    iv.contentMode = .scaleAspectFit
+                } else if let asset = RowView.asset(name) {
                     iv = UIImageView(image: asset)
                     iv.contentMode = .scaleAspectFit
                 } else {
@@ -308,6 +313,9 @@ final class RowView: UIView {
             case let .visual(id):
                 view = delegate?.rowView(self, visualFor: id) ?? UIView()
                 (view as? VisualView)?.active = !isHidden
+            case let .htmlRender(id, deviceId, path, scrolls):
+                view = delegate?.rowView(self, pageFor: id, deviceId: deviceId, path: path) ?? UIView()
+                (view as? HtmlPageView)?.scrolls = scrolls
             }
             view.frame = rect
             host.addSubview(view)
@@ -470,11 +478,13 @@ final class WorkingIndicatorView: UIView {
     private let label = UILabel()
     private let since: Date?
     private let word: String
+    private let rate: String?
     private var timer: Timer?
 
-    init(since: Date?, streaming: Bool) {
+    init(since: Date?, word: String, rate: String?) {
         self.since = since
-        self.word = streaming ? "Writing" : "Working"
+        self.word = word
+        self.rate = rate
         super.init(frame: .zero)
         isUserInteractionEnabled = false
         label.font = Fonts.ui(.sansMedium, UIFontMetrics(forTextStyle: .body).scaledValue(for: 13.5))
@@ -491,6 +501,10 @@ final class WorkingIndicatorView: UIView {
         let text = NSMutableAttributedString(string: "\(word)…", attributes: [.font: label.font as Any, .foregroundColor: Palette.secondary])
         if secs > 0 {
             text.append(NSAttributedString(string: "  \(StatusPill.elapsed(secs))", attributes: [.font: label.font as Any, .foregroundColor: Palette.tertiary]))
+        }
+        if let rate {
+            let small = Fonts.ui(.sans, UIFontMetrics(forTextStyle: .body).scaledValue(for: 11))
+            text.append(NSAttributedString(string: "  \(rate)", attributes: [.font: small, .foregroundColor: Palette.tertiary.withAlphaComponent(0.8)]))
         }
         label.attributedText = text
         label.sizeToFit()

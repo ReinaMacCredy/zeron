@@ -269,13 +269,7 @@ fn spawn_reasoning(call: &ToolCall) -> Option<ReasoningLevel> {
     })
 }
 
-pub(crate) fn compact_count(n: u64) -> String {
-    match n {
-        0..1_000 => n.to_string(),
-        1_000..1_000_000 => format!("{:.1}k", n as f64 / 1_000.0),
-        _ => format!("{:.2}M", n as f64 / 1_000_000.0),
-    }
-}
+pub(crate) use zeron_proto::transcript::compact_count;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RawRole {

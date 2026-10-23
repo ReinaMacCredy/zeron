@@ -214,3 +214,60 @@ fn still_frames_come_from_an_online_host_only() {
         None
     );
 }
+
+#[test]
+fn needs_you_lists_each_ask_once_until_answered_here() {
+    use crate::workspace::NeedsYouKind;
+    let (client, _dir) = demo(false);
+    let inputs = |client: &Client| -> Vec<(String, String, bool, bool)> {
+        client
+            .needs_you()
+            .into_iter()
+            .filter_map(|entry| match entry.kind {
+                NeedsYouKind::Input {
+                    chat_id,
+                    request_id,
+                    approval,
+                    destructive,
+                    ..
+                } => Some((chat_id, request_id, approval, destructive)),
+                _ => None,
+            })
+            .collect()
+    };
+    wait_for("the awaiting chats", || {
+        inputs(&client).iter().all(|(_, request, ..)| !request.is_empty())
+            && inputs(&client).len() == 4
+    });
+    let mut asks = inputs(&client);
+    asks.sort();
+    let asks: Vec<(&str, &str, bool, bool)> = asks
+        .iter()
+        .map(|(chat, request, approval, destructive)| {
+            (chat.as_str(), request.as_str(), *approval, *destructive)
+        })
+        .collect();
+    assert_eq!(
+        asks,
+        [
+            ("chat-approve-push", "req-approve", true, true),
+            ("chat-approve-test", "req-approve", true, false),
+            ("chat-picker", "req-1", false, false),
+            ("chat-shelf-4", "req-shelf", false, false),
+        ]
+    );
+
+    let picker = client.session("chat-picker").expect("opened by needs_you");
+    picker
+        .respond_input(
+            "req-1",
+            vec![zeron_proto::UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec!["Local device".into()],
+            }],
+        )
+        .unwrap();
+    wait_for("the answered ask to leave", || {
+        !inputs(&client).iter().any(|(chat, ..)| chat == "chat-picker")
+    });
+}

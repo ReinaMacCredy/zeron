@@ -45,6 +45,25 @@ impl HarnessId {
             HarnessId::Mock => "Mock",
         }
     }
+
+    /// Whose brand mark an agent wears: the model's maker when the model id
+    /// names one, else the harness running it.
+    pub fn brand_of(harness: Option<HarnessId>, model: Option<&str>) -> Option<HarnessId> {
+        let model = model
+            .map(|m| m.split('[').next().unwrap_or(m).trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        let (provider, id) = model.split_once('/').unwrap_or(("", &model));
+        let maker = match provider {
+            "anthropic" => Some(HarnessId::ClaudeCode),
+            "openai" => Some(HarnessId::Codex),
+            "xai" => Some(HarnessId::Grok),
+            _ if id.starts_with("claude") => Some(HarnessId::ClaudeCode),
+            _ if id.starts_with("gpt") || id.contains("codex") => Some(HarnessId::Codex),
+            _ if id.starts_with("grok") => Some(HarnessId::Grok),
+            _ => None,
+        };
+        maker.or(harness)
+    }
 }
 
 /// Durable user preference for one agent's independently-installed CLI.
@@ -165,6 +184,29 @@ pub struct LimitResume {
 pub enum OfferChoice {
     Switch,
     Wait,
+}
+
+impl OfferChoice {
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Switch => "switch",
+            Self::Wait => "wait",
+        }
+    }
+
+    pub fn act_label(self) -> &'static str {
+        match self {
+            Self::Switch => "Switch now",
+            Self::Wait => "Wait now",
+        }
+    }
+
+    pub fn countdown_verb(self) -> &'static str {
+        match self {
+            Self::Switch => "Switching",
+            Self::Wait => "Waiting",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -56,6 +56,7 @@ final class CoreSessionSource: SessionSource {
         let project = row?.project?.name ?? "No project"
         next.subtitle = c.host.name.map { "\(project) @ \($0)" } ?? project
         next.running = c.live.turnRunning
+        next.resumable = c.live.resumable
         next.canSteer = c.host.capabilities.midTurnSteering ?? false
         next.placeholder = "Message \(row?.harnessLabel ?? "the agent")"
         var chips: [ComposerChip] = []
@@ -95,7 +96,10 @@ final class CoreSessionSource: SessionSource {
             next.banner = .offline
         } else if !c.room.connected, let retry = c.room.retryAtMs {
             next.banner = .reconnecting(in: max(1, Int((retry - Int64(Date().timeIntervalSince1970 * 1000)) / 1000)))
+        } else if let pill = c.limitPill {
+            next.banner = .limit(pill.text)
         }
+        next.limitPill = c.limitPill
         next.uploadProgress = c.transferProgress
         // Working state is shown at the transcript tail (layout engine), not here.
         if let input = c.openInput {
@@ -109,7 +113,7 @@ final class CoreSessionSource: SessionSource {
             case .reviewRequired?: "Needs review"
             case nil: q.actionPending ? "Updating" : nil
             }
-            return SessionChrome.QueuedItem(id: q.id, text: q.visibleText, thumbnail: nil, gate: gate)
+            return SessionChrome.QueuedItem(id: q.id, text: q.visibleText, thumbnail: nil, gate: gate, from: q.fromLabel)
         }
         next.error = c.queueError
         if next != chrome {
@@ -249,8 +253,15 @@ final class CoreSessionSource: SessionSource {
             }])
         case "pr":
             guard let url = row.pullRequest.flatMap({ URL(string: $0.url) }) else { return nil }
+            let device = hostDevice
             return UIMenu(title: row.pullRequest?.title ?? "", children: [
-                UIAction(title: "Open Pull Request", image: UIImage(systemName: "safari")) { _ in UIApplication.shared.open(url) },
+                UIAction(title: "Open Pull Request", image: UIImage(systemName: "arrow.triangle.pull")) { _ in
+                    let window = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
+                    guard pullRequestLink(url: url.absoluteString) != nil,
+                          let router = window?.rootViewController as? AppRouter
+                    else { return UIApplication.shared.open(url) }
+                    router.openPullRequest(url: url.absoluteString, deviceId: device)
+                },
                 UIAction(title: "Copy Link", image: UIImage(systemName: "link")) { _ in UIPasteboard.general.url = url },
             ])
         default:
@@ -268,7 +279,51 @@ final class CoreSessionSource: SessionSource {
         (try? await client.searchFiles(deviceId: hostDevice, chatId: chatId, spaceId: nil, query: query)) ?? []
     }
 
+    func branchBlocked(rewind: Bool) async -> String? {
+        await handle.branchBlocked(rewind: rewind)
+    }
+
+    func fork(from entryId: String) async throws -> String {
+        try await handle.forkFrom(entryId: entryId)
+    }
+
+    func rewind(to entryId: String) async throws -> String {
+        try await handle.rewindTo(entryId: entryId)
+    }
+
+    func skillFile(name: String, path: String?) async throws -> SkillFile {
+        try await handle.skillFile(name: name, path: path)
+    }
+
+    func chatUsage() async -> UsageMeter? {
+        try? await client.chatUsage(chatId: chatId)
+    }
+
+    func limitCard(chatId: String) -> LimitCard? {
+        client.limitCard(chatId: chatId)
+    }
+
+    func resolveLimit(chatId: String, choice: String) async throws {
+        _ = try await client.resolveLimitOffer(chatId: chatId, choice: choice)
+    }
+
+    func setLimitResume(chatId: String, auto: Bool) async throws {
+        _ = try await client.setLimitResume(chatId: chatId, autoResume: auto)
+    }
+
     private static let images = NSCache<NSString, UIImage>()
+    private static let pages = NSCache<NSString, NSString>()
+
+    func htmlPage(deviceId: String, path: String) async -> String? {
+        let device = deviceId.isEmpty ? hostDevice : deviceId
+        let key = "\(device)\n\(path)" as NSString
+        if let hit = Self.pages.object(forKey: key) { return hit as String }
+        guard let data = try? await client.readAttachment(deviceId: device, path: path),
+              let html = String(data: data, encoding: .utf8)
+        else { return nil }
+        Self.pages.setObject(html as NSString, forKey: key)
+        return html
+    }
 
     func image(_ reference: String) async -> UIImage? {
         if let hit = Self.images.object(forKey: reference as NSString) { return hit }

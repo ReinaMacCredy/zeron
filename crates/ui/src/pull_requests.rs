@@ -4,18 +4,24 @@ use std::{
     time::Instant,
 };
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use gpui::{
     AnyElement, Context, Entity, Focusable, IntoElement, ListOffset, ListState, Render,
     ScrollHandle, SharedString, Subscription, Task, Window, div, list, prelude::*, px,
 };
-use zeron_proto::{
-    ChangeRequestFilter, ChangeRequestListItem, ChangeRequestMergeability, ChangeRequestPage,
-    ChangeRequestReviewDecision, Device,
-};
-use zeron_rpc::{RpcError, capability_errors, methods};
+use zeron_proto::{ChangeRequestFilter, ChangeRequestListItem, ChangeRequestPage, Device};
+use zeron_rpc::{RpcError, methods};
 
-use zeron_proto::change_request_assessment::{Blocker, CiState, Facts};
+use zeron_proto::change_request_assessment::{CiState, Facts};
+use zeron_proto::pull_request::board::{
+    self, Group as PullRequestGroup, PersonalView, Sort as PullRequestSort, SortDirection,
+    SortField as PullRequestSortField, compact_relative_time, format_compact_count, matches_query,
+    valid_repository_filter,
+};
+pub(crate) use zeron_proto::pull_request::board::{
+    PageError as PullRequestsPageError, relative_time, star_key,
+};
+use zeron_proto::view::single_line;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons::{self, icon};
@@ -53,40 +59,11 @@ struct Paging {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PullRequestsPageError {
-    CliUnavailable,
-    Authentication,
-    RateLimited,
-    Network,
-    RemoteOffline(String),
-    UpdateRequired(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 enum PullRequestsLoadState {
     Idle,
     Loading,
     Ready,
     Failed(PullRequestsPageError),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PullRequestSortField {
-    Changes,
-    Opened,
-    Updated,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SortDirection {
-    Ascending,
-    Descending,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PullRequestSort {
-    field: PullRequestSortField,
-    direction: SortDirection,
 }
 
 /// One row of the virtualized board: a group's header, one pull request in
@@ -134,47 +111,6 @@ impl Board {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum PullRequestGroup {
-    Attention,
-    Review,
-    Approved,
-    Drafts,
-}
-
-impl PullRequestGroup {
-    const ALL: [Self; 4] = [Self::Attention, Self::Review, Self::Approved, Self::Drafts];
-    fn label(self) -> &'static str {
-        match self {
-            Self::Attention => "Needs attention",
-            Self::Review => "Awaiting review",
-            Self::Approved => "Approved",
-            Self::Drafts => "Drafts",
-        }
-    }
-    fn key(self) -> &'static str {
-        match self {
-            Self::Attention => "attention",
-            Self::Review => "review",
-            Self::Approved => "approved",
-            Self::Drafts => "drafts",
-        }
-    }
-}
-
-fn request_group(item: &ChangeRequestListItem) -> PullRequestGroup {
-    let assessment = Facts::from_item(item).assess();
-    if item.is_draft {
-        PullRequestGroup::Drafts
-    } else if !assessment.blockers.is_empty() || !assessment.attention.is_empty() {
-        PullRequestGroup::Attention
-    } else if item.review_decision == ChangeRequestReviewDecision::Approved {
-        PullRequestGroup::Approved
-    } else {
-        PullRequestGroup::Review
-    }
-}
-
 fn request_glyph(item: &ChangeRequestListItem) -> &'static str {
     if item.is_draft {
         icons::PULL_REQUEST_DRAFT
@@ -183,58 +119,13 @@ fn request_glyph(item: &ChangeRequestListItem) -> &'static str {
     }
 }
 
-fn request_color(item: &ChangeRequestListItem, theme: &Theme) -> gpui::Hsla {
-    if item.is_draft {
-        theme.text_muted
-    } else if item.mergeability == ChangeRequestMergeability::Conflicting {
-        theme.danger
-    } else if item.review_decision == ChangeRequestReviewDecision::ChangesRequested {
-        theme.warning
-    } else {
-        theme.success
+fn tone_color(tone: board::Tone, theme: &Theme) -> gpui::Hsla {
+    match tone {
+        board::Tone::Muted => theme.text_muted,
+        board::Tone::Danger => theme.danger,
+        board::Tone::Warning => theme.warning,
+        board::Tone::Success => theme.success,
     }
-}
-
-fn matches_query(item: &ChangeRequestListItem, query: &str) -> bool {
-    let text = format!(
-        "{} {} #{} {} {}",
-        item.title,
-        item.repository,
-        item.number,
-        status_description(item),
-        item.author.login
-    )
-    .to_lowercase();
-    query
-        .split_whitespace()
-        .all(|word| text.contains(&word.to_lowercase()))
-}
-
-impl PullRequestSort {
-    const DEFAULT: Self = Self {
-        field: PullRequestSortField::Updated,
-        direction: SortDirection::Descending,
-    };
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum PersonalView {
-    #[default]
-    Everything,
-    NeedsYou,
-    Starred,
-}
-
-/// Stable across devices and remote spellings; stars are local preferences.
-pub(crate) fn star_key(url: &str) -> String {
-    let Ok(mut parsed) = url::Url::parse(url) else {
-        return url.trim_end_matches('/').to_ascii_lowercase();
-    };
-    parsed.set_fragment(None);
-    parsed.set_query(None);
-    let path = parsed.path().trim_end_matches('/').to_owned();
-    parsed.set_path(&path);
-    parsed.to_string().to_ascii_lowercase()
 }
 
 pub(crate) fn star_button(url: &str, theme: &Theme, cx: &gpui::App) -> gpui::Stateful<gpui::Div> {
@@ -563,7 +454,7 @@ impl PullRequestsPage {
                     .filter(|item| matches_query(item, &self.query))
                     .cloned()
                     .collect();
-                sort_pull_requests(&mut items, self.sort);
+                board::sort(&mut items, self.sort);
                 Rc::new(items)
             })
             .clone();
@@ -582,14 +473,10 @@ impl PullRequestsPage {
         }
         let items: Vec<_> = sorted
             .iter()
-            .filter(|item| match self.personal_view {
-                PersonalView::Everything => true,
-                PersonalView::NeedsYou => !Facts::from_item(item).assess().attention.is_empty(),
-                PersonalView::Starred => stars.contains(&star_key(&item.url)),
-            })
+            .filter(|item| self.personal_view.shows(item, &stars))
             .cloned()
             .collect();
-        let groups: Vec<_> = items.iter().map(request_group).collect();
+        let groups: Vec<_> = items.iter().map(board::group).collect();
         let mut rows = Vec::new();
         for group in PullRequestGroup::ALL {
             let members: Vec<_> = (0..items.len())
@@ -1197,7 +1084,10 @@ impl PullRequestsPage {
             return;
         };
         if !state.device_online(&device, Utc::now()) {
-            crate::toast::error(cx, "This device is offline. Reconnect it to open the project.");
+            crate::toast::error(
+                cx,
+                "This device is offline. Reconnect it to open the project.",
+            );
             cx.notify();
             return;
         }
@@ -1488,7 +1378,13 @@ impl PullRequestsPage {
                                     .flex()
                                     .items_baseline()
                                     .gap(px(6.0))
-                                    .child(div().flex_none().max_w_full().truncate().child(name.clone()))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .max_w_full()
+                                            .truncate()
+                                            .child(name.clone()),
+                                    )
                                     .when_some(detail, |el, detail| {
                                         el.child(
                                             div()
@@ -1612,7 +1508,6 @@ impl PullRequestsPage {
                                 })),
                         ),
                 )
-
                 .when(!options.is_empty(), |el| {
                     el.child(
                         popover::menu_scroll_host("pr-repository-list-host")
@@ -2216,7 +2111,7 @@ impl PullRequestsPage {
             _ => icons::PULL_REQUEST,
         };
         let (title, body) = match &self.load_state {
-            PullRequestsLoadState::Failed(error) => error_copy(error),
+            PullRequestsLoadState::Failed(error) => error.copy(),
             _ if self.repository.is_none() => (
                 "Choose a repository".into(),
                 "No GitHub repository was found for this project. Choose one to load your open pull requests.".into(),
@@ -2583,8 +2478,6 @@ impl Render for PullRequestsPage {
                             .child(self.render_device_switcher(&theme, cx)),
                     ),
             )
-
-
             .child(
                 div()
                     .mt(px(12.0))
@@ -2841,11 +2734,7 @@ impl Render for PullRequestsPage {
                     .flex()
                     .flex_col()
                     .items_center()
-                    .child(match self.personal_view {
-                        PersonalView::NeedsYou => "Nothing needs your attention",
-                        PersonalView::Starred => "No starred pull requests",
-                        PersonalView::Everything => "No matching pull requests",
-                    })
+                    .child(self.personal_view.empty_copy())
                     .child(
                         empty_action("pr-empty-clear-search", "Show all pull requests", &theme)
                             .on_click(cx.listener(|page, _, _, cx| {
@@ -3217,27 +3106,6 @@ fn table_content_width(container_width: f32) -> f32 {
         .min(PR_PAGE_MAX_WIDTH - PR_PAGE_HORIZONTAL_PADDING * 2.0)
 }
 
-fn sort_pull_requests(items: &mut [ChangeRequestListItem], sort: PullRequestSort) {
-    items.sort_by(|left, right| {
-        let primary = match sort.field {
-            PullRequestSortField::Changes => left
-                .additions
-                .saturating_add(left.deletions)
-                .cmp(&right.additions.saturating_add(right.deletions)),
-            PullRequestSortField::Opened => left.created_at.cmp(&right.created_at),
-            PullRequestSortField::Updated => left.updated_at.cmp(&right.updated_at),
-        };
-        let primary = match sort.direction {
-            SortDirection::Ascending => primary,
-            SortDirection::Descending => primary.reverse(),
-        };
-        primary
-            .then_with(|| right.updated_at.cmp(&left.updated_at))
-            .then_with(|| left.repository.cmp(&right.repository))
-            .then_with(|| left.number.cmp(&right.number))
-    });
-}
-
 fn pull_request_key(item: &ChangeRequestListItem) -> String {
     format!("{}#{}", item.repository, item.number)
 }
@@ -3291,7 +3159,7 @@ fn render_table_row(
             item.title,
             item.repository,
             item.number,
-            status_description(item)
+            board::status_description(item)
         ))
         .tab_index(0)
         .when(selected, |el| el.bg(theme.glass_hover()))
@@ -3396,7 +3264,7 @@ fn render_list_row(
             item.title,
             item.repository,
             item.number,
-            status_description(item)
+            board::status_description(item)
         ))
         .aria_selected(selected)
         .tab_index(0)
@@ -3447,7 +3315,7 @@ fn render_list_row(
                             icon(request_glyph(item))
                                 .size(px(14.0))
                                 .flex_none()
-                                .text_color(request_color(item, theme)),
+                                .text_color(tone_color(board::glyph_tone(item), theme)),
                         )
                         .child(div().min_w_0().truncate().child(single_line(&item.title))),
                 )
@@ -3466,57 +3334,15 @@ fn render_list_row(
         .into_any_element()
 }
 
-fn status_description(item: &ChangeRequestListItem) -> String {
-    let assessment = Facts::from_item(item).assess();
-    let mut labels = vec![if item.is_draft { "Draft" } else { "Open" }];
-    labels.extend(assessment.blockers.iter().map(|blocker| blocker.label()));
-    if item.review_decision == ChangeRequestReviewDecision::Approved {
-        labels.push("Approved");
-    }
-    labels.extend(
-        assessment
-            .attention
-            .iter()
-            .filter(|reason| {
-                **reason != zeron_proto::change_request_assessment::AttentionReason::FailingCi
-            })
-            .map(|reason| reason.label()),
-    );
-    labels.join(" · ")
-}
-
 fn render_pr_identity(item: &ChangeRequestListItem, theme: &Theme) -> AnyElement {
     let title = SharedString::from(single_line(&item.title));
     let full_title = title.clone();
     let assessment = Facts::from_item(item).assess();
-    let mut labels: Vec<_> = assessment
-        .blockers
-        .iter()
-        .filter(|blocker| **blocker != Blocker::FailingCi)
-        .map(|blocker| blocker.label())
-        .collect();
-    if item.is_draft {
-        labels.insert(0, "Draft");
-    }
-    if item.review_decision == ChangeRequestReviewDecision::Approved {
-        labels.push("Approved");
-    }
-    labels.extend(
-        assessment
-            .attention
-            .iter()
-            .filter(|reason| {
-                **reason != zeron_proto::change_request_assessment::AttentionReason::FailingCi
-            })
-            .map(|reason| reason.label()),
-    );
-    let status = labels.join(" · ");
-    let tone = if item.mergeability == ChangeRequestMergeability::Conflicting {
-        theme.danger_muted
-    } else if item.review_decision == ChangeRequestReviewDecision::ChangesRequested {
-        theme.warning
-    } else {
-        theme.text_muted
+    let status = board::row_status(item);
+    let tone = match board::status_tone(item) {
+        board::Tone::Danger => theme.danger_muted,
+        board::Tone::Warning => theme.warning,
+        board::Tone::Muted | board::Tone::Success => theme.text_muted,
     };
     div()
         .flex_1()
@@ -3542,7 +3368,7 @@ fn render_pr_identity(item: &ChangeRequestListItem, theme: &Theme) -> AnyElement
                 .child(
                     icon(request_glyph(item))
                         .size(px(14.0))
-                        .text_color(request_color(item, theme)),
+                        .text_color(tone_color(board::glyph_tone(item), theme)),
                 )
                 .child(div().min_w_0().truncate().child(title)),
         )
@@ -3833,25 +3659,12 @@ fn repository_menu_label(theme: &Theme, label: &str) -> gpui::Div {
 
 /// A page-level failure as a toast: its title and explanation.
 fn toast_page_error(error: &PullRequestsPageError, suffix: Option<&str>, cx: &mut gpui::App) {
-    let (title, body) = error_copy(error);
+    let (title, body) = error.copy();
     let message = match suffix {
         Some(suffix) => format!("{title}. {body} {suffix}"),
         None => format!("{title}. {body}"),
     };
     crate::toast::error(cx, message);
-}
-
-fn valid_repository_filter(value: &str) -> bool {
-    let parts: Vec<_> = value.split('/').collect();
-    parts.len() == 2
-        && parts.iter().all(|part| {
-            !part.is_empty()
-                && *part != "."
-                && *part != ".."
-                && part
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
-        })
 }
 
 fn params_for_target(target: Option<&str>) -> serde_json::Value {
@@ -3872,52 +3685,14 @@ fn selected_device_name(state: &AppState, target: Option<&str>) -> String {
 
 pub(crate) fn map_rpc_error(error: &RpcError, target_name: &str) -> PullRequestsPageError {
     match error {
-        RpcError::Capability(code) if code == capability_errors::PULL_REQUESTS_CLI_UNAVAILABLE => {
-            PullRequestsPageError::CliUnavailable
-        }
-        RpcError::Capability(code) if code == capability_errors::PULL_REQUESTS_AUTHENTICATION => {
-            PullRequestsPageError::Authentication
-        }
-        RpcError::Capability(code) if code == capability_errors::PULL_REQUESTS_RATE_LIMITED => {
-            PullRequestsPageError::RateLimited
-        }
+        RpcError::Capability(code) => PullRequestsPageError::from_capability(code),
         RpcError::UnknownMethod(_) => {
             PullRequestsPageError::UpdateRequired(target_name.to_string())
         }
-        RpcError::Capability(_)
-        | RpcError::BadParams(_)
+        RpcError::BadParams(_)
         | RpcError::Failed(_)
         | RpcError::Transport(_)
         | RpcError::Closed => PullRequestsPageError::Network,
-    }
-}
-
-pub(crate) fn error_copy(error: &PullRequestsPageError) -> (String, String) {
-    match error {
-        PullRequestsPageError::CliUnavailable => (
-            "GitHub CLI isn’t available on this device".into(),
-            "Install gh and sign in to view your pull requests.".into(),
-        ),
-        PullRequestsPageError::Authentication => (
-            "Sign in to GitHub on this device".into(),
-            "Run gh auth login, then refresh this page.".into(),
-        ),
-        PullRequestsPageError::RateLimited => (
-            "GitHub’s rate limit was reached".into(),
-            "Requests are paused for 15 minutes. Your loaded results stay available.".into(),
-        ),
-        PullRequestsPageError::Network => (
-            "Couldn’t load pull requests".into(),
-            "Check the repository name and your connection, then try again.".into(),
-        ),
-        PullRequestsPageError::RemoteOffline(name) => (
-            format!("{name} is offline"),
-            "Reconnect the device and try again.".into(),
-        ),
-        PullRequestsPageError::UpdateRequired(name) => (
-            format!("Update Zeron on {name}"),
-            "This device doesn’t support pull requests yet.".into(),
-        ),
     }
 }
 
@@ -3926,67 +3701,6 @@ fn platform_icon(platform: &str) -> &'static str {
         "macos" | "darwin" => icons::LAPTOP,
         _ => icons::MONITOR,
     }
-}
-
-pub(crate) fn relative_time(timestamp: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    let seconds = now.signed_duration_since(timestamp).num_seconds().max(0);
-    let (amount, unit) = if seconds < 60 {
-        return "just now".into();
-    } else if seconds < 3_600 {
-        (seconds / 60, "minute")
-    } else if seconds < 86_400 {
-        (seconds / 3_600, "hour")
-    } else if seconds < 604_800 {
-        (seconds / 86_400, "day")
-    } else if seconds < 2_592_000 {
-        (seconds / 604_800, "week")
-    } else if seconds < 31_536_000 {
-        (seconds / 2_592_000, "month")
-    } else {
-        (seconds / 31_536_000, "year")
-    };
-    format!("{amount} {unit}{} ago", if amount == 1 { "" } else { "s" })
-}
-
-fn compact_relative_time(timestamp: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    let seconds = now.signed_duration_since(timestamp).num_seconds().max(0);
-    if seconds < 60 {
-        "now".into()
-    } else if seconds < 3_600 {
-        format!("{}m ago", seconds / 60)
-    } else if seconds < 86_400 {
-        format!("{}h ago", seconds / 3_600)
-    } else if seconds < 604_800 {
-        format!("{}d ago", seconds / 86_400)
-    } else if seconds < 2_592_000 {
-        format!("{}w ago", seconds / 604_800)
-    } else {
-        format!("{}mo ago", seconds / 2_592_000)
-    }
-}
-
-fn format_compact_count(value: u64) -> String {
-    if value < 1_000 {
-        value.to_string()
-    } else if value < 1_000_000 {
-        let tenths = value / 100;
-        if tenths % 10 == 0 {
-            format!("{}k", value / 1_000)
-        } else {
-            format!("{}.{:01}k", value / 1_000, tenths % 10)
-        }
-    } else {
-        let tenths = value / 100_000;
-        if tenths % 10 == 0 {
-            format!("{}m", value / 1_000_000)
-        } else {
-            format!("{}.{:01}m", value / 1_000_000, tenths % 10)
-        }
-    }
-}
-
-fn single_line(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 async fn fetch_page(
@@ -4036,6 +3750,7 @@ mod tests {
     use super::*;
     use crate::pull_request_test_support::{self as fixture, ScriptedRpc};
     use chrono::{TimeDelta, TimeZone};
+    use zeron_proto::{ChangeRequestMergeability, ChangeRequestReviewDecision};
 
     fn device(id: &str, platform: &str) -> Device {
         Device {
@@ -4116,7 +3831,7 @@ mod tests {
         }
     }
 
-    fn session(space: &str, last_message_at: Option<DateTime<Utc>>) -> zeron_proto::Chat {
+    fn session(space: &str, last_message_at: Option<chrono::DateTime<Utc>>) -> zeron_proto::Chat {
         zeron_proto::Chat {
             id: "chat".into(),
             device_id: "local".into(),
@@ -4245,7 +3960,7 @@ mod tests {
                 let repository = params["repository"].as_str().unwrap();
                 if repository == "failed/repo" {
                     return Err(RpcError::Capability(
-                        capability_errors::PULL_REQUESTS_AUTHENTICATION.into(),
+                        zeron_rpc::capability_errors::PULL_REQUESTS_AUTHENTICATION.into(),
                     ));
                 }
                 if repository == "slow/repo" {
@@ -5292,17 +5007,17 @@ mod tests {
     fn groups_prioritize_attention_without_claiming_merge_readiness() {
         let mut item = pull_request("owner/repo", 181, 1, 1, 1);
         item.review_decision = ChangeRequestReviewDecision::Unknown;
-        assert_eq!(request_group(&item), PullRequestGroup::Review);
+        assert_eq!(board::group(&item), PullRequestGroup::Review);
         item.review_decision = ChangeRequestReviewDecision::Approved;
-        assert_eq!(request_group(&item), PullRequestGroup::Approved);
+        assert_eq!(board::group(&item), PullRequestGroup::Approved);
         item.mergeability = ChangeRequestMergeability::Conflicting;
-        assert_eq!(request_group(&item), PullRequestGroup::Attention);
+        assert_eq!(board::group(&item), PullRequestGroup::Attention);
         item.is_draft = true;
-        assert_eq!(request_group(&item), PullRequestGroup::Drafts);
+        assert_eq!(board::group(&item), PullRequestGroup::Drafts);
         item.is_draft = false;
         item.mergeability = ChangeRequestMergeability::Unknown;
         item.review_decision = ChangeRequestReviewDecision::ChangesRequested;
-        assert_eq!(request_group(&item), PullRequestGroup::Attention);
+        assert_eq!(board::group(&item), PullRequestGroup::Attention);
     }
 
     #[test]
@@ -5372,13 +5087,13 @@ mod tests {
         item.mergeability = ChangeRequestMergeability::Conflicting;
         item.review_decision = ChangeRequestReviewDecision::ChangesRequested;
         assert_eq!(
-            status_description(&item),
+            board::status_description(&item),
             "Draft · Changes requested · Merge conflicts"
         );
         item.is_draft = false;
         item.mergeability = ChangeRequestMergeability::Unknown;
         item.review_decision = ChangeRequestReviewDecision::Approved;
-        assert_eq!(status_description(&item), "Open · Approved");
+        assert_eq!(board::status_description(&item), "Open · Approved");
     }
 
     fn numbers(items: &[ChangeRequestListItem]) -> Vec<u64> {
@@ -5442,11 +5157,11 @@ mod tests {
         ];
 
         let mut items = original.clone();
-        sort_pull_requests(&mut items, PullRequestSort::DEFAULT);
+        board::sort(&mut items, PullRequestSort::DEFAULT);
         assert_eq!(numbers(&items), [3, 1, 2]);
 
         let mut items = original.clone();
-        sort_pull_requests(
+        board::sort(
             &mut items,
             PullRequestSort {
                 field: PullRequestSortField::Changes,
@@ -5456,7 +5171,7 @@ mod tests {
         assert_eq!(numbers(&items), [3, 2, 1]);
 
         let mut items = original.clone();
-        sort_pull_requests(
+        board::sort(
             &mut items,
             PullRequestSort {
                 field: PullRequestSortField::Opened,
@@ -5466,7 +5181,7 @@ mod tests {
         assert_eq!(numbers(&items), [1, 3, 2]);
 
         let mut items = original;
-        sort_pull_requests(
+        board::sort(
             &mut items,
             PullRequestSort {
                 field: PullRequestSortField::Updated,
@@ -5483,7 +5198,7 @@ mod tests {
             pull_request("alpha/repo", 3, 10, 1, 10),
             pull_request("alpha/repo", 1, 10, 1, 10),
         ];
-        sort_pull_requests(
+        board::sort(
             &mut items,
             PullRequestSort {
                 field: PullRequestSortField::Changes,
@@ -5537,7 +5252,9 @@ mod tests {
     fn error_mapping_uses_stable_codes_and_hides_transport_details() {
         assert_eq!(
             map_rpc_error(
-                &RpcError::Capability(capability_errors::PULL_REQUESTS_AUTHENTICATION.into()),
+                &RpcError::Capability(
+                    zeron_rpc::capability_errors::PULL_REQUESTS_AUTHENTICATION.into()
+                ),
                 "Studio Mac",
             ),
             PullRequestsPageError::Authentication

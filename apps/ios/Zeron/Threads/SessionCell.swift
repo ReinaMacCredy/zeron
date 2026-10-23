@@ -29,6 +29,12 @@ struct SessionRowVM: Hashable {
     var unseen: Bool
     var pinned: Bool
     var sendFailed: Bool
+    var settled = false
+    var expired = false
+    /// 1 for a step thread or opened chat drawn under its lead.
+    var depth = 0
+    var childCount = 0
+    var childrenOpen = false
 }
 
 /// Folder row ("Pinned 2 ›", "P0 3 ›").
@@ -37,6 +43,8 @@ struct FolderRowVM: Hashable {
     var name: String
     var count: Int
     var symbol: String
+    /// Synced fold state (user sections only).
+    var collapsed = false
 }
 
 /// Two-line session row, laid out by hand: fixed height, no Auto Layout
@@ -47,8 +55,14 @@ struct FolderRowVM: Hashable {
 ///           [P] project  branch ············· ⎇ 412
 final class SessionCell: UICollectionViewListCell {
     static var height: CGFloat { (62 * TypeScale.factor).rounded() }
+    /// Settled rows draw slim: the title line only.
+    static var settledHeight: CGFloat { (40 * TypeScale.factor).rounded() }
+    static let indent: CGFloat = 22
 
     private let harness = UIImageView()
+    private let disclosure = UIButton(type: .system)
+    /// Shows or hides a lead's step threads (local to this phone).
+    var onToggleChildren: (() -> Void)?
     private let title = FadingLabel()
     private let meta = FadingLabel()
     private let time = UILabel()
@@ -64,7 +78,9 @@ final class SessionCell: UICollectionViewListCell {
         time.textAlignment = .right
         harness.contentMode = .scaleAspectFit
         harness.tintColor = Palette.text
-        for v in [harness, title, meta, time, status, prBadge] as [UIView] { contentView.addSubview(v) }
+        disclosure.tintColor = Palette.tertiary
+        disclosure.addAction(UIAction { [weak self] _ in self?.onToggleChildren?() }, for: .touchUpInside)
+        for v in [harness, title, meta, time, status, prBadge, disclosure] as [UIView] { contentView.addSubview(v) }
         var bg = UIBackgroundConfiguration.listCell()
         bg.backgroundColor = .clear
         backgroundConfiguration = bg
@@ -86,13 +102,14 @@ final class SessionCell: UICollectionViewListCell {
 
     /// Fixed height: skip Auto Layout self-sizing entirely.
     override func preferredLayoutAttributesFitting(_ attrs: UICollectionViewLayoutAttributes) -> UICollectionViewLayoutAttributes {
-        attrs.size.height = Self.height
+        attrs.size.height = vm?.settled == true ? Self.settledHeight : Self.height
         return attrs
     }
 
     /// Desktop precedence: a failed send beats everything; then the live
     /// state; unseen-and-finished reads "Done"; otherwise the time.
     static func corner(_ vm: SessionRowVM) -> (word: String, color: UIColor, glyph: StatusGlyph.Kind)? {
+        if vm.expired { return ("Expired", StatusTone.time, .dot(StatusTone.idle)) }
         if vm.sendFailed { return ("Failed", Palette.danger, .dot(Palette.danger)) }
         switch vm.status {
         case .working: return ("Working", StatusTone.working, .spinner)
@@ -129,6 +146,12 @@ final class SessionCell: UICollectionViewListCell {
             metaText.append(NSAttributedString(string: " " + b, attributes: [.font: font, .foregroundColor: Palette.subline]))
         }
         meta.attributedText = metaText
+        meta.isHidden = vm.settled
+        if vm.settled { title.textColor = Palette.secondary }
+        disclosure.isHidden = vm.childCount == 0
+        disclosure.setImage(UIImage(systemName: vm.childrenOpen ? "chevron.down" : "chevron.right", withConfiguration: UIImage.SymbolConfiguration(pointSize: 10, weight: .semibold)), for: .normal)
+        disclosure.accessibilityIdentifier = "session-children-\(vm.id)"
+        disclosure.accessibilityLabel = vm.childrenOpen ? "Hide \(vm.childCount) steps" : "Show \(vm.childCount) steps"
         if let pr = vm.pr, let n = vm.prNumber {
             prBadge.isHidden = false
             prBadge.configure(number: n, state: pr, size: TypeScale.size(11))
@@ -149,7 +172,7 @@ final class SessionCell: UICollectionViewListCell {
             status.kind = .none
             status.isHidden = true
         }
-        accessibilityLabel = [vm.title, vm.projectName, corner?.word, prBadge.isHidden ? nil : prBadge.accessibilityLabel].compactMap { $0 }.joined(separator: ", ")
+        accessibilityLabel = [vm.title, vm.projectName, corner?.word, prBadge.isHidden ? nil : prBadge.accessibilityLabel, vm.settled ? "Settled" : nil].compactMap { $0 }.joined(separator: ", ")
         accessibilityIdentifier = "session-\(vm.id)"
         setNeedsLayout()
     }
@@ -157,10 +180,10 @@ final class SessionCell: UICollectionViewListCell {
     override func layoutSubviews() {
         super.layoutSubviews()
         let b = contentView.bounds
-        let left: CGFloat = 20
+        let left: CGFloat = 20 + CGFloat(vm?.depth ?? 0) * Self.indent
         let right: CGFloat = 20
         let k = TypeScale.factor
-        let titleY = (10 * k).rounded()
+        let titleY = vm?.settled == true ? (b.height - (22 * k).rounded()) / 2 : (10 * k).rounded()
         let titleH = (22 * k).rounded()
         let metaY = (35 * k).rounded()
         let metaH = (18 * k).rounded()
@@ -171,6 +194,8 @@ final class SessionCell: UICollectionViewListCell {
         let titleFont = title.font ?? Fonts.ui(.sansMedium, TypeScale.size(16.5))
         let baseline = titleY + (titleH - titleFont.lineHeight) / 2 + titleFont.ascender
         harness.frame = CGRect(x: left, y: (baseline - titleFont.xHeight / 2 - mark / 2).rounded(), width: mark, height: mark)
+        disclosure.frame = CGRect(x: left - 18, y: harness.frame.midY - 18, width: 18 + mark, height: 36)
+        disclosure.contentHorizontalAlignment = .leading
         let textX = left + mark + 14
         let tw = ceil(time.sizeThatFits(CGSize(width: 140, height: 40)).width)
         time.frame = CGRect(x: b.width - right - tw, y: titleY, width: tw, height: titleH)

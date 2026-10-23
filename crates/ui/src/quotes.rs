@@ -1,8 +1,12 @@
 //! Transcript text the user selected and added to the chat, staged on the
 //! composer and folded into the next prompt as a quoted block.
 //!
-//! [`with_quotes`] appends them; [`extract_badge`] reads the same block back
-//! out for the transcript. There is no second data model.
+//! [`with_quotes`] appends them; `zeron_proto::badges` reads the same block
+//! back out for the transcript. There is no second data model.
+
+use zeron_proto::badges::{
+    QUOTE_BLOCK_HEADER, SELECTION_LOCATION, TERMINAL_BLOCK_HEADER, TERMINAL_LOCATION,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Quote {
@@ -32,7 +36,7 @@ impl Quote {
         if self.terminal {
             TERMINAL_LOCATION
         } else {
-            DETAIL_LOCATION
+            SELECTION_LOCATION
         }
     }
 }
@@ -40,14 +44,6 @@ impl Quote {
 pub const TERMINAL_QUOTE_ID: &str = "terminal-selection";
 
 pub const QUOTE_ONLY_TEXT: &str = "Refer to the selected text below.";
-
-pub const QUOTE_BLOCK_HEADER: &str = "Selected text from this conversation (quoted):";
-
-const DETAIL_LOCATION: &str = "Selected text";
-
-pub const TERMINAL_BLOCK_HEADER: &str = "Selected text from this chat's terminal (quoted):";
-
-const TERMINAL_LOCATION: &str = "Terminal selection";
 
 fn quote_block(text: &str) -> String {
     text.trim()
@@ -86,83 +82,12 @@ pub fn with_quotes(text: &str, quotes: &[Quote]) -> String {
     out
 }
 
-pub fn extract_badge(text: &str) -> Option<(String, crate::badges::MessageBadge)> {
-    extract_block(text, QUOTE_BLOCK_HEADER, DETAIL_LOCATION)
-}
-
-pub fn extract_terminal_badge(text: &str) -> Option<(String, crate::badges::MessageBadge)> {
-    extract_block(text, TERMINAL_BLOCK_HEADER, TERMINAL_LOCATION)
-}
-
-pub(crate) fn quoted_chunks<'a>(
-    text: &'a str,
-    header: &str,
-) -> Option<(&'a str, Vec<Vec<&'a str>>)> {
-    let marker = format!("\n\n{header}\n");
-    let at = text.rfind(&marker)?;
-    let block = &text[at + marker.len()..];
-    if block.is_empty()
-        || !block
-            .lines()
-            .all(|line| line.is_empty() || line.starts_with('>'))
-    {
-        return None;
-    }
-    let chunks: Vec<Vec<&str>> = block
-        .split("\n\n")
-        .filter(|chunk| !chunk.is_empty())
-        .map(|chunk| {
-            chunk
-                .lines()
-                .map(|line| {
-                    line.strip_prefix("> ")
-                        .or_else(|| line.strip_prefix('>'))
-                        .unwrap_or(line)
-                })
-                .collect()
-        })
-        .collect();
-    if chunks.is_empty() {
-        return None;
-    }
-    Some((&text[..at], chunks))
-}
-
-fn extract_block(
-    text: &str,
-    header: &str,
-    location: &'static str,
-) -> Option<(String, crate::badges::MessageBadge)> {
-    let (rest, chunks) = quoted_chunks(text, header)?;
-    let details: Vec<crate::badges::BadgeDetail> = chunks
-        .into_iter()
-        .map(|lines| crate::badges::BadgeDetail {
-            location: location.into(),
-            tag: None,
-            body: lines.join("\n").into(),
-        })
-        .collect();
-    Some((
-        rest.to_string(),
-        crate::badges::MessageBadge {
-            icon: crate::icons::WRAP_TEXT,
-            label: chip_label(details.len()).into(),
-            details,
-        },
-    ))
-}
-
-pub fn chip_label(count: usize) -> String {
-    if count == 1 {
-        "1 selection".to_string()
-    } else {
-        format!("{count} selections")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeron_proto::badges::{
+        extract_selection_badge as extract_badge, selection_label as chip_label,
+    };
 
     #[test]
     fn terminal_selections_get_their_own_block_and_badge() {
@@ -177,9 +102,9 @@ mod tests {
         let (rest, badges) = crate::badges::split(&sent);
         assert_eq!(rest, "fix it");
         assert_eq!(badges.len(), 2);
-        assert_eq!(badges[0].details[0].location.as_ref(), TERMINAL_LOCATION);
-        assert_eq!(badges[0].details[0].body.as_ref(), "$ make\nerror: boom");
-        assert_eq!(badges[1].details[0].body.as_ref(), "why");
+        assert_eq!(badges[0].details[0].location.as_str(), TERMINAL_LOCATION);
+        assert_eq!(badges[0].details[0].body.as_str(), "$ make\nerror: boom");
+        assert_eq!(badges[1].details[0].body.as_str(), "why");
     }
 
     #[test]
@@ -210,7 +135,7 @@ mod tests {
         let (rest, badge) = extract_badge(&sent).expect("badge");
         assert_eq!(rest, "q");
         assert_eq!(badge.details.len(), 1);
-        assert_eq!(badge.details[0].body.as_ref(), "a\n\nb");
+        assert_eq!(badge.details[0].body.as_str(), "a\n\nb");
     }
 
     #[test]
@@ -219,9 +144,9 @@ mod tests {
         let sent = with_quotes("explain this", &quotes);
         let (rest, badge) = extract_badge(&sent).expect("badge");
         assert_eq!(rest, "explain this");
-        assert_eq!(badge.label.as_ref(), "2 selections");
-        assert_eq!(badge.details[0].body.as_ref(), "first line\nsecond line");
-        assert_eq!(badge.details[1].body.as_ref(), "other");
+        assert_eq!(badge.label.as_str(), "2 selections");
+        assert_eq!(badge.details[0].body.as_str(), "first line\nsecond line");
+        assert_eq!(badge.details[1].body.as_str(), "other");
     }
 
     #[test]
@@ -245,8 +170,8 @@ mod tests {
         let (rest, badges) = crate::badges::split(&sent);
         assert_eq!(rest, "do it");
         assert_eq!(badges.len(), 2);
-        assert_eq!(badges[0].label.as_ref(), "1 comment");
-        assert_eq!(badges[1].label.as_ref(), "1 selection");
+        assert_eq!(badges[0].label.as_str(), "1 comment");
+        assert_eq!(badges[1].label.as_str(), "1 selection");
     }
 
     #[test]

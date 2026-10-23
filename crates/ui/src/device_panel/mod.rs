@@ -6,7 +6,6 @@ pub mod h264;
 pub mod loading;
 #[cfg(target_os = "macos")]
 pub mod metal3d;
-pub mod presentation;
 mod rail;
 pub mod scene3d;
 pub mod setup;

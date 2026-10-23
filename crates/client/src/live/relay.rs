@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
-use zeron_proto::CheckoutChangeRequestStatus;
+use zeron_proto::supervisor::SupervisorSnapshot;
+use zeron_proto::{CheckoutChangeRequestStatus, LimitResumes, SidebarSettings};
 use zeron_rpc::{LinkCache, LinkCacheConfig, PeerLiveness, RpcError, methods};
 
 use super::{Bearer, b64};
@@ -52,9 +53,12 @@ fn map_rpc(device_id: &str, method: &str, err: RpcError) -> ClientError {
 pub(crate) struct Relay {
     links: Arc<LinkCache>,
     watches: Mutex<HashMap<WatchKey, CancellationToken>>,
+    limit_watches: Mutex<HashMap<String, CancellationToken>>,
     /// Devices whose engine lacks WatchCheckoutChangeRequest (cleared on
     /// registry reconnect).
     unsupported: Mutex<HashSet<String>>,
+    supervisors: Mutex<HashMap<String, CancellationToken>>,
+    no_supervisor: Mutex<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -112,15 +116,16 @@ impl Relay {
         Self {
             links,
             watches: Mutex::new(HashMap::new()),
+            limit_watches: Mutex::new(HashMap::new()),
             unsupported: Mutex::new(HashSet::new()),
+            supervisors: Mutex::new(HashMap::new()),
+            no_supervisor: Mutex::new(HashSet::new()),
         }
     }
 
     pub(crate) fn shutdown(&self) {
         self.links.disconnect_all();
-        for (_, token) in lock(&self.watches).drain() {
-            token.cancel();
-        }
+        self.stop_watches();
     }
 
     /// Presence says `device_id` is alive again: dial immediately next time.
@@ -284,6 +289,7 @@ impl Relay {
 
     pub(crate) fn clear_unsupported(&self) {
         lock(&self.unsupported).clear();
+        lock(&self.no_supervisor).clear();
     }
 
     /// Converge the running PR-status streams onto `targets`.
@@ -307,17 +313,81 @@ impl Relay {
         }
     }
 
+    pub(crate) fn reconcile_limit_watches(
+        &self,
+        inner: &Arc<ClientInner>,
+        devices: HashSet<String>,
+    ) {
+        let mut watches = lock(&self.limit_watches);
+        watches.retain(|device, token| {
+            let keep = devices.contains(device);
+            if !keep {
+                token.cancel();
+            }
+            keep
+        });
+        for device in devices {
+            if watches.contains_key(&device) {
+                continue;
+            }
+            let token = CancellationToken::new();
+            watches.insert(device.clone(), token.clone());
+            let weak = Arc::downgrade(inner);
+            let id = device.clone();
+            self.follow(
+                device,
+                methods::WATCH_LIMIT_RESUMES,
+                json!({}),
+                token,
+                move |item| {
+                    let Ok(limits) = serde_json::from_value::<LimitResumes>(item) else {
+                        return true;
+                    };
+                    let Some(inner) = weak.upgrade() else {
+                        return false;
+                    };
+                    inner.limits_changed(&id, limits);
+                    true
+                },
+                || {},
+            );
+        }
+    }
+
     pub(crate) fn stop_watches(&self) {
         for (_, token) in lock(&self.watches).drain() {
             token.cancel();
         }
+        for (_, token) in lock(&self.limit_watches).drain() {
+            token.cancel();
+        }
+        for (_, token) in lock(&self.supervisors).drain() {
+            token.cancel();
+        }
+    }
+
+    pub(crate) fn reconcile_supervisors(&self, inner: &Arc<ClientInner>, devices: HashSet<String>) {
+        let skip = lock(&self.no_supervisor).clone();
+        let mut watches = lock(&self.supervisors);
+        watches.retain(|device, token| {
+            let keep = devices.contains(device) && !skip.contains(device);
+            if !keep {
+                token.cancel();
+            }
+            keep
+        });
+        for device in devices {
+            if watches.contains_key(&device) || skip.contains(&device) {
+                continue;
+            }
+            let token = CancellationToken::new();
+            watches.insert(device.clone(), token.clone());
+            spawn_supervisor_watch(Arc::downgrade(inner), device, token);
+        }
     }
 }
 
-/// One `WatchCheckoutChangeRequest` stream, retried 0.5s→5s forever (last
-/// snapshot kept through gaps); an engine without the method marks the
-/// device unsupported.
-fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken) {
+fn spawn_supervisor_watch(weak: Weak<ClientInner>, device_id: String, cancel: CancellationToken) {
     crate::runtime::shared().spawn(async move {
         let mut backoff = Duration::from_millis(500);
         loop {
@@ -329,12 +399,17 @@ fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken
             let links = live.relay.links.clone();
             drop(inner);
             let result = async {
-                let client = links.client(&key.device_id).await?;
+                let client = links.client(&device_id).await?;
+                if let Ok(value) = client.call(methods::GET_SIDEBAR_SETTINGS, json!({})).await
+                    && let Ok(settings) = serde_json::from_value::<SidebarSettings>(value)
+                    && let Some(inner) = weak.upgrade()
+                {
+                    inner
+                        .workspace
+                        .put_settle_days(&device_id, settings.settle_after_days);
+                }
                 client
-                    .subscribe_checked(
-                        methods::WATCH_CHECKOUT_CHANGE_REQUEST,
-                        json!({ "cwd": key.cwd, "branch": key.branch }),
-                    )
+                    .subscribe_checked(methods::WATCH_SUPERVISOR, json!({}))
                     .await
             };
             let subscription = tokio::select! {
@@ -348,27 +423,131 @@ fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken
                         item = stream.recv() => item,
                     };
                     let Some(item) = item else { break };
-                    let Ok(status) = serde_json::from_value::<CheckoutChangeRequestStatus>(item)
-                    else {
+                    let Ok(snapshot) = serde_json::from_value::<SupervisorSnapshot>(item) else {
                         continue;
                     };
-                    if status.device_id != key.device_id || status.cwd != key.cwd {
-                        continue;
-                    }
                     backoff = Duration::from_millis(500);
                     let Some(inner) = weak.upgrade() else { return };
-                    inner.workspace.put_change_request(status);
+                    inner.workspace.put_supervisor(&device_id, snapshot);
                     inner.recompute_workspace();
                 },
-                Err(RpcError::UnknownMethod(_)) => {
+                Err(RpcError::UnknownMethod(_) | RpcError::Failed(_)) => {
                     if let Some(inner) = weak.upgrade()
                         && let Some(live) = inner.live()
                     {
-                        lock(&live.relay.unsupported).insert(key.device_id.clone());
+                        lock(&live.relay.no_supervisor).insert(device_id.clone());
                     }
                     return;
                 }
-                Err(RpcError::Closed | RpcError::Transport(_)) => links.invalidate(&key.device_id),
+                Err(RpcError::Closed | RpcError::Transport(_)) => links.invalidate(&device_id),
+                Err(_) => {}
+            }
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(backoff) => {}
+            }
+            backoff = (backoff * 2).min(Duration::from_secs(5));
+        }
+    });
+}
+
+/// One `WatchCheckoutChangeRequest` stream (last snapshot kept through
+/// gaps); an engine without the method marks the device unsupported.
+fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken) {
+    let Some(inner) = weak.upgrade() else { return };
+    let Some(live) = inner.live() else { return };
+    let links = live.relay.links.clone();
+    let params = json!({ "cwd": key.cwd, "branch": key.branch });
+    let unsupported = weak.clone();
+    let device_id = key.device_id.clone();
+    follow(
+        links,
+        key.device_id.clone(),
+        methods::WATCH_CHECKOUT_CHANGE_REQUEST,
+        params,
+        cancel,
+        move |item| {
+            let Ok(status) = serde_json::from_value::<CheckoutChangeRequestStatus>(item) else {
+                return true;
+            };
+            if status.device_id != key.device_id || status.cwd != key.cwd {
+                return true;
+            }
+            let Some(inner) = weak.upgrade() else {
+                return false;
+            };
+            inner.workspace.put_change_request(status);
+            inner.recompute_workspace();
+            true
+        },
+        move || {
+            if let Some(inner) = unsupported.upgrade()
+                && let Some(live) = inner.live()
+            {
+                lock(&live.relay.unsupported).insert(device_id);
+            }
+        },
+    );
+}
+
+impl Relay {
+    pub(crate) fn follow(
+        &self,
+        device_id: String,
+        method: &'static str,
+        params: Value,
+        cancel: CancellationToken,
+        on_item: impl FnMut(Value) -> bool + Send + 'static,
+        on_unsupported: impl FnOnce() + Send + 'static,
+    ) {
+        follow(
+            self.links.clone(),
+            device_id,
+            method,
+            params,
+            cancel,
+            on_item,
+            on_unsupported,
+        );
+    }
+}
+
+fn follow(
+    links: Arc<LinkCache>,
+    device_id: String,
+    method: &'static str,
+    params: Value,
+    cancel: CancellationToken,
+    mut on_item: impl FnMut(Value) -> bool + Send + 'static,
+    on_unsupported: impl FnOnce() + Send + 'static,
+) {
+    crate::runtime::shared().spawn(async move {
+        let mut backoff = Duration::from_millis(500);
+        loop {
+            let subscription = tokio::select! {
+                _ = cancel.cancelled() => return,
+                result = async {
+                    let client = links.client(&device_id).await?;
+                    client.subscribe_checked(method, params.clone()).await
+                } => result,
+            };
+            match subscription {
+                Ok(mut stream) => loop {
+                    let item = tokio::select! {
+                        _ = cancel.cancelled() => return,
+                        item = stream.recv() => item,
+                    };
+                    let Some(item) = item else { break };
+                    backoff = Duration::from_millis(500);
+                    if !on_item(item) {
+                        return;
+                    }
+                },
+                Err(RpcError::UnknownMethod(_)) => {
+                    on_unsupported();
+                    return;
+                }
+                Err(RpcError::Closed | RpcError::Transport(_)) => links.invalidate(&device_id),
                 Err(_) => {}
             }
             tokio::select! {

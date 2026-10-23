@@ -22,6 +22,7 @@ enum Palette {
     /// Translucent control fill that reads on glass in both modes.
     static let controlFill = dynamic(0x27272C, 0xE8E8EA, alpha: 0.075)
     static let accentSoft = dynamic(0x5B43E8, 0x8B7CF6, alpha: 0.12)
+    static let ask = dynamic(0xC2478F, 0xF08BC2)
     static let danger = dynamic(0xDC2626, 0xF87171)
     static let success = dynamic(0x15803D, 0x34D399)
     static let warning = dynamic(0xA16207, 0xFACC15)
@@ -99,6 +100,10 @@ enum Palette {
         case .warningTile: warning.withAlphaComponent(0.12)
         case .buttonBorder: dual(UIColor(white: 0, alpha: 0.135), UIColor(white: 1, alpha: 0.1))
         case .onSolid: background
+        case .cyan: dynamic(0x0E7490, 0x22D3EE)
+        case .accentWash: dynamic(0x5B43E8, 0x8B7CF6, alpha: 0.14)
+        case .warningWash: dynamic(0xA16207, 0xFACC15, alpha: 0.14)
+        case .cyanWash: dynamic(0x0E7490, 0x22D3EE, alpha: 0.14)
         }
     }
 }

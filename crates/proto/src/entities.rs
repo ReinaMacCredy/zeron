@@ -492,6 +492,17 @@ impl Chat {
 }
 
 impl Chat {
+    pub fn display_title(&self) -> String {
+        self.title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or("New session")
+            .to_owned()
+    }
+}
+
+impl Chat {
     /// Ignores the live status; Working and AwaitingInput chats never settle.
     /// A chat with no messages never settles on its own, as in T3.
     pub fn settled_at(&self, after_days: u32, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
@@ -503,6 +514,22 @@ impl Chat {
             Some(settle) => settle.settled.then_some(settle.at),
             None => activity.filter(|at| *at < now - chrono::Duration::days(i64::from(after_days))),
         }
+    }
+
+    /// [`Chat::settled_at`] for a row showing `status`: a live turn keeps it in the Inbox.
+    pub fn inbox_settled_at(
+        &self,
+        status: ChatIndicator,
+        after_days: u32,
+        now: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        if matches!(
+            status,
+            ChatIndicator::Working | ChatIndicator::AwaitingInput
+        ) {
+            return None;
+        }
+        self.settled_at(after_days, now)
     }
 
     /// True when the chat has activity the user hasn't seen on any device.
@@ -756,6 +783,32 @@ pub enum StepTurnEnd {
     Completed,
     Failed,
     Stopped,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanEdit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overview_images: Option<Vec<String>>,
+    pub steps: Vec<PlanStepEdit>,
+    #[serde(default)]
+    pub remove_step_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanStepEdit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+    pub title: String,
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub images: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2128,6 +2181,42 @@ pub struct AgentUsageWindow {
     /// 0.0..=1.0
     pub used_fraction: f32,
     pub resets_at: Option<DateTime<Utc>>,
+}
+
+pub const USAGE_WARN_FRACTION: f32 = 0.80;
+pub const USAGE_CRITICAL_FRACTION: f32 = 0.95;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageLevel {
+    /// < 80% — indigo.
+    Normal,
+    /// ≥ 80% — amber.
+    Warn,
+    /// ≥ 95% — red.
+    Critical,
+}
+
+/// Threshold classification of a usage fraction. Pure.
+pub fn usage_level(fraction: f32) -> UsageLevel {
+    if fraction >= USAGE_CRITICAL_FRACTION {
+        UsageLevel::Critical
+    } else if fraction >= USAGE_WARN_FRACTION {
+        UsageLevel::Warn
+    } else {
+        UsageLevel::Normal
+    }
+}
+
+impl AgentAccountsSnapshot {
+    pub fn busiest_window(&self, harness: HarnessId) -> Option<(&str, f32)> {
+        self.accounts
+            .iter()
+            .find(|account| account.harness == harness && account.active)?
+            .usage_windows
+            .iter()
+            .max_by(|a, b| a.used_fraction.total_cmp(&b.used_fraction))
+            .map(|window| (window.label.as_str(), window.used_fraction.clamp(0.0, 1.0)))
+    }
 }
 
 /// Claude's usage credits, spent past the plan limits; amounts in `currency` units.

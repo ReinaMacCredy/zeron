@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use zeron_proto::{ChildRoute, HarnessId, RouteTarget};
 
 use super::quota::{self, Gated};
@@ -17,37 +17,7 @@ pub struct PreviewParams {
     pub steps: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct Fallback {
-    pub target: Option<RouteTarget>,
-    pub native: bool,
-    pub reason: String,
-    pub resets_at: Option<i64>,
-    pub multiplier: Option<f64>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct Row {
-    pub role: String,
-    pub source: String,
-    pub target: Option<RouteTarget>,
-    pub multiplier: Option<f64>,
-    pub quota: QuotaState,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fallback: Option<Fallback>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct Preview {
-    pub base: Option<RouteTarget>,
-    pub rows: Vec<Row>,
-    pub guidance: String,
-}
+pub use zeron_proto::route_preview::{Fallback, Preview, Row};
 
 pub struct Inputs<'a> {
     pub settings: &'a RoutingSettings,
