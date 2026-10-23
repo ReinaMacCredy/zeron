@@ -1005,20 +1005,42 @@ fn an_idle_chat_waiting_on_compaction_shows_the_wait_row() {
         };
         let f = w.pass();
         (0..f.row_count()).find_map(|i| {
-            f.display(i).unwrap().widgets.iter().find_map(|w| match &w.kind {
-                display::WidgetKind::Working { word, since_ms, rate } => Some((word.clone(), *since_ms, rate.clone())),
-                _ => None,
-            })
+            f.display(i)
+                .unwrap()
+                .widgets
+                .iter()
+                .find_map(|w| match &w.kind {
+                    display::WidgetKind::Working {
+                        word,
+                        since_ms,
+                        rate,
+                        divider,
+                    } => Some((word.clone(), *since_ms, rate.clone(), *divider)),
+                    _ => None,
+                })
         })
     };
     assert_eq!(shown(&mut w, None), None);
     assert_eq!(
-        shown(&mut w, Some(CompactionWait::Compacting(Some((120_000, true))))),
-        Some(("Compacting 120.0k, carrying the last turns over".to_owned(), Some(1_000), None))
+        shown(
+            &mut w,
+            Some(CompactionWait::Compacting(Some((120_000, true))))
+        ),
+        Some((
+            "Compacting 120.0k, carrying the last turns over".to_owned(),
+            Some(1_000),
+            None,
+            true
+        ))
     );
     assert_eq!(
-        shown(&mut w, Some(CompactionWait::Queued)).map(|(word, since, _)| (word, since)),
-        Some(("Compaction queued · starts when the turn settles".to_owned(), None))
+        shown(&mut w, Some(CompactionWait::Queued))
+            .map(|(word, since, _, divider)| (word, since, divider)),
+        Some((
+            "Compaction queued · starts when the turn settles".to_owned(),
+            None,
+            true
+        ))
     );
 }
 

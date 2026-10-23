@@ -269,6 +269,22 @@ fn subagent_turn(now: i64) -> Vec<zeron_doc::SessionMessageEntry> {
 }
 
 pub(super) fn background_session(chat_id: &str) -> Option<Session> {
+    if chat_id == "chat-blog" {
+        return Some(Session {
+            last_completed_turn: None,
+            chat_id: chat_id.into(),
+            device_id: super::fixtures::STUDIO.into(),
+            status: SessionStatus::Idle,
+            held_by_subagents: false,
+            compacting: false,
+            classifying: None,
+            background_tasks: Vec::new(),
+            started_at: None,
+            updated_at: Utc::now(),
+            running_subagents: 0,
+            compact_plan: Some(CompactPlan::Agent),
+        });
+    }
     (chat_id == "chat-home").then(|| Session {
         last_completed_turn: None,
         chat_id: chat_id.into(),

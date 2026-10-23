@@ -516,19 +516,16 @@ impl SessionCore {
                 .last()
                 .is_some_and(|e| e.is_streaming());
             let working = indicator_working || streaming;
-            let wait = if compacting {
-                Some(CompactionWait::Compacting(
+            let wait = CompactionWait::of(
+                compacting.then(|| {
                     zeron_doc::schema::boundary_compaction(
                         st.tracker.entries().iter().map(|e| &*e.message),
-                    ),
-                ))
-            } else {
-                classifying.map(|run| CompactionWait::Classifying {
-                    harness: run.harness,
-                    model: run.model,
-                    agent_note: false,
-                })
-            };
+                    )
+                }),
+                classifying.as_ref(),
+                st.session.as_ref().and_then(|session| session.compact_plan),
+                !working,
+            );
             st.compaction = match (wait, st.compaction.take()) {
                 (Some(wait), Some((last, since))) if wait == last => Some((wait, since)),
                 (wait, _) => wait.map(|wait| (wait, now)),
