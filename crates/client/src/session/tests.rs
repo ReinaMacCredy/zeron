@@ -271,3 +271,62 @@ fn needs_you_lists_each_ask_once_until_answered_here() {
         !inputs(&client).iter().any(|(chat, ..)| chat == "chat-picker")
     });
 }
+
+fn park_on_background_agent(session: &SessionHandle, held_by_subagents: bool) {
+    let chat_id = session.core.chat_id.clone();
+    let host = session.composer().host.device_id.clone();
+    session
+        .core
+        .client()
+        .unwrap()
+        .registry_write(|doc| {
+            doc.upsert_session(&zeron_proto::Session {
+                last_completed_turn: None,
+                running_subagents: 1,
+                compact_plan: None,
+                classifying: None,
+                chat_id,
+                device_id: host,
+                status: zeron_proto::SessionStatus::Working,
+                started_at: Some(chrono::Utc::now()),
+                updated_at: chrono::Utc::now(),
+                held_by_subagents,
+                compacting: false,
+                background_tasks: Vec::new(),
+            })
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_turn_parked_on_a_background_agent_takes_a_send_not_a_queue_row() {
+    let (client, _dir) = demo(false);
+    let session = client.open_session("chat-deploy").unwrap();
+    wait_for("the host", || session.composer().host.online);
+    park_on_background_agent(&session, true);
+    wait_for("the Working dot", || {
+        session.composer().live.indicator == zeron_proto::ChatIndicator::Working
+    });
+    assert!(
+        !session.snapshot().working,
+        "no Working… row for a parked turn"
+    );
+    let outcome = session.send(SendRequest::text("next")).unwrap();
+    assert!(
+        matches!(outcome, crate::SendOutcome::Started { .. }),
+        "the desktop sends into a parked turn: {outcome:?}"
+    );
+    assert!(session.core.doc().read_queue().unwrap().is_empty());
+
+    let (client, _dir) = demo(false);
+    let session = client.open_session("chat-deploy").unwrap();
+    wait_for("the host", || session.composer().host.online);
+    park_on_background_agent(&session, false);
+    wait_for("the running turn", || session.composer().live.turn_running);
+    wait_for("the Working… row", || session.snapshot().working);
+    let outcome = session.send(SendRequest::text("next")).unwrap();
+    assert!(
+        matches!(outcome, crate::SendOutcome::Queued { .. }),
+        "a live turn still queues: {outcome:?}"
+    );
+}

@@ -7181,6 +7181,7 @@ pub struct Composer {
     /// under their own chat — a blanket clear-on-switch erased the one
     /// visible trace of a failed send (2026-08-19).
     failure_key: Option<String>,
+    queue_failure: Option<(String, SharedString)>,
     resume_compaction_kept: Option<(String, Option<chrono::DateTime<chrono::Utc>>)>,
     wizard: Option<Wizard>,
     wizard_focus: FocusHandle,
@@ -7828,6 +7829,7 @@ impl Composer {
             ask_focus: cx.focus_handle(),
             _ask_input_events: ask_input_events,
             failure_key: None,
+            queue_failure: None,
             resume_compaction_kept: None,
             action_task: None,
             computer_preflight: None,
@@ -8446,6 +8448,39 @@ impl Composer {
         self.failure = Some(message.into());
         self.failure_key = Some(self.current_key.clone());
         cx.notify();
+    }
+
+    pub(crate) fn show_queue_failure(
+        &mut self,
+        chat_id: String,
+        row: Option<String>,
+        message: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        self.queue_failure = row.map(|row| (row, message.clone()));
+        self.failure = Some(message);
+        self.failure_key = Some(chat_id);
+        cx.notify();
+    }
+
+    pub(crate) fn clear_settled_queue_failure(
+        &mut self,
+        chat_id: &str,
+        queue: &[zeron_doc::QueuedMessage],
+        cx: &mut Context<Self>,
+    ) {
+        let Some((row, message)) = &self.queue_failure else {
+            return;
+        };
+        if self.failure_key.as_deref() != Some(chat_id) || queue.iter().any(|q| q.id == *row) {
+            return;
+        }
+        if self.failure.as_ref() == Some(message) {
+            self.failure = None;
+            self.failure_key = None;
+            cx.notify();
+        }
+        self.queue_failure = None;
     }
 
     fn add_staged(&mut self, staged: Vec<StagedAttachment>, cx: &mut Context<Self>) {
@@ -16483,6 +16518,43 @@ mod tests {
             assert!(input.read(cx).focus_handle.is_focused(window));
         })
         .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_queue_action_failure_clears_once_its_row_is_delivered(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let row = zeron_doc::QueuedMessage::new("row-1", "photos", "phone");
+        handle
+            .update(cx, |composer, _, cx| {
+                composer.current_key = "chat-a".into();
+                composer.show_queue_failure(
+                    "chat-a".into(),
+                    Some("row-1".into()),
+                    "Couldn't send that message: still uploading".into(),
+                    cx,
+                );
+                composer.clear_settled_queue_failure("chat-a", std::slice::from_ref(&row), cx);
+                assert!(composer.visible_failure().is_some(), "row still queued");
+                composer.clear_settled_queue_failure("chat-b", &[], cx);
+                assert!(composer.visible_failure().is_some(), "another chat's queue");
+                composer.clear_settled_queue_failure("chat-a", &[], cx);
+                assert_eq!(composer.visible_failure(), None, "row left the queue");
+
+                composer.show_queue_failure(
+                    "chat-a".into(),
+                    Some("row-1".into()),
+                    "Couldn't send that message".into(),
+                    cx,
+                );
+                composer.show_error("Something else", cx);
+                composer.clear_settled_queue_failure("chat-a", &[], cx);
+                assert_eq!(
+                    composer.visible_failure().as_deref(),
+                    Some("Something else"),
+                    "a newer failure stays"
+                );
+            })
+            .unwrap();
     }
 
     #[gpui::test]

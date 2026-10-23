@@ -462,7 +462,7 @@ impl SessionCore {
             .session(&self.chat_id)
             .map_or((false, None, false, None), |row| {
                 (
-                    row.host_indicator == ChatIndicator::Working,
+                    row.host_indicator == ChatIndicator::Working && !row.held_by_subagents,
                     row.working_since_ms,
                     row.compacting,
                     row.classifying.clone(),
@@ -577,7 +577,9 @@ impl SessionCore {
             host_indicator,
             ChatIndicator::Working | ChatIndicator::AwaitingInput
         );
-        let turn_running = host_indicator == ChatIndicator::Working || snapshot.streaming;
+        let parked = row.as_ref().is_some_and(|r| r.held_by_subagents);
+        let turn_running =
+            (host_indicator == ChatIndicator::Working && !parked) || snapshot.streaming;
         let mut next = ComposerState {
             chat_id: self.chat_id.clone(),
             revision: 0,
