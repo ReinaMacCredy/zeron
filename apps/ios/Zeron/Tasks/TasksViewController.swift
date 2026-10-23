@@ -38,10 +38,16 @@ enum TaskGlyph {
         }
     }
 
-    static func leading(_ kind: StatusGlyph.Kind) -> UICellAccessory {
+    static func leading(_ kind: StatusGlyph.Kind, indent: CGFloat = 0) -> UICellAccessory {
         let glyph = StatusGlyph(kind)
-        glyph.frame = CGRect(x: 0, y: 0, width: 12, height: 12)
-        return .customView(configuration: .init(customView: glyph, placement: .leading(), reservedLayoutWidth: .custom(16)))
+        guard indent > 0 else {
+            glyph.frame = CGRect(x: 0, y: 0, width: 12, height: 12)
+            return .customView(configuration: .init(customView: glyph, placement: .leading(), reservedLayoutWidth: .custom(16)))
+        }
+        let box = UIView(frame: CGRect(x: 0, y: 0, width: 16 + indent, height: 12))
+        glyph.frame = CGRect(x: indent + 2, y: 0, width: 12, height: 12)
+        box.addSubview(glyph)
+        return .customView(configuration: .init(customView: box, placement: .leading(), reservedLayoutWidth: .custom(16 + indent), maintainsFixedSize: true))
     }
 
     static func brands(_ harnesses: [String]) -> UICellAccessory? {
