@@ -194,5 +194,17 @@ final class NeedsYouFlowTests: XCTestCase {
             app.swipeDown()
         }
         snapshot(app, "html-page")
+        app.buttons["html-render-expand"].firstMatch.tap()
+        let views = app.segmentedControls["html-sheet-view"]
+        XCTAssertTrue(views.waitForExistence(timeout: 10))
+        snapshot(app, "html-sheet-live")
+        views.buttons["Source"].tap()
+        let source = app.textViews["html-sheet-source"]
+        XCTAssertTrue(source.waitForExistence(timeout: 5))
+        XCTAssertTrue((source.value as? String ?? "").contains("<"))
+        snapshot(app, "html-sheet-source")
+        app.buttons["html-sheet-save"].tap()
+        _ = app.buttons["Cancel"].waitForExistence(timeout: 10)
+        snapshot(app, "html-sheet-save")
     }
 }
