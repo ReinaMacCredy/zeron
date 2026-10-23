@@ -992,7 +992,7 @@ private final class ThumbCell: UIView {
         addSubview(imageArea)
 
         var x = UIButton.Configuration.filled()
-        x.image = UIImage(systemName: "xmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .bold))
+        x.image = UIImage(systemName: "xmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 9, weight: .bold))
         x.baseBackgroundColor = UIColor.black.withAlphaComponent(0.5)
         x.baseForegroundColor = .white
         x.cornerStyle = .capsule
