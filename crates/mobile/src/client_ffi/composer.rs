@@ -857,6 +857,27 @@ pub fn mission_text(text: String, pasted: Vec<String>) -> String {
     zeron_proto::mission::mission_text(&text, &pasted)
 }
 
+fn profile_rows(rows: CoreResult<Vec<zeron_client::model_menu::ProfileRow>>) -> Vec<ProfileRow> {
+    rows.unwrap_or_default()
+        .into_iter()
+        .map(|row| ProfileRow {
+            id: row.id,
+            name: row.name,
+            line: row.line,
+            active: row.active,
+            drift: row.drift,
+            savable: row.savable,
+        })
+        .collect()
+}
+
+#[uniffi::export]
+pub fn detach_draft_profile(config: ChatConfig) -> CoreResult<ChatConfig> {
+    let mut config = config.try_into()?;
+    zeron_proto::picker::detach_profile(&mut config);
+    Ok((&config).into())
+}
+
 #[uniffi::export]
 pub fn profile_menu_labels() -> ProfileMenuLabels {
     use zeron_proto::picker as p;
@@ -917,19 +938,54 @@ impl CoreClient {
 
     pub async fn profile_rows(&self, chat_id: String) -> Vec<ProfileRow> {
         let client = self.client.clone();
-        on_runtime(async move { client.profile_rows(&chat_id).await })
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|row| ProfileRow {
-                id: row.id,
-                name: row.name,
-                line: row.line,
-                active: row.active,
-                drift: row.drift,
-                savable: row.savable,
-            })
-            .collect()
+        profile_rows(on_runtime(async move { client.profile_rows(&chat_id).await }).await)
+    }
+
+    pub async fn draft_profile_rows(
+        &self,
+        device_id: String,
+        config: ChatConfig,
+    ) -> Vec<ProfileRow> {
+        let Ok(config) = config.try_into() else {
+            return Vec::new();
+        };
+        let client = self.client.clone();
+        profile_rows(
+            on_runtime(async move { client.draft_profile_rows(&device_id, config).await }).await,
+        )
+    }
+
+    pub async fn apply_draft_profile(
+        &self,
+        device_id: String,
+        config: ChatConfig,
+        profile_id: String,
+    ) -> CoreResult<ChatConfig> {
+        let config = config.try_into()?;
+        let client = self.client.clone();
+        let config = on_runtime(async move {
+            client
+                .apply_draft_profile(&device_id, config, &profile_id)
+                .await
+        })
+        .await?;
+        Ok((&config).into())
+    }
+
+    pub async fn save_draft_into_profile(
+        &self,
+        device_id: String,
+        config: ChatConfig,
+        profile_id: String,
+    ) -> CoreResult<()> {
+        let config = config.try_into()?;
+        let client = self.client.clone();
+        on_runtime(async move {
+            client
+                .save_draft_into_profile(&device_id, &config, &profile_id)
+                .await
+        })
+        .await
     }
 
     pub async fn profile_switch_prompt(

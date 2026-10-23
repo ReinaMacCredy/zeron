@@ -1220,3 +1220,39 @@ fn a_row_names_the_background_work_its_host_reports() {
     assert_eq!(ring("chat-veil"), (Some(1), Some("1 shell")));
     assert_eq!(ring("chat-ios-scroll"), (None, None));
 }
+
+#[test]
+fn a_new_chat_draft_takes_and_drops_a_profile() {
+    let (client, _dir) = demo(fast());
+    let rt = zeron_client::runtime::shared();
+    let device = client.workspace().sessions["chat-home"].device_id.clone();
+    let draft = zeron_proto::ChatConfig {
+        harness: zeron_proto::HarnessId::ClaudeCode,
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+        permission_mode: Default::default(),
+        instructions: String::new(),
+        profile_id: None,
+        instance_id: None,
+        disabled_tools: Vec::new(),
+    };
+    let rows = rt
+        .block_on(client.draft_profile_rows(&device, draft.clone()))
+        .unwrap();
+    assert!(rows.iter().all(|row| !row.active));
+
+    let planned = rt
+        .block_on(client.apply_draft_profile(&device, draft, "planner"))
+        .unwrap();
+    assert_eq!(planned.harness, zeron_proto::HarnessId::Codex);
+    assert_eq!(planned.profile_id.as_deref(), Some("planner"));
+    assert_eq!(planned.instructions, "Plan first; do not edit files.");
+    assert_eq!(planned.permission_mode, zeron_proto::PermissionMode::Ask);
+    let rows = rt
+        .block_on(client.draft_profile_rows(&device, planned))
+        .unwrap();
+    let planner = rows.iter().find(|row| row.id == "planner").unwrap();
+    assert!(planner.active && planner.drift.is_none());
+}

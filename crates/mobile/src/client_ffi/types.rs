@@ -794,6 +794,11 @@ pub struct ChatConfig {
     /// None keeps the chat's current mode (Full for a new chat).
     #[uniffi(default = None)]
     pub permission_mode: Option<PermissionMode>,
+    /// A new chat's profile instructions; an existing chat keeps its own.
+    #[uniffi(default = "")]
+    pub instructions: String,
+    #[uniffi(default = [])]
+    pub disabled_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -860,6 +865,8 @@ impl From<&zc::ChatConfig> for ChatConfig {
             profile_id: c.profile_id.clone(),
             instance_id: c.instance_id.clone(),
             permission_mode: Some(c.permission_mode.into()),
+            instructions: c.instructions.clone(),
+            disabled_tools: c.disabled_tools.clone(),
         }
     }
 }
@@ -887,10 +894,10 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
                 SandboxLevel::DangerFullAccess => zeron_proto::SandboxLevel::DangerFullAccess,
             },
             permission_mode: c.permission_mode.map(Into::into).unwrap_or_default(),
-            instructions: String::new(),
+            instructions: c.instructions,
             profile_id: c.profile_id,
             instance_id: c.instance_id,
-            disabled_tools: Vec::new(),
+            disabled_tools: c.disabled_tools,
         })
     }
 }

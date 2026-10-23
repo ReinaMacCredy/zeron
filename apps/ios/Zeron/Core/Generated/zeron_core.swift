@@ -1264,11 +1264,15 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func applyAgentProfile(chatId: String, profileId: String, note: String?, hint: String?) async throws 
     
+    func applyDraftProfile(deviceId: String, config: ChatConfig, profileId: String) async throws  -> ChatConfig
+    
     func continueInNewThread(sourceChatId: String, harness: String?, model: String?, targetSpaceId: String?) async throws  -> String
     
     func createSidechat(sourceChatId: String) async throws  -> String
     
     func detachAgentProfile(chatId: String) throws 
+    
+    func draftProfileRows(deviceId: String, config: ChatConfig) async  -> [ProfileRow]
     
     func handoffTargets(deviceId: String) async  -> [HandoffTarget]
     
@@ -1290,9 +1294,13 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func saveChatIntoProfile(chatId: String, profileId: String) async throws 
     
+    func saveDraftIntoProfile(deviceId: String, config: ChatConfig, profileId: String) async throws 
+    
     func setSessionConfigNoted(chatId: String, config: ChatConfig, note: String, hint: String) async throws 
     
     func sidechatSheet(sourceChatId: String, sourceTitle: String)  -> SidechatSheet
+    
+    func startMissionFromChat(chatId: String, draft: TaskDraft, options: MissionOptions, lead: Bool) async throws  -> MissionFromChat
     
     func threadMentions(deviceId: String, spaceId: String?, exclude: String?, query: String)  -> [ThreadMention]
     
@@ -2212,6 +2220,22 @@ open func applyAgentProfile(chatId: String, profileId: String, note: String?, hi
         )
 }
     
+open func applyDraftProfile(deviceId: String, config: ChatConfig, profileId: String)async throws  -> ChatConfig  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_apply_draft_profile(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterTypeChatConfig_lower(config),FfiConverterString.lower(profileId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeChatConfig_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
 open func continueInNewThread(sourceChatId: String, harness: String?, model: String?, targetSpaceId: String?)async throws  -> String  {
     return
         try  await uniffiRustCallAsync(
@@ -2251,6 +2275,23 @@ open func detachAgentProfile(chatId: String)throws   {try rustCallWithError(FfiC
         FfiConverterString.lower(chatId),uniffiCallStatus
     )
 }
+}
+    
+open func draftProfileRows(deviceId: String, config: ChatConfig)async  -> [ProfileRow]  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_draft_profile_rows(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterTypeChatConfig_lower(config)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeProfileRow.lift,
+            errorHandler: nil
+            
+        )
 }
     
 open func handoffTargets(deviceId: String)async  -> [HandoffTarget]  {
@@ -2413,6 +2454,22 @@ open func saveChatIntoProfile(chatId: String, profileId: String)async throws   {
         )
 }
     
+open func saveDraftIntoProfile(deviceId: String, config: ChatConfig, profileId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_save_draft_into_profile(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterTypeChatConfig_lower(config),FfiConverterString.lower(profileId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
 open func setSessionConfigNoted(chatId: String, config: ChatConfig, note: String, hint: String)async throws   {
     return
         try  await uniffiRustCallAsync(
@@ -2438,6 +2495,22 @@ open func sidechatSheet(sourceChatId: String, sourceTitle: String) -> SidechatSh
         FfiConverterString.lower(sourceTitle),uniffiCallStatus
     )
 })
+}
+    
+open func startMissionFromChat(chatId: String, draft: TaskDraft, options: MissionOptions, lead: Bool)async throws  -> MissionFromChat  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_start_mission_from_chat(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId),FfiConverterTypeTaskDraft_lower(draft),FfiConverterTypeMissionOptions_lower(options),FfiConverterBool.lower(lead)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeMissionFromChat_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
 open func threadMentions(deviceId: String, spaceId: String?, exclude: String?, query: String) -> [ThreadMention]  {
@@ -7081,6 +7154,11 @@ public struct ChatConfig: Equatable, Hashable {
      * None keeps the chat's current mode (Full for a new chat).
      */
     public var permissionMode: PermissionMode?
+    /**
+     * A new chat's profile instructions; an existing chat keeps its own.
+     */
+    public var instructions: String
+    public var disabledTools: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -7099,7 +7177,10 @@ public struct ChatConfig: Equatable, Hashable {
          */instanceId: String? = nil, 
         /**
          * None keeps the chat's current mode (Full for a new chat).
-         */permissionMode: PermissionMode? = nil) {
+         */permissionMode: PermissionMode? = nil, 
+        /**
+         * A new chat's profile instructions; an existing chat keeps its own.
+         */instructions: String = "", disabledTools: [String] = []) {
         self.harness = harness
         self.model = model
         self.reasoning = reasoning
@@ -7108,6 +7189,8 @@ public struct ChatConfig: Equatable, Hashable {
         self.profileId = profileId
         self.instanceId = instanceId
         self.permissionMode = permissionMode
+        self.instructions = instructions
+        self.disabledTools = disabledTools
     }
 
     
@@ -7133,7 +7216,9 @@ public struct FfiConverterTypeChatConfig: FfiConverterRustBuffer {
                 sandbox: FfiConverterTypeSandboxLevel.read(from: &buf), 
                 profileId: FfiConverterOptionString.read(from: &buf), 
                 instanceId: FfiConverterOptionString.read(from: &buf), 
-                permissionMode: FfiConverterOptionTypePermissionMode.read(from: &buf)
+                permissionMode: FfiConverterOptionTypePermissionMode.read(from: &buf), 
+                instructions: FfiConverterString.read(from: &buf), 
+                disabledTools: FfiConverterSequenceString.read(from: &buf)
         )
     }
 
@@ -7146,6 +7231,8 @@ public struct FfiConverterTypeChatConfig: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.profileId, into: &buf)
         FfiConverterOptionString.write(value.instanceId, into: &buf)
         FfiConverterOptionTypePermissionMode.write(value.permissionMode, into: &buf)
+        FfiConverterString.write(value.instructions, into: &buf)
+        FfiConverterSequenceString.write(value.disabledTools, into: &buf)
     }
 }
 
@@ -7162,6 +7249,68 @@ public func FfiConverterTypeChatConfig_lift(_ buf: RustBuffer) throws -> ChatCon
 #endif
 public func FfiConverterTypeChatConfig_lower(_ value: ChatConfig) -> RustBuffer {
     return FfiConverterTypeChatConfig.lower(value)
+}
+
+
+public struct ChatMissionLabels: Equatable, Hashable {
+    public var title: String
+    public var detail: String
+    public var lead: String
+    public var newMission: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(title: String, detail: String, lead: String, newMission: String) {
+        self.title = title
+        self.detail = detail
+        self.lead = lead
+        self.newMission = newMission
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ChatMissionLabels: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeChatMissionLabels: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChatMissionLabels {
+        return
+            try ChatMissionLabels(
+                title: FfiConverterString.read(from: &buf), 
+                detail: FfiConverterString.read(from: &buf), 
+                lead: FfiConverterString.read(from: &buf), 
+                newMission: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ChatMissionLabels, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.detail, into: &buf)
+        FfiConverterString.write(value.lead, into: &buf)
+        FfiConverterString.write(value.newMission, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatMissionLabels_lift(_ buf: RustBuffer) throws -> ChatMissionLabels {
+    return try FfiConverterTypeChatMissionLabels.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatMissionLabels_lower(_ value: ChatMissionLabels) -> RustBuffer {
+    return FfiConverterTypeChatMissionLabels.lower(value)
 }
 
 
@@ -9720,6 +9869,60 @@ public func FfiConverterTypeMissionComposerLabels_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeMissionComposerLabels_lower(_ value: MissionComposerLabels) -> RustBuffer {
     return FfiConverterTypeMissionComposerLabels.lower(value)
+}
+
+
+public struct MissionFromChat: Equatable, Hashable {
+    public var taskId: String
+    public var notice: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(taskId: String, notice: String?) {
+        self.taskId = taskId
+        self.notice = notice
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MissionFromChat: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMissionFromChat: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MissionFromChat {
+        return
+            try MissionFromChat(
+                taskId: FfiConverterString.read(from: &buf), 
+                notice: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MissionFromChat, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.taskId, into: &buf)
+        FfiConverterOptionString.write(value.notice, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMissionFromChat_lift(_ buf: RustBuffer) throws -> MissionFromChat {
+    return try FfiConverterTypeMissionFromChat.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMissionFromChat_lower(_ value: MissionFromChat) -> RustBuffer {
+    return FfiConverterTypeMissionFromChat.lower(value)
 }
 
 
@@ -12404,6 +12607,8 @@ public struct SessionRow: Equatable, Hashable {
      */
     public var workingSinceMs: Int64?
     public var heldBySubagents: Bool
+    public var backgroundRing: UInt32?
+    public var backgroundLabel: String?
     public var lastActivityMs: Int64
     /**
      * `now` / `34m` / `4h` / `2d` at derive time.
@@ -12454,7 +12659,7 @@ public struct SessionRow: Equatable, Hashable {
          */hostIndicator: ChatIndicator, 
         /**
          * Run start of the live turn while Working/AwaitingInput.
-         */workingSinceMs: Int64?, heldBySubagents: Bool, lastActivityMs: Int64, 
+         */workingSinceMs: Int64?, heldBySubagents: Bool, backgroundRing: UInt32?, backgroundLabel: String?, lastActivityMs: Int64, 
         /**
          * `now` / `34m` / `4h` / `2d` at derive time.
          */timeLabel: String, createdAtMs: Int64, unseen: Bool, archived: Bool, pinned: Bool, sectionId: String?, pullRequest: PullRequest?, 
@@ -12484,6 +12689,8 @@ public struct SessionRow: Equatable, Hashable {
         self.hostIndicator = hostIndicator
         self.workingSinceMs = workingSinceMs
         self.heldBySubagents = heldBySubagents
+        self.backgroundRing = backgroundRing
+        self.backgroundLabel = backgroundLabel
         self.lastActivityMs = lastActivityMs
         self.timeLabel = timeLabel
         self.createdAtMs = createdAtMs
@@ -12536,6 +12743,8 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
                 hostIndicator: FfiConverterTypeChatIndicator.read(from: &buf), 
                 workingSinceMs: FfiConverterOptionInt64.read(from: &buf), 
                 heldBySubagents: FfiConverterBool.read(from: &buf), 
+                backgroundRing: FfiConverterOptionUInt32.read(from: &buf), 
+                backgroundLabel: FfiConverterOptionString.read(from: &buf), 
                 lastActivityMs: FfiConverterInt64.read(from: &buf), 
                 timeLabel: FfiConverterString.read(from: &buf), 
                 createdAtMs: FfiConverterInt64.read(from: &buf), 
@@ -12574,6 +12783,8 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
         FfiConverterTypeChatIndicator.write(value.hostIndicator, into: &buf)
         FfiConverterOptionInt64.write(value.workingSinceMs, into: &buf)
         FfiConverterBool.write(value.heldBySubagents, into: &buf)
+        FfiConverterOptionUInt32.write(value.backgroundRing, into: &buf)
+        FfiConverterOptionString.write(value.backgroundLabel, into: &buf)
         FfiConverterInt64.write(value.lastActivityMs, into: &buf)
         FfiConverterString.write(value.timeLabel, into: &buf)
         FfiConverterInt64.write(value.createdAtMs, into: &buf)
@@ -23092,6 +23303,13 @@ public func workosAuthorizeUrl(state: String) -> String  {
     )
 })
 }
+public func chatMissionLabels() -> ChatMissionLabels  {
+    return try!  FfiConverterTypeChatMissionLabels_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_chat_mission_labels(uniffiCallStatus
+    )
+})
+}
 public func compactCommand(text: String) -> CompactCommand?  {
     return try!  FfiConverterOptionTypeCompactCommand.lift(try! rustCall() {
         uniffiCallStatus in
@@ -23107,6 +23325,14 @@ public func contextCard(model: ModelInfo, config: ChatConfig, tokens: UInt64?) -
         FfiConverterTypeModelInfo_lower(model),
         FfiConverterTypeChatConfig_lower(config),
         FfiConverterOptionUInt64.lower(tokens),uniffiCallStatus
+    )
+})
+}
+public func detachDraftProfile(config: ChatConfig)throws  -> ChatConfig  {
+    return try  FfiConverterTypeChatConfig_lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_detach_draft_profile(
+        FfiConverterTypeChatConfig_lower(config),uniffiCallStatus
     )
 })
 }
@@ -23491,10 +23717,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_workos_authorize_url() != 35994) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_func_chat_mission_labels() != 14897) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_func_compact_command() != 48932) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_context_card() != 21031) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_detach_draft_profile() != 8162) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_fast_mode_on() != 11254) {
@@ -23776,6 +24008,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_apply_agent_profile() != 2556) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_apply_draft_profile() != 61298) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_continue_in_new_thread() != 58949) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -23783,6 +24018,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_detach_agent_profile() != 40793) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_draft_profile_rows() != 29396) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_handoff_targets() != 35638) {
@@ -23815,10 +24053,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_save_chat_into_profile() != 57028) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_save_draft_into_profile() != 49525) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_set_session_config_noted() != 45535) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_sidechat_sheet() != 17177) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_start_mission_from_chat() != 16560) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_thread_mentions() != 27556) {

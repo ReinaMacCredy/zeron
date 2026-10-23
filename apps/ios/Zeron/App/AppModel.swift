@@ -665,7 +665,35 @@ final class AppModel {
 }
 
 extension NewSessionDraft {
-    var config: ChatConfig { ChatConfig(harness: harness, model: model, reasoning: effort, modelOptions: [:], sandbox: .workspaceWrite) }
+    var config: ChatConfig {
+        ChatConfig(harness: harness, model: model, reasoning: effort, modelOptions: modelOptions ?? [:], sandbox: .workspaceWrite, profileId: profileId, permissionMode: permission.flatMap(Self.permissionMode), instructions: instructions ?? "", disabledTools: disabledTools ?? [])
+    }
+
+    mutating func adopt(_ config: ChatConfig) {
+        harness = config.harness
+        model = config.model
+        effort = config.reasoning
+        modelOptions = config.modelOptions
+        permission = config.permissionMode.map { mode in
+            switch mode {
+            case .ask: "ask"
+            case .auto: "auto"
+            case .full: "full"
+            }
+        }
+        profileId = config.profileId
+        instructions = config.instructions
+        disabledTools = config.disabledTools
+    }
+
+    private static func permissionMode(_ wire: String) -> PermissionMode? {
+        switch wire {
+        case "ask": .ask
+        case "auto": .auto
+        case "full": .full
+        default: nil
+        }
+    }
 }
 
 extension StagedImage {

@@ -10,6 +10,11 @@ struct NewSessionDraft: Equatable, Codable {
     var harness = "claude-code"
     var model: String?
     var effort: String?
+    var modelOptions: [String: String]?
+    var permission: String?
+    var profileId: String?
+    var instructions: String?
+    var disabledTools: [String]?
 }
 
 /// Options the pickers offer (from the core's workspace + host catalogs).
@@ -59,6 +64,8 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     private var mission = false
     private var missionReview = true
     private var missionPlanDoc = true
+    private var profiles: [ProfileRow] = []
+    private var profilesFor: (device: String, config: ChatConfig)?
 
     /// Embedded in the iPad split's main column (no sheet chrome).
     private let embedded: Bool
@@ -282,7 +289,8 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         // Never the harness name in place of a model: a model this host
         // hasn't listed still gets its catalog label.
         let modelTitle = model?.label ?? draft.model.map { modelLabel(harness: draft.harness, model: $0) } ?? fallbackModels(harness: draft.harness).first?.label ?? HarnessNames.label(draft.harness)
-        chips.append(ComposerChip(id: "model", title: modelTitle, symbol: nil, icon: BrandMarks.image(for: draft.harness, side: 13)))
+        let profile = profiles.first(where: \.active).map { "\($0.name)\($0.drift == nil ? "" : " •") · \(modelTitle)" }
+        chips.append(ComposerChip(id: "model", title: profile ?? modelTitle, symbol: nil, icon: BrandMarks.image(for: draft.harness, side: 13)))
         if let efforts = model?.efforts, !efforts.isEmpty {
             chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: draft.effort ?? efforts[efforts.count / 2]), symbol: "gauge.with.dots.needle.67percent"))
         }
@@ -302,6 +310,75 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             "mission-plan": { [weak self] in self?.missionPlanMenu() },
         ]
         mark.image = BrandMarks.image(for: draft.harness, side: 34)
+        loadProfiles()
+    }
+
+    private func loadProfiles() {
+        let device = deviceId
+        let config = draft.config
+        guard let client = app.client, !device.isEmpty, profilesFor?.device != device || profilesFor?.config != config else { return }
+        profilesFor = (device, config)
+        Task { @MainActor [weak self] in
+            let rows = await client.draftProfileRows(deviceId: device, config: config)
+            guard let self, self.profilesFor?.device == device, self.profilesFor?.config == config, rows != self.profiles else { return }
+            self.profiles = rows
+            self.refreshChips()
+        }
+    }
+
+    private func profileSection() -> UIMenu? {
+        guard !profiles.isEmpty else { return nil }
+        let labels = profileMenuLabels()
+        var items: [UIMenuElement] = profiles.map { p in
+            let image = UIImage(systemName: "person.crop.circle")
+            guard p.active, let drift = p.drift else {
+                return UIAction(title: p.name, subtitle: p.line, image: image, state: p.active ? .on : .off) { [weak self] _ in
+                    self?.applyProfile(p.id)
+                }
+            }
+            var actions = [UIAction(title: labels.revert, image: UIImage(systemName: "arrow.uturn.backward")) { [weak self] _ in self?.applyProfile(p.id) }]
+            if p.savable {
+                actions.append(UIAction(title: labels.save, image: UIImage(systemName: "square.and.arrow.down")) { [weak self] _ in self?.saveProfile(p.id) })
+            }
+            return UIMenu(title: "\(p.name) · \(labels.edited)", subtitle: drift, image: image, children: actions)
+        }
+        let none = !profiles.contains(where: \.active)
+        items.append(UIAction(title: labels.none, subtitle: labels.noneNote, image: UIImage(systemName: "person.crop.circle.badge.xmark"), state: none ? .on : .off) { [weak self] _ in
+            guard let self, !none, let config = try? detachDraftProfile(config: self.draft.config) else { return }
+            self.draft.adopt(config)
+            self.refreshChips()
+        })
+        return UIMenu(title: labels.title, options: .displayInline, children: items)
+    }
+
+    private func applyProfile(_ id: String) {
+        guard let client = app.client else { return }
+        let device = deviceId
+        let config = draft.config
+        Task { @MainActor [weak self] in
+            do {
+                let applied = try await client.applyDraftProfile(deviceId: device, config: config, profileId: id)
+                self?.draft.adopt(applied)
+                self?.refreshChips()
+            } catch {
+                Toast.show("\(error)", in: self?.view.window)
+            }
+        }
+    }
+
+    private func saveProfile(_ id: String) {
+        guard let client = app.client else { return }
+        let device = deviceId
+        let config = draft.config
+        Task { @MainActor [weak self] in
+            do {
+                try await client.saveDraftIntoProfile(deviceId: device, config: config, profileId: id)
+                self?.profilesFor = nil
+                self?.refreshChips()
+            } catch {
+                Toast.show("\(error)", in: self?.view.window)
+            }
+        }
     }
 
     /// One entry per project — checkouts of one repository, on any device,
@@ -408,7 +485,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     private func modelMenu() -> UIMenu {
         let byHarness = Dictionary(grouping: models, by: \.harness)
-        return UIMenu(title: "Model", children: byHarness.keys.sorted().map { h in
+        return UIMenu(title: "Model", children: [profileSection()].compactMap { $0 } + byHarness.keys.sorted().map { h in
             UIMenu(title: byHarness[h]!.first!.harnessLabel, options: .displayInline, children: byHarness[h]!.map { m in
                 UIAction(title: m.label, image: BrandMarks.image(for: h, side: 16), state: m.harness == draft.harness && m.id == draft.model ? .on : .off) { [weak self] _ in
                     self?.draft.harness = m.harness

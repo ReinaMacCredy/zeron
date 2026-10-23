@@ -101,26 +101,37 @@ impl Client {
         Ok((chat.device_id, config))
     }
 
+    async fn agent_profile(&self, device_id: &str, profile_id: &str) -> Result<AgentProfile> {
+        self.list_agent_profiles(device_id)
+            .await?
+            .into_iter()
+            .find(|profile| profile.id == profile_id)
+            .ok_or_else(|| ClientError::NotFound(profile_id.to_owned()))
+    }
+
     async fn chat_profile(
         &self,
         chat_id: &str,
         profile_id: &str,
     ) -> Result<(String, ChatConfig, AgentProfile)> {
         let (device_id, config) = self.chat_device_and_config(chat_id)?;
-        let profile = self
-            .list_agent_profiles(&device_id)
-            .await?
-            .into_iter()
-            .find(|profile| profile.id == profile_id)
-            .ok_or_else(|| ClientError::NotFound(profile_id.to_owned()))?;
+        let profile = self.agent_profile(&device_id, profile_id).await?;
         Ok((device_id, config, profile))
     }
 
     pub async fn profile_rows(&self, chat_id: &str) -> Result<Vec<ProfileRow>> {
-        let (device_id, mut config) = self.chat_device_and_config(chat_id)?;
-        let profiles = self.list_agent_profiles(&device_id).await?;
+        let (device_id, config) = self.chat_device_and_config(chat_id)?;
+        self.draft_profile_rows(&device_id, config).await
+    }
+
+    pub async fn draft_profile_rows(
+        &self,
+        device_id: &str,
+        mut config: ChatConfig,
+    ) -> Result<Vec<ProfileRow>> {
+        let profiles = self.list_agent_profiles(device_id).await?;
         let harness = harness_wire(config.harness);
-        let models = self.list_models(&device_id, &harness).await;
+        let models = self.list_models(device_id, &harness).await;
         let options = config
             .model
             .as_deref()
@@ -217,6 +228,18 @@ impl Client {
         }
     }
 
+    pub async fn apply_draft_profile(
+        &self,
+        device_id: &str,
+        mut config: ChatConfig,
+        profile_id: &str,
+    ) -> Result<ChatConfig> {
+        self.agent_profile(device_id, profile_id)
+            .await?
+            .apply_to(&mut config);
+        Ok(config)
+    }
+
     pub fn detach_agent_profile(&self, chat_id: &str) -> Result<()> {
         let (_, mut config) = self.chat_device_and_config(chat_id)?;
         detach_profile(&mut config);
@@ -224,11 +247,22 @@ impl Client {
     }
 
     pub async fn save_chat_into_profile(&self, chat_id: &str, profile_id: &str) -> Result<()> {
-        let (device_id, config, profile) = self.chat_profile(chat_id, profile_id).await?;
+        let (device_id, config) = self.chat_device_and_config(chat_id)?;
+        self.save_draft_into_profile(&device_id, &config, profile_id)
+            .await
+    }
+
+    pub async fn save_draft_into_profile(
+        &self,
+        device_id: &str,
+        config: &ChatConfig,
+        profile_id: &str,
+    ) -> Result<()> {
+        let profile = self.agent_profile(device_id, profile_id).await?;
         let params =
             serde_json::json!({ "profileId": profile.id, "profile": profile.absorb(&config) });
         self.inner
-            .host_rpc(&device_id, methods::UPSERT_AGENT_PROFILE, params)
+            .host_rpc(device_id, methods::UPSERT_AGENT_PROFILE, params)
             .await?;
         Ok(())
     }
