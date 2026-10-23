@@ -275,6 +275,54 @@ const IMAGES: &[(&str, &[u8])] = &[
         "command-line-status.jpg",
         include_bytes!("../assets/whats_new/command-line-status.jpg"),
     ),
+    (
+        "ios-tasks.jpg",
+        include_bytes!("../assets/whats_new/ios-tasks.jpg"),
+    ),
+    (
+        "ios-composer.jpg",
+        include_bytes!("../assets/whats_new/ios-composer.jpg"),
+    ),
+    (
+        "ios-git.jpg",
+        include_bytes!("../assets/whats_new/ios-git.jpg"),
+    ),
+    (
+        "ios-settings.jpg",
+        include_bytes!("../assets/whats_new/ios-settings.jpg"),
+    ),
+    (
+        "ios-computer-use.jpg",
+        include_bytes!("../assets/whats_new/ios-computer-use.jpg"),
+    ),
+    (
+        "ios-transcript.jpg",
+        include_bytes!("../assets/whats_new/ios-transcript.jpg"),
+    ),
+    (
+        "ios-composer-menus.jpg",
+        include_bytes!("../assets/whats_new/ios-composer-menus.jpg"),
+    ),
+    (
+        "ios-transcript-branch.jpg",
+        include_bytes!("../assets/whats_new/ios-transcript-branch.jpg"),
+    ),
+    (
+        "ios-providers.jpg",
+        include_bytes!("../assets/whats_new/ios-providers.jpg"),
+    ),
+    (
+        "ios-supervisor.jpg",
+        include_bytes!("../assets/whats_new/ios-supervisor.jpg"),
+    ),
+    (
+        "ios-task-sheet.jpg",
+        include_bytes!("../assets/whats_new/ios-task-sheet.jpg"),
+    ),
+    (
+        "ios-devices-stop.jpg",
+        include_bytes!("../assets/whats_new/ios-devices-stop.jpg"),
+    ),
 ];
 
 pub struct Picture {

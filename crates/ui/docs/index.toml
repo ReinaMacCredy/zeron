@@ -18,6 +18,10 @@ title = "Work"
 id = "tools"
 title = "Tools"
 
+[[section]]
+id = "iphone"
+title = "iPhone"
+
 [[article]]
 id = "getting-around"
 section = "basics"
@@ -361,8 +365,64 @@ actions = ["settings/devices"]
 
 [[article]]
 id = "mobile"
-section = "tools"
+section = "iphone"
 title = "Zeron on iPhone"
 icon = "smartphone"
-blurb = "Follow and steer your chats from your phone while agents run on your computers."
+blurb = "Sign in, follow your sessions, start new ones, and get notifications and voice calls on your phone, while agents run on your computers."
 actions = ["settings/devices"]
+
+[[article]]
+id = "mobile-composer"
+section = "iphone"
+title = "The composer on iPhone"
+icon = "lucide-square-pen"
+blurb = "Model, effort and permission chips, context and stats, queued messages, side chats, hand-offs and missions from the phone."
+actions = ["docs/composer"]
+
+[[article]]
+id = "mobile-transcript"
+section = "iphone"
+title = "The transcript on iPhone"
+icon = "astra-chat-bubble"
+blurb = "Worked for, other agents' chips, fork and rewind, usage limits and session info in a session on the phone."
+actions = ["docs/conversation"]
+
+[[article]]
+id = "mobile-tasks"
+section = "iphone"
+title = "Tasks and missions on iPhone"
+icon = "checklist"
+blurb = "The Tasks tab, a task's sheet, and a mission's plan review and steps on the phone."
+actions = ["tasks", "docs/mission-control"]
+
+[[article]]
+id = "mobile-inbox"
+section = "iphone"
+title = "Sessions and the Supervisor on iPhone"
+icon = "hugeicons-target-02"
+blurb = "Organize, sort and nest the sessions list, and run each Mac's Supervisor from the phone."
+actions = ["supervisor", "docs/sessions-sidebar"]
+
+[[article]]
+id = "mobile-git"
+section = "iphone"
+title = "Pull requests and Git on iPhone"
+icon = "lucide-git-pull-request"
+blurb = "Review, comment on and merge pull requests, and stage, commit, pull and push a checkout from the phone."
+actions = ["pull-requests", "docs/git"]
+
+[[article]]
+id = "mobile-settings"
+section = "iphone"
+title = "Settings on iPhone"
+icon = "lucide-sliders-horizontal"
+blurb = "Your Macs' accounts, usage, providers, profiles, routing and tools, the phone's own settings, What's New and Docs."
+actions = ["settings/devices", "changelog"]
+
+[[article]]
+id = "mobile-devices"
+section = "iphone"
+title = "Devices and computer use on iPhone"
+icon = "screen-capture"
+blurb = "Answer computer use requests, watch the still preview, stop computer use, and read terminals and run project actions from the phone."
+actions = ["settings/computer", "docs/computer-use"]

@@ -96,6 +96,13 @@ pub const BODIES: &[(&str, &str)] = &[
         include_str!("../../ui/docs/command-line.md"),
     ),
     ("mobile", include_str!("../../ui/docs/mobile.md")),
+    ("mobile-composer", include_str!("../../ui/docs/mobile-composer.md")),
+    ("mobile-transcript", include_str!("../../ui/docs/mobile-transcript.md")),
+    ("mobile-tasks", include_str!("../../ui/docs/mobile-tasks.md")),
+    ("mobile-inbox", include_str!("../../ui/docs/mobile-inbox.md")),
+    ("mobile-git", include_str!("../../ui/docs/mobile-git.md")),
+    ("mobile-settings", include_str!("../../ui/docs/mobile-settings.md")),
+    ("mobile-devices", include_str!("../../ui/docs/mobile-devices.md")),
 ];
 
 #[derive(Debug, Deserialize)]

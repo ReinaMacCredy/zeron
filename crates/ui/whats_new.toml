@@ -42,6 +42,55 @@ description = "ui_driver and ui_driver_drive sit in a UI driver group of their o
 image = "agent-tools-settings.jpg"
 
 [[entry.features]]
+id = "ios-composer"
+title = "The composer on iPhone"
+description = "The composer on iPhone has the chips you know from the Mac: Start mission, the model with your agent profiles, effort, the permission mode and how full the context is. Tap the context chip for Context and stats."
+image = "ios-composer-menus.jpg"
+details = "Type / for commands, $ for skills and @ to mention a thread or a file. Touch and hold send to queue, steer or stop and send. The session's … menu has Agents, New sidechat, Hand off thread and Compact Context. The + card attaches photos, files or a pasted image, and a long paste becomes a Pasted text chip."
+
+[[entry.features]]
+id = "ios-tasks"
+title = "Tasks and missions on iPhone"
+description = "A new Tasks tab lists your missions and tasks from every Mac, with the Supervisor card on top. Tap a mission for its Mission page: the plan with its cost estimate, Approve and run, and each step with its model."
+image = "ios-tasks.jpg"
+details = "Tap + for a new task, with Plan first to have a lead plan it. A task's sheet starts it in a new chat or hands it to a thread you have. On a Mission page you edit the steps, open a step's thread, retry or skip it, and read the Lead brief. A thread in a mission shows a strip that opens its Mission page."
+
+[[entry.features]]
+id = "ios-supervisor-sessions"
+title = "The Supervisor and the sessions list on iPhone"
+description = "Tap the Supervisor card on Tasks to see each Mac's Supervisor: stop, resume or start it, open its conversation, turn on Watch everything, and set its authority. The Sessions tab organizes by device or project, sorts with Active first, and nests step threads under their lead."
+image = "ios-supervisor.jpg"
+details = "Touch and hold a row for a preview, and a section header to move it up or down. Rows name background work such as 1 shell, and carry each agent's mark."
+
+[[entry.features]]
+id = "ios-pull-requests-git"
+title = "Pull requests and Git on iPhone"
+description = "The Pull requests button on the Sessions bar opens your pull requests on a Mac. Read a pull request's Summary, Code and Activity, comment and review, merge after a confirm, or hand it to an agent."
+image = "ios-git.jpg"
+details = "The Git side shows a checkout's working tree and history: stage and unstage files, commit with Write with AI, pull, push after a confirm, and copy a commit's SHA. Pull request links in a transcript open in the app."
+
+[[entry.features]]
+id = "ios-mac-settings"
+title = "Your Mac's settings on iPhone"
+description = "Settings > Devices > your Mac opens its accounts and usage, providers, agent profiles, routing, tools and limits. Add a provider instance, search the ACP Registry, or edit a profile from the phone."
+image = "ios-providers.jpg"
+details = "Settings > Help opens What's New and these Docs on the phone, and a card shows what is new after an update. Chat background shows your wallpaper behind open conversations."
+
+[[entry.features]]
+id = "ios-computer-use"
+title = "Computer use, terminals and actions on iPhone"
+description = "When an agent wants to use an app on a Mac, answer its request on the phone. A still preview shows the Mac's screen while it works, and Stop Computer Use in the session's … menu stops it for that chat."
+image = "ios-computer-use.jpg"
+details = "Settings > Devices > your Mac > Stop computer use stops every chat on that Mac. Terminal in the session's … menu shows the chat's terminals, and Project Actions runs the project's actions on the Mac."
+
+[[entry.features]]
+id = "ios-transcript"
+title = "Fork, rewind and session info on iPhone"
+description = "Touch and hold a reply to Fork chat from here, or one of your messages to Rewind to here. Session Info in the … menu shows the account's usage and the chat's sources."
+image = "ios-transcript-branch.jpg"
+details = "Settled turns fold under Worked for, delegate chips show the agent, model and route and open the child thread, and a usage limit card offers to switch now. A skill's name opens its SKILL.md."
+
+[[entry.features]]
 id = "upstream-0-2-118"
 title = "From upstream Zeron"
 description = "First-run setup for new installs, a background engine that keeps sessions running after you quit the app, and desktop notifications posted by the engine. Error cards say when an agent is signed out or out of usage and offer Log in, Claude sign-in falls back to its credentials file when the Keychain refuses, and long transcripts no longer drop the engine connection."

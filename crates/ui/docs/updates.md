@@ -46,6 +46,8 @@ After an update, a card at the bottom of the sidebar names the release's headlin
 
 To open the changelog any time, choose **Zeron > What's New…** in the menu bar.
 
+On iPhone, the same card shows above the tabs after an update, and **Settings** > **Help** > **What's New** opens the release and the changelog. See [Zeron on iPhone](zeron://docs/mobile).
+
 ## The Help menu
 
 The question-mark button in the app rail (**Help**) opens a menu with:
