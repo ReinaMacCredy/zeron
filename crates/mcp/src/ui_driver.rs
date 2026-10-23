@@ -8,7 +8,8 @@ use base64::Engine as _;
 use serde_json::{Map, Value, json};
 use zeron_proto::ui_driver::{
     DRAG_STEPS, DRIVE_ACTIONS, MAX_DRIVE_STEPS, MAX_WAIT_MS, OBSERVE_ACTIONS, PROCESS_ACTIONS,
-    STEP_CAP_MS, UiDriverBuild, UiDriverDescriptor, descriptor_pid, run_dir, socket_path,
+    STEP_CAP_MS, UiDriverBuild, UiDriverDescriptor, UiDriverEndpoint, descriptor_pid, run_dir,
+    socket_path,
 };
 
 pub const TOOL: &str = "ui_driver";
@@ -16,6 +17,7 @@ pub const DRIVE_TOOL: &str = "ui_driver_drive";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const REPLY_SLACK: Duration = Duration::from_secs(10);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const RECORDERS: &[&str] = &["frames", "track"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -320,25 +322,37 @@ fn list_in(dir: &Path) -> Vec<UiDriverDescriptor> {
     live
 }
 
-#[cfg(unix)]
 fn alive(app: &UiDriverDescriptor) -> bool {
     use std::io::ErrorKind;
-    // SAFETY: signal 0 delivers nothing; kill only reports whether the pid exists.
-    let exited = unsafe { libc::kill(app.pid as libc::pid_t, 0) } != 0
-        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-    !exited
-        && match std::os::unix::net::UnixStream::connect(&app.socket) {
-            Ok(_) => true,
-            Err(error) => !matches!(
-                error.kind(),
-                ErrorKind::ConnectionRefused | ErrorKind::NotFound
-            ),
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 delivers nothing; kill only reports whether the pid exists.
+        let exited = unsafe { libc::kill(app.pid as libc::pid_t, 0) } != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if exited {
+            return false;
         }
-}
-
-#[cfg(not(unix))]
-fn alive(_: &UiDriverDescriptor) -> bool {
-    false
+    }
+    let connected = match &app.endpoint {
+        #[cfg(unix)]
+        UiDriverEndpoint::Unix { socket } => {
+            std::os::unix::net::UnixStream::connect(socket).map(drop)
+        }
+        #[cfg(not(unix))]
+        UiDriverEndpoint::Unix { .. } => return false,
+        UiDriverEndpoint::Loopback { port, .. } => std::net::TcpStream::connect_timeout(
+            &(std::net::Ipv4Addr::LOCALHOST, *port).into(),
+            CONNECT_TIMEOUT,
+        )
+        .map(drop),
+    };
+    match connected {
+        Ok(()) => true,
+        Err(error) => !matches!(
+            error.kind(),
+            ErrorKind::ConnectionRefused | ErrorKind::NotFound
+        ),
+    }
 }
 
 pub fn select<'a>(
@@ -378,7 +392,9 @@ pub fn select<'a>(
         ),
         (Some(target), _) if target.contains('/') => (
             live.iter()
-                .filter(|app| app.socket == Path::new(target))
+                .filter(|app| {
+                    matches!(&app.endpoint, UiDriverEndpoint::Unix { socket } if socket == Path::new(target))
+                })
                 .collect(),
             format!("no Zeron app listens on {target}"),
         ),
@@ -472,7 +488,7 @@ pub async fn request(
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     let timeout = reply_timeout(&request);
     request.insert("id".into(), json!(NEXT_ID.fetch_add(1, Ordering::Relaxed)));
-    let mut reply = tokio::time::timeout(timeout, exchange(&app.socket, Value::Object(request)))
+    let mut reply = tokio::time::timeout(timeout, exchange(&app.endpoint, Value::Object(request)))
         .await
         .map_err(|_| {
             format!(
@@ -493,15 +509,40 @@ pub async fn request(
         .ok_or_else(|| format!("reply has neither ok nor error: {reply}"))
 }
 
-#[cfg(unix)]
-async fn exchange(socket: &Path, request: Value) -> Result<Value, String> {
+async fn exchange(endpoint: &UiDriverEndpoint, request: Value) -> Result<Value, String> {
+    let failed = |error: std::io::Error| format!("{endpoint}: {error}");
+    match endpoint {
+        #[cfg(unix)]
+        UiDriverEndpoint::Unix { socket } => {
+            let stream = tokio::net::UnixStream::connect(socket)
+                .await
+                .map_err(failed)?;
+            talk(stream, None, request, endpoint).await
+        }
+        #[cfg(not(unix))]
+        UiDriverEndpoint::Unix { .. } => Err(format!(
+            "{endpoint} is a unix socket, which this platform cannot open"
+        )),
+        UiDriverEndpoint::Loopback { port, token } => {
+            let stream = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, *port))
+                .await
+                .map_err(failed)?;
+            talk(stream, Some(token), request, endpoint).await
+        }
+    }
+}
+
+async fn talk(
+    stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite,
+    token: Option<&str>,
+    request: Value,
+    endpoint: &UiDriverEndpoint,
+) -> Result<Value, String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    let failed = |error: std::io::Error| format!("{}: {error}", socket.display());
-    let stream = tokio::net::UnixStream::connect(socket)
-        .await
-        .map_err(failed)?;
-    let (reader, mut writer) = stream.into_split();
-    let mut line = request.to_string();
+    let failed = |error: std::io::Error| format!("{endpoint}: {error}");
+    let (reader, mut writer) = tokio::io::split(stream);
+    let mut line = token.map(|token| format!("{token}\n")).unwrap_or_default();
+    line.push_str(&request.to_string());
     line.push('\n');
     writer.write_all(line.as_bytes()).await.map_err(failed)?;
     let mut reply = String::new();
@@ -510,14 +551,9 @@ async fn exchange(socket: &Path, request: Value) -> Result<Value, String> {
         .await
         .map_err(failed)?;
     if reply.trim().is_empty() {
-        return Err(format!("{} closed without a reply", socket.display()));
+        return Err(format!("{endpoint} closed without a reply"));
     }
     serde_json::from_str(&reply).map_err(|error| format!("reply is not JSON: {error}"))
-}
-
-#[cfg(not(unix))]
-async fn exchange(_: &Path, _: Value) -> Result<Value, String> {
-    Err("the UI driver needs unix sockets, which this platform lacks".into())
 }
 
 #[cfg(test)]
@@ -525,6 +561,7 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use std::path::PathBuf;
+    #[cfg(unix)]
     use zeron_proto::ui_driver::descriptor_path;
 
     fn app(
@@ -536,7 +573,9 @@ mod tests {
     ) -> UiDriverDescriptor {
         UiDriverDescriptor {
             pid,
-            socket: PathBuf::from(format!("/run/ui-{pid}.sock")),
+            endpoint: UiDriverEndpoint::Unix {
+                socket: PathBuf::from(format!("/run/ui-{pid}.sock")),
+            },
             label: label.into(),
             bundle_path: None,
             data_dir: PathBuf::from("/data"),
@@ -765,9 +804,12 @@ mod tests {
     async fn request_turns_each_reply_into_its_value_or_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let mut target = app(1, "Zeron Dev", UiDriverBuild::Debug, 49871, 1);
-        target.socket = dir.path().join("ui-1.sock");
+        let socket = dir.path().join("ui-1.sock");
+        target.endpoint = UiDriverEndpoint::Unix {
+            socket: socket.clone(),
+        };
         let server = answering(
-            &target.socket,
+            &socket,
             &[
                 r#"{"id":1,"ok":{"frame":3}}"#,
                 r#"{"id":2,"error":"no window"}"#,
@@ -817,14 +859,20 @@ mod tests {
             27654,
             2,
         );
-        own.socket = socket_path(dir.path(), own.pid);
+        let own_socket = socket_path(dir.path(), own.pid);
+        own.endpoint = UiDriverEndpoint::Unix {
+            socket: own_socket.clone(),
+        };
         write(&own);
         let mut dead = app(1, "Zeron Dev 3", UiDriverBuild::Debug, 49872, 1);
-        dead.socket = socket_path(dir.path(), 1);
-        drop(std::os::unix::net::UnixListener::bind(&dead.socket).unwrap());
+        let dead_socket = socket_path(dir.path(), 1);
+        dead.endpoint = UiDriverEndpoint::Unix {
+            socket: dead_socket.clone(),
+        };
+        drop(std::os::unix::net::UnixListener::bind(&dead_socket).unwrap());
         write(&dead);
         let server = answering(
-            &own.socket,
+            &own_socket,
             &[
                 r#"{"id":0,"ok":"drawn"}"#,
                 r#"{"id":0,"ok":{"windows":[]}}"#,
@@ -833,7 +881,7 @@ mod tests {
 
         let live: Vec<u32> = list_in(dir.path()).iter().map(|app| app.pid).collect();
         assert_eq!(live, [own.pid]);
-        assert!(!dead.socket.exists() && !descriptor_path(dir.path(), 1).exists());
+        assert!(!dead_socket.exists() && !descriptor_path(dir.path(), 1).exists());
 
         let click = json!({ "action": "click", "x": 1, "y": 2 });
         let mut aimed = click.clone();
@@ -893,5 +941,53 @@ mod tests {
         assert_eq!(select(&live, None, None).map(|app| app.pid), Ok(200));
         let error = pick(None, None).unwrap_err();
         assert!(error.starts_with("4 Zeron apps match;"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_loopback_app_is_alive_while_it_listens_and_gets_its_token_before_each_request() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut target = app(std::process::id(), "Zeron", UiDriverBuild::Debug, 49871, 1);
+        target.endpoint = UiDriverEndpoint::Loopback {
+            port,
+            token: "secret".into(),
+        };
+        let server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                let mut lines = BufReader::new(reader).lines();
+                let Some(token) = lines.next_line().await.unwrap() else {
+                    continue;
+                };
+                let request: Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                let reply = json!({ "id": request["id"], "ok": { "token": token } });
+                writer
+                    .write_all(format!("{reply}\n").as_bytes())
+                    .await
+                    .unwrap();
+                return request;
+            }
+        });
+
+        assert!(
+            tokio::task::spawn_blocking({
+                let target = target.clone();
+                move || alive(&target)
+            })
+            .await
+            .unwrap()
+        );
+        let state = Map::from_iter([("action".into(), json!("state"))]);
+        assert_eq!(
+            request(&target, state).await,
+            Ok(json!({ "token": "secret" }))
+        );
+        assert_eq!(server.await.unwrap()["action"], "state");
+        assert!(!alive(&target));
     }
 }
