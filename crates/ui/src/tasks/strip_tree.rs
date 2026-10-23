@@ -323,11 +323,10 @@ impl StripTree {
         self.motion.sync(&nodes, reduced, now);
     }
 
-    fn content_height(&self, rows: &[Row]) -> f32 {
+    fn content_height(&self, rows: &[Row], now: Instant) -> f32 {
         let shown: f32 = rows
             .iter()
-            .filter(|row| self.motion.shown(&row.id))
-            .map(|row| row.height() + GAP)
+            .map(|row| (row.height() + GAP) * self.motion.presence(&row.id, now))
             .sum();
         (shown - GAP).max(ROW) + PAD_BOTTOM
     }
@@ -340,8 +339,8 @@ impl StripTree {
         self.fold_deep(&rows);
         self.sync(&rows, motion::reduced_motion(cx), now);
         (
-            self.content_height(&rows) * self.open.value_at(now),
-            !self.open.settled_at(now),
+            self.content_height(&rows, now) * self.open.value_at(now),
+            !self.open.settled_at(now) || self.motion.animating(now),
         )
     }
 
@@ -870,7 +869,7 @@ impl Render for StripTree {
             .debug_selector(|| "strip-tree".into())
             .relative()
             .w_full()
-            .h(px(self.content_height(&rows)))
+            .h(px(self.content_height(&rows, now)))
             .children(elements)
             .child(tree::links(
                 links,

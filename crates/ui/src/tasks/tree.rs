@@ -20,9 +20,10 @@ pub(crate) const RISE_Y: f32 = 6.0;
 pub(crate) const DRAW: MotionSpec = MotionSpec::new(420, EASE);
 pub(crate) const DRAW_LEAD_MS: u64 = 160;
 pub(crate) const FIRST_ENTER_MS: u64 = 200;
-pub(crate) const LATER_ENTER_MS: u64 = 160;
 pub(crate) const STAGGER_MS: u64 = 60;
 const STAGGER_SPAN_MS: u64 = 180;
+const QUICK_STAGGER_MS: u64 = 30;
+const QUICK_SPAN_MS: u64 = 90;
 pub(crate) const GLIDE: MotionSpec = MotionSpec::new(420, EASE);
 pub(crate) const LEAVE: MotionSpec = MotionSpec::new(280, EASE);
 pub(crate) const LEAVE_Y: f32 = 4.0;
@@ -205,10 +206,15 @@ pub(crate) struct TreeMotion {
     solid: bool,
 }
 
-fn stagger_step(count: usize) -> u64 {
+fn stagger_step(count: usize, quick: bool) -> u64 {
+    let (step, span) = if quick {
+        (QUICK_STAGGER_MS, QUICK_SPAN_MS)
+    } else {
+        (STAGGER_MS, STAGGER_SPAN_MS)
+    };
     match count {
-        0 | 1 => STAGGER_MS,
-        n => STAGGER_MS.min(STAGGER_SPAN_MS / (n as u64 - 1)),
+        0 | 1 => step,
+        n => step.min(span / (n as u64 - 1)),
     }
 }
 
@@ -240,7 +246,7 @@ impl TreeMotion {
                         .is_none_or(|current| current.leave.is_some())
             })
             .count();
-        let enter_step = stagger_step(entering);
+        let enter_step = stagger_step(entering, self.built);
         let mut fresh = 0;
         let mut leaving = Vec::new();
         for node in nodes {
@@ -264,11 +270,7 @@ impl TreeMotion {
                     let delay = if node.root {
                         0
                     } else {
-                        let base = if self.built {
-                            LATER_ENTER_MS
-                        } else {
-                            FIRST_ENTER_MS
-                        };
+                        let base = if self.built { 0 } else { FIRST_ENTER_MS };
                         fresh += 1;
                         base + (fresh - 1) * enter_step
                     };
@@ -279,7 +281,7 @@ impl TreeMotion {
                 }
             }
         }
-        let leave_step = stagger_step(leaving.len());
+        let leave_step = stagger_step(leaving.len(), true);
         for (i, id) in leaving.iter().rev().enumerate() {
             if let Some(node) = self.nodes.get_mut(*id) {
                 let delay = i as u64 * leave_step;
@@ -306,6 +308,13 @@ impl TreeMotion {
 
     pub fn shown(&self, id: &str) -> bool {
         self.nodes.contains_key(id)
+    }
+
+    pub fn presence(&self, id: &str, now: Instant) -> f32 {
+        self.nodes.get(id).map_or(0.0, |node| match node.leave {
+            Some(leave) => leave.value_at(now),
+            None => node.rise.value_at(now),
+        })
     }
 
     pub fn frame(&self, id: &str, now: Instant) -> Frame {
@@ -850,7 +859,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_first_build_staggers_from_200_and_a_later_one_from_160() {
+    fn a_first_build_staggers_from_200_and_a_later_one_starts_at_once() {
         let now = Instant::now();
         let mut tree = TreeMotion::default();
         let node = |id, root| NodeIn {
@@ -882,8 +891,7 @@ mod tests {
             false,
             now,
         );
-        assert_eq!(at(&tree, "c", 160), 0.0);
-        assert!(at(&tree, "c", 161) > 0.0);
+        assert!(at(&tree, "c", 1) > 0.0);
     }
 
     #[test]
@@ -908,7 +916,7 @@ mod tests {
         let mut tree = TreeMotion::default();
         tree.sync(&nodes(true), false, now - Duration::from_secs(5));
         tree.sync(&nodes(false), false, now);
-        let span = now + Duration::from_millis(STAGGER_SPAN_MS + 20);
+        let span = now + Duration::from_millis(QUICK_SPAN_MS + 20);
         assert!(tree.frame("s0", span).opacity < 1.0, "the top row has left");
     }
 
@@ -932,12 +940,12 @@ mod tests {
             false,
             now,
         );
-        let mid = now + Duration::from_millis(30);
+        let mid = now + Duration::from_millis(15);
         assert!(tree.frame("b", mid).opacity < 1.0);
         assert_eq!(
             tree.frame("a", mid).opacity,
             1.0,
-            "the upper node waits 60 ms"
+            "the upper node waits 30 ms"
         );
         let first_gone = now + Duration::from_millis(300);
         tree.sync(
