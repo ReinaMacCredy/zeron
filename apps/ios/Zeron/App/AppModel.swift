@@ -105,29 +105,22 @@ final class AppModel {
     /// The new-session page's options (project, host, branch, model,
     /// effort), kept across launches.
     var lastDraft: NewSessionDraft = {
-        var d = !AppModel.persistsNewSession ? NewSessionDraft() : UserDefaults.standard.data(forKey: "newSessionDraft").flatMap { try? JSONDecoder().decode(NewSessionDraft.self, from: $0) } ?? NewSessionDraft()
+        var d = !Drafts.persists ? NewSessionDraft() : UserDefaults.standard.data(forKey: "newSessionDraft").flatMap { try? JSONDecoder().decode(NewSessionDraft.self, from: $0) } ?? NewSessionDraft()
         // `-harness mock`: live-stack tests must never start a real agent.
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "-harness"), i + 1 < args.count { d.harness = args[i + 1] }
         return d
     }() {
         didSet {
-            guard Self.persistsNewSession else { return }
+            guard Drafts.persists else { return }
             UserDefaults.standard.set(try? JSONEncoder().encode(lastDraft), forKey: "newSessionDraft")
         }
     }
 
-    /// The demo (and the UI tests on it) keep the new-session page in memory
-    /// only: one run's leftovers must not seed the next.
-    private static let persistsNewSession = !ProcessInfo.processInfo.arguments.contains("-demo")
-    private var volatileNewSessionText = ""
-
     /// What was typed on the new-session page when it was closed unsent.
     var newSessionText: String {
-        get { Self.persistsNewSession ? Drafts.load(Self.newSessionDraftKey) : volatileNewSessionText }
-        set {
-            if Self.persistsNewSession { Drafts.save(Self.newSessionDraftKey, newValue) } else { volatileNewSessionText = newValue }
-        }
+        get { Drafts.load(Self.newSessionDraftKey) }
+        set { Drafts.save(Self.newSessionDraftKey, newValue) }
     }
 
     /// Images staged there (this launch only).

@@ -272,7 +272,11 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     }
 
     private func refreshChips() {
-        var chips: [ComposerChip] = []
+        let labels = missionComposerLabels(fromChat: false)
+        var chips = [ComposerChip(id: "mission", title: labels.start, symbol: "target", tint: mission ? Palette.accent : nil)]
+        if mission {
+            chips.append(ComposerChip(id: "mission-plan", title: missionPlanDoc ? labels.planDoc : labels.stepsOnly, symbol: missionReview ? "checklist" : "doc.text"))
+        }
         if let p = project {
             // The project, then the host it runs on.
             chips.append(ComposerChip(id: "project", title: p.groupName, symbol: nil, icon: ProjectTile.image(name: p.groupName, colorIndex: p.colorIndex)))
@@ -293,11 +297,6 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         chips.append(ComposerChip(id: "model", title: profile ?? modelTitle, symbol: nil, icon: BrandMarks.image(for: draft.harness, side: 13)))
         if let efforts = model?.efforts, !efforts.isEmpty {
             chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: draft.effort ?? efforts[efforts.count / 2]), symbol: "gauge.with.dots.needle.67percent"))
-        }
-        let labels = missionComposerLabels(fromChat: false)
-        chips.append(ComposerChip(id: "mission", title: labels.start, symbol: "target", tint: mission ? Palette.accent : nil))
-        if mission {
-            chips.append(ComposerChip(id: "mission-plan", title: missionPlanDoc ? labels.planDoc : labels.stepsOnly, symbol: missionReview ? "checklist" : "doc.text"))
         }
         composer.placeholder = mission ? labels.placeholder : "Describe the task"
         composer.chips = chips
@@ -485,7 +484,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     private func modelMenu() -> UIMenu {
         let byHarness = Dictionary(grouping: models, by: \.harness)
-        return UIMenu(title: "Model", children: [profileSection()].compactMap { $0 } + byHarness.keys.sorted().map { h in
+        return UIMenu(children: [profileSection()].compactMap { $0 } + byHarness.keys.sorted().map { h in
             UIMenu(title: byHarness[h]!.first!.harnessLabel, options: .displayInline, children: byHarness[h]!.map { m in
                 UIAction(title: m.label, image: BrandMarks.image(for: h, side: 16), state: m.harness == draft.harness && m.id == draft.model ? .on : .off) { [weak self] _ in
                     self?.draft.harness = m.harness

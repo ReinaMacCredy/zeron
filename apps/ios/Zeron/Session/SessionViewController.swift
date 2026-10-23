@@ -100,6 +100,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             still.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
         ])
         missionStrip.configuration?.cornerStyle = .capsule
+        missionStrip.configuration?.baseForegroundColor = Palette.text
+        missionStrip.configuration?.background.visualEffect = UIBlurEffect(style: .systemThickMaterial)
+        missionStrip.configuration?.background.backgroundColor = Palette.elevated.withAlphaComponent(0.85)
+        missionStrip.configuration?.background.strokeColor = Palette.hairline
+        missionStrip.configuration?.background.strokeWidth = 1
         missionStrip.configuration?.image = UIImage(systemName: "list.bullet.rectangle")
         missionStrip.configuration?.imagePadding = 6
         missionStrip.configuration?.titleLineBreakMode = .byTruncatingTail
@@ -265,7 +270,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private var voiceToken: AnyObject?
     private var hostsToken: AnyObject?
     private var missionToken: AnyObject?
-    private let missionStrip = UIButton(configuration: .gray())
+    private let missionStrip = UIButton(configuration: .plain())
     private var mission = false
     private var missionReview = true
     private var missionPlanDoc = true
@@ -626,6 +631,13 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             list.verticalScrollIndicatorInsets.bottom = inset
             if following { list.contentOffset.y = list.maxOffsetY }
         }
+        let top = missionStrip.isHidden ? 0 : missionStrip.frame.maxY + 6 - view.safeAreaInsets.top
+        if abs(list.contentInset.top - top) > 0.5 {
+            let atTop = list.contentOffset.y <= -list.adjustedContentInset.top + 0.5
+            list.contentInset.top = top
+            list.verticalScrollIndicatorInsets.top = top
+            if atTop { list.contentOffset.y = -list.adjustedContentInset.top }
+        }
     }
 
     // MARK: Queue editing (host lease)
@@ -743,13 +755,14 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         let labels = missionComposerLabels(fromChat: true)
         let missionAvailable = app.row(chatId)?.sidechatOf == nil
         if !missionAvailable { mission = false }
-        var chips = c.chips
+        var chips: [ComposerChip] = []
         if missionAvailable {
             chips.append(ComposerChip(id: "mission", title: labels.start, symbol: "target", tint: mission ? Palette.accent : nil))
         }
         if mission {
             chips.append(ComposerChip(id: "mission-plan", title: missionPlanDoc ? labels.planDoc : labels.stepsOnly, symbol: missionReview ? "checklist" : "doc.text"))
         }
+        chips += c.chips
         composer.placeholder = mission ? labels.placeholder : c.placeholder
         composer.prediction = editingQueueId == nil && !mission ? c.prediction : nil
         composer.chips = chips
@@ -853,12 +866,14 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private func syncMission() {
         guard let strip = app.client?.missionStrip(chatId: chatId) else {
             missionStrip.isHidden = true
+            view.setNeedsLayout()
             return
         }
         var title = AttributedString("\(strip.role) · \(strip.title) · \(strip.done)/\(strip.total)")
         title.font = Fonts.ui(.sansMedium, 13)
         missionStrip.configuration?.attributedTitle = title
         missionStrip.isHidden = false
+        view.setNeedsLayout()
     }
 
     private func missionPlanMenu() -> UIMenu {
@@ -1106,14 +1121,22 @@ final class StatusPill: UIControl {
 enum Drafts {
     private static let key = "drafts"
 
+    /// The demo (and the UI tests on it) keep drafts in memory only: one
+    /// run's leftovers must not seed the next.
+    static let persists = !ProcessInfo.processInfo.arguments.contains("-demo")
+    private static var volatile: [String: String] = [:]
+
+    private static var all: [String: String] {
+        get { persists ? (UserDefaults.standard.dictionary(forKey: key) as? [String: String]) ?? [:] : volatile }
+        set { if persists { UserDefaults.standard.set(newValue, forKey: key) } else { volatile = newValue } }
+    }
+
     static func load(_ chatId: String) -> String {
-        (UserDefaults.standard.dictionary(forKey: key) as? [String: String])?[chatId] ?? ""
+        all[chatId] ?? ""
     }
 
     static func save(_ chatId: String, _ text: String) {
-        var all = (UserDefaults.standard.dictionary(forKey: key) as? [String: String]) ?? [:]
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         all[chatId] = trimmed.isEmpty ? nil : text
-        UserDefaults.standard.set(all, forKey: key)
     }
 }

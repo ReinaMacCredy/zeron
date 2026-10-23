@@ -159,7 +159,20 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         let refresh = UIRefreshControl()
         refresh.addAction(UIAction { [weak self, weak refresh] _ in
             guard let self else { return refresh?.endRefreshing() ?? () }
-            self.app.refresh { refresh?.endRefreshing() }
+            self.app.refresh { [weak self] in
+                guard let self, let cv = collectionView else { return refresh?.endRefreshing() ?? () }
+                // UIKit's animated end collides with its deferred top pin on the first pull after launch and settles ~17pt past the top.
+                let from = cv.contentOffset
+                let shell = navigationController?.view
+                UIView.performWithoutAnimation {
+                    refresh?.endRefreshing()
+                    shell?.layoutIfNeeded()
+                }
+                let top = CGPoint(x: from.x, y: -cv.adjustedContentInset.top)
+                guard from.y < top.y, !cv.isTracking else { return }
+                cv.contentOffset = from
+                UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) { cv.contentOffset = top }
+            }
         }, for: .valueChanged)
         refresh.accessibilityIdentifier = "pull-to-refresh"
         collectionView.refreshControl = refresh

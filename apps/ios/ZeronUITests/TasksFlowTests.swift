@@ -23,12 +23,6 @@ final class TasksFlowTests: XCTestCase {
         app.cells[id].firstMatch
     }
 
-    private func scrollTo(_ element: XCUIElement, in list: XCUIElement, back: Bool = false) {
-        for _ in 0..<8 where !(element.exists && element.isHittable) {
-            if back { list.swipeDown() } else { list.swipeUp() }
-        }
-    }
-
     func testApproveAndRun() {
         let app = launch("tasks:mission:task-ios-install")
         let approve = cell(app, "mc-approve")
