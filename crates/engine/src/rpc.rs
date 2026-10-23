@@ -946,7 +946,7 @@ enum MutateParams {
         cwd: Option<String>,
         /// The chat whose agent is opening this one (thread tools); sidebar
         /// grouping only.
-        #[serde(default)]
+        #[serde(default, alias = "parentChatId")]
         created_by_chat_id: Option<String>,
         /// Run on Cloud (the checkout picker's Cloud): the chat gets its own
         /// Cloud machine, cloning the project's GitHub repository.

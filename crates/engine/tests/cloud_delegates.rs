@@ -119,6 +119,17 @@ async fn a_cloud_machine_starts_delegates_of_its_own_chat() {
     // The edge writes the delegate's row; here it arrives as registry sync
     // would, a moment after the session starts.
     let workspace = core.workspace.clone();
+    workspace
+        .create_chat_hosted(
+            "main",
+            None,
+            Some("cloud-main"),
+            Some("cloud-main"),
+            None,
+            Some("/home/user/app".into()),
+            None,
+        )
+        .unwrap();
     let landed = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         workspace

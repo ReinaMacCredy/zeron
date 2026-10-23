@@ -1723,7 +1723,12 @@ pub fn rows_for_entry(
         return rows;
     }
 
-    if entry.role == MessageRole::System {
+    if entry.role == MessageRole::System
+        && !entry
+            .parts
+            .iter()
+            .any(|p| matches!(p, MessagePart::Switch { .. }))
+    {
         if let Some(record) = entry.parts.iter().find_map(|p| match p {
             MessagePart::Classifier { record, .. } => Some(record),
             _ => None,
