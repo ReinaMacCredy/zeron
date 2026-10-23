@@ -67,13 +67,14 @@ impl SessionHandle {
         let entries = transcript.iter().map(|entry| entry.message.as_ref());
         let turn_start = latest_prompt(entries.clone());
         let mut agents = agent_runs(entries, turn_start.unwrap_or(0));
+        let pending_review = super::review::pending_task(&lock(&self.core.state));
         let chat = self.core.client().ok().and_then(|client| {
             let (state, _) = client.workspace.state();
             agents.extend(delegate_runs(
                 &state.chats,
                 &self.core.chat_id,
                 turn_start.map_or(0, |ix| transcript[ix].message.created_at),
-                None,
+                pending_review.as_deref(),
             ));
             client.workspace.chat(&self.core.chat_id)
         });

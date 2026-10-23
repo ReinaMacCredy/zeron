@@ -314,4 +314,5 @@ pub struct ComposerState {
     pub prediction: Option<String>,
     pub review: Option<super::ReviewChip>,
     pub staged_comments: Vec<zeron_proto::comments::ReviewComment>,
+    pub review_revision: u64,
 }

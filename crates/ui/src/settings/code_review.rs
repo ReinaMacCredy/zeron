@@ -34,9 +34,8 @@ impl CodeReviewPage {
                 this.load(cx);
             }
         });
-        let instructions = cx.new(|cx| {
-            ComposerInput::new("Focus on correctness and security. Ignore formatting.", cx)
-        });
+        let instructions =
+            cx.new(|cx| ComposerInput::new(crate::review::INSTRUCTIONS_PLACEHOLDER, cx));
         let instructions_events = cx.subscribe(
             &instructions,
             |_: &mut Self, _, _: &ComposerInputEvent, cx| cx.notify(),
@@ -270,8 +269,7 @@ impl CodeReviewPage {
                             &theme,
                             false,
                             "Thinking",
-                            "How hard the reviewer thinks. Default leaves it to the agent."
-                                .to_string(),
+                            crate::review::THINKING_HINT.to_string(),
                         )
                         .child(
                             div()
@@ -329,7 +327,7 @@ impl CodeReviewPage {
                         &theme,
                         false,
                         "Model",
-                        "Shown when the reviewer is an agent.".to_string(),
+                        crate::review::MODEL_HINT.to_string(),
                     )
                     .child(select),
                 )
@@ -341,9 +339,7 @@ impl CodeReviewPage {
                 &theme,
                 true,
                 "Reviewer",
-                "Auto picks a profile named reviewer, else the other agent family from the \
-                 chat's."
-                    .to_string(),
+                crate::review::REVIEWER_HINT.to_string(),
             )
             .child(reviewer_select),
         )
@@ -371,10 +367,7 @@ impl CodeReviewPage {
                             div()
                                 .text_size(crate::typography::ui_rems(12.0))
                                 .text_color(theme.text_muted)
-                                .child(
-                                    "Added to every review prompt, for every reviewer, before the \
-                                     findings format it must follow.",
-                                ),
+                                .child(crate::review::INSTRUCTIONS_HINT),
                         )
                         .child(popover::dialog_field(
                             crate::composer::growing_field(
@@ -446,7 +439,7 @@ impl Render for CodeReviewPage {
                                 .child(widgets::page_header(&theme, "Code review", None))
                                 .child(widgets::page_subtitle(
                                     &theme,
-                                    "Who reviews changes when you press Review in the composer.",
+                                    crate::review::SETTINGS_SUBTITLE,
                                 ))
                                 .child(card.mt(px(16.0)))
                                 .child(
@@ -455,10 +448,7 @@ impl Render for CodeReviewPage {
                                         .px(px(8.0))
                                         .text_size(crate::typography::ui_rems(12.0))
                                         .text_color(theme.text_muted)
-                                        .child(
-                                            "A pick in the Review button's menu applies to that \
-                                             chat only and overrides this default.",
-                                        ),
+                                        .child(crate::review::OVERRIDE_NOTE),
                                 )
                                 .child(self.render_instructions(&theme, cx)),
                         ),

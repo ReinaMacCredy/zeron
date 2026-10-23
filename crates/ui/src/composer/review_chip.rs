@@ -628,7 +628,7 @@ impl Composer {
         let (icon, label, color) = if stopping {
             (
                 crate::icons::STOP,
-                SharedString::from("Stop review"),
+                SharedString::from(review::STOP_LABEL),
                 theme.text,
             )
         } else {
@@ -673,7 +673,7 @@ impl Composer {
                 }))
             })
             .tooltip(crate::settings::widgets::text_tooltip(if stoppable {
-                SharedString::from("Stop the reviewer. The chat keeps running.")
+                SharedString::from(review::STOP_TIP)
             } else {
                 tip
             }))
@@ -710,7 +710,7 @@ impl Composer {
             .id("composer-review-menu")
             .debug_selector(|| "composer-review-menu".into())
             .role(gpui::Role::Button)
-            .aria_label("Review options")
+            .aria_label(review::REVIEW_OPTIONS)
             .aria_expanded(self.review.menu.is_open())
             .h_full()
             .px(px(5.0))
@@ -776,10 +776,13 @@ impl Composer {
         let Some(target) = self.review_target(cx) else {
             return;
         };
-        match self.review_look(&target, scope, cx) {
-            Some(Look::Findings(_)) => self.open_review_findings(cx),
-            Some(Look::Busy | Look::Empty(_)) | None => {}
-            Some(_) => self.start_review(scope, cx),
+        match self
+            .review_look(&target, scope, cx)
+            .map(|look| look.action())
+        {
+            Some(review::ChipAction::OpenFindings) => self.open_review_findings(cx),
+            Some(review::ChipAction::Start) => self.start_review(scope, cx),
+            Some(review::ChipAction::Inert) | None => {}
         }
     }
 
@@ -1024,10 +1027,10 @@ impl Composer {
                 }
                 this.close_review_menu(cx);
             }))
-            .child(popover::menu_heading(&popup, "Scope"))
+            .child(popover::menu_heading(&popup, review::SCOPE_HEADING))
             .children(rows)
             .child(popover::menu_separator())
-            .child(popover::menu_heading(&popup, "Reviewer"))
+            .child(popover::menu_heading(&popup, review::REVIEWER_HEADING))
             .children(reviewer_rows)
             .child(popover::menu_separator())
             .child(review_now)
@@ -1323,7 +1326,7 @@ impl Composer {
                         .child(
                             div()
                                 .flex_1()
-                                .child(popover::menu_heading(popup, "Thinking")),
+                                .child(popover::menu_heading(popup, review::THINKING_HEADING)),
                         )
                         .child(
                             div()
@@ -1354,13 +1357,13 @@ impl Composer {
             .id("composer-review-scope-commit")
             .relative()
             .role(gpui::Role::MenuItemRadio)
-            .aria_label("Commit")
+            .aria_label(review::COMMIT_LABEL)
             .gap(px(8.0))
             .child(crate::settings::widgets::select_check(
                 popup,
                 selected == ReviewScope::Commit,
             ))
-            .child(div().flex_1().child("Commit"))
+            .child(div().flex_1().child(review::COMMIT_LABEL))
             .children(picked.map(|pick| {
                 div()
                     .font_family(popup.font_mono.clone())
@@ -1579,7 +1582,7 @@ impl Composer {
                                 .py(px(6.0))
                                 .text_size(crate::typography::ui_rems(12.0))
                                 .text_color(popup.text_faint)
-                                .child("No matching commits"),
+                                .child(review::NO_MATCHING_COMMITS),
                         )
                     }),
             )
@@ -1632,7 +1635,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let run = self.review_run_for(doc_id, cx)?;
-        let listed = run.status == RunStatus::Done && !run.findings.is_empty();
+        let listed = run.findings_listed();
         if !listed && run.note.is_none() {
             return None;
         }
@@ -1644,7 +1647,7 @@ impl Composer {
             div()
                 .pb(px(4.0))
                 .text_color(theme.danger)
-                .child(format!("Review again failed: {message}"))
+                .child(review::retry_failed(&message))
         });
         let rows = run.findings.iter().map(|finding| {
             let (tint, wash) = review::severity_colors(finding.severity, theme);
@@ -1732,7 +1735,7 @@ impl Composer {
                             .hover(|s| s.bg(theme.glass_hover()))
                             .role(gpui::Role::Button)
                             .aria_label(format!("Dismiss {}", finding.title))
-                            .tooltip(crate::settings::widgets::text_tooltip("Dismiss"))
+                            .tooltip(crate::settings::widgets::text_tooltip(review::DISMISS))
                             .child(
                                 crate::icons::icon(crate::icons::CLOSE)
                                     .size(px(10.0))
@@ -1789,7 +1792,7 @@ impl Composer {
                                 el.child(
                                     button(
                                         "review-fix-all",
-                                        format!("Fix {fixable} remaining").into(),
+                                        review::fix_remaining(fixable).into(),
                                         true,
                                     )
                                     .on_click(cx.listener(
@@ -1801,7 +1804,7 @@ impl Composer {
                                 )
                             })
                             .child(
-                                button("review-open-changes", "Open Changes".into(), false)
+                                button("review-open-changes", review::OPEN_CHANGES.into(), false)
                                     .on_click(cx.listener(|_, _, _, cx| {
                                         cx.stop_propagation();
                                         cx.emit(ComposerEvent::OpenChanges);

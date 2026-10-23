@@ -85,6 +85,16 @@ pub fn selection_label(count: usize) -> String {
     }
 }
 
+pub const CHANGES_TITLE: &str = "Changes";
+
+pub fn files_label(count: usize) -> String {
+    if count == 1 {
+        "1 file".to_string()
+    } else {
+        format!("{count} files")
+    }
+}
+
 pub fn comment_label(count: usize) -> String {
     if count == 1 {
         "1 comment".to_string()

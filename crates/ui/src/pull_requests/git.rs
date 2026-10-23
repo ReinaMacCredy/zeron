@@ -325,11 +325,7 @@ fn conflict_note(conflicts: &[String]) -> String {
     } else {
         shown.join(", ")
     };
-    let count = if conflicts.len() == 1 {
-        "1 file".to_string()
-    } else {
-        format!("{} files", conflicts.len())
-    };
+    let count = zeron_proto::badges::files_label(conflicts.len());
     format!(
         "The pop stopped on conflicts in {count} ({files}). The stash is kept; resolve the conflicts, then delete it."
     )

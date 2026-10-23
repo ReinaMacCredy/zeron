@@ -13,6 +13,29 @@ pub const REQUEST_PREFIX: &str = "zeron-review:";
 pub const CARD_PREFIX: &str = "review-finding:";
 pub const STAGED_PREFIX: &str = "review-staged:";
 const FENCE: &str = "```zeron-review";
+pub const SETTINGS_SUBTITLE: &str = "Who reviews changes when you press Review in the composer.";
+pub const REVIEWER_HINT: &str =
+    "Auto picks a profile named reviewer, else the other agent family from the chat's.";
+pub const MODEL_HINT: &str = "Shown when the reviewer is an agent.";
+pub const THINKING_HINT: &str = "How hard the reviewer thinks. Default leaves it to the agent.";
+pub const INSTRUCTIONS_HINT: &str =
+    "Added to every review prompt, for every reviewer, before the findings format it must follow.";
+pub const INSTRUCTIONS_PLACEHOLDER: &str = "Focus on correctness and security. Ignore formatting.";
+pub const OVERRIDE_NOTE: &str =
+    "A pick in the Review button's menu applies to that chat only and overrides this default.";
+pub const STOP_LABEL: &str = "Stop review";
+pub const STOP_TIP: &str = "Stop the reviewer. The chat keeps running.";
+pub const SCOPE_HEADING: &str = "Scope";
+pub const REVIEWER_HEADING: &str = "Reviewer";
+pub const COMMIT_LABEL: &str = "Commit";
+pub const OPEN_CHANGES: &str = "Open Changes";
+pub const DISMISS: &str = "Dismiss";
+pub const FIX: &str = "Fix";
+pub const CLEAR_COMMENTS: &str = "Clear all";
+pub const THINKING_HEADING: &str = "Thinking";
+pub const NO_MATCHING_COMMITS: &str = "No matching commits";
+pub const REVIEW_OPTIONS: &str = "Review options";
+pub const REVIEW_CHANGES: &str = "Review changes";
 const REANCHOR_WINDOW: u32 = 40;
 
 pub fn is_commit_id(rev: &str) -> bool {
@@ -703,6 +726,10 @@ impl ReviewRun {
         self.status == RunStatus::Running && self.task_id.is_some()
     }
 
+    pub fn findings_listed(&self) -> bool {
+        self.status == RunStatus::Done && !self.findings.is_empty()
+    }
+
     pub fn apply_read(&mut self, outcome: ReadOutcome, reviewed: Option<&str>, restored: bool) {
         match outcome {
             ReadOutcome::Stopped => self.status = RunStatus::Stopped,
@@ -1222,6 +1249,47 @@ impl Look {
             _ => None,
         }
     }
+
+    pub fn action(&self) -> ChipAction {
+        match self {
+            Self::Findings(_) => ChipAction::OpenFindings,
+            Self::Busy | Self::Empty(_) => ChipAction::Inert,
+            _ => ChipAction::Start,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChipAction {
+    OpenFindings,
+    Start,
+    Inert,
+}
+
+pub fn retry_failed(message: &str) -> String {
+    format!("Review again failed: {message}")
+}
+
+pub fn fix_remaining(count: usize) -> String {
+    format!("Fix {count} remaining")
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StagedLine {
+    pub severity: Option<Severity>,
+    pub text: String,
+    pub location: String,
+}
+
+pub fn staged_line(comment: &ReviewComment) -> StagedLine {
+    let (severity, title, detail) = split_finding(&comment.body);
+    let text = if title.is_empty() { detail } else { title };
+    let file = comment.cite_path().rsplit('/').next().unwrap_or_default();
+    StagedLine {
+        severity,
+        text: text.lines().next().unwrap_or_default().to_string(),
+        location: format!("{file}:{}", comment.line),
+    }
 }
 
 pub fn capitalize(text: &str) -> String {
@@ -1398,6 +1466,7 @@ pub fn commit_matches(subject: &str, sha: &str, query: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DelegationWake;
     use crate::patch::parse_patch;
 
     const PATCH: &str = "diff --git a/src/session.rs b/src/session.rs
@@ -1710,6 +1779,7 @@ mod tests {
             finding.id = format!("F{}", ix + 1);
         }
         let mut delegation = delegation();
+        delegation.wake = DelegationWake::Always;
         delegation.finding_outcomes.insert(
             "F1".into(),
             FindingOutcome {

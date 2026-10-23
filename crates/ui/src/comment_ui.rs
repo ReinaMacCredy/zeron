@@ -235,8 +235,8 @@ pub(crate) fn render_finding_card<T: 'static>(
                                 .text_color(theme.text)
                                 .child(SharedString::from(title.clone())),
                         )
-                        .child(action("Fix", true, fix))
-                        .child(action("Dismiss", false, dismiss)),
+                        .child(action(crate::review::FIX, true, fix))
+                        .child(action(crate::review::DISMISS, false, dismiss)),
                 )
                 .when(!detail.is_empty(), |el| {
                     el.child(

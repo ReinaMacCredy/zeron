@@ -94,15 +94,11 @@ impl Composer {
     ) -> AnyElement {
         let popup = theme.for_popup();
         let rows = comments.iter().map(|comment| {
-            let (severity, title, detail) = crate::review::split_finding(&comment.body);
-            let text = if title.is_empty() { detail } else { title };
-            let text = text.lines().next().unwrap_or_default().to_string();
-            let file = comment
-                .cite_path()
-                .rsplit('/')
-                .next()
-                .unwrap_or_default()
-                .to_string();
+            let crate::review::StagedLine {
+                severity,
+                text,
+                location,
+            } = crate::review::staged_line(comment);
             let id = comment.id.clone();
             let row_id = SharedString::from(format!("composer-comment-{}", comment.id));
             popover::menu_row(&popup, false, row_id.clone())
@@ -131,7 +127,7 @@ impl Composer {
                         .font_family(popup.font_mono.clone())
                         .text_size(crate::typography::ui_rems(10.5))
                         .text_color(popup.text_faint)
-                        .child(format!("{file}:{}", comment.line)),
+                        .child(location),
                 )
                 .child(
                     div()
@@ -166,7 +162,7 @@ impl Composer {
             .role(gpui::Role::MenuItem)
             .aria_label("Clear all comments")
             .text_color(popup.text_muted)
-            .child("Clear all")
+            .child(crate::review::CLEAR_COMMENTS)
             .on_click(cx.listener(|this, _, _, cx| this.clear_staged_comments(cx)));
         let menu = popover::popover_card(&popup)
             .id("composer-comments-popup-card")

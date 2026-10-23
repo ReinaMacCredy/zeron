@@ -35,7 +35,7 @@ use zeron_proto::{
 };
 
 pub use background::BackgroundRoster;
-pub use review::{ReviewChip, ReviewSnapshot, model_levels};
+pub use review::{NextReviewer, ReviewChip, ReviewSnapshot, model_levels};
 pub use snapshot::{
     AppendHint, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest, LiveStatus,
     LocalEcho, PendingKind, PendingSend, QueueGate, QueueItem, RoomState, SessionSnapshot,
@@ -680,6 +680,7 @@ impl SessionCore {
             prediction: st.prediction.as_ref().map(|p| p.text.clone()),
             review: review::chip(&st, review::target(client, &self.chat_id).as_ref()),
             staged_comments: review::staged(&st),
+            review_revision: review::revision(&st),
         };
         let current = self.composer();
         next.revision = current.revision;
@@ -843,6 +844,7 @@ fn empty_composer(chat_id: &str) -> ComposerState {
         prediction: None,
         review: None,
         staged_comments: Vec::new(),
+        review_revision: 0,
     }
 }
 

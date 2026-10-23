@@ -26,6 +26,7 @@ pub(super) struct ReviewState {
     staged: Vec<ReviewComment>,
     options_loading: bool,
     hand_busy: bool,
+    revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,7 +35,13 @@ pub struct ReviewChip {
     pub look: Look,
     pub picked: Option<String>,
     pub stoppable: bool,
-    pub next_reviewer: Option<ReviewerChoice>,
+    pub next_reviewer: Option<NextReviewer>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NextReviewer {
+    pub name: String,
+    pub brand: Option<HarnessId>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,13 +107,33 @@ pub(super) fn chip(st: &CoreState, target: Option<&Target>) -> Option<ReviewChip
         next_reviewer: (!busy
             && !matches!(look, Look::Findings(_))
             && review.reviewer_changed(&effective))
-        .then_some(effective),
+        .then(|| {
+            let options = st.review.options.clone().unwrap_or_default();
+            let (harness, model) = review::choice_agent(&options, &effective, target.harness);
+            NextReviewer {
+                name: review::choice_name(st.review.options.as_ref(), &effective, target.harness),
+                brand: HarnessId::brand_of(harness, model.as_deref()),
+            }
+        }),
         look,
     })
 }
 
+pub(super) fn revision(st: &CoreState) -> u64 {
+    st.review.revision
+}
+
 pub(super) fn staged(st: &CoreState) -> Vec<ReviewComment> {
     st.review.staged.clone()
+}
+
+pub(super) fn pending_task(st: &CoreState) -> Option<String> {
+    st.review
+        .chat
+        .run
+        .as_ref()
+        .filter(|run| !run.findings.is_empty())
+        .and_then(|run| run.task_id.clone())
 }
 
 fn client_of(inner: &Arc<ClientInner>) -> Client {
@@ -209,6 +236,13 @@ async fn checkout_diff(
 }
 
 impl SessionCore {
+    fn update_review(&self, f: impl FnOnce(&mut CoreState)) {
+        self.update_state(|st| {
+            f(st);
+            st.review.revision += 1;
+        });
+    }
+
     fn review_core(&self, client: &Arc<ClientInner>) -> Option<Arc<SessionCore>> {
         client.session_core(&self.chat_id)
     }
@@ -332,7 +366,7 @@ impl SessionCore {
                 Err(err) => ReadOutcome::Failed(err.to_string()),
                 Ok(view) => review::read_task_view(&view),
             };
-            self.update_state(|st| {
+            self.update_review(|st| {
                 if let Some(run) = st.review.chat.run.as_mut()
                     && run.task_id.as_deref() == Some(task_id.as_str())
                 {
@@ -361,7 +395,7 @@ impl SessionCore {
             if let Err(err) = &handed {
                 tracing::warn!(error = %err, "review findings not handed");
             }
-            self.update_state(|st| {
+            self.update_review(|st| {
                 st.review.hand_busy = false;
                 if handed.is_err()
                     && let Some(run) = st.review.chat.run.as_mut()
@@ -394,7 +428,7 @@ impl SessionCore {
                     checkout_diff(&client, &target, scope, commit.as_deref()).await,
                 ));
             }
-            self.update_state(|st| {
+            self.update_review(|st| {
                 let review = &mut st.review.chat;
                 if key.is_some() && review.stats_key != key {
                     return;
@@ -411,7 +445,7 @@ impl SessionCore {
             let host = client_of(&client);
             let options = host.reviewer_options(&device_id).await;
             let settings = host.review_settings(&device_id).await.unwrap_or_default();
-            self.update_state(|st| {
+            self.update_review(|st| {
                 st.review.options = Some(options);
                 st.review.settings = Some(settings);
                 st.review.options_loading = false;
@@ -479,12 +513,12 @@ impl SessionHandle {
 
     pub fn set_review_scope(&self, scope: ReviewScope) {
         self.core
-            .update_state(|st| st.review.chat.scope = Some(scope));
+            .update_review(|st| st.review.chat.scope = Some(scope));
     }
 
     pub fn set_reviewer(&self, choice: ReviewerChoice) {
         self.core
-            .update_state(|st| st.review.chat.reviewer = Some(choice));
+            .update_review(|st| st.review.chat.reviewer = Some(choice));
     }
 
     pub fn load_review_commits(&self) -> Result<()> {
@@ -494,7 +528,7 @@ impl SessionHandle {
             let page = client_of(&client)
                 .git_history(&target.device_id, &target.cwd, 0, COMMIT_LIST_LIMIT)
                 .await;
-            core.update_state(|st| {
+            core.update_review(|st| {
                 st.review.commits = Some(page.map(|page| page.commits).unwrap_or_default());
             });
         });
@@ -503,7 +537,7 @@ impl SessionHandle {
 
     pub fn pick_review_commit(&self, sha: &str, subject: &str) -> Result<()> {
         let (client, target) = self.review_target()?;
-        self.core.update_state(|st| {
+        self.core.update_review(|st| {
             let review = &mut st.review.chat;
             review.commit = Some(CommitPick {
                 sha: sha.to_owned(),
@@ -531,7 +565,7 @@ impl SessionHandle {
             let models = client_of(&client)
                 .list_models(&target.device_id, &wire)
                 .await;
-            core.update_state(|st| {
+            core.update_review(|st| {
                 st.review.models.insert(harness, models);
             });
         });
@@ -567,7 +601,7 @@ impl SessionHandle {
                     .ok_or_else(|| "The reviewer did not start".to_string())
             });
         let failed = started.as_ref().err().cloned();
-        self.core.update_state(|st| {
+        self.core.update_review(|st| {
             if let Some(run) = st.review.chat.run.as_mut() {
                 run.apply_start(started, previous);
             }
@@ -592,9 +626,30 @@ impl SessionHandle {
         }
     }
 
+    pub async fn review_changes(&self) -> Result<String> {
+        let (client, target) = self.review_target()?;
+        let (scope, commit) = {
+            let st = lock(&self.core.state);
+            let review = &st.review.chat;
+            match review.run.as_ref() {
+                Some(run) => (run.scope, run.commit.clone()),
+                None => (
+                    review
+                        .scope
+                        .unwrap_or_else(|| ReviewScope::default_for(target.worktree)),
+                    review.commit.as_ref().map(|pick| pick.sha.clone()),
+                ),
+            }
+        };
+        checkout_diff(&client, &target, scope, commit.as_deref())
+            .await
+            .map(|(diff, _)| diff.patch)
+            .map_err(ClientError::HostError)
+    }
+
     pub fn fix_review_findings(&self, only: Option<&str>) -> usize {
         let mut staged = 0;
-        self.core.update_state(|st| {
+        self.core.update_review(|st| {
             let comments = st.review.chat.take_fixable(only);
             staged = comments.len();
             for comment in comments {
@@ -608,11 +663,11 @@ impl SessionHandle {
     }
 
     pub fn dismiss_review_finding(&self, id: &str) {
-        self.core.update_state(|st| st.review.chat.dismiss(id));
+        self.core.update_review(|st| st.review.chat.dismiss(id));
     }
 
     pub fn remove_staged_comment(&self, id: &str) {
-        self.core.update_state(|st| {
+        self.core.update_review(|st| {
             st.review.staged.retain(|comment| comment.id != id);
             st.review.chat.withdraw_comment(id);
         });
