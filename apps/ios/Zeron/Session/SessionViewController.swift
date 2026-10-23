@@ -20,6 +20,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private var shown = SessionChrome()
     private let openedAt = CACurrentMediaTime()
     private var reportedOpen = false
+    private var routedPanel = false
 
     init?(app: AppModel, chatId: String) {
         guard let source = app.sessionSource(chatId) else { return nil }
@@ -44,6 +45,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         navigationItem.largeTitleDisplayMode = .never
         navigationItem.titleView = titleView
         navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: sessionMenu())
+        navigationItem.rightBarButtonItem?.accessibilityIdentifier = "session-menu"
         // The session has its own composer, so the tab bar's voice control
         // steps aside with the accessory; the call stays a tap away up here.
         let voiceBar = VoiceBarItem(app: app, host: self)
@@ -296,6 +298,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         (splitViewController as? SplitRootController)?.sessionDidAppear(chatId)
         list.settleEdgeEffect()
         showTranscriptIfReady()
+        openRoutedPanel()
         if holdingTranscript {
             // Nothing to lay out (an empty or unreachable session): stop
             // holding eventually rather than spin forever.
@@ -361,7 +364,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
 
     private func perform(_ action: CardAction) {
         switch action {
-        case let .consent(requestId, questionId, answer):
+        case let .consent(requestId, questionId, answer, _):
             source.answerConsent(requestId: requestId, questionId: questionId, answer: answer)
         case .enableComputer:
             composer.text = computerUseEnablingDraft(draft: composer.text)
@@ -430,6 +433,58 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         let nav = UINavigationController(rootViewController: info)
         if let s = nav.sheetPresentationController { s.detents = [.medium(), .large()]; s.prefersGrabberVisible = true }
         present(nav, animated: true)
+    }
+
+    private func openTerminal(_ terminalId: String?) {
+        let nav = UINavigationController(rootViewController: TerminalViewController(source: source, terminalId: terminalId))
+        if let s = nav.sheetPresentationController { s.detents = [.medium(), .large()]; s.selectedDetentIdentifier = .large; s.prefersGrabberVisible = true }
+        present(nav, animated: true)
+    }
+
+    private func openProjectActions() {
+        let actions = ProjectActionsViewController(source: source)
+        actions.openTerminal = { [weak actions] id in
+            actions?.navigationController?.pushViewController(TerminalViewController(source: self.source, terminalId: id), animated: true)
+        }
+        let nav = UINavigationController(rootViewController: actions)
+        if let s = nav.sheetPresentationController { s.detents = [.medium(), .large()]; s.prefersGrabberVisible = true }
+        present(nav, animated: true)
+    }
+
+    private func confirmComputerStop() {
+        let host = shown.hostName ?? "the Mac"
+        let alert = UIAlertController(
+            title: "Stop computer use?",
+            message: "Zeron stops using apps on \(host) for this chat now. Other chats keep their access.",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Stop", style: .destructive) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                do {
+                    let stopped = try await self.source.computerStop()
+                    Toast.show(stopped ? "Stopped computer use" : "Computer use had already stopped", in: self.view.window)
+                } catch {
+                    Toast.show(Self.hostFailure(error, fallback: "Couldn't reach the host. Try again."), in: self.view.window)
+                }
+            }
+        })
+        present(alert, animated: true)
+    }
+
+    private func openRoutedPanel() {
+        let args = ProcessInfo.processInfo.arguments
+        guard !routedPanel, let i = args.firstIndex(of: "-route"), i + 1 < args.count else { return }
+        let parts = args[i + 1].dropFirst(5).split(separator: "/", maxSplits: 1).map(String.init)
+        guard args[i + 1].hasPrefix("chat:"), parts.count == 2, parts[0] == chatId else { return }
+        routedPanel = true
+        switch parts[1] {
+        case "terminal": openTerminal(nil)
+        case "actions": openProjectActions()
+        case "stop": confirmComputerStop()
+        default: break
+        }
     }
 
     private func limitActions() {
@@ -676,9 +731,14 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             guard let self else { return done([]) }
             let vm = self.app.session(self.chatId)
             let pinned = vm?.pinned ?? false
-            done([
+            let stop = self.still.receiving
+                ? [UIAction(title: "Stop Computer Use", image: UIImage(systemName: "stop.circle"), attributes: .destructive) { _ in self.confirmComputerStop() }]
+                : []
+            done(stop + [
                 UIAction(title: pinned ? "Unpin" : "Pin", image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(self.chatId, !pinned) },
                 UIAction(title: "Session Info", image: UIImage(systemName: "info.circle")) { _ in self.openInfo() },
+                UIAction(title: "Terminal", image: UIImage(systemName: "apple.terminal")) { _ in self.openTerminal(nil) },
+                UIAction(title: "Project Actions", image: UIImage(systemName: "play.rectangle")) { _ in self.openProjectActions() },
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = self.engine.frame().plainText()
                 },

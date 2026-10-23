@@ -20,11 +20,9 @@ final class ComputerSurfacesTests: XCTestCase {
         }
     }
 
-    func testCardButtonsCarryTheOldAccessibilityIdentifiers() {
-        let consent = { (answer: String) in CardAction.consent(requestId: "r", questionId: "consent", answer: answer) }
-        XCTAssertEqual(CardButtonControl.identifier(consent("Allow")), "computer-consent-allow")
-        XCTAssertEqual(CardButtonControl.identifier(consent("Deny")), "computer-consent-decline")
-        XCTAssertEqual(CardButtonControl.identifier(consent("Always allow Safari")), "computer-consent-always")
+    func testCardButtonsCarryTheCoresAccessibilityIdentifiers() {
+        let consent = CardAction.consent(requestId: "r", questionId: "consent", answer: "Deny", identifier: "computer-consent-deny")
+        XCTAssertEqual(CardButtonControl.identifier(consent), "computer-consent-deny", "the core names each button")
         XCTAssertEqual(CardButtonControl.identifier(.enableComputer), "computer-denied-enable")
     }
 

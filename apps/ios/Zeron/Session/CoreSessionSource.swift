@@ -54,6 +54,7 @@ final class CoreSessionSource: SessionSource {
         var next = SessionChrome()
         next.title = c.title
         let project = row?.project?.name ?? "No project"
+        next.hostName = c.host.name
         next.subtitle = c.host.name.map { "\(project) @ \($0)" } ?? project
         next.running = c.live.turnRunning
         next.resumable = c.live.resumable
@@ -157,6 +158,12 @@ final class CoreSessionSource: SessionSource {
         guard let still = try? await handle.computerStillFrame(), let image = UIImage(data: still.image) else { return nil }
         return (still.sequence, image)
     }
+
+    func computerStop() async throws -> Bool { try await handle.computerStop() }
+    func terminals() async throws -> [TerminalTab] { try await handle.listTerminals() }
+    func terminal(_ id: String, dark: Bool) async throws -> TerminalView { try await handle.readTerminal(terminalId: id, dark: dark) }
+    func projectActions() async throws -> ProjectActions? { try await handle.listProjectActions() }
+    func runProjectAction(_ id: String) async throws -> String { try await handle.runProjectAction(actionId: id) }
 
     func queueAction(_ id: String, _ action: QueueAction) {
         switch action {
