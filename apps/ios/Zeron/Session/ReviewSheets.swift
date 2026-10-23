@@ -154,7 +154,7 @@ final class ReviewFindingsViewController: UITableViewController, ReviewReloading
     }
 
     private func openChanges(focus: String?) {
-        DiffSheetViewController.presentFindings(handle, from: self, title: findings?.changesTitle ?? "", subtitle: findings?.summary, focus: focus)
+        DiffSheetViewController.presentFindings(handle, from: self, title: findings?.changesTitle ?? "", focus: focus)
     }
 
     override func numberOfSections(in tableView: UITableView) -> Int { 1 }

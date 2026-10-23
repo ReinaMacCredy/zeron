@@ -659,7 +659,7 @@ final class CoreSessionSource: SessionSource {
     }
 
     func openChanges(from host: UIViewController, title: String) {
-        DiffSheetViewController.presentFindings(handle, from: host, title: title, subtitle: nil, focus: nil)
+        DiffSheetViewController.presentFindings(handle, from: host, title: title, focus: nil)
     }
 
     func removeStagedComment(_ id: String) {
