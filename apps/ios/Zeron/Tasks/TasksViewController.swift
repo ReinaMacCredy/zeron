@@ -247,7 +247,7 @@ final class TasksViewController: UIViewController, UICollectionViewDelegate {
         let title = { (status: TaskStatus) in page.board.first { $0.status == status }?.title ?? "" }
         for (status, rows) in [(TaskStatus.needsYou, page.needsYou), (.working, page.working), (.toDo, page.toDo), (.done, page.done)] {
             var items = rows.map(Row.task)
-            if status == .working { items = trees.running.map(Row.tree) + items }
+            if status == .working { items += trees.running.map(Row.tree) }
             if status == .done { items += trees.doneToday.map(Row.tree) }
             guard !items.isEmpty else { continue }
             snap.appendSections(["\(title(status)) · \(items.count)"])
