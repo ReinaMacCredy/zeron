@@ -78,7 +78,7 @@ final class MissionControlViewController: UIViewController, UICollectionViewDele
         self.app = app
         self.taskId = taskId
         super.init(nibName: nil, bundle: nil)
-        title = "Mission Control"
+        title = missionLabels().missionPage
         navigationItem.largeTitleDisplayMode = .never
     }
 

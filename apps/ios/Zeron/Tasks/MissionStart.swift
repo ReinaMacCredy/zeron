@@ -96,8 +96,8 @@ final class NewTaskViewController: UIViewController {
         approve.isOn = true
         approve.onTintColor = Palette.accent
 
-        let missionRow = Self.row("Run as a mission", mission)
-        approveRow.addArrangedSubview(Self.label("Approve the plan first"))
+        let missionRow = Self.row(missionLabels().planFirst, mission)
+        approveRow.addArrangedSubview(Self.label(missionLabels().reviewPlan))
         approveRow.addArrangedSubview(approve)
         approveRow.spacing = 12
         let stack = UIStackView(arrangedSubviews: [titleField, notes, hostButton, imagesButton, missionRow, approveRow])

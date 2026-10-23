@@ -913,7 +913,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         var items: [UIMenuElement] = []
         let strip = client.missionStrip(chatId: chatId)
         if let strip {
-            items.append(UIAction(title: "Mission Control", image: UIImage(systemName: "list.bullet.rectangle")) { [weak self] _ in self?.openMission() })
+            items.append(UIAction(title: missionLabels().openMissionPage, image: UIImage(systemName: "list.bullet.rectangle")) { [weak self] _ in self?.openMission() })
             items.append(UIAction(title: "Brief", image: UIImage(systemName: "doc.plaintext")) { [weak self] _ in
                 guard let self else { return }
                 self.navigationController?.pushViewController(BriefViewController(app: self.app, taskId: strip.taskId, stepId: strip.stepId), animated: true)

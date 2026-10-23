@@ -1641,7 +1641,7 @@ impl TaskCard {
                         div()
                             .text_size(ui_rems(12.5))
                             .text_color(theme.text)
-                            .child("Plan first"),
+                            .child(zeron_proto::mission::PLAN_FIRST),
                     )
                     .child(
                         div()
@@ -1660,7 +1660,7 @@ impl TaskCard {
                     .cursor_pointer()
                     .tab_index(0)
                     .role(gpui::Role::Switch)
-                    .aria_label("Plan first")
+                    .aria_label(zeron_proto::mission::PLAN_FIRST)
                     .aria_toggled(if on {
                         gpui::Toggled::True
                     } else {
@@ -1717,7 +1717,7 @@ impl TaskCard {
         )
         .debug_selector(|| "task-card-plan-mode".into());
         let review = if choice.plan_doc {
-            "Let me review the plan before it runs"
+            zeron_proto::mission::REVIEW_PLAN
         } else {
             "Show me the plan before it runs"
         };

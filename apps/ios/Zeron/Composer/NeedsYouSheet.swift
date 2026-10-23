@@ -627,7 +627,7 @@ final class NeedsYouPlanController: UIViewController {
             guard let self else { return }
             self.navigationController?.pushViewController(MissionControlViewController(app: self.app, taskId: taskId), animated: true)
         })
-        open.configuration?.title = "Open mission"
+        open.configuration?.title = missionLabels().openMissionPage
         open.accessibilityIdentifier = "needs-you-open-mission"
         let approve = UIButton(configuration: .filled(), primaryAction: UIAction { [weak self] _ in self?.approve(taskId) })
         approve.configuration?.title = "Approve and run"

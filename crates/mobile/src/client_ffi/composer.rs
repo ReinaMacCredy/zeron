@@ -813,6 +813,25 @@ pub fn chat_mission_labels() -> ChatMissionLabels {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MissionLabels {
+    pub mission_page: String,
+    pub open_mission_page: String,
+    pub plan_first: String,
+    pub review_plan: String,
+}
+
+#[uniffi::export]
+pub fn mission_labels() -> MissionLabels {
+    use zeron_proto::mission as m;
+    MissionLabels {
+        mission_page: m::MISSION_PAGE.into(),
+        open_mission_page: m::OPEN_MISSION_PAGE.into(),
+        plan_first: m::PLAN_FIRST.into(),
+        review_plan: m::REVIEW_PLAN.into(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct MissionFromChat {
     pub task_id: String,
     pub notice: Option<String>,

@@ -130,7 +130,7 @@ final class TaskSheetViewController: UIViewController, UICollectionViewDelegate 
 
         var actions: [Row] = []
         if task.mission {
-            actions.append(Row(id: "mission", title: "Open Mission Control", symbol: "list.bullet.rectangle", tint: Palette.accent, action: true))
+            actions.append(Row(id: "mission", title: missionLabels().openMissionPage, symbol: "list.bullet.rectangle", tint: Palette.accent, action: true))
         }
         if let chat = task.leadChatId {
             actions.append(Row(id: "thread:\(chat)", title: "Open thread", symbol: "bubble.left", tint: Palette.accent, action: true))
@@ -140,7 +140,7 @@ final class TaskSheetViewController: UIViewController, UICollectionViewDelegate 
         } else if task.status != .done {
             actions.append(Row(id: "start", title: "Start in a new chat", symbol: "play", tint: Palette.accent, action: true))
             actions.append(Row(id: "assign", title: "Hand to a thread", symbol: "arrowshape.turn.up.right", tint: Palette.accent, action: true))
-            actions.append(Row(id: "start-mission", title: "Run as a mission", symbol: "list.bullet.rectangle", tint: Palette.accent, action: true))
+            actions.append(Row(id: "start-mission", title: missionLabels().planFirst, symbol: "list.bullet.rectangle", tint: Palette.accent, action: true))
         }
         actions.append(task.status == .done
             ? Row(id: "undone", title: "Mark as not done", symbol: "arrow.uturn.backward", tint: Palette.text, action: true)

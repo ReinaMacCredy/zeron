@@ -415,7 +415,7 @@ impl StripTree {
                 } else {
                     item(
                         "strip-tree-menu-open",
-                        "Open mission page",
+                        zeron_proto::mission::OPEN_MISSION_PAGE,
                         icons::LUCIDE_CHEVRON_RIGHT,
                     )
                 }

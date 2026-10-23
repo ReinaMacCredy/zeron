@@ -334,6 +334,10 @@ impl ApprovalState {
 pub const HELD_APPROVAL: &str = "Plan approved · can take back";
 
 pub const START_MISSION: &str = "Start mission";
+pub const MISSION_PAGE: &str = "Mission page";
+pub const OPEN_MISSION_PAGE: &str = "Open mission page";
+pub const PLAN_FIRST: &str = "Plan first";
+pub const REVIEW_PLAN: &str = "Let me review the plan before it runs";
 pub const REVIEW_PLAN_FIRST: &str = "Review plan first";
 pub const PLAN_DOC: &str = "plan.md";
 pub const STEPS_ONLY: &str = "Steps only";
