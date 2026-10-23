@@ -589,6 +589,7 @@ fn group_icon(group: ToolGroup) -> &'static str {
     match group {
         ToolGroup::Threads => icons::CHAT_ROUND_LINE,
         ToolGroup::Workspace => icons::TERMINAL,
+        ToolGroup::UiDriver => icons::MONITOR,
         ToolGroup::Delegation => icons::BOT,
         ToolGroup::Pages => icons::GLOBE,
         ToolGroup::Devices => icons::SMARTPHONE,

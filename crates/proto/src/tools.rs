@@ -9,6 +9,7 @@ use crate::computer::ZERON_COMPUTER_TOOL_NAMES;
 pub enum ToolGroup {
     Threads,
     Workspace,
+    UiDriver,
     Delegation,
     Pages,
     Devices,
@@ -95,7 +96,7 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
     ToolGroupInfo {
         group: ToolGroup::Workspace,
         title: "Questions, terminal, actions and tasks",
-        summary: "Reach the person watching, the terminal panel, the project Actions menu, the Tasks list, Zeron's own UI and its Docs.",
+        summary: "Reach the person watching, the terminal panel, the project Actions menu, the Tasks list and Zeron's Docs.",
         tools: &[
             tool(
                 "ask_user",
@@ -108,12 +109,6 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
             tool(
                 "project_actions",
                 "Manage the saved commands in the project's Actions menu.",
-            ),
-            tool("ui_driver", "Inspect a running Zeron app's UI."),
-            needs(
-                "ui_driver_drive",
-                "Click, type and change a Zeron Dev build's UI, never the app serving the chat.",
-                "ui_driver",
             ),
             tool(
                 "tasks",
@@ -130,6 +125,19 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
             tool(
                 "docs",
                 "Read Zeron's own Docs and release notes to answer how Zeron works.",
+            ),
+        ],
+    },
+    ToolGroupInfo {
+        group: ToolGroup::UiDriver,
+        title: "UI driver",
+        summary: "Read a running Zeron app's UI and drive a Zeron Dev build.",
+        tools: &[
+            tool("ui_driver", "Inspect a running Zeron app's UI."),
+            needs(
+                "ui_driver_drive",
+                "Click, type and change a Zeron Dev build's UI, never the app serving the chat.",
+                "ui_driver",
             ),
         ],
     },

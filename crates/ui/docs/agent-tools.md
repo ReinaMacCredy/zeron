@@ -2,12 +2,13 @@ Zeron gives agents extra tools through its own MCP server, so they can work acro
 
 ## What agents can do for you
 
-The tools come in six groups, the same ones you see in Settings > Tools:
+The tools come in seven groups, the same ones you see in Settings > Tools:
 
 | Group | What the agent can do |
 | --- | --- |
 | **Threads** | List, read, and rename your chats, start a new chat, message another chat, wait for or watch chats, stop a chat's turn, archive or settle chats, and answer another chat's pending question. |
-| **Questions, terminal, actions and tasks** | Ask you questions and wait for the answers, use this chat's terminals in the terminal panel, manage the project's Actions menu, write and assign tasks on your Tasks list, plan a Mission Control task's steps, read the Zeron app's own UI, drive a Zeron Dev build's UI with a separate tool, change this chat's auto-compact window, compact its own context, and read these Docs and the release notes to answer how Zeron works. |
+| **Questions, terminal, actions and tasks** | Ask you questions and wait for the answers, use this chat's terminals in the terminal panel, manage the project's Actions menu, write and assign tasks on your Tasks list, plan a Mission Control task's steps, change this chat's auto-compact window, compact its own context, and read these Docs and the release notes to answer how Zeron works. |
+| **UI driver** | Read a running Zeron app's UI, and drive a Zeron Dev build's UI with a separate tool. |
 | **Delegation** | Run child agents on any installed provider and model, check on or cancel them, start a code review, report what it did about review findings, and manage agent profiles when you ask. |
 | **Pages and visuals** | Show live HTML pages and native charts, tables, and mockups inline in the thread. |
 | **Device hub** | Open iOS Simulators and Android Emulators in the Device panel, take screenshots of them, and close them. |
@@ -27,10 +28,10 @@ Each tool has its own switch in Settings > Tools, under its group. The names are
 | **Questions, terminal, actions and tasks** | `ask_user` | Ask you one to four questions and wait for the answers. See [When an agent asks](zeron://docs/agent-questions). |
 | | `terminal` | Use this chat's terminals. See [Terminal](zeron://docs/terminal). |
 | | `project_actions` | Manage the project's saved Actions. See [Projects and worktrees](zeron://docs/projects). |
-| | `ui_driver`, `ui_driver_drive` | Read a running Zeron app's UI, and drive a Zeron Dev build's UI. |
 | | `tasks` | Write, update, and assign tasks, and plan a mission's steps. See [Tasks](zeron://docs/tasks). |
 | | `context_settings`, `compact` | Read the chat's context settings and set its auto-compact window, and compact its own context. See [Compaction and context](zeron://docs/compaction). |
 | | `docs` | Read these Docs and the release notes to answer how Zeron works. |
+| **UI driver** | `ui_driver`, `ui_driver_drive` | Read a running Zeron app's UI, and drive a Zeron Dev build's UI. |
 | **Delegation** | `list_projects`, `list_harnesses`, `list_models`, `orchestrator_capabilities` | Look up your projects, the agents installed on this device, and the models each one offers. |
 | | `delegate_task`, `task_status`, `task_cancel` | Start a child agent, read how it is doing, and stop it. See [Delegation and subagents](zeron://docs/delegation). |
 | | `review_changes`, `resolve_findings` | Start a code review, and report what it did about each finding. See [Code review](zeron://docs/review). |
