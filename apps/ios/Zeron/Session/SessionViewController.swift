@@ -577,13 +577,14 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         let labels = missionComposerLabels(fromChat: true)
         let missionAvailable = app.row(chatId)?.sidechatOf == nil
         if !missionAvailable { mission = false }
-        var chips = c.chips
+        var chips: [ComposerChip] = []
         if missionAvailable {
             chips.append(ComposerChip(id: "mission", title: labels.start, symbol: "target", tint: mission ? Palette.accent : nil))
         }
         if mission {
             chips.append(ComposerChip(id: "mission-plan", title: missionPlanDoc ? labels.planDoc : labels.stepsOnly, symbol: missionReview ? "checklist" : "doc.text"))
         }
+        chips += c.chips
         composer.placeholder = mission ? labels.placeholder : c.placeholder
         composer.prediction = editingQueueId == nil && !mission ? c.prediction : nil
         composer.chips = chips
