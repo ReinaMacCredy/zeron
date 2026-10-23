@@ -421,6 +421,7 @@ impl InlineWebView {
             .load_html(html)
             .map_err(|e| e.to_string())?;
         HOSTS.with(|hosts| hosts.borrow_mut().push(Rc::downgrade(&host)));
+        crate::ui_driver::web::register(Rc::downgrade(&host) as _);
         Ok(Self(host))
     }
 
@@ -548,6 +549,31 @@ fn page_signal(body: &str) -> Option<InlineEvent> {
 fn reported_height(value: &serde_json::Value) -> Option<f32> {
     let height = value.get("height")?.as_f64()? as f32;
     (height.is_finite() && height > 0.0).then(|| height.min(100_000.0))
+}
+
+impl crate::ui_driver::web::Hosted for RefCell<Host> {
+    fn page(&self) -> Option<crate::ui_driver::web::Page> {
+        let host = self.try_borrow().ok()?;
+        if !host.painted() {
+            return None;
+        }
+        let (bounds, visible) = host.placed.get()?;
+        Some(crate::ui_driver::web::Page {
+            view: host.view.clone(),
+            bounds,
+            visible,
+        })
+    }
+
+    fn pressing(&self) {
+        if let Ok(host) = self.try_borrow() {
+            set_armed(&host.input, &host.key, true, "driver");
+            host._policy
+                .ivars()
+                .clicked
+                .store(now_ms(), Ordering::Relaxed);
+        }
+    }
 }
 
 impl Host {
