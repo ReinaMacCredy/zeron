@@ -1,4 +1,5 @@
 use zeron_proto::account_usage::{provider_name, used_fraction};
+use zeron_proto::computer::host_runs_computer_use;
 use zeron_proto::{AgentAccountsSnapshot, LimitResumes};
 use zeron_rpc::methods;
 
@@ -40,11 +41,14 @@ pub(super) async fn page(client: &Client, device_id: &str) -> Result<Page> {
         client.list_harnesses(device_id),
         providers::updates(client, device_id),
     );
-    let name = client
+    let device = client
         .workspace()
         .devices
         .iter()
         .find(|d| d.id == device_id)
+        .cloned();
+    let name = device
+        .as_ref()
         .map_or_else(|| "Mac".to_owned(), |d| d.name.clone());
     let mut rows = vec![
         Row::link(
@@ -93,32 +97,33 @@ pub(super) async fn page(client: &Client, device_id: &str) -> Result<Page> {
             .subtitle(Some("Auto-resume after usage limits".to_owned())),
         );
     }
-    let mut stop = Row::new(
-        "stop-computer",
-        "Stop computer use",
-        RowKind::Action { destructive: true },
-    )
-    .subtitle(Some(
-        "Every chat on this Mac stops using apps now".to_owned(),
-    ));
-    stop.actions.push(RowAction {
-        id: "stop-computer".into(),
-        title: "Stop".into(),
-        destructive: true,
-        confirm: Some(format!("Stop computer use on {name}?")),
-    });
+    let mut sections = vec![Section {
+        rows,
+        ..Section::default()
+    }];
+    if device.is_some_and(|d| host_runs_computer_use(&d.platform)) {
+        let mut stop = Row::new(
+            "stop-computer",
+            "Stop computer use",
+            RowKind::Action { destructive: true },
+        )
+        .subtitle(Some(
+            "Every chat on this Mac stops using apps now".to_owned(),
+        ));
+        stop.actions.push(RowAction {
+            id: "stop-computer".into(),
+            title: "Stop".into(),
+            destructive: true,
+            confirm: Some(format!("Stop computer use on {name}?")),
+        });
+        sections.push(Section {
+            rows: vec![stop],
+            ..Section::default()
+        });
+    }
     Ok(Page {
         title: name,
-        sections: vec![
-            Section {
-                rows,
-                ..Section::default()
-            },
-            Section {
-                rows: vec![stop],
-                ..Section::default()
-            },
-        ],
+        sections,
     })
 }
 

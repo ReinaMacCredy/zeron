@@ -288,6 +288,21 @@ fn the_mac_page_stop_revokes_every_live_chat_on_that_mac() {
         !runtime.block_on(session.computer_stop()).unwrap(),
         "the Mac page already revoked this chat"
     );
+    let linux = client
+        .workspace()
+        .devices
+        .iter()
+        .find(|d| d.platform == "linux")
+        .map(|d| d.id.clone())
+        .expect("the demo has a Linux host");
+    let page = runtime.block_on(client.host_page(&linux, "mac")).unwrap();
+    assert!(
+        page.sections
+            .iter()
+            .flat_map(|s| &s.rows)
+            .all(|row| row.id != "stop-computer"),
+        "a host that cannot run computer use offers no Stop"
+    );
 }
 
 #[test]

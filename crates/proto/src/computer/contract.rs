@@ -259,6 +259,11 @@ pub enum ComputerAvailability {
     },
 }
 
+/// The cua backend builds only for macOS; `platform` is the registry's `std::env::consts::OS`.
+pub fn host_runs_computer_use(platform: &str) -> bool {
+    platform == "macos"
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ComputerHealthStatus {
