@@ -84,6 +84,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             still.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
         ])
         missionStrip.configuration?.cornerStyle = .capsule
+        missionStrip.configuration?.baseForegroundColor = Palette.text
+        missionStrip.configuration?.background.visualEffect = UIBlurEffect(style: .systemThickMaterial)
+        missionStrip.configuration?.background.backgroundColor = Palette.elevated.withAlphaComponent(0.85)
+        missionStrip.configuration?.background.strokeColor = Palette.hairline
+        missionStrip.configuration?.background.strokeWidth = 1
         missionStrip.configuration?.image = UIImage(systemName: "list.bullet.rectangle")
         missionStrip.configuration?.imagePadding = 6
         missionStrip.configuration?.titleLineBreakMode = .byTruncatingTail
@@ -242,7 +247,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private var voiceToken: AnyObject?
     private var hostsToken: AnyObject?
     private var missionToken: AnyObject?
-    private let missionStrip = UIButton(configuration: .gray())
+    private let missionStrip = UIButton(configuration: .plain())
     private var mission = false
     private var missionReview = true
     private var missionPlanDoc = true
@@ -449,6 +454,13 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             list.verticalScrollIndicatorInsets.bottom = inset
             if following { list.contentOffset.y = list.maxOffsetY }
         }
+        let top = missionStrip.isHidden ? 0 : missionStrip.frame.maxY + 6 - view.safeAreaInsets.top
+        if abs(list.contentInset.top - top) > 0.5 {
+            let atTop = list.contentOffset.y <= -list.adjustedContentInset.top + 0.5
+            list.contentInset.top = top
+            list.verticalScrollIndicatorInsets.top = top
+            if atTop { list.contentOffset.y = -list.adjustedContentInset.top }
+        }
     }
 
     // MARK: Queue editing (host lease)
@@ -646,12 +658,14 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private func syncMission() {
         guard let strip = app.client?.missionStrip(chatId: chatId) else {
             missionStrip.isHidden = true
+            view.setNeedsLayout()
             return
         }
         var title = AttributedString("\(strip.role) · \(strip.title) · \(strip.done)/\(strip.total)")
         title.font = Fonts.ui(.sansMedium, 13)
         missionStrip.configuration?.attributedTitle = title
         missionStrip.isHidden = false
+        view.setNeedsLayout()
     }
 
     private func missionPlanMenu() -> UIMenu {
