@@ -199,6 +199,7 @@ final class InboxFlowTests: XCTestCase {
         drag(list, from: recent.frame.midY / list.frame.height, to: 0.25)
         let updated = rows(under: recent, in: app)
         XCTAssertGreaterThan(updated.count, 3)
+        snapshot(app, "sort-last-updated")
         option(app, "Created")
         let resorted = NSPredicate { _, _ in self.rows(under: recent, in: app) != updated }
         expectation(for: resorted, evaluatedWith: nil)
