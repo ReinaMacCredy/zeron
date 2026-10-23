@@ -16,7 +16,8 @@ const DRAG_PT: f32 = 4.0;
 const LINE_PX: f32 = 20.0;
 const HOLD_EVERY: Duration = Duration::from_secs(5);
 const REDACTED: &str = "<redacted>";
-const SECRET_WORDS: [&str; 5] = ["key", "token", "secret", "password", "api"];
+const SECRET_WORDS: [&str; 3] = ["token", "secret", "password"];
+const SECRET_TERMS: [&str; 2] = ["key", "api"];
 
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "do", rename_all = "camelCase", rename_all_fields = "camelCase")]
@@ -602,6 +603,9 @@ fn secret_field(node: &Node) -> bool {
             .any(|text| {
                 let text = text.to_lowercase();
                 SECRET_WORDS.iter().any(|word| text.contains(word))
+                    || text
+                        .split(|c: char| !c.is_alphanumeric())
+                        .any(|term| SECRET_TERMS.contains(&term))
             })
 }
 
@@ -660,12 +664,13 @@ fn target_at(tree: &Tree, x: f32, y: f32) -> Target {
 
 fn selector_for(tree: &Tree, index: usize) -> Option<(String, Option<usize>)> {
     let node = &tree.nodes[index];
+    let typed = node.role.ends_with("Input");
     let mut best: Option<(String, Option<usize>, usize)> = None;
     for text in [
-        &node.label,
-        &node.value,
-        &node.placeholder,
-        &node.description,
+        node.label.as_ref(),
+        node.value.as_ref().filter(|_| !typed),
+        node.placeholder.as_ref(),
+        node.description.as_ref(),
     ]
     .into_iter()
     .flatten()
@@ -846,6 +851,22 @@ mod tests {
             ] })
         );
         assert_eq!((steps, fallbacks, redacted), (13, 3, 0));
+    }
+
+    #[test]
+    fn key_and_api_count_only_as_whole_words() {
+        let labelled = |label: &str| node("e1", "TextInput", Some(label));
+        for label in [
+            "API key",
+            "api_key",
+            "Signing Key",
+            "https://api.openai.com/v1",
+        ] {
+            assert!(secret_field(&labelled(label)), "{label}");
+        }
+        for label in ["Hotkey", "Keychain item", "Keyboard layout", "Rapid notes"] {
+            assert!(!secret_field(&labelled(label)), "{label}");
+        }
     }
 
     #[test]
