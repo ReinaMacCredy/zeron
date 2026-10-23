@@ -91,7 +91,7 @@ final class DevicesFlowTests: XCTestCase {
     }
 
     func testTheMacPageStopsEveryChatUsingTheComputer() {
-        let app = launch("page:mac", ["-still"])
+        let app = launch("page:mac@MacBook Pro", ["-still"])
         let row = app.staticTexts["Stop computer use"]
         for _ in 0..<4 where !(row.exists && row.isHittable) {
             app.swipeUp()
@@ -105,5 +105,13 @@ final class DevicesFlowTests: XCTestCase {
         snapshot(app, "mac-stop-confirm")
         confirm.tap()
         XCTAssertTrue(row.waitForExistence(timeout: 10), "the page reloads after the stop")
+    }
+
+    func testAHostThatCannotRunComputerUseOffersNoStop() {
+        let app = launch("page:mac@hetzner-01")
+        XCTAssertTrue(app.staticTexts["Tools"].waitForExistence(timeout: 10))
+        app.swipeUp()
+        XCTAssertFalse(app.staticTexts["Stop computer use"].exists)
+        snapshot(app, "linux-no-stop")
     }
 }

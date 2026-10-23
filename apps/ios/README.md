@@ -87,6 +87,7 @@ ZeronShared/   Compiled into the app and the extension: the activity's
 | `-still` | Demo `chat-computer` works and its host serves a Computer still frame |
 | `-route chat:<id>` / `new` / `more` / `search` | Open a screen at launch |
 | `-route chat:<id>/terminal` / `/actions` / `/stop` | Open a chat with its Terminal sheet, Project actions sheet or Stop computer use confirm |
+| `-route page:<page>[@<host name>]` | Open a host settings page, on the first host or the named one |
 | `-signedout` | Clear stored credentials |
 | `-dev <userId> <orgId> [-edge <url>]` | Dev bearer against an `AUTH_MODE=dev` edge (e.g. `wrangler dev`); not persisted |
 | `-harness <id>` | Default harness for new sessions (`mock` for live-stack tests) |
