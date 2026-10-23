@@ -249,6 +249,48 @@ fn stop_revokes_this_chat_once_and_ends_its_preview() {
 }
 
 #[test]
+fn the_mac_page_stop_revokes_every_live_chat_on_that_mac() {
+    let runtime = crate::runtime::shared();
+    let (client, _dir) = demo(true);
+    let session = client.open_session("chat-computer").unwrap();
+    wait_for("the host", || session.composer().host.online);
+    let host = session.composer().host.device_id.clone();
+    let page = runtime.block_on(client.host_page(&host, "mac")).unwrap();
+    let stop = page
+        .sections
+        .iter()
+        .flat_map(|s| &s.rows)
+        .find(|row| row.id == "stop-computer")
+        .expect("the Stop row");
+    assert_eq!(
+        stop.kind,
+        crate::host_settings::RowKind::Action { destructive: true }
+    );
+    let confirm = stop.actions.iter().find(|a| a.id == stop.id).unwrap();
+    assert_eq!(
+        confirm.confirm,
+        Some(format!("Stop computer use on {}?", page.title))
+    );
+    assert!(
+        runtime
+            .block_on(session.computer_still_frame())
+            .unwrap()
+            .is_some()
+    );
+    runtime
+        .block_on(client.host_action(&host, "mac", "stop-computer", None))
+        .unwrap();
+    assert_eq!(
+        runtime.block_on(session.computer_still_frame()).unwrap(),
+        None
+    );
+    assert!(
+        !runtime.block_on(session.computer_stop()).unwrap(),
+        "the Mac page already revoked this chat"
+    );
+}
+
+#[test]
 fn terminals_and_project_actions_come_from_the_chats_host() {
     use zeron_proto::TerminalColor;
     let runtime = crate::runtime::shared();
