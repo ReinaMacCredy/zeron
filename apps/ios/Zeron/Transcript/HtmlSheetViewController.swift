@@ -4,15 +4,15 @@ final class HtmlSheetViewController: UIViewController {
     private let pageTitle: String
     private let page: HtmlPageView
     private let source = UITextView()
-    private let html: () async -> String?
-    private var loaded: String?
+    private let segments = UISegmentedControl(items: ["Live", "Source"])
+    private var saveButton: UIBarButtonItem?
 
     init(title: String, html: @escaping () async -> String?, openURL: @escaping (URL) -> Void) {
         pageTitle = title
-        self.html = html
         page = HtmlPageView(source: html)
         super.init(nibName: nil, bundle: nil)
         page.scrolls = true
+        page.accessibilityIdentifier = "html-sheet-page"
         page.openURL = { [weak self] url in self?.dismiss(animated: true) { openURL(url) } }
     }
 
@@ -22,16 +22,19 @@ final class HtmlSheetViewController: UIViewController {
         super.viewDidLoad()
         view.backgroundColor = Palette.background
         navigationItem.title = pageTitle
-        let segments = UISegmentedControl(items: ["Live", "Source"])
         segments.selectedSegmentIndex = 0
         segments.accessibilityIdentifier = "html-sheet-view"
-        segments.addAction(UIAction { [weak self, weak segments] _ in
-            self?.show(source: segments?.selectedSegmentIndex == 1)
-        }, for: .valueChanged)
+        segments.addAction(UIAction { [weak self] _ in self?.showSelected() }, for: .valueChanged)
         let close = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak self] _ in self?.dismiss(animated: true) })
         close.accessibilityIdentifier = "html-sheet-close"
         let save = UIBarButtonItem(title: "Save .html", primaryAction: UIAction { [weak self] _ in self?.save() })
         save.accessibilityIdentifier = "html-sheet-save"
+        save.isEnabled = page.html != nil
+        saveButton = save
+        page.onLoad = { [weak self] in
+            self?.saveButton?.isEnabled = true
+            self?.showSelected()
+        }
         navigationItem.leftBarButtonItem = close
         navigationItem.rightBarButtonItem = save
         toolbarItems = [.flexibleSpace(), UIBarButtonItem(customView: segments), .flexibleSpace()]
@@ -56,28 +59,21 @@ final class HtmlSheetViewController: UIViewController {
         }
     }
 
-    private func text() async -> String? {
-        if let loaded { return loaded }
-        loaded = await html()
-        return loaded
-    }
-
-    private func show(source shown: Bool) {
-        page.isHidden = shown
-        source.isHidden = !shown
-        guard shown, source.text.isEmpty else { return }
-        Task { @MainActor [weak self] in
-            guard let html = await self?.text() else { return }
-            self?.source.text = htmlRenderSource(html: html)
+    private func showSelected() {
+        guard let html = page.html, segments.selectedSegmentIndex == 1 else {
+            page.isHidden = false
+            source.isHidden = true
+            return
         }
+        if source.text.isEmpty { source.text = htmlRenderSource(html: html) }
+        page.isHidden = true
+        source.isHidden = false
     }
 
     private func save() {
-        Task { @MainActor [weak self] in
-            guard let self, let html = await self.text() else { return }
-            let url = FileManager.default.temporaryDirectory.appendingPathComponent(htmlRenderFileName(title: self.pageTitle))
-            guard (try? html.write(to: url, atomically: true, encoding: .utf8)) != nil else { return }
-            self.present(UIDocumentPickerViewController(forExporting: [url], asCopy: true), animated: true)
-        }
+        guard let html = page.html else { return }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(htmlRenderFileName(title: pageTitle))
+        guard (try? html.write(to: url, atomically: true, encoding: .utf8)) != nil else { return }
+        present(UIDocumentPickerViewController(forExporting: [url], asCopy: true), animated: true)
     }
 }

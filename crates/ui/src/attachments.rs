@@ -624,7 +624,7 @@ pub struct LoadedAttachmentImage {
     pub image: Arc<Image>,
 }
 
-/// `ReadAttachmentChunk` loop: 45KB base64 chunks until `done` (bounded, with
+/// `ReadAttachmentChunk` loop: base64 chunks until `done` (bounded, with
 /// the same stuck-offset guard as zeron's `readAttachmentImage`). Returns the
 /// file's name, MIME type and bytes.
 pub(crate) async fn read_attachment_bytes(

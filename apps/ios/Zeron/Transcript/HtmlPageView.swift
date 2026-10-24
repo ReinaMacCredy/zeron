@@ -4,12 +4,17 @@ import WebKit
 final class HtmlPageView: UIView, WKNavigationDelegate, WKUIDelegate {
     var onHeight: ((CGFloat) -> Void)?
     var openURL: ((URL) -> Void)?
+    var onLoad: (() -> Void)?
     var scrolls = false {
         didSet { web.scrollView.isScrollEnabled = scrolls }
     }
     private let web: WKWebView
     private let source: () async -> String?
-    private var html: String?
+    private(set) var html: String?
+    private let status = UIView()
+    private let spinner = UIActivityIndicatorView(style: .medium)
+    private let message = UILabel()
+    private let retry: UIButton
     private var loadedOnce = false
     private var crashes = 0
     private var rendered: (UIUserInterfaceStyle, Float)?
@@ -22,6 +27,18 @@ final class HtmlPageView: UIView, WKNavigationDelegate, WKUIDelegate {
         config.allowsInlineMediaPlayback = true
         config.dataDetectorTypes = []
         web = WKWebView(frame: .zero, configuration: config)
+        var retryStyle = UIButton.Configuration.gray()
+        retryStyle.title = "Retry"
+        retryStyle.image = UIImage(systemName: "arrow.clockwise", withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .medium))
+        retryStyle.imagePadding = 6
+        retryStyle.cornerStyle = .capsule
+        retryStyle.baseForegroundColor = Palette.text
+        retryStyle.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { a in
+            var a = a
+            a.font = Fonts.ui(.sansMedium, 14)
+            return a
+        }
+        retry = UIButton(configuration: retryStyle)
         super.init(frame: .zero)
         config.userContentController.add(HeightRelay(self), name: "zeron")
         web.isOpaque = false
@@ -37,13 +54,62 @@ final class HtmlPageView: UIView, WKNavigationDelegate, WKUIDelegate {
         web.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         web.accessibilityIdentifier = "html-render-page"
         addSubview(web)
+        addStatus()
         registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitPreferredContentSizeCategory.self]) { (self: HtmlPageView, _) in
             self.render()
         }
+        load()
+    }
+
+    private func addStatus() {
+        status.backgroundColor = Palette.controlFill
+        status.layer.cornerRadius = 10
+        status.layer.cornerCurve = .continuous
+        status.frame = bounds
+        status.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        spinner.color = Palette.tertiary
+        message.font = Fonts.ui(.sans, 13)
+        message.textColor = Palette.secondary
+        message.textAlignment = .center
+        message.numberOfLines = 0
+        retry.accessibilityIdentifier = "html-render-retry"
+        retry.addAction(UIAction { [weak self] _ in self?.load() }, for: .touchUpInside)
+        let stack = UIStackView(arrangedSubviews: [spinner, message, retry])
+        stack.axis = .vertical
+        stack.alignment = .center
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        status.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: status.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: status.centerYAnchor),
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: status.leadingAnchor, constant: 16),
+            stack.topAnchor.constraint(greaterThanOrEqualTo: status.topAnchor, constant: 8),
+        ])
+        addSubview(status)
+    }
+
+    private func load() {
+        status.isHidden = false
+        spinner.startAnimating()
+        spinner.isHidden = false
+        message.text = "Loading page"
+        retry.isHidden = true
+        let source = self.source
         Task { @MainActor [weak self] in
-            guard let html = await source() else { return }
-            self?.html = html
-            self?.render()
+            let html = await source()
+            guard let self else { return }
+            spinner.stopAnimating()
+            spinner.isHidden = true
+            guard let html else {
+                message.text = "Couldn't load this page."
+                retry.isHidden = false
+                return
+            }
+            status.isHidden = true
+            self.html = html
+            render()
+            onLoad?()
         }
     }
 
