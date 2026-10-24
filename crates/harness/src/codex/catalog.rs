@@ -128,10 +128,11 @@ mod tests {
     #[test]
     fn catalog_is_newest_first_with_service_tiers() {
         let models = static_models();
-        assert_eq!(models.len(), 9);
-        assert_eq!(models[0].id, "gpt-6-astra");
+        assert_eq!(models.len(), 8);
+        assert_eq!(models[0].id, "gpt-6.1-sol");
         assert!(models[0].reasoning_levels.contains(&ReasoningLevel::Ultra));
-        assert!(!models[5].reasoning_levels.contains(&ReasoningLevel::Max));
+        assert_eq!(models[3].id, "gpt-6-luna");
+        assert!(!models[3].reasoning_levels.contains(&ReasoningLevel::Ultra));
         for m in &models {
             let tier = m.options.iter().find(|o| o.id == "serviceTier");
             // Daybreak Blue reports no service tiers on the wire.
