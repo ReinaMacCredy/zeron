@@ -223,6 +223,7 @@ pub struct ChatBackground {
     pub opacity: f32,
     pub blur: f32,
     pub scrim: bool,
+    pub tab_shade: f32,
 }
 
 impl Default for ChatBackground {
@@ -233,6 +234,7 @@ impl Default for ChatBackground {
             opacity: 0.2,
             blur: 24.0,
             scrim: true,
+            tab_shade: 0.55,
         }
     }
 }
@@ -251,6 +253,7 @@ impl ChatBackground {
         self.opacity = clamp_or(self.opacity, 0.0, 1.0, default.opacity);
         self.blur = clamp_or(self.blur, 0.0, CHAT_BACKGROUND_BLUR_MAX, default.blur);
         self.blur = (self.blur / CHAT_BACKGROUND_BLUR_STEP).round() * CHAT_BACKGROUND_BLUR_STEP;
+        self.tab_shade = clamp_or(self.tab_shade, 0.0, 1.0, default.tab_shade);
         self
     }
 }
@@ -4237,6 +4240,7 @@ mod tests {
                 opacity: 0.35,
                 blur: 16.0,
                 scrim: false,
+                tab_shade: 0.3,
             },
             terminal_background: TerminalBackground {
                 mode: TerminalBackgroundMode::Custom,
@@ -4339,7 +4343,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             UiSettings::path(dir.path()),
-            r#"{"chatBackground": {"enabled": true, "opacity": 3.0, "blur": 21.0}}"#,
+            r#"{"chatBackground": {"enabled": true, "opacity": 3.0, "blur": 21.0, "tabShade": 3.0}}"#,
         )
         .unwrap();
         let loaded = UiSettings::load(dir.path()).chat_background;
@@ -4347,6 +4351,7 @@ mod tests {
         assert_eq!(loaded.opacity, 1.0);
         assert_eq!(loaded.blur, 20.0);
         assert_eq!(loaded.blur_level(), 5);
+        assert_eq!(loaded.tab_shade, 1.0);
         assert_eq!(loaded.placement, ChatBackgroundPlacement::Hero);
         assert!(loaded.scrim);
         let healed = ChatBackground {

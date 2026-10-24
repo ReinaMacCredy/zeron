@@ -1938,6 +1938,7 @@ struct BackgroundIds {
     opacity: &'static str,
     blur: &'static str,
     scrim: &'static str,
+    tab_shade: Option<&'static str>,
 }
 
 const CHAT_BACKGROUND_IDS: BackgroundIds = BackgroundIds {
@@ -1945,6 +1946,7 @@ const CHAT_BACKGROUND_IDS: BackgroundIds = BackgroundIds {
     opacity: "chat-background-opacity",
     blur: "chat-background-blur",
     scrim: "chat-background-scrim",
+    tab_shade: Some("chat-background-tab-shade"),
 };
 
 const TERMINAL_BACKGROUND_IDS: BackgroundIds = BackgroundIds {
@@ -1952,6 +1954,7 @@ const TERMINAL_BACKGROUND_IDS: BackgroundIds = BackgroundIds {
     opacity: "terminal-background-opacity",
     blur: "terminal-background-blur",
     scrim: "terminal-background-scrim",
+    tab_shade: None,
 };
 
 type BackgroundUpdate =
@@ -2014,7 +2017,7 @@ fn background_tuning_rows(
             }))
         })
         .collect::<Vec<_>>();
-    vec![
+    let mut rows = vec![
         widgets::card_row(theme, false)
             .child(widgets::row_tile(theme, icons::TUNING))
             .child(
@@ -2127,7 +2130,40 @@ fn background_tuning_rows(
                 )),
             )
             .into_any_element(),
-    ]
+    ];
+    rows.extend(ids.tab_shade.map(|id| {
+        widgets::card_row(theme, false)
+            .child(widgets::row_tile(theme, icons::TUNING))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(theme, "Tab bar shade"))
+                    .child(widgets::meta_line(
+                        theme,
+                        vec![
+                            div()
+                                .child(
+                                    "Darkens the tab bar over the artwork so tab titles stay readable.",
+                                )
+                                .into_any_element(),
+                            div()
+                                .child(SharedString::from(format!(
+                                    "{}%",
+                                    (background.tab_shade * 100.0).round()
+                                )))
+                                .into_any_element(),
+                        ],
+                    )),
+            )
+            .child(slider(theme, id, background.tab_shade, move |fraction, cx| {
+                update(SavePolicy::Debounced, cx, &|background| {
+                    background.tab_shade = fraction;
+                });
+            }))
+            .into_any_element()
+    }));
+    rows
 }
 
 fn chat_background_preview(
@@ -2179,6 +2215,7 @@ fn chat_background_preview(
             ),
             theme.bg,
             fade,
+            None,
         ))
         .child(
             div()

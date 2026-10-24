@@ -271,7 +271,56 @@ fn tab_spinner(id: &str, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
         .into_any_element()
 }
 
-fn folder_tab_backdrop(tones: InsetTones) -> AnyElement {
+fn folder_outline(path: &mut gpui::PathBuilder, bounds: gpui::Bounds<Pixels>) {
+    let at = |x: f32, y: f32| gpui::point(bounds.origin.x + px(x), bounds.origin.y + px(y));
+    let w = f32::from(bounds.size.width);
+    let j = f32::from(bounds.size.height) - 1.0;
+    let (f, r) = (FOLDER_FLARE, 8.0);
+    path.curve_to(at(f, j - f), at(f, j));
+    path.line_to(at(f, r));
+    path.curve_to(at(f + r, 0.0), at(f, 0.0));
+    path.line_to(at(w - f - r, 0.0));
+    path.curve_to(at(w - f, r), at(w - f, 0.0));
+    path.line_to(at(w - f, j - f));
+    path.curve_to(at(w, j), at(w - f, j));
+}
+
+fn folder_fill(bounds: gpui::Bounds<Pixels>) -> Option<gpui::Path<Pixels>> {
+    let mut fill = gpui::PathBuilder::fill();
+    fill.move_to(bounds.bottom_left());
+    fill.line_to(gpui::point(bounds.left(), bounds.bottom() - px(1.0)));
+    folder_outline(&mut fill, bounds);
+    fill.line_to(bounds.bottom_right());
+    fill.close();
+    fill.build().ok()
+}
+
+fn folder_wedges(bounds: gpui::Bounds<Pixels>) -> [Option<gpui::Path<Pixels>>; 2] {
+    let at = |x: f32, y: f32| gpui::point(bounds.origin.x + px(x), bounds.origin.y + px(y));
+    let w = f32::from(bounds.size.width);
+    let j = f32::from(bounds.size.height) - 1.0;
+    let (f, r) = (FOLDER_FLARE, 8.0);
+    let mut left = gpui::PathBuilder::fill();
+    left.move_to(at(0.0, 0.0));
+    left.line_to(at(0.0, j));
+    left.curve_to(at(f, j - f), at(f, j));
+    left.line_to(at(f, r));
+    left.curve_to(at(f + r, 0.0), at(f, 0.0));
+    left.close();
+    let mut right = gpui::PathBuilder::fill();
+    right.move_to(at(w, 0.0));
+    right.line_to(at(w - f - r, 0.0));
+    right.curve_to(at(w - f, r), at(w - f, 0.0));
+    right.line_to(at(w - f, j - f));
+    right.curve_to(at(w, j), at(w - f, j));
+    right.close();
+    [left.build().ok(), right.build().ok()]
+}
+
+fn folder_tab_backdrop(
+    tones: InsetTones,
+    backdrop: Option<crate::chat_background::Backdrop>,
+) -> AnyElement {
     div()
         .absolute()
         .top_0()
@@ -282,40 +331,49 @@ fn folder_tab_backdrop(tones: InsetTones) -> AnyElement {
             gpui::canvas(
                 |_, _, _| {},
                 move |bounds, _, window, _| {
-                    let at = |x: f32, y: f32| {
-                        gpui::point(bounds.origin.x + px(x), bounds.origin.y + px(y))
-                    };
-                    let w = f32::from(bounds.size.width);
-                    let b = f32::from(bounds.size.height);
-                    let j = b - 1.0;
-                    let (f, r) = (FOLDER_FLARE, 8.0);
-                    let outline = |path: &mut gpui::PathBuilder| {
-                        path.move_to(at(0.0, j));
-                        path.curve_to(at(f, j - f), at(f, j));
-                        path.line_to(at(f, r));
-                        path.curve_to(at(f + r, 0.0), at(f, 0.0));
-                        path.line_to(at(w - f - r, 0.0));
-                        path.curve_to(at(w - f, r), at(w - f, 0.0));
-                        path.line_to(at(w - f, j - f));
-                        path.curve_to(at(w, j), at(w - f, j));
-                    };
-                    let mut fill = gpui::PathBuilder::fill();
-                    fill.move_to(at(0.0, b));
-                    fill.line_to(at(0.0, j));
-                    outline(&mut fill);
-                    fill.line_to(at(w, b));
-                    fill.close();
-                    if let Ok(path) = fill.build() {
+                    if let Some(path) = folder_fill(bounds) {
                         window.paint_path(path, tones.body);
                     }
+                },
+            )
+            .size_full(),
+        )
+        .when_some(backdrop, |el, backdrop| {
+            let (shade, alpha) = (backdrop.scrim_color, backdrop.settings.tab_shade);
+            el.child(crate::chat_background::surface(
+                backdrop,
+                move |own, layer, window| {
+                    for wedge in folder_wedges(own).into_iter().flatten() {
+                        window.paint_path(wedge, shade.opacity(alpha));
+                    }
+                    if let Some(path) = folder_fill(own) {
+                        window.paint_path(
+                            path,
+                            crate::chat_background::tab_fade(
+                                shade,
+                                alpha,
+                                f32::from(own.top() - layer.top()),
+                                f32::from(own.bottom() - layer.top()),
+                            ),
+                        );
+                    }
+                },
+            ))
+        })
+        .child(
+            gpui::canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
                     let mut edge = gpui::PathBuilder::stroke(px(0.5));
-                    outline(&mut edge);
+                    edge.move_to(gpui::point(bounds.left(), bounds.bottom() - px(1.0)));
+                    folder_outline(&mut edge, bounds);
                     if let Ok(path) = edge.build() {
                         window.paint_path(path, tones.edge);
                     }
                 },
             )
-            .size_full(),
+            .absolute()
+            .inset_0(),
         )
         .into_any_element()
 }
@@ -338,6 +396,7 @@ fn split_tab_chip(
     selected: Option<&str>,
     hovered: Option<&str>,
     tones: Option<InsetTones>,
+    backdrop: Option<crate::chat_background::Backdrop>,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> gpui::Stateful<gpui::Div> {
@@ -355,7 +414,7 @@ fn split_tab_chip(
         .rounded(px(8.0))
         .text_size(px(12.0))
         .when(active, |el| match tones {
-            Some(tones) => el.relative().child(folder_tab_backdrop(tones)),
+            Some(tones) => el.relative().child(folder_tab_backdrop(tones, backdrop)),
             None => el
                 .bg(crate::theme::glass_selected_bg())
                 .shadow(crate::theme::glass_selected_shadows()),
@@ -1415,6 +1474,7 @@ impl Shell {
                             selected.as_deref(),
                             hovered.as_deref(),
                             tones,
+                            self.chat_backdrop.clone(),
                             &theme,
                             cx,
                         );
@@ -1468,7 +1528,9 @@ impl Shell {
                     .text_color(text_color)
                     .bg(bg)
                     .when(is_selected, |el| match tones {
-                        Some(tones) => el.relative().child(folder_tab_backdrop(tones)),
+                        Some(tones) => el
+                            .relative()
+                            .child(folder_tab_backdrop(tones, self.chat_backdrop.clone())),
                         None => el.shadow(crate::theme::glass_selected_shadows()),
                     })
                     .cursor_pointer()
@@ -1813,7 +1875,7 @@ impl Shell {
             .text_color(if on_page { theme.text } else { tone })
             .cursor_pointer()
             .when(on_page, |el| match tones {
-                Some(tones) => el.child(folder_tab_backdrop(tones)),
+                Some(tones) => el.child(folder_tab_backdrop(tones, self.chat_backdrop.clone())),
                 None => el
                     .bg(crate::theme::glass_selected_bg())
                     .shadow(crate::theme::glass_selected_shadows()),

@@ -614,6 +614,7 @@ impl Shell {
                 ),
                 theme.bg,
                 artwork_opacity,
+                None,
             )
         });
         let resize_suspended = self.tween_active(self.right_tween)

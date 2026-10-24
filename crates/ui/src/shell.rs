@@ -2536,6 +2536,7 @@ pub struct Shell {
     /// The chat layer alternates with the hero by route and carries its own
     /// blurred image, so sharing one tracker would restart the hero's fade.
     chat_artwork_ready: crate::new_thread_background_effects::FadeIn,
+    chat_backdrop: Option<crate::chat_background::Backdrop>,
     /// Session-transient disclosure state, matching the Archived shelf.
     pub(super) pinned_open: bool,
     pub(super) sessions_open: bool,
@@ -3364,6 +3365,7 @@ impl Shell {
             composer_dock: Default::default(),
             new_thread_artwork_ready: Default::default(),
             chat_artwork_ready: Default::default(),
+            chat_backdrop: None,
             archived_open: true,
             pinned_open: true,
             sessions_open: true,
@@ -15466,6 +15468,23 @@ impl Shell {
                         .child(content),
                 ),
             )
+            .when_some(self.chat_backdrop.clone(), |frame, backdrop| {
+                let (shade, alpha) = (backdrop.scrim_color, backdrop.settings.tab_shade);
+                frame.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(Theme::TITLEBAR_HEIGHT))
+                        .child(crate::chat_background::surface(
+                            backdrop,
+                            move |own, _, window| {
+                                window.paint_quad(gpui::fill(own, shade.opacity(alpha)));
+                            },
+                        )),
+                )
+            })
             .child(crate::theme::half_point_border(
                 card().rounded(px(CARD_RADIUS)),
                 tones.edge,
@@ -17114,13 +17133,28 @@ impl Shell {
                     self.viewport_height,
                     new_thread_background_height(self.viewport_height),
                 );
+                let fade = chat_artwork_opacity * dock_frame.transcript();
+                self.chat_backdrop =
+                    self.settings
+                        .inset_shell
+                        .then(|| crate::chat_background::Backdrop {
+                            artwork: chat_artwork.clone(),
+                            settings: chat_background,
+                            fade,
+                            scrim_color: theme.bg,
+                            body: theme.inset_tones().body,
+                            painted: Default::default(),
+                        });
                 let layer = crate::chat_background::layer(
                     chat_artwork,
                     chat_background,
                     Some(full_width),
                     height,
                     theme.bg,
-                    chat_artwork_opacity * dock_frame.transcript(),
+                    fade,
+                    self.chat_backdrop
+                        .as_ref()
+                        .map(|backdrop| backdrop.painted.clone()),
                 );
                 // The artwork spans the whole conversation column. With the
                 // split's secondary pane on the LEFT this column starts mid-
@@ -19436,6 +19470,7 @@ fn header_icon_button_with(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.chat_backdrop = None;
         if self.active_chat.is_empty() && self.right_pane_open(cx) {
             self.adopt_canvas_terminals(cx);
         }
