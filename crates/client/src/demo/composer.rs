@@ -54,27 +54,91 @@ pub(super) fn seed_meta(chat_id: &str, doc: &SessionDoc, now: i64) -> Result<(),
     })
 }
 
-pub(super) fn invocation_catalog(method: &str) -> Option<serde_json::Value> {
+pub(super) fn invocation_catalog(
+    method: &str,
+    params: &Value,
+) -> Option<crate::error::Result<Value>> {
     let command = |name: &str, description: &str, input_hint: Option<&str>| SlashCommand {
         name: name.into(),
         description: description.into(),
         input_hint: input_hint.map(Into::into),
         kind: SlashCommandKind::BuiltIn,
     };
-    let skill = |name: &str, description: &str| Skill {
+    let skill = |root: &str, name: &str, description: &str| Skill {
         name: name.into(),
-        path: format!("/Users/demo/.claude/skills/{name}/SKILL.md"),
+        path: format!("/Users/demo/{root}/skills/{name}/SKILL.md"),
         description: description.into(),
         enabled: true,
         command: None,
     };
-    match method {
-        zeron_rpc::methods::LIST_COMMANDS => serde_json::to_value(vec![
+    let harness = params["harness"].as_str().unwrap_or_default();
+    let reply = match (method, harness) {
+        (zeron_rpc::methods::LIST_COMMANDS, "antigravity") => {
+            return Some(Err(ClientError::HostError(
+                "command discovery timeout".into(),
+            )));
+        }
+        (zeron_rpc::methods::LIST_COMMANDS, "codex") => serde_json::to_value(vec![
+            command(
+                "init",
+                "Create an AGENTS.md file with instructions for Codex",
+                None,
+            ),
+            command("review", "Review my current changes and find issues", None),
+            command("diff", "Show git diff (including untracked files)", None),
+            command("mention", "Mention a file", None),
+            command(
+                "status",
+                "Show current session configuration and token usage",
+                None,
+            ),
+            command(
+                "approvals",
+                "Choose what Codex can do without approval",
+                None,
+            ),
+            command("new", "Start a new chat during a conversation", None),
+            command("quit", "Exit Codex", None),
+        ]),
+        (zeron_rpc::methods::LIST_COMMANDS, "opencode") => serde_json::to_value(vec![
+            command("init", "Create or update AGENTS.md", None),
+            command("undo", "Undo the last message and its file changes", None),
+            command("redo", "Redo a previously undone message", None),
+            command("share", "Share the current session", None),
+            command("models", "List available models", None),
+            command("help", "Show the help dialog", None),
+        ]),
+        (zeron_rpc::methods::LIST_COMMANDS, "pi") => serde_json::to_value(vec![
+            command("session", "Show session info and stats", None),
+            command("tree", "Navigate the session tree", None),
+            command("fork", "Fork from a previous message", None),
+            command("export", "Export the session to HTML", Some("path")),
+            command("hotkeys", "Show all keyboard shortcuts", None),
+        ]),
+        (zeron_rpc::methods::LIST_COMMANDS, "acp") => serde_json::to_value(vec![
+            command("memory", "Manage memory", Some("show|add|refresh")),
+            command("tools", "List available tools", None),
+            command("mcp", "List configured MCP servers and tools", None),
+            command("stats", "Check session stats", None),
+        ]),
+        (zeron_rpc::methods::LIST_COMMANDS, "cursor") => {
+            serde_json::to_value(Vec::<SlashCommand>::new())
+        }
+        (zeron_rpc::methods::LIST_COMMANDS, _) => serde_json::to_value(vec![
             command(
                 "clear",
                 "Clear conversation history and free up context",
                 None,
             ),
+            command(
+                "context",
+                "Visualize current context usage as a colored grid",
+                None,
+            ),
+            command("config", "Open config panel", None),
+            command("model", "Set the AI model for Claude Code", Some("model")),
+            command("usage", "Show plan usage limits", None),
+            command("mcp", "Manage MCP servers", None),
             command("review", "Review a pull request", Some("pr")),
             command(
                 "init",
@@ -86,19 +150,62 @@ pub(super) fn invocation_catalog(method: &str) -> Option<serde_json::Value> {
                 "Show the total cost and duration of the current session",
                 None,
             ),
-        ])
-        .ok(),
-        zeron_rpc::methods::LIST_SKILLS => serde_json::to_value(Some(vec![
+            command(
+                "status",
+                "Show Claude Code status including version, model, account",
+                None,
+            ),
+            command(
+                "permissions",
+                "Manage allow & deny tool permission rules",
+                None,
+            ),
+            command("hooks", "Manage hook configurations for tool events", None),
+            command(
+                "export",
+                "Export the current conversation to a file or clipboard",
+                None,
+            ),
+            command("help", "Show help and available commands", None),
+        ]),
+        (zeron_rpc::methods::LIST_SKILLS, "pi" | "cursor") => {
+            serde_json::to_value(None::<Vec<Skill>>)
+        }
+        (zeron_rpc::methods::LIST_SKILLS, "codex") => serde_json::to_value(Some(vec![
             skill(
+                ".codex",
+                "gh-fix-ci",
+                "Debug and fix failing GitHub Actions checks",
+            ),
+            skill(
+                ".codex",
+                "playwright",
+                "Drive a real browser from the terminal",
+            ),
+        ])),
+        (zeron_rpc::methods::LIST_SKILLS, "opencode") => {
+            serde_json::to_value(Some(Vec::<Skill>::new()))
+        }
+        (zeron_rpc::methods::LIST_SKILLS, _) => serde_json::to_value(Some(vec![
+            skill(
+                ".claude",
                 "frontend-design",
                 "Create distinctive, production-grade frontend interfaces",
             ),
-            skill("release-notes", "Draft release notes from merged changes"),
-            skill("pdf", "Read, create and edit PDF files"),
-        ]))
-        .ok(),
-        _ => None,
-    }
+            skill(
+                ".claude",
+                "release-notes",
+                "Draft release notes from merged changes",
+            ),
+            skill(".claude", "pdf", "Read, create and edit PDF files"),
+        ])),
+        (zeron_rpc::methods::HARNESS_COMPACTION, harness) => Ok(serde_json::json!({
+            "compaction": if harness == "cursor" { "none" } else { "native" },
+            "branching": true,
+        })),
+        _ => return None,
+    };
+    Some(reply.map_err(|e| ClientError::HostError(e.to_string())))
 }
 
 pub(super) fn continue_in_new_thread(

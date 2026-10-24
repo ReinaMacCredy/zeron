@@ -836,6 +836,7 @@ final class CoreSessionSource: SessionSource {
         client.threadMentions(deviceId: hostDevice, spaceId: app?.row(chatId)?.project?.id, exclude: chatId, query: query)
     }
 
+    @MainActor
     func invocationCatalog(skill: Bool) async -> InvocationCatalog? {
         let harness = app?.row(chatId)?.harness ?? "claude-code"
         let key = "\(hostDevice)|\(harness)|\(skill)"

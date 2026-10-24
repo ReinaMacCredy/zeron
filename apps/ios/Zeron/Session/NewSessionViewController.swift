@@ -178,8 +178,21 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             if found.warning == nil { self.invocationCatalogs[key] = found }
             return found
         }
+        composer.onWorkspaceCommand = { [weak self] command in
+            guard let self else { return }
+            switch command {
+            case .model: self.composer.openChip("model")
+            case .resume: self.router?.showSearch()
+            case .settings: self.router?.showSettings()
+            case .new, .diff, .files, .terminal, .rename, .stop: break
+            }
+        }
         composer.onSend = { [weak self] text, images, _ in
             guard let self else { return .kept }
+            if let refusal = draftCommandRefusal(text: text) {
+                Toast.show(refusal, in: self.view.window, above: self.composer)
+                return .kept
+            }
             if self.mission {
                 self.startMission(text: text, images: images)
                 return .kept

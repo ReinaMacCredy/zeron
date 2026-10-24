@@ -14952,16 +14952,20 @@ public struct InvocationEntry: Equatable, Hashable {
     public var skill: Bool
     public var insert: String
     public var link: String?
+    public var workspaceCommand: WorkspaceCommand?
+    public var blocked: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(name: String, title: String, detail: String, skill: Bool, insert: String, link: String?) {
+    public init(name: String, title: String, detail: String, skill: Bool, insert: String, link: String?, workspaceCommand: WorkspaceCommand?, blocked: Bool) {
         self.name = name
         self.title = title
         self.detail = detail
         self.skill = skill
         self.insert = insert
         self.link = link
+        self.workspaceCommand = workspaceCommand
+        self.blocked = blocked
     }
 
     
@@ -14985,7 +14989,9 @@ public struct FfiConverterTypeInvocationEntry: FfiConverterRustBuffer {
                 detail: FfiConverterString.read(from: &buf), 
                 skill: FfiConverterBool.read(from: &buf), 
                 insert: FfiConverterString.read(from: &buf), 
-                link: FfiConverterOptionString.read(from: &buf)
+                link: FfiConverterOptionString.read(from: &buf), 
+                workspaceCommand: FfiConverterOptionTypeWorkspaceCommand.read(from: &buf), 
+                blocked: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -14996,6 +15002,8 @@ public struct FfiConverterTypeInvocationEntry: FfiConverterRustBuffer {
         FfiConverterBool.write(value.skill, into: &buf)
         FfiConverterString.write(value.insert, into: &buf)
         FfiConverterOptionString.write(value.link, into: &buf)
+        FfiConverterOptionTypeWorkspaceCommand.write(value.workspaceCommand, into: &buf)
+        FfiConverterBool.write(value.blocked, into: &buf)
     }
 }
 
@@ -15017,13 +15025,15 @@ public func FfiConverterTypeInvocationEntry_lower(_ value: InvocationEntry) -> R
 
 public struct InvocationMatches: Equatable, Hashable {
     public var entries: [InvocationEntry]
-    public var note: String?
+    public var error: String?
+    public var empty: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(entries: [InvocationEntry], note: String?) {
+    public init(entries: [InvocationEntry], error: String?, empty: String?) {
         self.entries = entries
-        self.note = note
+        self.error = error
+        self.empty = empty
     }
 
     
@@ -15043,13 +15053,15 @@ public struct FfiConverterTypeInvocationMatches: FfiConverterRustBuffer {
         return
             try InvocationMatches(
                 entries: FfiConverterSequenceTypeInvocationEntry.read(from: &buf), 
-                note: FfiConverterOptionString.read(from: &buf)
+                error: FfiConverterOptionString.read(from: &buf), 
+                empty: FfiConverterOptionString.read(from: &buf)
         )
     }
 
     public static func write(_ value: InvocationMatches, into buf: inout [UInt8]) {
         FfiConverterSequenceTypeInvocationEntry.write(value.entries, into: &buf)
-        FfiConverterOptionString.write(value.note, into: &buf)
+        FfiConverterOptionString.write(value.error, into: &buf)
+        FfiConverterOptionString.write(value.empty, into: &buf)
     }
 }
 
@@ -32584,6 +32596,121 @@ public func FfiConverterTypeWidgetKind_lower(_ value: WidgetKind) -> RustBuffer 
 }
 
 
+
+
+public enum WorkspaceCommand: Equatable, Hashable {
+    
+    case model
+    case new
+    case resume
+    case settings
+    case diff
+    case files
+    case terminal
+    case rename
+    case stop
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WorkspaceCommand: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWorkspaceCommand: FfiConverterRustBuffer {
+    typealias SwiftType = WorkspaceCommand
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WorkspaceCommand {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .model
+        
+        case 2: return .new
+        
+        case 3: return .resume
+        
+        case 4: return .settings
+        
+        case 5: return .diff
+        
+        case 6: return .files
+        
+        case 7: return .terminal
+        
+        case 8: return .rename
+        
+        case 9: return .stop
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WorkspaceCommand, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .model:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .new:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .resume:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .settings:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .diff:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .files:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .terminal:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .rename:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .stop:
+            writeInt(&buf, Int32(9))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWorkspaceCommand_lift(_ buf: RustBuffer) throws -> WorkspaceCommand {
+    return try FfiConverterTypeWorkspaceCommand.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWorkspaceCommand_lower(_ value: WorkspaceCommand) -> RustBuffer {
+    return FfiConverterTypeWorkspaceCommand.lower(value)
+}
+
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -34307,6 +34434,30 @@ fileprivate struct FfiConverterOptionTypeVoiceSpeaker: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeVoiceSpeaker.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeWorkspaceCommand: FfiConverterRustBuffer {
+    typealias SwiftType = WorkspaceCommand?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWorkspaceCommand.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWorkspaceCommand.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -37623,6 +37774,14 @@ public func detachDraftProfile(config: ChatConfig)throws  -> ChatConfig  {
     )
 })
 }
+public func draftCommandRefusal(text: String) -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_draft_command_refusal(
+        FfiConverterString.lower(text),uniffiCallStatus
+    )
+})
+}
 public func fastModeOn(model: ModelInfo, config: ChatConfig) -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
         uniffiCallStatus in
@@ -37819,6 +37978,18 @@ public func toggleSpeed(model: ModelInfo, config: ChatConfig) -> ChatConfig  {
     uniffi_zeron_mobile_fn_func_toggle_speed(
         FfiConverterTypeModelInfo_lower(model),
         FfiConverterTypeChatConfig_lower(config),uniffiCallStatus
+    )
+})
+}
+/**
+ * The Zeron command a whole draft runs on send, from the catalog the popup loaded.
+ */
+public func typedWorkspaceCommand(catalog: InvocationCatalog, text: String) -> WorkspaceCommand?  {
+    return try!  FfiConverterOptionTypeWorkspaceCommand.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_typed_workspace_command(
+        FfiConverterTypeInvocationCatalog_lower(catalog),
+        FfiConverterString.lower(text),uniffiCallStatus
     )
 })
 }
@@ -38180,6 +38351,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_detach_draft_profile() != 8162) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_func_draft_command_refusal() != 14112) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_func_fast_mode_on() != 11254) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -38247,6 +38421,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_toggle_speed() != 34779) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_typed_workspace_command() != 43814) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_with_quotes() != 52382) {

@@ -133,6 +133,7 @@ protocol SessionSource: AnyObject {
     func setLimitResume(chatId: String, auto: Bool) async throws
     func htmlPage(deviceId: String, path: String) async -> String?
     func threadMentions(_ query: String) -> [ThreadMention]
+    @MainActor
     func invocationCatalog(skill: Bool) async -> InvocationCatalog?
     var compactBlocked: String? { get }
     func compact(focus: String?)
@@ -150,6 +151,7 @@ protocol SessionSource: AnyObject {
 extension SessionSource {
     func clearQueueError() {}
     func chipSheet(_ id: String) -> UIViewController? { nil }
+    @MainActor
     func invocationCatalog(skill: Bool) async -> InvocationCatalog? { nil }
     var compactBlocked: String? { nil }
     func compact(focus: String?) {}

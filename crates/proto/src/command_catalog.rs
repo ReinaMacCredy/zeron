@@ -116,6 +116,10 @@ pub fn skill_display_name(name: &str) -> String {
         .join(" ")
 }
 
+pub fn compaction_unsupported(harness: HarnessId) -> String {
+    format!("{} does not support compaction", harness.display_name())
+}
+
 pub fn invocation_detail(description: &str, input_hint: Option<&str>) -> String {
     match input_hint {
         Some(hint) if description.is_empty() => format!("<{hint}>"),
@@ -138,6 +142,91 @@ pub struct InvocationCandidate {
     pub description: String,
     pub input_hint: Option<String>,
     pub invocation: Invocation,
+    pub workspace_command: Option<WorkspaceCommand>,
+}
+
+/// Commands implemented by Zeron, independently of the provider protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceCommand {
+    Model,
+    New,
+    Resume,
+    Settings,
+    Diff,
+    Files,
+    Terminal,
+    Rename,
+    Stop,
+}
+
+impl WorkspaceCommand {
+    fn catalog() -> &'static [(Self, &'static str, &'static str, bool)] {
+        &[
+            (
+                Self::Model,
+                "model",
+                "Zeron: choose agent, model, and reasoning",
+                false,
+            ),
+            (Self::New, "new", "Zeron: start a new conversation", false),
+            (
+                Self::Resume,
+                "resume",
+                "Zeron: search and open conversations",
+                false,
+            ),
+            (Self::Settings, "settings", "Zeron: open settings", false),
+            (Self::Diff, "diff", "Zeron: open changes", true),
+            (Self::Files, "files", "Zeron: open project files", true),
+            (Self::Terminal, "terminal", "Zeron: open a terminal", true),
+            (
+                Self::Rename,
+                "rename",
+                "Zeron: rename this conversation",
+                true,
+            ),
+            (Self::Stop, "stop", "Zeron: stop the active run", true),
+        ]
+    }
+}
+
+pub fn with_workspace_commands(
+    mut rows: Vec<InvocationCandidate>,
+    in_chat: bool,
+) -> Vec<InvocationCandidate> {
+    rows.retain(|row| row.workspace_command.is_none());
+    for &(command, name, description, needs_chat) in WorkspaceCommand::catalog() {
+        if needs_chat && !in_chat {
+            continue;
+        }
+        // Keep provider commands intact. Explicit Zeron names remain available
+        // when a provider owns the unqualified name.
+        let mut name = name.to_string();
+        while rows.iter().any(|row| row.name == name) {
+            name = format!("zeron:{name}");
+        }
+        rows.push(InvocationCandidate {
+            invocation: Invocation::Command { name: name.clone() },
+            name,
+            description: description.into(),
+            input_hint: None,
+            workspace_command: Some(command),
+        });
+    }
+    rows
+}
+
+/// The Zeron command a whole draft invokes: indented, quoted or argumented
+/// text stays an ordinary prompt.
+pub fn workspace_command_for_text<'a, C>(
+    text: &str,
+    rows: impl IntoIterator<Item = (&'a str, Option<C>)>,
+) -> Option<C> {
+    let (name, argument) = crate::invocation::leading_command(text)?;
+    if !argument.is_empty() {
+        return None;
+    }
+    rows.into_iter().find(|(row, _)| *row == name)?.1
 }
 
 pub fn invocation_candidates(
@@ -174,6 +263,7 @@ pub fn invocation_candidates(
             name: c.name.clone(),
             description: c.description,
             invocation: Invocation::Command { name: c.name },
+            workspace_command: None,
         })
         .chain(
             skills
@@ -192,6 +282,7 @@ pub fn invocation_candidates(
                         path: s.path,
                         command: s.command,
                     },
+                    workspace_command: None,
                 }),
         )
         .collect()
@@ -491,6 +582,61 @@ mod tests {
         );
         assert!(zeron_owned_command(COMPACT_COMMAND));
         assert!(!zeron_owned_command("model"));
+    }
+
+    #[test]
+    fn workspace_commands_preserve_native_commands_and_avoid_collisions() {
+        let native = invocation_candidates(
+            vec![
+                SlashCommand {
+                    name: "model".into(),
+                    description: "Native model command".into(),
+                    input_hint: Some("model id".into()),
+                    kind: Default::default(),
+                },
+                SlashCommand {
+                    name: "zeron:model".into(),
+                    description: "Plugin command".into(),
+                    input_hint: None,
+                    kind: Default::default(),
+                },
+            ],
+            vec![],
+        );
+        let typed = |text: &str, rows: &[InvocationCandidate]| {
+            workspace_command_for_text(
+                text,
+                rows.iter().map(|r| (r.name.as_str(), r.workspace_command)),
+            )
+        };
+        let rows = with_workspace_commands(native, true);
+        assert_eq!(rows.len(), 11);
+        assert!(rows[0].workspace_command.is_none());
+        assert_eq!(rows[0].input_hint.as_deref(), Some("model id"));
+        assert_eq!(typed("/model", &rows), None);
+        assert_eq!(typed("/zeron:model", &rows), None);
+        assert_eq!(
+            typed("/zeron:zeron:model", &rows),
+            Some(WorkspaceCommand::Model)
+        );
+        assert_eq!(with_workspace_commands(rows, true).len(), 11);
+        let draft_rows = with_workspace_commands(vec![], false);
+        assert_eq!(draft_rows.len(), 4);
+        assert_eq!(typed("/diff", &draft_rows), None);
+        assert_eq!(
+            typed("/model  ", &draft_rows),
+            Some(WorkspaceCommand::Model)
+        );
+        for literal in [
+            "    /model",
+            "`/model`",
+            "```\n/model\n```",
+            "please /model",
+            "/model extra",
+            "/model/path",
+        ] {
+            assert_eq!(typed(literal, &draft_rows), None, "{literal:?}");
+        }
     }
 
     #[test]

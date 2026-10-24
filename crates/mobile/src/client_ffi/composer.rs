@@ -386,6 +386,36 @@ impl SessionHandle {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum WorkspaceCommand {
+    Model,
+    New,
+    Resume,
+    Settings,
+    Diff,
+    Files,
+    Terminal,
+    Rename,
+    Stop,
+}
+
+impl From<zeron_proto::command_catalog::WorkspaceCommand> for WorkspaceCommand {
+    fn from(command: zeron_proto::command_catalog::WorkspaceCommand) -> Self {
+        use zeron_proto::command_catalog::WorkspaceCommand as W;
+        match command {
+            W::Model => Self::Model,
+            W::New => Self::New,
+            W::Resume => Self::Resume,
+            W::Settings => Self::Settings,
+            W::Diff => Self::Diff,
+            W::Files => Self::Files,
+            W::Terminal => Self::Terminal,
+            W::Rename => Self::Rename,
+            W::Stop => Self::Stop,
+        }
+    }
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct InvocationEntry {
     pub name: String,
@@ -394,6 +424,8 @@ pub struct InvocationEntry {
     pub skill: bool,
     pub insert: String,
     pub link: Option<String>,
+    pub workspace_command: Option<WorkspaceCommand>,
+    pub blocked: bool,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -407,32 +439,40 @@ pub struct InvocationCatalog {
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct InvocationMatches {
     pub entries: Vec<InvocationEntry>,
-    pub note: Option<String>,
+    pub error: Option<String>,
+    pub empty: Option<String>,
 }
 
 fn invocation_entry(
     candidate: zeron_proto::command_catalog::InvocationCandidate,
     references: bool,
+    compact_unsupported: Option<&str>,
 ) -> InvocationEntry {
     use zeron_proto::command_catalog::{
         invocation_detail, invocation_insertion, skill_display_name, zeron_owned_command,
     };
     let skill = candidate.invocation.prefix() == '$';
     let insert = format!("{}{}", candidate.invocation.prefix(), candidate.name);
-    let link = (!zeron_owned_command(&candidate.name))
+    let link = (!zeron_owned_command(&candidate.name) && candidate.workspace_command.is_none())
         .then(|| invocation_insertion(&candidate.invocation, references))
         .filter(|link| *link != insert);
+    let blocked = compact_unsupported
+        .filter(|_| candidate.name == zeron_proto::app_commands::COMPACT_COMMAND && !skill);
     InvocationEntry {
         title: if skill {
             skill_display_name(&candidate.name)
         } else {
             insert.clone()
         },
-        detail: invocation_detail(&candidate.description, candidate.input_hint.as_deref()),
+        detail: blocked.map(str::to_owned).unwrap_or_else(|| {
+            invocation_detail(&candidate.description, candidate.input_hint.as_deref())
+        }),
         name: candidate.name,
         skill,
         insert,
         link,
+        workspace_command: candidate.workspace_command.map(Into::into),
+        blocked: blocked.is_some(),
     }
 }
 
@@ -464,7 +504,9 @@ impl CoreClient {
                 entries: found
                     .entries
                     .into_iter()
-                    .map(|c| invocation_entry(c, found.references))
+                    .map(|c| {
+                        invocation_entry(c, found.references, found.compact_unsupported.as_deref())
+                    })
                     .collect(),
                 skill,
                 supported: found.supported,
@@ -494,18 +536,35 @@ pub fn filter_invocations(catalog: InvocationCatalog, query: String) -> Invocati
         .into_iter()
         .map(|ix| catalog.entries[ix].clone())
         .collect();
-    let note = catalog.warning.clone().or_else(|| {
-        entries.is_empty().then(|| {
-            zeron_proto::command_catalog::catalog_empty_message(
-                catalog.skill,
-                catalog.supported,
-                catalog.entries.is_empty(),
-                true,
-            )
-            .into()
-        })
+    let empty = (entries.is_empty() && catalog.warning.is_none()).then(|| {
+        zeron_proto::command_catalog::catalog_empty_message(
+            catalog.skill,
+            catalog.supported,
+            catalog.entries.is_empty(),
+            true,
+        )
+        .into()
     });
-    InvocationMatches { entries, note }
+    InvocationMatches {
+        entries,
+        error: catalog.warning,
+        empty,
+    }
+}
+
+/// The Zeron command a whole draft runs on send, from the catalog the popup loaded.
+#[uniffi::export]
+pub fn typed_workspace_command(
+    catalog: InvocationCatalog,
+    text: String,
+) -> Option<WorkspaceCommand> {
+    zeron_proto::command_catalog::workspace_command_for_text(
+        &text,
+        catalog
+            .entries
+            .iter()
+            .map(|e| (e.name.as_str(), e.workspace_command)),
+    )
 }
 
 /// The phone draws only the empty-draft prediction; the desktop's inline
@@ -594,6 +653,11 @@ impl SessionHandle {
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct SidechatCommand {
     pub prompt: Option<String>,
+}
+
+#[uniffi::export]
+pub fn draft_command_refusal(text: String) -> Option<String> {
+    zeron_proto::app_commands::draft_command_refusal(text.trim()).map(Into::into)
 }
 
 #[uniffi::export]

@@ -86,8 +86,9 @@ final class MentionSuggestions: UIView {
     private(set) var files: [FileMatch] = []
     private(set) var invocations: [InvocationEntry] = []
     private var note: String?
+    private(set) var loading = false
 
-    var isEmpty: Bool { threads.isEmpty && files.isEmpty && invocations.isEmpty && note == nil }
+    var isEmpty: Bool { threads.isEmpty && files.isEmpty && invocations.isEmpty && note == nil && !loading }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -97,6 +98,7 @@ final class MentionSuggestions: UIView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.alwaysBounceVertical = false
+        scroll.accessibilityIdentifier = "suggestions-list"
         card.contentView.addSubview(scroll)
         scroll.addSubview(stack)
         let fit = scroll.heightAnchor.constraint(equalTo: stack.heightAnchor)
@@ -115,30 +117,65 @@ final class MentionSuggestions: UIView {
             stack.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor),
             stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
             stack.widthAnchor.constraint(equalTo: scroll.frameLayoutGuide.widthAnchor),
+            heightAnchor.constraint(lessThanOrEqualToConstant: 320),
             fit,
         ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func show(invocations: [InvocationEntry], note: String?) {
+    func show(invocations: [InvocationEntry], error: String?, empty: String?) {
         threads = []
         files = []
-        self.invocations = Array(invocations.prefix(6))
-        self.note = note
+        loading = false
+        self.invocations = invocations
+        note = error ?? empty
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         scroll.contentOffset = .zero
-        if let note { stack.addArrangedSubview(header(note)) }
-        for (i, entry) in self.invocations.enumerated() {
-            let b = row(symbol: entry.skill ? "sparkles" : "command", title: entry.title, subtitle: entry.detail, mono: false) { [weak self] in self?.onPick?(.invocation(entry)) }
-            b.accessibilityIdentifier = "invocation-\(i)"
-            stack.addArrangedSubview(b)
+        if let error { stack.addArrangedSubview(message(error, color: Palette.danger, identifier: "invocation-error")) }
+        if let empty { stack.addArrangedSubview(message(empty, color: Palette.secondary, identifier: "invocation-empty")) }
+        for (i, entry) in invocations.enumerated() {
+            let row = InvocationRow(entry: entry) { [weak self] in self?.onPick?(.invocation(entry)) }
+            row.accessibilityIdentifier = "invocation-\(i)"
+            stack.addArrangedSubview(row)
         }
+    }
+
+    func showLoading() {
+        threads = []
+        files = []
+        invocations = []
+        note = nil
+        loading = true
+        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        for width in [0.42, 0.6, 0.5] {
+            stack.addArrangedSubview(SkeletonRow(fraction: width))
+        }
+    }
+
+    private func message(_ text: String, color: UIColor, identifier: String) -> UIView {
+        let label = UILabel()
+        label.text = text
+        label.font = Fonts.ui(.sans, 13.5)
+        label.textColor = color
+        label.numberOfLines = 0
+        label.accessibilityIdentifier = identifier
+        let wrap = UIView()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        wrap.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: 14),
+            label.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -14),
+            label.topAnchor.constraint(equalTo: wrap.topAnchor, constant: 10),
+            label.bottomAnchor.constraint(equalTo: wrap.bottomAnchor, constant: -10),
+        ])
+        return wrap
     }
 
     func show(threads: [ThreadMention], files: [FileMatch]) {
         invocations = []
         note = nil
+        loading = false
         self.threads = threads
         self.files = Array(files.prefix(threads.isEmpty ? 5 : 3))
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
@@ -201,4 +238,79 @@ final class MentionSuggestions: UIView {
         b.contentHorizontalAlignment = .leading
         return b
     }
+}
+
+private final class InvocationRow: UIControl {
+    private let pick: () -> Void
+
+    init(entry: InvocationEntry, pick: @escaping () -> Void) {
+        self.pick = pick
+        super.init(frame: .zero)
+        let icon = UIImageView(image: UIImage(systemName: entry.skill ? "sparkles" : "command", withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .medium)))
+        icon.tintColor = Palette.secondary
+        icon.contentMode = .center
+        let title = UILabel()
+        title.text = entry.title
+        title.font = Fonts.ui(.sansMedium, 15)
+        title.textColor = Palette.text
+        title.lineBreakMode = .byTruncatingTail
+        let detail = UILabel()
+        detail.text = entry.detail
+        detail.font = Fonts.ui(.sans, 13.5)
+        detail.textColor = Palette.secondary
+        detail.lineBreakMode = .byTruncatingTail
+        detail.isHidden = entry.detail.isEmpty
+        title.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        title.setContentHuggingPriority(.required, for: .horizontal)
+        let line = UIStackView(arrangedSubviews: [icon, title, detail])
+        line.spacing = 8
+        line.alignment = .center
+        line.isUserInteractionEnabled = false
+        line.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(line)
+        var constraints = [
+            icon.widthAnchor.constraint(equalToConstant: 18),
+            line.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            line.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            line.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            line.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+        ]
+        if !entry.detail.isEmpty {
+            constraints.append(title.widthAnchor.constraint(lessThanOrEqualTo: line.widthAnchor, multiplier: 0.55))
+        }
+        NSLayoutConstraint.activate(constraints)
+        alpha = entry.blocked ? 0.45 : 1
+        isAccessibilityElement = true
+        accessibilityTraits = entry.blocked ? [.button, .notEnabled] : .button
+        accessibilityLabel = entry.title
+        accessibilityValue = entry.detail
+        addAction(UIAction { [weak self] _ in self?.pick() }, for: .touchUpInside)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isHighlighted: Bool {
+        didSet { backgroundColor = isHighlighted ? Palette.controlFill : .clear }
+    }
+}
+
+private final class SkeletonRow: UIView {
+    init(fraction: CGFloat) {
+        super.init(frame: .zero)
+        let bar = UIView()
+        bar.backgroundColor = Palette.controlFill
+        bar.layer.cornerRadius = 5
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(bar)
+        NSLayoutConstraint.activate([
+            bar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            bar.widthAnchor.constraint(equalTo: widthAnchor, multiplier: fraction),
+            bar.heightAnchor.constraint(equalToConstant: 12),
+            bar.topAnchor.constraint(equalTo: topAnchor, constant: 13),
+            bar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -13),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
 }

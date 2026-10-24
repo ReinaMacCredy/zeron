@@ -78,6 +78,8 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     var mentionSearch: ((String) async -> [FileMatch])?
     var threadSearch: ((String) -> [ThreadMention])?
     var invocationCatalog: ((Bool) async -> InvocationCatalog?)?
+    var onWorkspaceCommand: ((WorkspaceCommand) -> Void)?
+    private var slashCatalog: InvocationCatalog?
 
     // State
     var running = false { didSet { if running != oldValue { refreshAction(animated: true) } } }
@@ -398,10 +400,19 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         mentionTask?.cancel()
         if let catalog = invocationCatalog, let q = MentionIndex.invocationQuery(in: textView.text, cursor: textView.selectedRange.location) {
             mentionQuery = (q.range, q.query)
+            let loading = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled, let self, self.mentionQuery?.query == q.query else { return }
+                self.suggestions.showLoading()
+                self.setSuggestionsVisible(true)
+            }
             mentionTask = Task { [weak self] in
-                guard let found = await catalog(q.skill), !Task.isCancelled, let self, self.mentionQuery?.query == q.query else { return }
+                let found = await catalog(q.skill)
+                loading.cancel()
+                guard let found, !Task.isCancelled, let self, self.mentionQuery?.query == q.query else { return }
+                if !q.skill { self.slashCatalog = found }
                 let matches = filterInvocations(catalog: found, query: q.query)
-                self.suggestions.show(invocations: matches.entries, note: matches.note)
+                self.suggestions.show(invocations: matches.entries, error: matches.error, empty: matches.empty)
                 self.setSuggestionsVisible(!self.suggestions.isEmpty)
             }
             return
@@ -447,6 +458,19 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
 
     private func insertMention(_ pick: MentionPick) {
         guard let q = mentionQuery else { return }
+        if case .invocation(let entry) = pick {
+            if entry.blocked { return }
+            if let command = entry.workspaceCommand {
+                UISelectionFeedbackGenerator().selectionChanged()
+                textView.text = (textView.text as NSString).replacingCharacters(in: q.range, with: "")
+                textView.selectedRange = NSRange(location: q.range.location, length: 0)
+                mentionQuery = nil
+                setSuggestionsVisible(false)
+                textChanged()
+                onWorkspaceCommand?(command)
+                return
+            }
+        }
         UISelectionFeedbackGenerator().selectionChanged()
         let token: String
         switch pick {
@@ -540,6 +564,20 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             chipStrip.addArrangedSubview(b)
         }
         applyChipMenus()
+    }
+
+    func beginFileMention() {
+        let text = textView.text ?? ""
+        let gap = text.isEmpty || text.hasSuffix(" ") || text.hasSuffix("\n") ? "" : " "
+        self.text = text + gap + "@"
+        textView.selectedRange = NSRange(location: (textView.text as NSString).length, length: 0)
+        _ = textView.becomeFirstResponder()
+        updateMentionQuery()
+    }
+
+    func openChip(_ id: String) {
+        guard let b = chipStrip.arrangedSubviews.first(where: { $0.accessibilityIdentifier == "composer-chip-\(id)" }) as? UIButton else { return }
+        if b.showsMenuAsPrimaryAction { b.performPrimaryAction() } else { onChipTap?(id, b) }
     }
 
     private func applyChipMenus() {
@@ -947,6 +985,13 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
 
     private func send(_ mode: DeliveryMode) {
         guard hasContent else { return }
+        if let catalog = slashCatalog, let command = typedWorkspaceCommand(catalog: catalog, text: textView.text) {
+            textView.text = ""
+            setSuggestionsVisible(false)
+            textChanged()
+            onWorkspaceCommand?(command)
+            return
+        }
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         let body = withQuotes(text: mentions.encode(textView.text.trimmingCharacters(in: .whitespacesAndNewlines)), quotes: quotes)
         let staged = images

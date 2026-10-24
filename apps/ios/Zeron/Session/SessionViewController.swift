@@ -197,6 +197,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         composer.mentionSearch = { [weak self] q in await self?.source.searchFiles(q) ?? [] }
         composer.threadSearch = { [weak self] q in self?.source.threadMentions(q) ?? [] }
         composer.invocationCatalog = { [weak self] skill in await self?.source.invocationCatalog(skill: skill) }
+        composer.onWorkspaceCommand = { [weak self] command in self?.run(command) }
         composer.onHeightChange = { [weak self] in self?.view.setNeedsLayout() }
         composer.onActionChange = { [weak self] in self?.render(animated: true) }
         composer.onChipTap = { [weak self] id, _ in
@@ -555,6 +556,40 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         let nav = UINavigationController(rootViewController: TerminalViewController(source: source, terminalId: terminalId))
         if let s = nav.sheetPresentationController { s.detents = [.medium(), .large()]; s.selectedDetentIdentifier = .large; s.prefersGrabberVisible = true }
         present(nav, animated: true)
+    }
+
+    private func run(_ command: WorkspaceCommand) {
+        switch command {
+        case .model: composer.openChip("model")
+        case .new: router?.presentNewSession(prompt: nil)
+        case .resume: router?.showSearch()
+        case .settings: router?.showSettings()
+        case .diff:
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard let changes = await self.source.chatChanges() else {
+                    return Toast.show("No changes in this chat yet", in: self.view.window, above: self.bottom)
+                }
+                self.source.openChanges(from: self, title: changes.title)
+            }
+        case .files:
+            composer.beginFileMention()
+        case .terminal: openTerminal(nil)
+        case .rename: renameChat()
+        case .stop: source.stop()
+        }
+    }
+
+    private func renameChat() {
+        let alert = UIAlertController(title: "Rename Session", message: nil, preferredStyle: .alert)
+        alert.addTextField { [weak self] field in field.text = self.flatMap { $0.app.row($0.chatId)?.title } }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Rename", style: .default) { [weak self] _ in
+            let title = alert.textFields?.first?.text?.trimmingCharacters(in: .whitespaces) ?? ""
+            guard let self, !title.isEmpty else { return }
+            self.app.rename(self.chatId, title)
+        })
+        present(alert, animated: true)
     }
 
     private func openProjectActions() {

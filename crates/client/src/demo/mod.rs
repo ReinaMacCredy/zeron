@@ -939,9 +939,6 @@ impl DemoHost {
         }
         tokio::time::sleep(Duration::from_millis(80)).await;
         match method {
-            m::HARNESS_COMPACTION => {
-                return Ok(serde_json::json!({ "compaction": "native", "branching": true }));
-            }
             m::FORK_CHAT => return self.fork_chat(&client, &params),
             m::FETCH_TOOL_BLOB => return Ok(demo_blob(&params)),
             m::GET_SESSION_STATS => return Ok(missions::session_stats(&params)),
@@ -967,8 +964,8 @@ impl DemoHost {
         if let Some(reply) = fixtures::today_reply(device_id, method, now_ms()) {
             return Ok(reply);
         }
-        if let Some(catalog) = composer::invocation_catalog(method) {
-            return Ok(catalog);
+        if let Some(catalog) = composer::invocation_catalog(method, &params) {
+            return catalog;
         }
         if method == m::CONTINUE_IN_NEW_THREAD {
             return composer::continue_in_new_thread(&client, &params);

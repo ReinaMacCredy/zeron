@@ -33,6 +33,19 @@ pub fn sidechat_prompt(text: &str) -> Option<Option<String>> {
     app_command_argument(text, BTW_COMMAND).or_else(|| app_command_argument(text, SIDECHAT_COMMAND))
 }
 
+pub const COMPACT_NEEDS_CHAT: &str = "Start a chat before compacting its context.";
+pub const SIDECHAT_NEEDS_CHAT: &str = "Start a chat before opening a sidechat.";
+
+pub fn draft_command_refusal(text: &str) -> Option<&'static str> {
+    if compact_focus(text).is_some() {
+        Some(COMPACT_NEEDS_CHAT)
+    } else if sidechat_prompt(text).is_some() {
+        Some(SIDECHAT_NEEDS_CHAT)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
