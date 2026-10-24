@@ -86,7 +86,31 @@ pub fn with_zeron_commands(
         Some(harness) => with_computer_use_entry(harness, commands),
         None => commands,
     };
-    with_sidechat_entry(with_compact_entry(commands))
+    let commands = with_sidechat_entry(with_compact_entry(commands));
+    if harness == Some(HarnessId::ClaudeCode) {
+        with_terminal_commands(commands)
+    } else {
+        commands
+    }
+}
+
+pub const TERMINAL_ONLY_DESCRIPTION: &str = "Runs only in Claude Code's terminal";
+
+// Headless Claude Code leaves terminal-only commands out of its catalog, so typing one finds
+// nothing; Zeron's own command keeps a shared name such as /resume.
+pub fn with_terminal_commands(mut commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
+    let zeron = WorkspaceCommand::catalog();
+    for name in crate::app_commands::TERMINAL_ONLY_COMMANDS {
+        if !commands.iter().any(|c| c.name == *name) && !zeron.iter().any(|z| z.1 == *name) {
+            commands.push(SlashCommand {
+                name: (*name).into(),
+                description: TERMINAL_ONLY_DESCRIPTION.into(),
+                input_hint: None,
+                kind: SlashCommandKind::BuiltIn,
+            });
+        }
+    }
+    commands
 }
 
 // Send intercepts these from the typed text, so they insert as plain `/name`.
@@ -569,14 +593,33 @@ mod tests {
         .map(|command| command.name)
         .collect();
         assert_eq!(
-            names,
-            vec![
+            names[..5],
+            [
                 BTW_COMMAND,
                 SIDECHAT_COMMAND,
                 COMPACT_COMMAND,
                 COMPUTER_USE_COMMAND,
                 "model"
             ]
+        );
+        assert_eq!(
+            names[5..],
+            crate::app_commands::TERMINAL_ONLY_COMMANDS
+                .iter()
+                .filter(|name| **name != "resume")
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>(),
+            "Claude Code's terminal-only commands join at the end"
+        );
+        let advertised = with_zeron_commands(
+            Some(HarnessId::ClaudeCode),
+            vec![command("status", SlashCommandKind::BuiltIn)],
+        );
+        assert_eq!(advertised.iter().filter(|c| c.name == "status").count(), 1);
+        assert!(
+            with_zeron_commands(Some(HarnessId::Codex), vec![])
+                .iter()
+                .all(|c| c.description != TERMINAL_ONLY_DESCRIPTION)
         );
         assert!(zeron_owned_command(COMPACT_COMMAND));
         assert!(!zeron_owned_command("model"));

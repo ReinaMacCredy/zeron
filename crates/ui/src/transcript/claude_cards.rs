@@ -3,8 +3,9 @@ use std::sync::Arc;
 
 use gpui::{AnyElement, ClipboardItem, Context, Hsla, SharedString, div, prelude::*, px};
 use zeron_proto::claude_cards::{
-    LOCAL_FOOTNOTE, MCP_EMPTY, MCP_FOOTNOTE, MODEL_FOOTNOTE, Series, TerminalAction, mcp_servers,
-    parse_context, percent, selected_model, terminal_action, terminal_only, usage_subtitle,
+    LOCAL_FOOTNOTE, MCP_EMPTY, MCP_FOOTNOTE, MODEL_FOOTNOTE, RUNNING, Series, TerminalAction,
+    mcp_servers, parse_context, percent, selected_model, stale_card, terminal_action,
+    terminal_only, usage_subtitle,
 };
 use zeron_proto::claude_config::CommandCard;
 use zeron_proto::usage::format_tokens;
@@ -13,8 +14,6 @@ use super::{Transcript, TranscriptEvent};
 use crate::composer::claude_config::{meter, parse_usage};
 use crate::icons::{self, icon};
 use crate::theme::Theme;
-
-const STALE_PENDING_MS: i64 = 120_000;
 
 #[derive(Default)]
 pub(super) struct CardUi {
@@ -272,16 +271,13 @@ impl Transcript {
             return self.render_notice(row, name, theme, cx);
         }
         if card.pending {
-            let started = card.started_at.unwrap_or_else(now_ms);
-            if now_ms() - started < STALE_PENDING_MS {
-                return self.render_pending(row, &card.command, started, theme, cx);
-            }
-            let stale = CommandCard {
-                error: Some("No answer came back from Claude Code.".into()),
-                pending: false,
-                ..(*card).clone()
+            return match stale_card(&card, now_ms()) {
+                Some(stale) => self.render_generic(row, &stale, theme, cx),
+                None => {
+                    let started = card.started_at.unwrap_or_else(now_ms);
+                    self.render_pending(row, &card.command, started, theme, cx)
+                }
             };
-            return self.render_generic(row, &stale, theme, cx);
         }
         let body = match (card.error.as_deref(), card.command.as_str()) {
             (Some(_), _) => None,
@@ -410,7 +406,7 @@ impl Transcript {
                             .truncate()
                             .text_size(text_size(12.5))
                             .text_color(theme.text_muted)
-                            .child("Running in Claude Code…"),
+                            .child(RUNNING),
                     )
                     .child(div().flex_1())
                     .child(
@@ -433,7 +429,7 @@ impl Transcript {
             .and_then(|chat| chat.title.clone())
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| "Chat".into());
-        let markdown = transcript_markdown(&title, &state.transcript);
+        let markdown = zeron_doc::transcript_markdown(&title, &state.transcript);
         let name: String = title
             .chars()
             .map(|c| {
@@ -1149,68 +1145,4 @@ impl Transcript {
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
-}
-
-fn transcript_markdown(title: &str, entries: &[zeron_doc::SessionMessageEntry]) -> String {
-    let mut out = format!("# {title}\n");
-    for entry in entries {
-        let text: Vec<&str> = entry
-            .parts
-            .iter()
-            .filter_map(|part| match part {
-                zeron_doc::MessagePart::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        let Some(first) = text.first() else {
-            continue;
-        };
-        match entry.role {
-            zeron_doc::MessageRole::User => {
-                out.push_str(&format!("\n## You\n\n{}\n", text.concat()))
-            }
-            zeron_doc::MessageRole::Assistant => {
-                out.push_str(&format!("\n## Assistant\n\n{}\n", text.concat()))
-            }
-            zeron_doc::MessageRole::System => out.push_str(&format!("\n_{first}_\n")),
-        }
-    }
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn export_keeps_turns_and_notes_in_order() {
-        let entry = |role, text: &str| zeron_doc::SessionMessageEntry {
-            id: text.into(),
-            role,
-            parts: vec![zeron_doc::MessagePart::Text {
-                id: "t0".into(),
-                text: text.into(),
-            }],
-            created_at: 0,
-            device_id: "d".into(),
-            status: None,
-            continuation_of: None,
-            from_chat_id: None,
-            fork_import: false,
-            answers_request_id: None,
-            duration_ms: None,
-        };
-        let md = transcript_markdown(
-            "Lab",
-            &[
-                entry(zeron_doc::MessageRole::User, "hi"),
-                entry(zeron_doc::MessageRole::Assistant, "hello"),
-                entry(zeron_doc::MessageRole::System, "Claude Code /usage"),
-            ],
-        );
-        assert_eq!(
-            md,
-            "# Lab\n\n## You\n\nhi\n\n## Assistant\n\nhello\n\n_Claude Code /usage_\n"
-        );
-    }
 }

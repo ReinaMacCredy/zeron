@@ -11,6 +11,7 @@
 pub mod background;
 pub mod commands;
 pub mod constants;
+pub mod export;
 pub mod parts;
 pub mod queue;
 pub mod rebuild;
@@ -23,6 +24,7 @@ pub mod workspace;
 
 pub use commands::*;
 pub use constants::*;
+pub use export::transcript_markdown;
 pub use parts::*;
 pub use queue::*;
 pub use rebuild::*;

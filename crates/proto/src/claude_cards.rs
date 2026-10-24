@@ -53,6 +53,19 @@ pub fn pending_card(name: &str, now_ms: i64) -> CommandCard {
     }
 }
 
+pub const RUNNING: &str = "Running in Claude Code…";
+pub const STALE_PENDING_MS: i64 = 120_000;
+
+// A placeholder whose answer never came back turns into an error card the user can retry.
+pub fn stale_card(card: &CommandCard, now_ms: i64) -> Option<CommandCard> {
+    let started = card.started_at.unwrap_or(now_ms);
+    (card.pending && now_ms - started >= STALE_PENDING_MS).then(|| CommandCard {
+        error: Some("No answer came back from Claude Code.".into()),
+        pending: false,
+        ..card.clone()
+    })
+}
+
 pub fn side_headline(name: &str) -> String {
     format!("{COMMAND_NOTE_PREFIX}{name}")
 }
