@@ -329,6 +329,7 @@ final class AppModel {
         endDeliveryBackgroundTask()
         client?.onForeground()
         refreshWorkspace()
+        WallpaperSync.refresh(self)
     }
 
     /// Pull to refresh: redial the registry and rooms and re-probe health (the

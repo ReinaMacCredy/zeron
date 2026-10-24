@@ -829,6 +829,56 @@ impl Client {
         Ok(reply["text"].as_str().unwrap_or_default().to_owned())
     }
 
+    pub async fn chat_wallpaper(
+        &self,
+        device_id: &str,
+        known_hash: Option<&str>,
+    ) -> Result<(zeron_proto::chat_wallpaper::ChatWallpaper, Option<Vec<u8>>)> {
+        use base64::Engine as _;
+        use zeron_proto::chat_wallpaper::{ChatWallpaper, ChatWallpaperRequest};
+        let mut request = ChatWallpaperRequest {
+            offset: 0,
+            hash: known_hash.map(str::to_owned),
+        };
+        let mut bytes = Vec::new();
+        loop {
+            let reply = self
+                .inner
+                .host_rpc(
+                    device_id,
+                    zeron_rpc::methods::GET_CHAT_WALLPAPER,
+                    serde_json::to_value(&request)
+                        .map_err(|e| ClientError::Internal(e.to_string()))?,
+                )
+                .await?;
+            let wallpaper: ChatWallpaper =
+                serde_json::from_value(reply).map_err(|e| ClientError::HostError(e.to_string()))?;
+            let Some(image) = &wallpaper.image else {
+                return Ok((wallpaper, None));
+            };
+            if request.offset == 0 && known_hash == Some(image.hash.as_str()) {
+                return Ok((wallpaper, None));
+            }
+            bytes.extend(
+                base64::engine::general_purpose::STANDARD
+                    .decode(&image.data)
+                    .map_err(|e| ClientError::HostError(e.to_string()))?,
+            );
+            if image.done {
+                return Ok((wallpaper, Some(bytes)));
+            }
+            if image.next_offset <= request.offset {
+                return Err(ClientError::HostError(
+                    "wallpaper read made no progress".into(),
+                ));
+            }
+            request = ChatWallpaperRequest {
+                offset: image.next_offset,
+                hash: Some(image.hash.clone()),
+            };
+        }
+    }
+
     async fn limit_rpc(
         &self,
         chat_id: &str,

@@ -314,6 +314,9 @@ pub mod methods {
     /// Plain-text search over a workspace's file contents.
     pub const SEARCH_WORKSPACE_CONTENT: &str = "SearchWorkspaceContent";
     pub const READ_WORKSPACE_IMAGE: &str = "ReadWorkspaceImage";
+    /// `ChatWallpaperRequest` → `ChatWallpaper`: the new-thread artwork and chat
+    /// background settings from this device's `ui-settings.json`, for Sync with Mac.
+    pub const GET_CHAT_WALLPAPER: &str = "GetChatWallpaper";
     pub const READ_WORKSPACE_FILE: &str = "ReadWorkspaceFile";
     pub const MOVE_WORKSPACE_ENTRY: &str = "MoveWorkspaceEntry";
     pub const DELETE_WORKSPACE_ENTRY: &str = "DeleteWorkspaceEntry";

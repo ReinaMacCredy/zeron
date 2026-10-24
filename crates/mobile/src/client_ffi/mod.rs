@@ -24,6 +24,7 @@ pub use voice::*;
 mod tasks;
 mod today;
 mod types;
+mod wallpaper;
 
 use std::sync::Arc;
 

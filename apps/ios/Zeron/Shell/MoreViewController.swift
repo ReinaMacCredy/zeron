@@ -16,6 +16,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         var tint: UIColor = Palette.secondary
         var accessory: Accessory = .disclosure
         var destructive = false
+        var disabled = false
 
         enum Accessory: Hashable {
             case disclosure
@@ -23,6 +24,18 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             case check(Bool)
             case dot(Bool)
             case toggle(Bool)
+            case segmented([String], Int)
+            case slider(Slider)
+        }
+
+        struct Slider: Hashable {
+            var value: Double
+            var max: Double
+            var step: Double
+            var scale: Double
+            var unit: String
+
+            func text(_ v: Double) -> String { "\(Int((v * scale).rounded()))\(unit)" }
         }
     }
 
@@ -55,7 +68,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             var c = UIListContentConfiguration.subtitleCell()
             c.text = row.title
             c.textProperties.font = Fonts.ui(.sansMedium, 16)
-            c.textProperties.color = row.destructive ? Palette.danger : Palette.text
+            c.textProperties.color = row.destructive ? Palette.danger : row.disabled ? Palette.tertiary : Palette.text
             c.secondaryText = row.subtitle
             c.secondaryTextProperties.font = Fonts.ui(.sans, 13)
             c.secondaryTextProperties.color = Palette.secondary
@@ -78,11 +91,46 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
                 let toggle = UISwitch()
                 toggle.isOn = on
                 toggle.onTintColor = Palette.accent
+                toggle.isEnabled = !row.disabled
                 toggle.accessibilityIdentifier = "toggle-\(row.id)"
                 toggle.addAction(UIAction { [weak self, weak toggle] _ in
                     self?.toggled(row.id, toggle?.isOn ?? false)
                 }, for: .valueChanged)
                 cell.accessories = [.customView(configuration: .init(customView: toggle, placement: .trailing()))]
+            case let .segmented(items, selected):
+                let control = UISegmentedControl(items: items)
+                control.selectedSegmentIndex = selected
+                control.isEnabled = !row.disabled
+                control.accessibilityIdentifier = "segment-\(row.id)"
+                control.addAction(UIAction { [weak self, weak control] _ in
+                    self?.picked(row.id, control?.selectedSegmentIndex ?? 0)
+                }, for: .valueChanged)
+                control.sizeToFit()
+                cell.accessories = [.customView(configuration: .init(customView: control, placement: .trailing(), reservedLayoutWidth: .actual, maintainsFixedSize: true))]
+            case let .slider(spec):
+                let slider = UISlider()
+                slider.maximumValue = Float(spec.max)
+                slider.value = Float(spec.value)
+                slider.minimumTrackTintColor = Palette.accent
+                slider.isEnabled = !row.disabled
+                slider.accessibilityIdentifier = "slider-\(row.id)"
+                let label = UILabel()
+                label.font = Fonts.ui(.sans, 13)
+                label.textColor = Palette.secondary
+                label.textAlignment = .right
+                label.text = spec.text(spec.value)
+                label.accessibilityIdentifier = "value-\(row.id)"
+                slider.addAction(UIAction { [weak self, weak slider, weak label] _ in
+                    guard let slider else { return }
+                    let value = (Double(slider.value) / spec.step).rounded() * spec.step
+                    label?.text = spec.text(value)
+                    self?.slid(row.id, value)
+                }, for: .valueChanged)
+                let stack = UIStackView(arrangedSubviews: [slider, label])
+                stack.spacing = 8
+                stack.frame = CGRect(x: 0, y: 0, width: 168, height: 32)
+                label.widthAnchor.constraint(equalToConstant: 42).isActive = true
+                cell.accessories = [.customView(configuration: .init(customView: stack, placement: .trailing(), reservedLayoutWidth: .actual, maintainsFixedSize: true))]
             }
             cell.accessibilityIdentifier = "settings-\(row.id)"
         }
@@ -98,7 +146,9 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             cv.dequeueConfiguredReusableSupplementary(using: header, for: path)
         }
         reload()
-        wallpaperObserver = NotificationCenter.default.addObserver(forName: WallpaperStore.didChange, object: nil, queue: .main) { [weak self] _ in self?.reload() }
+        wallpaperObserver = NotificationCenter.default.addObserver(forName: WallpaperStore.didChange, object: nil, queue: .main) { [weak self] _ in
+            if self?.sliding == false { self?.reload() }
+        }
         // Devices go on/offline and the org name backfills after opening.
         appToken = app.observe { [weak self] in self?.reload() }
         cloudToken = app.cloud.observe { [weak self] in self?.reload() }
@@ -115,6 +165,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         super.viewWillAppear(animated)
         if dataSource != nil { reload() }
         refreshNotificationStatus()
+        WallpaperSync.refresh(app)
     }
 
     // MARK: Notifications
@@ -155,8 +206,15 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             app.groupByProject = on
             return
         }
-        if id == "wallpaper:chats" {
-            WallpaperStore.behindChats = on
+        if id == "wallpaper:sync" {
+            WallpaperStore.syncWithMac = on
+            WallpaperSync.refresh(app)
+            return
+        }
+        if id == "wallpaper:chats" || id == "wallpaper:scrim" {
+            var chat = WallpaperStore.chatBackground
+            if id == "wallpaper:chats" { chat.enabled = on } else { chat.scrim = on }
+            WallpaperStore.chatBackground = chat
             return
         }
         if id == "math:render" {
@@ -190,6 +248,53 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         if let kind = PushNotifications.Kind(rawValue: String(id.dropFirst("notify:".count))) {
             push.set(kind, on)
         }
+    }
+
+    private func picked(_ id: String, _ index: Int) {
+        guard id == "wallpaper:placement" else { return }
+        var chat = WallpaperStore.chatBackground
+        chat.placement = WallpaperStore.ChatBackground.Placement.allCases[index]
+        WallpaperStore.chatBackground = chat
+    }
+
+    // Rebuilding the rows mid-drag would replace the slider under the finger.
+    private var sliding = false
+
+    private func slid(_ id: String, _ value: Double) {
+        var chat = WallpaperStore.chatBackground
+        if id == "wallpaper:opacity" { chat.opacity = CGFloat(value) } else { chat.blur = CGFloat(value) }
+        sliding = true
+        WallpaperStore.chatBackground = chat
+        sliding = false
+    }
+
+    private func wallpaperRows() -> [Row] {
+        let syncing = WallpaperStore.syncWithMac
+        let host = WallpaperSync.host(app)
+        let follows = host.map { syncing ? "Follows \($0.name)\($0.online ? "" : " (offline)")" : "Use \($0.name)'s background and chat settings" }
+        var rows = [Row(id: "wallpaper:sync", title: "Sync with Mac", subtitle: follows ?? "No Mac in this workspace", symbol: "laptopcomputer.and.iphone", accessory: .toggle(syncing), disabled: host == nil && !syncing)]
+        if syncing, (app.client?.wallpaperHosts().count ?? 0) > 1 {
+            rows.append(Row(id: "wallpaper:host", title: "Mac", subtitle: host?.name, symbol: "desktopcomputer"))
+        }
+        let set = WallpaperStore.isSet
+        let choose = syncing ? "Wallpaper" : set ? "Change Wallpaper…" : "Choose Wallpaper…"
+        rows.append(Row(id: "wallpaper:choose", title: choose, subtitle: set ? WallpaperStore.name : syncing ? "None on the Mac" : "Shown behind new chats and the sessions list", symbol: "photo", accessory: syncing ? .none : .disclosure, disabled: syncing))
+        guard set else { return rows }
+        let effect = WallpaperStore.effect
+        rows.append(Row(id: "wallpaper:effect", title: "Effect", subtitle: "\(WallpaperStore.label(effect)) — \(WallpaperStore.detail(effect))", symbol: "wand.and.stars", accessory: syncing ? .none : .disclosure, disabled: syncing))
+        let chat = WallpaperStore.chatBackground
+        rows.append(Row(id: "wallpaper:chats", title: "Chat background", subtitle: "Show the artwork behind open conversations.", symbol: "bubble.left.and.text.bubble.right", accessory: .toggle(chat.enabled), disabled: syncing))
+        if chat.enabled {
+            let placements = WallpaperStore.ChatBackground.Placement.allCases
+            rows.append(Row(id: "wallpaper:placement", title: "Placement", subtitle: chat.placement.detail, symbol: "rectangle.portrait.topthird.inset.filled", accessory: .segmented(placements.map(\.label), placements.firstIndex(of: chat.placement) ?? 0), disabled: syncing))
+            rows.append(Row(id: "wallpaper:opacity", title: "Opacity", symbol: "circle.lefthalf.filled", accessory: .slider(.init(value: Double(chat.opacity), max: 1, step: 0.01, scale: 100, unit: "%")), disabled: syncing))
+            rows.append(Row(id: "wallpaper:blur", title: "Blur", symbol: "drop", accessory: .slider(.init(value: Double(chat.blur), max: Double(WallpaperStore.ChatBackground.blurMax), step: Double(WallpaperStore.ChatBackground.blurStep), scale: 1, unit: "px")), disabled: syncing))
+            rows.append(Row(id: "wallpaper:scrim", title: "Scrim", subtitle: "Darkens the artwork toward the bottom so text stays readable.", symbol: "square.bottomhalf.filled", accessory: .toggle(chat.scrim), disabled: syncing))
+        }
+        if !syncing {
+            rows.append(Row(id: "wallpaper:remove", title: "Remove Wallpaper", symbol: "trash", accessory: .none, destructive: true))
+        }
+        return rows
     }
 
     private var wallpaperObserver: NSObjectProtocol?
@@ -232,14 +337,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             Row(id: "appearance:2", title: "Dark", symbol: "moon", accessory: .check(style == 2)),
         ])
         s.appendSections(["Wallpaper"])
-        var wall = [Row(id: "wallpaper:choose", title: WallpaperStore.isSet ? "Change Wallpaper…" : "Choose Wallpaper…", subtitle: WallpaperStore.isSet ? WallpaperStore.name : "Shown behind new chats and the sessions list", symbol: "photo")]
-        if WallpaperStore.isSet {
-            let effect = WallpaperStore.effect
-            wall.append(Row(id: "wallpaper:chats", title: "Chat background", subtitle: "Show the artwork behind open conversations.", symbol: "bubble.left.and.text.bubble.right", accessory: .toggle(WallpaperStore.behindChats)))
-            wall.append(Row(id: "wallpaper:effect", title: "Effect", subtitle: "\(WallpaperStore.label(effect)) — \(WallpaperStore.detail(effect))", symbol: "wand.and.stars"))
-            wall.append(Row(id: "wallpaper:remove", title: "Remove Wallpaper", symbol: "trash", accessory: .none, destructive: true))
-        }
-        s.appendItems(wall)
+        s.appendItems(wallpaperRows())
         s.appendSections(["Math"])
         var math = [Row(id: "math:render", title: "Render Math", subtitle: "Off shows LaTeX as its source", symbol: "function", accessory: .toggle(MathSettings.render))]
         if MathSettings.render {
@@ -277,7 +375,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt path: IndexPath) {
         collectionView.deselectItem(at: path, animated: true)
-        guard let row = dataSource.itemIdentifier(for: path) else { return }
+        guard let row = dataSource.itemIdentifier(for: path), !row.disabled else { return }
         switch row.id {
         case "voice": navigationController?.pushViewController(VoiceViewController(app: app), animated: true)
         case "providers":
@@ -301,6 +399,22 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             reload()
         case "wallpaper:choose":
             WallpaperPicker.present(from: self)
+        case "wallpaper:host":
+            let sheet = UIAlertController(title: "Sync with Mac", message: nil, preferredStyle: .actionSheet)
+            let current = WallpaperSync.host(app)?.id
+            for host in app.client?.wallpaperHosts() ?? [] {
+                let action = UIAlertAction(title: host.name, style: .default) { [weak self] _ in
+                    guard let self else { return }
+                    WallpaperStore.syncDeviceId = host.id
+                    WallpaperSync.refresh(self.app)
+                    self.reload()
+                }
+                action.setValue(host.id == current, forKey: "checked")
+                sheet.addAction(action)
+            }
+            sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+            sheet.popoverPresentationController?.sourceView = collectionView.cellForItem(at: path)
+            present(sheet, animated: true)
         case "wallpaper:effect":
             let sheet = UIAlertController(title: "Wallpaper Effect", message: nil, preferredStyle: .actionSheet)
             for e in WallpaperStore.allEffects {

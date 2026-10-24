@@ -6921,6 +6921,18 @@ impl RpcService for EngineRpc {
                 self.doc_host.kick_drains();
                 RpcReply::value(&serde_json::json!({ "path": path }))
             }
+            methods::GET_CHAT_WALLPAPER => {
+                let request: zeron_proto::chat_wallpaper::ChatWallpaperRequest =
+                    parse_params(params)?;
+                let data_dir = self.repos.data_dir().to_path_buf();
+                let wallpaper = tokio::task::spawn_blocking(move || {
+                    crate::chat_wallpaper::read(&data_dir, &request)
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?
+                .map_err(RpcError::Failed)?;
+                RpcReply::value(&wallpaper)
+            }
             methods::READ_ATTACHMENT_CHUNK => {
                 let p: ReadAttachmentChunkParams = parse_params(params)?;
                 // Path jail: the uploads dir, the ACP registry icons, and every

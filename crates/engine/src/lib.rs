@@ -25,6 +25,7 @@ mod change_request_store;
 pub mod change_requests;
 pub mod chat2_host;
 mod chat_persistence;
+mod chat_wallpaper;
 mod commit_messages;
 mod compact_boundary;
 pub mod computer;

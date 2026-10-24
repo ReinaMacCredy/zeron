@@ -796,19 +796,30 @@ final class SessionFlowTests: XCTestCase {
     func testWallpaperSettings() throws {
         let path = "/tmp/wall-test.png"
         try XCTSkipUnless(FileManager.default.fileExists(atPath: path), "needs a host image at \(path)")
-        let app = launch(["-wallpaper", path, "-wallpaper-effect", "halftone", "-route", "more"])
+        let app = launch(["-wallpaper", path, "-wallpaper-effect", "halftone", "-wallpaperSync", "NO", "-route", "more"])
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 10))
         let effect = app.staticTexts["Effect"]
         for _ in 0..<4 where !effect.isHittable { app.swipeUp() }
         XCTAssertTrue(effect.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Halftone'")).firstMatch.exists)
         snapshot(app, "wallpaper-settings")
+        let chats = app.switches["toggle-wallpaper:chats"]
+        for _ in 0..<4 where !chats.isHittable { app.swipeUp() }
+        if chats.value as? String == "0" { chats.tap() }
+        let blur = app.staticTexts["Blur"]
+        for _ in 0..<4 where !blur.isHittable { app.swipeUp() }
+        XCTAssertTrue(app.segmentedControls["segment-wallpaper:placement"].exists)
+        XCTAssertTrue(app.sliders["slider-wallpaper:opacity"].exists)
+        XCTAssertTrue(app.staticTexts["Darkens the artwork toward the bottom so text stays readable."].exists)
+        snapshot(app, "chat-background-settings")
         // Scroll the row clear of the bottom accessory / tab bar before tapping.
         let remove = app.staticTexts["Remove Wallpaper"]
         let limit = app.windows.firstMatch.frame.height * 0.7
         for _ in 0..<4 where remove.frame.maxY > limit { app.swipeUp() }
         remove.tap()
-        XCTAssertTrue(app.staticTexts["Choose Wallpaper…"].waitForExistence(timeout: 5))
+        let choose = app.staticTexts["Choose Wallpaper…"]
+        for _ in 0..<3 where !choose.waitForExistence(timeout: 2) { app.swipeDown() }
+        XCTAssertTrue(choose.exists)
         XCTAssertFalse(app.staticTexts["Effect"].exists)
     }
 
