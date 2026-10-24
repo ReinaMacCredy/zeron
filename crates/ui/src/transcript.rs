@@ -32,6 +32,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
+mod compaction_card;
 mod html_card;
 
 use gpui::{
@@ -1313,6 +1314,11 @@ pub enum RowKind {
     },
     Classifier {
         record: Arc<zeron_doc::ClassifierRecord>,
+        compaction: Option<Arc<zeron_doc::CompactionRecord>>,
+    },
+    Compaction {
+        text: SharedString,
+        record: Arc<zeron_doc::CompactionRecord>,
     },
     /// The fork seam: a labeled divider between copied history and the
     /// chat's own turns.
@@ -1792,9 +1798,38 @@ pub fn rows_for_entry(
         }) {
             return vec![Row {
                 id: entry.id.clone().into(),
-                version: fnv1a(record.input.as_bytes()) ^ record.duration_ms,
+                version: fnv1a(record.input.as_bytes())
+                    ^ record.duration_ms
+                    ^ fnv1a(record.reason.as_deref().unwrap_or_default().as_bytes()).rotate_left(1),
                 turn_start: true,
                 kind: RowKind::Classifier {
+                    record: Arc::new(record.clone()),
+                    compaction: None,
+                },
+                entry_id,
+                timestamp: None,
+                copy_text: None,
+                compact_fold: None,
+            }];
+        }
+        if let Some(record) = entry.parts.iter().find_map(|p| match p {
+            MessagePart::Compaction { record, .. } => Some(record),
+            _ => None,
+        }) {
+            let text = entry
+                .parts
+                .iter()
+                .find_map(|p| match p {
+                    MessagePart::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            return vec![Row {
+                id: entry.id.clone().into(),
+                version: fnv1a(format!("{text}{record:?}").as_bytes()),
+                turn_start: true,
+                kind: RowKind::Compaction {
+                    text: text.into(),
                     record: Arc::new(record.clone()),
                 },
                 entry_id,
@@ -4239,7 +4274,7 @@ pub struct Transcript {
     /// Last live elapsed (seconds) per assistant entry, used if `duration_ms`
     /// has not landed on the doc yet when the turn settles.
     compact_last_elapsed: HashMap<String, i64>,
-    compaction_wait_since: Option<(String, CompactionWait, Instant)>,
+    compaction_clock: compaction_card::CardClock,
     /// When a compact work group first settled this session, so "Worked for"
     /// can fade in without replaying on later paints.
     compact_worked_fade_at: HashMap<SharedString, Instant>,
@@ -5220,7 +5255,7 @@ impl Transcript {
             hidden_fence: None,
             compact_live_entries: HashSet::new(),
             compact_last_elapsed: HashMap::new(),
-            compaction_wait_since: None,
+            compaction_clock: Default::default(),
             compact_worked_fade_at: HashMap::new(),
             compact_fold_heights: HashMap::new(),
             compact_fold_settle: None,
@@ -6808,6 +6843,7 @@ impl Transcript {
                     .is_some_and(|e| e.status == Some(MessageStatus::Streaming)),
             )
         };
+        compaction_card::merge_compaction_rows(&mut new_rows);
         new_rows.retain(|row| !self.fence_hidden(row));
         let workless: Vec<SharedString> = self
             .settle_close
@@ -9890,8 +9926,8 @@ impl Transcript {
                 );
             }
             match self.compaction_wait(&chat_id, now, cx) {
-                Some(wait) => return Some(self.render_compaction_wait(chat_id, wait, cx)),
-                None => self.compaction_wait_since = None,
+                Some(wait) => return self.render_compaction_wait(chat_id, wait, cx),
+                None => self.compaction_clock.no_wait(&chat_id, motion::now()),
             }
             let (sending, queued, elapsed, turn, booting) = {
                 let state = self.state.read(cx);
@@ -10083,104 +10119,6 @@ impl Transcript {
             session.and_then(|session| session.compact_plan),
             state.indicator_for(chat_id, now) == crate::state::Indicator::None,
         )
-    }
-
-    /// Drawn where the classifier row or compaction note lands, so the result replaces it in place.
-    fn render_compaction_wait(
-        &mut self,
-        chat_id: String,
-        wait: CompactionWait,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let now = motion::now();
-        let since = match &self.compaction_wait_since {
-            Some((id, last, at)) if *id == chat_id && *last == wait => *at,
-            _ => {
-                self.compaction_wait_since = Some((chat_id, wait.clone(), now));
-                now
-            }
-        };
-        let theme = Theme::of(cx).clone();
-        let shimmer_phase = (!cx.reduce_motion()).then(|| {
-            motion::pulse_lease(cx.entity_id(), cx);
-            tool_title_shimmer_phase(since, now)
-        });
-        let size = crate::typography::ui_rems(11.5);
-        let label = |text: &str| -> AnyElement {
-            let text = SharedString::from(text.to_string());
-            match shimmer_phase {
-                Some(phase) => shimmer_label(
-                    text,
-                    phase,
-                    theme.font_sans.clone(),
-                    size.into(),
-                    None,
-                    theme.text_muted,
-                    theme.text,
-                )
-                .flex_none()
-                .into_any_element(),
-                None => text.into_any_element(),
-            }
-        };
-        let (lead, tail) = wait.words();
-        let timed = wait.timed();
-        let chip = match &wait {
-            CompactionWait::Classifying { harness, model, .. } => {
-                Some(HandoffSide::new(*harness, model.as_deref(), cx).chip(&theme))
-            }
-            _ => None,
-        };
-        let elapsed = format!(
-            "· {}",
-            format_elapsed(now.duration_since(since).as_secs() as i64)
-        );
-        let rule = || {
-            div()
-                .flex_1()
-                .min_w(px(12.0))
-                .h(px(1.0))
-                .bg(crate::theme::hairline(0.08))
-        };
-        let spinner =
-            crate::loaders::gradient_spinner("compaction-wait", &theme, 2.5, cx.entity_id(), cx);
-        div()
-            .pt(px(Theme::SPACE_LG))
-            .child(
-                div()
-                    .py(px(4.0))
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .child(rule())
-                    .child(
-                        div()
-                            .flex_none()
-                            .max_w(gpui::relative(0.9))
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .font_family(theme.font_sans.clone())
-                            .text_size(size)
-                            .text_color(theme.text_muted)
-                            .child(spinner)
-                            .child(label(&lead))
-                            .children(chip)
-                            .children(tail.map(&label))
-                            .when(timed, |el| {
-                                el.child(
-                                    div()
-                                        .flex_none()
-                                        .text_color(theme.text_faint)
-                                        .child(SharedString::from(elapsed)),
-                                )
-                            }),
-                    )
-                    .child(rule()),
-            )
-            .into_any_element()
     }
 
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -10750,8 +10688,16 @@ impl Transcript {
                 text,
                 route,
             } => self.render_handoff(&row.id, *harness, text.clone(), route, &theme, cx),
-            RowKind::Classifier { record } => {
-                self.render_classifier(&row.id, record.clone(), &theme, cx)
+            RowKind::Classifier { record, compaction } => self.render_compaction_card(
+                ix,
+                &row.id,
+                record.clone(),
+                compaction.clone(),
+                &theme,
+                cx,
+            ),
+            RowKind::Compaction { text, record } => {
+                self.render_compaction_divider(&row.id, text.clone(), record.clone(), &theme, cx)
             }
             RowKind::ForkMarker {
                 source_chat_id,
@@ -11400,263 +11346,6 @@ impl Transcript {
                                 .text_color(theme.text_muted.opacity(0.7))
                                 .child(zeron_proto::transcript::handoff_footnote(pointer)),
                         )
-                })
-        });
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .py(px(4.0))
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .child(rule())
-                    .child(header)
-                    .child(rule()),
-            )
-            .children(details)
-            .into_any_element()
-    }
-
-    fn render_classifier(
-        &mut self,
-        row_id: &SharedString,
-        record: Arc<zeron_doc::ClassifierRecord>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        use zeron_doc::{ClassifierVerdict, DecidedBy};
-        let open = self
-            .folds
-            .get(row_id)
-            .and_then(|fold| fold.open)
-            .unwrap_or(false);
-        let muted = theme.text_muted.opacity(0.7);
-        let bright = theme.text_muted;
-        let model = record
-            .harness
-            .map(|harness| HandoffSide::new(harness, record.model.as_deref(), cx));
-        let model_text = record
-            .model
-            .clone()
-            .filter(|_| record.harness.is_none())
-            .map(SharedString::from);
-        let label = ClassifierVerdict::label;
-        let verdict_color = match record.verdict {
-            ClassifierVerdict::New => theme.accent,
-            ClassifierVerdict::Carry => theme.success,
-            ClassifierVerdict::Continue => muted,
-            ClassifierVerdict::Failed => theme.warning,
-        };
-        let verdict = match record.classifier_verdict {
-            Some(said) => format!("{} (said {})", label(record.verdict), label(said)),
-            None => label(record.verdict).to_string(),
-        };
-        let overturned = record.decided_by == DecidedBy::Stage2
-            && record.stage2_reply.is_some()
-            && record.verdict != ClassifierVerdict::Continue;
-        let secs = format!("{:.1}s", record.duration_ms as f64 / 1000.0);
-        let decided = record.decided_by.label();
-        let asked = record.decided_by.asked();
-        let toggle_id = row_id.clone();
-        let rule = || {
-            div()
-                .flex_1()
-                .min_w(px(12.0))
-                .h(px(1.0))
-                .bg(crate::theme::hairline(0.08))
-        };
-        let header = div()
-            .id(SharedString::from(format!("{row_id}-toggle")))
-            .flex_none()
-            .max_w(gpui::relative(0.9))
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .cursor_pointer()
-            .text_size(crate::typography::ui_rems(11.5))
-            .text_color(muted)
-            .hover(move |s| s.text_color(bright))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.folds.entry(toggle_id.clone()).or_default().open = Some(!open);
-                this.diagram_layout_changed(std::slice::from_ref(&toggle_id), cx);
-            }))
-            .child(
-                crate::icons::icon(crate::icons::LUCIDE_LIST_FILTER)
-                    .size(px(12.0))
-                    .text_color(muted),
-            )
-            .child("Classifier")
-            .children(model.as_ref().map(|side| side.chip(theme)))
-            .children(model_text.clone())
-            .child(SharedString::from(format!(
-                "· {} ·",
-                if asked { secs.as_str() } else { decided }
-            )))
-            .when(overturned, |header| {
-                header
-                    .child(
-                        div()
-                            .line_through()
-                            .child(label(ClassifierVerdict::Continue)),
-                    )
-                    .child("→")
-            })
-            .child(
-                div()
-                    .text_color(verdict_color)
-                    .child(SharedString::from(verdict.clone())),
-            )
-            .when(overturned, |header| {
-                header.child(div().text_color(theme.accent).child("second look"))
-            })
-            .child(
-                crate::icons::icon(if open {
-                    crate::icons::LUCIDE_CHEVRON_DOWN
-                } else {
-                    crate::icons::LUCIDE_CHEVRON_RIGHT
-                })
-                .size(px(11.0))
-                .text_color(muted.opacity(0.7)),
-            );
-        let details = open.then(|| {
-            let field = |key: &'static str, value: String| {
-                div()
-                    .flex()
-                    .gap(px(12.0))
-                    .child(
-                        div()
-                            .w(px(64.0))
-                            .flex_none()
-                            .text_color(theme.text_muted.opacity(0.56))
-                            .child(key),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .text_color(theme.text)
-                            .child(SharedString::from(value)),
-                    )
-            };
-            let tokens = match (record.input_tokens, record.output_tokens) {
-                (Some(input), Some(output)) => Some(format!(
-                    "{} in · {} out",
-                    crate::composer::background::compact_count(input),
-                    crate::composer::background::compact_count(output)
-                )),
-                _ => None,
-            };
-            let mono_box = |id: &'static str, text: &str, border: gpui::Hsla| {
-                div()
-                    .id(SharedString::from(format!("{row_id}-{id}")))
-                    .max_h(px(224.0))
-                    .overflow_y_scroll()
-                    .p(px(10.0))
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(border)
-                    .font_family(theme.font_mono.clone())
-                    .text_size(px(12.0))
-                    .line_height(px(18.0))
-                    .text_color(theme.text_faint)
-                    .children(text.lines().map(|line| {
-                        div()
-                            .w_full()
-                            .min_h(px(18.0))
-                            .child(SharedString::from(line.to_string()))
-                    }))
-            };
-            div()
-                .w_full()
-                .max_w(px(560.0))
-                .mx_auto()
-                .pt(px(6.0))
-                .pb(px(4.0))
-                .flex()
-                .flex_col()
-                .gap(px(10.0))
-                .text_size(crate::typography::ui_rems(12.5))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .p(px(10.0))
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.surface.opacity(0.6))
-                        .children(model.as_ref().map(|side| field("Model", side.detail())))
-                        .children(model_text.map(|text| field("Model", text.to_string())))
-                        .child(field("Verdict", verdict.to_string()))
-                        .child(field("Decided", decided.to_string()))
-                        .when(asked, |card| card.child(field("Time", secs.clone())))
-                        .child(field(
-                            "Context",
-                            format!(
-                                "{} tokens",
-                                crate::composer::background::compact_count(record.context_tokens)
-                            ),
-                        ))
-                        .children(tokens.map(|tokens| field("Tokens", tokens))),
-                )
-                .child(div().text_color(theme.text_muted).child(if asked {
-                    "Sent to the classifier"
-                } else {
-                    "Not sent: decided without asking"
-                }))
-                .child(mono_box("input", &record.input, theme.border))
-                .when(asked, |details| {
-                    details.child(match record.stage2_reply.as_deref() {
-                        None => div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(10.0))
-                            .child(div().text_color(theme.text_muted).child("Reply"))
-                            .child(mono_box("reply", &record.reply, theme.border)),
-                        Some(stage2) => {
-                            let stage = |title: &'static str,
-                                         id: &'static str,
-                                         text: &str,
-                                         decided| {
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(10.0))
-                                    .child(div().text_color(theme.text_muted).child(if decided {
-                                        SharedString::from(format!("{title} · decides"))
-                                    } else {
-                                        SharedString::from(title)
-                                    }))
-                                    .child(mono_box(
-                                        id,
-                                        text,
-                                        if decided { theme.accent } else { theme.border },
-                                    ))
-                            };
-                            div()
-                                .flex()
-                                .gap(px(10.0))
-                                .child(stage(
-                                    "First look",
-                                    "reply",
-                                    &record.reply,
-                                    record.decided_by == DecidedBy::Stage1,
-                                ))
-                                .child(stage(
-                                    "Second look",
-                                    "stage2",
-                                    stage2,
-                                    record.decided_by == DecidedBy::Stage2,
-                                ))
-                        }
-                    })
                 })
         });
         div()
