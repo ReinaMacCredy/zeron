@@ -10,7 +10,7 @@
 //! Attachments live only on the host device — every read proxies through the
 //! owning device via `ReadAttachmentChunk`; nothing is mirrored to the edge.
 //!
-//! `read_chunk` serves attachments back in 45KB base64 chunks. Path jail:
+//! `read_chunk` serves attachments back in 384 KiB base64 chunks. Path jail:
 //! only files under the uploads dir or a workspace-known chat cwd are readable
 //! (the RPC layer supplies the cwd roots). Workspace files must be supported
 //! image types, as in zeron; files in the uploads dir read back whatever their
@@ -80,8 +80,9 @@ pub fn pending_refs_in(text: &str) -> Vec<String> {
 }
 /// Hard cap on an assembled file.
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
-/// Multiple of 3 so independent base64 chunks concatenate losslessly.
-const READ_CHUNK_BYTES: u64 = 45_000;
+/// Multiple of 3 so independent base64 chunks concatenate losslessly; its
+/// base64 stays under the relay's 1 MiB message cap.
+const READ_CHUNK_BYTES: u64 = 384 * 1024;
 
 /// `ReadAttachmentChunk` reply.
 #[derive(Debug, Clone, Serialize)]
@@ -241,7 +242,7 @@ impl Uploads {
             .then(|| target.to_string_lossy().to_string())
     }
 
-    /// Read one 45KB chunk of an attachment. `extra_roots` are the workspace's
+    /// Read one chunk of an attachment. `extra_roots` are the workspace's
     /// known chat cwds — together with the uploads dir they form the path jail.
     pub fn read_chunk(
         &self,
@@ -655,6 +656,24 @@ mod tests {
             assert_eq!(chunk.mime_type, "application/octet-stream");
             assert!(chunk.done);
         }
+        let page: Vec<u8> = (0..1_000_000u32).map(|i| (i * 13 % 241) as u8).collect();
+        uploads
+            .append("u4", &BASE64.encode(&page), Some(0))
+            .unwrap();
+        let path = uploads.commit("u4", "page.html").unwrap();
+        let (mut offset, mut joined, mut calls) = (0, String::new(), 0);
+        loop {
+            let chunk = uploads.read_chunk(&path, offset, &[]).unwrap();
+            assert!(chunk.data.len() < 1024 * 1024 - 64 * 1024);
+            joined.push_str(&chunk.data);
+            calls += 1;
+            if chunk.done {
+                break;
+            }
+            offset = chunk.next_offset;
+        }
+        assert_eq!(calls, 3);
+        assert_eq!(BASE64.decode(joined).unwrap(), page);
         // A non-image in a workspace root is still refused.
         let notes = workspace.path().join("notes.md");
         std::fs::write(&notes, "# not an upload").unwrap();

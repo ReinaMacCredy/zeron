@@ -6,8 +6,25 @@ pub(crate) const PATH: &str = "/Users/dev/.zeron/html/chat-visuals/onboarding.ht
 const TITLE: &str = "Onboarding card, three treatments";
 const HEIGHT: u32 = 520;
 
-pub(crate) fn read(path: &str) -> Option<Vec<u8>> {
-    (path == PATH).then(|| PAGE.as_bytes().to_vec())
+pub(crate) fn read(path: &str, large: bool) -> Option<Vec<u8>> {
+    if path != PATH {
+        return None;
+    }
+    if !large {
+        return Some(PAGE.as_bytes().to_vec());
+    }
+    let shots: String = (0..2)
+        .map(|seed| {
+            format!(
+                r#"<img style="display:block;width:100%;margin-top:12px;border-radius:var(--radius)" src="data:image/png;base64,{}">"#,
+                crate::live::b64::encode(&super::png::gradient(900, 560, seed))
+            )
+        })
+        .collect();
+    Some(
+        PAGE.replace("</body>", &format!("{shots}\n</body>"))
+            .into_bytes(),
+    )
 }
 
 pub(crate) fn part() -> MessagePart {

@@ -2585,7 +2585,7 @@ impl Client {
             return Ok(hit);
         }
         let bytes = match self.inner.backend() {
-            Backend::Demo(demo) => demo.read_attachment(path)?,
+            Backend::Demo(demo) => demo.read_attachment(path).await?,
             Backend::Live(live) => Arc::new(live.relay.read_attachment(device_id, path).await?),
         };
         self.inner

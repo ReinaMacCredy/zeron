@@ -166,7 +166,8 @@ final class AppModel {
             transcriptScale: scale,
             streamSpeed: args.contains("-fast") ? .fast : .realistic,
             longReply: args.contains("-longreply"),
-            computerStill: args.contains("-still")
+            computerStill: args.contains("-still"),
+            flakyPages: args.contains("-flaky-pages")
         )
     }
 
