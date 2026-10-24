@@ -159,7 +159,6 @@ impl Shell {
     ) -> Task<()> {
         let params = project_action_params(serde_json::json!({}), &target_device_id);
         cx.spawn(async move |this, cx| {
-            let mut resubscribed = false;
             loop {
                 let Ok(engine) =
                     this.update(cx, |shell, cx| shell.state.read(cx).engine().cloned())
@@ -173,12 +172,7 @@ impl Shell {
                         .await
                     {
                         Ok(mut changes) => {
-                            // The first frame only repeats what the load beside this watch read.
-                            let mut current = !resubscribed;
                             while changes.recv().await.is_some() {
-                                if std::mem::take(&mut current) {
-                                    continue;
-                                }
                                 if this
                                     .update(cx, |shell, cx| shell.retry_project_actions(cx))
                                     .is_err()
@@ -193,7 +187,6 @@ impl Shell {
                         Err(_) => {}
                     }
                 }
-                resubscribed = true;
                 cx.background_executor().timer(Duration::from_secs(2)).await;
             }
         })
