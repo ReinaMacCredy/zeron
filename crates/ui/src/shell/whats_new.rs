@@ -368,18 +368,6 @@ impl Shell {
                 ),
             )
             .child(
-                help_row(
-                    theme,
-                    "help-mission-intro",
-                    icons::MISSION_CONTROL,
-                    "Mission Control intro",
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.close_help_menu(cx);
-                    this.reopen_intro(super::intros::Deck::Mission, cx);
-                })),
-            )
-            .child(
                 help_row(theme, "help-new-since", icons::TASKS, "New since 0.2.114").on_click(
                     cx.listener(|this, _, _, cx| {
                         this.close_help_menu(cx);
