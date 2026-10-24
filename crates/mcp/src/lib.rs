@@ -16,7 +16,6 @@
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -52,10 +51,6 @@ const DEFAULT_TERMINAL_WAIT_MS: u64 = 500;
 const MAX_TERMINAL_WAIT_MS: u64 = 30_000;
 const MAX_LISTED_TASKS: usize = 200;
 const LISTED_NOTES_PREVIEW_CHARS: usize = 500;
-/// Outgoing messages (sends and creates) one server process — one turn —
-/// may issue. A ping-pong between two agents ends in a tool error instead of
-/// a silent token burn.
-pub const SEND_BUDGET: usize = 16;
 /// A Working row that stops heartbeating only turns stale by the clock, so a
 /// wait re-evaluates its snapshot on a timer, not just on pushes.
 const STALE_RECHECK: Duration = Duration::from_secs(5);
@@ -64,7 +59,6 @@ const MODEL_LIST_WAIT: Duration = Duration::from_secs(20);
 pub struct ThreadTools {
     client: RpcClient,
     chat_id: String,
-    sends: AtomicUsize,
     run_secret: Option<String>,
     computer_calls: Mutex<HashSet<String>>,
     ui_driver_calls: Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>,
@@ -231,7 +225,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "create_thread",
-            "description": "Open a new peer thread and give it `prompt` as its first message. It opens in this chat's project and folder unless `project` names another project on this device (it then runs in that project's folder) or `cwd` names an existing directory. It runs this chat's harness, model, reasoning level, permission mode, model options and tool set, but never this chat's agent profile or its instructions. `profile` starts it on an agent profile from orchestrator_capabilities instead: that profile's harness, model, reasoning, model options, instructions and tool set (added to this chat's), and its permission mode when that is no higher than this chat's. `harness`, `model` or `reasoning` override this chat's or the profile's; picking a different harness without a `model` uses that harness's default model, and an unknown harness, model, reasoning level or profile is an error. Returns the new thread's row as list_threads reports it; with `wait`, also `turn` once its first turn ends (see send_message_to_thread). `taskStepId` runs that step of a Mission Control task this chat leads (an id from the tasks tool) and binds the new thread to it: the thread takes the step's title unless `title` is set, and Zeron messages this chat when the thread finishes a turn or fails, so it cannot be combined with `wait`. Counts against this turn's send budget.",
+            "description": "Open a new peer thread and give it `prompt` as its first message. It opens in this chat's project and folder unless `project` names another project on this device (it then runs in that project's folder) or `cwd` names an existing directory. It runs this chat's harness, model, reasoning level, permission mode, model options and tool set, but never this chat's agent profile or its instructions. `profile` starts it on an agent profile from orchestrator_capabilities instead: that profile's harness, model, reasoning, model options, instructions and tool set (added to this chat's), and its permission mode when that is no higher than this chat's. `harness`, `model` or `reasoning` override this chat's or the profile's; picking a different harness without a `model` uses that harness's default model, and an unknown harness, model, reasoning level or profile is an error. Returns the new thread's row as list_threads reports it; with `wait`, also `turn` once its first turn ends (see send_message_to_thread). `taskStepId` runs that step of a Mission Control task this chat leads (an id from the tasks tool) and binds the new thread to it: the thread takes the step's title unless `title` is set, and Zeron messages this chat when the thread finishes a turn or fails, so it cannot be combined with `wait`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -254,7 +248,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "send_message_to_thread",
-            "description": "Send a message to another thread on this device, in any project. An idle thread starts a turn with it; a working thread receives it inside its current turn at the next step (a wait_threads call there returns with it), or at turn end if its agent takes no mid-turn input. With `wait`, blocks until the turn that read the message ends (timeoutSeconds default 600, max 1800) and adds `turn`: `status`, `timedOut`, the assistant `replies` written after the message, and `pendingInput`. Never to this chat itself. Counts against this turn's send budget.",
+            "description": "Send a message to another thread on this device, in any project. An idle thread starts a turn with it; a working thread receives it inside its current turn at the next step (a wait_threads call there returns with it), or at turn end if its agent takes no mid-turn input. With `wait`, blocks until the turn that read the message ends (timeoutSeconds default 600, max 1800) and adds `turn`: `status`, `timedOut`, the assistant `replies` written after the message, and `pendingInput`. Never to this chat itself.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -314,7 +308,7 @@ fn thread_tool_list() -> Value {
         ),
         {
             "name": "interrupt_thread",
-            "description": "Stop another thread's running turn on this device, as its stop button does. Never this chat itself. Counts against this turn's send budget.",
+            "description": "Stop another thread's running turn on this device, as its stop button does. Never this chat itself.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "threadId": thread_id },
@@ -324,7 +318,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "respond_to_input",
-            "description": "Answer the question or permission request another thread is blocked on (read_thread's `pendingInput`). `requestId` defaults to its current one. Each answer names a question id and the chosen option labels, or free text for an open question. A tool approval (`approval: true`) can only be answered while this chat runs at Full access; otherwise ask the person. Computer-use consent is the person's to give and is refused. Never this chat itself. Counts against this turn's send budget.",
+            "description": "Answer the question or permission request another thread is blocked on (read_thread's `pendingInput`). `requestId` defaults to its current one. Each answer names a question id and the chosen option labels, or free text for an open question. A tool approval (`approval: true`) can only be answered while this chat runs at Full access; otherwise ask the person. Computer-use consent is the person's to give and is refused. Never this chat itself.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -681,7 +675,6 @@ impl ThreadTools {
         Self {
             client,
             chat_id: chat_id.into(),
-            sends: AtomicUsize::new(0),
             // The secret reaches this process in its env, not its argv; Claude's inline
             // `--mcp-config` does put it on the claude argv (SPEC d43: identity, not a sandbox).
             run_secret: std::env::var(zeron_rpc::COMPUTER_RUN_SECRET_ENV)
@@ -970,17 +963,6 @@ impl ThreadTools {
             .ok_or_else(|| "taskId is required".to_string())
     }
 
-    fn spend_send(&self) -> Result<(), String> {
-        let used = self.sends.fetch_add(1, Ordering::SeqCst);
-        if used >= SEND_BUDGET {
-            self.sends.fetch_sub(1, Ordering::SeqCst);
-            return Err(format!(
-                "this turn's outgoing message budget ({SEND_BUDGET}) is spent; finish the turn and continue in the next one"
-            ));
-        }
-        Ok(())
-    }
-
     pub async fn list_threads(&self, args: &Value) -> Result<Value, String> {
         let include_archived = args["includeArchived"].as_bool().unwrap_or(false);
         let filter = match args.get("status") {
@@ -1263,7 +1245,6 @@ impl ThreadTools {
             None => None,
         };
         let mut run = self.run_settings(&caller, args, args, "").await?;
-        self.spend_send()?;
         run["fromChatId"] = json!(self.chat_id);
         run["prompt"] = json!(prompt);
         run["title"] = json!(args["title"].as_str());
@@ -1303,7 +1284,6 @@ impl ThreadTools {
             return Err("a thread cannot message itself".into());
         }
         self.peer(thread_id).await?;
-        self.spend_send()?;
         let queued = self
             .call_engine(
                 methods::SEND_THREAD_MESSAGE,
@@ -1738,9 +1718,6 @@ impl ThreadTools {
                 takes.join(", ")
             ));
         }
-        if action != "check" {
-            self.spend_send()?;
-        }
         let mut params = args.clone();
         params["fromChatId"] = json!(self.chat_id);
         self.call_engine(methods::SUPERVISOR_ACT, params).await
@@ -1752,7 +1729,6 @@ impl ThreadTools {
             return Err("a thread cannot interrupt itself".into());
         }
         self.open_peer(thread_id).await?;
-        self.spend_send()?;
         let queued = self
             .call_engine(
                 methods::QUEUE_COMMAND,
@@ -1807,7 +1783,6 @@ impl ThreadTools {
                 ids.join(", ")
             ));
         }
-        self.spend_send()?;
         let request_id = pending["requestId"].clone();
         let queued = self
             .call_engine(
@@ -2225,9 +2200,6 @@ impl ThreadTools {
                     self.peer(thread_id).await?;
                 }
                 let send = args["send"].as_bool().unwrap_or(thread_id != self.chat_id);
-                if send {
-                    self.spend_send()?;
-                }
                 self.call_engine(
                     methods::MUTATE,
                     json!({
@@ -2335,7 +2307,6 @@ impl ThreadTools {
                     .as_str()
                     .filter(|why| matches!(*why, "goal" | "spend" | "decision"))
                     .ok_or("why must be goal, spend or decision")?;
-                self.spend_send()?;
                 let raised = self
                     .call_engine(
                         methods::MUTATE,
@@ -4657,28 +4628,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_send_budget_ends_a_ping_pong() {
-        let rig = rig(fixture());
-        for _ in 0..SEND_BUDGET - 1 {
-            rig.tools
-                .send_message_to_thread(&json!({ "threadId": "b", "text": "again" }))
-                .await
-                .unwrap();
-        }
-        rig.tools
-            .create_thread(&json!({ "prompt": "last one" }))
-            .await
-            .unwrap();
-        let err = rig
-            .tools
-            .send_message_to_thread(&json!({ "threadId": "b", "text": "one too many" }))
-            .await
-            .unwrap_err();
-        assert!(err.contains("budget"), "{err}");
-        assert_eq!(rig.calls.calls.lock().unwrap().len(), SEND_BUDGET);
-    }
-
-    #[tokio::test]
     async fn title_and_archive_are_registry_mutations_in_scope() {
         let rig = rig(fixture());
         rig.tools
@@ -5613,7 +5562,6 @@ mod tests {
         assert_eq!(sent[0]["role"], "test");
         assert_eq!(sent[0]["clientRequestId"], "k1");
         assert!(logged(&rig.calls, methods::TASK_STATUS).is_empty());
-        assert_eq!(rig.tools.sends.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -6577,11 +6525,6 @@ mod tests {
             );
         }
         assert_eq!(logged(&rig.calls, methods::CREATE_THREAD).len(), 4);
-        assert_eq!(
-            rig.tools.sends.load(Ordering::SeqCst),
-            4,
-            "refusals spend nothing"
-        );
     }
 
     #[tokio::test]
@@ -6804,7 +6747,6 @@ mod tests {
             "no thread far on this device"
         );
         assert_eq!(queued_commands(&rig.calls).len(), 1);
-        assert_eq!(rig.tools.sends.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -6833,35 +6775,6 @@ mod tests {
             )
             .await
             .expect("a lead still writes to the Supervisor");
-    }
-
-    #[tokio::test]
-    async fn interrupt_and_respond_count_against_the_send_budget() {
-        let mut fake = fixture();
-        fake.entries.push(entry(
-            "m6",
-            "assistant",
-            vec![input_part("req-1", false, None)],
-        ));
-        let rig = rig(fake);
-        for _ in 0..SEND_BUDGET - 1 {
-            rig.tools
-                .interrupt_thread(&json!({ "threadId": "b" }))
-                .await
-                .unwrap();
-        }
-        let answers = json!([{ "questionId": "q1", "labels": ["Yes"] }]);
-        rig.tools
-            .respond_to_input(&json!({ "threadId": "b", "answers": answers }))
-            .await
-            .unwrap();
-        let err = rig
-            .tools
-            .interrupt_thread(&json!({ "threadId": "b" }))
-            .await
-            .unwrap_err();
-        assert!(err.contains("budget"), "{err}");
-        assert_eq!(queued_commands(&rig.calls).len(), SEND_BUDGET);
     }
 
     #[tokio::test]
@@ -6939,7 +6852,6 @@ mod tests {
                 .unwrap_err();
             assert!(err.contains("Full access"), "{mode:?}: {err}");
             assert!(queued_commands(&rig.calls).is_empty());
-            assert_eq!(rig.tools.sends.load(Ordering::SeqCst), 0);
         }
         let rig = asked(Some("full"));
         rig.tools
@@ -6983,7 +6895,6 @@ mod tests {
             let rig = rig(fake);
             let err = rig.tools.respond_to_input(&args).await.unwrap_err();
             assert!(queued_commands(&rig.calls).is_empty(), "{err}");
-            assert_eq!(rig.tools.sends.load(Ordering::SeqCst), 0, "{err}");
             err
         };
         assert_eq!(
