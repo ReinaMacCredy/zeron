@@ -95,6 +95,8 @@ pub mod methods {
     pub const LIST_SKILLS: &str = "ListSkills";
     pub const LIST_COMMANDS: &str = "ListCommands";
     pub const LIST_HARNESS_TOOLS: &str = "ListHarnessTools";
+    pub const READ_CLAUDE_CONFIG: &str = "ReadClaudeConfig";
+    pub const RUN_CLAUDE_LOCAL_COMMAND: &str = "RunClaudeLocalCommand";
     /// How a harness compacts its own context: `native`, `slash` or `none`.
     pub const HARNESS_COMPACTION: &str = "HarnessCompaction";
     /// Compact a chat's context in place. Returns once the harness is done —

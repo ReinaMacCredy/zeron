@@ -359,6 +359,26 @@ pub trait Harness: Send + Sync {
     ) -> Result<Vec<SlashCommand>, HarnessError> {
         self.commands().await
     }
+    async fn claude_config(
+        &self,
+        _cwd: &std::path::Path,
+        _env: &std::collections::BTreeMap<String, String>,
+    ) -> Result<zeron_proto::claude_config::ClaudeConfigSnapshot, HarnessError> {
+        Err(HarnessError::Protocol(
+            "this agent has no Claude Code settings".into(),
+        ))
+    }
+    async fn local_command(
+        &self,
+        _cwd: &std::path::Path,
+        _env: &std::collections::BTreeMap<String, String>,
+        _command: &str,
+        _connect_mcp: bool,
+    ) -> Result<zeron_proto::claude_config::LocalCommandOutput, HarnessError> {
+        Err(HarnessError::Protocol(
+            "this agent cannot run local commands".into(),
+        ))
+    }
     /// `cwd` matters: project-scoped MCP servers differ per directory.
     async fn tool_inventory(
         &self,

@@ -262,6 +262,10 @@ impl Composer {
     }
 
     pub(crate) fn dismiss_corner_card(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.config_panel_open() {
+            self.close_config_panel(cx);
+            return true;
+        }
         if self.ask.open.is_some() {
             self.close_ask_tray(cx);
             return true;

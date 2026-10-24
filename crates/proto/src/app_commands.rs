@@ -9,6 +9,12 @@ pub const BTW_COMMAND: &str = "btw";
 
 pub const COMPUTER_USE_COMMAND: &str = "computer-use";
 
+pub const CONFIG_COMMAND: &str = "config";
+
+pub fn opens_config_panel(text: &str) -> bool {
+    app_command_argument(text, CONFIG_COMMAND) == Some(None)
+}
+
 /// `Some(argument)` when the prompt invokes zeron's own `command`: the first
 /// token must be exactly `/command`, and the rest of the line is its argument.
 pub fn app_command_argument(text: &str, command: &str) -> Option<Option<String>> {
@@ -67,5 +73,14 @@ mod tests {
             assert!(sidechat_prompt(&format!("ask in a /{command}")).is_none());
         }
         assert!(sidechat_prompt("/compact").is_none());
+    }
+
+    #[test]
+    fn only_a_bare_config_opens_the_panel() {
+        assert!(opens_config_panel("/config"));
+        assert!(opens_config_panel("/config  "));
+        assert!(!opens_config_panel("/config theme=dark"));
+        assert!(!opens_config_panel("/configure"));
+        assert!(!opens_config_panel("open /config"));
     }
 }

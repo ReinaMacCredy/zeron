@@ -3209,6 +3209,7 @@ impl Shell {
                 ComposerEvent::OpenChat(chat_id) => this.open_chat(chat_id.clone(), cx),
                 ComposerEvent::StartMission(start) => this.start_mission(start.clone(), cx),
                 ComposerEvent::PlanFirst => this.on_plan_first(cx),
+                ComposerEvent::OpenUsage => this.open_usage(cx),
                 ComposerEvent::OpenTaskCenter(task_id) => {
                     this.open_task_center(task_id.clone(), cx)
                 }
@@ -5590,6 +5591,12 @@ impl Shell {
                 );
             }
             TranscriptEvent::SignIn { chat_id } => self.sign_in_for_chat(chat_id, cx),
+            TranscriptEvent::OpenClaudeConfig { chat_id } => {
+                let composer = self.composer_for_transcript(&emitter);
+                if composer.read(cx).bound_chat_id(cx).as_deref() == Some(chat_id.as_str()) {
+                    composer.update(cx, |composer, cx| composer.open_config_panel(cx));
+                }
+            }
         }
     }
 
@@ -7288,6 +7295,7 @@ impl Shell {
             | ComposerEvent::StartMission(_)
             | ComposerEvent::OpenTaskCenter(_)
             | ComposerEvent::PlanFirst => {}
+            ComposerEvent::OpenUsage => self.open_usage(cx),
             ComposerEvent::OpenSubagent {
                 chat_id,
                 doc_id,

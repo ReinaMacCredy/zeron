@@ -42,6 +42,7 @@ use crate::state::{AppState, Indicator};
 use crate::theme::Theme;
 
 mod ask_pill;
+pub(crate) mod claude_config;
 pub(crate) use ask_pill::pending_questions;
 pub(crate) mod background;
 mod chip;
@@ -6120,6 +6121,7 @@ pub enum ComposerEvent {
     StartMission(MissionStart),
     OpenTaskCenter(String),
     PlanFirst,
+    OpenUsage,
 }
 
 #[derive(Debug, Clone)]
@@ -6925,6 +6927,7 @@ pub struct Composer {
     /// frame marks them resolved).
     answered_requests: HashSet<String>,
     ask: ask_pill::AskPills,
+    config_panel: Option<claude_config::ConfigPanel>,
     review: review_chip::ReviewChipUi,
     comments_menu: crate::popover::Popup<()>,
     ask_input: Entity<ComposerInput>,
@@ -7566,6 +7569,7 @@ impl Composer {
             wizard_focus: cx.focus_handle(),
             answered_requests: HashSet::new(),
             ask: Default::default(),
+            config_panel: None,
             review: Default::default(),
             comments_menu: Default::default(),
             ask_input,
@@ -10347,6 +10351,23 @@ impl Composer {
             self.execute_workspace_command(action, token.range, cx);
             return;
         }
+        let draft = self.input.read(cx).text();
+        let alone = draft
+            .get(..token.range.start)
+            .is_some_and(|t| t.trim().is_empty())
+            && draft
+                .get(token.range.end..)
+                .is_some_and(|t| t.trim().is_empty());
+        if alone
+            && command.name == zeron_proto::app_commands::CONFIG_COMMAND
+            && self.pickers.read(cx).resolved(cx).harness == Some(HarnessId::ClaudeCode)
+        {
+            self.input.update(cx, |input, cx| input.set_text("", cx));
+            self.reset_slash(None, cx);
+            self.sync_draft(cx);
+            self.open_config_panel(cx);
+            return;
+        }
         let insertion = if zeron_owned_command(&command.name) {
             format!("/{}", command.name)
         } else {
@@ -11758,6 +11779,14 @@ impl Composer {
             self.input.update(cx, |input, cx| input.set_text("", cx));
             self.sync_draft(cx);
             self.request_compaction(focus, cx);
+            return;
+        }
+        if zeron_proto::app_commands::opens_config_panel(&plain)
+            && self.pickers.read(cx).resolved(cx).harness == Some(HarnessId::ClaudeCode)
+        {
+            self.input.update(cx, |input, cx| input.set_text("", cx));
+            self.sync_draft(cx);
+            self.open_config_panel(cx);
             return;
         }
         // `/btw` and `/sidechat` are zeron's own too: they open a side
@@ -14663,6 +14692,7 @@ impl Render for Composer {
                 self.staged_chip_count(cx),
             );
         let (card, corner) = self.render_corner(window, cx);
+        let card = self.render_config_panel(window, cx).or(card);
         // The checklist tray stacks above the queue (or directly above the
         // composer), one step narrower than what follows it.
         let has_queue = self.reads_selection(cx) && !self.state.read(cx).queue.is_empty();
