@@ -38,12 +38,16 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         super.viewDidLoad()
         view.backgroundColor = Palette.background
         navigationItem.largeTitleDisplayMode = .always
+        navigationItem.largeTitle = title
+        navigationItem.title = nil
+        navigationItem.backButtonTitle = title
         var config = UICollectionLayoutListConfiguration(appearance: .insetGrouped)
         config.backgroundColor = .clear
         config.headerMode = .supplementary
         collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: UICollectionViewCompositionalLayout.list(using: config))
         collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         collectionView.backgroundColor = .clear
+        collectionView.topEdgeEffect.style = .soft
         collectionView.delegate = self
         view.addSubview(collectionView)
 
