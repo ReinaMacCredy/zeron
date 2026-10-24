@@ -834,12 +834,11 @@ impl Harness for ClaudeHarness {
 
     async fn local_command(
         &self,
-        cwd: &std::path::Path,
-        env: &std::collections::BTreeMap<String, String>,
+        request: &RunRequest,
         command: &str,
         connect_mcp: bool,
     ) -> Result<zeron_proto::claude_config::LocalCommandOutput, HarnessError> {
-        local::run(self, cwd, env, command, connect_mcp).await
+        local::run(self, request, command, connect_mcp).await
     }
 
     async fn commands_for(&self, cwd: &std::path::Path) -> Result<Vec<SlashCommand>, HarnessError> {

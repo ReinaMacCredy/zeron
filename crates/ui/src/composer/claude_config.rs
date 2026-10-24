@@ -286,6 +286,27 @@ impl Composer {
         cx.notify();
     }
 
+    pub(crate) fn open_config_panel_at(
+        &mut self,
+        status: bool,
+        search: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_config_panel(cx);
+        if let Some(panel) = self.config_panel.as_mut() {
+            if status {
+                panel.tab = Tab::Status;
+            }
+            if let Some(query) = search {
+                let query = query.to_string();
+                panel
+                    .search
+                    .update(cx, |input, cx| input.set_text(query, cx));
+            }
+        }
+        cx.notify();
+    }
+
     fn config_snapshot_arrived(
         &mut self,
         reply: Result<ClaudeConfigSnapshot, String>,
@@ -1868,7 +1889,7 @@ fn kv_row(theme: &Theme, rule: bool, key: &str, value: String, tag: Option<&str>
         .into_any_element()
 }
 
-fn meter(theme: &Theme, meter: Meter) -> AnyElement {
+pub(crate) fn meter(theme: &Theme, meter: Meter) -> AnyElement {
     let warn = meter.percent >= 80;
     let color = if warn { theme.warning } else { theme.accent };
     div()
@@ -2041,26 +2062,26 @@ fn plugins_summary(plugins: Option<&serde_json::Value>) -> String {
 }
 
 #[derive(Debug, PartialEq)]
-struct Meter {
-    label: String,
-    percent: u32,
-    resets: Option<String>,
+pub(crate) struct Meter {
+    pub label: String,
+    pub percent: u32,
+    pub resets: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
-struct UsageSection {
-    title: String,
-    lines: Vec<String>,
+pub(crate) struct UsageSection {
+    pub title: String,
+    pub lines: Vec<String>,
 }
 
 #[derive(Debug, Default, PartialEq)]
-struct UsageReport {
-    meters: Vec<Meter>,
-    sections: Vec<UsageSection>,
-    note: Option<String>,
+pub(crate) struct UsageReport {
+    pub meters: Vec<Meter>,
+    pub sections: Vec<UsageSection>,
+    pub note: Option<String>,
 }
 
-fn parse_usage(text: &str) -> UsageReport {
+pub(crate) fn parse_usage(text: &str) -> UsageReport {
     let mut report = UsageReport::default();
     for raw in text.lines() {
         let line = raw.trim();

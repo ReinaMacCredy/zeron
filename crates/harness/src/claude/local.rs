@@ -6,7 +6,7 @@ use zeron_proto::claude_config::{
     ClaudeConfigSnapshot, LocalCommandOutput, Sources, keep_known_keys,
 };
 
-use super::{ClaudeHarness, PROBE_TIMEOUT, config_root, launch_env, managed_mcp_config};
+use super::{ClaudeHarness, PROBE_TIMEOUT, config_root, launch_env, managed_mcp_config, model_arg};
 use crate::HarnessError;
 use crate::process::{Command, Stdio};
 
@@ -85,11 +85,11 @@ pub(super) fn read_config(
 
 pub(super) async fn run(
     harness: &ClaudeHarness,
-    cwd: &Path,
-    run_env: &BTreeMap<String, String>,
+    request: &zeron_proto::RunRequest,
     command: &str,
     connect_mcp: bool,
 ) -> Result<LocalCommandOutput, HarnessError> {
+    let cwd = Path::new(&request.cwd);
     if !command.starts_with('/') {
         return Err(HarnessError::Protocol(format!(
             "not a slash command: {command}"
@@ -101,7 +101,7 @@ pub(super) async fn run(
     crate::process::owned::configure(&mut cmd);
     crate::compose_child_path(&mut cmd, &exe);
     harness.launch.apply(&mut cmd, Some("CLAUDE_CONFIG_DIR"));
-    crate::apply_run_env(&mut cmd, run_env);
+    crate::apply_run_env(&mut cmd, &request.env);
     cmd.args([
         "--print",
         "--output-format",
@@ -113,6 +113,12 @@ pub(super) async fn run(
     ]);
     if !connect_mcp && !managed_mcp_config() {
         cmd.arg("--strict-mcp-config");
+    }
+    if let Some(model) = model_arg(request) {
+        cmd.args(["--model", &model]);
+    }
+    if let Some(session) = &request.resume {
+        cmd.args(["--resume", session, "--fork-session"]);
     }
     cmd.args(&harness.launch.args);
     cmd.arg(command);

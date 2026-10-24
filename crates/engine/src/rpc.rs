@@ -1032,7 +1032,12 @@ enum MutateParams {
         note: Option<crate::provider_switch::SystemNote>,
     },
     #[serde(rename_all = "camelCase")]
-    AddChatNote { chat_id: String, text: String },
+    AddChatNote {
+        chat_id: String,
+        text: String,
+        #[serde(default)]
+        hint: Option<String>,
+    },
     /// Tombstone: removes the chats-map row; the session doc remains.
     #[serde(rename_all = "camelCase")]
     DeleteChat { chat_id: String },
@@ -2914,11 +2919,20 @@ impl EngineRpc {
                 .await
                 .map_err(failed)
             }
-            MutateParams::AddChatNote { chat_id, text } => self
+            MutateParams::AddChatNote {
+                chat_id,
+                text,
+                hint,
+            } => self
                 .doc_host
                 .open(&chat_id)
                 .and_then(|handle| {
-                    Ok(handle.write_system_note(&crate::new_id(), &text, None, crate::now_ms())?)
+                    Ok(handle.write_system_note(
+                        &crate::new_id(),
+                        &text,
+                        hint.as_deref(),
+                        crate::now_ms(),
+                    )?)
                 })
                 .map_err(failed),
             MutateParams::DeleteChat { chat_id } => self.delete_chat(&chat_id),
@@ -4062,9 +4076,15 @@ impl RpcService for EngineRpc {
                     command: Option<String>,
                     #[serde(default)]
                     connect_mcp: bool,
+                    #[serde(default)]
+                    live_session: bool,
                 }
                 let p: Params = parse_params(params)?;
                 let harness = self.discovery_harness(p.chat_id.as_deref(), HarnessId::ClaudeCode)?;
+                let chat = match (&p.chat_id, p.live_session) {
+                    (Some(chat_id), true) => self.workspace.chat(chat_id).ok().flatten(),
+                    _ => None,
+                };
                 let root = self
                     .catalog_root(&FileSearchParams {
                         query: String::new(),
@@ -4082,6 +4102,22 @@ impl RpcService for EngineRpc {
                     "resume": null,
                 }))
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if let Some(chat) = chat {
+                    if let Some(config) = chat.config {
+                        request.model = config.model;
+                        request.model_options = config.model_options;
+                    }
+                    if let Some(cwd) = chat.harness_session_cwd.filter(|cwd| !cwd.is_empty()) {
+                        request.cwd = cwd;
+                    }
+                    if chat
+                        .harness_session_harness
+                        .as_deref()
+                        .is_none_or(|h| h == HarnessId::ClaudeCode.as_str())
+                    {
+                        request.resume = chat.harness_session_id.filter(|id| !id.is_empty());
+                    }
+                }
                 self.registry
                     .prepare_run(HarnessId::ClaudeCode, &mut request)
                     .await
@@ -4098,7 +4134,7 @@ impl RpcService for EngineRpc {
                     .command
                     .ok_or_else(|| RpcError::BadParams("command is required".into()))?;
                 let output = harness
-                    .local_command(&root, &request.env, &command, p.connect_mcp)
+                    .local_command(&request, &command, p.connect_mcp)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&output)

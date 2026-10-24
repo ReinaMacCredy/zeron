@@ -15,6 +15,73 @@ pub fn opens_config_panel(text: &str) -> bool {
     app_command_argument(text, CONFIG_COMMAND) == Some(None)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClaudeCardCommand {
+    Context,
+    Usage,
+    Model(Option<String>),
+    Mcp,
+    TerminalOnly(String),
+}
+
+// Headless `claude -p "/<name>"` answers "isn't available in this environment"
+// (or "here yet") for these, and init lists doctor/color/focus/reload-plugins as
+// terminal_slash_commands (2.1.310).
+pub const TERMINAL_ONLY_COMMANDS: &[&str] = &[
+    "add-dir",
+    "bashes",
+    "bug",
+    "color",
+    "doctor",
+    "export",
+    "feedback",
+    "focus",
+    "help",
+    "hooks",
+    "ide",
+    "install-github-app",
+    "login",
+    "logout",
+    "memory",
+    "permissions",
+    "plugin",
+    "privacy-settings",
+    "release-notes",
+    "reload-plugins",
+    "resume",
+    "rewind",
+    "status",
+    "statusline",
+    "tasks",
+    "terminal-setup",
+    "theme",
+    "upgrade",
+    "vim",
+];
+
+pub fn claude_card_command(
+    text: &str,
+    is_skill: impl Fn(&str) -> bool,
+) -> Option<ClaudeCardCommand> {
+    let (name, rest) = crate::invocation::leading_command(text.trim_start())?;
+    let rest = rest.trim();
+    if is_skill(name) {
+        return None;
+    }
+    match name {
+        "context" => Some(ClaudeCardCommand::Context),
+        "usage" | "cost" => Some(ClaudeCardCommand::Usage),
+        "model" => Some(ClaudeCardCommand::Model(
+            (!rest.is_empty()).then(|| rest.to_string()),
+        )),
+        "mcp" if rest.is_empty() => Some(ClaudeCardCommand::Mcp),
+        name if TERMINAL_ONLY_COMMANDS.contains(&name) => {
+            Some(ClaudeCardCommand::TerminalOnly(name.to_string()))
+        }
+        _ => None,
+    }
+}
+
 /// `Some(argument)` when the prompt invokes zeron's own `command`: the first
 /// token must be exactly `/command`, and the rest of the line is its argument.
 pub fn app_command_argument(text: &str, command: &str) -> Option<Option<String>> {
@@ -73,6 +140,38 @@ mod tests {
             assert!(sidechat_prompt(&format!("ask in a /{command}")).is_none());
         }
         assert!(sidechat_prompt("/compact").is_none());
+    }
+
+    #[test]
+    fn card_commands_are_recognized_and_skills_keep_their_turn() {
+        let none = |_: &str| false;
+        assert_eq!(
+            claude_card_command("/context", none),
+            Some(ClaudeCardCommand::Context)
+        );
+        assert_eq!(
+            claude_card_command("/cost", none),
+            Some(ClaudeCardCommand::Usage)
+        );
+        assert_eq!(
+            claude_card_command("/model opus", none),
+            Some(ClaudeCardCommand::Model(Some("opus".into())))
+        );
+        assert_eq!(
+            claude_card_command("/mcp", none),
+            Some(ClaudeCardCommand::Mcp)
+        );
+        assert_eq!(claude_card_command("/mcp reconnect x", none), None);
+        assert_eq!(
+            claude_card_command("/status", none),
+            Some(ClaudeCardCommand::TerminalOnly("status".into()))
+        );
+        assert_eq!(
+            claude_card_command("/memory", |name| name == "memory"),
+            None
+        );
+        assert_eq!(claude_card_command("/review this", none), None);
+        assert_eq!(claude_card_command("explain /context", none), None);
     }
 
     #[test]

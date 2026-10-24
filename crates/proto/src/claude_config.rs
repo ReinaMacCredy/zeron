@@ -673,6 +673,46 @@ pub struct ClaudeConfigSnapshot {
     pub files: Vec<String>,
 }
 
+pub const COMMAND_NOTE_PREFIX: &str = "Claude Code /";
+const COMMAND_TEXT_CAP: usize = 32 * 1024;
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandCard {
+    pub command: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_servers: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl CommandCard {
+    pub fn capped(mut self) -> Self {
+        if self.text.len() > COMMAND_TEXT_CAP {
+            let mut end = COMMAND_TEXT_CAP;
+            while !self.text.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.text.truncate(end);
+        }
+        self
+    }
+
+    pub fn from_note(text: &str, hint: Option<&str>) -> Option<Self> {
+        text.starts_with(COMMAND_NOTE_PREFIX)
+            .then(|| serde_json::from_str(hint?).ok())
+            .flatten()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalCommandOutput {
@@ -833,6 +873,30 @@ mod tests {
         assert_eq!(
             global.keys().collect::<Vec<_>>(),
             ["remoteControlAtStartup", "theme"]
+        );
+    }
+
+    #[test]
+    fn command_cards_round_trip_through_a_note_and_stay_small() {
+        let card = CommandCard {
+            command: "/context".into(),
+            text: "x".repeat(40 * 1024),
+            ..Default::default()
+        }
+        .capped();
+        assert_eq!(card.text.len(), 32 * 1024);
+        let hint = serde_json::to_string(&card).unwrap();
+        assert_eq!(
+            CommandCard::from_note("Claude Code /context · 59.9k / 1M", Some(&hint)),
+            Some(card)
+        );
+        assert_eq!(
+            CommandCard::from_note("Context compacted", Some(&hint)),
+            None
+        );
+        assert_eq!(
+            CommandCard::from_note("Claude Code /usage", Some("{")),
+            None
         );
     }
 
