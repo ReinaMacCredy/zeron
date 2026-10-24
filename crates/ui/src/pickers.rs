@@ -755,14 +755,6 @@ struct ModelRowsKey {
     selected: Option<String>,
 }
 
-pub(crate) struct ChipChoices {
-    pub models: Vec<(String, String)>,
-    pub model: Option<String>,
-    pub efforts: Vec<ReasoningLevel>,
-    pub effort: Option<ReasoningLevel>,
-    pub permission: PermissionMode,
-}
-
 /// One row of the model list: the model plus the harness it belongs to —
 /// search results and the favorites view mix harnesses, and every row's
 /// subline names its harness (t3code ModelListRow `showProvider`).
@@ -2351,7 +2343,7 @@ impl Pickers {
         cx.notify();
     }
 
-    pub(crate) fn chip_choices(&self, cx: &App) -> ChipChoices {
+    pub(crate) fn chip_choices(&self, cx: &App) -> zeron_proto::claude_panel::ChipChoices {
         let models = self
             .effective_harness(cx)
             .and_then(|h| self.catalog(h, self.effective_instance(cx).as_deref()))
@@ -2363,7 +2355,7 @@ impl Pickers {
                     .collect()
             })
             .unwrap_or_default();
-        ChipChoices {
+        zeron_proto::claude_panel::ChipChoices {
             models,
             model: self
                 .selected_model(cx)

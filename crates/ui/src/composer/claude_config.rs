@@ -1,15 +1,16 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable, Hsla, KeyDownEvent, ScrollHandle,
     SharedString, Subscription, Task, Window, div, prelude::*, px,
 };
-use zeron_proto::claude_config::{
-    self as cc, ClaudeConfigSnapshot, Kind, LocalCommandOutput, Scope, Setting,
+use zeron_proto::claude_config::{self as cc, ClaudeConfigSnapshot, LocalCommandOutput};
+use zeron_proto::claude_panel::{
+    Change, ConfigState, Filter, Load, Meter, RowView, STATS_DAYS, STATS_FOOTNOTE, STATUS_FOOTNOTE,
+    Tab, parse_usage, plural_days, stats_of, status_rows,
 };
 use zeron_proto::usage::{UsageSummary, format_tokens};
-use zeron_proto::{HarnessId, PermissionMode, ReasoningLevel};
+use zeron_proto::{HarnessId, PermissionMode};
 use zeron_rpc::methods;
 
 use super::background::{CardMotion, card_frame, card_motion};
@@ -18,63 +19,7 @@ use crate::icons::{self, icon};
 use crate::popover;
 use crate::theme::Theme;
 
-pub(crate) const SUMMARY_PREFIX: &str = "Claude Code settings · ";
-const STATS_DAYS: u32 = 7 * 36;
-const READ_ONLY_NOTE: &str =
-    "Claude Code does not set this headless; change it in the terminal's /config.";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Tab {
-    Status,
-    Config,
-    Usage,
-    Stats,
-}
-
-impl Tab {
-    const ALL: [Tab; 4] = [Tab::Status, Tab::Config, Tab::Usage, Tab::Stats];
-
-    fn label(self) -> &'static str {
-        match self {
-            Tab::Status => "Status",
-            Tab::Config => "Config",
-            Tab::Usage => "Usage",
-            Tab::Stats => "Stats",
-        }
-    }
-
-    fn step(self, forward: bool) -> Tab {
-        let ix = Tab::ALL.iter().position(|t| *t == self).unwrap_or(0);
-        let n = Tab::ALL.len();
-        Tab::ALL[if forward {
-            (ix + 1) % n
-        } else {
-            (ix + n - 1) % n
-        }]
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Filter {
-    All,
-    Zeron,
-    Terminal,
-}
-
-enum Load<T> {
-    Loading,
-    Ready(T),
-    Failed(String),
-}
-
-impl<T> Load<T> {
-    fn from(result: Result<T, String>) -> Self {
-        match result {
-            Ok(value) => Load::Ready(value),
-            Err(error) => Load::Failed(error),
-        }
-    }
-}
+pub(crate) use zeron_proto::claude_panel::SUMMARY_PREFIX;
 
 pub(super) struct ConfigPanel {
     chat_id: Option<String>,
@@ -89,14 +34,7 @@ pub(super) struct ConfigPanel {
     editing: Option<&'static str>,
     search: Entity<ComposerInput>,
     text: Entity<ComposerInput>,
-    values: Load<BTreeMap<String, String>>,
-    files: Vec<String>,
-    notes: HashMap<&'static str, String>,
-    refused: HashSet<&'static str>,
-    queue: VecDeque<(&'static str, String, String)>,
-    writing: Option<&'static str>,
-    originals: HashMap<&'static str, String>,
-    changes: Vec<(&'static str, String)>,
+    state: ConfigState,
     status: Load<LocalCommandOutput>,
     stats: Option<Load<UsageSummary>>,
     opened_at: Instant,
@@ -107,47 +45,6 @@ pub(super) struct ConfigPanel {
     tasks: Vec<Task<()>>,
     write_task: Option<Task<()>>,
     _subs: Vec<Subscription>,
-}
-
-#[derive(Clone, Debug)]
-struct RowView {
-    setting: &'static Setting,
-    value: String,
-    options: Vec<String>,
-    writable: bool,
-    note: Option<String>,
-}
-
-impl RowView {
-    fn is_bool(&self) -> bool {
-        self.setting.kind == Kind::Bool
-    }
-
-    fn is_text(&self) -> bool {
-        self.setting.kind == Kind::Text && self.setting.chip.is_none()
-    }
-
-    fn matches(&self, query: &str) -> bool {
-        if query.is_empty() {
-            return true;
-        }
-        let query = query.to_lowercase();
-        [self.setting.label, self.setting.id, self.value.as_str()]
-            .iter()
-            .any(|field| field.to_lowercase().contains(&query))
-    }
-}
-
-fn filter_matches(filter: Filter, setting: &Setting) -> bool {
-    match filter {
-        Filter::All => true,
-        Filter::Zeron => setting.scope == Scope::Zeron,
-        Filter::Terminal => setting.scope == Scope::Terminal,
-    }
-}
-
-fn effort_value(level: Option<ReasoningLevel>) -> String {
-    level.map(|l| l.label().to_string()).unwrap_or_default()
 }
 
 impl Composer {
@@ -207,14 +104,7 @@ impl Composer {
             editing: None,
             search,
             text,
-            values: Load::Loading,
-            files: Vec::new(),
-            notes: HashMap::new(),
-            refused: HashSet::new(),
-            queue: VecDeque::new(),
-            writing: None,
-            originals: HashMap::new(),
-            changes: Vec::new(),
+            state: ConfigState::default(),
             status: Load::Loading,
             stats: None,
             opened_at: crate::motion::now(),
@@ -266,22 +156,8 @@ impl Composer {
         reply: Result<ClaudeConfigSnapshot, String>,
         cx: &mut Context<Self>,
     ) {
-        let Some(panel) = self.config_panel.as_mut() else {
-            return;
-        };
-        match reply {
-            Ok(snapshot) => {
-                let mut values = snapshot.values;
-                for (id, _, value) in &panel.queue {
-                    values.insert(id.to_string(), value.clone());
-                }
-                panel.files = snapshot.files;
-                panel.values = Load::Ready(values);
-            }
-            Err(error) if !matches!(panel.values, Load::Ready(_)) => {
-                panel.values = Load::Failed(error)
-            }
-            Err(_) => {}
+        if let Some(panel) = self.config_panel.as_mut() {
+            panel.state.snapshot_arrived(reply);
         }
         cx.notify();
     }
@@ -296,7 +172,7 @@ impl Composer {
         panel.closing = Some(crate::motion::now());
         panel.expanded = None;
         panel.editing = None;
-        let summary = summary_text(&panel.changes);
+        let summary = panel.state.summary();
         let note_chat = panel.note_chat.clone();
         if let (Some(text), Some(chat_id)) = (summary, note_chat)
             && let Some(engine) = self.state.read(cx).engine().cloned()
@@ -320,88 +196,16 @@ impl Composer {
     }
 
     fn config_rows(&self, panel: &ConfigPanel, cx: &App) -> Vec<RowView> {
-        let values = match &panel.values {
-            Load::Ready(values) => Some(values),
-            _ => None,
-        };
-        let chips = self.pickers.read(cx).chip_choices(cx);
-        cc::SETTINGS
-            .iter()
-            .filter_map(|setting| {
-                let row = match setting.chip {
-                    Some(cc::Chip::Model) => {
-                        let label = |id: &str| {
-                            chips
-                                .models
-                                .iter()
-                                .find(|(m, _)| m == id)
-                                .map(|(_, label)| label.clone())
-                                .unwrap_or_else(|| id.to_string())
-                        };
-                        RowView {
-                            setting,
-                            value: chips.model.as_deref().map(label).unwrap_or_default(),
-                            options: chips.models.iter().map(|(_, l)| l.clone()).collect(),
-                            writable: !chips.models.is_empty(),
-                            note: None,
-                        }
-                    }
-                    Some(cc::Chip::Effort) => RowView {
-                        setting,
-                        value: if chips.efforts.is_empty() {
-                            "not offered by this model".into()
-                        } else {
-                            effort_value(chips.effort)
-                        },
-                        options: chips
-                            .efforts
-                            .iter()
-                            .map(|l| l.label().to_string())
-                            .collect(),
-                        writable: !chips.efforts.is_empty(),
-                        note: None,
-                    },
-                    Some(cc::Chip::Permission) => RowView {
-                        setting,
-                        value: chips.permission.label().to_string(),
-                        options: PermissionMode::ALL
-                            .iter()
-                            .map(|m| m.label().to_string())
-                            .collect(),
-                        writable: true,
-                        note: None,
-                    },
-                    None => {
-                        let value = values?.get(setting.id)?.clone();
-                        let refused = panel.refused.contains(setting.id);
-                        RowView {
-                            setting,
-                            value,
-                            options: match setting.kind {
-                                Kind::Enum(options) => {
-                                    options.iter().map(|o| o.to_string()).collect()
-                                }
-                                Kind::Bool => vec!["true".into(), "false".into()],
-                                Kind::Text => Vec::new(),
-                            },
-                            writable: setting.cli.is_some() && !refused,
-                            note: panel.notes.get(setting.id).cloned().or_else(|| {
-                                (setting.cli.is_none()).then(|| READ_ONLY_NOTE.to_string())
-                            }),
-                        }
-                    }
-                };
-                Some(row)
-            })
-            .collect()
+        panel.state.rows(&self.pickers.read(cx).chip_choices(cx))
     }
 
     fn visible_config_rows(&self, panel: &ConfigPanel, cx: &App) -> Vec<RowView> {
         let query = panel.search.read(cx).text().trim().to_string();
-        self.config_rows(panel, cx)
-            .into_iter()
-            .filter(|row| filter_matches(panel.filter, row.setting) && row.matches(&query))
-            .collect()
+        panel.state.visible_rows(
+            &self.pickers.read(cx).chip_choices(cx),
+            panel.filter,
+            &query,
+        )
     }
 
     fn activate_config_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -491,12 +295,11 @@ impl Composer {
     }
 
     fn set_config_value(&mut self, row: &RowView, value: String, cx: &mut Context<Self>) {
-        if row.value == value {
+        let Some(panel) = self.config_panel.as_mut() else {
             return;
-        }
-        let id = row.setting.id;
-        match row.setting.chip {
-            Some(chip) => {
+        };
+        match panel.state.set_value(row, value) {
+            Change::Chip(chip, value) => {
                 let chips = self.pickers.read(cx).chip_choices(cx);
                 self.pickers.update(cx, |pickers, cx| match chip {
                     cc::Chip::Model => {
@@ -517,54 +320,27 @@ impl Composer {
                     }
                 });
                 if let Some(panel) = self.config_panel.as_mut() {
-                    record_change(panel, id, &row.value, &value);
-                }
-            }
-            None => {
-                let Some(panel) = self.config_panel.as_mut() else {
-                    return;
-                };
-                if cc::config_command(row.setting, &value).is_none() {
                     panel
-                        .notes
-                        .insert(id, "Quotes and line breaks cannot be written.".into());
-                    cx.notify();
-                    return;
+                        .state
+                        .record_change(row.setting.id, &row.value, &value);
                 }
-                if let Load::Ready(values) = &mut panel.values {
-                    values.insert(id.to_string(), value.clone());
-                }
-                panel.notes.remove(id);
-                panel.queue.push_back((id, row.value.clone(), value));
-                self.drain_config_writes(cx);
             }
+            Change::Queued => self.drain_config_writes(cx),
+            Change::Unchanged | Change::Refused => {}
         }
         cx.notify();
     }
 
-    // One /config at a time: each rewrites the whole file, so two at once can drop a change.
     fn drain_config_writes(&mut self, cx: &mut Context<Self>) {
-        let Some(panel) = self.config_panel.as_mut() else {
-            return;
-        };
-        if panel.writing.is_some() {
-            return;
-        }
-        let Some((id, before, value)) = panel.queue.front().cloned() else {
-            return;
-        };
-        let Some(setting) = cc::setting(id) else {
-            panel.queue.pop_front();
-            return;
-        };
-        let Some(command) = cc::config_command(setting, &value) else {
-            panel.queue.pop_front();
-            return;
-        };
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        panel.writing = Some(id);
+        let Some(panel) = self.config_panel.as_mut() else {
+            return;
+        };
+        let Some(command) = panel.state.next_write() else {
+            return;
+        };
         let mut params = panel.params.clone();
         params["command"] = command.into();
         params["connectMcp"] = false.into();
@@ -575,8 +351,7 @@ impl Composer {
                 .call_as::<LocalCommandOutput>(methods::RUN_CLAUDE_LOCAL_COMMAND, params)
                 .await
                 .map_err(|e| e.to_string());
-            let saved = matches!(&reply, Ok(out) if cc::config_saved(&out.text));
-            let snapshot = if saved {
+            let snapshot = if ConfigState::write_saved(&reply) {
                 Some(
                     engine
                         .client()
@@ -591,40 +366,7 @@ impl Composer {
                 let Some(panel) = this.config_panel.as_mut() else {
                     return;
                 };
-                panel.writing = None;
-                panel.queue.pop_front();
-                let confirmed = snapshot
-                    .as_ref()
-                    .and_then(|s| s.as_ref().ok())
-                    .and_then(|s| s.values.get(id))
-                    .is_none_or(|on_disk| *on_disk == value);
-                match reply {
-                    Ok(_) if saved && confirmed => record_change(panel, id, &before, &value),
-                    Ok(out) => {
-                        if cc::config_key_unknown(&out.text) {
-                            panel.refused.insert(id);
-                        }
-                        let text = if saved {
-                            "Claude Code reported it saved, but the file still holds the old value."
-                                .to_string()
-                        } else {
-                            out.text.trim().to_string()
-                        };
-                        panel.notes.insert(id, text);
-                        if let Load::Ready(values) = &mut panel.values {
-                            values.insert(id.to_string(), before.clone());
-                        }
-                    }
-                    Err(error) => {
-                        panel.notes.insert(id, error);
-                        if let Load::Ready(values) = &mut panel.values {
-                            values.insert(id.to_string(), before.clone());
-                        }
-                    }
-                }
-                if let Some(snapshot) = snapshot {
-                    this.config_snapshot_arrived(snapshot, cx);
-                }
+                panel.state.write_done(reply, snapshot);
                 this.drain_config_writes(cx);
                 cx.notify();
             })
@@ -922,13 +664,7 @@ impl Composer {
                 .children(keys.iter().map(|k| kbd(theme, k)))
                 .child(label)
         };
-        let saved = match (panel.changes.len(), panel.writing) {
-            (_, Some(_)) => "Saving…".to_string(),
-            (0, None) if panel.files.is_empty() => "Claude Code defaults".to_string(),
-            (0, None) => format!("Read from {}", short_files(&panel.files)),
-            (1, None) => "1 change, saved".to_string(),
-            (n, None) => format!("{n} changes, saved"),
-        };
+        let saved = panel.state.footer();
         div()
             .flex()
             .flex_row()
@@ -961,7 +697,7 @@ impl Composer {
         let query = panel.search.read(cx).text().trim().to_string();
         let rows: Vec<RowView> = all
             .iter()
-            .filter(|row| filter_matches(panel.filter, row.setting) && row.matches(&query))
+            .filter(|row| panel.filter.matches(row.setting) && row.matches(&query))
             .cloned()
             .collect();
         let selected = panel.selected.min(rows.len().saturating_sub(1));
@@ -991,12 +727,6 @@ impl Composer {
             )
             .child(div().flex_1().min_w_0().child(panel.search.clone()))
             .child(kbd(theme, "/"));
-        let count = |filter: Filter| {
-            cc::SETTINGS
-                .iter()
-                .filter(|s| filter_matches(filter, s))
-                .count()
-        };
         let filters = div()
             .flex()
             .flex_row()
@@ -1004,42 +734,35 @@ impl Composer {
             .gap(px(6.0))
             .px(px(12.0))
             .pb(px(6.0))
-            .children(
-                [
-                    (Filter::All, "All"),
-                    (Filter::Zeron, "Affects Zeron chats"),
-                    (Filter::Terminal, "Terminal only"),
-                ]
-                .into_iter()
-                .map(|(filter, label)| {
-                    let on = panel.filter == filter;
-                    div()
-                        .id(("claude-config-filter", filter as usize))
-                        .debug_selector(move || format!("claude-config-filter-{label}"))
-                        .role(gpui::Role::Button)
-                        .aria_selected(on)
-                        .px(px(9.0))
-                        .h(px(20.0))
-                        .flex()
-                        .items_center()
-                        .rounded_full()
-                        .border_1()
-                        .cursor_pointer()
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .border_color(if on { theme.accent } else { theme.border })
-                        .text_color(if on { theme.accent } else { theme.text_muted })
-                        .when(on, |el| el.bg(theme.accent.opacity(0.14)))
-                        .child(format!("{label} {}", count(filter)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(panel) = this.config_panel.as_mut() {
-                                panel.filter = filter;
-                                panel.selected = 0;
-                                panel.expanded = None;
-                                cx.notify();
-                            }
-                        }))
-                }),
-            )
+            .children(Filter::ALL.into_iter().map(|filter| {
+                let label = filter.label();
+                let on = panel.filter == filter;
+                div()
+                    .id(("claude-config-filter", filter as usize))
+                    .debug_selector(move || format!("claude-config-filter-{label}"))
+                    .role(gpui::Role::Button)
+                    .aria_selected(on)
+                    .px(px(9.0))
+                    .h(px(20.0))
+                    .flex()
+                    .items_center()
+                    .rounded_full()
+                    .border_1()
+                    .cursor_pointer()
+                    .text_size(crate::typography::ui_rems(11.5))
+                    .border_color(if on { theme.accent } else { theme.border })
+                    .text_color(if on { theme.accent } else { theme.text_muted })
+                    .when(on, |el| el.bg(theme.accent.opacity(0.14)))
+                    .child(format!("{label} {}", filter.count()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(panel) = this.config_panel.as_mut() {
+                            panel.filter = filter;
+                            panel.selected = 0;
+                            panel.expanded = None;
+                            cx.notify();
+                        }
+                    }))
+            }))
             .child(
                 div()
                     .ml_auto()
@@ -1047,7 +770,7 @@ impl Composer {
                     .text_color(theme.text_faint)
                     .child(format!("{} shown", rows.len())),
             );
-        let list: AnyElement = match &panel.values {
+        let list: AnyElement = match &panel.state.values {
             Load::Loading => empty_note(theme, "Reading Claude Code's settings…"),
             Load::Failed(error) => empty_note(theme, &format!("Could not read settings: {error}")),
             Load::Ready(_) if rows.is_empty() => {
@@ -1090,7 +813,7 @@ impl Composer {
     ) -> AnyElement {
         let panel = self.config_panel.as_ref().unwrap();
         let id = row.setting.id;
-        let changed = panel.changes.iter().any(|(c, _)| *c == id);
+        let changed = panel.state.changed(id);
         let dim = !row.writable;
         let mono = theme.font_mono.clone();
         let value: AnyElement = if row.is_bool() {
@@ -1128,11 +851,7 @@ impl Composer {
                 })
                 .into_any_element()
         };
-        let tag = match (row.setting.chip, row.setting.scope) {
-            (Some(_), _) => Some(("= chip", true)),
-            (None, Scope::Terminal) => Some(("Terminal", false)),
-            _ => None,
-        };
+        let tag = row.tag().map(|label| (label, row.setting.chip.is_some()));
         let line = div()
             .id(("claude-config-row", ix))
             .debug_selector(move || format!("claude-config-row-{id}"))
@@ -1239,7 +958,7 @@ impl Composer {
         let note = row
             .note
             .clone()
-            .filter(|_| selected || panel.notes.contains_key(id))
+            .filter(|_| selected || panel.state.notes.contains_key(id))
             .map(|note| {
                 div()
                     .pl(px(28.0))
@@ -1352,74 +1071,27 @@ impl Composer {
     fn status_pane(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let panel = self.config_panel.as_ref().unwrap();
         let chips = self.pickers.read(cx).chip_choices(cx);
-        let model = chips
-            .model
-            .as_deref()
-            .map(|id| {
-                let label = chips
-                    .models
-                    .iter()
-                    .find(|(m, _)| m == id)
-                    .map(|(_, l)| l.as_str())
-                    .unwrap_or(id);
-                format!("{id} · {label}")
-            })
-            .unwrap_or_else(|| "default".into());
-        let session = panel
-            .session_id
-            .as_deref()
-            .map(short_id)
-            .unwrap_or_else(|| "No session yet".into());
-        let mut rows: Vec<(&str, String, bool)> = Vec::new();
-        let init = match &panel.status {
-            Load::Ready(out) => out.init.clone(),
-            _ => None,
-        };
-        let field = |key: &str| {
-            init.as_ref()
-                .and_then(|i| i.get(key))
-                .and_then(|v| v.as_str())
-                .map(str::to_owned)
-        };
-        let waiting = match &panel.status {
-            Load::Loading => "Asking Claude Code…".to_string(),
-            Load::Failed(error) => error.clone(),
-            Load::Ready(_) => "Not reported".to_string(),
-        };
-        let or_wait = |value: Option<String>| value.unwrap_or_else(|| waiting.clone());
-        rows.push(("Version", or_wait(field("claude_code_version")), false));
-        rows.push(("Session", session, false));
-        rows.push(("Folder", or_wait(field("cwd").map(|c| tilde(&c))), false));
-        rows.push(("Model", model, true));
-        rows.push((
-            "Permission mode",
-            chips.permission.label().to_string(),
-            true,
-        ));
-        rows.push(("Output style", or_wait(field("output_style")), false));
-        rows.push((
-            "MCP servers",
-            or_wait(init.as_ref().map(|i| mcp_summary(i.get("mcp_servers")))),
-            false,
-        ));
-        rows.push((
-            "Memory",
-            or_wait(init.as_ref().map(|i| memory_summary(i.get("memory_paths")))),
-            false,
-        ));
-        rows.push((
-            "Plugins",
-            or_wait(init.as_ref().map(|i| plugins_summary(i.get("plugins")))),
-            false,
-        ));
+        let home = std::env::var("HOME").ok();
+        let rows = status_rows(
+            &panel.status,
+            &chips,
+            panel.session_id.as_deref(),
+            home.as_deref(),
+        );
         div()
             .id("claude-config-status")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
             .p(px(6.0))
-            .children(rows.into_iter().enumerate().map(|(ix, (k, v, chip))| {
-                kv_row(theme, ix > 0, k, v, chip.then_some("= chip"))
+            .children(rows.into_iter().enumerate().map(|(ix, row)| {
+                kv_row(
+                    theme,
+                    ix > 0,
+                    row.key,
+                    row.value,
+                    row.chip.then_some("= chip"),
+                )
             }))
             .child(
                 div()
@@ -1427,9 +1099,7 @@ impl Composer {
                     .mt(px(10.0))
                     .text_size(crate::typography::ui_rems(11.5))
                     .text_color(theme.text_faint)
-                    .child(
-                        "From Claude Code's system/init for this folder; model and permission mode are this chat's.",
-                    ),
+                    .child(STATUS_FOOTNOTE),
             )
             .into_any_element()
     }
@@ -1462,7 +1132,7 @@ impl Composer {
             Load::Failed(error) => empty_note(theme, error),
             Load::Ready(out) => {
                 let report = parse_usage(&out.text);
-                if report.meters.is_empty() && report.sections.is_empty() {
+                if report.is_empty() {
                     empty_note(theme, out.text.trim())
                 } else {
                     div()
@@ -1612,39 +1282,10 @@ impl Composer {
                     .mx(px(14.0))
                     .text_size(crate::typography::ui_rems(11.5))
                     .text_color(theme.warning)
-                    .child(
-                        "Claude Code returns no stats headless; Zeron counts them from its Usage data on this device. Longest session is not recorded there.",
-                    ),
+                    .child(STATS_FOOTNOTE),
             )
             .into_any_element()
     }
-}
-
-fn record_change(panel: &mut ConfigPanel, id: &'static str, before: &str, after: &str) {
-    let original = panel
-        .originals
-        .entry(id)
-        .or_insert_with(|| before.to_string())
-        .clone();
-    panel.changes.retain(|(c, _)| *c != id);
-    if original != after {
-        panel.changes.push((id, after.to_string()));
-    }
-}
-
-fn summary_text(changes: &[(&'static str, String)]) -> Option<String> {
-    if changes.is_empty() {
-        return None;
-    }
-    let parts = changes
-        .iter()
-        .map(|(id, value)| {
-            let label = cc::setting(id).map_or(*id, |s| s.label);
-            let value = if value.is_empty() { "default" } else { value };
-            format!("{label} → {value}")
-        })
-        .collect::<Vec<_>>();
-    Some(format!("{SUMMARY_PREFIX}{}", parts.join(", ")))
 }
 
 pub(crate) fn summary_row(
@@ -1896,291 +1537,11 @@ fn meter(theme: &Theme, meter: Meter) -> AnyElement {
 }
 
 fn heat(theme: &Theme, tokens: u64, max: u64) -> Hsla {
-    if tokens == 0 {
-        return crate::theme::ink(0.06);
-    }
-    let share = tokens as f32 / max as f32;
-    let alpha = if share > 0.6 {
-        1.0
-    } else if share > 0.3 {
-        0.7
-    } else if share > 0.1 {
-        0.45
-    } else {
-        0.25
-    };
-    theme.accent.opacity(alpha)
-}
-
-fn plural_days(n: u64) -> String {
-    if n == 1 {
-        "1 day".into()
-    } else {
-        format!("{n} days")
-    }
-}
-
-fn short_id(id: &str) -> String {
-    if id.chars().count() <= 12 {
-        return id.to_string();
-    }
-    let head: String = id.chars().take(4).collect();
-    let tail: String = id
-        .chars()
-        .rev()
-        .take(4)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("{head}…{tail}")
-}
-
-fn tilde(path: &str) -> String {
-    match dirs_home() {
-        Some(home) if path.starts_with(&home) => format!("~{}", &path[home.len()..]),
-        _ => path.to_string(),
-    }
-}
-
-fn dirs_home() -> Option<String> {
-    std::env::var("HOME").ok().filter(|h| !h.is_empty())
-}
-
-fn short_files(files: &[String]) -> String {
-    files
-        .iter()
-        .map(|f| {
-            let path = std::path::Path::new(f);
-            let parent = path
-                .parent()
-                .and_then(|p| p.file_name())
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            format!("{parent}/{name}")
-        })
-        .collect::<Vec<_>>()
-        .join(" + ")
-}
-
-fn mcp_summary(servers: Option<&serde_json::Value>) -> String {
-    let servers = servers
-        .and_then(|s| s.as_array())
-        .cloned()
-        .unwrap_or_default();
-    if servers.is_empty() {
-        return "none".into();
-    }
-    let connected = servers
-        .iter()
-        .filter(|s| s.get("status").and_then(|v| v.as_str()) == Some("connected"))
-        .count();
-    let failed = servers.len() - connected;
-    let names = servers
-        .iter()
-        .filter_map(|s| s.get("name").and_then(|v| v.as_str()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("{connected} connected · {failed} failed ({names})")
-}
-
-fn memory_summary(paths: Option<&serde_json::Value>) -> String {
-    match paths.and_then(|p| p.as_object()) {
-        Some(map) if !map.is_empty() => map
-            .iter()
-            .map(|(kind, path)| format!("{kind}: {}", tilde(path.as_str().unwrap_or_default())))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => "none".into(),
-    }
-}
-
-fn plugins_summary(plugins: Option<&serde_json::Value>) -> String {
-    let plugins = plugins
-        .and_then(|p| p.as_array())
-        .cloned()
-        .unwrap_or_default();
-    if plugins.is_empty() {
-        return "none".into();
-    }
-    let names = plugins
-        .iter()
-        .filter_map(|p| p.get("name").and_then(|v| v.as_str()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("{} enabled ({names})", plugins.len())
-}
-
-#[derive(Debug, PartialEq)]
-struct Meter {
-    label: String,
-    percent: u32,
-    resets: Option<String>,
-}
-
-#[derive(Debug, PartialEq)]
-struct UsageSection {
-    title: String,
-    lines: Vec<String>,
-}
-
-#[derive(Debug, Default, PartialEq)]
-struct UsageReport {
-    meters: Vec<Meter>,
-    sections: Vec<UsageSection>,
-    note: Option<String>,
-}
-
-fn parse_usage(text: &str) -> UsageReport {
-    let mut report = UsageReport::default();
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some((label, rest)) = line.split_once(": ")
-            && let Some((pct, tail)) = rest.split_once("% used")
-            && let Ok(percent) = pct.trim().parse::<u32>()
-        {
-            let resets = tail
-                .trim_start_matches([' ', '·'])
-                .strip_prefix("resets ")
-                .map(str::to_owned);
-            report.meters.push(Meter {
-                label: label.to_string(),
-                percent,
-                resets,
-            });
-        } else if line.starts_with("Last ") {
-            report.sections.push(UsageSection {
-                title: line.to_string(),
-                lines: Vec::new(),
-            });
-        } else if let Some(section) = report.sections.last_mut() {
-            section
-                .lines
-                .push(line.split_whitespace().collect::<Vec<_>>().join(" "));
-        } else if report.meters.is_empty() && report.note.is_none() {
-            report.note = Some(line.to_string());
-        }
-    }
-    report
-}
-
-#[derive(Debug, PartialEq)]
-struct Stats {
-    days: Vec<u64>,
-    favorite_model: Option<String>,
-    sessions: u64,
-    active_days: u64,
-    streak: u64,
-    tokens: u64,
-}
-
-fn stats_of(summary: &UsageSummary) -> Option<Stats> {
-    let claude: Vec<_> = summary
-        .buckets
-        .iter()
-        .filter(|b| b.harness == HarnessId::ClaudeCode)
-        .collect();
-    if claude.is_empty() || summary.hourly {
-        return None;
-    }
-    let mut days = vec![0u64; summary.periods.len()];
-    let mut models: BTreeMap<&str, u64> = BTreeMap::new();
-    for bucket in &claude {
-        if let Some(day) = days.get_mut(bucket.period) {
-            *day += bucket.tokens.total().max(1);
-        }
-        *models.entry(bucket.model.as_str()).or_default() += bucket.tokens.total();
-    }
-    let streak = days
-        .iter()
-        .rev()
-        .skip_while(|t| **t == 0)
-        .take_while(|t| **t > 0)
-        .count() as u64;
-    let streak = if days.last().is_some_and(|t| *t > 0)
-        || days.iter().rev().nth(1).is_some_and(|t| *t > 0)
-    {
-        streak
-    } else {
-        0
-    };
-    Some(Stats {
-        favorite_model: models
-            .iter()
-            .max_by_key(|(_, tokens)| **tokens)
-            .map(|(model, _)| model.to_string()),
-        sessions: summary
-            .sessions
-            .iter()
-            .filter(|s| s.harness == HarnessId::ClaudeCode)
-            .map(|s| s.sessions)
-            .sum(),
-        active_days: days.iter().filter(|t| **t > 0).count() as u64,
-        streak,
-        tokens: claude.iter().map(|b| b.tokens.total()).sum(),
-        days,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn usage_text_becomes_meters_and_contributor_blocks() {
-        let text = "You are currently using your subscription to power your Claude Code usage\n\n\
-Current session: 5% used · resets Oct 25 at 2:50am (Asia/Saigon)\n\
-Current week (all models): 81% used · resets Oct 29 at 5am (Asia/Saigon)\n\
-Current week (Fable): 2% used · resets Oct 29 at 5am (Asia/Saigon)\n\n\
-What's contributing to your limits usage?\n\
-Approximate · sessions on this machine only · shares overlap\n\n\
-Last 24h · 2893 requests · 147 sessions\n\
-  85%  Give \"general-purpose\" subagents a cheaper model\n\
-  Top MCP servers: zeron 3%\n\n\
-Last 7d · 67140 requests · 1484 sessions\n\
-  90%  Give \"general-purpose\" subagents a cheaper model\n";
-        let report = parse_usage(text);
-        assert_eq!(report.meters.len(), 3);
-        assert_eq!(
-            report.meters[1],
-            Meter {
-                label: "Current week (all models)".into(),
-                percent: 81,
-                resets: Some("Oct 29 at 5am (Asia/Saigon)".into()),
-            }
-        );
-        assert_eq!(report.sections.len(), 2);
-        assert_eq!(
-            report.sections[0].title,
-            "Last 24h · 2893 requests · 147 sessions"
-        );
-        assert_eq!(
-            report.sections[0].lines,
-            [
-                "85% Give \"general-purpose\" subagents a cheaper model",
-                "Top MCP servers: zeron 3%"
-            ]
-        );
-        assert!(report.note.unwrap().starts_with("You are currently using"));
-    }
-
-    #[test]
-    fn summary_names_each_changed_row_and_stays_quiet_without_changes() {
-        assert_eq!(summary_text(&[]), None);
-        assert_eq!(
-            summary_text(&[("theme", "dark".into()), ("autoCompact", "false".into())]).unwrap(),
-            "Claude Code settings · Theme → dark, Auto-compact → false"
-        );
-        assert_eq!(
-            summary_text(&[("language", String::new())]).unwrap(),
-            "Claude Code settings · Language → default"
-        );
+    match zeron_proto::claude_panel::heat_level(tokens, max) {
+        0 => crate::theme::ink(0.06),
+        1 => theme.accent.opacity(0.25),
+        2 => theme.accent.opacity(0.45),
+        3 => theme.accent.opacity(0.7),
+        _ => theme.accent.opacity(1.0),
     }
 }

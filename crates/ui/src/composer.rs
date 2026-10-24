@@ -9687,10 +9687,7 @@ impl Composer {
                         .map_or(zeron_proto::ChatIndicator::Idle, |chat| {
                             state.display_status_for(chat, now)
                         });
-                    let ring = zeron_proto::background::sidebar_ring(
-                        status,
-                        state.session_for(&thread.chat_id),
-                    );
+                    let ring = zeron_proto::background::sidebar_ring(status, state.session_for(&thread.chat_id));
                     (status, ring)
                 })
                 .collect()
@@ -13887,13 +13884,15 @@ impl Composer {
                     .when(!blocked || explains, |el| {
                         el.on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
                     })
-                    .tooltip(crate::settings::widgets::text_tooltip(if explains {
-                        "Out of Cloud credits"
-                    } else if mode == SendButtonMode::Queue {
-                        "Queue message"
-                    } else {
-                        "Send message"
-                    }))
+                    .tooltip(crate::settings::widgets::text_tooltip(
+                        if explains {
+                            "Out of Cloud credits"
+                        } else if mode == SendButtonMode::Queue {
+                            "Queue message"
+                        } else {
+                            "Send message"
+                        },
+                    ))
                     .into_any_element()
             }
         }
