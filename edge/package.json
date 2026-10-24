@@ -24,7 +24,7 @@
     "loro-adaptors": "^0.6.1",
     "loro-websocket": "^0.6.2",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.10",
+    "vitest": "^4.1.12",
     "wrangler": "^4.151.1"
   }
 }
