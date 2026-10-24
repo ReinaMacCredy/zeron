@@ -1976,3 +1976,137 @@ async fn workspace_entry_mutations_are_forwarded_to_the_owning_plain_folder() {
     viewer.shutdown().await;
     host.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_card_calls_run_on_the_chat_host_through_the_relay() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let config_dir = dirs.path().join("claude-config");
+    let folder = dirs.path().join("chat-folder");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(config_dir.join("settings.json"), r#"{"theme":"light"}"#).unwrap();
+
+    let registry_b = HarnessRegistry::new();
+    registry_b.register(Arc::new(InstantHarness));
+    registry_b.register(Arc::new(
+        zeron_harness::claude::ClaudeHarness::new().with_launch(zeron_harness::LaunchOverrides {
+            home: Some(config_dir.clone()),
+            ..Default::default()
+        }),
+    ));
+    let b_dir = dirs.path().join("b");
+    std::fs::create_dir_all(&b_dir).unwrap();
+    std::fs::write(b_dir.join("device-id"), "device-b").unwrap();
+    let core_b = EngineCore::assemble(&b_dir, Arc::new(registry_b), HarnessId::Mock, None)
+        .expect("engine assembles");
+    core_b
+        .workspace
+        .create_chat(
+            "remote-chat",
+            None,
+            Some("device-b"),
+            None,
+            Some(folder.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+    let _host = core_b.start_host_relay(&relay_url);
+
+    let core_a = assemble(&dirs.path().join("a"), "device-a");
+    let mut link_config =
+        LinkCacheConfig::new(relay_url.clone(), Arc::new(StaticToken("test-user".into())));
+    link_config.probe_timeout = Duration::from_secs(5);
+    core_a.set_links(LinkCache::new(link_config));
+    let client = zeron_rpc::memory_client(core_a.rpc_service());
+
+    let read = serde_json::json!({ "chatId": "remote-chat" });
+    assert!(
+        client
+            .call(methods::READ_CLAUDE_CONFIG, read.clone())
+            .await
+            .is_err(),
+        "device A has neither the chat nor Claude Code's files"
+    );
+    let mut targeted = read;
+    targeted["targetDeviceId"] = "device-b".into();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let snapshot = loop {
+        match client
+            .call(methods::READ_CLAUDE_CONFIG, targeted.clone())
+            .await
+        {
+            Ok(value) => break value,
+            Err(err) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "relay never came up: {err}"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    };
+    assert_eq!(snapshot["values"]["theme"], "light");
+    assert!(
+        snapshot["userSettings"]
+            .as_str()
+            .unwrap()
+            .ends_with("settings.json")
+    );
+
+    let refused = client
+        .call(
+            methods::RUN_CLAUDE_LOCAL_COMMAND,
+            serde_json::json!({
+                "chatId": "remote-chat",
+                "command": "usage",
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect_err("B's harness refuses a command without a slash")
+        .to_string();
+    assert!(refused.contains("not a slash command"), "{refused}");
+
+    for (text, hint) in [
+        (Some("Claude Code /usage"), "{\"pending\":true}"),
+        (None, "{}"),
+    ] {
+        let mut params = serde_json::json!({
+            "chatId": "remote-chat",
+            "messageId": "card-1",
+            "hint": hint,
+            "targetDeviceId": "device-b",
+        });
+        if let Some(text) = text {
+            params["text"] = text.into();
+        }
+        client
+            .call(methods::WRITE_CHAT_NOTE, params)
+            .await
+            .expect("note written on B");
+    }
+    let entries = core_b
+        .doc_host
+        .open("remote-chat")
+        .unwrap()
+        .doc()
+        .read_entries()
+        .unwrap();
+    let card = entries.iter().find(|entry| entry.id == "card-1").unwrap();
+    assert_eq!(
+        card.parts.len(),
+        3,
+        "the answer lands on the placeholder's note"
+    );
+    let a_entries = core_a
+        .doc_host
+        .open("remote-chat")
+        .unwrap()
+        .doc()
+        .read_entries()
+        .unwrap();
+    assert!(a_entries.iter().all(|entry| entry.id != "card-1"));
+
+    core_a.shutdown().await;
+    core_b.shutdown().await;
+}

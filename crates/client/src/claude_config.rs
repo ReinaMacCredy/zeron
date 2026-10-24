@@ -1,9 +1,10 @@
 use zeron_proto::app_commands::ClaudeCardCommand;
 use zeron_proto::claude_cards::{
-    FORKED, LOST_SESSION, NO_SESSION, headline, lost_session, model_card, model_match,
-    no_match_note, output_card, side_run, switched_note, terminal_card,
+    FORKED, LOST_SESSION, NO_SESSION, lost_session, model_card, model_headline, model_match,
+    no_match_note, output_card, pending_card, side_headline, side_run, switched_note,
+    terminal_card,
 };
-use zeron_proto::claude_config::{ClaudeConfigSnapshot, LocalCommandOutput};
+use zeron_proto::claude_config::{ClaudeConfigSnapshot, CommandCard, LocalCommandOutput};
 use zeron_proto::claude_panel::{ChipChoices, STATS_DAYS};
 use zeron_proto::usage::UsageSummary;
 use zeron_proto::{HarnessId, ReasoningLevel};
@@ -42,18 +43,43 @@ impl Client {
             .await
     }
 
-    pub async fn add_chat_note(&self, chat_id: &str, text: &str, hint: Option<&str>) -> Result<()> {
-        let (device, _) = self.claude_target(chat_id)?;
+    pub async fn write_chat_note(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        text: Option<&str>,
+        hint: Option<&str>,
+    ) -> Result<()> {
+        let (device, mut params) = self.claude_target(chat_id)?;
+        params["messageId"] = message_id.into();
+        if let Some(text) = text {
+            params["text"] = text.into();
+        }
+        if let Some(hint) = hint {
+            params["hint"] = hint.into();
+        }
         self.inner
-            .host_rpc(
-                &device,
-                methods::MUTATE,
-                serde_json::json!({
-                    "op": "addChatNote", "chatId": chat_id, "text": text, "hint": hint,
-                }),
-            )
+            .host_rpc(&device, methods::WRITE_CHAT_NOTE, params)
             .await
             .map(drop)
+    }
+
+    pub async fn add_chat_note(&self, chat_id: &str, text: &str) -> Result<()> {
+        self.write_chat_note(chat_id, &crate::new_id(), Some(text), None)
+            .await
+    }
+
+    async fn write_card(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        headline: Option<&str>,
+        card: CommandCard,
+    ) -> Result<()> {
+        let hint = serde_json::to_string(&card.capped())
+            .map_err(|e| ClientError::Internal(e.to_string()))?;
+        self.write_chat_note(chat_id, message_id, headline, Some(&hint))
+            .await
     }
 
     pub async fn claude_stats_summary(&self, chat_id: &str) -> Result<UsageSummary> {
@@ -122,9 +148,10 @@ impl Client {
         chat_id: &str,
         command: ClaudeCardCommand,
     ) -> Result<Option<(String, String)>> {
-        let mut switch = None;
-        let (headline, card) = match side_run(&command) {
-            None => match command {
+        let message_id = crate::new_id();
+        let Some(run) = side_run(&command) else {
+            let mut switch = None;
+            let (headline, card) = match command {
                 ClaudeCardCommand::Model(arg) => {
                     let chips = self.chip_choices(chat_id).await;
                     let mut model = chips.model.clone();
@@ -137,40 +164,51 @@ impl Client {
                         None => no_match_note(&arg),
                     });
                     let card = model_card(chips.models, model, note);
-                    (headline(&card), card)
+                    (model_headline(&card), card)
                 }
                 ClaudeCardCommand::TerminalOnly(name) => terminal_card(&name),
                 _ => return Ok(None),
-            },
-            Some(run) => {
-                let has_session = self
-                    .chat(chat_id)
-                    .and_then(|chat| chat.harness_session_id)
-                    .is_some_and(|id| !id.is_empty());
-                let live = run.live && has_session;
-                let command = format!("/{}", run.name);
-                let mut note = (run.live && !has_session).then_some(NO_SESSION);
-                let mut reply = self
-                    .run_claude_local_command(chat_id, &command, run.connect_mcp, live)
+            };
+            self.write_card(chat_id, &message_id, Some(&headline), card)
+                .await?;
+            return Ok(switch);
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        self.write_card(
+            chat_id,
+            &message_id,
+            Some(&side_headline(run.name)),
+            pending_card(run.name, now),
+        )
+        .await?;
+        let has_session = self
+            .chat(chat_id)
+            .and_then(|chat| chat.harness_session_id)
+            .is_some_and(|id| !id.is_empty());
+        let live = run.live && has_session;
+        let command = format!("/{}", run.name);
+        let mut note = (run.live && !has_session).then_some(NO_SESSION);
+        let mut reply = self
+            .run_claude_local_command(chat_id, &command, run.connect_mcp, live)
+            .await
+            .map_err(|e| e.to_string());
+        if live {
+            note = Some(FORKED);
+            if lost_session(&reply) {
+                reply = self
+                    .run_claude_local_command(chat_id, &command, run.connect_mcp, false)
                     .await
                     .map_err(|e| e.to_string());
-                if live {
-                    note = Some(FORKED);
-                    if lost_session(&reply) {
-                        reply = self
-                            .run_claude_local_command(chat_id, &command, run.connect_mcp, false)
-                            .await
-                            .map_err(|e| e.to_string());
-                        note = Some(LOST_SESSION);
-                    }
-                }
-                let card = output_card(run.name, reply, note);
-                (headline(&card), card)
+                note = Some(LOST_SESSION);
             }
-        };
-        let hint = serde_json::to_string(&card.capped())
-            .map_err(|e| ClientError::Internal(e.to_string()))?;
-        self.add_chat_note(chat_id, &headline, Some(&hint)).await?;
-        Ok(switch)
+        }
+        self.write_card(
+            chat_id,
+            &message_id,
+            None,
+            output_card(run.name, reply, note),
+        )
+        .await?;
+        Ok(None)
     }
 }

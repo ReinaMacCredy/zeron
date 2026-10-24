@@ -1031,13 +1031,6 @@ enum MutateParams {
         #[serde(default)]
         note: Option<crate::provider_switch::SystemNote>,
     },
-    #[serde(rename_all = "camelCase")]
-    AddChatNote {
-        chat_id: String,
-        text: String,
-        #[serde(default)]
-        hint: Option<String>,
-    },
     /// Tombstone: removes the chats-map row; the session doc remains.
     #[serde(rename_all = "camelCase")]
     DeleteChat { chat_id: String },
@@ -2919,22 +2912,6 @@ impl EngineRpc {
                 .await
                 .map_err(failed)
             }
-            MutateParams::AddChatNote {
-                chat_id,
-                text,
-                hint,
-            } => self
-                .doc_host
-                .open(&chat_id)
-                .and_then(|handle| {
-                    Ok(handle.write_system_note(
-                        &crate::new_id(),
-                        &text,
-                        hint.as_deref(),
-                        crate::now_ms(),
-                    )?)
-                })
-                .map_err(failed),
             MutateParams::DeleteChat { chat_id } => self.delete_chat(&chat_id),
             MutateParams::RenameDevice { device_id, name } => self
                 .workspace
@@ -3467,6 +3444,7 @@ fn forwardable(method: &str) -> bool {
             // Claude Code's settings live on the device that runs the chat.
             | methods::READ_CLAUDE_CONFIG
             | methods::RUN_CLAUDE_LOCAL_COMMAND
+            | methods::WRITE_CHAT_NOTE
             // Uploads/attachments target the chat's host device (the agent reads
             // the committed file from that device's disk).
             | methods::UPLOAD_CHUNK
@@ -4140,6 +4118,42 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&output)
+            }
+            methods::WRITE_CHAT_NOTE => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    chat_id: String,
+                    message_id: String,
+                    #[serde(default)]
+                    text: Option<String>,
+                    #[serde(default)]
+                    hint: Option<String>,
+                }
+                let p: Params = parse_params(params)?;
+                let handle = self
+                    .doc_host
+                    .open(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                match p.text {
+                    Some(text) => handle
+                        .write_system_note(&p.message_id, &text, p.hint.as_deref(), crate::now_ms())
+                        .map_err(|e| RpcError::Failed(e.to_string()))?,
+                    None => {
+                        let part = MessagePart::Text {
+                            id: crate::new_id(),
+                            text: p.hint.unwrap_or_default(),
+                        };
+                        let found = handle
+                            .doc()
+                            .append_part(&p.message_id, &part)
+                            .map_err(|e| RpcError::Failed(e.to_string()))?;
+                        if !found {
+                            return Err(RpcError::BadParams("note not found".into()));
+                        }
+                    }
+                }
+                RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::LIST_HARNESS_TOOLS => {
                 #[derive(Deserialize)]

@@ -671,6 +671,8 @@ pub struct ClaudeConfigSnapshot {
     pub values: BTreeMap<String, String>,
     #[serde(default)]
     pub files: Vec<String>,
+    #[serde(default)]
+    pub user_settings: String,
 }
 
 pub const COMMAND_NOTE_PREFIX: &str = "Claude Code /";
@@ -692,6 +694,10 @@ pub struct CommandCard {
     pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
 }
 
 impl CommandCard {

@@ -1826,18 +1826,21 @@ pub fn rows_for_entry(
         let hint = texts
             .next()
             .map(|hint| SharedString::from(hint.to_string()));
-        let hint_text = entry
+        let payloads: Vec<&str> = entry
             .parts
             .iter()
             .filter_map(|p| match p {
                 MessagePart::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
-            .nth(1);
-        if let Some(card) = zeron_proto::claude_config::CommandCard::from_note(&text, hint_text) {
+            .skip(1)
+            .collect();
+        if let Some(card) =
+            zeron_proto::claude_config::CommandCard::from_note(&text, payloads.last().copied())
+        {
             return vec![Row {
                 id: entry.id.clone().into(),
-                version: fnv1a(text.as_bytes()),
+                version: fnv1a(payloads.concat().as_bytes()),
                 turn_start: true,
                 kind: RowKind::ClaudeCommand {
                     card: Arc::new(card),
@@ -4141,6 +4144,9 @@ pub struct Transcript {
     /// Cleared as soon as the exit is invisible; never used for another chat.
     retain_on_deselect: bool,
     claude_cards: HashMap<SharedString, claude_cards::CardUi>,
+    card_copied: Option<SharedString>,
+    card_copied_clear: Option<Task<()>>,
+    card_tick: Option<Task<()>>,
     /// `Some(doc_id)` pins this instance to a SUBAGENT doc: rows come from
     /// `AppState::sub_transcript(doc_id)` instead of the selected chat, and
     /// the instance is READ-ONLY — no echoes, no own-turn hold, and no global
@@ -5211,6 +5217,9 @@ impl Transcript {
             chat_id: doc_override.clone(),
             retain_on_deselect: false,
             claude_cards: HashMap::new(),
+            card_copied: None,
+            card_copied_clear: None,
+            card_tick: None,
             land_end_pending: doc_override.is_some() && !follow,
             doc_live: doc_override.is_some() && follow,
             computer_preview,

@@ -577,7 +577,7 @@ impl ClaudeConfigPanel {
         let client = self.client.clone();
         let chat = self.chat_id.clone();
         let text = summary.clone();
-        on_runtime(async move { client.add_chat_note(&chat, &text, None).await }).await?;
+        on_runtime(async move { client.add_chat_note(&chat, &text).await }).await?;
         Ok(Some(summary))
     }
 }

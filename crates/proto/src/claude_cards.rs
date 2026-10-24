@@ -21,18 +21,40 @@ pub struct SideRun {
     pub live: bool,
 }
 
-pub fn side_run(command: &ClaudeCardCommand) -> Option<SideRun> {
-    let (name, connect_mcp, live) = match command {
-        ClaudeCardCommand::Context => ("context", true, true),
-        ClaudeCardCommand::Usage => ("usage", false, false),
-        ClaudeCardCommand::Mcp => ("mcp", true, false),
-        ClaudeCardCommand::Model(_) | ClaudeCardCommand::TerminalOnly(_) => return None,
+pub fn side_command(name: &str) -> Option<SideRun> {
+    let (name, connect_mcp, live) = match name.trim_start_matches('/') {
+        "context" => ("context", true, true),
+        "usage" | "cost" => ("usage", false, false),
+        "mcp" => ("mcp", true, false),
+        _ => return None,
     };
     Some(SideRun {
         name,
         connect_mcp,
         live,
     })
+}
+
+pub fn side_run(command: &ClaudeCardCommand) -> Option<SideRun> {
+    match command {
+        ClaudeCardCommand::Context => side_command("context"),
+        ClaudeCardCommand::Usage => side_command("usage"),
+        ClaudeCardCommand::Mcp => side_command("mcp"),
+        ClaudeCardCommand::Model(_) | ClaudeCardCommand::TerminalOnly(_) => None,
+    }
+}
+
+pub fn pending_card(name: &str, now_ms: i64) -> CommandCard {
+    CommandCard {
+        command: format!("/{name}"),
+        pending: true,
+        started_at: Some(now_ms),
+        ..Default::default()
+    }
+}
+
+pub fn side_headline(name: &str) -> String {
+    format!("{COMMAND_NOTE_PREFIX}{name}")
 }
 
 pub fn lost_session(reply: &Result<LocalCommandOutput, String>) -> bool {
@@ -108,27 +130,14 @@ pub fn no_match_note(arg: &str) -> String {
     format!("No model matches \u{201c}{arg}\u{201d}.")
 }
 
-pub fn headline(card: &CommandCard) -> String {
-    let detail = match card.command.as_str() {
-        _ if card.error.is_some() => Some("failed".to_string()),
-        "/context" => card
-            .text
-            .lines()
-            .find_map(|l| l.trim().strip_prefix("**Tokens:**"))
-            .map(|t| t.trim().to_string()),
-        "/usage" => card
-            .text
-            .lines()
-            .find(|l| l.contains("% used"))
-            .map(|l| l.trim().to_string()),
-        "/model" => card.model.clone(),
-        _ => None,
-    };
-    let name = card.command.trim_start_matches('/');
-    match detail {
-        Some(detail) => format!("{COMMAND_NOTE_PREFIX}{name} · {detail}"),
-        None => format!("{COMMAND_NOTE_PREFIX}{name}"),
-    }
+pub fn model_headline(card: &CommandCard) -> String {
+    format!(
+        "{COMMAND_NOTE_PREFIX}model{}",
+        card.model
+            .as_deref()
+            .map(|m| format!(" · {m}"))
+            .unwrap_or_default()
+    )
 }
 
 pub fn terminal_only(card: &CommandCard) -> Option<&str> {
@@ -143,6 +152,8 @@ pub enum TerminalAction {
     Status,
     Permissions,
     Help,
+    Hooks,
+    Export,
 }
 
 pub fn terminal_action(name: &str) -> Option<(&'static str, TerminalAction)> {
@@ -150,6 +161,8 @@ pub fn terminal_action(name: &str) -> Option<(&'static str, TerminalAction)> {
         "status" => Some(("Open Status", TerminalAction::Status)),
         "permissions" => Some(("Open permission mode", TerminalAction::Permissions)),
         "help" => Some(("Open Docs", TerminalAction::Help)),
+        "hooks" => Some(("Open settings.json", TerminalAction::Hooks)),
+        "export" => Some(("Export chat…", TerminalAction::Export)),
         _ => None,
     }
 }

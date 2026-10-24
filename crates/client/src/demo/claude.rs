@@ -108,6 +108,7 @@ pub(super) fn snapshot(settings: &Map<String, Value>) -> ClaudeConfigSnapshot {
     ClaudeConfigSnapshot {
         values: sources.values(),
         files: vec![SETTINGS_FILE.into()],
+        user_settings: SETTINGS_FILE.into(),
     }
 }
 

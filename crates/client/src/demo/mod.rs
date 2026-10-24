@@ -1175,18 +1175,23 @@ impl DemoHost {
                 serde_json::to_value(claude::run(&mut lock(&self.claude_settings), command))
                     .unwrap_or_default()
             }
-            m::MUTATE if params["op"] == "addChatNote" => {
-                let host = self.host_of(&client, &chat_id);
-                let mut parts = vec![transcripts::text("t0", params["text"].as_str().unwrap_or_default())];
-                parts.extend(params["hint"].as_str().map(|hint| transcripts::text("t1", hint)));
-                let entry = transcripts::entry(
-                    &crate::new_id(),
-                    zeron_doc::MessageRole::System,
-                    &host,
-                    now,
-                    parts,
-                );
-                core.write(|doc| doc.push_message(&entry))?;
+            m::WRITE_CHAT_NOTE => {
+                let message_id = params["messageId"].as_str().unwrap_or_default();
+                let hint = params["hint"].as_str().map(|hint| transcripts::text(&crate::new_id(), hint));
+                match params["text"].as_str() {
+                    Some(text) => {
+                        let mut parts = vec![transcripts::text("t0", text)];
+                        parts.extend(hint);
+                        let host = self.host_of(&client, &chat_id);
+                        let entry = transcripts::entry(message_id, zeron_doc::MessageRole::System, &host, now, parts);
+                        core.write(|doc| doc.push_message(&entry))?;
+                    }
+                    None => {
+                        for part in hint {
+                            core.write(|doc| doc.append_part(message_id, &part))?;
+                        }
+                    }
+                }
                 serde_json::json!({ "ok": true })
             }
             m::MUTATE if params["op"] == "setChatConfig" => {

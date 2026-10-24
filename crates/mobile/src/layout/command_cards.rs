@@ -344,13 +344,14 @@ fn mcp(b: &mut Builder<'_, '_>, card: &CommandCard) -> Option<Spec> {
 
 fn notice(b: &mut Builder<'_, '_>, name: &str) -> Spec {
     let buttons = cards::terminal_action(name)
-        .map(|(label, action)| {
+        .and_then(|(label, action)| {
             let action = match action {
                 TerminalAction::Status => CardAction::OpenClaudeStatus,
                 TerminalAction::Permissions => CardAction::OpenClaudePermissions,
                 TerminalAction::Help => CardAction::OpenDocs,
+                TerminalAction::Hooks | TerminalAction::Export => return None,
             };
-            b.button(label, action, false)
+            Some(b.button(label, action, false))
         })
         .into_iter()
         .collect();
@@ -402,7 +403,17 @@ pub(crate) fn command_card(
         ctx,
         copy: Vec::new(),
     };
-    let spec = if let Some(name) = cards::terminal_only(card) {
+    let spec = if card.pending {
+        Spec {
+            icon: "apple.terminal",
+            title: card.command.clone(),
+            subtitle: Some("Asking Claude Code…".into()),
+            pill: None,
+            items: Vec::new(),
+            buttons: Vec::new(),
+            notice: false,
+        }
+    } else if let Some(name) = cards::terminal_only(card) {
         notice(&mut b, name)
     } else {
         let spec = match (card.error.as_deref(), card.command.as_str()) {

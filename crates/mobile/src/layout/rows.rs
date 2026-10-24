@@ -537,7 +537,11 @@ impl RowBuilder {
                 }
                 return rows;
             }
-            if let Some(card) = zeron_proto::claude_config::CommandCard::from_note(text, hint) {
+            let payload = entry.parts.iter().filter_map(|p| match p {
+                MessagePart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            }).skip(1).last();
+            if let Some(card) = zeron_proto::claude_config::CommandCard::from_note(text, payload) {
                 let live = own.and_then(|id| chats.get(id)).and_then(|c| c.model.as_deref());
                 let core = super::command_cards::command_card(ctx, &format!("{}#command", entry.id), &entry.id, &card, live);
                 rows.push(Placed { core: Arc::new(core), gap });
