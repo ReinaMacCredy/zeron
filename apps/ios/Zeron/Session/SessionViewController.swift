@@ -167,6 +167,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             // An immediate send (new turn, steer, stop-and-send) gets the
             // desktop runway; a message queued behind a live turn keeps the
             // live turn's runway and just follows.
+            if self.source.runsClaudeCode, opensConfigPanel(text: text) {
+                DispatchQueue.main.async { self.composer.resignFirstResponder() }
+                self.openClaudeConfig()
+                return .sent
+            }
             if let command = compactCommand(text: text) {
                 self.source.compact(focus: command.focus)
                 DispatchQueue.main.async { self.composer.resignFirstResponder() }
@@ -198,6 +203,12 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         composer.threadSearch = { [weak self] q in self?.source.threadMentions(q) ?? [] }
         composer.invocationCatalog = { [weak self] skill in await self?.source.invocationCatalog(skill: skill) }
         composer.onWorkspaceCommand = { [weak self] command in self?.run(command) }
+        composer.onWholeDraftPick = { [weak self] entry in
+            guard let self, self.source.runsClaudeCode, opensConfigPanel(text: entry.insert) else { return false }
+            DispatchQueue.main.async { self.composer.resignFirstResponder() }
+            self.openClaudeConfig()
+            return true
+        }
         composer.onHeightChange = { [weak self] in self?.view.setNeedsLayout() }
         composer.onActionChange = { [weak self] in self?.render(animated: true) }
         composer.onChipTap = { [weak self] id, _ in
@@ -481,7 +492,41 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         case .enableComputer:
             composer.text = computerUseEnablingDraft(draft: composer.text)
             composer.becomeFirstResponder()
+        case .openClaudeConfig:
+            openClaudeConfig()
+        case .openUsage:
+            openUsage()
+        case .openSessionInfo:
+            openInfo()
+        case .copyTranscript:
+            UIPasteboard.general.string = engine.frame().plainText()
+            Toast.show("Transcript copied", in: view.window, above: bottom)
+        case let .openChip(id):
+            composer.becomeFirstResponder()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in self?.composer.openChip(id) }
         }
+    }
+
+    private func openClaudeConfig() {
+        guard let panel = source.claudeConfigPanel() else { return }
+        let sheet = ClaudeConfigSheet(panel: panel)
+        sheet.applyChip = { [weak self] write in self?.source.applyChip(write) }
+        sheet.openUsage = { [weak self] in self?.openUsage() }
+        sheet.onCloseFailed = { [weak self] error in
+            Toast.show("Couldn't add the settings summary: \(error)", in: self?.view.window, above: self?.bottom)
+        }
+        let nav = UINavigationController(rootViewController: sheet)
+        nav.presentationController?.delegate = sheet
+        if let s = nav.sheetPresentationController { s.detents = [.medium(), .large()]; s.prefersGrabberVisible = true }
+        present(nav, animated: true)
+    }
+
+    private func openUsage() {
+        guard let page = source.usagePage() else { return }
+        let nav = UINavigationController(rootViewController: page)
+        page.navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak nav] _ in nav?.dismiss(animated: true) })
+        if let s = nav.sheetPresentationController { s.detents = [.large()]; s.prefersGrabberVisible = true }
+        present(nav, animated: true)
     }
 
     private func confirmBranch(_ offer: BranchOffer) {

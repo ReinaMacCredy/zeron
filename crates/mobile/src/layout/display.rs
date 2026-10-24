@@ -88,6 +88,11 @@ pub enum CardAction {
         identifier: String,
     },
     EnableComputer,
+    OpenClaudeConfig,
+    OpenUsage,
+    OpenSessionInfo,
+    CopyTranscript,
+    OpenChip { id: String },
 }
 
 /// Text decorations, painted relative to the run's baseline.

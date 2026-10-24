@@ -134,6 +134,7 @@ pub(crate) enum Content {
         divider: bool,
     },
     Card(Card),
+    Command(super::command_cards::CommandCard),
     /// An agent visual: its height comes from its worker.
     Visual(Arc<crate::visual::VisualSlot>),
     Strip(Strip),
@@ -241,6 +242,7 @@ pub(crate) struct RowBuilder {
     pub visual_slots: HashMap<String, Arc<crate::visual::VisualSlot>>,
     pub(crate) harness: Option<HarnessId>,
     in_fold: bool,
+    reply_to: Option<String>,
     pub html_slots: HashMap<String, Arc<super::html::HtmlSlot>>,
     pub(crate) blobs: HashMap<String, (Blob, u64)>,
     pub(crate) blob_clock: u64,
@@ -288,10 +290,19 @@ impl RowBuilder {
         let mut live_entries: HashSet<&str> = HashSet::with_capacity(input.entries.len());
         let mut live_parts: HashSet<String> = HashSet::new();
         let mut prev_role: Option<MessageRole> = None;
+        let mut command: Option<String> = None;
         for entry in &input.entries {
             live_entries.insert(entry.id.as_str());
             let first = out.is_empty();
-            let sig = self.entry_sig(entry, first, prev_role, input);
+            self.reply_to = command.take().filter(|_| entry.role == MessageRole::Assistant);
+            if entry.role == MessageRole::User && input.harness == Some(HarnessId::ClaudeCode) {
+                let text = seams::user_text(entry);
+                command = zeron_proto::invocation::leading_command(&text)
+                    .is_some_and(|(_, rest)| rest.is_empty())
+                    .then_some(text);
+            }
+            let sig = self.entry_sig(entry, first, prev_role, input)
+                ^ self.reply_to.as_deref().map_or(0, quick_hash);
             let reuse = self
                 .entries
                 .get(&entry.id)
@@ -530,12 +541,30 @@ impl RowBuilder {
                 }
                 return rows;
             }
+            if let Some(core) = super::command_cards::summary_card(ctx, &format!("{}#config", entry.id), &entry.id, text.trim()) {
+                rows.push(Placed { core: Arc::new(core), gap });
+                return rows;
+            }
             if !text.trim().is_empty() {
                 rows.push(Placed { core: Arc::new(seams::divider(ctx, format!("{}#divider", entry.id), &entry.id, text.trim(), hint)), gap });
             }
             return rows;
         }
         let streaming = entry.status == Some(MessageStatus::Streaming);
+        if let Some(command) = self.reply_to.as_deref().filter(|_| !streaming) {
+            let reply = entry
+                .parts
+                .iter()
+                .filter_map(|p| match p {
+                    MessagePart::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(core) = super::command_cards::command_card(ctx, &format!("{}#command", entry.id), &entry.id, command, &reply) {
+                return vec![Placed { core: Arc::new(core), gap: if first { Gap::First } else { Gap::Reply } }];
+            }
+        }
         if !streaming && !self.in_fold {
             self.in_fold = true;
             let folded = self.work_fold(ctx, entry, first, prev, input, live_parts);
@@ -1299,6 +1328,7 @@ pub(crate) fn place_row(
             side
         }
         Content::Card(card) => place_card(card, px, x, top, cw, out),
+        Content::Command(card) => super::command_cards::place_command_card(card, px, x, top, cw, out),
         Content::Strip(strip) => place_strip(strip, px, x, top, cw, out),
         Content::Html(row) => super::html::place_html(row, visual.unwrap_or_else(|| row.slot.snapshot().1), px, x, top, cw, out),
         Content::Visual(slot) => {
@@ -1522,6 +1552,7 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
         Content::Image { reference } => reference.len(),
         Content::Working { .. } | Content::Visual(_) => 0,
         Content::Card(card) => super::cards::heap_bytes(card),
+        Content::Command(card) => super::command_cards::heap_bytes(card),
         Content::Strip(strip) => super::strip::heap_bytes(strip),
         Content::Html(row) => row.title.p.heap_bytes(),
     }

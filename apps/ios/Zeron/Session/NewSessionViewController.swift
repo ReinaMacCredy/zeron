@@ -189,7 +189,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         }
         composer.onSend = { [weak self] text, images, _ in
             guard let self else { return .kept }
-            if let refusal = draftCommandRefusal(text: text) {
+            if let refusal = draftCommandRefusal(text: text, claudeCode: self.draft.harness == "claude-code") {
                 Toast.show(refusal, in: self.view.window, above: self.composer)
                 return .kept
             }

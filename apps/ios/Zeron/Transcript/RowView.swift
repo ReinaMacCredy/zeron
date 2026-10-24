@@ -468,6 +468,11 @@ final class CardButtonControl: UIControl {
         switch action {
         case let .consent(_, _, _, identifier): identifier
         case .enableComputer: "computer-denied-enable"
+        case .openClaudeConfig: "card-open-claude-config"
+        case .openUsage: "card-open-usage"
+        case .openSessionInfo: "card-open-session-info"
+        case .copyTranscript: "card-copy-transcript"
+        case let .openChip(id): "card-open-chip-\(id)"
         }
     }
 

@@ -42,8 +42,12 @@ pub fn sidechat_prompt(text: &str) -> Option<Option<String>> {
 pub const COMPACT_NEEDS_CHAT: &str = "Start a chat before compacting its context.";
 pub const SIDECHAT_NEEDS_CHAT: &str = "Start a chat before opening a sidechat.";
 
-pub fn draft_command_refusal(text: &str) -> Option<&'static str> {
-    if compact_focus(text).is_some() {
+pub const CONFIG_NEEDS_CHAT: &str = "Start a chat before opening Claude Code settings.";
+
+pub fn draft_command_refusal(text: &str, claude_code: bool) -> Option<&'static str> {
+    if claude_code && opens_config_panel(text) {
+        Some(CONFIG_NEEDS_CHAT)
+    } else if compact_focus(text).is_some() {
         Some(COMPACT_NEEDS_CHAT)
     } else if sidechat_prompt(text).is_some() {
         Some(SIDECHAT_NEEDS_CHAT)

@@ -11,6 +11,7 @@
 //! through [`CoreClient::session_handle`] → [`zeron_client::SessionHandle`]
 //! (`snapshot()` / `subscribe()`), never over FFI.
 
+mod claude_config;
 mod cloud;
 mod providers;
 pub use providers::UsageWindowInfo;

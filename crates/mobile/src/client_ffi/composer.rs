@@ -656,8 +656,8 @@ pub struct SidechatCommand {
 }
 
 #[uniffi::export]
-pub fn draft_command_refusal(text: String) -> Option<String> {
-    zeron_proto::app_commands::draft_command_refusal(text.trim()).map(Into::into)
+pub fn draft_command_refusal(text: String, claude_code: bool) -> Option<String> {
+    zeron_proto::app_commands::draft_command_refusal(text.trim(), claude_code).map(Into::into)
 }
 
 #[uniffi::export]

@@ -9,6 +9,7 @@
 //! frame's prepared rows (pure arithmetic, no measurement).
 
 mod cards;
+mod command_cards;
 pub mod display;
 mod markdown;
 mod file_icons;

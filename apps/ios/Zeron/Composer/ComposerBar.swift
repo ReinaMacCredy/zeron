@@ -79,6 +79,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     var threadSearch: ((String) -> [ThreadMention])?
     var invocationCatalog: ((Bool) async -> InvocationCatalog?)?
     var onWorkspaceCommand: ((WorkspaceCommand) -> Void)?
+    var onWholeDraftPick: ((InvocationEntry) -> Bool)?
     private var slashCatalog: InvocationCatalog?
 
     // State
@@ -460,6 +461,14 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         guard let q = mentionQuery else { return }
         if case .invocation(let entry) = pick {
             if entry.blocked { return }
+            let rest = (textView.text as NSString).replacingCharacters(in: q.range, with: "")
+            if rest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, onWholeDraftPick?(entry) == true {
+                textView.text = ""
+                mentionQuery = nil
+                setSuggestionsVisible(false)
+                textChanged()
+                return
+            }
             if let command = entry.workspaceCommand {
                 UISelectionFeedbackGenerator().selectionChanged()
                 textView.text = (textView.text as NSString).replacingCharacters(in: q.range, with: "")

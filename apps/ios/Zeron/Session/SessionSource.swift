@@ -146,9 +146,17 @@ protocol SessionSource: AnyObject {
     func openChanges(from host: UIViewController, title: String)
     func removeStagedComment(_ id: String)
     func clearStagedComments()
+    var runsClaudeCode: Bool { get }
+    func claudeConfigPanel() -> ClaudeConfigPanel?
+    func applyChip(_ write: ChipWrite)
+    func usagePage() -> UIViewController?
 }
 
 extension SessionSource {
+    var runsClaudeCode: Bool { false }
+    func claudeConfigPanel() -> ClaudeConfigPanel? { nil }
+    func applyChip(_ write: ChipWrite) {}
+    func usagePage() -> UIViewController? { nil }
     func clearQueueError() {}
     func chipSheet(_ id: String) -> UIViewController? { nil }
     @MainActor

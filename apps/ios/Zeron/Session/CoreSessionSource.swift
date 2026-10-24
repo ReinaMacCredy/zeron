@@ -716,6 +716,27 @@ final class CoreSessionSource: SessionSource {
         return try? await handle.chatChanges()
     }
 
+    var runsClaudeCode: Bool { (app?.row(chatId)?.harness ?? "claude-code") == "claude-code" }
+
+    func claudeConfigPanel() -> ClaudeConfigPanel? {
+        runsClaudeCode ? client.claudeConfigPanel(chatId: chatId) : nil
+    }
+
+    func applyChip(_ write: ChipWrite) {
+        if let model = write.model {
+            let current = client.sessionConfig(chatId: chatId)?.model
+            let from = app?.row(chatId)?.modelLabel ?? current ?? ""
+            confirmSwitch(client.modelSwitchPrompt(chatId: chatId, toModel: model, fromLabel: from, toLabel: write.modelLabel ?? model)) { $0.model = model }
+        }
+        if let reasoning = write.reasoning { setConfig { $0.reasoning = reasoning } }
+        if let permission = write.permission { setConfig { $0.permissionMode = permission } }
+    }
+
+    func usagePage() -> UIViewController? {
+        guard let app, !hostDevice.isEmpty else { return nil }
+        return HostPageViewController(app: app, deviceId: hostDevice, page: "usage", title: "Usage")
+    }
+
     func openChanges(from host: UIViewController, title: String) {
         DiffSheetViewController.presentFindings(handle, from: host, title: title, focus: nil)
     }

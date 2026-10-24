@@ -9,6 +9,7 @@
 //! id), streaming replies through `SegmentWriter`, flipping session status
 //! rows, draining the queue, and answering relay RPCs.
 
+mod claude;
 mod composer;
 mod fixtures;
 mod git;
@@ -100,6 +101,7 @@ pub(crate) struct DemoHost {
     terminals: Mutex<terminals::HostTerminals>,
     computer_stopped: Mutex<HashSet<String>>,
     page_reads: Mutex<HashMap<String, u32>>,
+    claude_settings: Mutex<serde_json::Map<String, serde_json::Value>>,
 }
 
 fn doc_err(err: zeron_doc::DocError) -> ClientError {
@@ -128,6 +130,7 @@ impl DemoHost {
             terminals: Mutex::new(terminals::HostTerminals::new(now_ms())),
             computer_stopped: Mutex::new(HashSet::new()),
             page_reads: Mutex::new(HashMap::new()),
+            claude_settings: Mutex::new(claude::default_settings()),
         })
     }
 
@@ -460,6 +463,8 @@ impl DemoHost {
     fn reply_for(&self, prompt: &str) -> Vec<Step> {
         if prompt.contains("?ask") {
             transcripts::asking()
+        } else if let Some(text) = claude::command_reply(prompt) {
+            vec![transcripts::Step::Text(text)]
         } else {
             transcripts::reply(prompt, self.options.long_reply)
         }
@@ -1162,6 +1167,28 @@ impl DemoHost {
                     .unwrap_or_default();
                 let removed = core.write(|doc| doc.truncate_from(entry_id))?;
                 serde_json::json!({ "prompt": prompt, "removed": removed })
+            }
+            m::READ_CLAUDE_CONFIG => {
+                serde_json::to_value(claude::snapshot(&lock(&self.claude_settings)))
+                    .unwrap_or_default()
+            }
+            m::RUN_CLAUDE_LOCAL_COMMAND => {
+                let command = params["command"].as_str().unwrap_or_default();
+                serde_json::to_value(claude::run(&mut lock(&self.claude_settings), command))
+                    .unwrap_or_default()
+            }
+            m::MUTATE if params["op"] == "addChatNote" => {
+                let host = self.host_of(&client, &chat_id);
+                let text = params["text"].as_str().unwrap_or_default();
+                let entry = transcripts::entry(
+                    &crate::new_id(),
+                    zeron_doc::MessageRole::System,
+                    &host,
+                    now,
+                    vec![transcripts::text("t0", text)],
+                );
+                core.write(|doc| doc.push_message(&entry))?;
+                serde_json::json!({ "ok": true })
             }
             m::MUTATE if params["op"] == "setChatConfig" => {
                 let config: zeron_proto::ChatConfig =

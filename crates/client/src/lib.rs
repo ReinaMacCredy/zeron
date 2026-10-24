@@ -27,6 +27,7 @@
 pub mod attachments;
 pub mod auth;
 pub mod catalog;
+pub mod claude_config;
 mod client;
 pub mod computer;
 pub mod cloud;
