@@ -129,5 +129,9 @@ final class SlashCommandFlowTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Start a chat before compacting its context."].waitForExistence(timeout: 3))
         XCTAssertEqual(input.value as? String, "/compact", "kept, not sent")
         snapshot(app, "new-session-compact-refused")
+        input.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 8) + "/context")
+        app.buttons["composer-send"].tap()
+        XCTAssertTrue(app.staticTexts["Send a first message, then run Claude Code commands."].waitForExistence(timeout: 3))
+        XCTAssertEqual(input.value as? String, "/context", "kept, not sent")
     }
 }

@@ -544,10 +544,11 @@ impl CoreClient {
 #[uniffi::export]
 pub fn filter_invocations(catalog: InvocationCatalog, query: String) -> InvocationMatches {
     let names: Vec<&str> = catalog.entries.iter().map(|e| e.name.as_str()).collect();
-    let entries: Vec<InvocationEntry> = zeron_proto::view::filter_indices(&query, &names)
+    let mut entries: Vec<InvocationEntry> = zeron_proto::view::filter_indices(&query, &names)
         .into_iter()
         .map(|ix| catalog.entries[ix].clone())
         .collect();
+    entries.sort_by_key(|e| e.terminal);
     let empty = (entries.is_empty() && catalog.warning.is_none()).then(|| {
         zeron_proto::command_catalog::catalog_empty_message(
             catalog.skill,
