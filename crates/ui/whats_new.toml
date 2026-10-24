@@ -2,6 +2,21 @@
 # must be listed in crates/docs/src/images.rs IMAGES. Order does not matter.
 
 [[entry]]
+version = "0.2.120"
+date = "Oct 24"
+
+[[entry.features]]
+id = "no-send-cap"
+title = "No cap on an agent's messages to other chats"
+description = "An agent can message chats, start new ones, stop them and answer their questions as often as the work needs. Before, a long-running agent went quiet toward other chats after 16 of these."
+
+[[entry.features]]
+id = "upstream-0-2-120"
+title = "From upstream Zeron"
+description = "Muse Code joins the agents in Settings > Providers. Claude logins stay signed in, a crash or stalled run on any agent is caught and recovered, and an agent CLI release known not to work with Zeron is held back, with the reason on its version line."
+details = "A failed agent update offers Retry update. Settings > General has a Git section with Credit Zeron in commits, which adds zeronsh[bot] as a co-author to agents' commits on that device; it is off by default. In Zeron Cloud, agents' commits are authored by you with zeronsh[bot] as a co-author. On iPhone, folding and unfolding a foldable iPhone keeps the open session, and Providers no longer crashes with no device to pick. Upstream's iPhone bottom bar is not taken: the iPhone keeps its tab bar."
+
+[[entry]]
 version = "0.2.118"
 date = "Oct 23"
 hero = "tasks-card.jpg"

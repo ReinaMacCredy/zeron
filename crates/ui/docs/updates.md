@@ -24,7 +24,7 @@ From a terminal, `zeron update` checks and installs in one step, and `zeron upda
 
 ## Updating agents
 
-On the new chat canvas, a small card at the bottom lists agent CLIs (Claude, Codex, and others) with an update, across your devices. Each row shows the installed and new version and an **Update** button, or **View steps** when Zeron cannot install that agent for you. While an update runs you can **Cancel** it, and a failed check offers **Check again**. A busy agent shows "Waiting for the current run" and updates once the run ends.
+On the new chat canvas, a small card at the bottom lists agent CLIs (Claude, Codex, and others) with an update, across your devices. Each row shows the installed and new version and an **Update** button, or **View steps** when Zeron cannot install that agent for you. While an update runs you can **Cancel** it. A failed update offers **Retry update**, and a failed check offers **Check again**. A busy agent shows "Waiting for the current run" and updates once the run ends.
 
 ![Agent updates waiting on the new chat canvas](updates-agent-card.jpg)
 

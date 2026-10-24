@@ -1,10 +1,10 @@
-Providers are the agents Zeron can run: Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, OpenCode, and Antigravity, plus any agent you add from the ACP Registry. Open [Settings > Providers](zeron://settings/providers) to choose which ones the composer offers, sign in, and add extra accounts or setups.
+Providers are the agents Zeron can run: Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, OpenCode, Antigravity, and Muse Code, plus any agent you add from the ACP Registry. Open [Settings > Providers](zeron://settings/providers) to choose which ones the composer offers, sign in, and add extra accounts or setups.
 
 ## Turn agents on and off
 
 Each row shows the agent, its version, and a switch that decides whether the composer offers it. Turning an agent on needs its CLI installed; a missing CLI dims the row and its hint says what to install, for example **Install the claude CLI to enable**. **Install** sets it up when Zeron can; the row reads **Installing** and the agent's name while it runs, and **Cancel** stops it. You cannot turn off the last enabled agent while it is installed (an agent whose CLI is missing can always be turned off). Turning off the agent the [Supervisor](zeron://docs/supervisor) runs on stops its wakes until you turn it back on.
 
-**Update** appears when a new version is out, and **Check now** in the header looks right away. While an update waits for the agent to be idle, prepares, or downloads, the version line says so (**Waiting for agent to be idle**, **Preparing update…**, **Downloading…**) and **Cancel** replaces **Update**.
+**Update** appears when a new version is out, and **Check now** in the header looks right away. While an update waits for the agent to be idle, prepares, or downloads, the version line says so (**Waiting for agent to be idle**, **Preparing update…**, **Downloading…**) and **Cancel** replaces **Update**. A failed update reads **Update failed** and offers **Retry update**. A new version known not to work with Zeron is held back, and the version line says so, for example **v1.4.13 held back: not supported yet**. When the version you have is the one that does not work, the line turns red and says so, with the version to use when there is one.
 
 ### Manage another device
 

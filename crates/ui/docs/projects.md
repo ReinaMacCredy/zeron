@@ -20,9 +20,11 @@ Zeron picks the icon from a favicon or app icon in the repository, such as `publ
 
 In a git project, the checkout chip on the New chat composer offers **Current checkout** and **New worktree**. A new worktree gets its own folder and a new `zeron/` branch, so the agent's edits stay away from your checkout.
 
-Worktrees go in `~/.zeron/worktrees/<repository>/` by default. To change that, open [Settings > General](zeron://settings/general), scroll to **Worktrees**, choose a **Device**, and turn on **Custom worktree location**. Each device keeps its own location, and existing worktrees stay where they are.
+Worktrees go in `~/.zeron/worktrees/<repository>/` by default. To change that, open [Settings > General](zeron://settings/general), scroll to **Git**, choose a **Device**, and turn on **Custom worktree location**. Each device keeps its own location, and existing worktrees stay where they are.
 
 With the switch on, click **Browse** to pick the folder; on another device you pick it from a folder list of that device, then **Use this folder**. Turning the switch off keeps the folder for next time, and the reset button (tooltip **Reset to default**) forgets it. When the `ZERON_WORKTREES_DIR` environment variable is set on a device, it decides the location there: the row reads **Set by ZERON_WORKTREES_DIR** and cannot be changed.
+
+**Credit Zeron in commits**, in the same **Git** section, adds `zeronsh[bot]` as a co-author to the commits agents make on that device. It is off by default, and always on for Zeron Cloud.
 
 ## Actions
 

@@ -75,7 +75,6 @@ The [Supervisor](zeron://docs/supervisor) reaches leads and their step threads t
 ## Limits
 
 - An agent reaches only chats on the same device as its own.
-- Messages, new chats, stops and answers to other chats are capped at 16 per turn.
 - An agent can keep up to 8 chats it started open at once; archive one to start another. A Mission Control lead's step threads do not count.
 - A chat can watch up to 50 other chats.
 
