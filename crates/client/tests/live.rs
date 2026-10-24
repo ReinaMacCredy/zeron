@@ -620,6 +620,24 @@ impl zeron_rpc::RpcService for HostService {
                 json!({ "name": "host.png", "mimeType": "image/png", "data": b64(&bytes[offset..end]),
                         "nextOffset": end, "done": end == bytes.len() })
             }
+            m::GET_CHAT_WALLPAPER => {
+                let offset = params["offset"].as_u64().unwrap_or(0) as usize;
+                let bytes = host_image();
+                let known = params["hash"].as_str() == Some("art-1");
+                let end = if offset == 0 && known {
+                    bytes.len()
+                } else {
+                    (offset + 45_000).min(bytes.len())
+                };
+                let data = if offset == 0 && known {
+                    String::new()
+                } else {
+                    b64(&bytes[offset..end])
+                };
+                json!({ "chatBackground": { "enabled": true, "placement": "full", "opacity": 0.5, "blur": 8.0, "scrim": false },
+                        "effect": "ascii", "name": "art.png",
+                        "image": { "hash": "art-1", "size": bytes.len(), "data": data, "nextOffset": end, "done": end == bytes.len() } })
+            }
             m::MUTATE => {
                 self.spaces
                     .lock()
@@ -737,6 +755,21 @@ async fn host_rpcs_ride_the_device_relay() {
             .await
             .unwrap();
     assert_eq!(*image, host_image());
+
+    let c = client.clone();
+    let (wallpaper, art) =
+        zeron_client::runtime::run(async move { c.chat_wallpaper(HOST, None).await })
+            .await
+            .unwrap();
+    assert_eq!(art.as_deref(), Some(host_image().as_slice()));
+    assert_eq!(wallpaper.effect, "ascii");
+    assert!(wallpaper.chat_background.enabled && !wallpaper.chat_background.scrim);
+    let c = client.clone();
+    let (_, unchanged) =
+        zeron_client::runtime::run(async move { c.chat_wallpaper(HOST, Some("art-1")).await })
+            .await
+            .unwrap();
+    assert!(unchanged.is_none());
 
     // PR status streams in for the chat's checkout.
     let start = Instant::now();

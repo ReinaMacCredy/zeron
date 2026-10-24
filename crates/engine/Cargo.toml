@@ -45,7 +45,7 @@ ignore.workspace = true
 regex = "1"
 pulldown-cmark.workspace = true
 miniz_oxide = "0.8"
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 usvg = { version = "0.46", default-features = false }
 fff-search.workspace = true
 

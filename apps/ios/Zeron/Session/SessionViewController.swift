@@ -679,7 +679,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        wallpaper.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: min(view.bounds.height * 0.72, 760))
+        wallpaper.frame = view.bounds
         let covered = view.bounds.maxY - bottom.frame.minY + 8
         let inset = max(0, covered - view.safeAreaInsets.bottom)
         if abs(list.contentInset.bottom - inset) > 0.5 {

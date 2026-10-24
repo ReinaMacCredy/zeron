@@ -38,4 +38,71 @@ final class LiveStackTests: XCTestCase {
         add(shot)
         XCTAssertTrue(app.buttons["Send message"].waitForExistence(timeout: 60), "turn settles")
     }
+
+    func testWallpaperFollowsTheMac() throws {
+        let env = ProcessInfo.processInfo.environment
+        let edge = try XCTUnwrap(env["ZERON_LIVE_EDGE"], "set TEST_RUNNER_ZERON_LIVE_EDGE")
+        let dataDir = try XCTUnwrap(env["ZERON_LIVE_DATA_DIR"])
+        let artA = try XCTUnwrap(env["ZERON_LIVE_ART_A"]), artB = try XCTUnwrap(env["ZERON_LIVE_ART_B"])
+        let phoneArt = try XCTUnwrap(env["ZERON_LIVE_ART_PHONE"])
+        func macSettings(_ art: String, _ chat: [String: Any]) throws {
+            let settings: [String: Any] = [
+                "newThreadComposerBackground": ["path": art, "name": (art as NSString).lastPathComponent],
+                "newThreadBackgroundEffect": "none",
+                "chatBackground": chat,
+            ]
+            try JSONSerialization.data(withJSONObject: settings).write(to: URL(fileURLWithPath: dataDir).appendingPathComponent("ui-settings.json"))
+        }
+        try macSettings(artA, ["enabled": true, "placement": "full", "opacity": 0.7, "blur": 0, "scrim": true])
+
+        let app = XCUIApplication()
+        app.launchArguments = ["-signedout", "-dev", "alice", "org1", "-edge", edge, "-harness", "mock", "-wallpaper", phoneArt, "-route", "more"]
+        app.launch()
+        for _ in 0..<6 {
+            guard let step = ["Skip for now", "Continue", "Not now", "I'll do this later"].map({ app.buttons[$0] }).first(where: { $0.waitForExistence(timeout: 2) }) else { break }
+            step.tap()
+        }
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 15))
+        let sync = app.switches["toggle-wallpaper:sync"]
+        for _ in 0..<6 where !sync.isHittable { app.swipeUp() }
+        if sync.value as? String == "1" { sync.tap() }
+        XCTAssertTrue(app.staticTexts[(phoneArt as NSString).lastPathComponent].waitForExistence(timeout: 5))
+        shot(app, "sync-off")
+
+        let enabled = NSPredicate(format: "isEnabled == true")
+        expectation(for: enabled, evaluatedWith: sync)
+        waitForExpectations(timeout: 20)
+        sync.tap()
+        XCTAssertTrue(app.staticTexts[(artA as NSString).lastPathComponent].waitForExistence(timeout: 20), "the Mac's artwork arrives")
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Follows '")).firstMatch.exists)
+        shot(app, "sync-on-top")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)))
+        XCTAssertTrue(app.staticTexts["Scrim"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.sliders["slider-wallpaper:opacity"].isEnabled, "the Mac's settings are read-only here")
+        shot(app, "sync-on")
+
+        app.buttons["new-session"].tap()
+        let input = app.textViews["composer-input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        input.typeText("wallpaper check")
+        app.buttons["composer-send"].tap()
+        let notNow = XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons.matching(NSPredicate(format: "label BEGINSWITH 'Don'")).firstMatch
+        if notNow.waitForExistence(timeout: 5) { notNow.tap() }
+        XCTAssertTrue(app.staticTexts.matching(identifier: "row-markdown").firstMatch.waitForExistence(timeout: 60))
+        shot(app, "sync-chat-a")
+
+        try macSettings(artB, ["enabled": true, "placement": "hero", "opacity": 0.9, "blur": 0, "scrim": false])
+        XCUIDevice.shared.press(.home)
+        sleep(2)
+        app.activate()
+        sleep(15)
+        shot(app, "sync-chat-b-after-foreground")
+    }
+
+    private func shot(_ app: XCUIApplication, _ name: String) {
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = name
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
 }

@@ -1555,6 +1555,10 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func startVoice(hostDeviceId: String, voice: String?, media: VoiceMediaListener, listener: VoiceSessionListener)  -> VoiceCall
     
+    func chatWallpaper(deviceId: String, knownHash: String?) async throws  -> SyncedWallpaper
+    
+    func wallpaperHosts()  -> [DeviceView]
+    
 }
 /**
  * One signed-in account (or Demo mode). Create one per sign-in; call
@@ -4019,6 +4023,31 @@ open func startVoice(hostDeviceId: String, voice: String?, media: VoiceMediaList
         FfiConverterOptionString.lower(voice),
         FfiConverterTypeVoiceMediaListener_lower(media),
         FfiConverterTypeVoiceSessionListener_lower(listener),uniffiCallStatus
+    )
+})
+}
+    
+open func chatWallpaper(deviceId: String, knownHash: String?)async throws  -> SyncedWallpaper  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_chat_wallpaper(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterOptionString.lower(knownHash)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeSyncedWallpaper_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func wallpaperHosts() -> [DeviceView]  {
+    return try!  FfiConverterSequenceTypeDeviceView.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_wallpaper_hosts(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -22151,6 +22180,94 @@ public func FfiConverterTypeSurfaceFrame_lower(_ value: SurfaceFrame) -> RustBuf
 }
 
 
+public struct SyncedWallpaper: Equatable, Hashable {
+    public var enabled: Bool
+    public var placement: String
+    public var opacity: Float
+    public var blur: Float
+    public var scrim: Bool
+    public var effect: String
+    public var name: String?
+    public var imageHash: String?
+    /**
+     * Only when it differs from the `known_hash` asked with.
+     */
+    public var image: Data?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(enabled: Bool, placement: String, opacity: Float, blur: Float, scrim: Bool, effect: String, name: String?, imageHash: String?, 
+        /**
+         * Only when it differs from the `known_hash` asked with.
+         */image: Data?) {
+        self.enabled = enabled
+        self.placement = placement
+        self.opacity = opacity
+        self.blur = blur
+        self.scrim = scrim
+        self.effect = effect
+        self.name = name
+        self.imageHash = imageHash
+        self.image = image
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SyncedWallpaper: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSyncedWallpaper: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncedWallpaper {
+        return
+            try SyncedWallpaper(
+                enabled: FfiConverterBool.read(from: &buf), 
+                placement: FfiConverterString.read(from: &buf), 
+                opacity: FfiConverterFloat.read(from: &buf), 
+                blur: FfiConverterFloat.read(from: &buf), 
+                scrim: FfiConverterBool.read(from: &buf), 
+                effect: FfiConverterString.read(from: &buf), 
+                name: FfiConverterOptionString.read(from: &buf), 
+                imageHash: FfiConverterOptionString.read(from: &buf), 
+                image: FfiConverterOptionData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SyncedWallpaper, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.enabled, into: &buf)
+        FfiConverterString.write(value.placement, into: &buf)
+        FfiConverterFloat.write(value.opacity, into: &buf)
+        FfiConverterFloat.write(value.blur, into: &buf)
+        FfiConverterBool.write(value.scrim, into: &buf)
+        FfiConverterString.write(value.effect, into: &buf)
+        FfiConverterOptionString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.imageHash, into: &buf)
+        FfiConverterOptionData.write(value.image, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncedWallpaper_lift(_ buf: RustBuffer) throws -> SyncedWallpaper {
+    return try FfiConverterTypeSyncedWallpaper.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncedWallpaper_lower(_ value: SyncedWallpaper) -> RustBuffer {
+    return FfiConverterTypeSyncedWallpaper.lower(value)
+}
+
+
 public struct TaskDetail: Equatable, Hashable {
     public var row: TaskRow
     public var phase: PlanPhase
@@ -38630,6 +38747,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_start_voice() != 62086) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_chat_wallpaper() != 63089) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_wallpaper_hosts() != 1954) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_uploadprogress_on_progress() != 40458) {

@@ -20,6 +20,7 @@ pub mod capability_errors {
 pub mod background;
 pub mod change_request_assessment;
 pub mod chat_mentions;
+pub mod chat_wallpaper;
 pub mod command_catalog;
 pub mod comments;
 pub mod compaction;
