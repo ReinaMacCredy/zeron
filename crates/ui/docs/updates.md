@@ -56,7 +56,6 @@ The question-mark button in the app rail (**Help**) opens a menu with:
 - **Full changelog**: the complete [changelog](zeron://changelog).
 - **Keybindings**: opens [Settings > Shortcuts](zeron://settings/shortcuts).
 - **Docs**: opens these help pages. See [Getting around](zeron://docs/getting-around).
-- **Mission Control intro**: shows the [Mission Control](zeron://docs/mission-control) introduction again.
 - **New since 0.2.114**: shows the introduction to what changed since 0.2.114 again.
 
 ## Introductions

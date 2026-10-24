@@ -207,4 +207,43 @@ final class NeedsYouFlowTests: XCTestCase {
         _ = app.buttons["Cancel"].waitForExistence(timeout: 10)
         snapshot(app, "html-sheet-save")
     }
+
+    func testAPageThatFailsToLoadOffersRetry() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-demo", "-fast", "-flaky-pages", "-route", "chat:chat-visuals"]
+        app.launch()
+        let loading = app.staticTexts["Loading page"].firstMatch
+        let retry = app.buttons["html-render-retry"].firstMatch
+        XCTAssertTrue(retry.waitForExistence(timeout: 30))
+        let header = app.staticTexts["Onboarding card, three treatments"].firstMatch
+        for _ in 0..<10 where !(header.isHittable && header.frame.minY > 120) {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.3))
+                .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.7)))
+        }
+        snapshot(app, "html-card-failed")
+        retry.tap()
+        XCTAssertTrue(loading.waitForExistence(timeout: 4))
+        snapshot(app, "html-card-loading")
+        XCTAssertTrue(retry.waitForExistence(timeout: 15))
+
+        app.buttons["html-render-expand"].firstMatch.tap()
+        XCTAssertTrue(app.segmentedControls["html-sheet-view"].waitForExistence(timeout: 10))
+        XCTAssertTrue(loading.waitForExistence(timeout: 5))
+        snapshot(app, "html-sheet-loading")
+        let sheetRetry = app.otherElements["html-sheet-page"].buttons["html-render-retry"]
+        XCTAssertTrue(sheetRetry.waitForExistence(timeout: 15))
+        XCTAssertFalse(app.buttons["html-sheet-save"].isEnabled)
+        snapshot(app, "html-sheet-failed")
+        sheetRetry.tap()
+        let rendered = app.staticTexts["Connect your Mac"].firstMatch
+        XCTAssertTrue(rendered.waitForExistence(timeout: 15))
+        XCTAssertTrue(app.buttons["html-sheet-save"].isEnabled)
+        snapshot(app, "html-sheet-rendered")
+
+        app.buttons["html-sheet-close"].tap()
+        XCTAssertTrue(retry.waitForExistence(timeout: 5))
+        retry.tap()
+        XCTAssertTrue(rendered.waitForExistence(timeout: 10))
+        snapshot(app, "html-card-rendered")
+    }
 }

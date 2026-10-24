@@ -399,6 +399,7 @@ impl Shell {
             ),
             ComposerEvent::UnsentChanged => cx.notify(),
             ComposerEvent::ThreadMentionDropped => self.accept_command_palette_drop(),
+            ComposerEvent::OpenUsage => self.open_usage(cx),
             ComposerEvent::OpenComputerSetup { missing } => {
                 self.open_computer_permission_guide(missing.clone(), cx)
             }

@@ -557,9 +557,15 @@ struct HostService {
 }
 
 const HOST_IMAGE: &str = "/Users/dev/.zeron/uploads/host.png";
+const HOST_PAGE: &str = "/Users/dev/.zeron/uploads/html/chat-live/page.html";
+const READ_CHUNK_BYTES: usize = 384 * 1024;
 
 fn host_image() -> Vec<u8> {
     (0..100_000u32).map(|i| (i * 7 % 251) as u8).collect()
+}
+
+fn host_page() -> Vec<u8> {
+    (0..1_000_000u32).map(|i| (i * 13 % 241) as u8).collect()
 }
 
 #[async_trait::async_trait]
@@ -615,8 +621,12 @@ impl zeron_rpc::RpcService for HostService {
             }
             m::READ_ATTACHMENT_CHUNK => {
                 let offset = params["offset"].as_u64().unwrap_or(0) as usize;
-                let bytes = host_image();
-                let end = (offset + 45_000).min(bytes.len());
+                let bytes = if params["path"] == HOST_PAGE {
+                    host_page()
+                } else {
+                    host_image()
+                };
+                let end = (offset + READ_CHUNK_BYTES).min(bytes.len());
                 json!({ "name": "host.png", "mimeType": "image/png", "data": b64(&bytes[offset..end]),
                         "nextOffset": end, "done": end == bytes.len() })
             }
@@ -755,6 +765,12 @@ async fn host_rpcs_ride_the_device_relay() {
             .await
             .unwrap();
     assert_eq!(*image, host_image());
+    let c = client.clone();
+    let page = zeron_client::runtime::run(async move { c.read_attachment(HOST, HOST_PAGE).await })
+        .await
+        .unwrap();
+    assert!(page.len() > 2 * READ_CHUNK_BYTES, "spans several chunks");
+    assert_eq!(*page, host_page());
 
     let c = client.clone();
     let (wallpaper, art) =

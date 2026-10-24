@@ -99,6 +99,7 @@ pub(crate) struct DemoHost {
     settings: Mutex<settings::HostSettings>,
     terminals: Mutex<terminals::HostTerminals>,
     computer_stopped: Mutex<HashSet<String>>,
+    page_reads: Mutex<HashMap<String, u32>>,
 }
 
 fn doc_err(err: zeron_doc::DocError) -> ClientError {
@@ -126,6 +127,7 @@ impl DemoHost {
             settings: Mutex::new(settings::HostSettings::new()),
             terminals: Mutex::new(terminals::HostTerminals::new(now_ms())),
             computer_stopped: Mutex::new(HashSet::new()),
+            page_reads: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1419,14 +1421,26 @@ impl DemoHost {
         Ok(path)
     }
 
-    pub(crate) fn read_attachment(&self, path: &str) -> Result<Arc<Vec<u8>>> {
+    pub(crate) async fn read_attachment(&self, path: &str) -> Result<Arc<Vec<u8>>> {
+        if self.options.flaky_pages
+            && let Some(page) = pages::read(path, true)
+        {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let mut reads = lock(&self.page_reads);
+            let read = reads.entry(path.to_owned()).or_default();
+            *read += 1;
+            if *read <= 3 {
+                return Err(ClientError::HostError("The host did not answer.".into()));
+            }
+            return Ok(Arc::new(page));
+        }
         if let Some(bytes) = lock(&self.uploads).get(path) {
             return Ok(bytes.clone());
         }
         if let Some(bytes) = visuals::read(path) {
             return Ok(Arc::new(bytes));
         }
-        if let Some(bytes) = pages::read(path).or_else(|| composer::icon(path)) {
+        if let Some(bytes) = pages::read(path, false).or_else(|| composer::icon(path)) {
             return Ok(Arc::new(bytes));
         }
         transcripts::DEMO_IMAGES

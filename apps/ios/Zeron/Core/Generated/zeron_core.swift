@@ -11551,6 +11551,7 @@ public struct DemoOptions: Equatable, Hashable {
      */
     public var longReply: Bool
     public var computerStill: Bool
+    public var flakyPages: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -11560,12 +11561,13 @@ public struct DemoOptions: Equatable, Hashable {
          */transcriptScale: TranscriptScale, streamSpeed: StreamSpeed, 
         /**
          * Repeat the scripted reply 12× (long streaming stress).
-         */longReply: Bool, computerStill: Bool) {
+         */longReply: Bool, computerStill: Bool, flakyPages: Bool) {
         self.fixture = fixture
         self.transcriptScale = transcriptScale
         self.streamSpeed = streamSpeed
         self.longReply = longReply
         self.computerStill = computerStill
+        self.flakyPages = flakyPages
     }
 
     
@@ -11588,7 +11590,8 @@ public struct FfiConverterTypeDemoOptions: FfiConverterRustBuffer {
                 transcriptScale: FfiConverterTypeTranscriptScale.read(from: &buf), 
                 streamSpeed: FfiConverterTypeStreamSpeed.read(from: &buf), 
                 longReply: FfiConverterBool.read(from: &buf), 
-                computerStill: FfiConverterBool.read(from: &buf)
+                computerStill: FfiConverterBool.read(from: &buf), 
+                flakyPages: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -11598,6 +11601,7 @@ public struct FfiConverterTypeDemoOptions: FfiConverterRustBuffer {
         FfiConverterTypeStreamSpeed.write(value.streamSpeed, into: &buf)
         FfiConverterBool.write(value.longReply, into: &buf)
         FfiConverterBool.write(value.computerStill, into: &buf)
+        FfiConverterBool.write(value.flakyPages, into: &buf)
     }
 }
 

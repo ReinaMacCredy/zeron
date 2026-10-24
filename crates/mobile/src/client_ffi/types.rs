@@ -156,6 +156,7 @@ pub struct DemoOptions {
     /// Repeat the scripted reply 12× (long streaming stress).
     pub long_reply: bool,
     pub computer_still: bool,
+    pub flaky_pages: bool,
 }
 
 impl From<DemoOptions> for zc::DemoOptions {
@@ -178,6 +179,7 @@ impl From<DemoOptions> for zc::DemoOptions {
             },
             long_reply: o.long_reply,
             computer_still: o.computer_still,
+            flaky_pages: o.flaky_pages,
         }
     }
 }

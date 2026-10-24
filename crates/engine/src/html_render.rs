@@ -207,10 +207,95 @@ fn read_image(path: &str) -> Result<Option<String>, PrepareError> {
         return Ok(None);
     }
     let mime = image_mime(path).unwrap_or("application/octet-stream");
+    let (bytes, mime) = match shrink(&bytes) {
+        Some((smaller, mime)) if smaller.len() < bytes.len() => (smaller, mime),
+        _ => (bytes, mime),
+    };
     Ok(Some(format!(
         "data:{mime};base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes)
     )))
+}
+
+const MAX_INLINE_SIDE: u32 = 2048;
+const KEEP_INLINE_BYTES: usize = 256 * 1024;
+
+/// Phones read pages over the relay, where a full-resolution screenshot costs megabytes.
+fn shrink(bytes: &[u8]) -> Option<(Vec<u8>, &'static str)> {
+    use image::{ImageDecoder, ImageEncoder};
+    let reader = std::io::Cursor::new(bytes);
+    let limits = image::Limits::default();
+    let format = image::guess_format(bytes).ok()?;
+    let (width, height) = image::ImageReader::with_format(reader.clone(), format)
+        .into_dimensions()
+        .ok()?;
+    if bytes.len() <= KEEP_INLINE_BYTES && width.max(height) <= MAX_INLINE_SIDE {
+        return None;
+    }
+    let (mut image, icc) = match format {
+        image::ImageFormat::Png => {
+            let mut decoder = image::codecs::png::PngDecoder::with_limits(reader, limits).ok()?;
+            if decoder.is_apng().ok()? {
+                return None;
+            }
+            let icc = decoder.icc_profile().ok().flatten();
+            (image::DynamicImage::from_decoder(decoder).ok()?, icc)
+        }
+        image::ImageFormat::Jpeg => {
+            let mut decoder = image::codecs::jpeg::JpegDecoder::new(reader).ok()?;
+            decoder.set_limits(limits).ok()?;
+            let orientation = decoder.orientation().ok()?;
+            let icc = decoder.icc_profile().ok().flatten();
+            let mut image = image::DynamicImage::from_decoder(decoder).ok()?;
+            image.apply_orientation(orientation);
+            (image, icc)
+        }
+        _ => return None,
+    };
+    if image.width().max(image.height()) > MAX_INLINE_SIDE {
+        image = image.resize(
+            MAX_INLINE_SIDE,
+            MAX_INLINE_SIDE,
+            image::imageops::FilterType::Lanczos3,
+        );
+    }
+    let mut out = Vec::new();
+    let opaque = !image.color().has_alpha() || image.to_rgba8().pixels().all(|p| p.0[3] == 255);
+    if opaque {
+        let rgb = image.to_rgb8();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80);
+        if let Some(icc) = icc {
+            let _ = encoder.set_icc_profile(icc);
+        }
+        encoder
+            .write_image(
+                &rgb,
+                rgb.width(),
+                rgb.height(),
+                image::ExtendedColorType::Rgb8,
+            )
+            .ok()?;
+        Some((out, "image/jpeg"))
+    } else {
+        let rgba = image.to_rgba8();
+        let mut encoder = image::codecs::png::PngEncoder::new_with_quality(
+            &mut out,
+            image::codecs::png::CompressionType::Best,
+            image::codecs::png::FilterType::Adaptive,
+        );
+        if let Some(icc) = icc {
+            let _ = encoder.set_icc_profile(icc);
+        }
+        encoder
+            .write_image(
+                &rgba,
+                rgba.width(),
+                rgba.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .ok()?;
+        Some((out, "image/png"))
+    }
 }
 
 /// Checks the agent's arguments before anything touches disk.
@@ -514,6 +599,53 @@ mod tests {
         assert!(out.contains("https://cdn.test/a.png"));
         assert!(out.contains("rel/b.png"));
         assert!(!out.contains(&*p));
+    }
+
+    #[test]
+    fn large_screenshots_inline_downsized_and_transparency_stays_png() {
+        let dir = tempfile::tempdir().unwrap();
+        let opaque = dir.path().join("shot.png");
+        let mut shot = image::RgbaImage::new(3456, 2234);
+        for (x, y, px) in shot.enumerate_pixels_mut() {
+            *px = image::Rgba([
+                (x * 7 % 251) as u8,
+                (y * 13 % 241) as u8,
+                ((x ^ y) % 239) as u8,
+                255,
+            ]);
+        }
+        shot.save(&opaque).unwrap();
+        let clear = dir.path().join("cutout.png");
+        let mut cutout = image::RgbaImage::from_pixel(2400, 600, image::Rgba([40, 90, 200, 255]));
+        cutout.put_pixel(10, 10, image::Rgba([0, 0, 0, 0]));
+        cutout.save(&clear).unwrap();
+        let html = format!(
+            r#"<img src="{}"><img src="{}">"#,
+            opaque.display(),
+            clear.display()
+        );
+        let (out, _) = inline_local_images(&html, true).unwrap();
+        let images: Vec<(String, image::DynamicImage)> = out
+            .split("data:")
+            .skip(1)
+            .map(|uri| {
+                let (mime, rest) = uri.split_once(";base64,").unwrap();
+                let data = rest.split('"').next().unwrap();
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .unwrap();
+                (mime.to_owned(), image::load_from_memory(&bytes).unwrap())
+            })
+            .collect();
+        assert_eq!(images[0].0, "image/jpeg");
+        assert_eq!((images[0].1.width(), images[0].1.height()), (2048, 1324));
+        assert_eq!(images[1].0, "image/png");
+        assert_eq!((images[1].1.width(), images[1].1.height()), (2048, 512));
+        assert!(
+            out.len() < std::fs::metadata(&opaque).unwrap().len() as usize / 2,
+            "page is {} bytes",
+            out.len()
+        );
     }
 
     #[test]

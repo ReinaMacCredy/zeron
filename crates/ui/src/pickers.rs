@@ -755,6 +755,14 @@ struct ModelRowsKey {
     selected: Option<String>,
 }
 
+pub(crate) struct ChipChoices {
+    pub models: Vec<(String, String)>,
+    pub model: Option<String>,
+    pub efforts: Vec<ReasoningLevel>,
+    pub effort: Option<ReasoningLevel>,
+    pub permission: PermissionMode,
+}
+
 /// One row of the model list: the model plus the harness it belongs to —
 /// search results and the favorites view mix harnesses, and every row's
 /// subline names its harness (t3code ModelListRow `showProvider`).
@@ -2341,6 +2349,42 @@ impl Pickers {
         }
         self.animate_close(cx);
         cx.notify();
+    }
+
+    pub(crate) fn chip_choices(&self, cx: &App) -> ChipChoices {
+        let models = self
+            .effective_harness(cx)
+            .and_then(|h| self.catalog(h, self.effective_instance(cx).as_deref()))
+            .and_then(Loadable::ready)
+            .map(|models| {
+                models
+                    .iter()
+                    .map(|m| (m.id.clone(), m.label.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        ChipChoices {
+            models,
+            model: self
+                .selected_model(cx)
+                .map(|m| m.id.clone())
+                .or_else(|| self.effective_model_id(cx).map(str::to_owned)),
+            efforts: self.trait_ladder(cx),
+            effort: self.effective_reasoning(cx),
+            permission: self.effective_permission_mode(cx),
+        }
+    }
+
+    pub(crate) fn set_chip_model(&mut self, model_id: String, cx: &mut Context<Self>) {
+        self.pick_model(model_id, cx);
+    }
+
+    pub(crate) fn set_chip_effort(&mut self, level: ReasoningLevel, cx: &mut Context<Self>) {
+        self.pick_reasoning(level, cx);
+    }
+
+    pub(crate) fn set_chip_permission(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
+        self.pick_permission(mode, cx);
     }
 
     // ---- open/close ----
