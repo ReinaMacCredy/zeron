@@ -1084,7 +1084,10 @@ impl ChatDocHandle {
             fork_import: false,
             answers_request_id: None,
             duration_ms: None,
-        })
+        })?;
+        // The send awaiting this record holds the doc worker past the compaction, so its publish would wait too.
+        self.publish_messages_if_watched();
+        Ok(())
     }
 
     /// [`Self::write_system_note`] carrying the provider-switch packet: the
@@ -7379,6 +7382,17 @@ mod transfer_progress_tests {
         let start = std::time::Instant::now();
         assert_eq!(handle.watch_messages().borrow().entries.len(), 2000);
         eprintln!("offline whale rebuilt mirror: {:?}", start.elapsed());
+    }
+
+    #[tokio::test]
+    async fn a_classifier_record_reaches_watchers_while_the_doc_worker_is_busy() {
+        let (_dir, host) = host();
+        let handle = host.open("busy").unwrap();
+        let rx = handle.watch_messages();
+        handle
+            .write_classifier_record("record", zeron_doc::ClassifierRecord::default(), 0)
+            .unwrap();
+        assert!(rx.borrow().entries.iter().any(|e| e.id == "record"));
     }
 
     #[tokio::test]

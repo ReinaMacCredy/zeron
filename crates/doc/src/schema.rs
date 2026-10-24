@@ -1593,7 +1593,7 @@ pub fn turn_stopped(last: &SessionMessageEntry) -> bool {
             && matches!(last.parts.last(), Some(MessagePart::Error { .. })))
 }
 
-pub fn boundary_compaction<'a, I>(transcript: I) -> Option<(u64, bool)>
+pub fn boundary_compaction<'a, I>(transcript: I) -> Option<zeron_proto::transcript::Boundary>
 where
     I: IntoIterator<Item = &'a SessionMessageEntry>,
     I::IntoIter: DoubleEndedIterator,
@@ -1603,11 +1603,18 @@ where
         .rev()
         .find(|entry| entry.role != MessageRole::User)?;
     entry.parts.iter().find_map(|part| match part {
-        MessagePart::Classifier { record, .. } => match record.verdict {
-            crate::parts::ClassifierVerdict::New => Some((record.context_tokens, false)),
-            crate::parts::ClassifierVerdict::Carry => Some((record.context_tokens, true)),
-            _ => None,
-        },
+        MessagePart::Classifier { record, .. } => {
+            let carry = match record.verdict {
+                crate::parts::ClassifierVerdict::New => false,
+                crate::parts::ClassifierVerdict::Carry => true,
+                _ => return None,
+            };
+            Some(zeron_proto::transcript::Boundary {
+                tokens: record.context_tokens,
+                carry,
+                cause: record.decided_by.compaction_cause(),
+            })
+        }
         _ => None,
     })
 }

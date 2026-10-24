@@ -11422,6 +11422,7 @@ impl Transcript {
             && record.verdict != ClassifierVerdict::Continue;
         let secs = format!("{:.1}s", record.duration_ms as f64 / 1000.0);
         let decided = record.decided_by.label();
+        let asked = record.decided_by.asked();
         let toggle_id = row_id.clone();
         let rule = || {
             div()
@@ -11454,7 +11455,10 @@ impl Transcript {
             .child("Classifier")
             .children(model.as_ref().map(|side| side.chip(theme)))
             .children(model_text.clone())
-            .child(SharedString::from(format!("· {secs} ·")))
+            .child(SharedString::from(format!(
+                "· {} ·",
+                if asked { secs.as_str() } else { decided }
+            )))
             .when(overturned, |header| {
                 header
                     .child(
@@ -11552,7 +11556,7 @@ impl Transcript {
                         .children(model_text.map(|text| field("Model", text.to_string())))
                         .child(field("Verdict", verdict.to_string()))
                         .child(field("Decided", decided.to_string()))
-                        .child(field("Time", secs.clone()))
+                        .when(asked, |card| card.child(field("Time", secs.clone())))
                         .child(field(
                             "Context",
                             format!(
@@ -11562,56 +11566,59 @@ impl Transcript {
                         ))
                         .children(tokens.map(|tokens| field("Tokens", tokens))),
                 )
-                .child(div().text_color(theme.text_muted).child(
-                    if matches!(record.decided_by, DecidedBy::Stage1 | DecidedBy::Stage2) {
-                        "Sent to the classifier"
-                    } else {
-                        "Not sent: decided without asking"
-                    },
-                ))
+                .child(div().text_color(theme.text_muted).child(if asked {
+                    "Sent to the classifier"
+                } else {
+                    "Not sent: decided without asking"
+                }))
                 .child(mono_box("input", &record.input, theme.border))
-                .child(match record.stage2_reply.as_deref() {
-                    None => div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(10.0))
-                        .child(div().text_color(theme.text_muted).child("Reply"))
-                        .child(mono_box("reply", &record.reply, theme.border)),
-                    Some(stage2) => {
-                        let stage = |title: &'static str, id: &'static str, text: &str, decided| {
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .gap(px(10.0))
-                                .child(div().text_color(theme.text_muted).child(if decided {
-                                    SharedString::from(format!("{title} · decides"))
-                                } else {
-                                    SharedString::from(title)
-                                }))
-                                .child(mono_box(
-                                    id,
-                                    text,
-                                    if decided { theme.accent } else { theme.border },
-                                ))
-                        };
-                        div()
+                .when(asked, |details| {
+                    details.child(match record.stage2_reply.as_deref() {
+                        None => div()
                             .flex()
+                            .flex_col()
                             .gap(px(10.0))
-                            .child(stage(
-                                "First look",
-                                "reply",
-                                &record.reply,
-                                record.decided_by == DecidedBy::Stage1,
-                            ))
-                            .child(stage(
-                                "Second look",
-                                "stage2",
-                                stage2,
-                                record.decided_by == DecidedBy::Stage2,
-                            ))
-                    }
+                            .child(div().text_color(theme.text_muted).child("Reply"))
+                            .child(mono_box("reply", &record.reply, theme.border)),
+                        Some(stage2) => {
+                            let stage = |title: &'static str,
+                                         id: &'static str,
+                                         text: &str,
+                                         decided| {
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(10.0))
+                                    .child(div().text_color(theme.text_muted).child(if decided {
+                                        SharedString::from(format!("{title} · decides"))
+                                    } else {
+                                        SharedString::from(title)
+                                    }))
+                                    .child(mono_box(
+                                        id,
+                                        text,
+                                        if decided { theme.accent } else { theme.border },
+                                    ))
+                            };
+                            div()
+                                .flex()
+                                .gap(px(10.0))
+                                .child(stage(
+                                    "First look",
+                                    "reply",
+                                    &record.reply,
+                                    record.decided_by == DecidedBy::Stage1,
+                                ))
+                                .child(stage(
+                                    "Second look",
+                                    "stage2",
+                                    stage2,
+                                    record.decided_by == DecidedBy::Stage2,
+                                ))
+                        }
+                    })
                 })
         });
         div()

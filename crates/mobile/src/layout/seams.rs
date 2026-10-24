@@ -340,6 +340,8 @@ pub(crate) fn classifier(ctx: &mut Ctx, key: String, entry_id: &str, record: &Cl
     };
     let overturned = record.decided_by == DecidedBy::Stage2 && record.stage2_reply.is_some() && record.verdict != ClassifierVerdict::Continue;
     let secs = format!("{:.1}s", record.duration_ms as f64 / 1000.0);
+    let asked = record.decided_by.asked();
+    let middle = if asked { secs.as_str() } else { record.decided_by.label() };
     let mut items = vec![
         Item::Icon {
             name: "line.3.horizontal.decrease".into(),
@@ -352,7 +354,7 @@ pub(crate) fn classifier(ctx: &mut Ctx, key: String, entry_id: &str, record: &Cl
         (None, Some(model)) => items.push(Item::Text(faces.text(ctx, model, ColorRole::TextFaint))),
         (None, None) => {}
     }
-    items.push(Item::Text(faces.text(ctx, &format!("· {secs} ·"), ColorRole::TextFaint)));
+    items.push(Item::Text(faces.text(ctx, &format!("· {middle} ·"), ColorRole::TextFaint)));
     if overturned {
         items.push(Item::Text(struck(faces.text(ctx, label(ClassifierVerdict::Continue), ColorRole::TextFaint))));
         items.push(Item::Text(faces.text(ctx, "→", ColorRole::TextFaint)));
@@ -371,12 +373,14 @@ pub(crate) fn classifier(ctx: &mut Ctx, key: String, entry_id: &str, record: &Cl
         }
         card.push(field(&faces, ctx, "Verdict", &verdict));
         card.push(field(&faces, ctx, "Decided", record.decided_by.label()));
-        card.push(field(&faces, ctx, "Time", &secs));
+        if asked {
+            card.push(field(&faces, ctx, "Time", &secs));
+        }
         card.push(field(&faces, ctx, "Context", &format!("{} tokens", words::compact_count(record.context_tokens))));
         if let (Some(input), Some(output)) = (record.input_tokens, record.output_tokens) {
             card.push(field(&faces, ctx, "Tokens", &format!("{} in · {} out", words::compact_count(input), words::compact_count(output))));
         }
-        let sent = if matches!(record.decided_by, DecidedBy::Stage1 | DecidedBy::Stage2) {
+        let sent = if asked {
             "Sent to the classifier"
         } else {
             "Not sent: decided without asking"
@@ -384,6 +388,7 @@ pub(crate) fn classifier(ctx: &mut Ctx, key: String, entry_id: &str, record: &Cl
         after.push(Block::Caption(faces.text(ctx, sent, ColorRole::TextSecondary)));
         after.push(mono_block(&faces, ctx, &record.input, sent, false));
         match record.stage2_reply.as_deref() {
+            _ if !asked => {}
             None => {
                 after.push(Block::Caption(faces.text(ctx, "Reply", ColorRole::TextSecondary)));
                 after.push(mono_block(&faces, ctx, &record.reply, "Reply", false));
@@ -408,7 +413,7 @@ pub(crate) fn classifier(ctx: &mut Ctx, key: String, entry_id: &str, record: &Cl
         card,
         after,
     };
-    core(key, entry_id, strip, format!("Classifier · {secs} · {verdict}"))
+    core(key, entry_id, strip, format!("Classifier · {middle} · {verdict}"))
 }
 
 pub(crate) fn route_badge(route: &ChildRoute) -> Option<(String, ColorRole)> {

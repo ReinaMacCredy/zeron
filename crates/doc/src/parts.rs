@@ -191,6 +191,19 @@ impl DecidedBy {
             Self::AgentNote => "Agent note, compacted without asking",
         }
     }
+
+    pub fn asked(self) -> bool {
+        matches!(self, Self::Stage1 | Self::Stage2)
+    }
+
+    pub fn compaction_cause(self) -> Option<&'static str> {
+        match self {
+            Self::Stage1 | Self::Stage2 => None,
+            Self::Streak => Some("after three same-task verdicts"),
+            Self::Ceiling => Some("near the context window"),
+            Self::AgentNote => Some("at the agent's request"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
