@@ -696,6 +696,7 @@ impl SessionCore {
             review: review::chip(&st, review::target(client, &self.chat_id).as_ref()),
             staged_comments: review::staged(&st),
             review_revision: review::revision(&st),
+            background_shells: zeron_proto::background::shell_tasks(st.session.as_ref()).len(),
         };
         let current = self.composer();
         next.revision = current.revision;
@@ -860,6 +861,7 @@ fn empty_composer(chat_id: &str) -> ComposerState {
         review: None,
         staged_comments: Vec::new(),
         review_revision: 0,
+        background_shells: 0,
     }
 }
 

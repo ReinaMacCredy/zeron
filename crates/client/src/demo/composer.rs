@@ -263,6 +263,12 @@ fn subagent_turn(now: i64) -> Vec<zeron_doc::SessionMessageEntry> {
                     "sonnet-5",
                     SubagentStatus::Running,
                 ),
+                spawn(
+                    "spawn-keyboard",
+                    "Reproduce the composer jump when the keyboard rises over a four-line draft",
+                    "gpt-5.5",
+                    SubagentStatus::Failed,
+                ),
             ],
         ),
     ]

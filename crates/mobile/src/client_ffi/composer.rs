@@ -658,12 +658,32 @@ pub fn new_sidechat_label() -> String {
     zeron_proto::sidechat::NEW_SIDECHAT.into()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum AgentRunState {
+    Working,
+    Completed,
+    Stopped,
+    Failed,
+}
+
+impl From<zeron_proto::background::RunState> for AgentRunState {
+    fn from(state: zeron_proto::background::RunState) -> Self {
+        use zeron_proto::background::RunState;
+        match state {
+            RunState::Working => Self::Working,
+            RunState::Completed => Self::Completed,
+            RunState::Stopped => Self::Stopped,
+            RunState::Failed => Self::Failed,
+        }
+    }
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct AgentRunRow {
     pub task_id: String,
     pub title: String,
     pub line: String,
-    pub working: bool,
+    pub state: AgentRunState,
     pub can_stop: bool,
     pub delegated: bool,
     pub review: Option<String>,
@@ -681,6 +701,8 @@ pub struct ShellRow {
 pub struct BackgroundRosterView {
     pub title: String,
     pub summary: Option<String>,
+    pub heading: String,
+    pub state: AgentRunState,
     pub agents_section: String,
     pub agents: Vec<AgentRunRow>,
     pub shells_section: String,
@@ -691,7 +713,8 @@ pub struct BackgroundRosterView {
 impl SessionHandle {
     pub fn background_roster(&self, now_ms: i64) -> BackgroundRosterView {
         use zeron_proto::background::{
-            roster_summary, shell_line, shells_section, stoppable, subagents_section,
+            RunState, aggregate, roster_heading, roster_summary, shell_line, shells_section,
+            stoppable, subagents_section,
         };
         let roster = self.inner.background_roster();
         let stoppable = stoppable(roster.harness);
@@ -715,6 +738,12 @@ impl SessionHandle {
         BackgroundRosterView {
             title: "Agents".into(),
             summary: summary.or_else(|| roster_summary(&roster.agents, roster.shells.len())),
+            heading: roster_heading(&roster.agents),
+            state: if roster.shells.is_empty() {
+                aggregate(&roster.agents).into()
+            } else {
+                RunState::Working.into()
+            },
             agents_section: subagents_section(&roster.agents),
             agents: roster
                 .agents
@@ -723,7 +752,7 @@ impl SessionHandle {
                     task_id: run.part_id.clone(),
                     title: run.title.clone(),
                     line: run.line(roster.harness, now_ms),
-                    working: run.state == zeron_proto::background::RunState::Working,
+                    state: run.state.into(),
                     can_stop: run.can_stop(stoppable),
                     delegated: run.delegated,
                     review: review_of(&run.part_id),

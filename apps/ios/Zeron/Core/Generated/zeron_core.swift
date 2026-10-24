@@ -8827,18 +8827,18 @@ public struct AgentRunRow: Equatable, Hashable {
     public var taskId: String
     public var title: String
     public var line: String
-    public var working: Bool
+    public var state: AgentRunState
     public var canStop: Bool
     public var delegated: Bool
     public var review: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(taskId: String, title: String, line: String, working: Bool, canStop: Bool, delegated: Bool, review: String?) {
+    public init(taskId: String, title: String, line: String, state: AgentRunState, canStop: Bool, delegated: Bool, review: String?) {
         self.taskId = taskId
         self.title = title
         self.line = line
-        self.working = working
+        self.state = state
         self.canStop = canStop
         self.delegated = delegated
         self.review = review
@@ -8863,7 +8863,7 @@ public struct FfiConverterTypeAgentRunRow: FfiConverterRustBuffer {
                 taskId: FfiConverterString.read(from: &buf), 
                 title: FfiConverterString.read(from: &buf), 
                 line: FfiConverterString.read(from: &buf), 
-                working: FfiConverterBool.read(from: &buf), 
+                state: FfiConverterTypeAgentRunState.read(from: &buf), 
                 canStop: FfiConverterBool.read(from: &buf), 
                 delegated: FfiConverterBool.read(from: &buf), 
                 review: FfiConverterOptionString.read(from: &buf)
@@ -8874,7 +8874,7 @@ public struct FfiConverterTypeAgentRunRow: FfiConverterRustBuffer {
         FfiConverterString.write(value.taskId, into: &buf)
         FfiConverterString.write(value.title, into: &buf)
         FfiConverterString.write(value.line, into: &buf)
-        FfiConverterBool.write(value.working, into: &buf)
+        FfiConverterTypeAgentRunState.write(value.state, into: &buf)
         FfiConverterBool.write(value.canStop, into: &buf)
         FfiConverterBool.write(value.delegated, into: &buf)
         FfiConverterOptionString.write(value.review, into: &buf)
@@ -9246,6 +9246,8 @@ public func FfiConverterTypeAuthUser_lower(_ value: AuthUser) -> RustBuffer {
 public struct BackgroundRosterView: Equatable, Hashable {
     public var title: String
     public var summary: String?
+    public var heading: String
+    public var state: AgentRunState
     public var agentsSection: String
     public var agents: [AgentRunRow]
     public var shellsSection: String
@@ -9253,9 +9255,11 @@ public struct BackgroundRosterView: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(title: String, summary: String?, agentsSection: String, agents: [AgentRunRow], shellsSection: String, shells: [ShellRow]) {
+    public init(title: String, summary: String?, heading: String, state: AgentRunState, agentsSection: String, agents: [AgentRunRow], shellsSection: String, shells: [ShellRow]) {
         self.title = title
         self.summary = summary
+        self.heading = heading
+        self.state = state
         self.agentsSection = agentsSection
         self.agents = agents
         self.shellsSection = shellsSection
@@ -9280,6 +9284,8 @@ public struct FfiConverterTypeBackgroundRosterView: FfiConverterRustBuffer {
             try BackgroundRosterView(
                 title: FfiConverterString.read(from: &buf), 
                 summary: FfiConverterOptionString.read(from: &buf), 
+                heading: FfiConverterString.read(from: &buf), 
+                state: FfiConverterTypeAgentRunState.read(from: &buf), 
                 agentsSection: FfiConverterString.read(from: &buf), 
                 agents: FfiConverterSequenceTypeAgentRunRow.read(from: &buf), 
                 shellsSection: FfiConverterString.read(from: &buf), 
@@ -9290,6 +9296,8 @@ public struct FfiConverterTypeBackgroundRosterView: FfiConverterRustBuffer {
     public static func write(_ value: BackgroundRosterView, into buf: inout [UInt8]) {
         FfiConverterString.write(value.title, into: &buf)
         FfiConverterOptionString.write(value.summary, into: &buf)
+        FfiConverterString.write(value.heading, into: &buf)
+        FfiConverterTypeAgentRunState.write(value.state, into: &buf)
         FfiConverterString.write(value.agentsSection, into: &buf)
         FfiConverterSequenceTypeAgentRunRow.write(value.agents, into: &buf)
         FfiConverterString.write(value.shellsSection, into: &buf)
@@ -25232,6 +25240,86 @@ public func FfiConverterTypeWorktreeSpec_lift(_ buf: RustBuffer) throws -> Workt
 public func FfiConverterTypeWorktreeSpec_lower(_ value: WorktreeSpec) -> RustBuffer {
     return FfiConverterTypeWorktreeSpec.lower(value)
 }
+
+
+
+public enum AgentRunState: Equatable, Hashable {
+    
+    case working
+    case completed
+    case stopped
+    case failed
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AgentRunState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAgentRunState: FfiConverterRustBuffer {
+    typealias SwiftType = AgentRunState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AgentRunState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .working
+        
+        case 2: return .completed
+        
+        case 3: return .stopped
+        
+        case 4: return .failed
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AgentRunState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .working:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .completed:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .stopped:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .failed:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAgentRunState_lift(_ buf: RustBuffer) throws -> AgentRunState {
+    return try FfiConverterTypeAgentRunState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAgentRunState_lower(_ value: AgentRunState) -> RustBuffer {
+    return FfiConverterTypeAgentRunState.lower(value)
+}
+
 
 
 

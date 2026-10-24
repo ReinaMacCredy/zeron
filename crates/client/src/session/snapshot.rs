@@ -350,4 +350,5 @@ pub struct ComposerState {
     pub review: Option<super::ReviewChip>,
     pub staged_comments: Vec<zeron_proto::comments::ReviewComment>,
     pub review_revision: u64,
+    pub background_shells: usize,
 }
