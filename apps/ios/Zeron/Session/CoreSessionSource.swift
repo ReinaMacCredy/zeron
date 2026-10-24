@@ -161,6 +161,8 @@ final class CoreSessionSource: SessionSource {
             return SessionChrome.QueuedItem(id: q.id, text: q.visibleText, thumbnail: nil, gate: gate, from: q.fromLabel, action: q.primaryAction, image: q.image)
         }
         next.error = c.queueError
+        let roster = handle.backgroundRoster(nowMs: nowMs())
+        next.agents = roster.summary.map { SessionChrome.Agents(summary: $0, state: roster.state) }
         if next != chrome {
             chrome = next
             onChange?()
@@ -652,7 +654,7 @@ final class CoreSessionSource: SessionSource {
     }
 
     func agentsAction(open: @escaping (String) -> Void) -> UIAction? {
-        let roster = handle.backgroundRoster(nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+        let roster = handle.backgroundRoster(nowMs: nowMs())
         guard let summary = roster.summary else { return nil }
         return UIAction(title: roster.title, subtitle: summary, image: UIImage(systemName: "person.2")) { [weak self] _ in
             guard let self else { return }
@@ -660,6 +662,15 @@ final class CoreSessionSource: SessionSource {
                 self?.findingsSheet(taskId: taskId)
             }).wrapped)
         }
+    }
+
+    func agentsCard(open: @escaping (String) -> Void) -> AgentsCard? {
+        AgentsCard(
+            handle: handle,
+            open: open,
+            findings: { [weak self] taskId in self?.findingsSheet(taskId: taskId).map { ReviewUI.wrap($0) } },
+            present: { [weak self] vc in self?.onPresent?(vc) }
+        )
     }
 
     func reviewAction() -> UIAction? {

@@ -15,6 +15,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private let pill = StatusPill()
     private let needsYou = NeedsYouPill()
     private var needsYouRow: UIStackView!
+    private let agentsPill = AgentsPill()
+    private var agentsRow: UIStackView!
+    private var agentsShown = false
+    private var agentsCard: AgentsCard?
+    private let agentsScrim = UIControl()
     private var pendingToken: AnyObject?
     private let still = ComputerStillPreview()
     /// A Cloud chat out of credits says so once, above the composer.
@@ -238,12 +243,19 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         needsYouRow.axis = .horizontal
         needsYouRow.isHidden = true
         needsYou.addAction(UIAction { [weak self] _ in self?.openNeedsYou() }, for: .touchUpInside)
+        agentsRow = UIStackView(arrangedSubviews: [agentsPill, UIView()])
+        agentsRow.axis = .horizontal
+        agentsRow.isHidden = true
+        agentsPill.addAction(UIAction { [weak self] _ in self?.toggleAgentsCard() }, for: .touchUpInside)
+        agentsScrim.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        agentsScrim.accessibilityIdentifier = "agents-card-scrim"
+        agentsScrim.addAction(UIAction { [weak self] _ in self?.closeAgentsCard(animated: true) }, for: .touchDown)
         creditsNotice.onAddCredits = { [weak self] in
             guard let self else { return }
             CloudRoutes.openBilling(app: self.app, from: self)
         }
         creditsNotice.isHidden = true
-        for v in [creditsNotice, needsYouRow!, pillRow, queue, questions, composer] { bottom.addArrangedSubview(v) }
+        for v in [creditsNotice, needsYouRow!, agentsRow!, pillRow, queue, questions, composer] { bottom.addArrangedSubview(v) }
         questions.isHidden = true
         queue.isHidden = true
         // Hidden panels start dematerialized so their first appearance grows in.
@@ -410,6 +422,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         // Leaving mid-edit: give the queued row back and the draft its place.
         if editingQueueId != nil { endEdit(commit: nil) }
         saveDraft()
+        closeAgentsCard(animated: false)
         if isMovingFromParent { setAccessory(visible: true) }
     }
 
@@ -887,6 +900,77 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         } else {
             changes()
         }
+        syncAgents(c.agents, animated: animated)
+    }
+
+    private func syncAgents(_ agents: SessionChrome.Agents?, animated: Bool) {
+        if let agents { agentsPill.configure(agents) } else { closeAgentsCard(animated: animated) }
+        let show = agents != nil
+        guard agentsShown != show else { return }
+        agentsShown = show
+        let motion = animated && view.window != nil
+        if show {
+            agentsRow.isHidden = false
+            guard motion else {
+                agentsPill.alpha = 1
+                agentsPill.transform = .identity
+                return
+            }
+            agentsPill.alpha = 0
+            agentsPill.transform = UIAccessibility.isReduceMotionEnabled ? .identity : CGAffineTransform(translationX: 0, y: 4)
+            UIView.animate(withDuration: 0.15, delay: 0, options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]) {
+                self.agentsPill.alpha = 1
+                self.agentsPill.transform = .identity
+            }
+        } else {
+            guard motion else { return agentsRow.isHidden = true }
+            UIView.animate(withDuration: 0.1, delay: 0, options: [.curveEaseIn, .beginFromCurrentState], animations: {
+                self.agentsPill.alpha = 0
+            }, completion: { _ in
+                if !self.agentsShown { self.agentsRow.isHidden = true }
+            })
+        }
+    }
+
+    private func toggleAgentsCard() {
+        if agentsCard != nil { return closeAgentsCard(animated: true) }
+        guard let card = source.agentsCard(open: { [weak self] id in self?.router?.openSession(id) }) else { return }
+        card.onClose = { [weak self] in self?.closeAgentsCard(animated: true) }
+        agentsCard = card
+        agentsPill.isSelected = true
+        agentsScrim.frame = view.bounds
+        view.addSubview(agentsScrim)
+        card.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(card)
+        NSLayoutConstraint.activate([
+            card.bottomAnchor.constraint(equalTo: agentsRow.topAnchor, constant: -8),
+            card.leadingAnchor.constraint(equalTo: bottom.leadingAnchor),
+            card.trailingAnchor.constraint(equalTo: bottom.trailingAnchor),
+            card.topAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+        ])
+        view.layoutIfNeeded()
+        UIAccessibility.post(notification: .layoutChanged, argument: card)
+        card.alpha = 0
+        UIView.animate(withDuration: 0.16, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) { card.alpha = 1 }
+        guard !UIAccessibility.isReduceMotionEnabled else { return }
+        // Desktop SIDECAR_POPOVER_SLIDE: 220ms cubic-bezier(.32,.72,0,1).
+        card.transform = CGAffineTransform(translationX: 0, y: 10)
+        UIViewPropertyAnimator(duration: 0.22, controlPoint1: CGPoint(x: 0.32, y: 0.72), controlPoint2: CGPoint(x: 0, y: 1)) {
+            card.transform = .identity
+        }.startAnimation()
+    }
+
+    private func closeAgentsCard(animated: Bool) {
+        guard let card = agentsCard else { return }
+        agentsCard = nil
+        agentsPill.isSelected = false
+        agentsScrim.removeFromSuperview()
+        card.isUserInteractionEnabled = false
+        guard animated, view.window != nil else { return card.removeFromSuperview() }
+        UIView.animate(withDuration: 0.1, delay: 0, options: [.curveEaseIn, .beginFromCurrentState], animations: {
+            card.alpha = 0
+            if !UIAccessibility.isReduceMotionEnabled { card.transform = CGAffineTransform(translationX: 0, y: 4) }
+        }, completion: { _ in card.removeFromSuperview() })
     }
 
     private func syncNeedsYou(animated: Bool) {

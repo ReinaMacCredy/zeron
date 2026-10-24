@@ -62,27 +62,9 @@ final class AgentsSheetViewController: UITableViewController {
     }
 
     private func stop(_ taskId: String, delegated: Bool) {
-        Task { @MainActor [weak self, handle] in
-            do {
-                try await handle.stopBackgroundRun(taskId: taskId, delegated: delegated)
-                self?.reload()
-            } catch {
-                let alert = UIAlertController(title: nil, message: "\(error)", preferredStyle: .alert)
-                alert.addAction(UIAlertAction(title: "OK", style: .default))
-                self?.present(alert, animated: true)
-            }
+        BackgroundRuns.stop(handle, taskId: taskId, delegated: delegated, present: { [weak self] in self?.present($0, animated: true) }) { [weak self] in
+            self?.reload()
         }
-    }
-
-    private func stopButton(id: String, action: @escaping () -> Void) -> UIButton {
-        var config = UIButton.Configuration.gray()
-        config.title = "Stop"
-        config.buttonSize = .small
-        config.cornerStyle = .capsule
-        let button = UIButton(configuration: config, primaryAction: UIAction { _ in action() })
-        button.accessibilityIdentifier = id
-        button.sizeToFit()
-        return button
     }
 
     override func numberOfSections(in tableView: UITableView) -> Int { sections.count }
@@ -110,7 +92,7 @@ final class AgentsSheetViewController: UITableViewController {
             content.image = UIImage(systemName: run.delegated ? "arrow.triangle.branch" : "person.2")
             cell.accessibilityIdentifier = "agents-row-\(indexPath.row)"
             if run.canStop {
-                cell.accessoryView = stopButton(id: "agents-stop-\(indexPath.row)") { [weak self] in
+                cell.accessoryView = BackgroundRuns.stopButton(id: "agents-stop-\(indexPath.row)") { [weak self] in
                     self?.stop(run.taskId, delegated: run.delegated)
                 }
             } else if run.delegated || run.review != nil {
@@ -133,13 +115,14 @@ final class AgentsSheetViewController: UITableViewController {
         tableView.deselectRow(at: indexPath, animated: true)
         switch sections[indexPath.section] {
         case .agents:
-            let run = roster.agents[indexPath.row]
-            if run.review != nil, let sheet = findings(run.taskId) {
+            switch BackgroundRuns.target(roster.agents[indexPath.row], findings: findings) {
+            case let .findings(sheet)?:
                 navigationController?.pushViewController(sheet, animated: true)
-                return
+            case let .session(id)?:
+                dismiss(animated: true) { [open] in open(id) }
+            case nil:
+                break
             }
-            guard run.delegated else { return }
-            dismiss(animated: true) { [open] in open(run.taskId) }
         case .shells:
             let shell = roster.shells[indexPath.row]
             navigationController?.pushViewController(
@@ -222,4 +205,40 @@ final class ShellOutputViewController: UIViewController {
     }
 }
 
-private func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
+enum BackgroundRuns {
+    enum Target {
+        case findings(UIViewController)
+        case session(String)
+    }
+
+    static func target(_ run: AgentRunRow, findings: (String) -> UIViewController?) -> Target? {
+        if run.review != nil, let sheet = findings(run.taskId) { return .findings(sheet) }
+        return run.delegated ? .session(run.taskId) : nil
+    }
+
+    static func stop(_ handle: SessionHandle, taskId: String, delegated: Bool, present: @escaping (UIViewController) -> Void, then reload: @escaping () -> Void) {
+        Task { @MainActor in
+            do {
+                try await handle.stopBackgroundRun(taskId: taskId, delegated: delegated)
+                reload()
+            } catch {
+                let alert = UIAlertController(title: nil, message: "\(error)", preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: "OK", style: .default))
+                present(alert)
+            }
+        }
+    }
+
+    static func stopButton(id: String, action: @escaping () -> Void) -> UIButton {
+        var config = UIButton.Configuration.gray()
+        config.title = "Stop"
+        config.buttonSize = .small
+        config.cornerStyle = .capsule
+        let button = UIButton(configuration: config, primaryAction: UIAction { _ in action() })
+        button.accessibilityIdentifier = id
+        button.sizeToFit()
+        return button
+    }
+}
+
+func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
