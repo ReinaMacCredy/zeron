@@ -346,6 +346,7 @@ final class AskAnythingAccessory: UIView {
     private let plate = UIView()
     private let needsChip = NeedsYouChip()
     private var summaryEnd: NSLayoutConstraint!
+    private var chipEnd: NSLayoutConstraint!
     var onNeedsYou: (() -> Void)?
     let voice = VoiceAccessoryView()
     private var voiceShown = false
@@ -386,6 +387,7 @@ final class AskAnythingAccessory: UIView {
         addSubview(needsChip)
         addSubview(voice)
         summaryEnd = summary.trailingAnchor.constraint(equalTo: newSession.trailingAnchor, constant: -16)
+        chipEnd = needsChip.trailingAnchor.constraint(equalTo: newSession.trailingAnchor, constant: -8)
         voice.isHidden = true
         summary.lineBreakMode = .byTruncatingTail
         NSLayoutConstraint.activate([
@@ -401,11 +403,10 @@ final class AskAnythingAccessory: UIView {
             label.leadingAnchor.constraint(equalTo: plate.trailingAnchor, constant: 11),
             label.centerYAnchor.constraint(equalTo: newSession.centerYAnchor),
             summaryEnd,
-            needsChip.trailingAnchor.constraint(equalTo: newSession.trailingAnchor, constant: -8),
+            chipEnd,
             needsChip.centerYAnchor.constraint(equalTo: newSession.centerYAnchor),
             summary.centerYAnchor.constraint(equalTo: newSession.centerYAnchor),
             cells.trailingAnchor.constraint(equalTo: summary.leadingAnchor, constant: -7),
-            cells.leadingAnchor.constraint(greaterThanOrEqualTo: plate.trailingAnchor, constant: 11),
             cells.centerYAnchor.constraint(equalTo: newSession.centerYAnchor),
             cells.widthAnchor.constraint(equalToConstant: 12),
             cells.heightAnchor.constraint(equalToConstant: 12),
@@ -417,6 +418,10 @@ final class AskAnythingAccessory: UIView {
         let labelEnd = label.trailingAnchor.constraint(lessThanOrEqualTo: cells.leadingAnchor, constant: -10)
         labelEnd.priority = .defaultHigh
         labelEnd.isActive = true
+        // Not required: on the narrower inline capsule it outgrew the width and pushed voice past the edge.
+        let cellsStart = cells.leadingAnchor.constraint(greaterThanOrEqualTo: plate.trailingAnchor, constant: 11)
+        cellsStart.priority = .defaultHigh
+        cellsStart.isActive = true
         // No voice: "New session" spans the capsule.
         restConstraints = [newSession.trailingAnchor.constraint(equalTo: trailingAnchor)]
         // Idle voice: a 34pt waveform at the trailing end.
@@ -478,7 +483,11 @@ final class AskAnythingAccessory: UIView {
         label.alpha = !inline && !voiceLive && title + row <= room ? 1 : 0
         let text = showWorking ? working : ""
         if summary.text != text { summary.text = text }
-        summaryEnd.constant = needs ? -(8 + chip) : -16
+        let cluster = (showWorking ? workingRow - 11 : 0) + (needs ? needsChip.intrinsicContentSize.width + (showWorking ? 8 : 0) : 0)
+        let span = newSession.bounds.width - 41 - 11 - (needs ? 8 : 16)
+        let shift = label.alpha == 0 ? max(0, (span - cluster) / 2) : 0
+        chipEnd.constant = -8 - shift
+        summaryEnd.constant = (needs ? -(8 + chip) : -16) - shift
         cells.isHidden = !showWorking || voiceLive
         cells.kind = .spinner
     }
