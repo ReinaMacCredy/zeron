@@ -12,6 +12,7 @@ use crate::theme::Theme;
 
 const BAR_SCALE: f32 = 6.0;
 const GROUP_ROWS: usize = 5;
+const STALE_PENDING_MS: i64 = 120_000;
 
 #[derive(Default)]
 pub(super) struct CardUi {
@@ -30,6 +31,8 @@ pub enum ClaudeCardAction {
     Status,
     Permissions,
     Help,
+    Hooks,
+    Retry { message_id: String, command: String },
 }
 
 #[derive(Debug, PartialEq)]
@@ -224,6 +227,7 @@ fn button(
         .id(id)
         .debug_selector(move || selector)
         .role(gpui::Role::Button)
+        .flex_none()
         .px(px(10.0))
         .h(px(26.0))
         .flex()
@@ -338,12 +342,30 @@ impl Transcript {
             })
             .when_some(raw, |el, raw| {
                 let raw_row = row.clone();
+                let copy_row = row.clone();
+                let copied = self.card_copied.as_ref() == Some(row);
                 el.child(
-                    icon_button(format!("{row}-copy"), icons::COPY, "Copy as Markdown").on_click(
-                        cx.listener(move |_, _, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(raw.clone()));
-                        }),
-                    ),
+                    icon_button(
+                        format!("{row}-copy"),
+                        if copied { icons::CHECK } else { icons::COPY },
+                        if copied { "Copied" } else { "Copy as Markdown" },
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(raw.clone()));
+                        this.card_copied = Some(copy_row.clone());
+                        this.card_copied_clear = Some(cx.spawn(async move |this, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(1200))
+                                .await;
+                            this.update(cx, |this, cx| {
+                                this.card_copied = None;
+                                this.card_copied_clear = None;
+                                cx.notify();
+                            })
+                            .ok();
+                        }));
+                        cx.notify();
+                    })),
                 )
                 .child(
                     icon_button(format!("{row}-raw"), icons::FILE_CODE, "Raw").on_click(
@@ -412,6 +434,18 @@ impl Transcript {
         if let Some(name) = terminal_only(&card) {
             return self.render_notice(row, name, theme, cx);
         }
+        if card.pending {
+            let started = card.started_at.unwrap_or_else(now_ms);
+            if now_ms() - started < STALE_PENDING_MS {
+                return self.render_pending(row, &card.command, started, theme, cx);
+            }
+            let stale = CommandCard {
+                error: Some("No answer came back from Claude Code.".into()),
+                pending: false,
+                ..(*card).clone()
+            };
+            return self.render_generic(row, &stale, theme, cx);
+        }
         let body = match (card.error.as_deref(), card.command.as_str()) {
             (Some(_), _) => None,
             (None, "/context") => self.render_context(row, &card, theme, cx),
@@ -459,17 +493,133 @@ impl Transcript {
                     })
                     .children(text.lines().map(|l| div().child(l.to_string()))),
             )
-            .child(
-                div()
+            .child(match card.error {
+                Some(_) => {
+                    let retry = ClaudeCardAction::Retry {
+                        message_id: row.to_string(),
+                        command: card.command.clone(),
+                    };
+                    self.footer(
+                        vec![
+                            button(format!("{row}-retry").into(), "Retry", true, theme)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.card_action(retry.clone(), cx)
+                                }))
+                                .into_any_element(),
+                        ],
+                        theme,
+                    )
+                }
+                None => div()
                     .px(px(12.0))
                     .py(px(8.0))
                     .border_t_1()
                     .border_color(theme.border)
                     .text_size(text_size(11.5))
                     .text_color(theme.text_faint)
-                    .child("Ran locally in Claude Code · no tokens used"),
+                    .child("Ran locally in Claude Code · no tokens used")
+                    .into_any_element(),
+            })
+            .into_any_element()
+    }
+
+    fn render_pending(
+        &mut self,
+        row: &SharedString,
+        command: &str,
+        started: i64,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self.card_tick.is_none() {
+            self.card_tick = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.card_tick = None;
+                    cx.notify();
+                })
+                .ok();
+            }));
+        }
+        let elapsed = ((now_ms() - started).max(0) / 1000) as u64;
+        let spinner = crate::loaders::mini_glyph_spinner(
+            format!("claude-card-spin-{row}"),
+            3.0,
+            theme.glyph,
+            cx.entity_id(),
+            cx,
+        );
+        self.card_shell(row, theme)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .px(px(12.0))
+                    .py(px(10.0))
+                    .child(div().flex_none().child(spinner))
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(theme.font_mono.clone())
+                            .child(command.to_string()),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(text_size(12.5))
+                            .text_color(theme.text_muted)
+                            .child("Running in Claude Code…"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(text_size(12.0))
+                            .text_color(theme.text_faint)
+                            .child(format!("{elapsed}s")),
+                    ),
             )
             .into_any_element()
+    }
+
+    fn export_transcript(&mut self, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        if self.chat_id.is_none() || state.selected_chat != self.chat_id {
+            return;
+        }
+        let title = state
+            .selected_chat_row()
+            .and_then(|chat| chat.title.clone())
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| "Chat".into());
+        let markdown = transcript_markdown(&title, &state.transcript);
+        let name: String = title
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == ' ' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let downloads = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .map(|home| home.join("Downloads"))
+            .unwrap_or_else(std::env::temp_dir);
+        let chosen = cx.prompt_for_new_path(&downloads, Some(&format!("{}.md", name.trim())));
+        cx.spawn(async move |_, _| {
+            if let Ok(Ok(Some(path))) = chosen.await
+                && let Err(error) = std::fs::write(&path, markdown.as_bytes())
+            {
+                tracing::warn!(%error, path = %path.display(), "transcript export not saved");
+            }
+        })
+        .detach();
     }
 
     fn render_context(
@@ -1145,9 +1295,11 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let action = match name {
-            "status" => Some(("Open Status", ClaudeCardAction::Status)),
-            "permissions" => Some(("Open permission mode", ClaudeCardAction::Permissions)),
-            "help" => Some(("Open Docs", ClaudeCardAction::Help)),
+            "status" => Some(("Open Status", Some(ClaudeCardAction::Status))),
+            "permissions" => Some(("Open permission mode", Some(ClaudeCardAction::Permissions))),
+            "help" => Some(("Open Docs", Some(ClaudeCardAction::Help))),
+            "hooks" => Some(("Open settings.json", Some(ClaudeCardAction::Hooks))),
+            "export" => Some(("Export chat…", None)),
             _ => None,
         };
         div()
@@ -1188,12 +1340,46 @@ impl Transcript {
             .when_some(action, |el, (label, action)| {
                 el.child(
                     button(format!("{row}-notice").into(), label, false, theme).on_click(
-                        cx.listener(move |this, _, _, cx| this.card_action(action.clone(), cx)),
+                        cx.listener(move |this, _, _, cx| match &action {
+                            Some(action) => this.card_action(action.clone(), cx),
+                            None => this.export_transcript(cx),
+                        }),
                     ),
                 )
             })
             .into_any_element()
     }
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+fn transcript_markdown(title: &str, entries: &[zeron_doc::SessionMessageEntry]) -> String {
+    let mut out = format!("# {title}\n");
+    for entry in entries {
+        let text: Vec<&str> = entry
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                zeron_doc::MessagePart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let Some(first) = text.first() else {
+            continue;
+        };
+        match entry.role {
+            zeron_doc::MessageRole::User => {
+                out.push_str(&format!("\n## You\n\n{}\n", text.concat()))
+            }
+            zeron_doc::MessageRole::Assistant => {
+                out.push_str(&format!("\n## Assistant\n\n{}\n", text.concat()))
+            }
+            zeron_doc::MessageRole::System => out.push_str(&format!("\n_{first}_\n")),
+        }
+    }
+    out
 }
 
 fn terminal_only(card: &CommandCard) -> Option<&str> {
@@ -1234,6 +1420,38 @@ mod tests {
             ("CLAUDE.md · User".to_string(), 3_500)
         );
         assert!(parse_context("Not enough messages to compact.").is_none());
+    }
+
+    #[test]
+    fn export_keeps_turns_and_notes_in_order() {
+        let entry = |role, text: &str| zeron_doc::SessionMessageEntry {
+            id: text.into(),
+            role,
+            parts: vec![zeron_doc::MessagePart::Text {
+                id: "t0".into(),
+                text: text.into(),
+            }],
+            created_at: 0,
+            device_id: "d".into(),
+            status: None,
+            continuation_of: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+            duration_ms: None,
+        };
+        let md = transcript_markdown(
+            "Lab",
+            &[
+                entry(zeron_doc::MessageRole::User, "hi"),
+                entry(zeron_doc::MessageRole::Assistant, "hello"),
+                entry(zeron_doc::MessageRole::System, "Claude Code /usage"),
+            ],
+        );
+        assert_eq!(
+            md,
+            "# Lab\n\n## You\n\nhi\n\n## Assistant\n\nhello\n\n_Claude Code /usage_\n"
+        );
     }
 
     #[test]

@@ -5602,6 +5602,13 @@ impl Shell {
                     }
                     ClaudeCardAction::OpenUsage => self.open_usage(cx),
                     ClaudeCardAction::Help => self.open_docs(None, cx),
+                    ClaudeCardAction::Hooks => self.open_claude_hooks(chat_id, cx),
+                    ClaudeCardAction::Retry {
+                        message_id,
+                        command,
+                    } => composer.update(cx, |composer, cx| {
+                        composer.retry_claude_card(chat_id, message_id.clone(), command, cx)
+                    }),
                     _ if !bound => {}
                     ClaudeCardAction::Compact => composer
                         .update(cx, |composer, cx| composer.request_compaction(None, cx)),
@@ -5867,6 +5874,40 @@ impl Shell {
             this.update(cx, |shell, cx| match path {
                 Some(path) => shell.open_tool_file(&chat_id, &path, cx),
                 None => shell.note_composer_failure(format!("No SKILL.md found for {name}"), cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn open_claude_hooks(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let Some(engine) = state.engine().cloned() else {
+            return;
+        };
+        let mut params = serde_json::json!({ "chatId": chat_id });
+        if let Some(chat) = state.chats.iter().find(|chat| chat.id == chat_id)
+            && state.local_device_id.as_deref() != Some(chat.device_id.as_str())
+        {
+            params["targetDeviceId"] = chat.device_id.clone().into();
+        }
+        let chat_id = chat_id.to_owned();
+        cx.spawn(async move |this, cx| {
+            let snapshot = engine
+                .client()
+                .call_as::<zeron_proto::claude_config::ClaudeConfigSnapshot>(
+                    methods::READ_CLAUDE_CONFIG,
+                    params,
+                )
+                .await;
+            this.update(cx, |shell, cx| match snapshot {
+                Ok(snapshot) if !snapshot.user_settings.is_empty() => {
+                    shell.open_tool_file(&chat_id, &snapshot.user_settings, cx)
+                }
+                Ok(_) => {
+                    shell.note_composer_failure("Claude Code has no settings file here".into(), cx)
+                }
+                Err(error) => shell.note_composer_failure(error.to_string(), cx),
             })
             .ok();
         })

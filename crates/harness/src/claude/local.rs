@@ -75,6 +75,7 @@ pub(super) fn read_config(
     };
     ClaudeConfigSnapshot {
         values: sources.values(),
+        user_settings: files[0].to_string_lossy().into_owned(),
         files: files
             .iter()
             .filter(|path| path.is_file())

@@ -83,7 +83,7 @@ impl<T> Load<T> {
 
 pub(super) struct ConfigPanel {
     chat_id: Option<String>,
-    note_chat: Option<String>,
+    note_chat: Option<(String, Option<String>)>,
     session_id: Option<String>,
     params: serde_json::Value,
     tab: Tab,
@@ -104,6 +104,7 @@ pub(super) struct ConfigPanel {
     changes: Vec<(&'static str, String)>,
     status: Load<LocalCommandOutput>,
     stats: Option<Load<UsageSummary>>,
+    stats_started: Instant,
     opened_at: Instant,
     closing: Option<Instant>,
     focus: FocusHandle,
@@ -218,10 +219,12 @@ impl Composer {
         })];
         let mut panel = ConfigPanel {
             chat_id: chat.as_ref().map(|c| c.id.clone()),
-            note_chat: chat
-                .as_ref()
-                .filter(|c| Some(&c.device_id) == local.as_ref())
-                .map(|c| c.id.clone()),
+            note_chat: chat.as_ref().map(|c| {
+                (
+                    c.id.clone(),
+                    (Some(&c.device_id) != local.as_ref()).then(|| c.device_id.clone()),
+                )
+            }),
             session_id: chat.as_ref().and_then(|c| c.harness_session_id.clone()),
             params: params.clone(),
             tab: Tab::Config,
@@ -242,6 +245,7 @@ impl Composer {
             changes: Vec::new(),
             status: Load::Loading,
             stats: None,
+            stats_started: crate::motion::now(),
             opened_at: crate::motion::now(),
             closing: None,
             focus: cx.focus_handle(),
@@ -344,18 +348,19 @@ impl Composer {
         panel.editing = None;
         let summary = summary_text(&panel.changes);
         let note_chat = panel.note_chat.clone();
-        if let (Some(text), Some(chat_id)) = (summary, note_chat)
+        if let (Some(text), Some((chat_id, host))) = (summary, note_chat)
             && let Some(engine) = self.state.read(cx).engine().cloned()
         {
+            let mut params = serde_json::json!({
+                "chatId": chat_id,
+                "messageId": uuid::Uuid::new_v4().to_string(),
+                "text": text,
+            });
+            if let Some(host) = host {
+                params["targetDeviceId"] = host.into();
+            }
             cx.background_spawn(async move {
-                if let Err(error) = engine
-                    .client()
-                    .call(
-                        methods::MUTATE,
-                        serde_json::json!({ "op": "addChatNote", "chatId": chat_id, "text": text }),
-                    )
-                    .await
-                {
+                if let Err(error) = engine.client().call(methods::WRITE_CHAT_NOTE, params).await {
                     tracing::warn!(%error, "Claude Code settings summary was not written");
                 }
             })
@@ -688,6 +693,7 @@ impl Composer {
         panel.focus_pending = true;
         if tab == Tab::Stats && panel.stats.is_none() {
             panel.stats = Some(Load::Loading);
+            panel.stats_started = crate::motion::now();
             if let Some(engine) = self.state.read(cx).engine().cloned() {
                 let mut params = serde_json::json!({ "days": STATS_DAYS });
                 if let Some(target) = panel.params.get("targetDeviceId") {
@@ -830,7 +836,12 @@ impl Composer {
             self.config_panel = None;
             return None;
         }
-        if motion.animating {
+        let waiting = match panel.tab {
+            Tab::Config => matches!(panel.values, Load::Loading),
+            Tab::Status | Tab::Usage => matches!(panel.status, Load::Loading),
+            Tab::Stats => matches!(panel.stats, None | Some(Load::Loading)),
+        };
+        if motion.animating || waiting {
             window.request_animation_frame();
         }
         if motion.live && panel.focus_pending {
@@ -1094,7 +1105,12 @@ impl Composer {
                     .child(format!("{} shown", rows.len())),
             );
         let list: AnyElement = match &panel.values {
-            Load::Loading => empty_note(theme, "Reading Claude Code's settings…"),
+            Load::Loading => waiting_note(
+                theme,
+                "Reading Claude Code's settings…",
+                panel.opened_at,
+                cx,
+            ),
             Load::Failed(error) => empty_note(theme, &format!("Could not read settings: {error}")),
             Load::Ready(_) if rows.is_empty() => {
                 empty_note(theme, &format!("No settings match “{query}”"))
@@ -1464,6 +1480,9 @@ impl Composer {
             .min_h_0()
             .overflow_y_scroll()
             .p(px(6.0))
+            .when(matches!(panel.status, Load::Loading), |el| {
+                el.child(waiting_note(theme, "Asking Claude Code…", panel.opened_at, cx))
+            })
             .children(rows.into_iter().enumerate().map(|(ix, (k, v, chip))| {
                 kv_row(theme, ix > 0, k, v, chip.then_some("= chip"))
             }))
@@ -1504,7 +1523,9 @@ impl Composer {
                 })),
         );
         let body: AnyElement = match &panel.status {
-            Load::Loading => empty_note(theme, "Asking Claude Code for /usage…"),
+            Load::Loading => {
+                waiting_note(theme, "Asking Claude Code for /usage…", panel.opened_at, cx)
+            }
             Load::Failed(error) => empty_note(theme, error),
             Load::Ready(out) => {
                 let report = parse_usage(&out.text);
@@ -1551,7 +1572,12 @@ impl Composer {
     fn stats_pane(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let panel = self.config_panel.as_ref().unwrap();
         let body: AnyElement = match &panel.stats {
-            None | Some(Load::Loading) => empty_note(theme, "Counting Claude Code sessions…"),
+            None | Some(Load::Loading) => waiting_note(
+                theme,
+                "Counting Claude Code sessions…",
+                panel.stats_started,
+                cx,
+            ),
             Some(Load::Failed(error)) => empty_note(theme, error),
             Some(Load::Ready(summary)) => match stats_of(summary) {
                 None => empty_note(
@@ -1794,6 +1820,30 @@ fn kbd(theme: &Theme, label: &str) -> gpui::Div {
         .text_size(crate::typography::ui_rems(10.5))
         .text_color(theme.text_muted)
         .child(SharedString::from(label.to_string()))
+}
+
+fn waiting_note<V: 'static>(
+    theme: &Theme,
+    text: &str,
+    since: Instant,
+    cx: &mut Context<V>,
+) -> AnyElement {
+    let view = cx.entity_id();
+    let spinner =
+        crate::loaders::mini_glyph_spinner("claude-config-waiting", 3.0, theme.glyph, view, cx);
+    div()
+        .p(px(16.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .gap(px(8.0))
+        .text_size(crate::typography::ui_rems(12.5))
+        .text_color(theme.text_faint)
+        .child(spinner)
+        .child(SharedString::from(text.to_string()))
+        .child(format!("{}s", since.elapsed().as_secs()))
+        .into_any_element()
 }
 
 fn empty_note(theme: &Theme, text: &str) -> AnyElement {

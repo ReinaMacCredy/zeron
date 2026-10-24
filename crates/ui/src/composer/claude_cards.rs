@@ -1,4 +1,4 @@
-use gpui::{App, AppContext, Context};
+use gpui::{App, Context};
 use zeron_proto::HarnessId;
 use zeron_proto::app_commands::{ClaudeCardCommand, claude_card_command};
 use zeron_proto::claude_config::{COMMAND_NOTE_PREFIX, CommandCard, LocalCommandOutput};
@@ -6,12 +6,116 @@ use zeron_proto::invocation::Invocation;
 use zeron_rpc::methods;
 
 use super::Composer;
+use crate::state::EngineHandle;
 
 const NO_SESSION: &str =
     "No turn has run in this chat yet, so these numbers are for a new session.";
 const LOST_SESSION: &str =
     "The chat's Claude session was not found, so these numbers are for a new session.";
 const FORKED: &str = "Read from a copy of this chat's saved session; Zeron's own tool server and per-run settings are not counted.";
+
+#[derive(Clone, Debug)]
+struct CardTarget {
+    chat_id: String,
+    host: Option<String>,
+    has_session: bool,
+}
+
+impl CardTarget {
+    fn params(&self) -> serde_json::Value {
+        let mut params = serde_json::json!({ "chatId": self.chat_id });
+        if let Some(host) = &self.host {
+            params["targetDeviceId"] = host.clone().into();
+        }
+        params
+    }
+}
+
+fn side_command(name: &str) -> Option<(&'static str, bool, bool)> {
+    match name.trim_start_matches('/') {
+        "context" => Some(("context", true, true)),
+        "usage" | "cost" => Some(("usage", false, false)),
+        "mcp" => Some(("mcp", true, false)),
+        _ => None,
+    }
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+async fn write_note(
+    engine: &EngineHandle,
+    target: &CardTarget,
+    message_id: &str,
+    headline: Option<String>,
+    card: &CommandCard,
+) -> Result<(), String> {
+    let hint = serde_json::to_string(&card.clone().capped()).map_err(|e| e.to_string())?;
+    let mut params = target.params();
+    params["messageId"] = message_id.into();
+    params["hint"] = hint.into();
+    if let Some(text) = headline {
+        params["text"] = text.into();
+    }
+    engine
+        .client()
+        .call(methods::WRITE_CHAT_NOTE, params)
+        .await
+        .map(drop)
+        .map_err(|e| e.to_string())
+}
+
+async fn side_run(
+    engine: &EngineHandle,
+    target: &CardTarget,
+    name: &'static str,
+    connect_mcp: bool,
+    live: bool,
+) -> CommandCard {
+    let call = |live_session: bool| {
+        let mut params = target.params();
+        params["command"] = format!("/{name}").into();
+        params["connectMcp"] = connect_mcp.into();
+        params["liveSession"] = live_session.into();
+        async move {
+            engine
+                .client()
+                .call_as::<LocalCommandOutput>(methods::RUN_CLAUDE_LOCAL_COMMAND, params)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    };
+    let live_session = live && target.has_session;
+    let mut note = (live && !target.has_session).then_some(NO_SESSION);
+    let mut reply = call(live_session).await;
+    if live_session {
+        note = Some(FORKED);
+        if reply
+            .as_ref()
+            .is_err_and(|e| e.contains("No conversation found"))
+        {
+            reply = call(false).await;
+            note = Some(LOST_SESSION);
+        }
+    }
+    match reply {
+        Ok(out) => CommandCard {
+            command: format!("/{name}"),
+            mcp_servers: (name == "mcp")
+                .then(|| out.init.as_ref()?.get("mcp_servers").cloned())
+                .flatten(),
+            text: out.text,
+            note: note.map(str::to_owned),
+            ..Default::default()
+        },
+        Err(error) => CommandCard {
+            command: format!("/{name}"),
+            error: Some(error),
+            ..Default::default()
+        },
+    }
+}
 
 impl Composer {
     pub(super) fn claude_card_for(&self, plain: &str, cx: &App) -> Option<ClaudeCardCommand> {
@@ -28,102 +132,187 @@ impl Composer {
         })
     }
 
+    fn card_target(&self, chat_id: &str, cx: &App) -> Option<CardTarget> {
+        let state = self.state.read(cx);
+        let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
+        Some(CardTarget {
+            chat_id: chat.id.clone(),
+            host: (Some(&chat.device_id) != state.local_device_id.as_ref())
+                .then(|| chat.device_id.clone()),
+            has_session: chat
+                .harness_session_id
+                .as_deref()
+                .is_some_and(|id| !id.is_empty()),
+        })
+    }
+
     pub(super) fn run_claude_card(&mut self, command: ClaudeCardCommand, cx: &mut Context<Self>) {
-        let Some(chat) = self.bound_chat_row(cx).cloned() else {
-            self.set_chat_failure(
-                "Send a first message, then run Claude Code commands.".into(),
-                cx,
-            );
-            return;
-        };
-        if Some(&chat.device_id) != self.state.read(cx).local_device_id.as_ref() {
-            self.set_chat_failure(
-                "Claude Code commands run on the device that hosts this chat.".into(),
-                cx,
-            );
-            return;
+        match self
+            .bound_chat_id(cx)
+            .and_then(|id| self.card_target(&id, cx))
+        {
+            Some(target) => self.dispatch_card(target, command, cx),
+            None if self.bound_chat_id(cx).is_none() => self.create_card_chat(command, cx),
+            None => self.set_chat_failure("This chat is not loaded yet.".into(), cx),
         }
-        let (name, connect_mcp, live) = match command {
-            ClaudeCardCommand::Model(arg) => return self.model_card(chat.id, arg, cx),
+    }
+
+    fn dispatch_card(
+        &mut self,
+        target: CardTarget,
+        command: ClaudeCardCommand,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            ClaudeCardCommand::Model(arg) => self.model_card(target, arg, cx),
             ClaudeCardCommand::TerminalOnly(name) => {
                 let card = CommandCard {
                     command: format!("/{name}"),
                     ..Default::default()
                 };
-                return self.write_card(
-                    chat.id,
-                    format!("{COMMAND_NOTE_PREFIX}{name} · terminal only"),
-                    card,
-                    cx,
-                );
+                let headline = format!("{COMMAND_NOTE_PREFIX}{name} · terminal only");
+                self.write_card(target, Some(headline), card, cx);
             }
-            ClaudeCardCommand::Context => ("context", true, true),
-            ClaudeCardCommand::Usage => ("usage", false, false),
-            ClaudeCardCommand::Mcp => ("mcp", true, false),
+            ClaudeCardCommand::Context => self.side_card(target, "context", None, cx),
+            ClaudeCardCommand::Usage => self.side_card(target, "usage", None, cx),
+            ClaudeCardCommand::Mcp => self.side_card(target, "mcp", None, cx),
+        }
+    }
+
+    fn side_card(
+        &mut self,
+        target: CardTarget,
+        name: &str,
+        retry_of: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((name, connect_mcp, live)) = side_command(name) else {
+            return;
         };
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.set_chat_failure("Engine not connected".into(), cx);
             return;
         };
-        let has_session = chat
-            .harness_session_id
-            .as_deref()
-            .is_some_and(|id| !id.is_empty());
-        let mut params = self.catalog_params(cx);
-        params["command"] = format!("/{name}").into();
-        params["connectMcp"] = connect_mcp.into();
-        params["liveSession"] = (live && has_session).into();
-        let chat_id = chat.id;
-        cx.spawn(async move |this, cx| {
-            let call = |params: serde_json::Value| {
-                let engine = engine.clone();
-                async move {
-                    engine
-                        .client()
-                        .call_as::<LocalCommandOutput>(methods::RUN_CLAUDE_LOCAL_COMMAND, params)
-                        .await
-                        .map_err(|e| e.to_string())
-                }
-            };
-            let mut note = (live && !has_session).then_some(NO_SESSION);
-            let mut reply = call(params.clone()).await;
-            if live && has_session {
-                note = Some(FORKED);
-                if reply
-                    .as_ref()
-                    .is_err_and(|e| e.contains("No conversation found"))
-                {
-                    params["liveSession"] = false.into();
-                    reply = call(params).await;
-                    note = Some(LOST_SESSION);
-                }
+        let pending = CommandCard {
+            command: format!("/{name}"),
+            pending: true,
+            started_at: Some(now_ms()),
+            ..Default::default()
+        };
+        let headline = retry_of
+            .is_none()
+            .then(|| format!("{COMMAND_NOTE_PREFIX}{name}"));
+        let message_id = retry_of.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        cx.spawn(async move |_, _| {
+            if let Err(error) = write_note(&engine, &target, &message_id, headline, &pending).await
+            {
+                tracing::warn!(%error, "Claude Code command placeholder was not written");
+                return;
             }
-            let card = match reply {
-                Ok(out) => CommandCard {
-                    command: format!("/{name}"),
-                    mcp_servers: (name == "mcp")
-                        .then(|| out.init.as_ref()?.get("mcp_servers").cloned())
-                        .flatten(),
-                    text: out.text,
-                    note: note.map(str::to_owned),
-                    ..Default::default()
-                },
-                Err(error) => CommandCard {
-                    command: format!("/{name}"),
-                    error: Some(error),
-                    ..Default::default()
-                },
-            };
+            let card = side_run(&engine, &target, name, connect_mcp, live).await;
+            if let Err(error) = write_note(&engine, &target, &message_id, None, &card).await {
+                tracing::warn!(%error, "Claude Code command card was not written");
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn retry_claude_card(
+        &mut self,
+        chat_id: &str,
+        message_id: String,
+        command: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(target) = self.card_target(chat_id, cx) {
+            self.side_card(target, command, Some(message_id), cx);
+        }
+    }
+
+    fn create_card_chat(&mut self, command: ClaudeCardCommand, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.set_chat_failure("Engine not connected".into(), cx);
+            return;
+        };
+        let resolved = self.pickers.read(cx).resolved(cx);
+        let Some(config) = resolved.chat_config() else {
+            self.set_chat_failure("Pick an agent first.".into(), cx);
+            return;
+        };
+        let (chat_id, space, local, device) = {
+            let state = self.state.read(cx);
+            (
+                state
+                    .active_draft
+                    .clone()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                state.selected_space_row().cloned(),
+                state.local_device_id.clone(),
+                state.effective_device_id(),
+            )
+        };
+        let mut mutate = serde_json::json!({
+            "op": "createChat",
+            "chatId": chat_id,
+            "config": config,
+        });
+        let host = match &space {
+            Some(space) => {
+                mutate["spaceId"] = space.id.clone().into();
+                if let crate::pickers::CheckoutPlan::CurrentCheckout {
+                    branch: Some(branch),
+                } = self.pickers.read(cx).session_checkout_plan(cx)
+                {
+                    mutate["branch"] = branch.into();
+                }
+                space.device_id.clone()
+            }
+            None => {
+                let device = device
+                    .or_else(|| local.clone())
+                    .unwrap_or_else(|| "local".into());
+                let scratch = self
+                    .state
+                    .read(cx)
+                    .device_supports(&device, zeron_proto::capabilities::PROJECTLESS_SCRATCH_V1);
+                mutate["deviceId"] = device.clone().into();
+                mutate["cwd"] = if scratch {
+                    zeron_proto::projectless::scratch_cwd(&chat_id, chrono::Utc::now())
+                } else {
+                    "~".to_string()
+                }
+                .into();
+                device
+            }
+        };
+        let target = CardTarget {
+            chat_id: chat_id.clone(),
+            host: (Some(&host) != local.as_ref()).then_some(host),
+            has_session: false,
+        };
+        self.input.update(cx, |input, cx| input.set_text("", cx));
+        self.sync_draft(cx);
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = engine.client().call(methods::MUTATE, mutate).await {
+                this.update(cx, |this, cx| {
+                    this.set_chat_failure(format!("Couldn't create the chat: {error}").into(), cx)
+                })
+                .ok();
+                return;
+            }
             this.update(cx, |this, cx| {
-                let headline = headline(&card);
-                this.write_card(chat_id, headline, card, cx)
+                this.state.update(cx, |state, cx| {
+                    state.select_chat(Some(chat_id.clone()), cx);
+                    cx.notify();
+                });
+                this.dispatch_card(target, command, cx);
             })
             .ok();
         })
         .detach();
     }
 
-    fn model_card(&mut self, chat_id: String, arg: Option<String>, cx: &mut Context<Self>) {
+    fn model_card(&mut self, target: CardTarget, arg: Option<String>, cx: &mut Context<Self>) {
         let chips = self.pickers.read(cx).chip_choices(cx);
         let mut note = None;
         let mut model = chips.model.clone();
@@ -157,63 +346,32 @@ impl Composer {
             note,
             ..Default::default()
         };
-        let headline = headline(&card);
-        self.write_card(chat_id, headline, card, cx);
+        let headline = format!(
+            "{COMMAND_NOTE_PREFIX}model{}",
+            card.model
+                .as_deref()
+                .map(|m| format!(" · {m}"))
+                .unwrap_or_default()
+        );
+        self.write_card(target, Some(headline), card, cx);
     }
 
     fn write_card(
         &mut self,
-        chat_id: String,
-        text: String,
+        target: CardTarget,
+        headline: Option<String>,
         card: CommandCard,
         cx: &mut Context<Self>,
     ) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let Ok(hint) = serde_json::to_string(&card.capped()) else {
-            return;
-        };
-        cx.background_spawn(async move {
-            if let Err(error) = engine
-                .client()
-                .call(
-                    methods::MUTATE,
-                    serde_json::json!({
-                        "op": "addChatNote",
-                        "chatId": chat_id,
-                        "text": text,
-                        "hint": hint,
-                    }),
-                )
-                .await
-            {
+        let message_id = uuid::Uuid::new_v4().to_string();
+        cx.spawn(async move |_, _| {
+            if let Err(error) = write_note(&engine, &target, &message_id, headline, &card).await {
                 tracing::warn!(%error, "Claude Code command card was not written");
             }
         })
         .detach();
-    }
-}
-
-fn headline(card: &CommandCard) -> String {
-    let detail = match card.command.as_str() {
-        _ if card.error.is_some() => Some("failed".to_string()),
-        "/context" => card
-            .text
-            .lines()
-            .find_map(|l| l.trim().strip_prefix("**Tokens:**"))
-            .map(|t| t.trim().to_string()),
-        "/usage" => card
-            .text
-            .lines()
-            .find(|l| l.contains("% used"))
-            .map(|l| l.trim().to_string()),
-        "/model" => card.model.clone(),
-        _ => None,
-    };
-    let name = card.command.trim_start_matches('/');
-    match detail {
-        Some(detail) => format!("{COMMAND_NOTE_PREFIX}{name} · {detail}"),
-        None => format!("{COMMAND_NOTE_PREFIX}{name}"),
     }
 }
