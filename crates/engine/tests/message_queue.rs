@@ -806,6 +806,11 @@ async fn queued_text_waits_for_a_steerable_turn_even_with_legacy_policy() {
     .await;
     assert_eq!(queue_texts(&core), vec!["second queued"]);
     assert!(!user_messages(&core).iter().any(|m| m == "second queued"));
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "first queued"),
+        "the agent to start the first queued turn",
+    )
+    .await;
     harness.finish.send(()).unwrap();
     wait_for(
         || user_messages(&core).iter().any(|m| m == "second queued"),
@@ -899,6 +904,11 @@ async fn a_steer_now_submit_with_attachments_steers_a_live_steerable_turn() {
     .await;
     assert!(queue_texts(&core).is_empty());
     assert!(core.sessions.turn_in_flight(CHAT), "steering never interrupts");
+    wait_for(
+        || !harness.steers.lock().unwrap().is_empty(),
+        "the agent to receive the steer",
+    )
+    .await;
     let steers = harness.steers.lock().unwrap().clone();
     assert_eq!(
         steers.iter().map(|(_, files)| files.as_slice()).collect::<Vec<_>>(),
