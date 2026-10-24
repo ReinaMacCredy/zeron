@@ -16979,6 +16979,12 @@ impl Shell {
         self.composer_dock
             .borrow_mut()
             .set_hero_anchor(if home_raised { HOME_HERO_ANCHOR } else { 0.5 });
+        let hero_floor = if self.composer.read(cx).config_panel_on_hero(cx) {
+            crate::composer::claude_config::HERO_PANEL_TOP
+        } else {
+            0.0
+        };
+        self.composer_dock.borrow_mut().set_hero_floor(hero_floor);
         let raise_target = if home_raised { 1.0 } else { 0.0 };
         self.home_raise = Some(match self.home_raise.take() {
             Some(tween) if (tween.to - raise_target).abs() > f32::EPSILON => {

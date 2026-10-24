@@ -14692,7 +14692,9 @@ impl Render for Composer {
                 self.staged_chip_count(cx),
             );
         let (card, corner) = self.render_corner(window, cx);
-        let card = self.render_config_panel(window, cx).or(card);
+        let config_card = self.render_config_panel(window, cx);
+        let config_in_flow = config_card.is_some() && self.config_panel_on_hero(cx);
+        let card = config_card.or(card);
         // The checklist tray stacks above the queue (or directly above the
         // composer), one step narrower than what follows it.
         let has_queue = self.reads_selection(cx) && !self.state.read(cx).queue.is_empty();
@@ -14701,14 +14703,19 @@ impl Render for Composer {
         let trays = usize::from(todo.is_some()) + usize::from(queue.is_some());
         let tab = self.render_sidechat_tab(trays, &Theme::of(cx).clone(), window, cx);
         // Out of flow: the shell measures this stack for transcript clearance.
+        // The New chat page has no transcript above, so there it takes space instead.
         let card = card.map(|card| {
-            div()
-                .absolute()
-                .bottom_full()
-                .left_0()
-                .right_0()
-                .pb(px(Theme::SPACE_SM))
-                .child(card)
+            if config_in_flow {
+                div().pb(px(Theme::SPACE_SM)).child(card)
+            } else {
+                div()
+                    .absolute()
+                    .bottom_full()
+                    .left_0()
+                    .right_0()
+                    .pb(px(Theme::SPACE_SM))
+                    .child(card)
+            }
         });
         let container = match tab {
             Some(tab) => container.child(

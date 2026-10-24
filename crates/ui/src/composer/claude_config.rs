@@ -19,6 +19,11 @@ use crate::popover;
 use crate::theme::Theme;
 
 pub(crate) const SUMMARY_PREFIX: &str = "Claude Code settings · ";
+// Clears the titlebar, the Chat | Work toggle and the New task row above the panel.
+pub(crate) const HERO_PANEL_TOP: f32 = Theme::TITLEBAR_HEIGHT + 96.0;
+const HERO_BELOW_PILL: f32 = 64.0;
+const ABOVE_PILL: f32 = 52.0;
+const MIN_HEIGHT: f32 = 180.0;
 const STATS_DAYS: u32 = 7 * 36;
 const READ_ONLY_NOTE: &str =
     "Claude Code does not set this headless; change it in the terminal's /config.";
@@ -151,6 +156,26 @@ fn effort_value(level: Option<ReasoningLevel>) -> String {
 }
 
 impl Composer {
+    pub(crate) fn config_panel_on_hero(&self, cx: &App) -> bool {
+        self.config_panel.is_some() && self.bound_chat_id(cx).is_none()
+    }
+
+    fn config_panel_height(&self, window: &Window, cx: &App) -> f32 {
+        let viewport = f32::from(window.viewport_size().height);
+        let pill = self.surface_bounds.get();
+        let room = if self.config_panel_on_hero(cx) {
+            let pill_height = pill.map_or(120.0, |b| f32::from(b.size.height));
+            viewport - HERO_PANEL_TOP - pill_height - HERO_BELOW_PILL
+        } else {
+            let pill_top = pill.map_or(viewport - 120.0, |b| f32::from(b.top()));
+            pill_top - ABOVE_PILL - Theme::TITLEBAR_HEIGHT
+        };
+        (viewport * 0.62)
+            .clamp(300.0, 620.0)
+            .min(room)
+            .max(MIN_HEIGHT)
+    }
+
     pub(super) fn config_panel_open(&self) -> bool {
         self.config_panel
             .as_ref()
@@ -793,7 +818,7 @@ impl Composer {
             window.focus(&focus, cx);
         }
         let theme = Theme::of(cx).clone();
-        let height = (f32::from(window.viewport_size().height) * 0.62).clamp(300.0, 620.0);
+        let height = self.config_panel_height(window, cx);
         Some(self.config_card(motion, height, &theme, window, cx))
     }
 

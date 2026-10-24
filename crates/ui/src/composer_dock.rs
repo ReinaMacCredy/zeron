@@ -270,6 +270,7 @@ pub(crate) struct DockState {
     column_width: Option<f32>,
     departing_column_width: Option<f32>,
     hero_anchor: f32,
+    hero_floor: f32,
 }
 
 impl Default for DockState {
@@ -293,6 +294,7 @@ impl Default for DockState {
             column_width: None,
             departing_column_width: None,
             hero_anchor: 0.5,
+            hero_floor: 0.0,
         }
     }
 }
@@ -363,12 +365,19 @@ impl DockState {
         }
     }
 
+    pub fn set_hero_floor(&mut self, floor: f32) {
+        if (self.hero_floor - floor).abs() > f32::EPSILON {
+            self.hero_floor = floor;
+            self.moving = true;
+        }
+    }
+
     pub fn jump(&mut self) {
         self.position = None;
     }
 
     pub fn hero_y(&self, viewport: f32, height: f32) -> f32 {
-        (viewport - height) * self.hero_anchor + 8.0
+        ((viewport - height) * self.hero_anchor + 8.0).max(self.hero_floor)
     }
 
     /// A different conversation can have a different panel allocation even
