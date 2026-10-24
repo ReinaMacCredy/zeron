@@ -71,6 +71,7 @@ pub struct ProjectActionsController {
     pub menu_scroll: gpui::ScrollHandle,
     pub editor: Option<ProjectActionEditor>,
     pub request_task: Option<Task<()>>,
+    pub watch_task: Option<Task<()>>,
     pub mutation_task: Option<Task<()>>,
 }
 
@@ -85,6 +86,7 @@ impl Default for ProjectActionsController {
             menu_scroll: gpui::ScrollHandle::new(),
             editor: None,
             request_task: None,
+            watch_task: None,
             mutation_task: None,
         }
     }
@@ -101,6 +103,7 @@ impl ProjectActionsController {
         self.menu_scroll = gpui::ScrollHandle::new();
         self.editor = None;
         self.request_task = None;
+        self.watch_task = None;
         self.invalidate_mutation();
         true
     }
@@ -256,7 +259,7 @@ pub fn draft_from_action(action: &ProjectAction) -> ProjectActionDraft {
     }
 }
 
-fn unknown_method(message: &str) -> bool {
+pub(crate) fn unknown_method(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
     message.contains("unknown method") || message.contains("unknownmethod")
 }

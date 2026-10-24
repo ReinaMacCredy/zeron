@@ -3398,6 +3398,7 @@ fn forwardable(method: &str) -> bool {
             | methods::DELETE_WORKTREE
             // Project Actions live in the owning engine's private profile store.
             | methods::LIST_PROJECT_ACTIONS
+            | methods::WATCH_PROJECT_ACTIONS
             | methods::UPSERT_PROJECT_ACTION
             | methods::DELETE_PROJECT_ACTION
             | methods::RUN_PROJECT_ACTION
@@ -3509,6 +3510,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::WATCH_HARNESS_UPDATES
             | methods::WATCH_LIMIT_RESUMES
             | methods::WATCH_PROVIDER_INSTANCES
+            | methods::WATCH_PROJECT_ACTIONS
     )
 }
 
@@ -6682,6 +6684,9 @@ impl RpcService for EngineRpc {
                 .map_err(|err| RpcError::Failed(err.to_string()))?;
                 RpcReply::value(&snapshot)
             }
+            methods::WATCH_PROJECT_ACTIONS => Ok(RpcReply::Stream(watch_stream(
+                self.project_actions.watch(),
+            ))),
             methods::UPSERT_PROJECT_ACTION => {
                 let p: UpsertProjectActionParams = parse_params(params)?;
                 let space = self.local_project_action_space(&p.space_id)?;
@@ -8156,6 +8161,8 @@ mod tests {
         assert!(is_stream_method(methods::WATCH_HARNESS_UPDATES));
         assert!(forwardable(methods::WATCH_PROVIDER_INSTANCES));
         assert!(is_stream_method(methods::WATCH_PROVIDER_INSTANCES));
+        assert!(forwardable(methods::WATCH_PROJECT_ACTIONS));
+        assert!(is_stream_method(methods::WATCH_PROJECT_ACTIONS));
         assert!(forwardable(methods::CHECK_HARNESS_UPDATES));
         assert!(forwardable(methods::APPLY_HARNESS_UPDATE));
         assert!(forwardable(methods::LIST_CHANGE_REQUEST_PAGE));
