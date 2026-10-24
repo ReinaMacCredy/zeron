@@ -6392,11 +6392,15 @@ fn invocation_token(text: &str, cursor: usize, prefix: char) -> Option<MentionTo
 }
 
 use zeron_proto::app_commands::{
-    COMPACT_COMMAND, COMPUTER_USE_COMMAND, compact_focus, sidechat_prompt,
+    COMPACT_COMMAND, COMPACT_NEEDS_CHAT, COMPUTER_USE_COMMAND, SIDECHAT_NEEDS_CHAT, compact_focus,
+    sidechat_prompt,
 };
+pub use zeron_proto::command_catalog::WorkspaceCommand;
 use zeron_proto::command_catalog::{
-    CatalogFailure, catalog_empty_message, catalog_error_message, invocation_detail,
-    invocation_insertion, skill_display_name, with_zeron_commands, zeron_owned_command,
+    CatalogFailure, InvocationCandidate, catalog_empty_message, catalog_error_message,
+    compaction_unsupported, invocation_candidates, invocation_detail, invocation_insertion,
+    skill_display_name, with_workspace_commands, with_zeron_commands, workspace_command_for_text,
+    zeron_owned_command,
 };
 use zeron_proto::compaction::{
     RESUME_COMPACTION_TITLE, ResumeCompaction, compact_outcome_notice, resume_compaction_due,
@@ -6514,100 +6518,6 @@ fn completion_trigger(
     (token, skill, include_skills, commands_allowed)
 }
 
-/// Commands implemented by Zeron, independently of the provider protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkspaceCommand {
-    Model,
-    New,
-    Resume,
-    Settings,
-    Diff,
-    Files,
-    Terminal,
-    Rename,
-    Stop,
-}
-
-impl WorkspaceCommand {
-    fn catalog() -> &'static [(Self, &'static str, &'static str, bool)] {
-        &[
-            (
-                Self::Model,
-                "model",
-                "Zeron: choose agent, model, and reasoning",
-                false,
-            ),
-            (Self::New, "new", "Zeron: start a new conversation", false),
-            (
-                Self::Resume,
-                "resume",
-                "Zeron: search and open conversations",
-                false,
-            ),
-            (Self::Settings, "settings", "Zeron: open settings", false),
-            (Self::Diff, "diff", "Zeron: open changes", true),
-            (Self::Files, "files", "Zeron: open project files", true),
-            (Self::Terminal, "terminal", "Zeron: open a terminal", true),
-            (
-                Self::Rename,
-                "rename",
-                "Zeron: rename this conversation",
-                true,
-            ),
-            (Self::Stop, "stop", "Zeron: stop the active run", true),
-        ]
-    }
-}
-
-fn with_workspace_commands(
-    mut rows: Vec<InvocationCandidate>,
-    in_chat: bool,
-) -> Vec<InvocationCandidate> {
-    rows.retain(|row| row.workspace_command.is_none());
-    for &(command, name, description, needs_chat) in WorkspaceCommand::catalog() {
-        if needs_chat && !in_chat {
-            continue;
-        }
-        // Keep provider commands intact. Explicit Zeron names remain available
-        // when a provider owns the unqualified name.
-        let mut name = name.to_string();
-        while rows.iter().any(|row| row.name == name) {
-            name = format!("zeron:{name}");
-        }
-        rows.push(InvocationCandidate {
-            invocation: zeron_proto::invocation::Invocation::Command { name: name.clone() },
-            name,
-            description: description.into(),
-            input_hint: None,
-            workspace_command: Some(command),
-        });
-    }
-    rows
-}
-
-fn workspace_command_for_text(
-    text: &str,
-    rows: &[InvocationCandidate],
-) -> Option<WorkspaceCommand> {
-    let end = text.trim_end().len();
-    let token = slash_token(text, end)?;
-    if !text[..token.range.start].trim().is_empty() {
-        return None;
-    }
-    rows.iter()
-        .find(|row| row.name == token.query)?
-        .workspace_command
-}
-
-#[derive(Debug, Clone)]
-struct InvocationCandidate {
-    workspace_command: Option<WorkspaceCommand>,
-    name: String,
-    description: String,
-    input_hint: Option<String>,
-    invocation: zeron_proto::invocation::Invocation,
-}
-
 fn references_require_update(text: &str, supported: bool) -> bool {
     !supported
         && (!zeron_proto::invocation::invocation_links(text).is_empty()
@@ -6709,28 +6619,6 @@ fn mention_error_message(err: &RpcError) -> SharedString {
     }
 }
 
-impl From<zeron_proto::command_catalog::InvocationCandidate> for InvocationCandidate {
-    fn from(c: zeron_proto::command_catalog::InvocationCandidate) -> Self {
-        Self {
-            workspace_command: None,
-            name: c.name,
-            description: c.description,
-            input_hint: c.input_hint,
-            invocation: c.invocation,
-        }
-    }
-}
-
-fn invocation_candidates(
-    commands: Vec<SlashCommand>,
-    skills: Vec<zeron_proto::invocation::Skill>,
-) -> Vec<InvocationCandidate> {
-    zeron_proto::command_catalog::invocation_candidates(commands, skills)
-        .into_iter()
-        .map(InvocationCandidate::from)
-        .collect()
-}
-
 const SLASH_PREFETCH_DELAY: Duration = Duration::from_millis(400);
 
 fn slash_context(
@@ -6792,7 +6680,7 @@ fn merge_invocation_results(
     zeron_proto::command_catalog::merge_invocation_results(commands, skills, skill_only).map(
         |(rows, supported, warning)| {
             (
-                rows.into_iter().map(InvocationCandidate::from).collect(),
+                rows,
                 supported,
                 warning.map(|(error, skill)| slash_error_message(&error, skill)),
             )
@@ -9795,7 +9683,10 @@ impl Composer {
                         .map_or(zeron_proto::ChatIndicator::Idle, |chat| {
                             state.display_status_for(chat, now)
                         });
-                    let ring = zeron_proto::background::sidebar_ring(status, state.session_for(&thread.chat_id));
+                    let ring = zeron_proto::background::sidebar_ring(
+                        status,
+                        state.session_for(&thread.chat_id),
+                    );
                     (status, ring)
                 })
                 .collect()
@@ -10452,13 +10343,7 @@ impl Composer {
     fn unsupported_compaction(&self, cx: &App) -> Option<SharedString> {
         let harness = self.pickers.read(cx).resolved(cx).harness?;
         (self.compaction_cache.get(&harness).copied() == Some(zeron_proto::CompactionKind::None))
-            .then(|| {
-                format!(
-                    "{} does not support compaction",
-                    harness_display_name(harness)
-                )
-                .into()
-            })
+            .then(|| compaction_unsupported(harness).into())
     }
 
     /// This composer's chat is compacting. Another chat's compaction must not
@@ -10531,7 +10416,7 @@ impl Composer {
             .bound_chat_row(cx)
             .map(|chat| (chat.id.clone(), chat.device_id.clone()))
         else {
-            self.set_chat_failure("Start a chat before compacting its context.".into(), cx);
+            self.set_chat_failure(COMPACT_NEEDS_CHAT.into(), cx);
             return;
         };
         let mut params = serde_json::json!({
@@ -10600,7 +10485,7 @@ impl Composer {
                 .clone()
                 .unwrap_or_else(|| chat.id.clone())
         }) else {
-            self.set_chat_failure("Start a chat before opening a sidechat.".into(), cx);
+            self.set_chat_failure(SIDECHAT_NEEDS_CHAT.into(), cx);
             return;
         };
         self.failure = None;
@@ -11375,11 +11260,13 @@ impl Composer {
         // Leading indentation distinguishes literal Markdown from native commands
         // and skill invocations. Only the empty-content check may trim the draft.
         let text = self.input.read(cx).text().to_string();
-        if let Some(action) = self
-            .slash_cache
-            .get(&self.slash.context)
-            .and_then(|rows| workspace_command_for_text(self.input.read(cx).text(), rows))
-        {
+        if let Some(action) = self.slash_cache.get(&self.slash.context).and_then(|rows| {
+            workspace_command_for_text(
+                self.input.read(cx).text(),
+                rows.iter()
+                    .map(|row| (row.name.as_str(), row.workspace_command)),
+            )
+        }) {
             self.execute_workspace_command(action, 0..self.input.read(cx).text().len(), cx);
             return;
         }
@@ -13971,15 +13858,13 @@ impl Composer {
                     .when(!blocked || explains, |el| {
                         el.on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
                     })
-                    .tooltip(crate::settings::widgets::text_tooltip(
-                        if explains {
-                            "Out of Cloud credits"
-                        } else if mode == SendButtonMode::Queue {
-                            "Queue message"
-                        } else {
-                            "Send message"
-                        },
-                    ))
+                    .tooltip(crate::settings::widgets::text_tooltip(if explains {
+                        "Out of Cloud credits"
+                    } else if mode == SendButtonMode::Queue {
+                        "Queue message"
+                    } else {
+                        "Send message"
+                    }))
                     .into_any_element()
             }
         }
@@ -16540,59 +16425,6 @@ mod tests {
             assert!(input.read(cx).focus_handle.is_focused(window));
         })
         .unwrap();
-    }
-
-    #[test]
-    fn workspace_commands_preserve_native_commands_and_avoid_collisions() {
-        let native = invocation_candidates(
-            vec![
-                SlashCommand {
-                    name: "model".into(),
-                    description: "Native model command".into(),
-                    input_hint: Some("model id".into()),
-                    kind: Default::default(),
-                },
-                SlashCommand {
-                    name: "zeron:model".into(),
-                    description: "Plugin command".into(),
-                    input_hint: None,
-                    kind: Default::default(),
-                },
-            ],
-            vec![],
-        );
-        let rows = with_workspace_commands(native, true);
-        assert_eq!(rows.len(), 11);
-        assert!(rows[0].workspace_command.is_none());
-        assert_eq!(rows[0].input_hint.as_deref(), Some("model id"));
-        assert_eq!(workspace_command_for_text("/model", &rows), None);
-        assert_eq!(workspace_command_for_text("/zeron:model", &rows), None);
-        assert_eq!(
-            workspace_command_for_text("/zeron:zeron:model", &rows),
-            Some(WorkspaceCommand::Model)
-        );
-        assert_eq!(with_workspace_commands(rows, true).len(), 11);
-        let draft_rows = with_workspace_commands(vec![], false);
-        assert_eq!(draft_rows.len(), 4);
-        assert_eq!(workspace_command_for_text("/diff", &draft_rows), None);
-        assert_eq!(
-            workspace_command_for_text("/model  ", &draft_rows),
-            Some(WorkspaceCommand::Model)
-        );
-        for literal in [
-            "    /model",
-            "`/model`",
-            "```\n/model\n```",
-            "please /model",
-            "/model extra",
-            "/model/path",
-        ] {
-            assert_eq!(
-                workspace_command_for_text(literal, &draft_rows),
-                None,
-                "{literal:?}"
-            );
-        }
     }
 
     #[gpui::test]
