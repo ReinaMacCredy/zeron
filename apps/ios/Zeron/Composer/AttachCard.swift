@@ -221,17 +221,17 @@ final class AttachCard: UIView {
     }
 
     private func makeGrid() -> RecentPhotosGrid {
-        let grid = RecentPhotosGrid(limit: picker.limit, showsCamera: picker.canTakePhoto)
+        let grid = RecentPhotosGrid(limit: picker.gridLimit, showsCamera: picker.canTakePhoto, attached: picker.attached)
         grid.alpha = 0
         grid.frame = CGRect(origin: .zero, size: gridRect.size)
         grid.onBack = { [weak self] in self?.morph(toGrid: false) }
         grid.onCamera = { [weak self] in self?.close { $0.presentCamera() } }
         grid.onAllPhotos = { [weak self] in self?.close { $0.presentPhotos() } }
-        grid.onAdd = { [weak self] assets in
+        grid.onAdd = { [weak self] ids in
             guard let self else { return }
             let picker = self.picker
             self.close()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { picker.attach(assets) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { picker.attach(ids) }
         }
         self.grid = grid
         return grid

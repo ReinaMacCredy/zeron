@@ -8,12 +8,17 @@ import UniformTypeIdentifiers
 final class AttachmentPicker: NSObject, PHPickerViewControllerDelegate, UIImagePickerControllerDelegate, UINavigationControllerDelegate, UIDocumentPickerDelegate {
     private weak var host: UIViewController?
     let limit: Int
+    let attached: [String]
+    let gridLimit: Int
+    var onDrop: (([String]) -> Void)?
     private let completion: ([StagedImage]) -> Void
     private var retainSelf: AttachmentPicker?
 
-    init(host: UIViewController, limit: Int, completion: @escaping ([StagedImage]) -> Void) {
+    init(host: UIViewController, limit: Int, attached: [String] = [], completion: @escaping ([StagedImage]) -> Void) {
         self.host = host
         self.limit = max(1, limit)
+        self.attached = attached
+        gridLimit = max(1, limit + attached.count)
         self.completion = completion
     }
 
@@ -35,19 +40,26 @@ final class AttachmentPicker: NSObject, PHPickerViewControllerDelegate, UIImageP
         host?.present(picker, animated: true)
     }
 
-    /// Picks from the inline recent-photos grid, attached in selection order.
-    func attach(_ assets: [PHAsset]) {
+    /// The inline recent-photos grid's selection: photos it no longer holds
+    /// leave the composer, new ones are attached in selection order.
+    func attach(_ ids: [String]) {
+        let dropped = attached.filter { !ids.contains($0) }
+        if !dropped.isEmpty { onDrop?(dropped) }
+        let new = ids.filter { !attached.contains($0) }
+        var found: [String: PHAsset] = [:]
+        PHAsset.fetchAssets(withLocalIdentifiers: new, options: nil).enumerateObjects { asset, _, _ in found[asset.localIdentifier] = asset }
+        let assets = new.compactMap { found[$0] }
         let options = PHImageRequestOptions()
         options.isNetworkAccessAllowed = true
         options.deliveryMode = .highQualityFormat
         options.version = .current
         var staged = [StagedImage?](repeating: nil, count: assets.count)
         let group = DispatchGroup()
-        for (i, asset) in assets.prefix(limit).enumerated() {
+        for (i, asset) in assets.enumerated() {
             group.enter()
             PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
                 DispatchQueue.global(qos: .userInitiated).async {
-                    let s = data.flatMap(UIImage.init(data:)).flatMap { AttachmentPicker.stage(image: $0) }
+                    let s = data.flatMap(UIImage.init(data:)).flatMap { AttachmentPicker.stage(image: $0, assetId: asset.localIdentifier) }
                     DispatchQueue.main.async {
                         staged[i] = s
                         group.leave()
@@ -83,7 +95,7 @@ final class AttachmentPicker: NSObject, PHPickerViewControllerDelegate, UIImageP
             group.enter()
             result.itemProvider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
                 defer { group.leave() }
-                guard let data, let image = UIImage(data: data), let s = AttachmentPicker.stage(image: image) else { return }
+                guard let data, let image = UIImage(data: data), let s = AttachmentPicker.stage(image: image, assetId: result.assetIdentifier) else { return }
                 lock.lock()
                 staged.append((i, s))
                 lock.unlock()
@@ -117,7 +129,7 @@ final class AttachmentPicker: NSObject, PHPickerViewControllerDelegate, UIImageP
 
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { retainSelf = nil }
 
-    static func stage(image: UIImage, name: String? = nil) -> StagedImage? {
+    static func stage(image: UIImage, name: String? = nil, assetId: String? = nil) -> StagedImage? {
         let maxSide: CGFloat = 2560
         let size = image.size
         let scale = min(1, maxSide / max(size.width, size.height))
@@ -129,6 +141,6 @@ final class AttachmentPicker: NSObject, PHPickerViewControllerDelegate, UIImageP
         let fill = min(1, 312 / max(1, min(target.width, target.height)))
         let thumb = resized.preparingThumbnail(of: CGSize(width: (target.width * fill).rounded(), height: (target.height * fill).rounded())) ?? resized
         let id = UUID().uuidString.lowercased()
-        return StagedImage(id: id, name: "\(name ?? "image-\(id.prefix(8))").jpg", data: data, thumbnail: thumb)
+        return StagedImage(id: id, name: "\(name ?? "image-\(id.prefix(8))").jpg", data: data, thumbnail: thumb, assetId: assetId)
     }
 }

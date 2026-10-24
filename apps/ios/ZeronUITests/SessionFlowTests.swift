@@ -617,6 +617,29 @@ final class SessionFlowTests: XCTestCase {
         removeButtons.firstMatch.tap()
         expectation(for: NSPredicate(format: "count == 0"), evaluatedWith: removeButtons)
         waitForExpectations(timeout: 5)
+
+        attach.tap()
+        XCTAssertTrue(photos.waitForExistence(timeout: 5))
+        photos.tap()
+        XCTAssertTrue(photoCells.element(boundBy: 0).waitForExistence(timeout: 5))
+        photoCells.element(boundBy: 0).tap()
+        app.buttons["attach-grid-main"].tap()
+        expectation(for: NSPredicate(format: "count == 1"), evaluatedWith: removeButtons)
+        waitForExpectations(timeout: 10)
+
+        attach.tap()
+        XCTAssertTrue(photos.waitForExistence(timeout: 5))
+        photos.tap()
+        XCTAssertTrue(photoCells.element(boundBy: 0).waitForExistence(timeout: 5))
+        XCTAssertEqual(photoCells.element(boundBy: 0).value as? String, "Selected, 1", "an attached photo shows picked when the grid reopens")
+        XCTAssertEqual(app.buttons["attach-grid-main"].label, "All Photos")
+        sleep(1)
+        snapshot(app, "attach-grid-reopened")
+        photoCells.element(boundBy: 0).tap()
+        XCTAssertEqual(app.buttons["attach-grid-main"].label, "Done")
+        app.buttons["attach-grid-main"].tap()
+        expectation(for: NSPredicate(format: "count == 0"), evaluatedWith: removeButtons)
+        waitForExpectations(timeout: 10)
     }
 
     /// Run after `simctl privacy revoke photos`, with TEST_RUNNER_ZERON_PHOTOS_DENIED=1.

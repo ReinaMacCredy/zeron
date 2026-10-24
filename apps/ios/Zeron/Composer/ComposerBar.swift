@@ -8,6 +8,7 @@ struct StagedImage: Identifiable, Equatable {
     let data: Data
     let thumbnail: UIImage
     var mimeType = "image/jpeg"
+    var assetId: String? = nil
 
     var isImage: Bool { mimeType.hasPrefix("image/") }
 
@@ -556,7 +557,10 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     private func toggleAttachCard() {
         if let attachCard { return attachCard.close() }
         guard let host = findViewController() else { return }
-        let picker = AttachmentPicker(host: host, limit: 8 - images.count) { [weak self] in self?.addImages($0) }
+        let picker = AttachmentPicker(host: host, limit: 8 - images.count, attached: images.compactMap(\.assetId)) { [weak self] in self?.addImages($0) }
+        picker.onDrop = { [weak self] ids in
+            for img in self?.images ?? [] where img.assetId.map(ids.contains) == true { self?.removeImage(id: img.id) }
+        }
         let present = { [weak self] in
             guard let self, let window = self.window, self.attachCard == nil else { return }
             let fallback = CGRect(x: 0, y: window.bounds.height - 336, width: window.bounds.width, height: 336)

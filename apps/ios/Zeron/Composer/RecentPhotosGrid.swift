@@ -8,21 +8,24 @@ final class RecentPhotosGrid: UIView, UICollectionViewDataSource, UICollectionVi
     var onBack: (() -> Void)?
     var onCamera: (() -> Void)?
     var onAllPhotos: (() -> Void)?
-    var onAdd: (([PHAsset]) -> Void)?
+    var onAdd: (([String]) -> Void)?
 
     private let limit: Int
     private let showsCamera: Bool
     private let assets: PHFetchResult<PHAsset>
     private let imageManager = PHCachingImageManager()
-    private var selected: [PHAsset] = []
+    private let attached: [String]
+    private var selected: [String]
     private var thumbSize = CGSize(width: 200, height: 200)
     private let collection: UICollectionView
     private let backButton = UIButton(type: .system)
     private let mainButton = UIButton(type: .system)
 
-    init(limit: Int, showsCamera: Bool) {
+    init(limit: Int, showsCamera: Bool, attached: [String]) {
         self.limit = limit
         self.showsCamera = showsCamera
+        self.attached = attached
+        selected = attached
         let options = PHFetchOptions()
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         options.fetchLimit = 240
@@ -67,7 +70,7 @@ final class RecentPhotosGrid: UIView, UICollectionViewDataSource, UICollectionVi
         mainButton.accessibilityIdentifier = "attach-grid-main"
         mainButton.addAction(UIAction { [weak self] _ in
             guard let self else { return }
-            if self.selected.isEmpty { self.onAllPhotos?() } else { self.onAdd?(self.selected) }
+            if self.selected == self.attached { self.onAllPhotos?() } else { self.onAdd?(self.selected) }
         }, for: .touchUpInside)
         mainButton.translatesAutoresizingMaskIntoConstraints = false
         addSubview(mainButton)
@@ -95,10 +98,12 @@ final class RecentPhotosGrid: UIView, UICollectionViewDataSource, UICollectionVi
     }
 
     private func refreshMainButton() {
-        var config: UIButton.Configuration = selected.isEmpty ? .glass() : .prominentGlass()
-        config.title = selected.isEmpty ? "All Photos" : "Add \(selected.count)"
-        config.baseForegroundColor = selected.isEmpty ? Palette.text : .white
-        if !selected.isEmpty { config.baseBackgroundColor = Palette.accent }
+        let changed = selected != attached
+        let added = selected.filter { !attached.contains($0) }.count
+        var config: UIButton.Configuration = changed ? .prominentGlass() : .glass()
+        config.title = !changed ? "All Photos" : added == 0 ? "Done" : "Add \(added)"
+        config.baseForegroundColor = changed ? .white : Palette.text
+        if changed { config.baseBackgroundColor = Palette.accent }
         config.cornerStyle = .capsule
         config.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20)
         config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attrs in
@@ -131,7 +136,7 @@ final class RecentPhotosGrid: UIView, UICollectionViewDataSource, UICollectionVi
         }
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "photo", for: indexPath) as! PhotoCell
         cell.assetId = asset.localIdentifier
-        cell.badge(selected.firstIndex(of: asset).map { $0 + 1 }, animated: false)
+        cell.badge(selected.firstIndex(of: asset.localIdentifier).map { $0 + 1 }, animated: false)
         let options = PHImageRequestOptions()
         options.isNetworkAccessAllowed = true
         options.deliveryMode = .opportunistic
@@ -156,10 +161,10 @@ final class RecentPhotosGrid: UIView, UICollectionViewDataSource, UICollectionVi
             onCamera?()
             return false
         }
-        if let i = selected.firstIndex(of: asset) {
+        if let i = selected.firstIndex(of: asset.localIdentifier) {
             selected.remove(at: i)
         } else if selected.count < limit {
-            selected.append(asset)
+            selected.append(asset.localIdentifier)
         } else {
             UINotificationFeedbackGenerator().notificationOccurred(.warning)
             return false
@@ -167,7 +172,7 @@ final class RecentPhotosGrid: UIView, UICollectionViewDataSource, UICollectionVi
         UISelectionFeedbackGenerator().selectionChanged()
         for case let cell as PhotoCell in collectionView.visibleCells {
             guard let id = cell.assetId else { continue }
-            cell.badge(selected.firstIndex { $0.localIdentifier == id }.map { $0 + 1 }, animated: true)
+            cell.badge(selected.firstIndex(of: id).map { $0 + 1 }, animated: true)
         }
         refreshMainButton()
         return false
