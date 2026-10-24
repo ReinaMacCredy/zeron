@@ -1072,7 +1072,7 @@ impl ChatDocHandle {
                     text: label.into(),
                 },
                 MessagePart::Classifier {
-                    id: format!("{message_id}-classifier"),
+                    id: zeron_doc::classifier_part_id(message_id),
                     record,
                 },
             ],
@@ -1088,6 +1088,17 @@ impl ChatDocHandle {
         // The send awaiting this record holds the doc worker past the compaction, so its publish would wait too.
         self.publish_messages_if_watched();
         Ok(())
+    }
+
+    /// Published at once: no run drains these commits.
+    pub fn update_record_part(
+        &self,
+        message_id: &str,
+        part: &MessagePart,
+    ) -> Result<bool, DocError> {
+        let updated = self.doc.update_record_part(message_id, part)?;
+        self.publish_messages_if_watched();
+        Ok(updated)
     }
 
     /// [`Self::write_system_note`] carrying the provider-switch packet: the

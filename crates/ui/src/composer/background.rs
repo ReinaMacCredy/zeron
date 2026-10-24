@@ -147,7 +147,8 @@ pub(crate) fn raw_blocks(entries: &[SessionMessageEntry], hide_thinking: bool) -
                 MessagePart::Fork { .. }
                 | MessagePart::Switch { .. }
                 | MessagePart::Visual { .. }
-                | MessagePart::Classifier { .. } => {}
+                | MessagePart::Classifier { .. }
+                | MessagePart::Compaction { .. } => {}
             }
         }
     }

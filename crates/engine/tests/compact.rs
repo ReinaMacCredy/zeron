@@ -1146,7 +1146,7 @@ fn system_entries(core: &EngineCore) -> Vec<SessionMessageEntry> {
         .collect()
 }
 
-const CARRY_HEAD: &str = "<carried_over>\nThe last turns of this conversation from before the compaction, verbatim: each turn's message and the agent's final reply. Tool calls, their output and thinking are left out.\n\n";
+const CARRY_HEAD: &str = "<carried_over>\nThe last turns of this conversation from before the compaction, verbatim and oldest first: each turn's message and the agent's final reply. Tool calls, their output and thinking are left out. A later turn may have finished what an earlier one planned or listed as next, and the agent's last reply was already delivered to the person.\n\n";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_carry_verdict_compacts_and_hands_the_last_turns_to_the_next_prompt() {
@@ -1156,6 +1156,7 @@ async fn a_carry_verdict_compacts_and_hands_the_last_turns_to_the_next_prompt() 
     harness.replies.lock().unwrap().extend([
         "CONTINUE".to_string(),
         "The plan is still open.\nCARRY".to_string(),
+        "\"Asks about the plan the last reply laid out.\"".to_string(),
     ]);
     core.doc_host
         .queue_command(CHAT, run_payload("msg-2", &tmp.path().to_string_lossy()))
@@ -1177,13 +1178,28 @@ async fn a_carry_verdict_compacts_and_hands_the_last_turns_to_the_next_prompt() 
         sent[2],
         format!("{CARRY_HEAD}person: hello\nagent: ack: hello\n</carried_over>\n\nhello")
     );
+    wait_for(
+        || {
+            record_of(&system_entries(&core)[0]).and_then(|record| record.reason.clone())
+                == Some("Asks about the plan the last reply laid out.".into())
+        },
+        "the reason fills the record",
+    )
+    .await;
     let one_shots = harness.one_shots.lock().unwrap().clone();
-    assert_eq!(one_shots.len(), 2);
+    assert_eq!(one_shots.len(), 3);
     assert!(
         one_shots[1].starts_with(&format!("{}\n\n", one_shots[0])),
         "stage 2 shares stage 1's prompt as its prefix"
     );
     assert!(one_shots[0].ends_with("New message (from the person):\nuser: hello"));
+    assert_eq!(
+        one_shots[2],
+        format!(
+            "{}\n\nDecision: compact, but keep the last 2 user/agent turns word for word.",
+            one_shots[0]
+        )
+    );
     let system = system_entries(&core);
     let record = record_of(&system[0]).expect("classifier record");
     assert_eq!(record.verdict, ClassifierVerdict::Carry);
@@ -1196,6 +1212,23 @@ async fn a_carry_verdict_compacts_and_hands_the_last_turns_to_the_next_prompt() 
     assert_eq!(
         entry_text(&system[1]),
         "Compacted, last turns carried over · 22.8k → 2.3k tokens"
+    );
+    let compaction = system[1]
+        .parts
+        .iter()
+        .find_map(|part| match part {
+            MessagePart::Compaction { record, .. } => Some(record.clone()),
+            _ => None,
+        })
+        .expect("compaction record");
+    assert_eq!(
+        (compaction.pre_tokens, compaction.post_tokens),
+        (Some(22_762), Some(2_326))
+    );
+    assert!(compaction.duration_ms.is_some());
+    assert_eq!(
+        compaction.carried.as_deref(),
+        Some(format!("{CARRY_HEAD}person: hello\nagent: ack: hello\n</carried_over>").as_str())
     );
 
     *harness.verdict.lock().unwrap() = Some("CONTINUE".into());

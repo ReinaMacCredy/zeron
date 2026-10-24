@@ -2489,7 +2489,8 @@ pub fn rows_for_entry(
                     MessagePart::Tool { .. }
                     | MessagePart::Reasoning { .. }
                     | MessagePart::Handoff { .. }
-                    | MessagePart::Classifier { .. } => {}
+                    | MessagePart::Classifier { .. }
+                    | MessagePart::Compaction { .. } => {}
                 }
             }
         }
