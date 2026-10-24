@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
-use zeron_proto::claude_panel::{
-    self as panel, CommandReply, ContextReport, McpReport, ModelReport, TerminalEquivalent,
-    UsageReport,
+use zeron_proto::claude_cards::{
+    self as cards, LOCAL_FOOTNOTE, MCP_EMPTY, MCP_FOOTNOTE, MODEL_FOOTNOTE, Series, TerminalAction,
 };
+use zeron_proto::claude_config::CommandCard;
+use zeron_proto::claude_panel as panel;
+use zeron_proto::usage::format_tokens;
 use zeron_text::WhiteSpace;
 
 use super::cards::CardButton;
@@ -17,14 +19,12 @@ const ICON: f32 = 16.0;
 const GAP: f32 = 8.0;
 const ITEM_GAP: f32 = 10.0;
 const TRACK: f32 = 6.0;
+const STACK: f32 = 10.0;
 const BAR_W: f32 = 64.0;
 const LEAD_W: f32 = 46.0;
 const DOT: f32 = 7.0;
-const PILL_H: f32 = 30.0;
-const PILL_PAD: f32 = 12.0;
-const BUTTON_H: f32 = 34.0;
-const BUTTON_PAD: f32 = 14.0;
-const LOCAL_NOTE: &str = "Ran locally in Claude Code · no tokens used";
+const BUTTON_H: f32 = 32.0;
+const BUTTON_PAD: f32 = 13.0;
 
 pub(crate) enum Item {
     Meter {
@@ -33,6 +33,12 @@ pub(crate) enum Item {
         foot: Option<PText>,
         fill: f32,
         warning: bool,
+    },
+    Stack(Vec<(f32, ColorRole)>),
+    Legend {
+        color: ColorRole,
+        name: PText,
+        value: PText,
     },
     Bar {
         lead: PText,
@@ -44,17 +50,18 @@ pub(crate) enum Item {
         state: PText,
         ok: bool,
     },
-    Pills(Vec<(PText, bool)>),
-    Heading(PText),
+    Choices(Vec<CardButton>),
     Text(PText),
 }
 
-pub(crate) struct CommandCard {
+pub(crate) struct CommandCardView {
     pub icon: &'static str,
     pub title: PText,
     pub subtitle: Option<PText>,
+    pub pill: Option<PText>,
     pub items: Vec<Item>,
     pub buttons: Vec<CardButton>,
+    pub notice: bool,
 }
 
 struct Builder<'a, 'c> {
@@ -63,21 +70,49 @@ struct Builder<'a, 'c> {
 }
 
 impl Builder<'_, '_> {
-    fn text(&mut self, text: &str, weight: Weight, color: ColorRole) -> PText {
+    fn styled(&mut self, text: &str, family: Family, weight: Weight, color: ColorRole) -> PText {
         let (size, lh) = TYPE.small;
         let lh = self.ctx.typo.px(lh);
-        let style = self.ctx.typo.style(Family::Sans, weight, false, size);
+        let style = self.ctx.typo.style(family, weight, false, size);
         self.copy.push(text.to_string());
-        prepare_plain(self.ctx, text, style, lh, color, WhiteSpace::Normal)
+        prepare_plain(self.ctx, text, style, lh, color, WhiteSpace::PreWrap)
     }
 
-    fn button(&mut self, title: &str, action: CardAction) -> CardButton {
+    fn text(&mut self, text: &str, weight: Weight, color: ColorRole) -> PText {
+        self.styled(text, Family::Sans, weight, color)
+    }
+
+    fn note(&mut self, text: &str) -> Item {
+        Item::Text(self.text(text, Weight::Regular, ColorRole::TextTertiary))
+    }
+
+    fn heading(&mut self, text: &str) -> Item {
+        Item::Text(self.text(text, Weight::Medium, ColorRole::Text))
+    }
+
+    fn button(&mut self, title: &str, action: CardAction, on: bool) -> CardButton {
+        let label = self.text(
+            title,
+            Weight::Medium,
+            if on {
+                ColorRole::Accent
+            } else {
+                ColorRole::TextSoft
+            },
+        );
+        self.copy.pop();
         CardButton {
-            label: self.text(title, Weight::Medium, ColorRole::TextSoft),
+            label,
             title: title.to_string(),
-            primary: false,
+            primary: on,
             action,
         }
+    }
+
+    fn copy_button(&mut self, raw: &str) -> CardButton {
+        let mut button = self.button("Copy", CardAction::CopyText { text: raw.into() }, false);
+        button.title = "Copy as Markdown".into();
+        button
     }
 
     fn bar_line(&mut self, line: &str) -> Item {
@@ -88,12 +123,109 @@ impl Builder<'_, '_> {
                 fill: (percent / 100.0).clamp(0.0, 1.0),
                 text: self.text(line[lead.len()..].trim(), Weight::Regular, ColorRole::Text),
             },
-            None => Item::Text(self.text(line, Weight::Regular, ColorRole::TextTertiary)),
+            None => self.note(line),
         }
     }
 }
 
-fn usage_items(b: &mut Builder<'_, '_>, report: &UsageReport) -> Vec<Item> {
+struct Spec {
+    icon: &'static str,
+    title: String,
+    subtitle: Option<String>,
+    pill: Option<String>,
+    items: Vec<Item>,
+    buttons: Vec<CardButton>,
+    notice: bool,
+}
+
+fn series_color(name: &str) -> ColorRole {
+    match cards::series(name) {
+        Series::System => ColorRole::Accent,
+        Series::Mcp => ColorRole::SyntaxFunction,
+        Series::Agents => ColorRole::SyntaxType,
+        Series::Memory => ColorRole::Warning,
+        Series::Skills => ColorRole::Success,
+        Series::Messages => ColorRole::Danger,
+        Series::Other => ColorRole::TextTertiary,
+    }
+}
+
+fn context(b: &mut Builder<'_, '_>, card: &CommandCard) -> Option<Spec> {
+    let report = cards::parse_context(&card.text)?;
+    let mut stack: Vec<(f32, ColorRole)> = report
+        .categories
+        .iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(name, n)| (report.bar_fraction(*n), series_color(name)))
+        .collect();
+    if report.buffer > 0 {
+        stack.push((report.bar_fraction(report.buffer), ColorRole::Rule));
+    }
+    let mut items = vec![Item::Stack(stack), b.note(&report.bar_caption())];
+    let total = report.total;
+    let legend = |b: &mut Builder<'_, '_>, color: ColorRole, name: &str, n: u64| Item::Legend {
+        color,
+        name: b.text(name, Weight::Regular, ColorRole::Text),
+        value: b.text(
+            &format!("{} · {}", format_tokens(n), cards::percent(n, total)),
+            Weight::Regular,
+            ColorRole::TextSecondary,
+        ),
+    };
+    for (name, n) in &report.categories {
+        items.push(legend(b, series_color(name), name, *n));
+    }
+    if report.buffer > 0 {
+        items.push(legend(
+            b,
+            ColorRole::Rule,
+            "Autocompact buffer",
+            report.buffer,
+        ));
+    }
+    items.push(legend(b, ColorRole::ChipBackground, "Free", report.free));
+    if let Some(tip) = report.tip() {
+        items.push(b.note(&tip));
+    }
+    for group in &report.groups {
+        items.push(b.heading(&format!("{} · {}", group.title, format_tokens(group.total))));
+        for (name, n) in &group.rows {
+            items.push(Item::Legend {
+                color: ColorRole::ChipBackground,
+                name: b.text(name, Weight::Regular, ColorRole::TextSecondary),
+                value: b.text(
+                    &format_tokens(*n),
+                    Weight::Regular,
+                    ColorRole::TextSecondary,
+                ),
+            });
+        }
+    }
+    if let Some(note) = &card.note {
+        items.push(b.note(note));
+    }
+    let buttons = vec![
+        b.button("Compact now", CardAction::Compact, true),
+        b.button("Manage tools", CardAction::OpenSettings, false),
+        b.button("Context settings", CardAction::OpenSettings, false),
+        b.copy_button(&card.text),
+    ];
+    Some(Spec {
+        icon: "chart.pie",
+        title: "Context".into(),
+        subtitle: Some(format!("Claude Code · {}", report.model)),
+        pill: Some(report.pill()),
+        items,
+        buttons,
+        notice: false,
+    })
+}
+
+fn usage(b: &mut Builder<'_, '_>, card: &CommandCard) -> Option<Spec> {
+    let report = panel::parse_usage(&card.text);
+    if report.meters.is_empty() {
+        return None;
+    }
     let mut items: Vec<Item> = report
         .meters
         .iter()
@@ -119,200 +251,171 @@ fn usage_items(b: &mut Builder<'_, '_>, report: &UsageReport) -> Vec<Item> {
             warning: m.warning(),
         })
         .collect();
+    if !report.sections.is_empty() {
+        items.push(b.heading("What uses your limits"));
+    }
     for section in &report.sections {
-        items.push(Item::Heading(b.text(
-            &section.title,
-            Weight::Medium,
-            ColorRole::Text,
-        )));
+        items.push(b.note(&section.title));
         for line in &section.lines {
             items.push(b.bar_line(line));
         }
     }
-    items
+    let buttons = vec![
+        b.button("Open Usage page", CardAction::OpenUsage, false),
+        b.copy_button(&card.text),
+    ];
+    Some(Spec {
+        icon: "bolt",
+        title: "Usage".into(),
+        subtitle: Some(cards::usage_subtitle(report.note.as_deref())),
+        pill: None,
+        items,
+        buttons,
+        notice: false,
+    })
 }
 
-fn context_items(b: &mut Builder<'_, '_>, report: &ContextReport) -> Vec<Item> {
-    let mut items = Vec::new();
-    if let Some(tokens) = &report.tokens {
-        let percent = tokens
-            .rsplit_once('(')
-            .and_then(|(_, p)| p.trim_end_matches([')', '%']).parse::<f32>().ok())
-            .unwrap_or(0.0);
-        items.push(Item::Meter {
-            label: b.text("Tokens", Weight::Regular, ColorRole::Text),
-            value: b.text(tokens, Weight::Regular, ColorRole::TextSecondary),
-            foot: None,
-            fill: (percent / 100.0).clamp(0.0, 1.0),
-            warning: percent >= 80.0,
-        });
-    }
-    let max = report
-        .categories
+fn model(b: &mut Builder<'_, '_>, card: &CommandCard, live: Option<&str>) -> Spec {
+    let current = live.map(str::to_owned).or_else(|| card.model.clone());
+    let selected = cards::selected_model(&card.models, current.as_deref());
+    let label = selected
+        .map(|ix| card.models[ix].1.clone())
+        .or(current)
+        .unwrap_or_else(|| "default".into());
+    let choices = card
+        .models
         .iter()
-        .filter(|c| c.name != "Free space")
-        .map(|c| c.percent)
-        .fold(0.0f32, f32::max)
-        .max(0.1);
-    if !report.categories.is_empty() {
-        items.push(Item::Heading(b.text(
-            "Estimated usage by category",
-            Weight::Medium,
-            ColorRole::Text,
-        )));
-    }
-    for category in &report.categories {
-        items.push(Item::Bar {
-            lead: b.text(
-                &format!("{}%", category.percent),
-                Weight::Regular,
-                ColorRole::TextSecondary,
-            ),
-            fill: (category.percent / max).clamp(0.0, 1.0),
-            text: b.text(
-                &format!("{} · {}", category.name, category.tokens),
-                Weight::Regular,
-                ColorRole::Text,
-            ),
-        });
-    }
-    items
-}
-
-fn model_items(b: &mut Builder<'_, '_>, report: &ModelReport) -> Vec<Item> {
-    let current = report.current.to_lowercase();
-    let pills = report
-        .available
-        .iter()
-        .map(|alias| {
-            let on = current.split_whitespace().next() == Some(alias.as_str());
-            (
-                b.text(
-                    alias,
-                    Weight::Regular,
-                    if on {
-                        ColorRole::Accent
-                    } else {
-                        ColorRole::Text
-                    },
-                ),
-                on,
+        .enumerate()
+        .map(|(ix, (id, name))| {
+            b.button(
+                name,
+                CardAction::PickModel {
+                    id: id.clone(),
+                    label: name.clone(),
+                },
+                selected == Some(ix),
             )
         })
         .collect();
-    vec![
-        Item::Pills(pills),
-        Item::Text(b.text(
-            "Zeron runs this chat on its model chip; change it there.",
-            Weight::Regular,
-            ColorRole::TextTertiary,
-        )),
-    ]
+    let note = card.note.clone().unwrap_or_else(|| MODEL_FOOTNOTE.into());
+    Spec {
+        icon: "bolt",
+        title: "Model".into(),
+        subtitle: Some("Claude Code".into()),
+        pill: Some(label),
+        items: vec![Item::Choices(choices), b.note(&note)],
+        buttons: Vec::new(),
+        notice: false,
+    }
 }
 
-fn mcp_items(b: &mut Builder<'_, '_>, report: &McpReport) -> Vec<Item> {
-    [
-        ("Connected", report.connected, true),
-        ("Not connected", report.not_connected, false),
-        ("Disabled", report.disabled, false),
-    ]
-    .into_iter()
-    .map(|(name, n, ok)| Item::Status {
-        name: b.text(name, Weight::Regular, ColorRole::Text),
-        state: b.text(&n.to_string(), Weight::Regular, ColorRole::TextSecondary),
-        ok: ok && n > 0,
+fn mcp(b: &mut Builder<'_, '_>, card: &CommandCard) -> Option<Spec> {
+    let servers = cards::mcp_servers(card)?;
+    let connected = servers.iter().filter(|(_, s)| s == "connected").count();
+    let mut items: Vec<Item> = servers
+        .iter()
+        .map(|(name, state)| Item::Status {
+            name: b.text(name, Weight::Regular, ColorRole::Text),
+            state: b.text(state, Weight::Regular, ColorRole::TextSecondary),
+            ok: state == "connected",
+        })
+        .collect();
+    if servers.is_empty() {
+        items.push(b.note(MCP_EMPTY));
+    }
+    items.push(b.note(MCP_FOOTNOTE));
+    let buttons = vec![
+        b.button("Manage in Settings", CardAction::OpenSettings, false),
+        b.copy_button(&card.text),
+    ];
+    Some(Spec {
+        icon: "powerplug",
+        title: "MCP servers".into(),
+        subtitle: Some(format!(
+            "{connected} connected · {} not connected",
+            servers.len() - connected
+        )),
+        pill: None,
+        items,
+        buttons,
+        notice: false,
     })
-    .collect()
+}
+
+fn notice(b: &mut Builder<'_, '_>, name: &str) -> Spec {
+    let buttons = cards::terminal_action(name)
+        .map(|(label, action)| {
+            let action = match action {
+                TerminalAction::Status => CardAction::OpenClaudeStatus,
+                TerminalAction::Permissions => CardAction::OpenClaudePermissions,
+                TerminalAction::Help => CardAction::OpenDocs,
+            };
+            b.button(label, action, false)
+        })
+        .into_iter()
+        .collect();
+    Spec {
+        icon: "apple.terminal",
+        title: format!("/{name} only runs in Claude Code's terminal."),
+        subtitle: None,
+        pill: None,
+        items: Vec::new(),
+        buttons,
+        notice: true,
+    }
+}
+
+fn generic(b: &mut Builder<'_, '_>, card: &CommandCard) -> Spec {
+    let failed = card.error.is_some();
+    let text = card.error.clone().unwrap_or_else(|| card.text.clone());
+    let body = b.styled(
+        text.trim(),
+        Family::Mono,
+        Weight::Regular,
+        if failed {
+            ColorRole::Warning
+        } else {
+            ColorRole::Text
+        },
+    );
+    let items = vec![Item::Text(body), b.note(LOCAL_FOOTNOTE)];
+    let buttons = vec![b.copy_button(&text)];
+    Spec {
+        icon: "apple.terminal",
+        title: card.command.clone(),
+        subtitle: Some("Claude Code · command output".into()),
+        pill: None,
+        items,
+        buttons,
+        notice: false,
+    }
 }
 
 pub(crate) fn command_card(
     ctx: &mut Ctx,
     key: &str,
     entry_id: &str,
-    command: &str,
-    reply: &str,
-) -> Option<RowCore> {
-    let parsed = panel::command_reply(command, reply)?;
+    card: &CommandCard,
+    live_model: Option<&str>,
+) -> RowCore {
     let mut b = Builder {
         ctx,
         copy: Vec::new(),
     };
-    let (icon, title, subtitle, mut items, buttons) = match &parsed {
-        CommandReply::Usage(report) => (
-            "bolt",
-            "Usage",
-            Some("Claude Code · subscription".to_string()),
-            usage_items(&mut b, report),
-            vec![b.button("Open Usage page", CardAction::OpenUsage)],
-        ),
-        CommandReply::Context(report) => (
-            "chart.pie",
-            "Context",
-            Some(
-                report
-                    .model
-                    .as_ref()
-                    .map_or("Claude Code".to_string(), |m| format!("Claude Code · {m}")),
-            ),
-            context_items(&mut b, report),
-            Vec::new(),
-        ),
-        CommandReply::Model(report) => (
-            "bolt",
-            "Model",
-            Some(format!("Claude Code · {}", report.current)),
-            model_items(&mut b, report),
-            vec![b.button("Change model", CardAction::OpenChip { id: "model".into() })],
-        ),
-        CommandReply::Mcp(report) => (
-            "powerplug",
-            "MCP servers",
-            Some(format!(
-                "{} connected · {} not connected",
-                report.connected, report.not_connected
-            )),
-            mcp_items(&mut b, report),
-            vec![b.button("Open Claude Code settings", CardAction::OpenClaudeConfig)],
-        ),
-        CommandReply::TerminalOnly(name) => {
-            let buttons = panel::terminal_equivalent(name)
-                .map(|(label, equivalent)| {
-                    let action = match equivalent {
-                        TerminalEquivalent::SessionInfo => CardAction::OpenSessionInfo,
-                        TerminalEquivalent::PermissionChip => CardAction::OpenChip {
-                            id: "permission".into(),
-                        },
-                        TerminalEquivalent::ClaudeConfig => CardAction::OpenClaudeConfig,
-                        TerminalEquivalent::CopyTranscript => CardAction::CopyTranscript,
-                    };
-                    b.button(label, action)
-                })
-                .into_iter()
-                .collect();
-            ("apple.terminal", "", None, Vec::new(), buttons)
-        }
+    let spec = if let Some(name) = cards::terminal_only(card) {
+        notice(&mut b, name)
+    } else {
+        let spec = match (card.error.as_deref(), card.command.as_str()) {
+            (Some(_), _) => None,
+            (None, "/context") => context(&mut b, card),
+            (None, "/usage") => usage(&mut b, card),
+            (None, "/model") => Some(model(&mut b, card, live_model)),
+            (None, "/mcp") => mcp(&mut b, card),
+            _ => None,
+        };
+        spec.unwrap_or_else(|| generic(&mut b, card))
     };
-    let title = match &parsed {
-        CommandReply::TerminalOnly(name) => panel::terminal_only_notice(name),
-        _ => title.to_string(),
-    };
-    if !matches!(parsed, CommandReply::TerminalOnly(_)) {
-        items.push(Item::Text(b.text(
-            LOCAL_NOTE,
-            Weight::Regular,
-            ColorRole::TextTertiary,
-        )));
-    }
-    Some(finish(
-        b,
-        key,
-        entry_id,
-        icon,
-        &title,
-        subtitle.as_deref(),
-        items,
-        buttons,
-    ))
+    finish(b, key, entry_id, spec)
 }
 
 pub(crate) fn summary_card(
@@ -336,45 +439,43 @@ pub(crate) fn summary_card(
         Weight::Regular,
         ColorRole::TextSecondary,
     ))];
-    let buttons = vec![b.button("Reopen", CardAction::OpenClaudeConfig)];
-    let title = panel::SUMMARY_PREFIX.trim_end_matches([' ', '·']);
-    Some(finish(
-        b,
-        key,
-        entry_id,
-        "gearshape",
-        title,
-        None,
+    let buttons = vec![b.button("Reopen", CardAction::OpenClaudeConfig, false)];
+    let spec = Spec {
+        icon: "gearshape",
+        title: panel::SUMMARY_PREFIX.trim_end_matches([' ', '·']).into(),
+        subtitle: None,
+        pill: None,
         items,
         buttons,
-    ))
+        notice: false,
+    };
+    Some(finish(b, key, entry_id, spec))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn finish(
-    mut b: Builder<'_, '_>,
-    key: &str,
-    entry_id: &str,
-    icon: &'static str,
-    title: &str,
-    subtitle: Option<&str>,
-    items: Vec<Item>,
-    buttons: Vec<CardButton>,
-) -> RowCore {
-    let title = b.text(title, Weight::Medium, ColorRole::Text);
-    let subtitle = subtitle.map(|s| b.text(s, Weight::Regular, ColorRole::TextSecondary));
+fn finish(mut b: Builder<'_, '_>, key: &str, entry_id: &str, spec: Spec) -> RowCore {
+    let title = b.text(&spec.title, Weight::Medium, ColorRole::Text);
+    let subtitle = spec
+        .subtitle
+        .as_deref()
+        .map(|s| b.text(s, Weight::Regular, ColorRole::TextSecondary));
+    let pill = spec
+        .pill
+        .as_deref()
+        .map(|p| b.text(p, Weight::Regular, ColorRole::TextSecondary));
     RowCore {
         key: row_key(key),
         version: next_version(),
         kind: RowKind::Card,
         entry_id: Arc::from(entry_id),
         copy_text: b.copy.join("\n"),
-        content: Content::Command(CommandCard {
-            icon,
+        content: Content::Command(CommandCardView {
+            icon: spec.icon,
             title,
             subtitle,
-            items,
-            buttons,
+            pill,
+            items: spec.items,
+            buttons: spec.buttons,
+            notice: spec.notice,
         }),
     }
 }
@@ -384,7 +485,7 @@ fn width(t: &PText) -> f32 {
 }
 
 pub(crate) fn place_command_card(
-    card: &CommandCard,
+    card: &CommandCardView,
     px: Px,
     x: f32,
     top: f32,
@@ -393,15 +494,78 @@ pub(crate) fn place_command_card(
 ) -> f32 {
     let h = layout(card, px, x, top, cw, None);
     if let Some(o) = out {
-        o.fill(x, top, cw, h, px.v(14.0), ColorRole::CardBackground);
+        let fill = if card.notice {
+            ColorRole::ChipBackground
+        } else {
+            ColorRole::CardBackground
+        };
+        o.fill(x, top, cw, h, px.v(14.0), fill);
         o.hairline(x, top, cw, h, px.v(14.0), ColorRole::CardBorder);
         layout(card, px, x, top, cw, Some(o));
     }
     h
 }
 
+fn place_buttons(
+    buttons: &[CardButton],
+    px: Px,
+    x: f32,
+    y: f32,
+    w: f32,
+    out: &mut Option<&mut DisplayBuilder>,
+) -> f32 {
+    if buttons.is_empty() {
+        return 0.0;
+    }
+    let bh = px.v(BUTTON_H);
+    let gap = px.v(GAP);
+    let (mut bx, mut by) = (x, y);
+    for b in buttons {
+        let bw = (width(&b.label) + px.v(BUTTON_PAD) * 2.0).min(w);
+        if bx > x && bx + bw > x + w {
+            bx = x;
+            by += bh + gap;
+        }
+        if let Some(o) = out.as_deref_mut() {
+            if b.primary {
+                o.fill(bx, by, bw, bh, bh / 2.0, ColorRole::AccentWash);
+            }
+            o.hairline(
+                bx,
+                by,
+                bw,
+                bh,
+                bh / 2.0,
+                if b.primary {
+                    ColorRole::Accent
+                } else {
+                    ColorRole::ButtonBorder
+                },
+            );
+            place_text_lines(
+                &b.label,
+                bx + px.v(BUTTON_PAD),
+                by + (bh - b.label.lh) / 2.0,
+                (bw - px.v(BUTTON_PAD) * 2.0).max(1.0),
+                1,
+                px,
+                o,
+            );
+            o.widget(
+                WidgetKind::CardButton {
+                    action: b.action.clone(),
+                },
+                (bx, by, bw, bh),
+                Some(b.title.clone()),
+            );
+        }
+        bx += bw + gap;
+    }
+    by + bh - y
+}
+
 fn layout(
-    card: &CommandCard,
+    card: &CommandCardView,
     px: Px,
     x: f32,
     top: f32,
@@ -413,7 +577,16 @@ fn layout(
     let inner_w = (cw - pad * 2.0).max(1.0);
     let icon = px.v(ICON);
     let title_x = inner_x + icon + px.v(GAP);
-    let title_w = (x + cw - pad - title_x).max(1.0);
+    let pill_w = card
+        .pill
+        .as_ref()
+        .map_or(0.0, |p| (width(p) + px.v(14.0)).min(inner_w / 2.0));
+    let trailing = if pill_w > 0.0 {
+        pill_w + px.v(GAP)
+    } else {
+        0.0
+    };
+    let title_w = (x + cw - pad - title_x - trailing).max(1.0);
     let mut y = top + pad;
     if let Some(o) = out.as_deref_mut() {
         o.widget(
@@ -424,20 +597,31 @@ fn layout(
             (inner_x, y + (card.title.lh - icon) / 2.0, icon, icon),
             None,
         );
-    }
-    let th = place_text(&card.title, title_x, y, title_w, out.as_deref_mut());
-    if let Some(sub) = &card.subtitle {
-        let tw = width(&card.title);
-        let gap = px.v(GAP);
-        if th <= card.title.lh + 0.5 && tw + gap + width(sub) <= title_w {
-            place_text_lines_opt(sub, title_x + tw + gap, y, title_w - tw - gap, px, &mut out);
-            y += th;
-        } else {
-            y += th;
-            y += place_text(sub, title_x, y, title_w, out.as_deref_mut());
+        if let Some(pill) = &card.pill {
+            let ph = pill.lh + px.v(4.0);
+            let left = x + cw - pad - pill_w;
+            o.hairline(
+                left,
+                y + (card.title.lh - ph) / 2.0,
+                pill_w,
+                ph,
+                ph / 2.0,
+                ColorRole::ButtonBorder,
+            );
+            place_text_lines(
+                pill,
+                left + px.v(7.0),
+                y + (card.title.lh - pill.lh) / 2.0,
+                pill_w - px.v(14.0),
+                1,
+                px,
+                o,
+            );
         }
-    } else {
-        y += th;
+    }
+    y += place_text(&card.title, title_x, y, title_w, out.as_deref_mut());
+    if let Some(sub) = &card.subtitle {
+        y += place_text(sub, title_x, y, title_w, out.as_deref_mut());
     }
     if !card.items.is_empty() {
         y += pad;
@@ -454,48 +638,12 @@ fn layout(
     }
     if !card.buttons.is_empty() {
         y += pad;
-        let bh = px.v(BUTTON_H);
-        let mut bx = inner_x;
-        for b in &card.buttons {
-            let bw = (width(&b.label) + px.v(BUTTON_PAD) * 2.0).min(inner_w);
-            if bx > inner_x && bx + bw > inner_x + inner_w {
-                bx = inner_x;
-                y += bh + px.v(GAP);
-            }
-            if let Some(o) = out.as_deref_mut() {
-                o.hairline(bx, y, bw, bh, bh / 2.0, ColorRole::ButtonBorder);
-                place_text_lines(
-                    &b.label,
-                    bx + px.v(BUTTON_PAD),
-                    y + (bh - b.label.lh) / 2.0,
-                    (bw - px.v(BUTTON_PAD) * 2.0).max(1.0),
-                    1,
-                    px,
-                    o,
-                );
-                o.widget(
-                    WidgetKind::CardButton {
-                        action: b.action.clone(),
-                    },
-                    (bx, y, bw, bh),
-                    Some(b.title.clone()),
-                );
-            }
-            bx += bw + px.v(GAP);
-        }
-        y += bh;
+        y += place_buttons(&card.buttons, px, inner_x, y, inner_w, &mut out);
     }
     y + pad - top
 }
 
-fn place_text_lines_opt(
-    t: &PText,
-    x: f32,
-    y: f32,
-    w: f32,
-    px: Px,
-    out: &mut Option<&mut DisplayBuilder>,
-) {
+fn place_line(t: &PText, x: f32, y: f32, w: f32, px: Px, out: &mut Option<&mut DisplayBuilder>) {
     if let Some(o) = out.as_deref_mut() {
         place_text_lines(t, x, y, w, 1, px, o);
     }
@@ -510,7 +658,7 @@ fn place_item(
     out: &mut Option<&mut DisplayBuilder>,
 ) -> f32 {
     match item {
-        Item::Heading(t) | Item::Text(t) => place_text(t, x, y, w, out.as_deref_mut()),
+        Item::Text(t) => place_text(t, x, y, w, out.as_deref_mut()),
         Item::Meter {
             label,
             value,
@@ -526,24 +674,18 @@ fn place_item(
                 (w - vw - px.v(GAP)).max(1.0),
                 out.as_deref_mut(),
             );
-            place_text_lines_opt(value, x + w - vw, y, vw, px, out);
+            place_line(value, x + w - vw, y, vw, px, out);
             let track_y = y + lh + px.v(4.0);
             let track = px.v(TRACK);
             if let Some(o) = out.as_deref_mut() {
                 o.fill(x, track_y, w, track, track / 2.0, ColorRole::ChipBackground);
                 if *fill > 0.0 {
-                    o.fill(
-                        x,
-                        track_y,
-                        (w * fill).max(track),
-                        track,
-                        track / 2.0,
-                        if *warning {
-                            ColorRole::Warning
-                        } else {
-                            ColorRole::Accent
-                        },
-                    );
+                    let color = if *warning {
+                        ColorRole::Warning
+                    } else {
+                        ColorRole::Accent
+                    };
+                    o.fill(x, track_y, (w * fill).max(track), track, track / 2.0, color);
                 }
             }
             let mut h = lh + px.v(4.0) + track;
@@ -552,6 +694,33 @@ fn place_item(
                 h += place_text(foot, x, y + h, w, out.as_deref_mut());
             }
             h
+        }
+        Item::Stack(segments) => {
+            let h = px.v(STACK);
+            if let Some(o) = out.as_deref_mut() {
+                o.fill(x, y, w, h, h / 2.0, ColorRole::ChipBackground);
+                let mut sx = x;
+                for (fraction, color) in segments {
+                    let sw = (w * fraction).min(x + w - sx).max(0.0);
+                    if sw > 0.0 {
+                        o.fill(sx, y, sw, h, 0.0, *color);
+                    }
+                    sx += sw + px.v(1.0);
+                }
+            }
+            h
+        }
+        Item::Legend { color, name, value } => {
+            let dot = px.v(DOT);
+            let vw = width(value).min(w / 2.0);
+            let nx = x + dot + px.v(GAP);
+            let nw = (w - vw - dot - px.v(GAP) * 2.0).max(1.0);
+            let nh = place_text(name, nx, y, nw, out.as_deref_mut());
+            place_line(value, x + w - vw, y, vw, px, out);
+            if let Some(o) = out.as_deref_mut() {
+                o.fill(x, y + (name.lh - dot) / 2.0, dot, dot, px.v(2.0), *color);
+            }
+            nh
         }
         Item::Bar { lead, fill, text } => {
             let lead_w = px.v(LEAD_W);
@@ -564,7 +733,7 @@ fn place_item(
                 (x + w - text_x).max(1.0),
                 out.as_deref_mut(),
             );
-            place_text_lines_opt(lead, x, y, lead_w, px, out);
+            place_line(lead, x, y, lead_w, px, out);
             let track = px.v(TRACK);
             let track_y = y + (lead.lh - track) / 2.0;
             if let Some(o) = out.as_deref_mut() {
@@ -578,14 +747,8 @@ fn place_item(
                     ColorRole::ChipBackground,
                 );
                 if *fill > 0.0 {
-                    o.fill(
-                        bx,
-                        track_y,
-                        (bar_w * fill).max(track),
-                        track,
-                        track / 2.0,
-                        ColorRole::TextTertiary,
-                    );
+                    let bw = (bar_w * fill).max(track);
+                    o.fill(bx, track_y, bw, track, track / 2.0, ColorRole::TextTertiary);
                 }
             }
             th.max(lead.lh)
@@ -593,75 +756,26 @@ fn place_item(
         Item::Status { name, state, ok } => {
             let dot = px.v(DOT);
             let sw = width(state).min(w / 2.0);
-            let name_x = x + dot + px.v(GAP);
-            let nh = place_text(
-                name,
-                name_x,
-                y,
-                (w - sw - dot - px.v(GAP) * 2.0).max(1.0),
-                out.as_deref_mut(),
-            );
-            place_text_lines_opt(state, x + w - sw, y, sw, px, out);
+            let nx = x + dot + px.v(GAP);
+            let nw = (w - sw - dot - px.v(GAP) * 2.0).max(1.0);
+            let nh = place_text(name, nx, y, nw, out.as_deref_mut());
+            place_line(state, x + w - sw, y, sw, px, out);
             if let Some(o) = out.as_deref_mut() {
-                o.fill(
-                    x,
-                    y + (name.lh - dot) / 2.0,
-                    dot,
-                    dot,
-                    dot / 2.0,
-                    if *ok {
-                        ColorRole::Success
-                    } else {
-                        ColorRole::TextTertiary
-                    },
-                );
+                let color = if *ok {
+                    ColorRole::Success
+                } else {
+                    ColorRole::TextTertiary
+                };
+                o.fill(x, y + (name.lh - dot) / 2.0, dot, dot, dot / 2.0, color);
             }
             nh
         }
-        Item::Pills(pills) => {
-            let ph = px.v(PILL_H);
-            let gap = px.v(GAP);
-            let (mut px_, mut py) = (x, y);
-            for (label, on) in pills {
-                let pw = width(label) + px.v(PILL_PAD) * 2.0;
-                if px_ > x && px_ + pw > x + w {
-                    px_ = x;
-                    py += ph + gap;
-                }
-                if let Some(o) = out.as_deref_mut() {
-                    if *on {
-                        o.fill(px_, py, pw, ph, ph / 2.0, ColorRole::AccentWash);
-                    }
-                    o.hairline(
-                        px_,
-                        py,
-                        pw,
-                        ph,
-                        ph / 2.0,
-                        if *on {
-                            ColorRole::Accent
-                        } else {
-                            ColorRole::ButtonBorder
-                        },
-                    );
-                    place_text_lines(
-                        label,
-                        px_ + px.v(PILL_PAD),
-                        py + (ph - label.lh) / 2.0,
-                        pw,
-                        1,
-                        px,
-                        o,
-                    );
-                }
-                px_ += pw + gap;
-            }
-            py + ph - y
-        }
+        Item::Choices(buttons) => place_buttons(buttons, px, x, y, w, out),
     }
 }
 
-pub(crate) fn heap_bytes(card: &CommandCard) -> usize {
+pub(crate) fn heap_bytes(card: &CommandCardView) -> usize {
+    let buttons = |b: &[CardButton]| b.iter().map(|b| b.label.p.heap_bytes()).sum::<usize>();
     let item = |item: &Item| match item {
         Item::Meter {
             label, value, foot, ..
@@ -670,17 +784,16 @@ pub(crate) fn heap_bytes(card: &CommandCard) -> usize {
                 + value.p.heap_bytes()
                 + foot.as_ref().map_or(0, |f| f.p.heap_bytes())
         }
+        Item::Stack(_) => 0,
+        Item::Legend { name, value, .. } => name.p.heap_bytes() + value.p.heap_bytes(),
         Item::Bar { lead, text, .. } => lead.p.heap_bytes() + text.p.heap_bytes(),
         Item::Status { name, state, .. } => name.p.heap_bytes() + state.p.heap_bytes(),
-        Item::Pills(pills) => pills.iter().map(|(p, _)| p.p.heap_bytes()).sum(),
-        Item::Heading(t) | Item::Text(t) => t.p.heap_bytes(),
+        Item::Choices(b) => buttons(b),
+        Item::Text(t) => t.p.heap_bytes(),
     };
     card.title.p.heap_bytes()
         + card.subtitle.as_ref().map_or(0, |s| s.p.heap_bytes())
+        + card.pill.as_ref().map_or(0, |s| s.p.heap_bytes())
         + card.items.iter().map(item).sum::<usize>()
-        + card
-            .buttons
-            .iter()
-            .map(|b| b.label.p.heap_bytes())
-            .sum::<usize>()
+        + buttons(&card.buttons)
 }

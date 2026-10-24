@@ -89,10 +89,14 @@ pub enum CardAction {
     },
     EnableComputer,
     OpenClaudeConfig,
+    OpenClaudeStatus,
+    OpenClaudePermissions,
     OpenUsage,
-    OpenSessionInfo,
-    CopyTranscript,
-    OpenChip { id: String },
+    OpenSettings,
+    OpenDocs,
+    Compact,
+    PickModel { id: String, label: String },
+    CopyText { text: String },
 }
 
 /// Text decorations, painted relative to the run's baseline.

@@ -732,6 +732,24 @@ final class CoreSessionSource: SessionSource {
         if let permission = write.permission { setConfig { $0.permissionMode = permission } }
     }
 
+    var skillNames: [String] {
+        invocationCatalogs.filter { $0.key.hasSuffix("|true") }.values.flatMap { $0.entries.map(\.name) }
+    }
+
+    func runClaudeCard(_ text: String) {
+        let skills = skillNames
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                if let write = try await self.client.runClaudeCard(chatId: self.chatId, text: text, skills: skills) {
+                    self.applyChip(write)
+                }
+            } catch {
+                self.alert("\(error)")
+            }
+        }
+    }
+
     func usagePage() -> UIViewController? {
         guard let app, !hostDevice.isEmpty else { return nil }
         return HostPageViewController(app: app, deviceId: hostDevice, page: "usage", title: "Usage")

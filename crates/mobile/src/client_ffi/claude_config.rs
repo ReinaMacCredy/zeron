@@ -219,6 +219,41 @@ impl CoreClient {
     }
 }
 
+fn card_command(
+    text: &str,
+    skills: &[String],
+) -> Option<zeron_proto::app_commands::ClaudeCardCommand> {
+    zeron_proto::app_commands::claude_card_command(text, |name| skills.iter().any(|s| s == name))
+}
+
+#[uniffi::export]
+pub fn is_claude_card_command(text: String, skills: Vec<String>) -> bool {
+    card_command(&text, &skills).is_some()
+}
+
+#[uniffi::export]
+impl CoreClient {
+    pub async fn run_claude_card(
+        &self,
+        chat_id: String,
+        text: String,
+        skills: Vec<String>,
+    ) -> CoreResult<Option<ChipWrite>> {
+        let Some(command) = card_command(&text, &skills) else {
+            return Ok(None);
+        };
+        let client = self.client.clone();
+        let switch =
+            on_runtime(async move { client.run_claude_card(&chat_id, command).await }).await?;
+        Ok(switch.map(|(model, label)| ChipWrite {
+            model: Some(model),
+            model_label: Some(label),
+            reasoning: None,
+            permission: None,
+        }))
+    }
+}
+
 #[uniffi::export]
 pub fn opens_config_panel(text: String) -> bool {
     zeron_proto::app_commands::opens_config_panel(text.trim())
@@ -240,7 +275,7 @@ impl ClaudeConfigPanel {
             let chat = self.chat_id.clone();
             let (reply, snapshot) = zc::runtime::run(async move {
                 let reply = client
-                    .run_claude_local_command(&chat, &command, false)
+                    .run_claude_local_command(&chat, &command, false, false)
                     .await
                     .map_err(|e| e.to_string());
                 let snapshot = if ConfigState::write_saved(&reply) {
@@ -542,7 +577,7 @@ impl ClaudeConfigPanel {
         let client = self.client.clone();
         let chat = self.chat_id.clone();
         let text = summary.clone();
-        on_runtime(async move { client.add_chat_note(&chat, &text).await }).await?;
+        on_runtime(async move { client.add_chat_note(&chat, &text, None).await }).await?;
         Ok(Some(summary))
     }
 }

@@ -150,6 +150,8 @@ protocol SessionSource: AnyObject {
     func claudeConfigPanel() -> ClaudeConfigPanel?
     func applyChip(_ write: ChipWrite)
     func usagePage() -> UIViewController?
+    var skillNames: [String] { get }
+    func runClaudeCard(_ text: String)
 }
 
 extension SessionSource {
@@ -157,6 +159,8 @@ extension SessionSource {
     func claudeConfigPanel() -> ClaudeConfigPanel? { nil }
     func applyChip(_ write: ChipWrite) {}
     func usagePage() -> UIViewController? { nil }
+    var skillNames: [String] { [] }
+    func runClaudeCard(_ text: String) {}
     func clearQueueError() {}
     func chipSheet(_ id: String) -> UIViewController? { nil }
     @MainActor

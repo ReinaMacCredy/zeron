@@ -1,7 +1,11 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::{AnyElement, ClipboardItem, Context, Hsla, SharedString, div, prelude::*, px};
+use zeron_proto::claude_cards::{
+    LOCAL_FOOTNOTE, MCP_EMPTY, MCP_FOOTNOTE, MODEL_FOOTNOTE, Series, TerminalAction, mcp_servers,
+    parse_context, percent, selected_model, terminal_action, terminal_only, usage_subtitle,
+};
 use zeron_proto::claude_config::CommandCard;
 use zeron_proto::usage::format_tokens;
 
@@ -9,9 +13,6 @@ use super::{Transcript, TranscriptEvent};
 use crate::composer::claude_config::{meter, parse_usage};
 use crate::icons::{self, icon};
 use crate::theme::Theme;
-
-const BAR_SCALE: f32 = 6.0;
-const GROUP_ROWS: usize = 5;
 
 #[derive(Default)]
 pub(super) struct CardUi {
@@ -32,181 +33,16 @@ pub enum ClaudeCardAction {
     Help,
 }
 
-#[derive(Debug, PartialEq)]
-struct Group {
-    title: String,
-    total: u64,
-    rows: Vec<(String, u64)>,
-}
-
-#[derive(Debug, PartialEq)]
-struct ContextReport {
-    model: String,
-    used: u64,
-    total: u64,
-    categories: Vec<(String, u64)>,
-    free: u64,
-    buffer: u64,
-    groups: Vec<Group>,
-}
-
-fn tokens(cell: &str) -> Option<u64> {
-    let cell = cell.trim().trim_start_matches('~').to_lowercase();
-    let (number, scale) = match cell.chars().last()? {
-        'k' => (&cell[..cell.len() - 1], 1_000.0),
-        'm' => (&cell[..cell.len() - 1], 1_000_000.0),
-        _ => (cell.as_str(), 1.0),
-    };
-    let value: f64 = number.trim().replace(',', "").parse().ok()?;
-    Some((value * scale).round() as u64)
-}
-
-fn cells(line: &str) -> Option<Vec<String>> {
-    let line = line.trim();
-    let inner = line.strip_prefix('|')?.strip_suffix('|')?;
-    if inner.chars().all(|c| matches!(c, '-' | '|' | ' ' | ':')) {
-        return None;
-    }
-    Some(inner.split('|').map(|c| c.trim().to_string()).collect())
-}
-
-fn sections(text: &str) -> Vec<(String, Vec<Vec<String>>)> {
-    let mut out: Vec<(String, Vec<Vec<String>>)> = Vec::new();
-    let mut header_seen = false;
-    for line in text.lines() {
-        if let Some(title) = line.strip_prefix("### ") {
-            out.push((title.trim().to_string(), Vec::new()));
-            header_seen = false;
-        } else if let Some(row) = cells(line)
-            && let Some((_, rows)) = out.last_mut()
-        {
-            if header_seen {
-                rows.push(row);
-            } else {
-                header_seen = true;
-            }
-        }
-    }
-    out
-}
-
-fn group_of(title: &str, rows: &[Vec<String>]) -> Option<Group> {
-    let last = |row: &Vec<String>| row.last().and_then(|c| tokens(c));
-    let mut items: Vec<(String, u64)> = match title {
-        "MCP Tools" => {
-            let mut servers: BTreeMap<String, u64> = BTreeMap::new();
-            for row in rows {
-                if let (Some(server), Some(n)) = (row.get(1), last(row)) {
-                    *servers.entry(server.clone()).or_default() += n;
-                }
-            }
-            servers.into_iter().collect()
-        }
-        "Memory Files" => rows
-            .iter()
-            .filter_map(|row| {
-                let path = row.get(1)?;
-                let name = path.rsplit('/').next().unwrap_or(path);
-                Some((format!("{name} · {}", row.first()?), last(row)?))
-            })
-            .collect(),
-        "Custom Agents" => rows
-            .iter()
-            .filter_map(|row| Some((format!("{} · {}", row.first()?, row.get(1)?), last(row)?)))
-            .collect(),
-        "Skills" => rows
-            .iter()
-            .filter_map(|row| Some((row.first()?.clone(), last(row)?)))
-            .collect(),
-        _ => return None,
-    };
-    if items.is_empty() {
-        return None;
-    }
-    items.sort_by(|a, b| b.1.cmp(&a.1));
-    let total = items.iter().map(|(_, n)| n).sum();
-    if items.len() > GROUP_ROWS {
-        let rest: Vec<_> = items.split_off(GROUP_ROWS - 1);
-        let label = match title {
-            "MCP Tools" => "servers",
-            "Memory Files" => "files",
-            "Custom Agents" => "agents",
-            _ => "skills",
-        };
-        items.push((
-            format!("+ {} {label}", rest.len()),
-            rest.iter().map(|(_, n)| n).sum(),
-        ));
-    }
-    let title = match title {
-        "MCP Tools" => "MCP tools",
-        "Memory Files" => "Memory files",
-        "Custom Agents" => "Custom agents",
-        other => other,
-    };
-    Some(Group {
-        title: title.to_string(),
-        total,
-        rows: items,
-    })
-}
-
-fn parse_context(text: &str) -> Option<ContextReport> {
-    let field = |name: &str| {
-        text.lines()
-            .find_map(|l| l.trim().strip_prefix(&format!("**{name}:**")))
-            .map(|v| v.trim().to_string())
-    };
-    let tokens_line = field("Tokens")?;
-    let (used, rest) = tokens_line.split_once('/')?;
-    let total = rest.split_whitespace().next().and_then(tokens)?;
-    let used = tokens(used)?;
-    let mut report = ContextReport {
-        model: field("Model").unwrap_or_default(),
-        used,
-        total,
-        categories: Vec::new(),
-        free: 0,
-        buffer: 0,
-        groups: Vec::new(),
-    };
-    for (title, rows) in sections(text) {
-        if title.starts_with("Estimated usage by category") {
-            for row in rows {
-                let (Some(name), Some(n)) = (row.first(), row.get(1).and_then(|c| tokens(c)))
-                else {
-                    continue;
-                };
-                match name.as_str() {
-                    "Free space" => report.free = n,
-                    "Autocompact buffer" => report.buffer = n,
-                    _ => report.categories.push((name.clone(), n)),
-                }
-            }
-        } else if let Some(group) = group_of(&title, &rows) {
-            report.groups.push(group);
-        }
-    }
-    (!report.categories.is_empty()).then_some(report)
-}
-
 fn series(theme: &Theme, name: &str) -> Hsla {
-    match name {
-        n if n.starts_with("System") => theme.accent,
-        n if n.starts_with("MCP") => theme.syntax.function,
-        "Custom agents" => theme.syntax.type_name,
-        "Memory files" => theme.warning,
-        "Skills" => theme.success,
-        "Messages" => theme.danger,
-        _ => theme.text_muted,
+    match zeron_proto::claude_cards::series(name) {
+        Series::System => theme.accent,
+        Series::Mcp => theme.syntax.function,
+        Series::Agents => theme.syntax.type_name,
+        Series::Memory => theme.warning,
+        Series::Skills => theme.success,
+        Series::Messages => theme.danger,
+        Series::Other => theme.text_muted,
     }
-}
-
-fn percent(part: u64, whole: u64) -> String {
-    if whole == 0 {
-        return "0%".into();
-    }
-    format!("{:.1}%", part as f64 / whole as f64 * 100.0)
 }
 
 fn text_size(size: f32) -> gpui::Rems {
@@ -467,7 +303,7 @@ impl Transcript {
                     .border_color(theme.border)
                     .text_size(text_size(11.5))
                     .text_color(theme.text_faint)
-                    .child("Ran locally in Claude Code · no tokens used"),
+                    .child(LOCAL_FOOTNOTE),
             )
             .into_any_element()
     }
@@ -485,9 +321,7 @@ impl Transcript {
             (ui.raw, ui.open.clone())
         };
         let total = report.total.max(1);
-        let drawn = report.used + report.buffer;
-        let scale = (0.98 * total as f32 / drawn.max(1) as f32).min(BAR_SCALE);
-        let width = |n: u64| gpui::relative((n as f32 / total as f32 * scale).max(0.004));
+        let width = |n: u64| gpui::relative(report.bar_fraction(n));
         let bar = div()
             .h(px(10.0))
             .rounded(px(5.0))
@@ -560,16 +394,7 @@ impl Transcript {
             );
         }
         legend.push(legend_item(None, "Free".into(), report.free).into_any_element());
-        let tip = report.groups.iter().max_by_key(|g| g.total).and_then(|g| {
-            let top = g.rows.first()?;
-            Some(format!(
-                "{} take {}. Largest: {} {}.",
-                g.title,
-                format_tokens(g.total),
-                top.0,
-                format_tokens(top.1)
-            ))
-        });
+        let tip = report.tip();
         let groups = report.groups.iter().map(|group| {
             let key = group.title.clone();
             let is_open = open.contains(&key);
@@ -663,12 +488,7 @@ impl Transcript {
             icons::SPEEDOMETER,
             "Context",
             format!("Claude Code · {}", report.model),
-            Some(format!(
-                "{} / {} · {}",
-                format_tokens(report.used),
-                format_tokens(report.total),
-                percent(report.used, report.total)
-            )),
+            Some(report.pill()),
             Some(card.text.clone()),
             theme,
             cx,
@@ -713,11 +533,16 @@ impl Transcript {
                                 .mt(px(4.0))
                                 .text_size(text_size(11.5))
                                 .text_color(theme.text_faint)
-                                .child(format!(
-                                    "Bar drawn {scale:.0}× so the used part reads; free space is not drawn."
-                                )),
+                                .child(report.bar_caption()),
                         )
-                        .child(div().mt(px(10.0)).flex().flex_row().flex_wrap().children(legend))
+                        .child(
+                            div()
+                                .mt(px(10.0))
+                                .flex()
+                                .flex_row()
+                                .flex_wrap()
+                                .children(legend),
+                        )
                         .when_some(tip, |el, tip| {
                             el.child(
                                 div()
@@ -885,17 +710,7 @@ impl Transcript {
                         )
                 }))
         });
-        let sub = report
-            .note
-            .as_deref()
-            .map(|n| {
-                if n.contains("subscription") {
-                    "Claude Code · subscription".to_string()
-                } else {
-                    format!("Claude Code · {n}")
-                }
-            })
-            .unwrap_or_else(|| "Claude Code".into());
+        let sub = usage_subtitle(report.note.as_deref());
         let header = self.card_header(
             row,
             icons::BOLT,
@@ -960,17 +775,7 @@ impl Transcript {
                 .and_then(|c| c.model.clone())
         });
         let current = live.or_else(|| card.model.clone());
-        let selected = current.as_deref().and_then(|current| {
-            let alias = current.to_lowercase();
-            card.models
-                .iter()
-                .position(|(id, _)| id == current)
-                .or_else(|| {
-                    card.models
-                        .iter()
-                        .position(|(_, label)| label.to_lowercase().starts_with(&alias))
-                })
-        });
+        let selected = selected_model(&card.models, current.as_deref());
         let label = selected
             .map(|ix| card.models[ix].1.clone())
             .or_else(|| current.clone())
@@ -1025,9 +830,7 @@ impl Transcript {
                             .mt(px(8.0))
                             .text_size(text_size(11.5))
                             .text_color(theme.text_faint)
-                            .child(card.note.clone().unwrap_or_else(|| {
-                                "Picking a model here changes this chat's model chip.".into()
-                            })),
+                            .child(card.note.clone().unwrap_or_else(|| MODEL_FOOTNOTE.into())),
                     ),
             )
             .into_any_element()
@@ -1040,18 +843,7 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let servers: Vec<(String, String)> = card
-            .mcp_servers
-            .as_ref()?
-            .as_array()?
-            .iter()
-            .filter_map(|s| {
-                Some((
-                    s.get("name")?.as_str()?.to_string(),
-                    s.get("status")?.as_str().unwrap_or("unknown").to_string(),
-                ))
-            })
-            .collect();
+        let servers = mcp_servers(card)?;
         let connected = servers.iter().filter(|(_, s)| s == "connected").count();
         let raw_on = self.card_ui(row).raw;
         let header = self.card_header(
@@ -1096,7 +888,7 @@ impl Transcript {
                                     .py(px(5.0))
                                     .text_size(text_size(12.5))
                                     .text_color(theme.text_muted)
-                                    .child("No MCP servers are configured for this folder."),
+                                    .child(MCP_EMPTY),
                             )
                         })
                         .children(servers.iter().map(|(name, status)| {
@@ -1109,18 +901,17 @@ impl Transcript {
                                 .px(px(12.0))
                                 .py(px(5.0))
                                 .text_size(text_size(12.5))
-                                .child(
-                                    div()
-                                        .size(px(7.0))
-                                        .rounded_full()
-                                        .bg(if ok { theme.success } else { theme.text_faint }),
-                                )
+                                .child(div().size(px(7.0)).rounded_full().bg(if ok {
+                                    theme.success
+                                } else {
+                                    theme.text_faint
+                                }))
                                 .child(div().flex_1().child(name.clone()))
-                                .child(
-                                    div()
-                                        .text_color(theme.text_muted)
-                                        .child(if ok { "connected".to_string() } else { status.replace('-', " ") }),
-                                )
+                                .child(div().text_color(theme.text_muted).child(if ok {
+                                    "connected".to_string()
+                                } else {
+                                    status.replace('-', " ")
+                                }))
                         }))
                         .child(
                             div()
@@ -1128,7 +919,7 @@ impl Transcript {
                                 .pt(px(4.0))
                                 .text_size(text_size(11.5))
                                 .text_color(theme.text_faint)
-                                .child("Names and status from Claude Code's init for this folder; Zeron's own tool server is not listed."),
+                                .child(MCP_FOOTNOTE),
                         ),
                 )
                 .when(raw_on, |el| el.child(self.raw_block(&card.text, theme)))
@@ -1144,12 +935,16 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let action = match name {
-            "status" => Some(("Open Status", ClaudeCardAction::Status)),
-            "permissions" => Some(("Open permission mode", ClaudeCardAction::Permissions)),
-            "help" => Some(("Open Docs", ClaudeCardAction::Help)),
-            _ => None,
-        };
+        let action = terminal_action(name).map(|(label, action)| {
+            (
+                label,
+                match action {
+                    TerminalAction::Status => ClaudeCardAction::Status,
+                    TerminalAction::Permissions => ClaudeCardAction::Permissions,
+                    TerminalAction::Help => ClaudeCardAction::Help,
+                },
+            )
+        });
         div()
             .id(row.clone())
             .debug_selector(|| "claude-card-notice".into())
@@ -1193,60 +988,5 @@ impl Transcript {
                 )
             })
             .into_any_element()
-    }
-}
-
-fn terminal_only(card: &CommandCard) -> Option<&str> {
-    (card.text.is_empty() && card.error.is_none() && card.models.is_empty())
-        .then(|| card.command.strip_prefix('/'))
-        .flatten()
-        .filter(|name| zeron_proto::app_commands::TERMINAL_ONLY_COMMANDS.contains(name))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const CONTEXT: &str = "## Context Usage\n\n**Model:** claude-haiku-5-5  \n**Tokens:** 59.9k / 1m (6%)\n\n### Estimated usage by category\n\n| Category | Tokens | Percentage |\n|----------|--------|------------|\n| System prompt | 3.3k | 0.3% |\n| Memory files | 25.1k | 2.5% |\n| Messages | 18.8k | 1.9% |\n| Free space | 907.1k | 90.7% |\n| Autocompact buffer | 33k | 3.3% |\n\n### MCP Tools\n\n| Tool | Server | Tokens |\n|------|--------|--------|\n| mcp__xcode__A | xcode | 1.4k |\n| mcp__xcode__B | xcode | 1.2k |\n| mcp__semble__search | semble | 519 |\n\n### Memory Files\n\n| Type | Path | Tokens |\n|------|------|--------|\n| User | /Users/r/.claude/CLAUDE.md | 3.5k |\n| Project | /Users/r/AGENTS.md | 3.4k |\n";
-
-    #[test]
-    fn context_markdown_becomes_categories_and_groups() {
-        let report = parse_context(CONTEXT).unwrap();
-        assert_eq!(report.model, "claude-haiku-5-5");
-        assert_eq!((report.used, report.total), (59_900, 1_000_000));
-        assert_eq!(report.free, 907_100);
-        assert_eq!(report.buffer, 33_000);
-        assert_eq!(
-            report.categories,
-            [
-                ("System prompt".to_string(), 3_300),
-                ("Memory files".to_string(), 25_100),
-                ("Messages".to_string(), 18_800)
-            ]
-        );
-        assert_eq!(report.groups[0].title, "MCP tools");
-        assert_eq!(
-            report.groups[0].rows,
-            [("xcode".to_string(), 2_600), ("semble".to_string(), 519)]
-        );
-        assert_eq!(
-            report.groups[1].rows[0],
-            ("CLAUDE.md · User".to_string(), 3_500)
-        );
-        assert!(parse_context("Not enough messages to compact.").is_none());
-    }
-
-    #[test]
-    fn long_groups_fold_their_tail_into_one_row() {
-        let rows: Vec<Vec<String>> = (1..=8)
-            .map(|n| vec![format!("skill-{n}"), "User".into(), format!("{}", n * 100)])
-            .collect();
-        let group = group_of("Skills", &rows).unwrap();
-        assert_eq!(group.rows.len(), GROUP_ROWS);
-        assert_eq!(
-            group.rows.last().unwrap(),
-            &("+ 4 skills".to_string(), 1_000)
-        );
-        assert_eq!(group.total, 3_600);
     }
 }

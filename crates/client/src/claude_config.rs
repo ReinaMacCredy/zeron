@@ -1,3 +1,8 @@
+use zeron_proto::app_commands::ClaudeCardCommand;
+use zeron_proto::claude_cards::{
+    FORKED, LOST_SESSION, NO_SESSION, headline, lost_session, model_card, model_match,
+    no_match_note, output_card, side_run, switched_note, terminal_card,
+};
 use zeron_proto::claude_config::{ClaudeConfigSnapshot, LocalCommandOutput};
 use zeron_proto::claude_panel::{ChipChoices, STATS_DAYS};
 use zeron_proto::usage::UsageSummary;
@@ -27,21 +32,25 @@ impl Client {
         chat_id: &str,
         command: &str,
         connect_mcp: bool,
+        live_session: bool,
     ) -> Result<LocalCommandOutput> {
         let (device, mut params) = self.claude_target(chat_id)?;
         params["command"] = command.into();
         params["connectMcp"] = connect_mcp.into();
+        params["liveSession"] = live_session.into();
         self.host_call(&device, methods::RUN_CLAUDE_LOCAL_COMMAND, params)
             .await
     }
 
-    pub async fn add_chat_note(&self, chat_id: &str, text: &str) -> Result<()> {
+    pub async fn add_chat_note(&self, chat_id: &str, text: &str, hint: Option<&str>) -> Result<()> {
         let (device, _) = self.claude_target(chat_id)?;
         self.inner
             .host_rpc(
                 &device,
                 methods::MUTATE,
-                serde_json::json!({ "op": "addChatNote", "chatId": chat_id, "text": text }),
+                serde_json::json!({
+                    "op": "addChatNote", "chatId": chat_id, "text": text, "hint": hint,
+                }),
             )
             .await
             .map(drop)
@@ -104,7 +113,64 @@ impl Client {
         futures::join!(
             self.read_claude_config(chat_id),
             self.chip_choices(chat_id),
-            self.run_claude_local_command(chat_id, "/usage", true),
+            self.run_claude_local_command(chat_id, "/usage", true, false),
         )
+    }
+
+    pub async fn run_claude_card(
+        &self,
+        chat_id: &str,
+        command: ClaudeCardCommand,
+    ) -> Result<Option<(String, String)>> {
+        let mut switch = None;
+        let (headline, card) = match side_run(&command) {
+            None => match command {
+                ClaudeCardCommand::Model(arg) => {
+                    let chips = self.chip_choices(chat_id).await;
+                    let mut model = chips.model.clone();
+                    let note = arg.map(|arg| match model_match(&chips.models, &arg) {
+                        Some((id, label)) => {
+                            switch = Some((id.clone(), label.clone()));
+                            model = Some(id.clone());
+                            switched_note(label)
+                        }
+                        None => no_match_note(&arg),
+                    });
+                    let card = model_card(chips.models, model, note);
+                    (headline(&card), card)
+                }
+                ClaudeCardCommand::TerminalOnly(name) => terminal_card(&name),
+                _ => return Ok(None),
+            },
+            Some(run) => {
+                let has_session = self
+                    .chat(chat_id)
+                    .and_then(|chat| chat.harness_session_id)
+                    .is_some_and(|id| !id.is_empty());
+                let live = run.live && has_session;
+                let command = format!("/{}", run.name);
+                let mut note = (run.live && !has_session).then_some(NO_SESSION);
+                let mut reply = self
+                    .run_claude_local_command(chat_id, &command, run.connect_mcp, live)
+                    .await
+                    .map_err(|e| e.to_string());
+                if live {
+                    note = Some(FORKED);
+                    if lost_session(&reply) {
+                        reply = self
+                            .run_claude_local_command(chat_id, &command, run.connect_mcp, false)
+                            .await
+                            .map_err(|e| e.to_string());
+                        note = Some(LOST_SESSION);
+                    }
+                }
+                let card = output_card(run.name, reply, note);
+                (headline(&card), card)
+            }
+        };
+        let hint = serde_json::to_string(&card.capped())
+            .map_err(|e| ClientError::Internal(e.to_string()))?;
+        self.add_chat_note(chat_id, &headline, Some(&hint)).await?;
+        Ok(switch)
     }
 }

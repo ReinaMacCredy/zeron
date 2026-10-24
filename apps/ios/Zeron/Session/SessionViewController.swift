@@ -167,6 +167,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             // An immediate send (new turn, steer, stop-and-send) gets the
             // desktop runway; a message queued behind a live turn keeps the
             // live turn's runway and just follows.
+            if self.source.runsClaudeCode, isClaudeCardCommand(text: text, skills: self.source.skillNames) {
+                DispatchQueue.main.async { self.composer.resignFirstResponder() }
+                self.source.runClaudeCard(text)
+                return .sent
+            }
             if self.source.runsClaudeCode, opensConfigPanel(text: text) {
                 DispatchQueue.main.async { self.composer.resignFirstResponder() }
                 self.openClaudeConfig()
@@ -494,22 +499,31 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             composer.becomeFirstResponder()
         case .openClaudeConfig:
             openClaudeConfig()
+        case .openClaudeStatus:
+            openClaudeConfig(tab: .status)
+        case .openClaudePermissions:
+            openClaudeConfig(query: "permission")
         case .openUsage:
             openUsage()
-        case .openSessionInfo:
-            openInfo()
-        case .copyTranscript:
-            UIPasteboard.general.string = engine.frame().plainText()
-            Toast.show("Transcript copied", in: view.window, above: bottom)
-        case let .openChip(id):
-            composer.becomeFirstResponder()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in self?.composer.openChip(id) }
+        case .openSettings:
+            router?.showSettings()
+        case .openDocs:
+            let nav = UINavigationController(rootViewController: DocsViewController())
+            if let s = nav.sheetPresentationController { s.detents = [.large()]; s.prefersGrabberVisible = true }
+            present(nav, animated: true)
+        case .compact:
+            source.compact(focus: nil)
+        case let .pickModel(id, label):
+            source.applyChip(ChipWrite(model: id, modelLabel: label, reasoning: nil, permission: nil))
+        case let .copyText(text):
+            UIPasteboard.general.string = text
+            Toast.show("Copied", in: view.window, above: bottom)
         }
     }
 
-    private func openClaudeConfig() {
+    private func openClaudeConfig(tab: ConfigTab = .config, query: String = "") {
         guard let panel = source.claudeConfigPanel() else { return }
-        let sheet = ClaudeConfigSheet(panel: panel)
+        let sheet = ClaudeConfigSheet(panel: panel, tab: tab, query: query)
         sheet.applyChip = { [weak self] write in self?.source.applyChip(write) }
         sheet.openUsage = { [weak self] in self?.openUsage() }
         sheet.onCloseFailed = { [weak self] error in

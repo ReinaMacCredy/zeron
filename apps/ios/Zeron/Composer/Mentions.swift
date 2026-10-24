@@ -264,6 +264,17 @@ private final class InvocationRow: UIControl {
         detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         title.setContentHuggingPriority(.required, for: .horizontal)
         let line = UIStackView(arrangedSubviews: [icon, title, detail])
+        if entry.terminal {
+            let tag = PaddedLabel(insets: UIEdgeInsets(top: 1, left: 6, bottom: 1, right: 6))
+            tag.text = "Terminal"
+            tag.font = Fonts.ui(.sansMedium, 11)
+            tag.textColor = Palette.secondary
+            tag.backgroundColor = Palette.controlFill
+            tag.layer.cornerRadius = 4
+            tag.clipsToBounds = true
+            tag.setContentCompressionResistancePriority(.required, for: .horizontal)
+            line.addArrangedSubview(tag)
+        }
         line.spacing = 8
         line.alignment = .center
         line.isUserInteractionEnabled = false
@@ -280,7 +291,7 @@ private final class InvocationRow: UIControl {
             constraints.append(title.widthAnchor.constraint(lessThanOrEqualTo: line.widthAnchor, multiplier: 0.55))
         }
         NSLayoutConstraint.activate(constraints)
-        alpha = entry.blocked ? 0.45 : 1
+        alpha = entry.blocked ? 0.45 : (entry.terminal ? 0.55 : 1)
         isAccessibilityElement = true
         accessibilityTraits = entry.blocked ? [.button, .notEnabled] : .button
         accessibilityLabel = entry.title

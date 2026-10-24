@@ -134,7 +134,7 @@ pub(crate) enum Content {
         divider: bool,
     },
     Card(Card),
-    Command(super::command_cards::CommandCard),
+    Command(super::command_cards::CommandCardView),
     /// An agent visual: its height comes from its worker.
     Visual(Arc<crate::visual::VisualSlot>),
     Strip(Strip),
@@ -242,7 +242,6 @@ pub(crate) struct RowBuilder {
     pub visual_slots: HashMap<String, Arc<crate::visual::VisualSlot>>,
     pub(crate) harness: Option<HarnessId>,
     in_fold: bool,
-    reply_to: Option<String>,
     pub html_slots: HashMap<String, Arc<super::html::HtmlSlot>>,
     pub(crate) blobs: HashMap<String, (Blob, u64)>,
     pub(crate) blob_clock: u64,
@@ -290,19 +289,10 @@ impl RowBuilder {
         let mut live_entries: HashSet<&str> = HashSet::with_capacity(input.entries.len());
         let mut live_parts: HashSet<String> = HashSet::new();
         let mut prev_role: Option<MessageRole> = None;
-        let mut command: Option<String> = None;
         for entry in &input.entries {
             live_entries.insert(entry.id.as_str());
             let first = out.is_empty();
-            self.reply_to = command.take().filter(|_| entry.role == MessageRole::Assistant);
-            if entry.role == MessageRole::User && input.harness == Some(HarnessId::ClaudeCode) {
-                let text = seams::user_text(entry);
-                command = zeron_proto::invocation::leading_command(&text)
-                    .is_some_and(|(_, rest)| rest.is_empty())
-                    .then_some(text);
-            }
-            let sig = self.entry_sig(entry, first, prev_role, input)
-                ^ self.reply_to.as_deref().map_or(0, quick_hash);
+            let sig = self.entry_sig(entry, first, prev_role, input);
             let reuse = self
                 .entries
                 .get(&entry.id)
@@ -436,6 +426,12 @@ impl RowBuilder {
                 .filter_map(|r| self.blobs.get(&r))
                 .fold(sig, |sig, (blob, order)| sig.rotate_left(7) ^ blob.tag() ^ order << 2)
         };
+        let sig = if entry.role == MessageRole::System && seams::user_text(entry).starts_with(zeron_proto::claude_config::COMMAND_NOTE_PREFIX) {
+            let model = input.chat_id.as_deref().and_then(|id| input.chats.get(id)).and_then(|c| c.model.as_deref());
+            sig.rotate_left(7) ^ model.map_or(0, quick_hash)
+        } else {
+            sig
+        };
         let refs = seams::entry_refs(entry);
         let native = entry.parts.iter().any(|p| matches!(p, MessagePart::Tool { delegate_route: Some(_), .. }));
         if refs.is_empty() && !native {
@@ -541,6 +537,12 @@ impl RowBuilder {
                 }
                 return rows;
             }
+            if let Some(card) = zeron_proto::claude_config::CommandCard::from_note(text, hint) {
+                let live = own.and_then(|id| chats.get(id)).and_then(|c| c.model.as_deref());
+                let core = super::command_cards::command_card(ctx, &format!("{}#command", entry.id), &entry.id, &card, live);
+                rows.push(Placed { core: Arc::new(core), gap });
+                return rows;
+            }
             if let Some(core) = super::command_cards::summary_card(ctx, &format!("{}#config", entry.id), &entry.id, text.trim()) {
                 rows.push(Placed { core: Arc::new(core), gap });
                 return rows;
@@ -551,20 +553,6 @@ impl RowBuilder {
             return rows;
         }
         let streaming = entry.status == Some(MessageStatus::Streaming);
-        if let Some(command) = self.reply_to.as_deref().filter(|_| !streaming) {
-            let reply = entry
-                .parts
-                .iter()
-                .filter_map(|p| match p {
-                    MessagePart::Text { text, .. } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            if let Some(core) = super::command_cards::command_card(ctx, &format!("{}#command", entry.id), &entry.id, command, &reply) {
-                return vec![Placed { core: Arc::new(core), gap: if first { Gap::First } else { Gap::Reply } }];
-            }
-        }
         if !streaming && !self.in_fold {
             self.in_fold = true;
             let folded = self.work_fold(ctx, entry, first, prev, input, live_parts);

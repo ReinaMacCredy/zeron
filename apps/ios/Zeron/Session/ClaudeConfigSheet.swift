@@ -20,8 +20,10 @@ final class ClaudeConfigSheet: UITableViewController, UISearchTextFieldDelegate,
     private let shown = UILabel()
     private let footer = UILabel()
 
-    init(panel: ClaudeConfigPanel) {
+    init(panel: ClaudeConfigPanel, tab: ConfigTab = .config, query: String = "") {
         self.panel = panel
+        self.current = tab
+        self.query = query
         super.init(style: .insetGrouped)
         title = "Claude Code settings"
     }
@@ -40,7 +42,8 @@ final class ClaudeConfigSheet: UITableViewController, UISearchTextFieldDelegate,
         for (i, info) in panel.tabs().enumerated() {
             tabs.insertSegment(withTitle: info.label, at: i, animated: false)
         }
-        tabs.selectedSegmentIndex = panel.tabs().firstIndex { $0.tab == .config } ?? 1
+        tabs.selectedSegmentIndex = panel.tabs().firstIndex { $0.tab == current } ?? 1
+        search.text = query
         tabs.accessibilityIdentifier = "claude-config-tabs"
         tabs.addAction(UIAction { [weak self] _ in self?.selectTab() }, for: .valueChanged)
         search.placeholder = "Search settings…"

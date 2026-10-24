@@ -95,24 +95,35 @@ final class ClaudeConfigFlowTests: XCTestCase {
         XCTAssertTrue(table.waitForExistence(timeout: 5), "Reopen opens the panel again")
     }
 
-    func testClaudeCommandRepliesRenderAsCards() {
+    func testClaudeCommandsAnswerWithCardsInsteadOfTurns() {
         let (app, input) = open("chat-deploy")
         send(app, input, "/usage")
         XCTAssertTrue(app.buttons["card-open-usage"].waitForExistence(timeout: 15))
         snapshot(app, "card-usage")
         send(app, input, "/context")
-        XCTAssertTrue(card(app, containing: "Estimated usage by category").waitForExistence(timeout: 15))
+        XCTAssertTrue(app.buttons["card-compact"].waitForExistence(timeout: 15))
+        XCTAssertTrue(card(app, containing: "Context").exists)
         snapshot(app, "card-context")
         send(app, input, "/model")
-        XCTAssertTrue(app.buttons["card-open-chip-model"].waitForExistence(timeout: 15))
+        let chip = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'card-model-'")).firstMatch
+        XCTAssertTrue(chip.waitForExistence(timeout: 15))
         snapshot(app, "card-model")
         send(app, input, "/mcp")
         XCTAssertTrue(card(app, containing: "MCP servers").waitForExistence(timeout: 15))
         snapshot(app, "card-mcp")
         send(app, input, "/permissions")
-        XCTAssertTrue(app.buttons["card-open-chip-permission"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.buttons["card-open-claude-permissions"].waitForExistence(timeout: 15))
         XCTAssertTrue(card(app, containing: "only runs in Claude Code's terminal").exists)
         snapshot(app, "card-terminal-only")
+        for command in ["/usage", "/context", "/model", "/mcp", "/permissions"] {
+            XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "You: \(command)")).firstMatch.exists, "\(command) is never a turn")
+        }
+        send(app, input, "/status")
+        let status = app.buttons["card-open-claude-status"].firstMatch
+        XCTAssertTrue(status.waitForExistence(timeout: 15))
+        status.tap()
+        XCTAssertTrue(app.cells["claude-config-status-MCP servers"].waitForExistence(timeout: 10), "Open Status opens the panel's Status tab")
+        snapshot(app, "card-open-status")
     }
 
     func testConfigWithArgumentsStaysATurn() {

@@ -1554,6 +1554,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func claudeConfigPanel(chatId: String)  -> ClaudeConfigPanel
     
+    func runClaudeCard(chatId: String, text: String, skills: [String]) async throws  -> ChipWrite?
+    
     /**
      * A Stripe Checkout url: a plan (`kind = "subscription"`, `plan`) or
      * extra credits (`kind = "credits"`, `packs`).
@@ -2788,6 +2790,22 @@ open func claudeConfigPanel(chatId: String) -> ClaudeConfigPanel  {
         FfiConverterString.lower(chatId),uniffiCallStatus
     )
 })
+}
+    
+open func runClaudeCard(chatId: String, text: String, skills: [String])async throws  -> ChipWrite?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_run_claude_card(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId),FfiConverterString.lower(text),FfiConverterSequenceString.lower(skills)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeChipWrite.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
     /**
@@ -15750,10 +15768,11 @@ public struct InvocationEntry: Equatable, Hashable {
     public var link: String?
     public var workspaceCommand: WorkspaceCommand?
     public var blocked: Bool
+    public var terminal: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(name: String, title: String, detail: String, skill: Bool, insert: String, link: String?, workspaceCommand: WorkspaceCommand?, blocked: Bool) {
+    public init(name: String, title: String, detail: String, skill: Bool, insert: String, link: String?, workspaceCommand: WorkspaceCommand?, blocked: Bool, terminal: Bool) {
         self.name = name
         self.title = title
         self.detail = detail
@@ -15762,6 +15781,7 @@ public struct InvocationEntry: Equatable, Hashable {
         self.link = link
         self.workspaceCommand = workspaceCommand
         self.blocked = blocked
+        self.terminal = terminal
     }
 
     
@@ -15787,7 +15807,8 @@ public struct FfiConverterTypeInvocationEntry: FfiConverterRustBuffer {
                 insert: FfiConverterString.read(from: &buf), 
                 link: FfiConverterOptionString.read(from: &buf), 
                 workspaceCommand: FfiConverterOptionTypeWorkspaceCommand.read(from: &buf), 
-                blocked: FfiConverterBool.read(from: &buf)
+                blocked: FfiConverterBool.read(from: &buf), 
+                terminal: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -15800,6 +15821,7 @@ public struct FfiConverterTypeInvocationEntry: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.link, into: &buf)
         FfiConverterOptionTypeWorkspaceCommand.write(value.workspaceCommand, into: &buf)
         FfiConverterBool.write(value.blocked, into: &buf)
+        FfiConverterBool.write(value.terminal, into: &buf)
     }
 }
 
@@ -26701,10 +26723,15 @@ public enum CardAction: Equatable, Hashable {
     )
     case enableComputer
     case openClaudeConfig
+    case openClaudeStatus
+    case openClaudePermissions
     case openUsage
-    case openSessionInfo
-    case copyTranscript
-    case openChip(id: String
+    case openSettings
+    case openDocs
+    case compact
+    case pickModel(id: String, label: String
+    )
+    case copyText(text: String
     )
 
 
@@ -26734,13 +26761,22 @@ public struct FfiConverterTypeCardAction: FfiConverterRustBuffer {
         
         case 3: return .openClaudeConfig
         
-        case 4: return .openUsage
+        case 4: return .openClaudeStatus
         
-        case 5: return .openSessionInfo
+        case 5: return .openClaudePermissions
         
-        case 6: return .copyTranscript
+        case 6: return .openUsage
         
-        case 7: return .openChip(id: try FfiConverterString.read(from: &buf)
+        case 7: return .openSettings
+        
+        case 8: return .openDocs
+        
+        case 9: return .compact
+        
+        case 10: return .pickModel(id: try FfiConverterString.read(from: &buf), label: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 11: return .copyText(text: try FfiConverterString.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -26767,21 +26803,39 @@ public struct FfiConverterTypeCardAction: FfiConverterRustBuffer {
             writeInt(&buf, Int32(3))
         
         
-        case .openUsage:
+        case .openClaudeStatus:
             writeInt(&buf, Int32(4))
         
         
-        case .openSessionInfo:
+        case .openClaudePermissions:
             writeInt(&buf, Int32(5))
         
         
-        case .copyTranscript:
+        case .openUsage:
             writeInt(&buf, Int32(6))
         
         
-        case let .openChip(id):
+        case .openSettings:
             writeInt(&buf, Int32(7))
+        
+        
+        case .openDocs:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .compact:
+            writeInt(&buf, Int32(9))
+        
+        
+        case let .pickModel(id,label):
+            writeInt(&buf, Int32(10))
             FfiConverterString.write(id, into: &buf)
+            FfiConverterString.write(label, into: &buf)
+            
+        
+        case let .copyText(text):
+            writeInt(&buf, Int32(11))
+            FfiConverterString.write(text, into: &buf)
             
         }
     }
@@ -39239,6 +39293,15 @@ public func workosAuthorizeUrl(state: String) -> String  {
     )
 })
 }
+public func isClaudeCardCommand(text: String, skills: [String]) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_is_claude_card_command(
+        FfiConverterString.lower(text),
+        FfiConverterSequenceString.lower(skills),uniffiCallStatus
+    )
+})
+}
 public func opensConfigPanel(text: String) -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
         uniffiCallStatus in
@@ -39846,6 +39909,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_workos_authorize_url() != 35994) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_func_is_claude_card_command() != 49720) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_func_opens_config_panel() != 1331) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -40231,6 +40297,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_claude_config_panel() != 5201) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_run_claude_card() != 2600) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_billing_checkout() != 44997) {

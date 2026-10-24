@@ -469,10 +469,14 @@ final class CardButtonControl: UIControl {
         case let .consent(_, _, _, identifier): identifier
         case .enableComputer: "computer-denied-enable"
         case .openClaudeConfig: "card-open-claude-config"
+        case .openClaudeStatus: "card-open-claude-status"
+        case .openClaudePermissions: "card-open-claude-permissions"
         case .openUsage: "card-open-usage"
-        case .openSessionInfo: "card-open-session-info"
-        case .copyTranscript: "card-copy-transcript"
-        case let .openChip(id): "card-open-chip-\(id)"
+        case .openSettings: "card-open-settings"
+        case .openDocs: "card-open-docs"
+        case .compact: "card-compact"
+        case let .pickModel(id, _): "card-model-\(id)"
+        case .copyText: "card-copy"
         }
     }
 

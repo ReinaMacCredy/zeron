@@ -463,8 +463,6 @@ impl DemoHost {
     fn reply_for(&self, prompt: &str) -> Vec<Step> {
         if prompt.contains("?ask") {
             transcripts::asking()
-        } else if let Some(text) = claude::command_reply(prompt) {
-            vec![transcripts::Step::Text(text)]
         } else {
             transcripts::reply(prompt, self.options.long_reply)
         }
@@ -1179,13 +1177,14 @@ impl DemoHost {
             }
             m::MUTATE if params["op"] == "addChatNote" => {
                 let host = self.host_of(&client, &chat_id);
-                let text = params["text"].as_str().unwrap_or_default();
+                let mut parts = vec![transcripts::text("t0", params["text"].as_str().unwrap_or_default())];
+                parts.extend(params["hint"].as_str().map(|hint| transcripts::text("t1", hint)));
                 let entry = transcripts::entry(
                     &crate::new_id(),
                     zeron_doc::MessageRole::System,
                     &host,
                     now,
-                    vec![transcripts::text("t0", text)],
+                    parts,
                 );
                 core.write(|doc| doc.push_message(&entry))?;
                 serde_json::json!({ "ok": true })

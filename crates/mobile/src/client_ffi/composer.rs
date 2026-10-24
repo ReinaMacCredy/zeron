@@ -426,6 +426,7 @@ pub struct InvocationEntry {
     pub link: Option<String>,
     pub workspace_command: Option<WorkspaceCommand>,
     pub blocked: bool,
+    pub terminal: bool,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -447,6 +448,7 @@ fn invocation_entry(
     candidate: zeron_proto::command_catalog::InvocationCandidate,
     references: bool,
     compact_unsupported: Option<&str>,
+    claude: bool,
 ) -> InvocationEntry {
     use zeron_proto::command_catalog::{
         invocation_detail, invocation_insertion, skill_display_name, zeron_owned_command,
@@ -458,6 +460,9 @@ fn invocation_entry(
         .filter(|link| *link != insert);
     let blocked = compact_unsupported
         .filter(|_| candidate.name == zeron_proto::app_commands::COMPACT_COMMAND && !skill);
+    let terminal = claude
+        && !skill
+        && zeron_proto::app_commands::TERMINAL_ONLY_COMMANDS.contains(&candidate.name.as_str());
     InvocationEntry {
         title: if skill {
             skill_display_name(&candidate.name)
@@ -471,6 +476,7 @@ fn invocation_entry(
         skill,
         insert,
         link,
+        terminal,
         workspace_command: candidate.workspace_command.map(Into::into),
         blocked: blocked.is_some(),
     }
@@ -487,6 +493,7 @@ impl CoreClient {
         skill: bool,
     ) -> InvocationCatalog {
         let client = self.client.clone();
+        let claude = harness == zeron_proto::HarnessId::ClaudeCode.as_str();
         let found = on_runtime(async move {
             Ok(client
                 .invocation_catalog(
@@ -505,7 +512,12 @@ impl CoreClient {
                     .entries
                     .into_iter()
                     .map(|c| {
-                        invocation_entry(c, found.references, found.compact_unsupported.as_deref())
+                        invocation_entry(
+                            c,
+                            found.references,
+                            found.compact_unsupported.as_deref(),
+                            claude,
+                        )
                     })
                     .collect(),
                 skill,

@@ -57,23 +57,13 @@ const CONTEXT: &str = "## Context Usage
 | mcp__semble__search | semble | 519 |
 | mcp__zeron__docs | zeron | 1.1k |";
 
-const MODEL: &str = "Current model: `Haiku 5.5`
-Usage: /model <name>. Available: sonnet, opus, haiku, fable, best, sonnet[1m], opus[1m], fable[1m], opusplan, default, or a full model ID.";
-
 const MCP: &str = "7 MCP server(s): 4 connected, 3 not connected, 0 disabled. Use `/mcp` in the terminal for details.";
 
-pub(super) fn command_reply(prompt: &str) -> Option<String> {
-    let (name, rest) = zeron_proto::invocation::leading_command(prompt)?;
-    if !rest.is_empty() {
-        return None;
-    }
-    Some(match name {
-        "context" => CONTEXT.into(),
-        "usage" | "cost" | "stats" => USAGE.into(),
-        "model" => MODEL.into(),
-        "mcp" => MCP.into(),
-        "status" | "permissions" | "hooks" | "export" | "help" | "doctor" | "login" | "logout"
-        | "theme" | "terminal-setup" => format!("/{name} isn't available in this environment."),
+fn command_reply(command: &str) -> Option<&'static str> {
+    Some(match command {
+        "/context" => CONTEXT,
+        "/usage" | "/cost" => USAGE,
+        "/mcp" => MCP,
         _ => return None,
     })
 }
@@ -161,7 +151,7 @@ pub(super) fn run(settings: &mut Map<String, Value>, command: &str) -> LocalComm
                 }
             }
         }
-        None => command_reply(command).unwrap_or_default(),
+        None => command_reply(command).unwrap_or_default().to_string(),
     };
     LocalCommandOutput {
         init: Some(init()),

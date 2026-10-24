@@ -1,17 +1,15 @@
 use gpui::{App, AppContext, Context};
 use zeron_proto::HarnessId;
 use zeron_proto::app_commands::{ClaudeCardCommand, claude_card_command};
-use zeron_proto::claude_config::{COMMAND_NOTE_PREFIX, CommandCard, LocalCommandOutput};
+use zeron_proto::claude_cards::{
+    FORKED, LOST_SESSION, NO_SESSION, headline, lost_session, model_card, model_match,
+    no_match_note, output_card, side_run, switched_note, terminal_card,
+};
+use zeron_proto::claude_config::{CommandCard, LocalCommandOutput};
 use zeron_proto::invocation::Invocation;
 use zeron_rpc::methods;
 
 use super::Composer;
-
-const NO_SESSION: &str =
-    "No turn has run in this chat yet, so these numbers are for a new session.";
-const LOST_SESSION: &str =
-    "The chat's Claude session was not found, so these numbers are for a new session.";
-const FORKED: &str = "Read from a copy of this chat's saved session; Zeron's own tool server and per-run settings are not counted.";
 
 impl Composer {
     pub(super) fn claude_card_for(&self, plain: &str, cx: &App) -> Option<ClaudeCardCommand> {
@@ -43,24 +41,17 @@ impl Composer {
             );
             return;
         }
-        let (name, connect_mcp, live) = match command {
-            ClaudeCardCommand::Model(arg) => return self.model_card(chat.id, arg, cx),
-            ClaudeCardCommand::TerminalOnly(name) => {
-                let card = CommandCard {
-                    command: format!("/{name}"),
-                    ..Default::default()
-                };
-                return self.write_card(
-                    chat.id,
-                    format!("{COMMAND_NOTE_PREFIX}{name} · terminal only"),
-                    card,
-                    cx,
-                );
-            }
-            ClaudeCardCommand::Context => ("context", true, true),
-            ClaudeCardCommand::Usage => ("usage", false, false),
-            ClaudeCardCommand::Mcp => ("mcp", true, false),
+        let Some(run) = side_run(&command) else {
+            return match command {
+                ClaudeCardCommand::Model(arg) => self.model_card(chat.id, arg, cx),
+                ClaudeCardCommand::TerminalOnly(name) => {
+                    let (headline, card) = terminal_card(&name);
+                    self.write_card(chat.id, headline, card, cx)
+                }
+                _ => {}
+            };
         };
+        let (name, connect_mcp, live) = (run.name, run.connect_mcp, run.live);
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.set_chat_failure("Engine not connected".into(), cx);
             return;
@@ -89,31 +80,13 @@ impl Composer {
             let mut reply = call(params.clone()).await;
             if live && has_session {
                 note = Some(FORKED);
-                if reply
-                    .as_ref()
-                    .is_err_and(|e| e.contains("No conversation found"))
-                {
+                if lost_session(&reply) {
                     params["liveSession"] = false.into();
                     reply = call(params).await;
                     note = Some(LOST_SESSION);
                 }
             }
-            let card = match reply {
-                Ok(out) => CommandCard {
-                    command: format!("/{name}"),
-                    mcp_servers: (name == "mcp")
-                        .then(|| out.init.as_ref()?.get("mcp_servers").cloned())
-                        .flatten(),
-                    text: out.text,
-                    note: note.map(str::to_owned),
-                    ..Default::default()
-                },
-                Err(error) => CommandCard {
-                    command: format!("/{name}"),
-                    error: Some(error),
-                    ..Default::default()
-                },
-            };
+            let card = output_card(name, reply, note);
             this.update(cx, |this, cx| {
                 let headline = headline(&card);
                 this.write_card(chat_id, headline, card, cx)
@@ -128,35 +101,17 @@ impl Composer {
         let mut note = None;
         let mut model = chips.model.clone();
         if let Some(arg) = arg {
-            let wanted = arg.to_lowercase();
-            let found = chips
-                .models
-                .iter()
-                .find(|(id, label)| id.to_lowercase() == wanted || label.to_lowercase() == wanted)
-                .or_else(|| {
-                    chips.models.iter().find(|(id, label)| {
-                        id.to_lowercase().contains(&wanted)
-                            || label.to_lowercase().contains(&wanted)
-                    })
-                })
-                .cloned();
-            match found {
+            match model_match(&chips.models, &arg).cloned() {
                 Some((id, label)) => {
                     self.pickers
                         .update(cx, |pickers, cx| pickers.set_chip_model(id.clone(), cx));
-                    note = Some(format!("Switched this chat to {label}."));
+                    note = Some(switched_note(&label));
                     model = Some(id);
                 }
-                None => note = Some(format!("No model matches \u{201c}{arg}\u{201d}.")),
+                None => note = Some(no_match_note(&arg)),
             }
         }
-        let card = CommandCard {
-            command: "/model".into(),
-            models: chips.models,
-            model,
-            note,
-            ..Default::default()
-        };
+        let card = model_card(chips.models, model, note);
         let headline = headline(&card);
         self.write_card(chat_id, headline, card, cx);
     }
@@ -192,28 +147,5 @@ impl Composer {
             }
         })
         .detach();
-    }
-}
-
-fn headline(card: &CommandCard) -> String {
-    let detail = match card.command.as_str() {
-        _ if card.error.is_some() => Some("failed".to_string()),
-        "/context" => card
-            .text
-            .lines()
-            .find_map(|l| l.trim().strip_prefix("**Tokens:**"))
-            .map(|t| t.trim().to_string()),
-        "/usage" => card
-            .text
-            .lines()
-            .find(|l| l.contains("% used"))
-            .map(|l| l.trim().to_string()),
-        "/model" => card.model.clone(),
-        _ => None,
-    };
-    let name = card.command.trim_start_matches('/');
-    match detail {
-        Some(detail) => format!("{COMMAND_NOTE_PREFIX}{name} · {detail}"),
-        None => format!("{COMMAND_NOTE_PREFIX}{name}"),
     }
 }
