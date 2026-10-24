@@ -158,3 +158,35 @@ pub(super) fn run(settings: &mut Map<String, Value>, command: &str) -> LocalComm
         text,
     }
 }
+
+pub(super) fn stats_summary() -> Value {
+    let days = zeron_proto::claude_panel::STATS_DAYS as i64;
+    let now = chrono::Utc::now().timestamp_millis();
+    let periods: Vec<i64> = (0..days)
+        .map(|d| now - (days - 1 - d) * 86_400_000)
+        .collect();
+    let buckets: Vec<Value> = (0..days)
+        .filter(|d| d % 7 != 5 && (d * 37) % 11 > 2)
+        .map(|d| {
+            let tokens = 200_000 + (d * 7919 % 13) * 180_000 + d * 4_000;
+            let model = if d % 3 == 0 {
+                "claude-sonnet-5"
+            } else {
+                "claude-opus-5-5"
+            };
+            json!({
+                "period": d, "harness": "claude-code", "model": model,
+                "tokens": {
+                    "uncachedInput": tokens / 6, "cachedInput": tokens * 4 / 6,
+                    "cacheWrite": 0, "output": tokens / 6
+                },
+                "costUsd": 0.0, "cacheSavingsUsd": 0.0, "records": 10, "unpricedRecords": 0
+            })
+        })
+        .collect();
+    json!({
+        "hourly": false, "periods": periods, "untilMs": now, "pricesLoaded": true,
+        "buckets": buckets,
+        "sessions": [{ "harness": "claude-code", "sessions": 412 }]
+    })
+}

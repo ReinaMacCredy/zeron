@@ -216,8 +216,6 @@ pub fn with_workspace_commands(
     rows
 }
 
-/// The Zeron command a whole draft invokes: indented, quoted or argumented
-/// text stays an ordinary prompt.
 pub fn workspace_command_for_text<'a, C>(
     text: &str,
     rows: impl IntoIterator<Item = (&'a str, Option<C>)>,

@@ -315,6 +315,12 @@ impl HostSettings {
                 self.login = None;
                 Ok(json!({ "ok": true }))
             }
+            m::GET_USAGE_SUMMARY
+                if params["days"].as_u64()
+                    == Some(zeron_proto::claude_panel::STATS_DAYS.into()) =>
+            {
+                Ok(super::claude::stats_summary())
+            }
             m::GET_USAGE_SUMMARY => {
                 let scale = params["days"].as_f64().unwrap_or(30.0) / 30.0;
                 let bucket = |harness: &str, model: &str, cost: f64, tokens: f64| {

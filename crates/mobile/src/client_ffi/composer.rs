@@ -564,7 +564,6 @@ pub fn filter_invocations(catalog: InvocationCatalog, query: String) -> Invocati
     }
 }
 
-/// The Zeron command a whole draft runs on send, from the catalog the popup loaded.
 #[uniffi::export]
 pub fn typed_workspace_command(
     catalog: InvocationCatalog,

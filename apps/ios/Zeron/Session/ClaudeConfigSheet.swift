@@ -123,8 +123,6 @@ final class ClaudeConfigSheet: UITableViewController, UISearchTextFieldDelegate,
         }
     }
 
-    // MARK: Header
-
     private func header() -> UIView {
         let stack = UIStackView(arrangedSubviews: [tabs])
         stack.axis = .vertical
@@ -186,8 +184,6 @@ final class ClaudeConfigSheet: UITableViewController, UISearchTextFieldDelegate,
             chips.addArrangedSubview(b)
         }
     }
-
-    // MARK: Table
 
     private enum Line {
         case setting(ConfigRowView)
@@ -401,8 +397,6 @@ final class ClaudeConfigSheet: UITableViewController, UISearchTextFieldDelegate,
         return label
     }
 
-    // MARK: Usage and Stats
-
     private var usageLines: [() -> UITableViewCell] {
         let report = panel.usage()
         if let message = report.message { return [{ [unowned self] in self.messageCell(message) }] }
@@ -519,21 +513,33 @@ private final class HeatCell: UITableViewCell {
         let grid = UIStackView()
         grid.axis = .horizontal
         grid.spacing = 2
-        grid.distribution = .fillEqually
+        grid.alignment = .top
         for start in stride(from: 0, to: heat.count, by: 7) {
             let week = UIStackView()
             week.axis = .vertical
             week.spacing = 2
-            week.distribution = .fillEqually
             for level in heat[start..<min(start + 7, heat.count)] {
                 let cell = UIView()
                 cell.layer.cornerRadius = 1.5
+                cell.widthAnchor.constraint(equalToConstant: 7).isActive = true
+                cell.heightAnchor.constraint(equalToConstant: 7).isActive = true
                 cell.backgroundColor = level == 0 ? Palette.controlFill : Palette.accent.withAlphaComponent([0, 0.25, 0.45, 0.7, 1][Int(min(level, 4))])
                 week.addArrangedSubview(cell)
             }
             grid.addArrangedSubview(week)
         }
-        let stack = UIStackView(arrangedSubviews: [title, grid])
+        let scroll = UIScrollView()
+        scroll.showsHorizontalScrollIndicator = false
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        scroll.addSubview(grid)
+        NSLayoutConstraint.activate([
+            grid.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor),
+            grid.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
+            grid.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor),
+            grid.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor),
+            grid.heightAnchor.constraint(equalTo: scroll.frameLayoutGuide.heightAnchor),
+        ])
+        let stack = UIStackView(arrangedSubviews: [title, scroll])
         stack.axis = .vertical
         stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -543,7 +549,7 @@ private final class HeatCell: UITableViewCell {
             stack.trailingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.trailingAnchor),
             stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 10),
             stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10),
-            grid.heightAnchor.constraint(equalToConstant: 7 * 7 + 6 * 2),
+            scroll.heightAnchor.constraint(equalToConstant: 7 * 7 + 6 * 2),
         ])
         accessibilityIdentifier = "claude-config-heat"
     }

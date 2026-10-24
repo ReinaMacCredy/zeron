@@ -39551,9 +39551,6 @@ public func toggleSpeed(model: ModelInfo, config: ChatConfig) -> ChatConfig  {
     )
 })
 }
-/**
- * The Zeron command a whole draft runs on send, from the catalog the popup loaded.
- */
 public func typedWorkspaceCommand(catalog: InvocationCatalog, text: String) -> WorkspaceCommand?  {
     return try!  FfiConverterOptionTypeWorkspaceCommand.lift(try! rustCall() {
         uniffiCallStatus in
@@ -39999,7 +39996,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_toggle_speed() != 34779) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_zeron_mobile_checksum_func_typed_workspace_command() != 43814) {
+    if (uniffi_zeron_mobile_checksum_func_typed_workspace_command() != 11555) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_with_quotes() != 52382) {
