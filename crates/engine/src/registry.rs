@@ -276,6 +276,17 @@ pub trait RunEnvironment: Send + Sync {
     async fn credential(&self, _harness: HarnessId) -> Option<String> {
         None
     }
+
+    /// A run of `harness` that started with `credential` reported the
+    /// subscription's usage (see [`zeron_proto::AgentEvent::PlanUsage`]).
+    async fn record_usage(
+        &self,
+        _harness: HarnessId,
+        _credential: &str,
+        _windows: Vec<zeron_proto::AgentUsageWindow>,
+        _plan_label: Option<String>,
+    ) {
+    }
 }
 
 enum Slot {
@@ -307,6 +318,11 @@ pub struct HarnessRegistry {
     update_generation: tokio::sync::watch::Sender<u64>,
     /// Spawn-time environment provider (Cloud runner only).
     run_environment: Mutex<Option<Arc<dyn RunEnvironment>>>,
+    /// Spawn-time environment of the agent accounts zeron keeps itself
+    /// (Muse's per-account roots); after the Cloud broker, never over it.
+    account_environment: Mutex<Option<Arc<dyn RunEnvironment>>>,
+    /// Credits Zeron in agents' commits ([`crate::commit_credit`]).
+    commit_credit: std::sync::OnceLock<Arc<crate::commit_credit::CommitCredit>>,
 }
 
 impl Default for HarnessRegistry {
@@ -397,6 +413,8 @@ impl HarnessRegistry {
             pending_updates: Mutex::new(std::collections::HashSet::new()),
             update_generation,
             run_environment: Mutex::new(None),
+            account_environment: Mutex::new(None),
+            commit_credit: std::sync::OnceLock::new(),
         }
     }
 
@@ -409,33 +427,68 @@ impl HarnessRegistry {
             .unwrap_or_else(PoisonError::into_inner) = Some(environment);
     }
 
-    /// Fill `request.env` for a spawn of `harness` (no-op without a provider).
+    /// Install the agent accounts' environment provider (every device).
+    pub fn set_account_environment(&self, environment: Arc<dyn RunEnvironment>) {
+        *self
+            .account_environment
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(environment);
+    }
+
+    fn environments(&self) -> Vec<Arc<dyn RunEnvironment>> {
+        [&self.run_environment, &self.account_environment]
+            .into_iter()
+            .filter_map(|slot| slot.lock().unwrap_or_else(PoisonError::into_inner).clone())
+            .collect()
+    }
+
+    pub fn set_commit_credit(&self, credit: Arc<crate::commit_credit::CommitCredit>) {
+        let _ = self.commit_credit.set(credit);
+    }
+
+    pub fn commit_credit(&self) -> Option<&Arc<crate::commit_credit::CommitCredit>> {
+        self.commit_credit.get()
+    }
+
+    /// Fill `request.env` for a spawn of `harness` (no-op without a provider),
+    /// and credit Zeron in its commits when that's on.
     pub async fn prepare_run(
         &self,
         harness: HarnessId,
         request: &mut zeron_proto::RunRequest,
     ) -> Result<(), String> {
-        let environment = self
-            .run_environment
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        match environment {
-            Some(environment) => environment.prepare(harness, request).await,
-            None => Ok(()),
+        for environment in self.environments() {
+            environment.prepare(harness, request).await?;
         }
+        if let Some(credit) = self.commit_credit.get() {
+            credit.apply(&mut request.env);
+        }
+        Ok(())
     }
 
     /// [`RunEnvironment::credential`] (`None` without a provider).
     pub async fn run_credential(&self, harness: HarnessId) -> Option<String> {
-        let environment = self
-            .run_environment
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        match environment {
-            Some(environment) => environment.credential(harness).await,
-            None => None,
+        for environment in self.environments() {
+            if let Some(credential) = environment.credential(harness).await {
+                return Some(credential);
+            }
+        }
+        None
+    }
+
+    /// Hand a run's reported subscription usage to every provider (the
+    /// account it belongs to records it).
+    pub async fn record_plan_usage(
+        &self,
+        harness: HarnessId,
+        credential: &str,
+        windows: Vec<zeron_proto::AgentUsageWindow>,
+        plan_label: Option<String>,
+    ) {
+        for environment in self.environments() {
+            environment
+                .record_usage(harness, credential, windows.clone(), plan_label.clone())
+                .await;
         }
     }
 
@@ -1350,6 +1403,22 @@ fn full_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::AcpHarness::antigravity().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::antigravity()) as Arc<dyn Harness>)),
     );
+    // Muse Code over its native session protocol (`muse serve`), same lazy
+    // pattern: the static descriptor mirrors MuseHarness exactly.
+    registry.register_lazy(
+        HarnessDescriptor {
+            id: HarnessId::Muse,
+            name: "Muse Code".into(),
+            supports_steering: true,
+            steering_mode: SteeringMode::StepBoundary,
+            reasoning_levels: Vec::new(),
+            installed: true,
+            can_install: false,
+            enabled: None,
+        },
+        Box::new(|| zeron_harness::MuseHarness::new().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::MuseHarness::new()) as Arc<dyn Harness>)),
+    );
     registry
 }
 
@@ -1478,7 +1547,8 @@ mod tests {
                 HarnessId::Hermes,
                 HarnessId::Pi,
                 HarnessId::Opencode,
-                HarnessId::Antigravity
+                HarnessId::Antigravity,
+                HarnessId::Muse
             ]
         );
         assert!(registry.resolve(HarnessId::Mock).is_ok());
@@ -2202,6 +2272,7 @@ mod gate_tests {
             HarnessId::Pi,
             HarnessId::Opencode,
             HarnessId::Antigravity,
+            HarnessId::Muse,
         ] {
             assert!(!registry.is_registered(hidden), "{hidden:?}");
             // Never resolved, so never probed or spawned.
@@ -2272,5 +2343,42 @@ mod gate_tests {
             request.env.get("HARNESS").map(String::as_str),
             Some("Codex")
         );
+    }
+
+    /// Every agent spawn carries the commit-credit hooks while that's on.
+    #[tokio::test]
+    async fn runs_carry_the_commit_credit_hooks() {
+        let data = tempfile::tempdir().unwrap();
+        let mut request: zeron_proto::RunRequest = serde_json::from_str(
+            r#"{"prompt":"p","model":null,"reasoning":null,"cwd":".","sandbox":"workspace-write","resume":null}"#,
+        )
+        .unwrap();
+        let registry = HarnessRegistry::new();
+        let credit = Arc::new(crate::commit_credit::CommitCredit::open(data.path(), false));
+        credit.set(true).unwrap();
+        registry.set_commit_credit(credit.clone());
+        registry
+            .prepare_run(HarnessId::ClaudeCode, &mut request)
+            .await
+            .unwrap();
+        let hooks = data.path().join("git-hooks");
+        assert_eq!(
+            request.env.get("GIT_CONFIG_KEY_0").map(String::as_str),
+            Some("core.hooksPath")
+        );
+        assert_eq!(
+            request.env.get("GIT_CONFIG_VALUE_0").map(String::as_str),
+            Some(hooks.to_string_lossy().as_ref())
+        );
+        assert!(hooks.join("commit-msg").exists());
+
+        // Off on this device: nothing added.
+        credit.set(false).unwrap();
+        request.env.clear();
+        registry
+            .prepare_run(HarnessId::ClaudeCode, &mut request)
+            .await
+            .unwrap();
+        assert!(request.env.is_empty());
     }
 }

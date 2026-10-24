@@ -13,10 +13,12 @@ after prompt acceptance request `get_state`. In these versions AgentSession's
 The synchronous path sets it immediately after the preflight callback, before
 another stdin command can execute. A false isStreaming AND false isCompacting
 at this ordered barrier closes a handled prompt (or a run already settled).
-This is NOT polling for idle or a quiet timeout. Process all preceding events
-before the response, and scope barriers to the submitted execution. A future
-`data.disposition` is additive; the state barrier also catches extension-started
-work, which can accompany a handled disposition.
+This is NOT polling for idle or a quiet timeout; the one re-poll is an idle
+barrier reporting pendingMessageCount > 0 (input Pi left queued, with no
+settle event coming), bounded before the turn settles as it stands. Process
+all preceding events before the response, and scope barriers to the submitted
+execution. A future `data.disposition` is additive; the state barrier also
+catches extension-started work, which can accompany a handled disposition.
 
 Independent work started later by an extension is a new run (`agent_start`).
 Discovery/startup timeouts diagnose startup only; no active model run is timed

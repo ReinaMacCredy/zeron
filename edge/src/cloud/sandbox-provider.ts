@@ -33,7 +33,7 @@
  * what the operator must fix.
  */
 
-export type SandboxMachine = "small" | "default" | "large";
+export type SandboxMachine = "small" | "default" | "large" | "xlarge";
 
 /** Normalized lifecycle state. `deleted` = the provider no longer knows it. */
 export type SandboxState = "provisioning" | "ready" | "stopping" | "stopped" | "error" | "deleted";

@@ -264,6 +264,7 @@ pub fn driver_name(driver: HarnessId) -> &'static str {
         HarnessId::Pi => "Pi",
         HarnessId::Antigravity => "Antigravity",
         HarnessId::Acp => "ACP",
+        HarnessId::Muse => "Muse Code",
         HarnessId::Mock => "Mock",
     }
 }
@@ -280,6 +281,7 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
         HarnessId::Opencode => "opencode",
         HarnessId::Antigravity => "Antigravity",
         HarnessId::Acp => "acp",
+        HarnessId::Muse => "muse",
         HarnessId::Mock => "mock",
     }
 }

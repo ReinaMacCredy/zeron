@@ -19,6 +19,15 @@ read -r line || exit 1 # initialize
 has "$line" '"method":"initialize"' || exit 1
 has "$line" '"experimentalApi":true' || exit 1
 has "$line" '"name":"zeron-native"' || exit 1
+if [ -n "$FAKE_CODEX_REJECT_OPT_OUT" ] && has "$line" 'optOutNotificationMethods'; then
+  # An app-server that predates notification opt-outs: refuse, then expect
+  # the handshake again without them.
+  emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32602,\"message\":\"unknown field optOutNotificationMethods\"}}"
+  read -r line || exit 1
+  has "$line" '"method":"initialize"' || exit 1
+  has "$line" 'optOutNotificationMethods' && exit 7
+fi
+init_line="$line"
 emit "{\"id\":$(rid "$line"),\"result\":{\"userAgent\":\"fake-codex\"}}"
 
 read -r line || exit 1 # initialized notification (no reply)
@@ -35,6 +44,11 @@ if has "$line" '"method":"config/read"'; then
   read -r line || exit 1
 fi
 thread_line="$line"
+if has "$line" 'crash-on-thread-start'; then
+  # The app-server dies under thread/start: the run must report why.
+  echo 'thread 1 panicked at config.rs: bad toml in mcp_servers' >&2
+  exit 3
+fi
 if has "$line" '"method":"skills/list"'; then
   # Skill discovery probe: answer with two cwd groups sharing one skill
   # (dedupe by identity) and settle; no thread ever starts.
@@ -76,11 +90,36 @@ if has "$line" '"method":"thread/resume"'; then
       emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"writer\"}}}"
     fi
   elif has "$line" '"threadId":"resume-fail"'; then
-    # Missing/foreign rollout: reject, expect the fresh-start fallback.
-    emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32600,\"message\":\"rollout not found\"}}"
+    # Missing rollout (live 0.164.0 wording): reject, expect the fresh-start
+    # fallback.
+    emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32600,\"message\":\"no rollout found for thread id resume-fail\"}}"
     read -r line || exit 1
     has "$line" '"method":"thread/start"' || exit 1
     emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-fresh\"}}}"
+  elif has "$line" '"threadId":"resume-empty"'; then
+    # An empty rollout file (live 0.164.0 wording): unreadable for good, so
+    # the same fresh-start fallback.
+    emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32603,\"message\":\"failed to read thread: thread-store internal error: failed to read session metadata /h/sessions/2026/10/23/rollout-2026-10-23T10-00-00-resume-empty.jsonl: rollout at /h/sessions/2026/10/23/rollout-2026-10-23T10-00-00-resume-empty.jsonl is empty\"}}"
+    read -r line || exit 1
+    has "$line" '"method":"thread/start"' || exit 1
+    emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-fresh\"}}}"
+  elif has "$line" '"threadId":"resume-archived"'; then
+    # Archived (live 0.164.0 wording): expect thread/unarchive, then the
+    # resume again.
+    emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32600,\"message\":\"session resume-archived is archived. Run \`codex unarchive resume-archived\` to unarchive it first.\"}}"
+    read -r line || exit 1
+    has "$line" '"method":"thread/unarchive"' && has "$line" '"threadId":"resume-archived"' || exit 1
+    emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"resume-archived\"}}}"
+    read -r line || exit 1
+    has "$line" '"method":"thread/resume"' || exit 1
+    emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-unarchived\"}}}"
+  elif has "$line" '"threadId":"resume-broken"'; then
+    # A failure a fresh thread would share: no thread/start may follow.
+    emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32603,\"message\":\"failed to load configuration\"}}"
+    while read -r line; do
+      has "$line" '"method":"thread/start"' && emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-wrongly-fresh\"}}}"
+    done
+    exit 0
   else
     emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\"}}}"
   fi
@@ -286,6 +325,9 @@ case "$turnline" in
     '"serviceTier":"fast"'; do
     has "$thread_line" "$want" || { fail_turn "$tid" "thread param missing: $want"; exit 0; }
   done
+  for want in '"optOutNotificationMethods":[' '"turn/diff/updated"' '"item/commandExecution/outputDelta"'; do
+    has "$init_line" "$want" || { fail_turn "$tid" "initialize opt-out missing: $want"; exit 0; }
+  done
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
   # Deltas — both field spellings must be accepted.
@@ -417,7 +459,9 @@ case "$turnline" in
   # (live, 0.159.3) and must not pin the runtime once its process is gone.
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
-  emit "{\"method\":\"item/started\",\"params\":{\"threadId\":\"th-1\",\"item\":{\"type\":\"commandExecution\",\"id\":\"bg\",\"command\":\"npm run dev\",\"processId\":\"$$\",\"status\":\"inProgress\"}}}"
+  # processId names Codex's own exec session, not an OS process: only
+  # thread/backgroundTerminals/list can tell it still runs.
+  emit '{"method":"item/started","params":{"threadId":"th-1","item":{"type":"commandExecution","id":"bg","command":"npm run dev","processId":"codex-pty-7","status":"inProgress"}}}'
   emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
   read -r next || exit 1
   emit "{\"id\":$(rid "$next"),\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
@@ -428,7 +472,12 @@ case "$turnline" in
   has "$intline" '"method":"turn/interrupt"' || exit 9
   emit "{\"id\":$(rid "$intline"),\"result\":{}}"
   emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-2","status":"interrupted"}}}'
-  read -r last || exit 1
+  while read -r last; do
+    has "$last" '"method":"thread/backgroundTerminals/list"' || break
+    has "$last" '"threadId":"th-1"' || exit 9
+    emit "{\"id\":$(rid "$last"),\"result\":{\"data\":[{\"processId\":\"codex-pty-7\",\"itemId\":\"bg\",\"command\":\"npm run dev\",\"cwd\":\"/tmp\",\"osPid\":null}],\"nextCursor\":null}}"
+  done
+  has "$last" '"method":"turn/start"' || exit 9
   emit "{\"id\":$(rid "$last"),\"result\":{\"turn\":{\"id\":\"t-3\"}}}"
   emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-3"}}}'
   emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"type":"commandExecution","id":"bg","status":"completed"}}}'
@@ -503,7 +552,7 @@ case "$turnline" in
 
 *scenario:elicit*)
   # Codex's native MCP tool approval: a Zeron computer tool on a computer run
-  # is accepted by the harness; anything else keeps today's method-not-found.
+  # is accepted by the harness; anything else is asked as an elicitation.
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
   outcome=""
@@ -514,6 +563,7 @@ case "$turnline" in
     has "$answer" "\"id\":$1" || exit 1
     if has "$answer" '"action":"accept"'; then outcome="$outcome $1:accept"
     elif has "$answer" '"code":-32601'; then outcome="$outcome $1:unsupported"
+    elif has "$answer" '"action":"decline"'; then outcome="$outcome $1:decline"
     else outcome="$outcome $1:other"; fi
   done
   emit "{\"method\":\"item/agentMessage/delta\",\"params\":{\"itemId\":\"m1\",\"delta\":\"$outcome\"}}"
@@ -598,6 +648,58 @@ case "$turnline" in
   emit '{"method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"working"}}'
   # Ignore turn/interrupt entirely — forces the SIGTERM escalation path.
   exec sleep 30
+  ;;
+
+*scenario:retry-errors*)
+  # Live shapes (0.164.0 schema): retries announce themselves as `error`
+  # with willRetry; the final error repeats as turn.error.
+  resets=$(( $(date +%s) + 2 * 3600 + 600 ))
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit "{\"method\":\"account/rateLimits/updated\",\"params\":{\"rateLimits\":{\"primary\":{\"usedPercent\":100,\"windowDurationMins\":300,\"resetsAt\":$resets},\"secondary\":null}}}"
+  emit '{"method":"error","params":{"threadId":"th-1","turnId":"t-1","willRetry":true,"error":{"message":"Reconnecting... 1/5 (rate limit)","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":429}}}}}'
+  emit '{"method":"error","params":{"threadId":"th-1","turnId":"t-1","willRetry":true,"error":{"message":"Reconnecting... 2/5 (rate limit)","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":429}}}}}'
+  emit '{"method":"error","params":{"threadId":"th-1","turnId":"t-1","willRetry":false,"error":{"message":"You have hit your usage limit.","codexErrorInfo":"usageLimitExceeded"}}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"failed","error":{"message":"You have hit your usage limit.","codexErrorInfo":"usageLimitExceeded"}}}}'
+  ;;
+
+*scenario:crash-after-error*)
+  # A final error, then the app-server dies before the turn's end.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"method":"error","params":{"threadId":"th-1","turnId":"t-1","willRetry":false,"error":{"message":"unexpected status 401 Unauthorized: Incorrect API key provided","codexErrorInfo":{"httpConnectionFailed":{"httpStatusCode":401}}}}}'
+  echo 'thread main panicked at session.rs: lost the model client' >&2
+  exit 3
+  ;;
+
+*scenario:foreign-interrupt*)
+  # Interrupted by another client of the thread, not by us.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"m1","delta":"half an ans"}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"interrupted"}}}'
+  ;;
+
+*scenario:server-requests*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"id":301,"method":"item/permissions/requestApproval","params":{"threadId":"th-1","turnId":"t-1","itemId":"p1","cwd":"/tmp","startedAtMs":1,"reason":"fetch deps","permissions":{"network":{"enabled":true}}}}'
+  read -r r1 || exit 1
+  { has "$r1" '"id":301' && has "$r1" '"permissions":{"network":{"enabled":true}}' && has "$r1" '"scope":"turn"'; } ||
+    { emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"failed","error":{"message":"permissions not granted"}}}}'; exit 0; }
+  emit '{"id":302,"method":"mcpServer/elicitation/request","params":{"threadId":"th-1","serverName":"auth","mode":"url","message":"Sign in","url":"https://example.invalid","elicitationId":"e1"}}'
+  read -r r2 || exit 1
+  { has "$r2" '"id":302' && has "$r2" '"action":"decline"' && ! has "$r2" '"error"'; } ||
+    { emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"failed","error":{"message":"url elicitation not declined"}}}}'; exit 0; }
+  emit '{"id":303,"method":"mcpServer/elicitation/request","params":{"threadId":"th-1","serverName":"deploy","mode":"form","message":"Ship it?","requestedSchema":{"type":"object","required":["confirm"],"properties":{"confirm":{"type":"boolean","title":"Confirm"}}}}}'
+  read -r r3 || exit 1
+  { has "$r3" '"id":303' && has "$r3" '"action":"accept"' && has "$r3" '"confirm":true'; } ||
+    { emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"failed","error":{"message":"form elicitation not answered"}}}}'; exit 0; }
+  emit '{"id":304,"method":"brand/newRequest","params":{}}'
+  read -r r4 || exit 1
+  { has "$r4" '"id":304' && has "$r4" '"code":-32601'; } ||
+    { emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"failed","error":{"message":"unknown request not refused"}}}}'; exit 0; }
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
   ;;
 
 *scenario:fail*)

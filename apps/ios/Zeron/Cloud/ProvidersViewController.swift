@@ -115,7 +115,12 @@ final class ProvidersViewController: UIViewController, UICollectionViewDelegate 
             cell.backgroundConfiguration = bg
             var accessories: [UICellAccessory] = []
             if row.id == "device" {
-                accessories.append(.popUpMenu(self.deviceMenu(), displayed: .always, options: .init(tintColor: Palette.text)))
+                // UIKit aborts on a pop-up menu with nothing to select: a new
+                // account with no computer and no Cloud offer has no devices.
+                let menu = self.deviceMenu()
+                if !menu.children.isEmpty {
+                    accessories.append(.popUpMenu(menu, displayed: .always, options: .init(tintColor: Palette.text)))
+                }
                 let name = UILabel()
                 name.text = self.targetName
                 name.font = Fonts.ui(.sansMedium, 15)

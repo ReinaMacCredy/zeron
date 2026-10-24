@@ -29,7 +29,7 @@ import {
   previousMonth,
   roundDollars
 } from "./metering";
-import { cloudAccountName } from "./policy";
+import { cloudAccountName, machineName } from "./policy";
 import { configuredProviders, type ProviderEnv } from "./providers";
 import type { ListedSandbox } from "./sandbox-provider";
 
@@ -135,14 +135,16 @@ export const usageCsv = (data: UsageExport): string => {
   return `${lines.join("\n")}\n`;
 };
 
-/** `/admin/cloud/usage` and `/admin/cloud/credits` — undefined when not
- * one of them. */
+/** `/admin/cloud/usage`, `/admin/cloud/credits` and `/admin/cloud/machine`
+ * — undefined when not one of them. */
 export const handleAdminRoute = async (
   request: Request,
   env: BillingEnv,
   url: URL
 ): Promise<Response | undefined> => {
-  if (url.pathname !== "/admin/cloud/usage" && url.pathname !== "/admin/cloud/credits") return undefined;
+  if (url.pathname !== "/admin/cloud/usage" && url.pathname !== "/admin/cloud/credits" && url.pathname !== "/admin/cloud/machine") {
+    return undefined;
+  }
   if (!env.ADMIN_TOKEN) return json({ error: "not_found" }, 404);
   // Header only (never `?token=`: query strings end up in logs).
   const header = request.headers.get("authorization") ?? "";
@@ -153,6 +155,7 @@ export const handleAdminRoute = async (
     return jsonError(401, "unauthenticated", "Admin token required.");
   }
   if (url.pathname === "/admin/cloud/credits") return grantCredits(request, env);
+  if (url.pathname === "/admin/cloud/machine") return setMachine(request, env);
   if (request.method !== "GET") return jsonError(405, "method_not_allowed", "GET only.");
   const month = url.searchParams.get("month") ?? monthKey(Date.now());
   if (!isMonthKey(month)) return jsonError(400, "bad_request", "month must be YYYY-MM.");
@@ -169,6 +172,32 @@ export const handleAdminRoute = async (
 };
 
 const ADMIN_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
+/** `POST /admin/cloud/machine {orgId, userId, machine}`: the machine size a
+ * user's new Cloud sessions start on (`small` · `default` · `large` ·
+ * `xlarge`; `null` = the server's `CLOUD_MACHINE`). Answers the size set. */
+const setMachine = async (request: Request, env: BillingEnv): Promise<Response> => {
+  if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST only.");
+  if (!env.CLOUD_ACCOUNTS) return jsonError(503, "unavailable", "Cloud is not configured.");
+  let body: Record<string, unknown>;
+  try {
+    body = (await request.json()) as Record<string, unknown>;
+  } catch {
+    return jsonError(400, "bad_request", "Expected a JSON body.");
+  }
+  const { orgId, userId } = body;
+  const machine = body.machine === null ? undefined : machineName(body.machine);
+  if (
+    typeof orgId !== "string" ||
+    !ADMIN_ID_RE.test(orgId) ||
+    typeof userId !== "string" ||
+    !ADMIN_ID_RE.test(userId) ||
+    (body.machine !== null && machine === undefined)
+  ) {
+    return jsonError(400, "bad_request", "Expected {orgId, userId, machine: small | default | large | xlarge | null}.");
+  }
+  return json(await deviceStub(env, orgId, userId).setMachine(machine));
+};
 
 /** `POST /admin/cloud/credits {orgId, userId, credits, reason}`: add credits
  * to a user's Cloud (negative corrects). Answers the new balance. */

@@ -199,6 +199,13 @@ pub fn fallback_models(harness: &str) -> Vec<ModelInfo> {
                 vec![],
             ),
         ],
+        "muse" => vec![model(
+            "muse-spark-1.2",
+            "Muse Spark 1.2",
+            "Muse Code's default coding model",
+            &[],
+            vec![],
+        )],
         "pi" => vec![model(
             "default",
             "pi default",

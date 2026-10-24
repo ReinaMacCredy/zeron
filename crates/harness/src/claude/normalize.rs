@@ -6,7 +6,7 @@ use zeron_proto::{
     AgentEvent, AnchorRole, DoneStatus, HarnessId, TodoItem, TodoStatus, ToolCall, ToolDiff,
 };
 
-use super::wire::{ContentBlock, Frame};
+use super::wire::{ContentBlock, Frame, ResultFrame};
 
 /// Human-readable text for the CLI's assistant-level error codes. These arrive
 /// as a terse `error` field on an `assistant` frame — usually with NO text
@@ -84,6 +84,101 @@ fn result_error_text(subtype: &str) -> &'static str {
 /// transcript. They're debug-logged and dropped instead.
 fn is_internal_diagnostic(message: &str) -> bool {
     message.contains("[ede_diagnostic]")
+}
+
+const CONTEXT_FULL: &str =
+    "The conversation no longer fits the model's context window. Run /compact or start a new chat.";
+
+/// Wording for the `terminal_reason`s that mean the turn failed. Others
+/// (`completed`, the aborts, anything newer) are not failures by themselves.
+fn terminal_reason_text(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+        "api_error" => "Claude gave up after repeated API errors.",
+        "prompt_too_long" => CONTEXT_FULL,
+        // Also how a full context window ends; a rate limit says 429.
+        "blocking_limit" => CONTEXT_FULL,
+        "malformed_tool_use_exhausted" => "Claude gave up after repeated malformed tool calls.",
+        "budget_exhausted" => "Claude stopped: the turn's token budget ran out.",
+        "structured_output_retry_exhausted" => {
+            "Claude could not produce the requested structured output."
+        }
+        "tool_deferred_unavailable" => {
+            "Claude could not resume a deferred tool call: the tool is no longer available."
+        }
+        "turn_setup_failed" => "Claude could not start the turn.",
+        "rapid_refill_breaker" => {
+            "Claude stopped: the context refilled too quickly after compaction."
+        }
+        "image_error" => "Claude stopped: an image in the conversation could not be processed.",
+        "model_error" => "Claude stopped: the model returned an error.",
+        _ => return None,
+    })
+}
+
+/// An abort the CLI files as an ordinary end: a stop, or a `now` steer.
+fn aborted(f: &ResultFrame) -> bool {
+    matches!(
+        f.terminal_reason.as_deref(),
+        Some("aborted_streaming" | "aborted_tools")
+    )
+}
+
+/// A `success` result that is really a failed API call: an invalid key, a
+/// rate limit, an overloaded API, a full context window. The CLI's own
+/// `result` text says what happened ("Invalid API key · Fix external API
+/// key"); a status we recognize gets plainer wording in front of it.
+fn api_failure(f: &ResultFrame) -> Option<String> {
+    let reason = f.terminal_reason.as_deref().unwrap_or("");
+    let status = f.api_error_status;
+    if !f.is_error
+        && !has_api_error_text(f)
+        && !matches!(status, Some(429 | 529))
+        && terminal_reason_text(reason).is_none()
+    {
+        return None;
+    }
+    // The CLI's text carries the specifics (a reset time, the API's own
+    // message). Bounded: some are a raw API error body.
+    let detail = f
+        .result
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(|r| {
+            let mut r = r.to_owned();
+            if r.len() > 500 {
+                let mut end = 500;
+                while !r.is_char_boundary(end) {
+                    end -= 1;
+                }
+                r.truncate(end);
+                r.push('…');
+            }
+            api_error_text(&r)
+        });
+    let too_long = detail
+        .as_deref()
+        .is_some_and(|d| d.to_ascii_lowercase().contains("prompt is too long"));
+    let headline = match status {
+        Some(429) => Some("Claude rate limit reached — try again after it resets."),
+        Some(529) => Some("Claude is overloaded right now — try again shortly."),
+        _ if too_long => Some(CONTEXT_FULL),
+        _ => terminal_reason_text(reason).filter(|_| reason != "api_error" || detail.is_none()),
+    };
+    Some(match (headline, detail) {
+        (Some(headline), Some(detail)) if headline != CONTEXT_FULL => {
+            format!("{headline} {detail}")
+        }
+        (Some(headline), _) => headline.to_owned(),
+        (None, Some(detail)) => detail,
+        (None, None) => "Claude's API request failed.".to_owned(),
+    })
+}
+
+fn has_api_error_text(f: &ResultFrame) -> bool {
+    f.result
+        .as_deref()
+        .is_some_and(|text| text.starts_with(API_ERROR_PREFIX))
 }
 
 fn str_field(input: &Value, key: &str) -> String {
@@ -285,6 +380,22 @@ fn spawn_prompt(b: &ContentBlock) -> Option<&str> {
         .filter(|p| !p.trim().is_empty())
 }
 
+/// What `--resume <id>` would find in Claude's native history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Transcript {
+    /// A transcript with conversation in it.
+    Conversation,
+    /// A transcript read through to its end without a single user or
+    /// assistant line. The CLI refuses to resume it ("No conversation
+    /// found") and exits.
+    Empty,
+    /// The history could not be looked at, or holds no file for the session
+    /// — the CLI may keep it under another config root (a wrapper setting
+    /// its own `CLAUDE_CONFIG_DIR`): leave it to the CLI, whose "No
+    /// conversation found" relaunches the run fresh when it truly is gone.
+    Unknown,
+}
+
 /// Per-run normalization state.
 ///
 /// `saw_init` dedupes `system:init` — the CLI re-emits it every time the model
@@ -343,14 +454,20 @@ pub(crate) struct Normalizer {
     assistant_message_id: String,
     /// Last session id seen (init or result) — used for synthetic Dones.
     pub session_id: Option<String>,
+    rejected_windows: std::collections::BTreeMap<String, Option<i64>>,
+    rate_limited: bool,
     /// The main channel's assistant-level error, held until the `result`
     /// frame: when that carries the CLI's `API Error:` text it supersedes the
     /// code mapping, otherwise the mapping surfaces then. Every observed
     /// assistant error was followed by a result frame (journals 2026-09-19);
     /// the run loop drains a survivor into its synthetic Done.
     pub pending_error: Option<String>,
-    rejected_windows: std::collections::BTreeMap<String, Option<i64>>,
-    rate_limited: bool,
+    /// This turn already showed its failure as an `Error` part (an
+    /// assistant-level error code, a blocking rate limit): the result's own
+    /// wording of the same failure is not repeated.
+    turn_error_shown: bool,
+    /// This turn already said it is retrying the API.
+    retry_noticed: bool,
 }
 
 impl Normalizer {
@@ -370,10 +487,17 @@ impl Normalizer {
             pending_skill: std::collections::HashMap::new(),
             assistant_message_id: new_message_id(),
             session_id: None,
-            pending_error: None,
             rejected_windows: std::collections::BTreeMap::new(),
             rate_limited: false,
+            pending_error: None,
+            turn_error_shown: false,
+            retry_noticed: false,
         }
+    }
+
+    /// The CLI reported its session (`system:init`).
+    pub fn started(&self) -> bool {
+        self.saw_init
     }
 
     fn usage_limit_event(&self) -> AgentEvent {
@@ -482,15 +606,16 @@ impl Normalizer {
     /// duplicating the CLI's cwd encoding (including long-path hashing).
     /// Long sessions' histories run to hundreds of MB: the scan runs off the
     /// runtime and only parses lines that can name a spawn or its agent.
-    pub async fn for_resume(config_root: &std::path::Path, session_id: &str) -> Self {
+    /// The same scan says whether there is a conversation to resume at all.
+    pub async fn for_resume(config_root: &std::path::Path, session_id: &str) -> (Self, Transcript) {
         let config_root = config_root.to_owned();
         let session_id = session_id.to_owned();
         tokio::task::spawn_blocking(move || Self::restore_spawns(&config_root, &session_id))
             .await
-            .unwrap_or_else(|_| Self::new())
+            .unwrap_or_else(|_| (Self::new(), Transcript::Unknown))
     }
 
-    fn restore_spawns(config_root: &std::path::Path, session_id: &str) -> Self {
+    fn restore_spawns(config_root: &std::path::Path, session_id: &str) -> (Self, Transcript) {
         use std::io::BufRead as _;
         let mut norm = Self::new();
         if session_id.is_empty()
@@ -498,28 +623,55 @@ impl Normalizer {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-')
         {
-            return norm;
+            return (norm, Transcript::Unknown);
         }
         let Ok(projects) = std::fs::read_dir(config_root.join("projects")) else {
-            return norm;
+            return (norm, Transcript::Unknown);
         };
         let Some(file) = projects.flatten().find_map(|project| {
             std::fs::File::open(project.path().join(format!("{session_id}.jsonl"))).ok()
         }) else {
-            return norm;
+            return (norm, Transcript::Unknown);
         };
+        let mut transcript = Transcript::Empty;
+        // Only a transcript read whole, every line understood, is Empty: a
+        // read error or a line that might have been conversation leaves the
+        // call to the CLI.
+        let mut doubtful = false;
         let mut reader = std::io::BufReader::with_capacity(1 << 16, file);
         let mut line = Vec::new();
         loop {
             line.clear();
             match reader.read_until(b'\n', &mut line) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
+                Err(_) => {
+                    doubtful = true;
+                    break;
+                }
                 Ok(_) => {}
             }
             // Torn lines and older/newer unknown shapes are harmless.
             let Ok(text) = std::str::from_utf8(&line) else {
+                doubtful = true;
                 continue;
             };
+            // Most of a transcript is bookkeeping (queue operations, request
+            // records, attachments); one user or assistant record is enough.
+            if transcript == Transcript::Empty
+                && (text.contains("\"type\":\"user\"") || text.contains("\"type\":\"assistant\""))
+            {
+                match serde_json::from_str::<Value>(text) {
+                    Ok(record) => {
+                        if matches!(
+                            record.get("type").and_then(Value::as_str),
+                            Some("user" | "assistant")
+                        ) {
+                            transcript = Transcript::Conversation;
+                        }
+                    }
+                    Err(_) => doubtful = true,
+                }
+            }
             if !(text.contains("\"Agent\"")
                 || text.contains("\"Task\"")
                 || text.contains("agentId"))
@@ -576,7 +728,10 @@ impl Normalizer {
                 _ => {}
             }
         }
-        norm
+        if doubtful && transcript == Transcript::Empty {
+            transcript = Transcript::Unknown;
+        }
+        (norm, transcript)
     }
 
     /// Rotate the assistant message id for a steer boundary; returns
@@ -689,6 +844,44 @@ impl Normalizer {
                         }
                     }
                     return Vec::new();
+                }
+                // The CLI retrying a failed API call waits between attempts
+                // with nothing on the wire: keep the turn visibly alive, and
+                // once the retries add up, say why it is slow — once.
+                if f.subtype == "api_retry" {
+                    let attempt = f.attempt.unwrap_or(1);
+                    tracing::info!(
+                        target: "zeron_harness::claude",
+                        attempt,
+                        max = ?f.max_retries,
+                        status = ?f.error_status,
+                        delay_ms = ?f.retry_delay_ms,
+                        "Claude API retry"
+                    );
+                    let mut out = vec![AgentEvent::ReasoningDelta {
+                        text: String::new(),
+                    }];
+                    if attempt >= 3 && !self.retry_noticed {
+                        self.retry_noticed = true;
+                        let why = match (f.error_status, f.error.as_ref().and_then(Value::as_str)) {
+                            (Some(429), _) | (_, Some("rate_limit")) => {
+                                "is rate limited".to_owned()
+                            }
+                            (Some(529), _) | (_, Some("overloaded")) => "is overloaded".to_owned(),
+                            (Some(status), _) => format!("returned an error ({status})"),
+                            (None, _) => "could not be reached".to_owned(),
+                        };
+                        let of = f
+                            .max_retries
+                            .map(|m| format!(" of {m}"))
+                            .unwrap_or_default();
+                        out.push(AgentEvent::Error {
+                            message: format!(
+                                "The Claude API {why} — still retrying (attempt {attempt}{of})."
+                            ),
+                        });
+                    }
+                    return out;
                 }
                 // The CLI's own compaction boundary. Must precede the init
                 // gate below, which swallows every other system subtype.
@@ -1094,6 +1287,7 @@ impl Normalizer {
                 self.rejected_windows
                     .insert(kind, f.rate_limit_info.resets_at);
                 self.rate_limited = true;
+                self.turn_error_shown = true;
                 vec![
                     AgentEvent::Error {
                         message: format!(
@@ -1105,6 +1299,38 @@ impl Normalizer {
             }
 
             Frame::Result(f) => {
+                let held = self
+                    .pending_error
+                    .take()
+                    .filter(|_| !has_api_error_text(&f));
+                let error_shown = std::mem::take(&mut self.turn_error_shown) || held.is_some();
+                self.retry_noticed = false;
+                // A result line that would not parse (see `parse_frame`):
+                // its turn still ends, with what little the line told us.
+                if f.unreadable {
+                    tracing::warn!(target: "zeron_harness::claude", "unreadable result frame");
+                    let failed = f.is_error && !interrupted;
+                    let mut out = self.settle_pending_advisors();
+                    out.extend(held.map(|message| AgentEvent::Error { message }));
+                    out.extend(
+                        std::mem::take(&mut self.rate_limited).then(|| self.usage_limit_event()),
+                    );
+                    self.rejected_windows.clear();
+                    out.push(AgentEvent::Done {
+                        status: if interrupted {
+                            DoneStatus::Interrupted
+                        } else if failed {
+                            DoneStatus::Errored
+                        } else {
+                            DoneStatus::Completed
+                        },
+                        result: None,
+                        error: (failed && !error_shown)
+                            .then(|| "Claude's result for this turn could not be read.".to_owned()),
+                        session_id: self.session_id.clone(),
+                    });
+                    return out;
+                }
                 let model_usage = self
                     .last_model
                     .as_ref()
@@ -1152,33 +1378,26 @@ impl Normalizer {
                         None
                     },
                 });
-                let api_error = f
-                    .result
-                    .as_deref()
-                    .filter(|_| f.subtype == "success")
-                    .filter(|text| text.starts_with(API_ERROR_PREFIX))
-                    .map(api_error_text);
-                self.rate_limited |= api_error
-                    .as_deref()
-                    .is_some_and(|text| text.contains("rate_limit_error"));
+                let failure = (f.subtype == "success" && !interrupted && !aborted(&f))
+                    .then(|| api_failure(&f))
+                    .flatten();
+                self.rate_limited |= f.api_error_status == Some(429)
+                    || failure
+                        .as_deref()
+                        .is_some_and(|text| text.contains("rate_limit_error"));
                 let usage_limit =
                     std::mem::take(&mut self.rate_limited).then(|| self.usage_limit_event());
                 self.rejected_windows.clear();
-                let pending_error = self.pending_error.take().filter(|_| api_error.is_none());
-                let done = if let Some(text) = api_error {
+                let done = if let Some(error) = failure {
                     AgentEvent::Done {
-                        status: if interrupted {
-                            DoneStatus::Interrupted
-                        } else {
-                            DoneStatus::Errored
-                        },
+                        status: DoneStatus::Errored,
                         result: None,
-                        error: Some(text),
+                        error: (!error_shown || has_api_error_text(&f)).then_some(error),
                         session_id: f.session_id,
                     }
                 } else if f.subtype == "success" {
                     AgentEvent::Done {
-                        status: if interrupted {
+                        status: if interrupted || aborted(&f) {
                             DoneStatus::Interrupted
                         } else {
                             DoneStatus::Completed
@@ -1223,9 +1442,13 @@ impl Normalizer {
                             // telemetry, typically `error_during_execution`
                             // after an abort): nothing user-relevant to show.
                             _ if !diagnostics.is_empty() => None,
+                            // The failure already has its part; a generic
+                            // line under it adds nothing.
+                            _ if error_shown => None,
                             _ => Some(result_error_text(&f.subtype).to_owned()),
                         }
                     };
+                    let interrupted = interrupted || aborted(&f);
                     AgentEvent::Done {
                         status: if interrupted {
                             DoneStatus::Interrupted
@@ -1238,9 +1461,7 @@ impl Normalizer {
                     }
                 };
                 let mut out = self.settle_pending_advisors();
-                if let Some(message) = pending_error {
-                    out.push(AgentEvent::Error { message });
-                }
+                out.extend(held.map(|message| AgentEvent::Error { message }));
                 out.extend(usage_limit);
                 if let Some(window) = window {
                     out.push(AgentEvent::ContextUsage {
@@ -2637,7 +2858,8 @@ mod tests {
             r#"{"type":"user","isSidechain":true,"toolUseResult":{"agentId":"a2"},"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_nested"}]}}"#,
             "\n{torn tail"
         )).unwrap();
-        let mut norm = Normalizer::for_resume(root.path(), "session-1").await;
+        let (mut norm, transcript) = Normalizer::for_resume(root.path(), "session-1").await;
+        assert_eq!(transcript, Transcript::Conversation);
         assert!(!norm.agent_spawn_tools.contains("toolu_nested"));
         assert!(!norm.agent_tasks.contains_key("a2"));
         // The revived process has no original spawn frame on its wire.
@@ -2660,11 +2882,53 @@ mod tests {
             )]
         );
         assert!(!norm.saw_init, "history must not consume the live init");
-        assert!(
-            Normalizer::for_resume(root.path(), "missing")
-                .await
-                .agent_tasks
-                .is_empty()
+        // Another config root may hold it: only the CLI can tell.
+        let (missing, transcript) = Normalizer::for_resume(root.path(), "missing").await;
+        assert!(missing.agent_tasks.is_empty());
+        assert_eq!(transcript, Transcript::Unknown);
+    }
+
+    #[tokio::test]
+    async fn a_transcript_without_conversation_cannot_be_resumed() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("projects/encoded-project");
+        std::fs::create_dir_all(&project).unwrap();
+        // What a run that died before its first reply leaves behind.
+        std::fs::write(
+            project.join("bare.jsonl"),
+            concat!(
+                r#"{"type":"queue-operation","operation":"enqueue","content":"{\"type\":\"user\"}"}"#,
+                "\n",
+                r#"{"type":"last-prompt","lastPrompt":"hi"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            Normalizer::for_resume(root.path(), "bare").await.1,
+            Transcript::Empty
+        );
+        // A line that might have been conversation, cut short or not text:
+        // the CLI decides.
+        for (name, body) in [
+            (
+                "torn",
+                &b"{\"type\":\"last-prompt\"}\n{\"type\":\"user\",\"mess"[..],
+            ),
+            ("garbled", &b"{\"type\":\"last-prompt\"}\n\xff\xfe\n"[..]),
+        ] {
+            std::fs::write(project.join(format!("{name}.jsonl")), body).unwrap();
+            assert_eq!(
+                Normalizer::for_resume(root.path(), name).await.1,
+                Transcript::Unknown,
+                "{name}"
+            );
+        }
+        // No history at all: nothing can be said either way.
+        let nowhere = tempfile::tempdir().unwrap();
+        assert_eq!(
+            Normalizer::for_resume(nowhere.path(), "bare").await.1,
+            Transcript::Unknown
         );
     }
 
@@ -2860,6 +3124,143 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    fn done_of(events: &[AgentEvent]) -> (DoneStatus, Option<String>) {
+        match events.last() {
+            Some(AgentEvent::Done { status, error, .. }) => (*status, error.clone()),
+            other => panic!("no done: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_failures_filed_as_success_end_errored() {
+        // Live 2.1.309 with an invalid key: the assistant frame carries the
+        // error code, and the result says `success` with `is_error`.
+        let mut norm = Normalizer::new();
+        let assistant = norm.normalize(
+            crate::claude::wire::parse_frame(
+                r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Invalid API key · Fix external API key"}]},"error":"authentication_failed","api_error_status":401}"#,
+            )
+            .unwrap(),
+            false,
+        );
+        assert!(
+            !assistant
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Error { .. }))
+        );
+        let invalid_key = r#"{"type":"result","subtype":"success","is_error":true,"result":"Invalid API key · Fix external API key","terminal_reason":"api_error","api_error_status":401,"session_id":"s"}"#;
+        let done = norm.normalize(
+            crate::claude::wire::parse_frame(invalid_key).unwrap(),
+            false,
+        );
+        assert_eq!(
+            done.iter()
+                .filter(|e| matches!(e, AgentEvent::Error { .. }))
+                .count(),
+            1
+        );
+        // Errored, and the failure is not shown a second time.
+        assert_eq!(done_of(&done), (DoneStatus::Errored, None));
+        // Without the assistant's code, the result's own text is the error.
+        assert_eq!(
+            done_of(&normalize_one(invalid_key)),
+            (
+                DoneStatus::Errored,
+                Some("Invalid API key · Fix external API key".into())
+            )
+        );
+
+        let (status, error) = done_of(&normalize_one(
+            r#"{"type":"result","subtype":"success","is_error":true,"result":"API Error: 429 rate_limit_error (resets 3pm)","api_error_status":429}"#,
+        ));
+        assert_eq!(status, DoneStatus::Errored);
+        let error = error.unwrap();
+        assert!(error.starts_with("Claude rate limit reached"), "{error}");
+        assert!(error.contains("resets 3pm"), "{error}");
+
+        let (_, error) = done_of(&normalize_one(
+            r#"{"type":"result","subtype":"success","is_error":true,"result":"API Error: 529","api_error_status":529}"#,
+        ));
+        assert!(error.unwrap().contains("overloaded"));
+
+        for full in [
+            r#"{"type":"result","subtype":"success","is_error":true,"result":"Prompt is too long","terminal_reason":"prompt_too_long"}"#,
+            r#"{"type":"result","subtype":"success","is_error":true,"result":"Prompt is too long"}"#,
+        ] {
+            let (status, error) = done_of(&normalize_one(full));
+            assert_eq!(status, DoneStatus::Errored);
+            assert!(error.unwrap().contains("/compact"), "{full}");
+        }
+    }
+
+    #[test]
+    fn terminal_reasons_decide_how_a_success_ended() {
+        for (raw, expected) in [
+            (
+                r#"{"type":"result","subtype":"success","is_error":false,"result":"hi","terminal_reason":"completed"}"#,
+                DoneStatus::Completed,
+            ),
+            (
+                r#"{"type":"result","subtype":"success","is_error":false,"terminal_reason":"aborted_streaming"}"#,
+                DoneStatus::Interrupted,
+            ),
+            (
+                r#"{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_tools","errors":[]}"#,
+                DoneStatus::Interrupted,
+            ),
+            (
+                r#"{"type":"result","subtype":"success","is_error":false,"terminal_reason":"budget_exhausted"}"#,
+                DoneStatus::Errored,
+            ),
+        ] {
+            assert_eq!(done_of(&normalize_one(raw)).0, expected, "{raw}");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_result_ends_the_turn() {
+        let ok =
+            normalize_one(r#"{"type":"result","subtype":"success","usage":{"input_tokens":"x"}}"#);
+        assert_eq!(done_of(&ok), (DoneStatus::Completed, None));
+        let failed = normalize_one(
+            r#"{"type":"result","subtype":"success","is_error":true,"usage":{"input_tokens":"x"}}"#,
+        );
+        assert_eq!(done_of(&failed).0, DoneStatus::Errored);
+        assert!(done_of(&failed).1.is_some());
+    }
+
+    #[test]
+    fn api_retries_keep_the_turn_alive_and_are_noticed_once() {
+        let mut norm = Normalizer::new();
+        let retry = |norm: &mut Normalizer, attempt: u32| {
+            norm.normalize(
+                crate::claude::wire::parse_frame(&format!(
+                    r#"{{"type":"system","subtype":"api_retry","attempt":{attempt},"max_retries":10,"retry_delay_ms":4000,"error_status":529,"error":"overloaded"}}"#
+                ))
+                .unwrap(),
+                false,
+            )
+        };
+        let heartbeat = AgentEvent::ReasoningDelta {
+            text: String::new(),
+        };
+        assert_eq!(retry(&mut norm, 1), vec![heartbeat.clone()]);
+        assert_eq!(retry(&mut norm, 2), vec![heartbeat.clone()]);
+        let third = retry(&mut norm, 3);
+        assert!(matches!(
+            &third[..],
+            [AgentEvent::ReasoningDelta { .. }, AgentEvent::Error { message }]
+                if message.contains("overloaded") && message.contains("3 of 10")
+        ));
+        assert_eq!(retry(&mut norm, 4), vec![heartbeat.clone()]);
+        // The next turn may notice its own retries.
+        norm.normalize(
+            crate::claude::wire::parse_frame(r#"{"type":"result","subtype":"success"}"#).unwrap(),
+            false,
+        );
+        assert_eq!(retry(&mut norm, 3).len(), 2);
     }
 
     #[test]

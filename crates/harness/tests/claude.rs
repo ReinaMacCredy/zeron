@@ -731,6 +731,31 @@ async fn missing_binary_is_not_installed() {
 }
 
 #[tokio::test]
+async fn missing_working_directory_is_not_a_missing_binary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let gone = tmp.path().join("deleted-project");
+    let (controls, _steer, _token) = controls("A");
+    let err = harness()
+        .run(
+            RunRequest {
+                cwd: gone.to_string_lossy().into_owned(),
+                ..request("scenario:happy")
+            },
+            controls,
+        )
+        .await
+        .err()
+        .expect("spawn fails");
+    match err {
+        HarnessError::Io(error) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
+            assert!(error.to_string().contains("does not exist"), "{error}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn captured_live_background_subagent_frames_replay_correctly() {
     // Frames captured VERBATIM from claude 2.1.228 (2026-08-17): a turn that
     // spawns a background Agent subagent — eager result while it runs, tagged
@@ -1652,4 +1677,345 @@ async fn a_stopped_turn_keeps_the_process_and_its_background_work() {
         next_event(&mut stream).await.is_none(),
         "closing the mailbox ends the run"
     );
+}
+
+fn done(events: &[AgentEvent]) -> (DoneStatus, Option<String>, Option<String>) {
+    match events
+        .iter()
+        .rev()
+        .find(|e| matches!(e, AgentEvent::Done { .. }))
+    {
+        Some(AgentEvent::Done {
+            status,
+            result,
+            error,
+            ..
+        }) => (*status, result.clone(), error.clone()),
+        _ => panic!("no done: {events:?}"),
+    }
+}
+
+fn session_lost(events: &[AgentEvent]) -> bool {
+    events.iter().any(
+        |e| matches!(e, AgentEvent::Error { message } if message.contains("could not be restored")),
+    )
+}
+
+/// A resumed run against `config_dir` (the CLI's history root).
+fn resume_request(session: &str, config_dir: &std::path::Path) -> RunRequest {
+    let mut req = request("scenario:resume-check");
+    req.resume = Some(session.into());
+    req.env.insert(
+        "CLAUDE_CONFIG_DIR".into(),
+        config_dir.to_string_lossy().into_owned(),
+    );
+    req
+}
+
+/// The CLI has no conversation for a resumed session: it says so and
+/// exits, and reused forever that id broke the chat for good. The run
+/// carries on in a fresh session — the prompt replayed to it — and says so.
+#[tokio::test]
+async fn an_unrestorable_session_is_relaunched_fresh() {
+    // No readable history: only the CLI can tell, and it does.
+    let unknown = tempfile::tempdir().unwrap();
+    for session in ["stale-1", "stderr-only-1"] {
+        let (controls, _steer, _token) = controls("A");
+        let events = run_to_end(
+            &harness(),
+            resume_request(session, &unknown.path().join("missing")),
+            controls,
+        )
+        .await;
+        assert!(session_lost(&events), "{session}: {events:?}");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::SessionStarted { session_id, .. } if session_id == "sess-fresh"
+            )),
+            "{session}: {events:?}"
+        );
+        assert_eq!(
+            done(&events),
+            (DoneStatus::Completed, Some("resumed=none".into()), None),
+            "{session}"
+        );
+    }
+}
+
+/// Claude's own history says there is nothing to resume: the CLI is never
+/// asked to.
+#[tokio::test]
+async fn a_session_without_conversation_is_not_resumed() {
+    let config = tempfile::tempdir().unwrap();
+    let project = config.path().join("projects").join("-tmp");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("stale-2.jsonl"),
+        "{\"type\":\"queue-operation\",\"operation\":\"enqueue\"}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("live-1.jsonl"),
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
+    )
+    .unwrap();
+
+    let (first, _steer, _token) = controls("A");
+    let events = run_to_end(&harness(), resume_request("stale-2", config.path()), first).await;
+    assert!(session_lost(&events), "{events:?}");
+    assert_eq!(done(&events).1.as_deref(), Some("resumed=none"));
+
+    // A real conversation resumes as ever, without a notice.
+    let (again, _steer, _token) = controls("A");
+    let events = run_to_end(&harness(), resume_request("live-1", config.path()), again).await;
+    assert!(!session_lost(&events), "{events:?}");
+    assert_eq!(done(&events).1.as_deref(), Some("resumed=live-1"));
+
+    // No transcript here is no verdict: the CLI may keep its history under
+    // another config root (a wrapper setting its own), so it is still asked
+    // — and context survives the relaunch.
+    let (elsewhere, _steer, _token) = controls("A");
+    let events = run_to_end(
+        &harness(),
+        resume_request("kept-1", config.path()),
+        elsewhere,
+    )
+    .await;
+    assert!(!session_lost(&events), "{events:?}");
+    assert_eq!(done(&events).1.as_deref(), Some("resumed=kept-1"));
+    // Truly gone, the CLI's own answer still starts it fresh.
+    let (gone, _steer, _token) = controls("A");
+    let events = run_to_end(&harness(), resume_request("stale-3", config.path()), gone).await;
+    assert!(session_lost(&events), "{events:?}");
+    assert_eq!(done(&events).1.as_deref(), Some("resumed=none"));
+}
+
+/// A crash in any turn after the first used to end the stream with no Done
+/// at all; and the message must carry the exit and the last stderr line,
+/// which land just after stdout closes.
+#[tokio::test]
+async fn a_crash_in_a_later_turn_ends_it_with_the_reason() {
+    let (controls, steer, _token) = controls("A");
+    let mut stream = harness()
+        .run(request("scenario:crash-later-turn"), controls)
+        .await
+        .expect("run starts");
+    let mut events = Vec::new();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("event in time")
+            .expect("first turn ends")
+            .expect("stream event");
+        let first_done = matches!(event, AgentEvent::Done { .. });
+        events.push(event);
+        if first_done {
+            break;
+        }
+    }
+    assert_eq!(done(&events).0, DoneStatus::Completed);
+    steer.send(steer_msg("keep going")).await.unwrap();
+    let rest: Vec<_> = tokio::time::timeout(
+        Duration::from_secs(10),
+        stream.map(|r| r.expect("stream event")).collect::<Vec<_>>(),
+    )
+    .await
+    .expect("run finished in time");
+    let (status, _, error) = done(&rest);
+    assert_eq!(status, DoneStatus::Errored, "{rest:?}");
+    let error = error.expect("crash message");
+    assert!(error.contains("exit code 3"), "{error}");
+    assert!(error.contains("heap out of memory"), "{error}");
+}
+
+/// The CLI waits for an answer to every control request: one we do not
+/// serve gets an error reply rather than silence.
+#[tokio::test]
+async fn unknown_control_requests_are_answered() {
+    let (controls, _steer, _token) = controls("A");
+    let events = run_to_end(&harness(), request("scenario:unknown-control"), controls).await;
+    assert_eq!(done(&events).1.as_deref(), Some("answered"));
+}
+
+/// A model switch the CLI refused is shown, and not taken as applied: the
+/// next prompt with the same configuration asks again. Refused again the
+/// same way, it is not shown a second time.
+#[tokio::test]
+async fn a_refused_model_switch_is_shown_and_retried() {
+    let (controls, steer, _token) = controls("A");
+    let mut launch = request("scenario:set-model-fails");
+    launch.model = Some("claude-sonnet-5-5".into());
+    let mut next = launch.clone();
+    next.model = Some("claude-nonexistent".into());
+    let switch = |prompt: &str| {
+        let mut msg = steer_msg(prompt);
+        msg.config = Some(Box::new(next.clone()));
+        msg
+    };
+    let mut stream = harness().run(launch, controls).await.expect("run starts");
+    let mut events = Vec::new();
+    let mut dones = 0;
+    while dones < 2 {
+        let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("event in time")
+            .expect("stream open")
+            .expect("stream event");
+        if matches!(event, AgentEvent::Done { .. }) {
+            dones += 1;
+            if dones == 1 {
+                steer.send(switch("second")).await.unwrap();
+            }
+        }
+        events.push(event);
+    }
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Error { message }
+                if message.contains("model") && message.contains("Model not available")
+        )),
+        "{events:?}"
+    );
+    // The same configuration again: the switch is asked for once more.
+    steer.send(switch("third")).await.unwrap();
+    drop(steer);
+    let rest: Vec<_> = tokio::time::timeout(
+        Duration::from_secs(10),
+        stream.map(|r| r.expect("stream event")).collect::<Vec<_>>(),
+    )
+    .await
+    .expect("run finished in time");
+    assert_eq!(done(&rest).1.as_deref(), Some("third"), "{rest:?}");
+    assert!(
+        !rest.iter().any(
+            |e| matches!(e, AgentEvent::Error { message } if message.contains("could not change"))
+        ),
+        "{rest:?}"
+    );
+}
+
+/// What the CLI started (MCP servers, tools) goes with it when it exits on
+/// its own, not only on an interrupt.
+#[tokio::test]
+async fn processes_the_cli_started_end_with_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("grandchild.pid");
+    let mut req = request("scenario:grandchild");
+    req.env.insert(
+        "ZERON_TEST_PIDFILE".into(),
+        pidfile.to_string_lossy().into_owned(),
+    );
+    let (controls, _steer, _token) = controls("A");
+    let events = run_to_end(&harness(), req, controls).await;
+    assert_eq!(done(&events).0, DoneStatus::Completed);
+    let pid: i32 = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // The stream ends before teardown finishes; give it its grace.
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    // SAFETY: signal 0 only probes whether the pid exists.
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        if std::time::Instant::now() > deadline {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            panic!("the CLI's child outlived the run");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// A result line that will not parse still ends its turn; a lone surrogate
+/// half in a delta is repaired rather than dropped.
+#[tokio::test]
+async fn an_unreadable_result_still_ends_the_turn() {
+    let (controls, _steer, _token) = controls("A");
+    let mut stream = harness()
+        .run(request("scenario:unreadable-result"), controls)
+        .await
+        .expect("run starts");
+    let mut events = Vec::new();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("the turn ends without the CLI exiting")
+            .expect("stream open")
+            .expect("stream event");
+        let is_done = matches!(event, AgentEvent::Done { .. });
+        events.push(event);
+        if is_done {
+            break;
+        }
+    }
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "half \u{FFFD}".into()
+    }));
+    assert_eq!(done(&events).0, DoneStatus::Completed);
+}
+
+/// Discovery that fails says why: the CLI's exit and its last stderr line,
+/// not a bare "exited before answering".
+#[tokio::test]
+async fn a_failed_discovery_probe_reports_exit_and_stderr() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("claude");
+    std::fs::write(
+        &exe,
+        "#!/bin/sh\necho 'Error: settings.json is not valid JSON' >&2\nexit 2\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let error = ClaudeHarness::new()
+        .with_executable(&exe)
+        .commands()
+        .await
+        .expect_err("probe fails");
+    let error = error.to_string();
+    assert!(error.contains("exit code 2"), "{error}");
+    assert!(error.contains("settings.json is not valid JSON"), "{error}");
+}
+
+/// The real CLI, resuming a session it has never seen: it refuses, and the
+/// run continues in a fresh session. An invalid key keeps it free — the
+/// fresh session fails its API call and ends errored, which is the point:
+/// it ran. Run with `cargo test -p zeron-harness --test claude -- --ignored
+/// live_unrestorable`.
+#[tokio::test]
+#[ignore = "spawns the real claude CLI"]
+async fn live_unrestorable_session_relaunches_fresh() {
+    let config = tempfile::tempdir().unwrap();
+    let mut req = request("Reply PONG");
+    req.cwd = config.path().to_string_lossy().into_owned();
+    req.resume = Some("11111111-2222-3333-4444-555555555555".into());
+    // No `projects` dir yet: the history can't be checked, so the CLI is
+    // asked to resume and the relaunch path runs.
+    req.env.insert(
+        "CLAUDE_CONFIG_DIR".into(),
+        config.path().join("cfg").to_string_lossy().into_owned(),
+    );
+    req.env
+        .insert("ANTHROPIC_API_KEY".into(), "sk-ant-invalid".into());
+    let (controls, steer, _token) = controls("A");
+    drop(steer);
+    let stream = ClaudeHarness::new()
+        .run(req, controls)
+        .await
+        .expect("run starts");
+    let events = tokio::time::timeout(
+        Duration::from_secs(60),
+        stream.map(|r| r.expect("stream event")).collect::<Vec<_>>(),
+    )
+    .await
+    .expect("run finished in time");
+    eprintln!("{events:#?}");
+    assert!(session_lost(&events));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::SessionStarted { session_id, .. }
+            if session_id != "11111111-2222-3333-4444-555555555555"
+    )));
+    assert_eq!(done(&events).0, DoneStatus::Errored);
 }

@@ -2934,11 +2934,10 @@ fn a_child_revived_after_a_crash_settles_from_its_revived_run() {
         )
         .await;
         assert!(
-            prompts
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|p| p.ends_with("survive the crash")),
+            prompts.lock().unwrap().iter().any(|p| {
+                p.contains("Continue where you left off")
+                    && p.contains("survive the crash\n</request>")
+            }),
             "the crashed child run was revived"
         );
         let d = delegation(&core, &child);

@@ -1410,13 +1410,21 @@ async fn a_restart_resumes_a_slash_turn_with_the_generation_it_was_dispatched_wi
     let seen = rig.seen();
     let fenced = seen
         .iter()
-        .find(|seen| seen.prompt == "/computer-use open Calculator")
+        .find(|seen| {
+            seen.prompt
+                .contains("<request>\n/computer-use open Calculator\n</request>")
+        })
         .expect("the fenced turn resumed");
     assert!(!fenced.computer, "a turn the Stop fenced off resumes off");
     let current = seen
         .iter()
-        .find(|seen| seen.prompt == "open Safari")
+        .find(|seen| seen.prompt.contains("<request>\nopen Safari\n</request>"))
         .expect("the current turn resumed");
+    assert!(
+        !current.prompt.contains("/computer-use"),
+        "{}",
+        current.prompt
+    );
     assert!(
         current.computer,
         "a turn stamped at the current generation resumes on"

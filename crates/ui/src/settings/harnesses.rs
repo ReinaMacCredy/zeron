@@ -119,9 +119,12 @@ fn install_params(harness: HarnessId, target: &Option<String>) -> serde_json::Va
 /// The CLI named in the not-installed hint.
 fn harness_update_label(status: &HarnessUpdateStatus, theme: &Theme) -> (SharedString, gpui::Hsla) {
     let label = status.version_line();
-    let color = match status.phase {
-        HarnessUpdatePhase::Failed => theme.danger_muted,
-        _ => theme.text_muted.opacity(0.75),
+    let color = if status.phase == HarnessUpdatePhase::Failed
+        || status.blocking_compatibility().is_some()
+    {
+        theme.danger_muted
+    } else {
+        theme.text_muted.opacity(0.75)
     };
     (label.into(), color)
 }
@@ -1588,6 +1591,11 @@ impl HarnessesPage {
                             if status.can_apply =>
                         {
                             ("harness-update", "Update", true)
+                        }
+                        HarnessUpdatePhase::Failed
+                            if status.can_apply && status.install_failed() =>
+                        {
+                            ("harness-update", "Retry update", true)
                         }
                         HarnessUpdatePhase::WaitingForIdle
                         | HarnessUpdatePhase::Preparing

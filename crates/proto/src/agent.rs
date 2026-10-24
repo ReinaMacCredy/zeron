@@ -25,13 +25,16 @@ pub enum HarnessId {
     Antigravity,
     /// Generic ACP agent driver; the provider instance names the agent.
     Acp,
+    /// Meta's Muse Code agent, driven natively over the Muse Session Protocol
+    /// (MSP: `muse` speaking JSON-RPC on stdio).
+    Muse,
     /// Test harness; never shown in production pickers.
     Mock,
 }
 
 impl HarnessId {
     /// Every harness, in declaration order.
-    pub const ALL: [HarnessId; 11] = [
+    pub const ALL: [HarnessId; 12] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::Cursor,
@@ -42,6 +45,7 @@ impl HarnessId {
         HarnessId::Opencode,
         HarnessId::Antigravity,
         HarnessId::Acp,
+        HarnessId::Muse,
         HarnessId::Mock,
     ];
 
@@ -58,6 +62,7 @@ impl HarnessId {
             HarnessId::Opencode => "opencode",
             HarnessId::Antigravity => "antigravity",
             HarnessId::Acp => "acp",
+            HarnessId::Muse => "muse",
             HarnessId::Mock => "mock",
         }
     }
@@ -79,6 +84,7 @@ impl HarnessId {
             HarnessId::Opencode => "OpenCode",
             HarnessId::Antigravity => "Antigravity",
             HarnessId::Acp => "ACP agent",
+            HarnessId::Muse => "Muse Code",
             HarnessId::Mock => "Mock",
         }
     }
@@ -166,6 +172,21 @@ pub struct HarnessUpdateFailure {
     pub message: String,
     #[serde(default)]
     pub retryable: bool,
+    /// What failed: looking for a release, or installing one. An engine that
+    /// predates the field only ever reported failed checks.
+    #[serde(default)]
+    pub kind: HarnessUpdateFailureKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HarnessUpdateFailureKind {
+    /// The version probe or release lookup failed; checking again retries.
+    #[default]
+    Check,
+    /// The updater or its verification failed; the release is still known,
+    /// so the update itself can be retried.
+    Install,
 }
 
 /// One row in the device-local harness-update stream.
@@ -198,6 +219,38 @@ pub struct HarnessUpdateStatus {
     /// Provider command shown when mutation cannot be safely automated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_command: Option<String>,
+    /// The installed release is known not to work with (or isn't supported
+    /// by) this engine's zeron.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<HarnessCompatibility>,
+    /// A newer release exists, but zeron won't install it: it is known not
+    /// to work. Such a release is never reported as available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_back: Option<HarnessCompatibility>,
+}
+
+/// How well a CLI release works with this zeron (see the engine's
+/// compatibility policy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HarnessCompatibilityStatus {
+    Supported,
+    /// Outside the releases this zeron was built and tested against.
+    Unsupported,
+    /// Known not to work with this zeron.
+    Broken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessCompatibility {
+    pub status: HarnessCompatibilityStatus,
+    /// The release this is about.
+    pub version: String,
+    /// One line for the user, naming the release to use instead when known.
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended_version: Option<String>,
 }
 
 /// What the resume button and every automatic continuation send. A user
@@ -270,6 +323,9 @@ impl HarnessUpdateStatus {
     /// monitored show just the version, so rows don't flash through states
     /// while checks run.
     pub fn version_line(&self) -> String {
+        if let Some(compatibility) = self.blocking_compatibility() {
+            return compatibility.message.clone();
+        }
         let installed = self
             .installed_version
             .as_deref()
@@ -279,6 +335,11 @@ impl HarnessUpdateStatus {
             None => detail.to_owned(),
         };
         let version_only = || installed.clone().unwrap_or_default();
+        if self.phase == HarnessUpdatePhase::Current
+            && let Some(held) = &self.held_back
+        {
+            return with(&format!("v{} held back: not supported yet", held.version));
+        }
         match self.phase {
             HarnessUpdatePhase::Dormant
             | HarnessUpdatePhase::Checking
@@ -299,8 +360,33 @@ impl HarnessUpdateStatus {
             HarnessUpdatePhase::Installing => with("Installing…"),
             HarnessUpdatePhase::Verifying => with("Verifying…"),
             HarnessUpdatePhase::Updated => with("Updated"),
+            HarnessUpdatePhase::Failed if self.install_failed() => with("Update failed"),
             HarnessUpdatePhase::Failed => with("Couldn't check for updates"),
         }
+    }
+
+    /// An installed release this Zeron can't run explains failing runs: it
+    /// outranks everything but an update in flight.
+    pub fn blocking_compatibility(&self) -> Option<&HarnessCompatibility> {
+        self.compatibility.as_ref().filter(|_| {
+            matches!(
+                self.phase,
+                HarnessUpdatePhase::Dormant
+                    | HarnessUpdatePhase::Checking
+                    | HarnessUpdatePhase::Current
+                    | HarnessUpdatePhase::Available
+                    | HarnessUpdatePhase::ManualActionRequired
+                    | HarnessUpdatePhase::Failed
+            )
+        })
+    }
+
+    /// The failure was the update itself (its release is still known, so it
+    /// can be retried), not a failed check.
+    pub fn install_failed(&self) -> bool {
+        self.error
+            .as_ref()
+            .is_some_and(|error| error.kind == HarnessUpdateFailureKind::Install)
     }
 
     /// Home notices describe discovered releases or an update in progress.
@@ -1298,6 +1384,15 @@ pub enum AgentEvent {
     BackgroundTasks {
         tasks: Vec<crate::BackgroundTask>,
     },
+    /// The subscription's usage as the provider reported it mid-run (Muse's
+    /// `usage/changed`): the engine records it on the account the run used,
+    /// for the Providers meters. Never persisted to docs.
+    #[serde(rename_all = "camelCase")]
+    PlanUsage {
+        windows: Vec<crate::AgentUsageWindow>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan_label: Option<String>,
+    },
     /// Kept as a harness passthrough (rate-limit probes); only its running
     /// totals reach the doc, through the session stats.
     #[serde(rename_all = "camelCase")]
@@ -1798,8 +1893,12 @@ mod tests {
             error: None,
             can_apply: true,
             manual_command: Some("claude update".into()),
+            compatibility: None,
+            held_back: None,
         };
         let json = serde_json::to_value(&status).unwrap();
+        // Older peers neither send nor expect the compatibility fields.
+        assert!(json.get("compatibility").is_none() && json.get("heldBack").is_none());
         assert_eq!(json["harness"], "claude-code");
         assert_eq!(json["installedVersion"], "1.0.0");
         assert_eq!(json["policy"], "auto-when-idle");

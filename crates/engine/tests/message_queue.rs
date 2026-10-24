@@ -395,7 +395,8 @@ async fn queue_holds_during_a_turn_and_flushes_in_order_at_its_end() {
 
 /// Quitting the host must neither release the queue through the interrupt's
 /// Idle transition nor release it when the persisted document is reopened.
-/// An explicit queue action remains the thaw gesture.
+/// An explicit queue action remains the thaw gesture. (The turn the shutdown
+/// cut off is picked back up on its own; the queue behind it is not.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_restores_the_queue_frozen_until_an_explicit_send() {
     let tmp = tempfile::tempdir().unwrap();
@@ -437,9 +438,18 @@ async fn restart_restores_the_queue_frozen_until_an_explicit_send() {
     // Materializing the persisted chat starts its background drain task. Give
     // that task time to prove the restored row stays frozen.
     assert_eq!(queue_texts(&after), vec!["after restart"]);
+    wait_for(
+        || after_prompts.lock().unwrap().iter().any(|p| p == "opening"),
+        "the interrupted opening turn to be picked back up",
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(250)).await;
     assert!(
-        after_prompts.lock().unwrap().is_empty(),
+        !after_prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p == "after restart"),
         "startup must not dispatch a recovered queue"
     );
     assert_eq!(queue_texts(&after), vec!["after restart"]);

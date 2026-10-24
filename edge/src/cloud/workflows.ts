@@ -236,7 +236,8 @@ export class ProvisionWorkflow extends WorkflowEntrypoint<Env, ProvisionParams> 
     try {
       const provider = requireProvider(this.env, p.provider);
       const ttlSeconds = ttlFor(this.env, provider);
-      const machine = parseMachine(this.env.CLOUD_MACHINE);
+      // The account's own size when an operator set one, else the server's.
+      const machine = p.machine ?? parseMachine(this.env.CLOUD_MACHINE);
       const template = parseTemplate(this.env.CLOUD_TEMPLATE);
       const env = sessionEnv(p);
       let sandboxId = p.sandboxId;

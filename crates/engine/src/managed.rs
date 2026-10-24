@@ -387,6 +387,9 @@ impl Engine {
         engine.refresh_task.abort();
         engine.auth.quiesce_refresh(Duration::from_secs(10)).await;
         let runtime = engine.runtime.lock().await.take();
+        // The app signs out, then stops the engine: the StopEngine may land
+        // before the auth watcher does, so the runtime's shutdown decides
+        // revival from the auth state, not from the branch that fired.
         if let Some(runtime) = runtime {
             runtime.shutdown().await;
         }

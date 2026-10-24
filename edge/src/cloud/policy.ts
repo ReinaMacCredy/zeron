@@ -6,6 +6,8 @@
  * Provider-neutral: sandbox states come normalized from sandbox-provider.ts.
  */
 
+import type { SandboxMachine } from "./sandbox-provider";
+
 export type CloudState =
   | "off"
   | "provisioning"
@@ -106,9 +108,12 @@ export const parseMaxAwake = (raw: string | undefined): number => {
   return Number.isInteger(n) && n > 0 ? n : 5;
 };
 
+/** A sandbox size by name, or undefined. */
+export const machineName = (raw: unknown): SandboxMachine | undefined =>
+  raw === "small" || raw === "default" || raw === "large" || raw === "xlarge" ? raw : undefined;
+
 /** `CLOUD_MACHINE`: the session sandbox size (default "default"). */
-export const parseMachine = (raw: string | undefined): "small" | "default" | "large" =>
-  raw === "small" || raw === "large" ? raw : "default";
+export const parseMachine = (raw: string | undefined): SandboxMachine => machineName(raw) ?? "default";
 
 /** `CLOUD_TEMPLATE`: a provider snapshot name, or undefined. */
 export const parseTemplate = (raw: string | undefined): string | undefined => {

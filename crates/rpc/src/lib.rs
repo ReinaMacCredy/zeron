@@ -86,6 +86,10 @@ pub mod methods {
     /// Settings > Tools opt-outs. No params / `ToolSettings` → `ToolSettingsState`.
     pub const GET_TOOL_SETTINGS: &str = "GetToolSettings";
     pub const SET_TOOL_SETTINGS: &str = "SetToolSettings";
+    /// Whether agents' commits on this device credit Zeron
+    /// (`{enabled, cloud}`; set with `{enabled}`).
+    pub const GET_COMMIT_CREDIT: &str = "GetCommitCredit";
+    pub const SET_COMMIT_CREDIT: &str = "SetCommitCredit";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";

@@ -69,6 +69,7 @@ import {
   planReconcile,
   recordSandbox,
   recordUsageFailure,
+  sizeMultiplier,
   summarizeMonth,
   upsertUsage,
   type CloudUsage,
@@ -108,7 +109,7 @@ import {
   type StripeEnv,
   type SubscriptionState
 } from "./stripe";
-import { SandboxError, effectiveTtl, type SandboxUsage } from "./sandbox-provider";
+import { SandboxError, effectiveTtl, type SandboxMachine, type SandboxUsage } from "./sandbox-provider";
 
 export interface CloudCaller {
   readonly orgId: string;
@@ -220,6 +221,8 @@ export interface ProvisionParams {
   readonly project: SessionProject;
   /** Set when retrying a failed provision on the sandbox it already made. */
   readonly sandboxId?: string;
+  /** The account's machine size, when an operator set one. */
+  readonly machine?: SandboxMachine;
 }
 
 export interface LifecycleParams {
@@ -298,6 +301,9 @@ interface AccountRecord {
   retiredDeviceIds?: string[];
   /** The last reconcile that read awake machines' meters (any kind). */
   lastReconcileAt?: number;
+  /** Operator-set machine size for this account's new sessions
+   * (`POST /admin/cloud/machine`), over `CLOUD_MACHINE`. */
+  machine?: SandboxMachine;
   /** The last reconcile of every open row (the others read awake machines'). */
   lastFullReconcileAt?: number;
 }
@@ -538,10 +544,14 @@ export class CloudAccount extends DurableObject<Env> {
     if (!this.acct.orgId) return 0;
     const credits = this.breakdown(now);
     let unmetered = 0;
+    let sizes: Map<string, string> | undefined;
     for (const s of this.sessions.values()) {
       if (!AWAKE_STATES.has(s.state)) continue;
       const since = Math.max(s.awakeSince ?? now, this.acct.lastReconcileAt ?? 0);
-      unmetered += Math.max(0, now - since) / 1000;
+      // A bigger machine spends credits faster: estimate with its size.
+      sizes ??= new Map(listSandboxes(this.sql()).map((row) => [row.sandboxId, row.type]));
+      const type = s.sandboxId ? sizes.get(s.sandboxId) : this.acct.machine;
+      unmetered += (Math.max(0, now - since) / 1000) * sizeMultiplier(type);
     }
     return credits.monthly + credits.extra - unmetered / this.perCredit();
   }
@@ -1217,7 +1227,8 @@ export class CloudAccount extends DurableObject<Env> {
       enrollCode: code,
       edgeUrl,
       project: { cloneUrl: project.cloneUrl, path: project.path, defaultBranch: s.baseBranch ?? project.defaultBranch },
-      ...(sandboxId ? { sandboxId } : {})
+      ...(sandboxId ? { sandboxId } : {}),
+      ...(this.acct.machine ? { machine: this.acct.machine } : {})
     }));
   }
 
@@ -1682,6 +1693,16 @@ export class CloudAccount extends DurableObject<Env> {
         available: true
       }
     };
+  }
+
+  /** Operator: the machine size this account's new sessions start on
+   * (`POST /admin/cloud/machine`; undefined = the server default). Sessions
+   * that already have a machine keep it. */
+  async setMachine(machine: SandboxMachine | undefined): Promise<{ readonly machine: SandboxMachine | null }> {
+    if (machine) this.acct.machine = machine;
+    else delete this.acct.machine;
+    await this.saveAccount();
+    return { machine: this.acct.machine ?? null };
   }
 
   /** Operator grant (or correction, when negative): `POST /admin/cloud/credits`. */

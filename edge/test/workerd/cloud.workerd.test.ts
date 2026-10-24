@@ -157,6 +157,33 @@ describe("sessions get their own machines", () => {
     expect((await call("POST", `/device/${session.deviceId}/nudge`, userBearer(other), { chatId: "chat-early" })).status).toBe(403);
   });
 
+  it("starts a user's sessions on the machine size an operator set for them", async () => {
+    const admin = "Bearer test-admin-token";
+    const big = newUser();
+    const other = newUser();
+    const setSize = (u: TestUser, machine: unknown) =>
+      call("POST", "/admin/cloud/machine", admin, { orgId: u.orgId, userId: u.userId, machine });
+    expect((await setSize(big, "huge")).status).toBe(400);
+    expect((await call("POST", "/admin/cloud/machine", undefined, { orgId: big.orgId, userId: big.userId, machine: "xlarge" })).status).toBe(401);
+    expect(await (await setSize(big, "xlarge")).json()).toEqual({ machine: "xlarge" });
+
+    const sizeOf = async (u: TestUser, chatId: string) => {
+      const { spaceId } = await enableCloud(u);
+      const view = (await (await createSession(u, chatId, spaceId)).json()) as SessionView;
+      await sandboxFor(view.deviceId);
+      const create = (await boatState()).calls.find(
+        (c) => c.method === "POST" && c.path === "/sandboxes" && c.headers["idempotency-key"]?.startsWith(view.deviceId)
+      );
+      return (create?.body as { type?: string } | undefined)?.type;
+    };
+    expect(await sizeOf(big, "chat-big")).toBe("xlarge");
+    // Everyone else keeps the server's size.
+    expect(await sizeOf(other, "chat-other")).toBe("default");
+    // Cleared: back to the server's size for new sessions.
+    expect(await (await setSize(big, null)).json()).toEqual({ machine: null });
+    expect(await sizeOf(big, "chat-big-2")).toBe("default");
+  });
+
   it("starts a session from the branch picked in the composer", async () => {
     const u = newUser();
     const { spaceId } = await enableCloud(u);

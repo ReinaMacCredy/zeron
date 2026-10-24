@@ -945,6 +945,80 @@ async fn github_grant_sets_env_git_store_helper_and_gh_hosts() {
     assert!(hosts.contains("user: octo"));
 }
 
+/// Agents on Cloud commit as the signed-in GitHub user (author and
+/// committer), never as the App whose token pushes: the identity rides the
+/// run's environment, which outranks any git config an agent sets. The
+/// machine's global identity follows for the user's own terminals.
+#[tokio::test]
+async fn runs_commit_as_the_signed_in_github_user() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    rig.grant(
+        "github",
+        200,
+        json!({"provider": "github", "accessToken": "ghs_installation", "expiresAt": in_ms(3600),
+               "account": "octo", "generation": 1}),
+    );
+    rig.grant(
+        "anthropic-key",
+        200,
+        json!({"provider": "anthropic-key", "accessToken": "sk-ant", "expiresAt": in_ms(3600), "generation": 1}),
+    );
+    let github = Stub::start(|req: &Req| {
+        if req.path == "/users/octo" {
+            (
+                200,
+                json!({"login": "octo", "id": 583231, "name": "Octo Cat"}),
+            )
+        } else {
+            (404, json!({}))
+        }
+    })
+    .await;
+    let broker = rig.broker(identity, &github.url());
+    let mut request = run_request();
+    broker
+        .prepare(HarnessId::ClaudeCode, &mut request)
+        .await
+        .unwrap();
+    let email = "583231+octo@users.noreply.github.com";
+    for (key, value) in [
+        ("GIT_AUTHOR_NAME", "Octo Cat"),
+        ("GIT_AUTHOR_EMAIL", email),
+        ("GIT_COMMITTER_NAME", "Octo Cat"),
+        ("GIT_COMMITTER_EMAIL", email),
+    ] {
+        assert_eq!(
+            request.env.get(key).map(String::as_str),
+            Some(value),
+            "{key}"
+        );
+    }
+    let global = |key: &str| {
+        let out = std::process::Command::new("git")
+            .args(["config", "--global", key])
+            .env("HOME", &rig.home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    assert_eq!(global("user.email"), email);
+    assert_eq!(global("user.name"), "Octo Cat");
+
+    // Looked up once per login.
+    let mut again = run_request();
+    broker
+        .prepare(HarnessId::ClaudeCode, &mut again)
+        .await
+        .unwrap();
+    assert_eq!(
+        again.env.get("GIT_AUTHOR_EMAIL").map(String::as_str),
+        Some(email)
+    );
+    assert_eq!(github.requests("/users/").len(), 1);
+}
+
 #[tokio::test]
 async fn grants_are_cached_fall_back_offline_and_drop_on_revocation() {
     let rig = Rig::new().await;

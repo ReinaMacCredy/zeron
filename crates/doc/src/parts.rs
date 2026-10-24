@@ -735,6 +735,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         | AgentEvent::Compacted { .. }
         | AgentEvent::Compacting { .. }
         | AgentEvent::BackgroundTasks { .. }
+        | AgentEvent::PlanUsage { .. }
         | AgentEvent::ContextUsage { .. }
         | AgentEvent::AvailableCommands { .. }
         | AgentEvent::Anchor { .. }

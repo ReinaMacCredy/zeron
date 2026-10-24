@@ -277,8 +277,35 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
     /// Back to the Sessions list, releasing any pushed session (the iPad
     /// split takes the open session back into its own column).
     func popToFrontPage() {
-        guard let nav = tabs.first(where: { $0.identifier == "sessions" })?.viewController as? UINavigationController else { return }
+        sessionsNav?.popToRootViewController(animated: false)
+    }
+
+    private var sessionsNav: UINavigationController? {
+        tabs.first(where: { $0.identifier == "sessions" })?.viewController as? UINavigationController
+    }
+
+    /// The split's open session, handed over as it is when the window
+    /// narrows (iPhone Duo folding): same page, scroll position and draft.
+    func adoptSession(_ session: SessionViewController) {
+        guard let nav = sessionsNav else { return }
+        selectedTab = tabs.first { $0.identifier == "sessions" }
         nav.popToRootViewController(animated: false)
+        nav.pushViewController(session, animated: false)
+        syncAccessory()
+    }
+
+    /// The pushed session, taken off the stack for the split's main column
+    /// when the window widens; nil when none is open. It comes back marked
+    /// `relocating`, for the split to clear once it's placed.
+    func releaseSession() -> SessionViewController? {
+        guard let nav = sessionsNav,
+              let session = nav.viewControllers.last(where: { $0 is SessionViewController }) as? SessionViewController else {
+            return nil
+        }
+        session.relocating = true
+        nav.popToRootViewController(animated: false)
+        syncAccessory()
+        return session
     }
 
     func showSessionOpenError() {
@@ -477,5 +504,18 @@ final class AskAnythingAccessory: UIView {
         } else {
             UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0, options: [.beginFromCurrentState, .allowUserInteraction], animations: apply)
         }
+    }
+}
+
+extension UIViewController {
+    /// The iPhone shell this screen sits in, if any (not beside the iPad
+    /// sidebar, not a standalone sheet).
+    var mainShell: MainTabController? {
+        var ancestor = parent
+        while let current = ancestor {
+            if let shell = current as? MainTabController { return shell }
+            ancestor = current.parent
+        }
+        return nil
     }
 }

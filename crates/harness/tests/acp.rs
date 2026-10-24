@@ -488,13 +488,21 @@ async fn computer_runs_get_host_context_and_skip_the_prompt_for_recorded_shapes(
 
 #[tokio::test]
 async fn permission_requests_auto_accept_the_preferred_allow_option() {
-    let (controls, _steer, _token) = controls();
-    let events = run_to_end(&harness(), request("scenario:permission"), controls).await;
-    // The fixture answers refusal unless the harness selected "always".
-    assert!(events.contains(&AgentEvent::TextDelta {
-        text: "approved".into()
-    }));
-    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+    // Whatever the run's auto_approve: a Grok edit never waits on the user.
+    for auto_approve in [true, false] {
+        let (controls, _steer, _token) = controls();
+        let mut req = request("scenario:permission");
+        req.auto_approve = auto_approve;
+        let events = run_to_end(&harness(), req, controls).await;
+        // The fixture answers refusal unless the harness selected "always".
+        assert!(
+            events.contains(&AgentEvent::TextDelta {
+                text: "approved".into()
+            }),
+            "auto_approve {auto_approve}: {events:?}"
+        );
+        assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+    }
 }
 
 #[tokio::test]
@@ -734,6 +742,84 @@ async fn resume_loads_the_session_and_drops_replayed_history() {
     assert!(events.contains(&AgentEvent::TextDelta {
         text: "back again".into()
     }));
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+/// A load that outlasts its budget, is refused for a reason other than a
+/// missing session, or loses the agent errors the run and keeps the session:
+/// no session/new, and the Done still names the session being restored.
+#[tokio::test]
+async fn an_unfinished_restore_errors_and_keeps_the_session() {
+    for (resume, says) in [
+        ("load-hang", Some("did not finish within")),
+        ("load-busy", Some("session store is locked")),
+        ("load-exit", None),
+    ] {
+        let (controls, _steer, _token) = controls();
+        let mut req = request("scenario:echo-prompt");
+        req.resume = Some(resume.into());
+        let harness = harness().with_session_load_timeout(Duration::from_millis(300));
+        let events = run_to_end(&harness, req, controls).await;
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                AgentEvent::SessionStarted { .. } | AgentEvent::Error { .. }
+            )),
+            "{resume}: {events:?}"
+        );
+        let done: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Done {
+                    status,
+                    error,
+                    session_id,
+                    ..
+                } => Some((
+                    *status,
+                    error.clone().unwrap_or_default(),
+                    session_id.clone(),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(done.len(), 1, "{resume}: {events:?}");
+        assert_eq!(done[0].0, DoneStatus::Errored, "{resume}: {done:?}");
+        assert_eq!(done[0].2.as_deref(), Some(resume), "{resume}: {done:?}");
+        if let Some(says) = says {
+            let error = &done[0].1;
+            assert!(
+                error.contains(&format!("could not restore session {resume}"))
+                    && error.contains(says),
+                "{resume}: {error}"
+            );
+        }
+    }
+}
+
+/// An agent that no longer has the session gets a fresh one, announced.
+#[tokio::test]
+async fn an_unknown_session_starts_fresh_with_a_notice() {
+    let (controls, _steer, _token) = controls();
+    let mut req = request("scenario:echo-prompt");
+    req.resume = Some("load-fail".into());
+    let events = run_to_end(&harness(), req, controls).await;
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Error { message }
+                if message.contains("could not restore session load-fail")
+                    && message.contains("without the previous context")
+        )),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::SessionStarted { session_id, .. } if session_id == "s-fresh"
+        )),
+        "{events:?}"
+    );
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
 #[test]

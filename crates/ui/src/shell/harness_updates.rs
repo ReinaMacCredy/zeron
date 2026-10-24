@@ -112,6 +112,9 @@ fn action(status: &HarnessUpdateStatus) -> Option<(&'static str, Option<&'static
         Phase::WaitingForIdle | Phase::Preparing | Phase::Downloading => {
             Some(("Cancel", Some(methods::CANCEL_HARNESS_UPDATE)))
         }
+        Phase::Failed if status.can_apply && status.install_failed() => {
+            Some(("Retry update", Some(methods::APPLY_HARNESS_UPDATE)))
+        }
         Phase::Failed => Some(("Check again", Some(methods::CHECK_HARNESS_UPDATES))),
         _ => None,
     }
@@ -146,7 +149,13 @@ fn detail(status: &HarnessUpdateStatus) -> String {
             .error
             .as_ref()
             .map(|e| e.message.clone())
-            .unwrap_or_else(|| "Couldn’t check for updates".into()),
+            .unwrap_or_else(|| {
+                if status.install_failed() {
+                    "Update failed".into()
+                } else {
+                    "Couldn’t check for updates".into()
+                }
+            }),
         _ => "Checking for updates…".into(),
     }
 }
@@ -395,6 +404,7 @@ impl Shell {
                 Phase::Installing => format!("Updating {name}…"),
                 Phase::Verifying => format!("Verifying {name}…"),
                 Phase::Updated => format!("{name} updated"),
+                Phase::Failed if status.install_failed() => format!("{name} update failed"),
                 Phase::Failed => format!("{name} update check failed"),
                 _ => return None,
             }
@@ -907,7 +917,11 @@ impl Shell {
                     && !matches!(&error, zeron_rpc::RpcError::Failed(message)
                         if method == methods::APPLY_HARNESS_UPDATE && message == "update cancelled")
                 {
-                    shell.show_notice(crate::toast::ToastKind::Error, format!("Agent update ({device}): {error}"), cx);
+                    shell.show_notice(
+                        crate::toast::ToastKind::Error,
+                        format!("Agent update ({device}): {error}"),
+                        cx,
+                    );
                 }
                 cx.notify();
             })
@@ -936,6 +950,8 @@ mod tests {
             error: None,
             can_apply: true,
             manual_command: None,
+            compatibility: None,
+            held_back: None,
         }
     }
 

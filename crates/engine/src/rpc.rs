@@ -3309,6 +3309,8 @@ fn forwardable(method: &str) -> bool {
             | methods::START_REVIEW
             | methods::GET_TOOL_SETTINGS
             | methods::SET_TOOL_SETTINGS
+            | methods::GET_COMMIT_CREDIT
+            | methods::SET_COMMIT_CREDIT
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
@@ -3814,6 +3816,26 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&serde_json::json!({}))
             }
             methods::GET_TITLE_SETTINGS => RpcReply::value(&self.registry.title_settings()),
+            methods::GET_COMMIT_CREDIT => match self.registry.commit_credit() {
+                Some(credit) => RpcReply::value(&credit.status()),
+                None => Err(RpcError::Failed(
+                    "Commit credit isn't available on this engine.".into(),
+                )),
+            },
+            methods::SET_COMMIT_CREDIT => {
+                #[derive(serde::Deserialize)]
+                struct Params {
+                    enabled: bool,
+                }
+                let p: Params = parse_params(params)?;
+                let credit = self.registry.commit_credit().ok_or_else(|| {
+                    RpcError::Failed("Commit credit isn't available on this engine.".into())
+                })?;
+                let status = credit
+                    .set(p.enabled)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&status)
+            }
             methods::SET_TITLE_SETTINGS => {
                 let p: crate::registry::TitleSettings = parse_params(params)?;
                 self.registry
@@ -4988,9 +5010,13 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(format!("{e:#}")))?;
                 RpcReply::value(&serde_json::json!({ "ok": true, "version": version }))
             }
-            methods::WATCH_HARNESS_UPDATES => Ok(RpcReply::Stream(watch_stream(
-                self.harness_updates()?.watch(),
-            ))),
+            methods::WATCH_HARNESS_UPDATES => {
+                let coordinator = self.harness_updates()?;
+                // A view of the rows just opened: re-check any CLI that
+                // changed on disk since its last check (stat-only otherwise).
+                coordinator.recheck_changed_binaries_soon();
+                Ok(RpcReply::Stream(watch_stream(coordinator.watch())))
+            }
             methods::CHECK_HARNESS_UPDATES => {
                 let p: HarnessUpdateParams = parse_params(params)?;
                 let coordinator = self.harness_updates()?.clone();

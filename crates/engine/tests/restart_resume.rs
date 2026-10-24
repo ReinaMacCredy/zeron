@@ -765,20 +765,30 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
         )),
         "aborted entry carries the visible interruption note"
     );
-    // Re-dispatch reuses the original user message id — never a duplicate.
-    assert_eq!(
-        entries
-            .iter()
-            .filter(|e| e.role == MessageRole::User)
-            .count(),
-        1
-    );
+    // Re-dispatch reuses the original user message id — never a duplicate,
+    // and the transcript keeps the user's own words.
+    let users: Vec<_> = entries
+        .iter()
+        .filter(|e| e.role == MessageRole::User)
+        .collect();
+    assert_eq!(users.len(), 1);
+    assert!(matches!(
+        &users[0].parts[0],
+        MessagePart::Text { text, .. } if text == "long task"
+    ));
     // The revived run continues the journal-recovered harness conversation.
+    // That session already holds the request and the partial work on it, so
+    // the provider gets a continuation, never the bare request a second time
+    // (it rides along only for reference, should the session have started over).
     // (An auto-title request may precede it — titling fires at dispatch.)
     let recorded = requests.lock().unwrap().clone();
+    assert!(
+        recorded.iter().all(|r| r.prompt != "long task"),
+        "the crashed request must not be re-sent: {recorded:#?}"
+    );
     let revived = recorded
         .iter()
-        .find(|r| r.prompt == "long task")
+        .find(|r| r.prompt.contains("Continue where you left off"))
         .expect("auto-resumed dispatch reached the harness");
     assert_eq!(
         revived.resume.as_deref(),

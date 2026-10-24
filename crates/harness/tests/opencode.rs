@@ -241,6 +241,10 @@ impl FakeOpencode {
                 Value::Object(self.statuses.lock().unwrap().clone()),
             ),
             ("GET", "/session/ses_resume") => ("200 OK", json!({ "id": "ses_resume" })),
+            ("GET", "/session/ses_test/children") => (
+                "200 OK",
+                json!([{ "id": "ses_listed", "parentID": "ses_test" }]),
+            ),
             ("GET", p) if p.starts_with("/session/") => ("404 Not Found", json!({})),
             ("POST", p) if p.ends_with("/summarize") => ("200 OK", json!(true)),
             ("POST", p) if p.ends_with("/prompt_async") => ("204 No Content", json!({})),
@@ -774,6 +778,49 @@ async fn an_acknowledged_stop_drops_late_output_and_keeps_the_session() {
             ..
         })
     ));
+}
+
+/// A stop keeps the server up for the next prompt, so subagents must not
+/// outlive it: a background one does not end with its parent. Every child
+/// the bus announced is aborted, and so is any the server lists.
+#[tokio::test]
+async fn a_stop_aborts_the_turns_subagent_sessions() {
+    let fake = FakeOpencode::start().await;
+    let (mut stream, _steer, turn) = stoppable_turn(&fake, harness(&fake)).await;
+    fake.emit(json!({
+        "type": "session.created",
+        "properties": { "info": {
+            "id": "ses_child", "parentID": "ses_test", "title": "scan (@explore subagent)",
+        }},
+    }));
+    // A text frame after it proves the child was seen before the stop.
+    fake.emit(json!({
+        "type": "message.part.updated",
+        "properties": { "part": {
+            "id": "prt_t", "messageID": "msg_1", "sessionID": "ses_test",
+            "type": "text", "text": "working on",
+        }},
+    }));
+    assert_eq!(
+        next_event(&mut stream).await,
+        AgentEvent::TextDelta { text: " on".into() }
+    );
+    turn.stop_turn();
+    wait_posts(&fake, "/session/ses_test/abort", 1).await;
+    wait_posts(&fake, "/session/ses_child/abort", 1).await;
+    wait_posts(&fake, "/session/ses_listed/abort", 1).await;
+    idle(&fake, "ses_test");
+    let events = drain_to_done(&mut stream).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Interrupted,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
 }
 
 #[tokio::test]
@@ -1479,4 +1526,139 @@ async fn dollar_selected_skill_uses_opencode_native_command_with_arguments() {
     assistant_message(&fake, "ses_test", "msg_1");
     idle(&fake, "ses_test");
     drain_to_done(&mut stream).await;
+}
+
+// ---------------------------------------------------------------------------
+// Live
+// ---------------------------------------------------------------------------
+
+/// Collect a live turn: its text and its terminal status and error.
+async fn live_turn(
+    stream: &mut (impl futures::Stream<Item = Result<AgentEvent, HarnessError>> + Unpin),
+) -> (String, DoneStatus, Option<String>, Vec<String>) {
+    let mut text = String::new();
+    let mut errors = Vec::new();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(300), stream.next())
+            .await
+            .expect("live turn within budget")
+            .expect("stream open")
+            .expect("ok event");
+        match event {
+            AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
+            AgentEvent::Error { message } => errors.push(message),
+            AgentEvent::Done { status, error, .. } => return (text, status, error, errors),
+            _ => {}
+        }
+    }
+}
+
+/// Real turns against an installed opencode, isolated from the user's own
+/// data, config and logins (opencode's anonymous tier needs no account):
+/// an attachment whose name carries URL-reserved characters, a follow-up
+/// prompt, and a stop that keeps the session. Run with
+/// `ZERON_OPENCODE_LIVE_EXE=/path/to/opencode [ZERON_OPENCODE_LIVE_MODEL=provider/model]
+/// cargo test -p zeron-harness --test opencode live_ -- --ignored --nocapture`.
+#[tokio::test]
+#[ignore = "drives a real opencode; set ZERON_OPENCODE_LIVE_EXE"]
+async fn live_turns_against_a_real_opencode() {
+    let Some(exe) = std::env::var_os("ZERON_OPENCODE_LIVE_EXE") else {
+        eprintln!("ZERON_OPENCODE_LIVE_EXE unset; skipping");
+        return;
+    };
+    let model = std::env::var("ZERON_OPENCODE_LIVE_MODEL")
+        .unwrap_or_else(|_| "opencode/big-pickle".to_owned());
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project dir");
+    std::fs::create_dir_all(&project).unwrap();
+    // A 1x1 PNG under a name `file://{path}` used to mangle (Windows file
+    // names cannot hold `?`).
+    let shot = project.join(if cfg!(windows) {
+        "shot #1 %.png"
+    } else {
+        "shot #1 ?%.png"
+    });
+    std::fs::write(
+        &shot,
+        [
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0xF0, 0x1F, 0x00, 0x05, 0x00, 0x01, 0xFF, 0x89, 0x99,
+            0x3D, 0x1D, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ],
+    )
+    .unwrap();
+    let mut env = std::collections::BTreeMap::new();
+    for (key, dir) in [
+        ("XDG_DATA_HOME", "data"),
+        ("XDG_CONFIG_HOME", "config"),
+        ("XDG_CACHE_HOME", "cache"),
+        ("XDG_STATE_HOME", "state"),
+    ] {
+        let dir = root.path().join(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        env.insert(key.to_owned(), dir.to_string_lossy().into_owned());
+    }
+    let mut first = request("Reply with exactly the word: pong");
+    first.cwd = project.to_string_lossy().into_owned();
+    first.model = Some(model.clone());
+    first.attachments = vec![shot.to_string_lossy().into_owned()];
+    first.env = env;
+    let (mut controls, steer, _token) = controls();
+    let turn = zeron_harness::TurnControl::default();
+    controls.turn = turn.clone();
+    let driver = OpencodeHarness::new().with_executable(std::path::PathBuf::from(exe));
+    let mut stream = driver.run(first, controls).await.expect("run starts");
+
+    let (text, status, error, errors) = live_turn(&mut stream).await;
+    eprintln!("turn 1: {status:?} {text:?} {error:?} {errors:?}");
+    for message in errors.iter().chain(error.iter()) {
+        let lower = message.to_ascii_lowercase();
+        assert!(
+            !lower.contains("attachment")
+                && !lower.contains("enoent")
+                && !lower.contains("file uri"),
+            "the attachment did not resolve: {message}"
+        );
+    }
+
+    steer
+        .send(SteerMessage::text("Reply with exactly the word: ping"))
+        .await
+        .unwrap();
+    let (text, status, error, _) = live_turn(&mut stream).await;
+    eprintln!("turn 2: {status:?} {text:?} {error:?}");
+    assert_eq!(status, DoneStatus::Completed, "{error:?}");
+    assert!(text.to_ascii_lowercase().contains("ping"), "{text}");
+
+    steer
+        .send(SteerMessage::text(
+            "Write the numbers from 1 to 400 in words, one per line.",
+        ))
+        .await
+        .unwrap();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(300), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if matches!(event, AgentEvent::TextDelta { .. }) {
+            break;
+        }
+    }
+    turn.stop_turn();
+    let (_, status, _, _) = live_turn(&mut stream).await;
+    assert_eq!(status, DoneStatus::Interrupted);
+
+    steer
+        .send(SteerMessage::text("Reply with exactly the word: done"))
+        .await
+        .unwrap();
+    let (text, status, error, _) = live_turn(&mut stream).await;
+    eprintln!("turn 4: {status:?} {text:?} {error:?}");
+    assert_eq!(status, DoneStatus::Completed, "{error:?}");
+    assert!(text.to_ascii_lowercase().contains("done"), "{text}");
+    drop(steer);
 }

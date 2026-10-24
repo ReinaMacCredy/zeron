@@ -109,6 +109,19 @@ export const previousMonth = (month: string): string => monthKey(monthStart(mont
 export const monthClosable = (month: string, now: number, graceMs = CLOSE_GRACE_MS): boolean =>
   now >= monthEnd(month) + graceMs;
 
+/** Provider billing multiplier per sandbox size, relative to `default`
+ * (Boat's published figures, docs.boat.dev/pricing). Only for the live
+ * estimate between meter reads: the reconciled figure is the provider's own
+ * billable seconds, which carry the multiplier already. */
+export const SIZE_MULTIPLIER: Readonly<Record<string, number>> = {
+  small: 0.5,
+  default: 1,
+  large: 2,
+  xlarge: 5.56
+};
+
+export const sizeMultiplier = (type: string | undefined): number => SIZE_MULTIPLIER[type ?? "default"] ?? 1;
+
 export interface SandboxRecord {
   readonly provider: string;
   readonly sandboxId: string;

@@ -244,6 +244,8 @@ struct Inner {
     grant_gate: tokio::sync::Mutex<()>,
     /// Serializes writes of the managed files.
     files: tokio::sync::Mutex<FileState>,
+    /// The user's git identity, looked up once per GitHub login.
+    git_identity: tokio::sync::Mutex<Option<(String, GitIdentity)>>,
     refresher: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Whether this machine's Codex CLI can start ([`CredentialBroker::ensure_codex_starts`]).
     codex_check: tokio::sync::Mutex<CodexCheck>,
@@ -287,6 +289,7 @@ impl CredentialBroker {
                 cache: Mutex::new(HashMap::new()),
                 grant_gate: tokio::sync::Mutex::new(()),
                 files: tokio::sync::Mutex::new(FileState::default()),
+                git_identity: tokio::sync::Mutex::new(None),
                 refresher: Mutex::new(None),
                 codex_check: tokio::sync::Mutex::new(CodexCheck::Unchecked),
             }),
@@ -489,7 +492,16 @@ impl CredentialBroker {
     ) -> Result<(), String> {
         // GitHub: the credential store and hosts.yml (refreshed in place),
         // never the run's environment (fixed at spawn, outlived by the token).
-        let _ = self.github_token().await;
+        // The user's identity does go in the environment: it outranks any
+        // git config, so an agent that sets one of its own (the App's bot,
+        // which its token belongs to) still commits as the user.
+        if let Some(grant) = self.github_grant().await
+            && let Some(identity) = self.git_identity(&grant).await
+        {
+            for (key, value) in identity.env() {
+                request.env.insert(key.into(), value);
+            }
+        }
         if harness == HarnessId::Codex {
             self.ensure_codex_starts().await;
         }
@@ -598,10 +610,15 @@ impl CredentialBroker {
 
     /// The GitHub token (files synced), or `None` when not connected/unreachable.
     pub async fn github_token(&self) -> Option<String> {
+        self.github_grant().await.map(|grant| grant.access_token)
+    }
+
+    /// The GitHub grant, its files synced (or cleared when not connected).
+    async fn github_grant(&self) -> Option<Grant> {
         match self.grant(VaultProvider::Github).await {
             GrantOutcome::Granted(grant) => {
                 self.sync_github_files(&grant).await;
-                Some(grant.access_token)
+                Some(grant)
             }
             GrantOutcome::NotConnected(_) => {
                 self.clear_github_files().await;
@@ -840,6 +857,48 @@ impl CredentialBroker {
             files.git_helper_configured = configure_git_helper(&config.home, &store).await;
         }
         write_gh_hosts(&config.home, grant);
+    }
+
+    /// The user's git identity from the grant's GitHub login: their name and
+    /// GitHub noreply address (`{id}+{login}@users.noreply.github.com`,
+    /// which ties a commit to their account whatever their email settings).
+    /// Looked up once per login; `None` until GitHub answers. Also stamped as
+    /// the machine's global git identity for the user's own terminals, unless
+    /// they set their own.
+    async fn git_identity(&self, grant: &Grant) -> Option<GitIdentity> {
+        let login = grant
+            .account
+            .as_deref()
+            .map(str::trim)
+            .filter(|login| is_github_login(login))?;
+        let mut cached = self.inner.git_identity.lock().await;
+        if let Some((known, identity)) = cached.as_ref()
+            && known == login
+        {
+            return Some(identity.clone());
+        }
+        let api = self.inner.config.github_api.trim_end_matches('/');
+        let user = match github_get(
+            &self.inner.http,
+            &format!("{api}/users/{login}"),
+            &grant.access_token,
+        )
+        .await
+        {
+            Ok(user) => user,
+            Err(err) => {
+                let error = match err {
+                    GithubError::Unauthorized => "unauthorized".to_string(),
+                    GithubError::Other(error) => error,
+                };
+                tracing::warn!(%error, login, "credentials: GitHub user lookup failed");
+                return None;
+            }
+        };
+        let identity = GitIdentity::from_user(login, &user)?;
+        configure_git_identity(&self.inner.config.home, &identity).await;
+        *cached = Some((login.to_string(), identity.clone()));
+        Some(identity)
     }
 
     async fn clear_github_files(&self) {
@@ -1327,6 +1386,81 @@ fn write_gh_hosts(home: &Path, grant: &Grant) {
     }
 }
 
+/// Who a Cloud machine's commits are by: the signed-in GitHub user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GitIdentity {
+    pub name: String,
+    pub email: String,
+}
+
+impl GitIdentity {
+    /// From `GET /users/{login}`: the profile name (else the login) and the
+    /// noreply address keyed by the account id.
+    fn from_user(login: &str, user: &Value) -> Option<Self> {
+        let id = user["id"].as_u64()?;
+        let login = user["login"]
+            .as_str()
+            .filter(|l| is_github_login(l))
+            .unwrap_or(login);
+        let name = user["name"]
+            .as_str()
+            .map(str::trim)
+            .filter(|name| !name.is_empty() && !name.contains(['\n', '<', '>']))
+            .unwrap_or(login);
+        Some(Self {
+            name: name.to_string(),
+            email: format!("{id}+{login}@users.noreply.github.com"),
+        })
+    }
+
+    fn env(&self) -> [(&'static str, String); 4] {
+        [
+            ("GIT_AUTHOR_NAME", self.name.clone()),
+            ("GIT_AUTHOR_EMAIL", self.email.clone()),
+            ("GIT_COMMITTER_NAME", self.name.clone()),
+            ("GIT_COMMITTER_EMAIL", self.email.clone()),
+        ]
+    }
+}
+
+fn is_github_login(login: &str) -> bool {
+    !login.is_empty()
+        && login.len() <= 39
+        && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// The machine's global git identity, for the user's own terminals: set
+/// when there is none, or when it's a bot's (an agent that configured the
+/// App it pushes as). An identity the user chose stays.
+async fn configure_git_identity(home: &Path, identity: &GitIdentity) {
+    let git = |args: &[&str]| {
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.args(args)
+            .env("HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        cmd
+    };
+    let current = match git(&["config", "--global", "user.email"]).output().await {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        Err(_) => return,
+    };
+    if !current.is_empty() && !current.contains("[bot]") {
+        return;
+    }
+    for (key, value) in [
+        ("user.name", &identity.name),
+        ("user.email", &identity.email),
+    ] {
+        if let Err(err) = git(&["config", "--global", key, value]).output().await {
+            tracing::warn!(error = %err, "credentials: setting the git identity failed");
+            return;
+        }
+    }
+}
+
 /// `dir` created and made owner-only (0700 on Unix).
 fn private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
@@ -1471,6 +1605,50 @@ pub fn filter_and_sort_repos(repos: Vec<GithubRepo>, query: Option<&str>) -> Vec
 
 #[cfg(test)]
 mod tests {
+    use super::{GitIdentity, configure_git_identity};
+
+    #[tokio::test]
+    async fn the_machine_identity_never_overrides_the_users_own() {
+        let home = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .env("HOME", home.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let user = GitIdentity {
+            name: "Octo Cat".into(),
+            email: "583231+octo@users.noreply.github.com".into(),
+        };
+        // A bot identity an agent configured is replaced.
+        git(&[
+            "config",
+            "--global",
+            "user.email",
+            "346184242+zeronsh[bot]@users.noreply.github.com",
+        ]);
+        configure_git_identity(home.path(), &user).await;
+        assert_eq!(git(&["config", "--global", "user.email"]), user.email);
+        // One the user chose stays.
+        git(&["config", "--global", "user.email", "me@example.com"]);
+        configure_git_identity(home.path(), &user).await;
+        assert_eq!(git(&["config", "--global", "user.email"]), "me@example.com");
+    }
+
+    #[test]
+    fn identity_comes_from_the_github_profile() {
+        let user = serde_json::json!({"login": "octo", "id": 7, "name": "  "});
+        let identity = GitIdentity::from_user("octo", &user).unwrap();
+        assert_eq!(
+            identity.name, "octo",
+            "a blank name falls back to the login"
+        );
+        assert_eq!(identity.email, "7+octo@users.noreply.github.com");
+        assert!(GitIdentity::from_user("octo", &serde_json::json!({"login": "octo"})).is_none());
+    }
     use super::*;
 
     fn grant(access_token: &str) -> Grant {

@@ -70,6 +70,9 @@ fn main() {
     let active = Arc::new(AtomicBool::new(false));
     let abort = Arc::new(AtomicBool::new(false));
     let steering_all = Arc::new(AtomicBool::new(false));
+    let compacting = Arc::new(AtomicBool::new(false));
+    // Input Pi left queued while idle: reported, never started.
+    let stranded = Arc::new(AtomicBool::new(false));
     let mut dialog = None;
     let mut model = "mock".to_string();
     let mut thinking = "medium".to_string();
@@ -78,7 +81,7 @@ fn main() {
         match v["type"].as_str().unwrap_or("") {
             "get_state" => response(
                 &v,
-                json!({"sessionId":session,"sessionFile":file,"isStreaming":active.load(Ordering::SeqCst),"isCompacting":false,"model":{"id":model,"provider":"mock","contextWindow":128000},"thinkingLevel":thinking}),
+                json!({"sessionId":session,"sessionFile":file,"isStreaming":active.load(Ordering::SeqCst),"isCompacting":compacting.load(Ordering::SeqCst),"pendingMessageCount":u64::from(stranded.load(Ordering::SeqCst)),"model":{"id":model,"provider":"mock","contextWindow":128000},"thinkingLevel":thinking}),
             ),
             "get_available_models" => response(
                 &v,
@@ -167,6 +170,8 @@ fn main() {
                 let abort = abort.clone();
                 let queue = queue.clone();
                 let steering_all = steering_all.clone();
+                let compacting = compacting.clone();
+                let stranded = stranded.clone();
                 std::thread::spawn(move || {
                     let mut text = text;
                     loop {
@@ -208,6 +213,23 @@ fn main() {
                                 json!({"type":"compaction_end","result":{"estimatedTokensAfter":9}}),
                             );
                         }
+                        if text == "ext-error" {
+                            emit(
+                                json!({"type":"extension_error","extensionPath":"/x.ts","event":"tool_call","error":"handler threw"}),
+                            );
+                        }
+                        if text == "noise" {
+                            // A dependency's stray console output, then a JS
+                            // string sliced mid surrogate pair.
+                            let mut out = std::io::stdout().lock();
+                            writeln!(out, "loading plugin...").unwrap();
+                            writeln!(
+                                out,
+                                r#"{{"type":"message_update","assistantMessageEvent":{{"type":"text_delta","contentIndex":0,"delta":"cut \ud83d"}}}}"#
+                            )
+                            .unwrap();
+                            out.flush().unwrap();
+                        }
                         if abort.load(Ordering::SeqCst) {
                             message("", "aborted");
                         } else if text == "error" {
@@ -239,7 +261,23 @@ fn main() {
                             text = batch.join("\n");
                             continue;
                         }
+                        if text == "stranded" {
+                            stranded.store(true, Ordering::SeqCst);
+                        }
                         active.store(false, Ordering::SeqCst);
+                        if text == "compact-tail" {
+                            // Threshold compaction still running at the settle
+                            // barrier; it ends with no settle after it.
+                            compacting.store(true, Ordering::SeqCst);
+                            emit(json!({"type":"agent_settled"}));
+                            emit(json!({"type":"compaction_start","reason":"threshold"}));
+                            std::thread::sleep(Duration::from_millis(300));
+                            compacting.store(false, Ordering::SeqCst);
+                            emit(
+                                json!({"type":"compaction_end","reason":"threshold","result":{"estimatedTokensAfter":9}}),
+                            );
+                            break;
+                        }
                         emit(json!({"type":"agent_settled"}));
                         if text == "late-notify" {
                             std::thread::spawn(|| {

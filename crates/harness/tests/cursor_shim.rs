@@ -810,3 +810,272 @@ async fn a_model_switch_names_its_model_from_its_own_send_on() {
         "an earlier message was merged into the switch: {prompts}"
     );
 }
+
+impl SessionFixture {
+    /// [`Self::start`] with extra fields on the first frame.
+    async fn start_frame(
+        &self,
+        prompt: &str,
+        extra: serde_json::Value,
+    ) -> (
+        tokio::process::Child,
+        tokio::process::ChildStdin,
+        tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    ) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let mut child = tokio::process::Command::new("node")
+            .arg(self.dir.path().join("shim.mjs"))
+            .env("ZERON_CURSOR_STATE_DIR", self.dir.path().join("state"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        let mut frame = serde_json::json!({"op":"run","prompt":prompt,"cwd":self.dir.path()});
+        for (key, value) in extra.as_object().unwrap() {
+            frame[key] = value.clone();
+        }
+        stdin
+            .write_all(format!("{frame}\n").as_bytes())
+            .await
+            .unwrap();
+        (child, stdin, lines)
+    }
+    fn prompts(&self) -> Vec<String> {
+        let Ok(store) =
+            std::fs::read_to_string(self.dir.path().join("state/by-agent/agent-fixture"))
+        else {
+            return Vec::new();
+        };
+        std::fs::read_to_string(std::path::Path::new(store.trim()).join("prompts.ndjson"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+}
+
+/// Frames up to and including the turn's terminal one.
+async fn turn_frames(
+    lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+) -> Vec<serde_json::Value> {
+    let mut frames = Vec::new();
+    loop {
+        let next = frame(lines).await;
+        let end = next["ev"] == "turn" || next["ev"] == "fatal";
+        frames.push(next);
+        if end {
+            return frames;
+        }
+    }
+}
+
+#[tokio::test]
+async fn known_sdk_internal_rejections_do_not_kill_the_chat() {
+    let fixture = SessionFixture::new();
+    let (mut child, stdin, mut lines) = fixture.start("harmless-rejections", false).await;
+    let frames = turn_frames(&mut lines).await;
+    assert_eq!(frames.last().unwrap()["status"], "finished", "{frames:?}");
+    finish(&mut child, stdin).await;
+}
+
+#[tokio::test]
+async fn a_reply_that_is_only_a_transport_dump_fails_the_turn() {
+    let fixture = SessionFixture::new();
+    let (mut child, stdin, mut lines) = fixture.start("transport-dump", false).await;
+    let frames = turn_frames(&mut lines).await;
+    let last = frames.last().unwrap();
+    assert_eq!(last["status"], "error", "{frames:?}");
+    assert_eq!(
+        last["error"],
+        "Error: ConnectError: [unavailable] upstream connect error"
+    );
+    finish(&mut child, stdin).await;
+    // Prose quoting the same diagnostic is a real answer.
+    let fixture = SessionFixture::new();
+    let (mut child, stdin, mut lines) = fixture.start("transport-quoted", false).await;
+    let frames = turn_frames(&mut lines).await;
+    assert_eq!(frames.last().unwrap()["status"], "finished", "{frames:?}");
+    finish(&mut child, stdin).await;
+}
+
+#[tokio::test]
+async fn a_settled_reply_that_never_streamed_is_still_shown() {
+    let fixture = SessionFixture::new();
+    let (mut child, stdin, mut lines) = fixture.start("result-only", false).await;
+    let frames = turn_frames(&mut lines).await;
+    assert!(
+        frames
+            .iter()
+            .any(|f| f["ev"] == "text" && f["text"] == "settled reply"),
+        "{frames:?}"
+    );
+    assert_eq!(frames.last().unwrap()["status"], "finished");
+    finish(&mut child, stdin).await;
+}
+
+#[tokio::test]
+async fn a_stale_active_run_is_expired_once_and_the_send_retried() {
+    let fixture = SessionFixture::new();
+    let (mut child, stdin, mut lines) = fixture.start("stale-active", false).await;
+    let frames = turn_frames(&mut lines).await;
+    assert_eq!(frames.last().unwrap()["status"], "finished", "{frames:?}");
+    finish(&mut child, stdin).await;
+    assert_eq!(fixture.prompts(), ["stale-active", "stale-active"]);
+}
+
+#[tokio::test]
+async fn images_ride_the_send_with_the_text() {
+    let fixture = SessionFixture::new();
+    let images =
+        serde_json::json!([{"type":"image","data":"aGk=","mimeType":"image/png"}, {"bogus":true}]);
+    let (mut child, stdin, mut lines) = fixture
+        .start_frame("image", serde_json::json!({"images": images}))
+        .await;
+    let frames = turn_frames(&mut lines).await;
+    assert!(
+        frames.iter().any(|f| f["text"] == " images:image/png/aGk="),
+        "{frames:?}"
+    );
+    finish(&mut child, stdin).await;
+}
+
+/// A stop while startup waits out the model-catalog rate limit ends the turn
+/// once, cancelled, without retrying or sending the prompt.
+#[tokio::test]
+async fn a_stop_during_startup_retries_is_not_lost() {
+    use tokio::io::AsyncWriteExt;
+    let fixture = SessionFixture::new();
+    let marker = fixture.dir.path().join("startup-limit.json");
+    std::fs::write(
+        &marker,
+        serde_json::json!({"attempts":0,"failures":3,
+            "message":"You have exceeded the rate limit of 30 requests per minute for the get_models endpoint"})
+        .to_string(),
+    )
+    .unwrap();
+    let (mut child, mut stdin, mut lines) = fixture.start("normal", false).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    stdin.write_all(b"{\"op\":\"stop\"}\n").await.unwrap();
+    assert_eq!(
+        frame(&mut lines).await,
+        serde_json::json!({"ev":"turn","status":"cancelled"})
+    );
+    let rest = tokio::time::timeout(std::time::Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("the shim exits")
+        .unwrap();
+    assert!(rest.is_none(), "{rest:?}");
+    finish(&mut child, stdin).await;
+    let state: serde_json::Value = serde_json::from_slice(&std::fs::read(marker).unwrap()).unwrap();
+    assert_eq!(state["attempts"], 1);
+    assert!(fixture.prompts().is_empty());
+}
+
+/// A stop while the agent is still being created settles the first turn
+/// once, and its prompt never reaches the SDK.
+#[tokio::test]
+async fn a_stop_during_agent_creation_settles_once() {
+    use tokio::io::AsyncWriteExt;
+    let fixture = SessionFixture::new();
+    std::fs::write(
+        fixture.dir.path().join("startup-limit.json"),
+        serde_json::json!({"attempts":0,"failures":0,"message":"","delayMs":400}).to_string(),
+    )
+    .unwrap();
+    let (mut child, mut stdin, mut lines) = fixture.start("normal", false).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    stdin.write_all(b"{\"op\":\"stop\"}\n").await.unwrap();
+    assert_eq!(frame(&mut lines).await["ev"], "ready");
+    assert_eq!(
+        frame(&mut lines).await,
+        serde_json::json!({"ev":"turn","status":"cancelled"})
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), lines.next_line())
+            .await
+            .is_err(),
+        "a second terminal frame followed the stop"
+    );
+    finish(&mut child, stdin).await;
+    assert!(fixture.prompts().is_empty());
+}
+
+/// A send the SDK never answers with a single update ends the turn errored
+/// at the silence bound, whether the send itself or its run went quiet.
+#[tokio::test]
+async fn a_send_with_no_update_at_all_is_abandoned_at_the_bound() {
+    for prompt in ["silent", "silent-send"] {
+        let fixture = SessionFixture::new();
+        let (mut child, stdin, mut lines) = fixture
+            .start_frame(prompt, serde_json::json!({"silenceTimeoutMs": 300}))
+            .await;
+        let frames = turn_frames(&mut lines).await;
+        let last = frames.last().unwrap();
+        assert_eq!(last["status"], "error", "{prompt}: {frames:?}");
+        assert!(
+            last["error"]
+                .as_str()
+                .unwrap()
+                .contains("sent nothing back"),
+            "{prompt}: {frames:?}"
+        );
+        finish(&mut child, stdin).await;
+    }
+}
+
+/// A send that comes back after its turn was abandoned is heard no more: the
+/// engine already has the turn's end, and the process stays usable.
+#[tokio::test]
+async fn an_abandoned_send_that_comes_back_late_stays_silent() {
+    let fixture = SessionFixture::new();
+    let (mut child, stdin, mut lines) = fixture
+        .start_frame("silent-late", serde_json::json!({"silenceTimeoutMs": 300}))
+        .await;
+    let frames = turn_frames(&mut lines).await;
+    assert_eq!(frames.last().unwrap()["status"], "error", "{frames:?}");
+    let late =
+        tokio::time::timeout(std::time::Duration::from_millis(1200), lines.next_line()).await;
+    assert!(late.is_err(), "output after the abandoned turn: {late:?}");
+    finish(&mut child, stdin).await;
+}
+
+/// Updates keep a turn alive past the bound: only total silence trips it.
+#[tokio::test]
+async fn a_turn_that_streamed_outlives_the_silence_bound() {
+    let fixture = SessionFixture::new();
+    let (mut child, stdin, mut lines) = fixture
+        .start_frame("hang", serde_json::json!({"silenceTimeoutMs": 200}))
+        .await;
+    assert_eq!(frame(&mut lines).await["ev"], "ready");
+    assert_eq!(frame(&mut lines).await["ev"], "text");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(600), lines.next_line())
+            .await
+            .is_err(),
+        "a turn that streamed was abandoned"
+    );
+    finish(&mut child, stdin).await;
+}
+
+/// Images batched into one send stay under the engine's inline budget.
+#[tokio::test]
+async fn one_send_inlines_images_only_up_to_the_budget() {
+    let fixture = SessionFixture::new();
+    let image = serde_json::json!({"type":"image","data":"aGk=","mimeType":"image/png"});
+    let (mut child, stdin, mut lines) = fixture
+        .start_frame(
+            "image",
+            serde_json::json!({"images": [image, image], "imageBudget": 3}),
+        )
+        .await;
+    let frames = turn_frames(&mut lines).await;
+    assert!(
+        frames.iter().any(|f| f["text"] == " images:image/png/aGk="),
+        "{frames:?}"
+    );
+    finish(&mut child, stdin).await;
+}

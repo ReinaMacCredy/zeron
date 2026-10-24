@@ -6114,16 +6114,22 @@ impl DocHost {
             // between mark-processed and the outcome write. Left alone it is
             // a send no drain or retry can ever reach ("Sending…" forever,
             // 2026-08-19); terminalize it so the truth lands in the doc and
-            // a user retry can mint a fresh attempt.
+            // a user retry can mint a fresh attempt. `commands` may predate a
+            // racing drain that has since resolved the command and released
+            // its claim (resolve comes first), so once no claim is seen the
+            // status is read again rather than overwriting that outcome.
+            let still_pending = |id: &str| {
+                handle.doc.read_commands().is_ok_and(|now| {
+                    now.iter()
+                        .any(|c| c.id == id && c.status == SessionCommandStatus::Pending)
+                })
+            };
             for c in &commands {
                 if c.status == SessionCommandStatus::Pending
                     && !skipped.contains(&c.id)
                     && is_processed(&c.id)
                     && !lock(&self.inner.executing).contains(&c.id)
-                    && handle.doc.read_commands().is_ok_and(|now| {
-                        now.iter()
-                            .any(|n| n.id == c.id && n.status == SessionCommandStatus::Pending)
-                    })
+                    && still_pending(&c.id)
                 {
                     tracing::warn!(chat = %handle.chat_id, command = %c.id,
                         "command consumed but never resolved (crash mid-execute?); rejecting");

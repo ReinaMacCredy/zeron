@@ -461,6 +461,94 @@ case "$first" in
   exec sleep 30
   ;;
 
+*scenario:resume-check*)
+  # `--resume` of a session the CLI has no conversation for: live 2.1.309
+  # answers with a result and no init, says so on stderr, and exits 1.
+  resumed=none
+  for arg in "$@"; do
+    case "$arg" in --resume=*) resumed="${arg#--resume=}" ;; esac
+  done
+  case "$resumed" in
+  stale-*)
+    echo "No conversation found with session ID: $resumed" >&2
+    emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"num_turns\":0,\"session_id\":\"$resumed\",\"errors\":[\"No conversation found with session ID: $resumed\"]}"
+    exit 1
+    ;;
+  stderr-only-*)
+    echo "No conversation found with session ID: $resumed" >&2
+    exit 1
+    ;;
+  none) sid=sess-fresh ;;
+  *) sid=$resumed ;;
+  esac
+  emit "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fable-5\",\"tools\":[],\"cwd\":\"/tmp\",\"session_id\":\"$sid\"}"
+  emit "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"resumed=$resumed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"session_id\":\"$sid\"}"
+  ;;
+
+*scenario:crash-later-turn*)
+  # The first turn ends normally; the CLI dies during the second.
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-crash"}'
+  emit '{"type":"result","subtype":"success","result":"first","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-crash"}'
+  read -r next || exit 1
+  emit '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"working"}}}'
+  # stdout closes before the last stderr line is written.
+  exec 1>&-
+  sleep 0.05
+  echo "FATAL: heap out of memory" >&2
+  exit 3
+  ;;
+
+*scenario:unknown-control*)
+  # A control request this host does not serve must still be answered.
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-uc"}'
+  emit '{"type":"control_request","request_id":"cr-x","request":{"subtype":"hook_callback","callback_id":"h1"}}'
+  read -r reply || exit 1
+  result=unanswered
+  case "$reply" in
+  *'"request_id":"cr-x"'*) case "$reply" in *'"subtype":"error"'*) result=answered ;; esac ;;
+  esac
+  emit "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"$result\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"session_id\":\"sess-uc\"}"
+  ;;
+
+*scenario:set-model-fails*)
+  emit '{"type":"system","subtype":"init","model":"claude-sonnet-5-5","tools":[],"cwd":"/tmp","session_id":"sess-smf"}'
+  emit '{"type":"result","subtype":"success","result":"first","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-smf"}'
+  read -r model || exit 1
+  rid=$(printf '%s\n' "$model" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+  emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"$rid\",\"error\":\"Model not available\"}}"
+  read -r prompt || exit 1
+  emit "$prompt"
+  emit '{"type":"result","subtype":"success","result":"second","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-smf"}'
+  # The same configuration again: the failed switch is re-sent, and refused
+  # the same way.
+  read -r retry || exit 1
+  case "$retry" in *'"subtype":"set_model"'*) ;; *) exit 17 ;; esac
+  rid=$(printf '%s\n' "$retry" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+  emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"$rid\",\"error\":\"Model not available\"}}"
+  # The rest of the configuration rides along before the prompt.
+  while read -r again; do
+    case "$again" in *'"type":"user"'*) break ;; esac
+  done
+  emit "$again"
+  emit '{"type":"result","subtype":"success","result":"third","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-smf"}'
+  ;;
+
+*scenario:grandchild*)
+  # An MCP server or tool the CLI started, still running when it exits.
+  sleep 300 </dev/null >/dev/null 2>&1 &
+  printf '%s' "$!" > "$ZERON_TEST_PIDFILE"
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-gc"}'
+  emit '{"type":"result","subtype":"success","result":"done","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-gc"}'
+  ;;
+
+*scenario:unreadable-result*)
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-ur"}'
+  emit '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"half \ud83d"}}}'
+  emit '{"type":"result","subtype":"success","result":"x","usage":{"input_tokens":"lots"},"session_id":"sess-ur"}'
+  # Stays up like the real CLI between turns: only the result ends the turn.
+  read -r _ || exit 0
+  ;;
+
 *scenario:error*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-err"}'
   # Terse assistant-level error code with no content.

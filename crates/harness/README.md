@@ -16,6 +16,7 @@ pinned Antigravity archive.
 | [Grok](https://docs.x.ai/developers/release-notes) | `curl -fsSL https://x.ai/cli/install.sh \| bash` | `npm.cmd install -g @xai-official/grok` |
 | [Hermes](https://hermes-agent.nousresearch.com/docs/getting-started/installation) | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | `irm https://hermes-agent.nousresearch.com/install.ps1 \| iex` |
 | [Devin](https://cli.devin.ai/) | macOS, when brew resolves: `brew install --cask devin-cli`; otherwise `curl -fsSL https://cli.devin.ai/install.sh \| bash` | `irm https://static.devin.ai/cli/setup.ps1 \| iex` |
+| [Muse Code](https://dev.meta.ai/docs/muse-code/) | `curl -fsSL https://dev.meta.ai/install.sh \| sh` | `irm https://dev.meta.ai/install.ps1 \| iex` |
 | Antigravity | Existing verified 1.1.1 archive in `acp::antigravity_archive`; no shell command | Same archive path on supported architectures |
 
 Unix shell commands run through `sh -c`, with PATH augmented from the user's login
@@ -47,6 +48,24 @@ the normal installed probe runs again. A missing binary produces PATH guidance;
 the running app's login-shell snapshot is not refreshed. Authentication remains a
 separate step. Hermes may additionally require its documented ACP Python extra
 for agent sessions; the Install action checks CLI detection only.
+
+## Muse Code
+
+`muse::MuseHarness` drives `muse serve` over the Muse Session Protocol (MSP):
+newline-delimited JSON-RPC 2.0 on stdio, the wire Muse's own TypeScript SDK
+(`@muse-code/sdk`) speaks. Every state-changing method is a command carrying a
+client-minted UUIDv7 `commandId`; a fresh turn's id is its `turn/start` command
+id. A runtime is one host with one session (`session/start`, or
+`session/resume` by id); turns end on `turn/completed`, including the wake turns
+Muse starts when background subagents finish. Later prompts are
+`turn/start` with `ifBusy: "steer"`, stops are `turn/interrupt`, approvals are
+answered from the host's own choices, and questions reach the user through
+`request_input`. Models (`model/list`) and titles run on a read-only host
+(`--disable-shell --disable-write --no-session-log`). The host's environment
+drops an inherited `META_API_KEY` and sets `MUSE_NO_AUTO_UPDATE=1`.
+
+`tests/muse.rs` replays sessions recorded from a real Muse Code 1.4.x host
+(`tests/fixtures/muse/*.ndjson`, through `fake-muse.py`).
 
 ## Verification
 
