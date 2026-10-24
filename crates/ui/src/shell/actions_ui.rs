@@ -126,6 +126,10 @@ impl Shell {
             cx.notify();
             return;
         };
+        if self.project_actions.watch_task.is_none() {
+            self.project_actions.watch_task =
+                Some(self.watch_project_actions(context.target_device_id.clone(), cx));
+        }
         let generation = self.project_actions.begin_load(&context.key);
         let params = project_action_params(
             serde_json::json!({ "spaceId": context.key.space_id }),
@@ -146,6 +150,53 @@ impl Shell {
             .ok();
         }));
         cx.notify();
+    }
+
+    fn watch_project_actions(
+        &self,
+        target_device_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        let params = project_action_params(serde_json::json!({}), &target_device_id);
+        cx.spawn(async move |this, cx| {
+            let mut resubscribed = false;
+            loop {
+                let Ok(engine) =
+                    this.update(cx, |shell, cx| shell.state.read(cx).engine().cloned())
+                else {
+                    return;
+                };
+                if let Some(engine) = engine {
+                    match engine
+                        .client()
+                        .subscribe_checked(methods::WATCH_PROJECT_ACTIONS, params.clone())
+                        .await
+                    {
+                        Ok(mut changes) => {
+                            // The first frame only repeats what the load beside this watch read.
+                            let mut current = !resubscribed;
+                            while changes.recv().await.is_some() {
+                                if std::mem::take(&mut current) {
+                                    continue;
+                                }
+                                if this
+                                    .update(cx, |shell, cx| shell.retry_project_actions(cx))
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                        }
+                        Err(err) if crate::project_actions::unknown_method(&err.to_string()) => {
+                            return;
+                        }
+                        Err(_) => {}
+                    }
+                }
+                resubscribed = true;
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+            }
+        })
     }
 
     fn close_project_actions_menu(&mut self, cx: &mut Context<Self>) {

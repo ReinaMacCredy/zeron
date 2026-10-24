@@ -328,6 +328,7 @@ pub mod methods {
     pub const DELETE_WORKTREE: &str = "DeleteWorktree";
     // Project Actions are private state on the device that owns the project.
     pub const LIST_PROJECT_ACTIONS: &str = "ListProjectActions";
+    pub const WATCH_PROJECT_ACTIONS: &str = "WatchProjectActions";
     pub const UPSERT_PROJECT_ACTION: &str = "UpsertProjectAction";
     pub const DELETE_PROJECT_ACTION: &str = "DeleteProjectAction";
     pub const RUN_PROJECT_ACTION: &str = "RunProjectAction";
