@@ -48,6 +48,7 @@
 
 pub mod catalog;
 mod discovery;
+mod local;
 mod normalize;
 pub mod refresh_lock;
 mod wire;
@@ -821,6 +822,24 @@ impl Harness for ClaudeHarness {
     }
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
         self.discover_commands(None).await
+    }
+
+    async fn claude_config(
+        &self,
+        cwd: &std::path::Path,
+        env: &std::collections::BTreeMap<String, String>,
+    ) -> Result<zeron_proto::claude_config::ClaudeConfigSnapshot, HarnessError> {
+        Ok(local::read_config(self, cwd, env))
+    }
+
+    async fn local_command(
+        &self,
+        cwd: &std::path::Path,
+        env: &std::collections::BTreeMap<String, String>,
+        command: &str,
+        connect_mcp: bool,
+    ) -> Result<zeron_proto::claude_config::LocalCommandOutput, HarnessError> {
+        local::run(self, cwd, env, command, connect_mcp).await
     }
 
     async fn commands_for(&self, cwd: &std::path::Path) -> Result<Vec<SlashCommand>, HarnessError> {

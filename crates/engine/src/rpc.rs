@@ -1031,6 +1031,8 @@ enum MutateParams {
         #[serde(default)]
         note: Option<crate::provider_switch::SystemNote>,
     },
+    #[serde(rename_all = "camelCase")]
+    AddChatNote { chat_id: String, text: String },
     /// Tombstone: removes the chats-map row; the session doc remains.
     #[serde(rename_all = "camelCase")]
     DeleteChat { chat_id: String },
@@ -2912,6 +2914,13 @@ impl EngineRpc {
                 .await
                 .map_err(failed)
             }
+            MutateParams::AddChatNote { chat_id, text } => self
+                .doc_host
+                .open(&chat_id)
+                .and_then(|handle| {
+                    Ok(handle.write_system_note(&crate::new_id(), &text, None, crate::now_ms())?)
+                })
+                .map_err(failed),
             MutateParams::DeleteChat { chat_id } => self.delete_chat(&chat_id),
             MutateParams::RenameDevice { device_id, name } => self
                 .workspace
@@ -3440,6 +3449,9 @@ fn forwardable(method: &str) -> bool {
             | methods::RELAY_AGENT_LOGIN_CALLBACK
             // The usage summary reads this device's agent session logs.
             | methods::GET_USAGE_SUMMARY
+            // Claude Code's settings live on the device that runs the chat.
+            | methods::READ_CLAUDE_CONFIG
+            | methods::RUN_CLAUDE_LOCAL_COMMAND
             // Uploads/attachments target the chat's host device (the agent reads
             // the committed file from that device's disk).
             | methods::UPLOAD_CHUNK
@@ -4035,6 +4047,61 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&commands)
+            }
+            methods::READ_CLAUDE_CONFIG | methods::RUN_CLAUDE_LOCAL_COMMAND => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    #[serde(default)]
+                    chat_id: Option<String>,
+                    #[serde(default)]
+                    space_id: Option<String>,
+                    #[serde(default)]
+                    path: Option<String>,
+                    #[serde(default)]
+                    command: Option<String>,
+                    #[serde(default)]
+                    connect_mcp: bool,
+                }
+                let p: Params = parse_params(params)?;
+                let harness = self.discovery_harness(p.chat_id.as_deref(), HarnessId::ClaudeCode)?;
+                let root = self
+                    .catalog_root(&FileSearchParams {
+                        query: String::new(),
+                        chat_id: p.chat_id,
+                        space_id: p.space_id,
+                        path: p.path,
+                    })
+                    .await?;
+                let mut request: zeron_proto::RunRequest = serde_json::from_value(serde_json::json!({
+                    "prompt": "",
+                    "model": null,
+                    "reasoning": null,
+                    "cwd": root,
+                    "sandbox": "workspace-write",
+                    "resume": null,
+                }))
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                self.registry
+                    .prepare_run(HarnessId::ClaudeCode, &mut request)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                let _lease = self.registry.execution_lease(HarnessId::ClaudeCode).await;
+                if method == methods::READ_CLAUDE_CONFIG {
+                    let snapshot = harness
+                        .claude_config(&root, &request.env)
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    return RpcReply::value(&snapshot);
+                }
+                let command = p
+                    .command
+                    .ok_or_else(|| RpcError::BadParams("command is required".into()))?;
+                let output = harness
+                    .local_command(&root, &request.env, &command, p.connect_mcp)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&output)
             }
             methods::LIST_HARNESS_TOOLS => {
                 #[derive(Deserialize)]

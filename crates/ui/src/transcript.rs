@@ -1292,6 +1292,9 @@ pub enum RowKind {
         text: SharedString,
         hint: Option<SharedString>,
     },
+    ClaudeConfigSummary {
+        text: SharedString,
+    },
     /// A host-written `system` entry (the compaction boundary, the
     /// model-switch marker): centered label between two rules, never a
     /// bubble and never assistant blocks. `hint` sits behind an info glyph.
@@ -1818,6 +1821,18 @@ pub fn rows_for_entry(
         let hint = texts
             .next()
             .map(|hint| SharedString::from(hint.to_string()));
+        if text.starts_with(crate::composer::claude_config::SUMMARY_PREFIX) {
+            return vec![Row {
+                id: entry.id.clone().into(),
+                version: fnv1a(text.as_bytes()),
+                turn_start: true,
+                kind: RowKind::ClaudeConfigSummary { text: text.into() },
+                entry_id,
+                timestamp: None,
+                copy_text: None,
+                compact_fold: None,
+            }];
+        }
         if let Some(notice) = computer_notice(&text) {
             if notice == ComputerNotice::Disclosure {
                 return Vec::new();
@@ -4468,6 +4483,9 @@ pub enum TranscriptEvent {
     },
     ApprovePlan {
         task_id: String,
+    },
+    OpenClaudeConfig {
+        chat_id: String,
     },
 }
 
@@ -10706,6 +10724,25 @@ impl Transcript {
             ),
             RowKind::Divider { text, hint } => {
                 divider_row(&row.id, text.clone(), hint.clone(), &theme)
+            }
+            RowKind::ClaudeConfigSummary { text } => {
+                let transcript = cx.entity().downgrade();
+                let chat_id = self.chat_id.clone();
+                crate::composer::claude_config::summary_row(
+                    row.id.clone(),
+                    text,
+                    &theme,
+                    move |_, cx| {
+                        let Some(chat_id) = chat_id.clone() else {
+                            return;
+                        };
+                        transcript
+                            .update(cx, |_, cx| {
+                                cx.emit(TranscriptEvent::OpenClaudeConfig { chat_id })
+                            })
+                            .ok();
+                    },
+                )
             }
             RowKind::Handoff {
                 harness,
