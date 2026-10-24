@@ -262,18 +262,26 @@ impl FrameSink {
     }
 }
 
+async fn next_turn(turns: &mut mpsc::UnboundedReceiver<()>) {
+    if turns.next().await.is_none() {
+        std::future::pending::<()>().await;
+    }
+}
+
 async fn drain_mjpeg(frames: &mut RpcSubscription, sink: &mut FrameSink) {
     use futures::future::Either;
     let mut last: Option<(Vec<u8>, DeviceOrientation)> = None;
     loop {
-        let item =
-            match futures::future::select(Box::pin(frames.recv()), sink.turns.select_next_some())
-                .await
-            {
-                Either::Left((Some(item), _)) => Some(item),
-                Either::Left((None, _)) => return,
-                Either::Right(_) => None,
-            };
+        let item = match futures::future::select(
+            Box::pin(frames.recv()),
+            Box::pin(next_turn(&mut sink.turns)),
+        )
+        .await
+        {
+            Either::Left((Some(item), _)) => Some(item),
+            Either::Left((None, _)) => return,
+            Either::Right(_) => None,
+        };
         let jpeg = match item {
             Some(mut item) => {
                 while let Some(Some(newer)) = futures::FutureExt::now_or_never(frames.recv()) {
@@ -320,7 +328,10 @@ async fn drain_h264(
     loop {
         let mut items = match futures::future::select(
             Box::pin(frames.recv()),
-            futures::future::select(executor.timer(LINK_TICK), sink.turns.select_next_some()),
+            futures::future::select(
+                executor.timer(LINK_TICK),
+                Box::pin(next_turn(&mut sink.turns)),
+            ),
         )
         .await
         {
@@ -2006,6 +2017,59 @@ mod tests {
         )
     }
 
+    fn turnless_drain(
+        items: Vec<Value>,
+    ) -> (
+        zeron_rpc::RpcClient,
+        RpcSubscription,
+        FrameSink,
+        mpsc::UnboundedReceiver<()>,
+    ) {
+        let (out, mut requests) = tokio::sync::mpsc::channel::<String>(64);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
+        tokio::spawn(async move {
+            let request: Value = serde_json::from_str(&requests.recv().await.unwrap()).unwrap();
+            for item in items {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let reply = json!({ "id": request["id"], "item": item });
+                replies.send(reply.to_string()).await.unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+        let client = zeron_rpc::RpcClient::new(out, inbound);
+        let frames = futures::executor::block_on(
+            client.subscribe_scoped(methods::WATCH_HUB_DEVICE_FRAMES, json!({})),
+        )
+        .unwrap();
+        let (nudge, nudges) = mpsc::unbounded();
+        let sink = FrameSink {
+            slot: Arc::default(),
+            nudge,
+            rotation: Arc::new(Mutex::new(DeviceOrientation::Portrait)),
+            codec: Arc::new(Mutex::new(DeviceVideoCodec::Mjpeg)),
+            avcc_failed: Arc::default(),
+            failure: Arc::default(),
+            turns: mpsc::unbounded().1,
+        };
+        (client, frames, sink, nudges)
+    }
+
+    fn published(nudges: &mut mpsc::UnboundedReceiver<()>) -> usize {
+        std::iter::from_fn(|| nudges.try_recv().ok()).count()
+    }
+
+    #[test]
+    fn the_mjpeg_drain_keeps_painting_after_the_view_drops_its_rotation_sender() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let items = (1..=3)
+            .map(|seq| json!({ "seq": seq, "jpeg": jpeg() }))
+            .collect();
+        let (_client, mut frames, mut sink, mut nudges) = turnless_drain(items);
+        futures::executor::block_on(drain_mjpeg(&mut frames, &mut sink));
+        assert_eq!(published(&mut nudges), 3);
+    }
+
     fn wait(cx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContext) -> bool) {
         for _ in 0..400 {
             cx.run_until_parked();
@@ -3610,6 +3674,37 @@ mod tests {
             assert_eq!(codecs(&watches), [json!("h264")]);
             let frame = view.read_with(cx, |view, _| view.frame_box().unwrap());
             assert!((frame.size.width / frame.size.height - 588.0 / 1280.0).abs() < 0.01);
+        }
+
+        #[gpui::test]
+        fn the_h264_drain_keeps_ticking_after_the_view_drops_its_rotation_sender(
+            cx: &mut TestAppContext,
+        ) {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let _guard = runtime.enter();
+            setup(cx);
+            let envelopes = AvccDemuxer::default().push(FIXTURE).unwrap();
+            let (_client, mut frames, mut sink, mut nudges) =
+                turnless_drain(vec![item(&envelopes[..2])]);
+            let outcome = Arc::new(Mutex::new(None));
+            let done = outcome.clone();
+            let executor = cx.executor();
+            cx.executor()
+                .spawn(async move {
+                    let reason = drain_h264(&executor, &mut frames, &mut sink, false).await;
+                    *done.lock().unwrap() = Some(reason);
+                })
+                .detach();
+            for _ in 0..400 {
+                if outcome.lock().unwrap().is_some() {
+                    break;
+                }
+                cx.executor().advance_clock(LINK_TICK);
+                cx.run_until_parked();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(*outcome.lock().unwrap(), Some(None), "ends with its stream");
+            assert_eq!(published(&mut nudges), 1);
         }
 
         #[gpui::test]
