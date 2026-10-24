@@ -370,8 +370,7 @@ pub trait Harness: Send + Sync {
     }
     async fn local_command(
         &self,
-        _cwd: &std::path::Path,
-        _env: &std::collections::BTreeMap<String, String>,
+        _request: &RunRequest,
         _command: &str,
         _connect_mcp: bool,
     ) -> Result<zeron_proto::claude_config::LocalCommandOutput, HarnessError> {

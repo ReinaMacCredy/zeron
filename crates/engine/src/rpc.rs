@@ -1032,7 +1032,12 @@ enum MutateParams {
         note: Option<crate::provider_switch::SystemNote>,
     },
     #[serde(rename_all = "camelCase")]
-    AddChatNote { chat_id: String, text: String },
+    AddChatNote {
+        chat_id: String,
+        text: String,
+        #[serde(default)]
+        hint: Option<String>,
+    },
     /// Tombstone: removes the chats-map row; the session doc remains.
     #[serde(rename_all = "camelCase")]
     DeleteChat { chat_id: String },
@@ -2914,11 +2919,20 @@ impl EngineRpc {
                 .await
                 .map_err(failed)
             }
-            MutateParams::AddChatNote { chat_id, text } => self
+            MutateParams::AddChatNote {
+                chat_id,
+                text,
+                hint,
+            } => self
                 .doc_host
                 .open(&chat_id)
                 .and_then(|handle| {
-                    Ok(handle.write_system_note(&crate::new_id(), &text, None, crate::now_ms())?)
+                    Ok(handle.write_system_note(
+                        &crate::new_id(),
+                        &text,
+                        hint.as_deref(),
+                        crate::now_ms(),
+                    )?)
                 })
                 .map_err(failed),
             MutateParams::DeleteChat { chat_id } => self.delete_chat(&chat_id),
@@ -3384,6 +3398,7 @@ fn forwardable(method: &str) -> bool {
             | methods::DELETE_WORKTREE
             // Project Actions live in the owning engine's private profile store.
             | methods::LIST_PROJECT_ACTIONS
+            | methods::WATCH_PROJECT_ACTIONS
             | methods::UPSERT_PROJECT_ACTION
             | methods::DELETE_PROJECT_ACTION
             | methods::RUN_PROJECT_ACTION
@@ -3495,6 +3510,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::WATCH_HARNESS_UPDATES
             | methods::WATCH_LIMIT_RESUMES
             | methods::WATCH_PROVIDER_INSTANCES
+            | methods::WATCH_PROJECT_ACTIONS
     )
 }
 
@@ -4062,9 +4078,15 @@ impl RpcService for EngineRpc {
                     command: Option<String>,
                     #[serde(default)]
                     connect_mcp: bool,
+                    #[serde(default)]
+                    live_session: bool,
                 }
                 let p: Params = parse_params(params)?;
                 let harness = self.discovery_harness(p.chat_id.as_deref(), HarnessId::ClaudeCode)?;
+                let chat = match (&p.chat_id, p.live_session) {
+                    (Some(chat_id), true) => self.workspace.chat(chat_id).ok().flatten(),
+                    _ => None,
+                };
                 let root = self
                     .catalog_root(&FileSearchParams {
                         query: String::new(),
@@ -4082,6 +4104,22 @@ impl RpcService for EngineRpc {
                     "resume": null,
                 }))
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if let Some(chat) = chat {
+                    if let Some(config) = chat.config {
+                        request.model = config.model;
+                        request.model_options = config.model_options;
+                    }
+                    if let Some(cwd) = chat.harness_session_cwd.filter(|cwd| !cwd.is_empty()) {
+                        request.cwd = cwd;
+                    }
+                    if chat
+                        .harness_session_harness
+                        .as_deref()
+                        .is_none_or(|h| h == HarnessId::ClaudeCode.as_str())
+                    {
+                        request.resume = chat.harness_session_id.filter(|id| !id.is_empty());
+                    }
+                }
                 self.registry
                     .prepare_run(HarnessId::ClaudeCode, &mut request)
                     .await
@@ -4098,7 +4136,7 @@ impl RpcService for EngineRpc {
                     .command
                     .ok_or_else(|| RpcError::BadParams("command is required".into()))?;
                 let output = harness
-                    .local_command(&root, &request.env, &command, p.connect_mcp)
+                    .local_command(&request, &command, p.connect_mcp)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&output)
@@ -6646,6 +6684,9 @@ impl RpcService for EngineRpc {
                 .map_err(|err| RpcError::Failed(err.to_string()))?;
                 RpcReply::value(&snapshot)
             }
+            methods::WATCH_PROJECT_ACTIONS => Ok(RpcReply::Stream(watch_stream(
+                self.project_actions.watch(),
+            ))),
             methods::UPSERT_PROJECT_ACTION => {
                 let p: UpsertProjectActionParams = parse_params(params)?;
                 let space = self.local_project_action_space(&p.space_id)?;
@@ -8120,6 +8161,8 @@ mod tests {
         assert!(is_stream_method(methods::WATCH_HARNESS_UPDATES));
         assert!(forwardable(methods::WATCH_PROVIDER_INSTANCES));
         assert!(is_stream_method(methods::WATCH_PROVIDER_INSTANCES));
+        assert!(forwardable(methods::WATCH_PROJECT_ACTIONS));
+        assert!(is_stream_method(methods::WATCH_PROJECT_ACTIONS));
         assert!(forwardable(methods::CHECK_HARNESS_UPDATES));
         assert!(forwardable(methods::APPLY_HARNESS_UPDATE));
         assert!(forwardable(methods::LIST_CHANGE_REQUEST_PAGE));

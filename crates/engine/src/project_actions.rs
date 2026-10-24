@@ -60,6 +60,7 @@ struct ProjectActionsStoreInner {
     path: PathBuf,
     state: Mutex<ProjectActionsFile>,
     setup_handoffs: Mutex<HashMap<String, StoredSetupHandoff>>,
+    changes: tokio::sync::watch::Sender<u64>,
 }
 
 /// Account-scoped storage for executable project Actions.
@@ -100,6 +101,7 @@ impl ProjectActionsStore {
                 path,
                 state: Mutex::new(state),
                 setup_handoffs: Mutex::new(HashMap::new()),
+                changes: tokio::sync::watch::Sender::new(0),
             }),
         })
     }
@@ -124,6 +126,16 @@ impl ProjectActionsStore {
     ) -> Result<ProjectActionsSnapshot, EngineError> {
         let actions = self.actions(space_id, project_root)?;
         Ok(snapshot_from_actions(space_id, project_root, actions))
+    }
+
+    pub fn watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inner.changes.subscribe()
+    }
+
+    fn changed(&self) {
+        self.inner
+            .changes
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 
     pub fn upsert(
@@ -189,6 +201,7 @@ impl ProjectActionsStore {
             *state = next;
             actions
         };
+        self.changed();
         Ok(snapshot_from_actions(space_id, project_root, actions))
     }
 
@@ -216,6 +229,7 @@ impl ProjectActionsStore {
             *state = next;
             actions
         };
+        self.changed();
         Ok(snapshot_from_actions(space_id, project_root, actions))
     }
 
@@ -977,6 +991,61 @@ mod tests {
             assert!(yielded && released, "{method} blocked the async worker");
             request.await.unwrap();
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn project_action_writes_reach_watchers() {
+        use futures::StreamExt;
+        use zeron_rpc::{RpcReply, RpcService, methods};
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(
+            temp.path(),
+            Arc::new(crate::HarnessRegistry::new()),
+            zeron_proto::HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        core.workspace
+            .create_space(
+                "space",
+                &core.device_id,
+                &temp.path().to_string_lossy(),
+                None,
+                true,
+            )
+            .unwrap();
+        let rpc = core.rpc_service();
+        let Ok(RpcReply::Stream(mut changes)) = rpc
+            .handle(methods::WATCH_PROJECT_ACTIONS, serde_json::json!({}))
+            .await
+        else {
+            panic!("WatchProjectActions is a stream");
+        };
+        assert!(changes.next().await.is_some());
+        let mut call = async |method, params| {
+            let ok = rpc.handle(method, params).await.is_ok();
+            (ok, futures::poll!(changes.next()).is_ready())
+        };
+        let upsert = serde_json::json!({"spaceId": "space", "action": {"name": "Dev", "command": "echo dev", "icon": "play"}});
+        assert_eq!(
+            call(methods::UPSERT_PROJECT_ACTION, upsert).await,
+            (true, true)
+        );
+        let list = serde_json::json!({"spaceId": "space"});
+        assert_eq!(
+            call(methods::LIST_PROJECT_ACTIONS, list).await,
+            (true, false)
+        );
+        let missing = serde_json::json!({"spaceId": "space", "actionId": "gone"});
+        assert_eq!(
+            call(methods::DELETE_PROJECT_ACTION, missing).await,
+            (false, false)
+        );
+        let delete = serde_json::json!({"spaceId": "space", "actionId": "dev"});
+        assert_eq!(
+            call(methods::DELETE_PROJECT_ACTION, delete).await,
+            (true, true)
+        );
     }
 
     #[cfg(unix)]

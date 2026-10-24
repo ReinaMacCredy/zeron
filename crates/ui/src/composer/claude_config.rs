@@ -6,8 +6,8 @@ use gpui::{
 };
 use zeron_proto::claude_config::{self as cc, ClaudeConfigSnapshot, LocalCommandOutput};
 use zeron_proto::claude_panel::{
-    Change, ConfigState, Filter, Load, Meter, RowView, STATS_DAYS, STATS_FOOTNOTE, STATUS_FOOTNOTE,
-    Tab, parse_usage, plural_days, stats_of, status_rows,
+    Change, ConfigState, Filter, Load, RowView, STATS_DAYS, STATS_FOOTNOTE, STATUS_FOOTNOTE, Tab,
+    plural_days, stats_of, status_rows,
 };
 use zeron_proto::usage::{UsageSummary, format_tokens};
 use zeron_proto::{HarnessId, PermissionMode};
@@ -19,7 +19,12 @@ use crate::icons::{self, icon};
 use crate::popover;
 use crate::theme::Theme;
 
-pub(crate) use zeron_proto::claude_panel::SUMMARY_PREFIX;
+pub(crate) use zeron_proto::claude_panel::{Meter, SUMMARY_PREFIX, parse_usage};
+// Clears the titlebar, the Chat | Work toggle and the New task row above the panel.
+pub(crate) const HERO_PANEL_TOP: f32 = Theme::TITLEBAR_HEIGHT + 96.0;
+const HERO_BELOW_PILL: f32 = 64.0;
+const ABOVE_PILL: f32 = 52.0;
+const MIN_HEIGHT: f32 = 180.0;
 
 pub(super) struct ConfigPanel {
     chat_id: Option<String>,
@@ -48,6 +53,26 @@ pub(super) struct ConfigPanel {
 }
 
 impl Composer {
+    pub(crate) fn config_panel_on_hero(&self, cx: &App) -> bool {
+        self.config_panel.is_some() && self.bound_chat_id(cx).is_none()
+    }
+
+    fn config_panel_height(&self, window: &Window, cx: &App) -> f32 {
+        let viewport = f32::from(window.viewport_size().height);
+        let pill = self.surface_bounds.get();
+        let room = if self.config_panel_on_hero(cx) {
+            let pill_height = pill.map_or(120.0, |b| f32::from(b.size.height));
+            viewport - HERO_PANEL_TOP - pill_height - HERO_BELOW_PILL
+        } else {
+            let pill_top = pill.map_or(viewport - 120.0, |b| f32::from(b.top()));
+            pill_top - ABOVE_PILL - Theme::TITLEBAR_HEIGHT
+        };
+        (viewport * 0.62)
+            .clamp(300.0, 620.0)
+            .min(room)
+            .max(MIN_HEIGHT)
+    }
+
     pub(super) fn config_panel_open(&self) -> bool {
         self.config_panel
             .as_ref()
@@ -148,6 +173,27 @@ impl Composer {
         });
         panel.tasks = vec![read, status];
         self.config_panel = Some(panel);
+        cx.notify();
+    }
+
+    pub(crate) fn open_config_panel_at(
+        &mut self,
+        status: bool,
+        search: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_config_panel(cx);
+        if let Some(panel) = self.config_panel.as_mut() {
+            if status {
+                panel.tab = Tab::Status;
+            }
+            if let Some(query) = search {
+                let query = query.to_string();
+                panel
+                    .search
+                    .update(cx, |input, cx| input.set_text(query, cx));
+            }
+        }
         cx.notify();
     }
 
@@ -535,7 +581,7 @@ impl Composer {
             window.focus(&focus, cx);
         }
         let theme = Theme::of(cx).clone();
-        let height = (f32::from(window.viewport_size().height) * 0.62).clamp(300.0, 620.0);
+        let height = self.config_panel_height(window, cx);
         Some(self.config_card(motion, height, &theme, window, cx))
     }
 
@@ -1484,7 +1530,7 @@ fn kv_row(theme: &Theme, rule: bool, key: &str, value: String, tag: Option<&str>
         .into_any_element()
 }
 
-fn meter(theme: &Theme, meter: Meter) -> AnyElement {
+pub(crate) fn meter(theme: &Theme, meter: Meter) -> AnyElement {
     let warn = meter.percent >= 80;
     let color = if warn { theme.warning } else { theme.accent };
     div()

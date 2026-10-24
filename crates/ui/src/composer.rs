@@ -42,6 +42,7 @@ use crate::state::{AppState, Indicator};
 use crate::theme::Theme;
 
 mod ask_pill;
+mod claude_cards;
 pub(crate) mod claude_config;
 pub(crate) use ask_pill::pending_questions;
 pub(crate) mod background;
@@ -10740,6 +10741,7 @@ impl Composer {
         } else {
             let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(self.slash.filtered.len());
             let unsupported = self.unsupported_compaction(cx);
+            let claude = self.pickers.read(cx).resolved(cx).harness == Some(HarnessId::ClaudeCode);
             for (row_ix, &cmd_ix) in self.slash.filtered.iter().enumerate() {
                 let Some(command) = commands.get(cmd_ix) else {
                     continue;
@@ -10763,10 +10765,15 @@ impl Composer {
                         .into(),
                 };
                 let disabled = command.name == COMPACT_COMMAND && unsupported.is_some();
+                let terminal = claude
+                    && command.invocation.prefix() == '/'
+                    && zeron_proto::app_commands::TERMINAL_ONLY_COMMANDS
+                        .contains(&command.name.as_str());
                 rows.push(
                     crate::popover::menu_row(theme, selected, format!("slash-result-{row_ix}"))
                         .id(("slash-result", row_ix))
                         .when(disabled, |row| row.opacity(0.45))
+                        .when(terminal, |row| row.opacity(0.55))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.slash.active = Some(row_ix);
                             this.accept_slash(cx);
@@ -10784,6 +10791,18 @@ impl Composer {
                             name,
                             description,
                         ))
+                        .when(terminal, |row| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .px(px(6.0))
+                                    .rounded(px(4.0))
+                                    .bg(crate::theme::ink(0.06))
+                                    .text_size(crate::typography::ui_rems(10.5))
+                                    .text_color(theme.text_muted)
+                                    .child("Terminal"),
+                            )
+                        })
                         .into_any_element(),
                 );
             }
@@ -11671,6 +11690,12 @@ impl Composer {
             self.input.update(cx, |input, cx| input.set_text("", cx));
             self.sync_draft(cx);
             self.open_config_panel(cx);
+            return;
+        }
+        if let Some(command) = self.claude_card_for(&plain, cx) {
+            self.input.update(cx, |input, cx| input.set_text("", cx));
+            self.sync_draft(cx);
+            self.run_claude_card(command, cx);
             return;
         }
         // `/btw` and `/sidechat` are zeron's own too: they open a side
@@ -14576,7 +14601,9 @@ impl Render for Composer {
                 self.staged_chip_count(cx),
             );
         let (card, corner) = self.render_corner(window, cx);
-        let card = self.render_config_panel(window, cx).or(card);
+        let config_card = self.render_config_panel(window, cx);
+        let config_in_flow = config_card.is_some() && self.config_panel_on_hero(cx);
+        let card = config_card.or(card);
         // The checklist tray stacks above the queue (or directly above the
         // composer), one step narrower than what follows it.
         let has_queue = self.reads_selection(cx) && !self.state.read(cx).queue.is_empty();
@@ -14585,14 +14612,19 @@ impl Render for Composer {
         let trays = usize::from(todo.is_some()) + usize::from(queue.is_some());
         let tab = self.render_sidechat_tab(trays, &Theme::of(cx).clone(), window, cx);
         // Out of flow: the shell measures this stack for transcript clearance.
+        // The New chat page has no transcript above, so there it takes space instead.
         let card = card.map(|card| {
-            div()
-                .absolute()
-                .bottom_full()
-                .left_0()
-                .right_0()
-                .pb(px(Theme::SPACE_SM))
-                .child(card)
+            if config_in_flow {
+                div().pb(px(Theme::SPACE_SM)).child(card)
+            } else {
+                div()
+                    .absolute()
+                    .bottom_full()
+                    .left_0()
+                    .right_0()
+                    .pb(px(Theme::SPACE_SM))
+                    .child(card)
+            }
         });
         let container = match tab {
             Some(tab) => container.child(

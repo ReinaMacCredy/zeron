@@ -32,7 +32,9 @@ use std::rc::Rc;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
+mod claude_cards;
 mod html_card;
+pub(crate) use claude_cards::ClaudeCardAction;
 
 use gpui::{
     AnyElement, Bounds, ClipboardItem, ContentMask, Context, Entity, ListAlignment, ListOffset,
@@ -1295,6 +1297,9 @@ pub enum RowKind {
     ClaudeConfigSummary {
         text: SharedString,
     },
+    ClaudeCommand {
+        card: Arc<zeron_proto::claude_config::CommandCard>,
+    },
     /// A host-written `system` entry (the compaction boundary, the
     /// model-switch marker): centered label between two rules, never a
     /// bubble and never assistant blocks. `hint` sits behind an info glyph.
@@ -1821,6 +1826,28 @@ pub fn rows_for_entry(
         let hint = texts
             .next()
             .map(|hint| SharedString::from(hint.to_string()));
+        let hint_text = entry
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                MessagePart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .nth(1);
+        if let Some(card) = zeron_proto::claude_config::CommandCard::from_note(&text, hint_text) {
+            return vec![Row {
+                id: entry.id.clone().into(),
+                version: fnv1a(text.as_bytes()),
+                turn_start: true,
+                kind: RowKind::ClaudeCommand {
+                    card: Arc::new(card),
+                },
+                entry_id,
+                timestamp: None,
+                copy_text: None,
+                compact_fold: None,
+            }];
+        }
         if text.starts_with(crate::composer::claude_config::SUMMARY_PREFIX) {
             return vec![Row {
                 id: entry.id.clone().into(),
@@ -4113,6 +4140,7 @@ pub struct Transcript {
     /// The shell may retain this already-laid-out view briefly for its exit.
     /// Cleared as soon as the exit is invisible; never used for another chat.
     retain_on_deselect: bool,
+    claude_cards: HashMap<SharedString, claude_cards::CardUi>,
     /// `Some(doc_id)` pins this instance to a SUBAGENT doc: rows come from
     /// `AppState::sub_transcript(doc_id)` instead of the selected chat, and
     /// the instance is READ-ONLY — no echoes, no own-turn hold, and no global
@@ -4486,6 +4514,10 @@ pub enum TranscriptEvent {
     },
     OpenClaudeConfig {
         chat_id: String,
+    },
+    ClaudeCard {
+        chat_id: String,
+        action: ClaudeCardAction,
     },
 }
 
@@ -5178,6 +5210,7 @@ impl Transcript {
             // instance must not reset (or re-pin) on selection changes.
             chat_id: doc_override.clone(),
             retain_on_deselect: false,
+            claude_cards: HashMap::new(),
             land_end_pending: doc_override.is_some() && !follow,
             doc_live: doc_override.is_some() && follow,
             computer_preview,
@@ -10724,6 +10757,9 @@ impl Transcript {
             ),
             RowKind::Divider { text, hint } => {
                 divider_row(&row.id, text.clone(), hint.clone(), &theme)
+            }
+            RowKind::ClaudeCommand { card } => {
+                self.render_claude_card(&row.id, card.clone(), &theme, cx)
             }
             RowKind::ClaudeConfigSummary { text } => {
                 let transcript = cx.entity().downgrade();

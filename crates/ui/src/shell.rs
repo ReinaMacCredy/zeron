@@ -74,7 +74,7 @@ use crate::state::{
 use crate::swipe::SwipeDir;
 use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
 use crate::theme::Theme;
-use crate::transcript::{self, BranchKind, Transcript, TranscriptEvent};
+use crate::transcript::{self, BranchKind, ClaudeCardAction, Transcript, TranscriptEvent};
 use crate::workspace_links::resolve_workspace_file_link;
 
 mod actions_ui;
@@ -5591,6 +5591,32 @@ impl Shell {
                 );
             }
             TranscriptEvent::SignIn { chat_id } => self.sign_in_for_chat(chat_id, cx),
+            TranscriptEvent::ClaudeCard { chat_id, action } => {
+                let composer = self.composer_for_transcript(&emitter);
+                let bound =
+                    composer.read(cx).bound_chat_id(cx).as_deref() == Some(chat_id.as_str());
+                match action {
+                    ClaudeCardAction::ManageTools => self.open_settings(SettingsSection::Tools, cx),
+                    ClaudeCardAction::ContextSettings => {
+                        self.open_settings(SettingsSection::General, cx)
+                    }
+                    ClaudeCardAction::OpenUsage => self.open_usage(cx),
+                    ClaudeCardAction::Help => self.open_docs(None, cx),
+                    _ if !bound => {}
+                    ClaudeCardAction::Compact => composer
+                        .update(cx, |composer, cx| composer.request_compaction(None, cx)),
+                    ClaudeCardAction::Model(model) => {
+                        let pickers = composer.read(cx).pickers().clone();
+                        pickers.update(cx, |pickers, cx| pickers.set_chip_model(model.clone(), cx));
+                    }
+                    ClaudeCardAction::Status => composer.update(cx, |composer, cx| {
+                        composer.open_config_panel_at(true, None, cx)
+                    }),
+                    ClaudeCardAction::Permissions => composer.update(cx, |composer, cx| {
+                        composer.open_config_panel_at(false, Some("permission"), cx)
+                    }),
+                }
+            }
             TranscriptEvent::OpenClaudeConfig { chat_id } => {
                 let composer = self.composer_for_transcript(&emitter);
                 if composer.read(cx).bound_chat_id(cx).as_deref() == Some(chat_id.as_str()) {
@@ -16979,6 +17005,12 @@ impl Shell {
         self.composer_dock
             .borrow_mut()
             .set_hero_anchor(if home_raised { HOME_HERO_ANCHOR } else { 0.5 });
+        let hero_floor = if self.composer.read(cx).config_panel_on_hero(cx) {
+            crate::composer::claude_config::HERO_PANEL_TOP
+        } else {
+            0.0
+        };
+        self.composer_dock.borrow_mut().set_hero_floor(hero_floor);
         let raise_target = if home_raised { 1.0 } else { 0.0 };
         self.home_raise = Some(match self.home_raise.take() {
             Some(tween) if (tween.to - raise_target).abs() > f32::EPSILON => {
