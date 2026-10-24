@@ -277,17 +277,17 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
     /// Back to the Sessions list, releasing any pushed session (the iPad
     /// split takes the open session back into its own column).
     func popToFrontPage() {
-        sessionsNav?.popToRootViewController(animated: false)
+        sessionsStack?.popToRootViewController(animated: false)
     }
 
-    private var sessionsNav: UINavigationController? {
+    private var sessionsStack: UINavigationController? {
         tabs.first(where: { $0.identifier == "sessions" })?.viewController as? UINavigationController
     }
 
     /// The split's open session, handed over as it is when the window
     /// narrows (iPhone Duo folding): same page, scroll position and draft.
     func adoptSession(_ session: SessionViewController) {
-        guard let nav = sessionsNav else { return }
+        guard let nav = sessionsStack else { return }
         selectedTab = tabs.first { $0.identifier == "sessions" }
         nav.popToRootViewController(animated: false)
         nav.pushViewController(session, animated: false)
@@ -298,7 +298,7 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
     /// when the window widens; nil when none is open. It comes back marked
     /// `relocating`, for the split to clear once it's placed.
     func releaseSession() -> SessionViewController? {
-        guard let nav = sessionsNav,
+        guard let nav = sessionsStack,
               let session = nav.viewControllers.last(where: { $0 is SessionViewController }) as? SessionViewController else {
             return nil
         }
