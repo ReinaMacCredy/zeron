@@ -77,6 +77,7 @@ pub struct AppUpdate {
     /// Version whose advisory strip the user dismissed (a newer release shows
     /// it again).
     dismissed: Option<String>,
+    preview: bool,
     _status_watch: Task<()>,
     download: Option<Task<()>>,
     user_check: Option<Task<()>>,
@@ -122,7 +123,7 @@ impl AppUpdate {
             }
         });
         tracing::info!(?install, ?blocker, "desktop update checker started");
-        Self {
+        let mut this = Self {
             install,
             blocker,
             automatic: zeron_update::desktop_auto_update_enabled(),
@@ -133,10 +134,56 @@ impl AppUpdate {
             flow: Flow::Idle,
             prompt: None,
             dismissed: None,
+            preview: std::env::var("ZERON_UPDATE_PREVIEW").as_deref() == Ok("1"),
             _status_watch: status_watch,
             download: None,
             user_check: None,
+        };
+        if this.preview {
+            this.start_preview(cx);
         }
+        this
+    }
+
+    fn start_preview(&mut self, cx: &mut Context<Self>) {
+        let version = "9.9.9".to_owned();
+        self.status = Some(UpdateStatus {
+            current_version: zeron_update::current_version().to_string(),
+            latest_version: Some(version.clone()),
+            update_available: true,
+            checked_at: None,
+            error: None,
+        });
+        self.download = Some(cx.spawn(async move |this, cx| {
+            loop {
+                for (flow, secs) in [
+                    (
+                        Flow::Downloading {
+                            version: version.clone(),
+                        },
+                        6,
+                    ),
+                    (
+                        Flow::Ready {
+                            version: version.clone(),
+                            staged: PathBuf::new(),
+                        },
+                        8,
+                    ),
+                ] {
+                    let shown = this.update(cx, |this, cx| {
+                        this.flow = flow;
+                        cx.notify();
+                    });
+                    if shown.is_err() {
+                        return;
+                    }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(secs))
+                        .await;
+                }
+            }
+        }));
     }
 
     pub fn install(&self) -> &InstallKind {
@@ -174,6 +221,9 @@ impl AppUpdate {
     }
 
     fn apply_status(&mut self, status: UpdateStatus, cx: &mut Context<Self>) {
+        if self.preview {
+            return;
+        }
         let succeeded = status.error.is_none();
         self.status = Some(status);
         if succeeded && self.automatic {

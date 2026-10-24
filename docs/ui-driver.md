@@ -192,7 +192,8 @@ background and poll `zeron ui list` until the label shows up (the first build ca
 | `ZERON_DEV_PROFILE` | `debug` | `release` builds and bundles the release profile, which is observe-only: use it to check a release build's tree, audit or frame timing |
 
 Passed through to the app when set: every `ZERON_MOCK_*`, `ZERON_HARNESS`, `ZERON_FAKE_QUOTA`,
-`ZERON_MOTION_SCALE`, `ZERON_OPEN_ROUTE`, `CODEX_EXECUTABLE`, and the `ZERON_CUA_*` probes.
+`ZERON_MOTION_SCALE`, `ZERON_OPEN_ROUTE`, `ZERON_UPDATE_PREVIEW`, `CODEX_EXECUTABLE`, and the
+`ZERON_CUA_*` probes.
 `ZERON_AUTO_UPDATE` is not passed, so an upstream release never replaces a Dev bundle.
 Arguments after the script go to the app.
 

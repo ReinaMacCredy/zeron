@@ -122,6 +122,7 @@ mod thread_search;
 use side_chats::SideChatTab;
 mod tabs;
 mod terminal_tabs;
+mod update_glyph;
 mod voice_stage;
 use voice_stage::VOICE_STAGE_ORB_SCALE;
 
@@ -14762,11 +14763,12 @@ impl Shell {
     ) -> Option<AnyElement> {
         let update = crate::app_update::AppUpdate::global(cx)?;
         let (label, action) = update.read(cx).strip()?;
-        let failed = matches!(
-            update.read(cx).flow(),
-            crate::app_update::Flow::Failed { .. }
-        );
-        let fill = if failed { theme.danger } else { theme.accent };
+        let phase = update_glyph::GlyphPhase::of(update.read(cx).flow());
+        let fill = if phase == update_glyph::GlyphPhase::Failed {
+            theme.danger
+        } else {
+            theme.accent
+        };
         let wash = self.rail_wash(theme);
         let mut button = div()
             .id("update-rail-button")
@@ -14782,20 +14784,7 @@ impl Shell {
             .justify_center()
             .rounded(px(8.0))
             .tooltip(crate::settings::widgets::text_tooltip(label))
-            .child(
-                div()
-                    .size(px(28.0))
-                    .rounded_full()
-                    .bg(fill)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        icon(icons::LUCIDE_DOWNLOAD)
-                            .size(px(16.0))
-                            .text_color(theme.on_accent),
-                    ),
-            );
+            .child(update_glyph::update_glyph(phase, fill, theme.on_accent));
         if action != crate::app_update::StripAction::None {
             button = button
                 .cursor_pointer()

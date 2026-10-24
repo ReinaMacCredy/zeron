@@ -237,6 +237,29 @@ pub fn flow_dot(phase_offset: f32, cx: &mut App) -> Option<gpui::QuadAnimation> 
     })
 }
 
+pub fn update_halo(phase_offset: f32, peak: f32, cx: &mut App) -> Option<gpui::QuadAnimation> {
+    fn ripple(phase: f32) -> f32 {
+        let p = phase.rem_euclid(1.0);
+        if p < 0.12 {
+            p / 0.12
+        } else {
+            (1.0 - (p - 0.12) / 0.4).max(0.0)
+        }
+    }
+    if cx.reduce_motion() {
+        return None;
+    }
+    Some(gpui::QuadAnimation {
+        epoch: cx.default_global::<PulseClock>().epoch,
+        period: Duration::from_millis(2600),
+        phase_offset,
+        curve: ripple,
+        from: 0.0,
+        to: peak,
+        interval: PULSE_TICK * 2,
+    })
+}
+
 /// Where a loading spinner is in its turn (0..1, one turn per `period`), and
 /// keep `view` repainting on the loader clock while it shows. `None` when
 /// motion is reduced: the spinner rests in place.
