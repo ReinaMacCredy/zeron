@@ -4,6 +4,7 @@
 [[entry]]
 version = "0.2.120"
 date = "Oct 24"
+hero = "providers-muse.jpg"
 
 [[entry.features]]
 id = "no-send-cap"
