@@ -32,9 +32,13 @@ const SLOW_EVERY: Duration = Duration::from_secs(120);
 const VISIBLE_GRACE: Duration = Duration::from_secs(2);
 const FAILING_CHECK_LOOKUPS: usize = 3;
 const MISSION_ROWS: usize = 4;
+const WORKING_CHATS: usize = 4;
+const WORK_LINES: usize = 3;
+const WORK_LINE_HEIGHT: f32 = 22.0;
 
 pub enum HomeEvent {
     OpenChat(String),
+    OpenChatPanel(String, crate::composer::background::BackgroundPanel),
     OpenPullRequest(String),
     OpenSettings,
     OpenTaskCenter(String),
@@ -84,6 +88,9 @@ pub struct HomeView {
     last_render: Option<Instant>,
     projects_seen: Vec<String>,
     scroll: ScrollHandle,
+    working_expanded: std::collections::HashSet<String>,
+    work_seen: HashMap<String, Option<Instant>>,
+    work_seen_primed: bool,
     _ticker: Task<()>,
 }
 
@@ -126,6 +133,9 @@ impl HomeView {
             last_render: None,
             projects_seen: Vec::new(),
             scroll: ScrollHandle::new(),
+            working_expanded: Default::default(),
+            work_seen: HashMap::new(),
+            work_seen_primed: false,
             _ticker: ticker,
         }
     }
@@ -519,18 +529,256 @@ pub(crate) fn running_agents(state: &AppState, now: DateTime<Utc>) -> Vec<(&Chat
     state
         .overview_chats(now)
         .into_iter()
-        .filter(|(indicator, _)| *indicator == ChatIndicator::Working)
-        .map(|(_, chat)| {
-            let started = state
-                .session_for(&chat.id)
-                .and_then(|session| session.started_at)
-                .into_iter()
-                .chain(state.pending_send_started(&chat.id, now))
-                .max()
-                .unwrap_or(now);
-            (chat, started)
+        .filter_map(|(indicator, chat)| {
+            if indicator == ChatIndicator::Working {
+                let started = state
+                    .session_for(&chat.id)
+                    .and_then(|session| session.started_at)
+                    .into_iter()
+                    .chain(state.pending_send_started(&chat.id, now))
+                    .max()
+                    .unwrap_or(now);
+                return Some((chat, started));
+            }
+            if !matches!(indicator, ChatIndicator::Idle | ChatIndicator::Completed) {
+                return None;
+            }
+            let work = background_work(state, &chat.id, now);
+            if work.is_empty() {
+                return None;
+            }
+            let started = work.iter().filter_map(|child| child.started).min();
+            Some((chat, started.unwrap_or(now)))
         })
         .collect()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkKind {
+    Agent,
+    Shell,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct WorkChild {
+    pub id: String,
+    pub kind: WorkKind,
+    pub label: String,
+    pub model: Option<(zeron_proto::HarnessId, String)>,
+    pub started: Option<DateTime<Utc>>,
+    pub count: usize,
+}
+
+pub(crate) fn background_work(
+    state: &AppState,
+    chat_id: &str,
+    now: DateTime<Utc>,
+) -> Vec<WorkChild> {
+    let tasks = state
+        .session_for(chat_id)
+        .map(|session| session.background_tasks.as_slice())
+        .unwrap_or_default();
+    let task = |task: &zeron_proto::BackgroundTask, kind| WorkChild {
+        id: task.id.clone(),
+        kind,
+        label: task.label.clone(),
+        model: None,
+        started: task.started_at,
+        count: 1,
+    };
+    let of_kind = |kind: zeron_proto::BackgroundTaskKind, work: WorkKind| {
+        tasks
+            .iter()
+            .filter(move |t| t.kind == kind)
+            .map(move |t| task(t, work))
+    };
+    let mut work: Vec<WorkChild> =
+        of_kind(zeron_proto::BackgroundTaskKind::Agent, WorkKind::Agent).collect();
+    let named = work.len();
+    work.extend(
+        state
+            .chats
+            .iter()
+            .filter(|chat| {
+                chat.delegation.as_ref().is_some_and(|d| {
+                    d.delegated_by_chat_id == chat_id
+                        && d.status == zeron_proto::DelegationStatus::Running
+                })
+            })
+            .map(|chat| WorkChild {
+                id: chat.id.clone(),
+                kind: WorkKind::Agent,
+                label: chat
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| "Delegated task".into()),
+                model: chat
+                    .config
+                    .as_ref()
+                    .and_then(|c| Some((c.harness, c.model.clone()?))),
+                started: chat.delegation.as_ref().map(|d| d.started_at),
+                count: 1,
+            }),
+    );
+    let streaming = (state.running_subagents_for(chat_id, now) as usize).saturating_sub(named);
+    if streaming > 0 {
+        work.push(WorkChild {
+            id: format!("{chat_id}-streaming"),
+            kind: WorkKind::Agent,
+            label: format!(
+                "{streaming} subagent{}",
+                if streaming == 1 { "" } else { "s" }
+            ),
+            model: None,
+            started: None,
+            count: streaming,
+        });
+    }
+    work.extend(of_kind(
+        zeron_proto::BackgroundTaskKind::Shell,
+        WorkKind::Shell,
+    ));
+    work.extend(of_kind(
+        zeron_proto::BackgroundTaskKind::Other,
+        WorkKind::Other,
+    ));
+    work
+}
+
+struct WorkingRow {
+    chat_id: String,
+    title: String,
+    detail: Option<(bool, String)>,
+    mark: Option<crate::provider_instances::InstanceIcon>,
+    started: DateTime<Utc>,
+    model: Option<String>,
+    ringed: bool,
+    work: Vec<(WorkChild, Option<String>)>,
+}
+
+fn work_line(
+    theme: &Theme,
+    chat_id: &str,
+    child: WorkChild,
+    tag: Option<String>,
+    now: DateTime<Utc>,
+    reveal: f32,
+    cx: &mut Context<HomeView>,
+) -> AnyElement {
+    let glyph = match child.kind {
+        WorkKind::Agent => icons::BOT,
+        WorkKind::Shell | WorkKind::Other => icons::TERMINAL,
+    };
+    let panel = match child.kind {
+        WorkKind::Agent => Some(crate::composer::background::BackgroundPanel::Subagents),
+        WorkKind::Shell => Some(crate::composer::background::BackgroundPanel::Shells),
+        WorkKind::Other => None,
+    };
+    let elapsed = child
+        .started
+        .map(|at| zeron_proto::background::elapsed_label((now - at).num_seconds()));
+    let chat_id = chat_id.to_owned();
+    div()
+        .id(SharedString::from(format!("home-work-{}", child.id)))
+        .role(gpui::Role::Button)
+        .aria_label(child.label.clone())
+        .h(px(WORK_LINE_HEIGHT * reveal))
+        .opacity(reveal)
+        .overflow_hidden()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .px(px(6.0))
+        .mx(px(-6.0))
+        .rounded(px(5.0))
+        .text_size(crate::typography::ui_rems(12.0))
+        .text_color(theme.text_muted)
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.wash(0.05)).text_color(theme.text))
+        .on_click(cx.listener(move |_, _, _, cx| {
+            cx.emit(match panel {
+                Some(panel) => HomeEvent::OpenChatPanel(chat_id.clone(), panel),
+                None => HomeEvent::OpenChat(chat_id.clone()),
+            })
+        }))
+        .child(
+            icon(glyph)
+                .size(px(12.0))
+                .flex_none()
+                .text_color(theme.text_faint),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .when(child.kind != WorkKind::Agent, |el| {
+                    el.font_family(theme.font_mono.clone())
+                        .text_size(crate::typography::ui_rems(11.0))
+                })
+                .child(child.label),
+        )
+        .when_some(tag, |el, tag| {
+            el.child(
+                div()
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_faint)
+                    .child(tag),
+            )
+        })
+        .when_some(elapsed, |el, elapsed| {
+            el.child(mono(theme, theme.text_faint, elapsed))
+        })
+        .into_any_element()
+}
+
+fn more_line(
+    theme: &Theme,
+    id: String,
+    hidden: usize,
+    key: String,
+    cx: &mut Context<HomeView>,
+) -> AnyElement {
+    let label = format!("+{hidden} more");
+    div()
+        .id(SharedString::from(id))
+        .role(gpui::Role::Button)
+        .aria_label(label.clone())
+        .py(px(2.0))
+        .text_size(crate::typography::ui_rems(11.5))
+        .text_color(theme.text_faint)
+        .cursor_pointer()
+        .hover(|style| style.text_color(theme.text_muted))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.working_expanded.insert(key.clone());
+            cx.notify();
+        }))
+        .child(label)
+        .into_any_element()
+}
+
+fn work_totals<'a>(work: impl Iterator<Item = &'a WorkChild> + Clone) -> Option<String> {
+    let count = |kind| {
+        work.clone()
+            .filter(|c| c.kind == kind)
+            .map(|c| c.count)
+            .sum::<usize>()
+    };
+    let parts: Vec<String> = [
+        (count(WorkKind::Agent), "subagent"),
+        (count(WorkKind::Shell), "shell"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, noun)| format!("{n} {noun}{}", if n == 1 { "" } else { "s" }))
+    .collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 pub(crate) fn local_git_project_paths(state: &AppState) -> Vec<(String, String, String)> {
@@ -874,7 +1122,21 @@ impl HomeView {
     fn estimated_rows(&self, widget: Widget, cx: &App) -> usize {
         let state = self.state.read(cx);
         match widget {
-            Widget::WorkingNow => running_agents(state, Utc::now()).len().clamp(1, 4) * 2,
+            Widget::WorkingNow => {
+                let now = Utc::now();
+                let chats = running_agents(state, now);
+                let lines: usize = chats
+                    .iter()
+                    .take(WORKING_CHATS)
+                    .map(|(chat, _)| {
+                        background_work(state, &chat.id, now)
+                            .len()
+                            .min(WORK_LINES + 1)
+                    })
+                    .sum();
+                chats.len().clamp(1, WORKING_CHATS) * 2
+                    + (lines as f32 * WORK_LINE_HEIGHT / ROW_HEIGHT).ceil() as usize
+            }
             Widget::Missions => {
                 let count = mission_rows(state, Utc::now()).len();
                 count.clamp(1, MISSION_ROWS) + usize::from(count > MISSION_ROWS)
@@ -904,10 +1166,11 @@ impl HomeView {
         &mut self,
         widget: Widget,
         theme: &Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match widget {
-            Widget::WorkingNow => self.render_working(theme, cx),
+            Widget::WorkingNow => self.render_working(theme, window, cx),
             Widget::Missions => self.render_missions(theme, cx),
             Widget::PullRequests => self.render_prs(theme, cx),
             Widget::GitActivity => self.render_git(theme, cx),
@@ -918,28 +1181,46 @@ impl HomeView {
         }
     }
 
-    fn render_working(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_working(
+        &mut self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let now = Utc::now();
-        let rows: Vec<(
-            String,
-            String,
-            Option<String>,
-            Option<crate::provider_instances::InstanceIcon>,
-            DateTime<Utc>,
-            Option<String>,
-        )> = {
+        let rows: Vec<WorkingRow> = {
             let pickers = self.pickers.read(cx);
             let state = self.state.read(cx);
             running_agents(state, now)
                 .into_iter()
                 .map(|(chat, started)| {
-                    let shell =
-                        zeron_proto::background::shell_tasks(state.session_for(&chat.id))
+                    let indicator = state.display_status_for(chat, now);
+                    let own_turn = indicator == ChatIndicator::Working;
+                    let ringed = !own_turn
+                        || zeron_proto::background::sidebar_ring(
+                            indicator,
+                            state.session_for(&chat.id),
+                        )
+                        .is_some();
+                    let work: Vec<(WorkChild, Option<String>)> =
+                        background_work(state, &chat.id, now)
                             .into_iter()
-                            .next()
-                            .map(|task| task.label);
-                    let detail = shell.or_else(|| zeron_proto::view::chat_location(chat));
-                    let mark = crate::pickers::chat_mark(chat, cx);
+                            .map(|child| {
+                                let tag = child.model.as_ref().map(|(harness, id)| {
+                                    pickers
+                                        .model_label(*harness, id)
+                                        .unwrap_or_else(|| id.clone())
+                                });
+                                (child, tag)
+                            })
+                            .collect();
+                    let detail = if !own_turn {
+                        Some((false, "Turn done · background still running".to_owned()))
+                    } else if work.is_empty() {
+                        zeron_proto::view::chat_location(chat).map(|loc| (true, loc))
+                    } else {
+                        None
+                    };
                     let model = chat.config.as_ref().and_then(|config| {
                         let name = config.model.as_deref().map(|id| {
                             pickers
@@ -953,29 +1234,65 @@ impl HomeView {
                             None => name,
                         })
                     });
-                    (
-                        chat.id.clone(),
-                        chat_title(chat),
+                    WorkingRow {
+                        chat_id: chat.id.clone(),
+                        title: chat_title(chat),
                         detail,
-                        mark,
+                        mark: crate::pickers::chat_mark(chat, cx),
                         started,
                         model,
-                    )
+                        ringed,
+                        work,
+                    }
                 })
                 .collect()
         };
         let count = rows.len();
+        let totals = work_totals(rows.iter().flat_map(|row| row.work.iter().map(|(c, _)| c)));
+        let reveals = self.work_reveals(&rows, window, cx);
         let entity = cx.entity_id();
-        let body: Vec<AnyElement> = if rows.is_empty() {
+        let all_chats = self.working_expanded.contains("");
+        let hidden_chats = count.saturating_sub(WORKING_CHATS);
+        let mut body: Vec<AnyElement> = if rows.is_empty() {
             vec![empty_line(theme, "No agents running")]
         } else {
             rows.into_iter()
-                .take(4)
-                .map(|(chat_id, title, detail, mark, started, model)| {
+                .take(if all_chats { usize::MAX } else { WORKING_CHATS })
+                .map(|row| {
+                    let WorkingRow {
+                        chat_id,
+                        title,
+                        detail,
+                        mark,
+                        started,
+                        model,
+                        ringed,
+                        work,
+                    } = row;
                     let elapsed =
                         zeron_proto::background::elapsed_label((now - started).num_seconds());
                     let id: SharedString = format!("home-working-{chat_id}").into();
-                    div()
+                    let glyph = if ringed {
+                        div()
+                            .size(px(12.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(crate::composer::background::sidebar_ring_mark(0, theme))
+                            .into_any_element()
+                    } else {
+                        crate::loaders::mini_glyph_spinner(
+                            format!("{id}-spin"),
+                            2.0,
+                            theme.glyph,
+                            entity,
+                            cx,
+                        )
+                        .into_any_element()
+                    };
+                    let open_id = chat_id.clone();
+                    let head = div()
                         .id(id.clone())
                         .role(gpui::Role::Button)
                         .aria_label(title.clone())
@@ -989,20 +1306,14 @@ impl HomeView {
                         .cursor_pointer()
                         .hover(|style| style.bg(theme.wash(0.05)))
                         .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(HomeEvent::OpenChat(chat_id.clone()))
+                            cx.emit(HomeEvent::OpenChat(open_id.clone()))
                         }))
                         .child(
                             div()
                                 .flex()
                                 .items_center()
                                 .gap(px(8.0))
-                                .child(crate::loaders::mini_glyph_spinner(
-                                    format!("{id}-spin"),
-                                    2.0,
-                                    theme.glyph,
-                                    entity,
-                                    cx,
-                                ))
+                                .child(glyph)
                                 .child(
                                     div()
                                         .flex_1()
@@ -1028,31 +1339,114 @@ impl HomeView {
                                 })
                                 .child(mono(theme, theme.text_faint, elapsed)),
                         )
-                        .when_some(detail, |el, detail| {
+                        .when_some(detail, |el, (code, detail)| {
                             el.child(
                                 div()
                                     .pl(px(20.0))
                                     .overflow_hidden()
                                     .text_ellipsis()
                                     .whitespace_nowrap()
-                                    .font_family(theme.font_mono.clone())
+                                    .when(code, |el| el.font_family(theme.font_mono.clone()))
                                     .text_size(crate::typography::ui_rems(11.0))
                                     .text_color(theme.text_faint)
                                     .child(detail),
+                            )
+                        });
+                    let all = self.working_expanded.contains(&chat_id);
+                    let hidden = work.len().saturating_sub(WORK_LINES);
+                    let lines: Vec<AnyElement> = work
+                        .into_iter()
+                        .take(if all { usize::MAX } else { WORK_LINES })
+                        .map(|(child, tag)| {
+                            let reveal = reveals.get(&child.id).copied().unwrap_or(1.0);
+                            work_line(theme, &chat_id, child, tag, now, reveal, cx)
+                        })
+                        .collect();
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(head)
+                        .when(!lines.is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .ml(px(5.0))
+                                    .pl(px(13.0))
+                                    .mb(px(2.0))
+                                    .border_l_1()
+                                    .border_color(theme.border)
+                                    .flex()
+                                    .flex_col()
+                                    .children(lines)
+                                    .when(!all && hidden > 0, |el| {
+                                        el.child(more_line(
+                                            theme,
+                                            format!("home-working-more-{chat_id}"),
+                                            hidden,
+                                            chat_id.clone(),
+                                            cx,
+                                        ))
+                                    }),
                             )
                         })
                         .into_any_element()
                 })
                 .collect()
         };
+        if !all_chats && hidden_chats > 0 {
+            body.push(more_line(
+                theme,
+                "home-working-more".into(),
+                hidden_chats,
+                String::new(),
+                cx,
+            ));
+        }
         card(
             theme,
             icons::SPEEDOMETER,
             "Working now",
             Some(count.to_string()),
-            None,
+            totals.map(|totals| {
+                div()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_faint)
+                    .whitespace_nowrap()
+                    .child(totals)
+                    .into_any_element()
+            }),
             body,
         )
+    }
+
+    fn work_reveals(
+        &mut self,
+        rows: &[WorkingRow],
+        window: &mut Window,
+        cx: &App,
+    ) -> HashMap<String, f32> {
+        let now = crate::motion::now();
+        let primed = self.work_seen_primed && !crate::motion::reduced_motion(cx);
+        let ids: Vec<&str> = rows
+            .iter()
+            .flat_map(|row| row.work.iter().map(|(child, _)| child.id.as_str()))
+            .collect();
+        self.work_seen.retain(|id, _| ids.contains(&id.as_str()));
+        let total = crate::motion::COLLAPSE.total().as_secs_f32() * crate::motion::speed_scale();
+        let mut reveals = HashMap::new();
+        for id in ids {
+            let since = *self
+                .work_seen
+                .entry(id.to_owned())
+                .or_insert(primed.then_some(now));
+            let Some(since) = since else { continue };
+            let raw = now.saturating_duration_since(since).as_secs_f32() / total.max(f32::EPSILON);
+            if raw < 1.0 {
+                window.request_animation_frame();
+                reveals.insert(id.to_owned(), crate::motion::COLLAPSE.progress(raw));
+            }
+        }
+        self.work_seen_primed = true;
+        reveals
     }
 
     fn render_missions(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -2127,6 +2521,7 @@ impl Render for HomeView {
         let first = !self.visible();
         self.last_render = Some(Instant::now());
         if first {
+            self.work_seen_primed = false;
             self.refresh(cx);
         }
         let theme = Theme::of(cx).clone();
@@ -2144,11 +2539,11 @@ impl Render for HomeView {
         let [left, right] = columns(&enabled);
         let left: Vec<AnyElement> = left
             .into_iter()
-            .map(|widget| self.render_widget(widget, &theme, cx))
+            .map(|widget| self.render_widget(widget, &theme, window, cx))
             .collect();
         let right: Vec<AnyElement> = right
             .into_iter()
-            .map(|widget| self.render_widget(widget, &theme, cx))
+            .map(|widget| self.render_widget(widget, &theme, window, cx))
             .collect();
         let column = |cards: Vec<AnyElement>| {
             div()
@@ -2352,6 +2747,86 @@ mod tests {
                 ],
                 vec![Widget::PullRequests, Widget::ThisMac],
             ]
+        );
+    }
+
+    #[test]
+    fn working_now_keeps_chats_whose_background_outlives_the_turn() {
+        let now = Utc::now();
+        let chat = |id: &str, delegated_by: Option<&str>| -> Chat {
+            let mut chat = serde_json::json!({
+                "id": id, "deviceId": "dev", "title": id, "archived": false, "createdAt": now,
+                "config": { "harness": "claude-code", "model": "haiku", "sandbox": "workspace-write" },
+            });
+            if let Some(owner) = delegated_by {
+                chat["delegation"] = serde_json::json!({
+                    "delegatedByChatId": owner, "depth": 1, "anchor": "task", "wake": "always",
+                    "status": "running", "startedAt": now,
+                });
+            }
+            serde_json::from_value(chat).unwrap()
+        };
+        let task = |id: &str, kind| zeron_proto::BackgroundTask {
+            id: id.into(),
+            kind,
+            label: id.into(),
+            started_at: Some(now - chrono::TimeDelta::seconds(30)),
+            output_path: None,
+        };
+        let session = |id: &str, tasks, running_subagents| zeron_proto::Session {
+            last_turn_outcome: None,
+            terminal_activity: None,
+            last_completed_turn: None,
+            chat_id: id.into(),
+            device_id: "dev".into(),
+            status: zeron_proto::SessionStatus::Idle,
+            held_by_subagents: false,
+            compacting: false,
+            classifying: None,
+            background_tasks: tasks,
+            started_at: None,
+            updated_at: now,
+            running_subagents,
+            compact_plan: None,
+        };
+        let mut state = AppState::new();
+        state.apply_chats(vec![
+            chat("busy", None),
+            chat("quiet", None),
+            chat("helper", Some("busy")),
+        ]);
+        state.apply_sessions(vec![
+            session(
+                "busy",
+                vec![
+                    task("build", zeron_proto::BackgroundTaskKind::Shell),
+                    task("audit", zeron_proto::BackgroundTaskKind::Agent),
+                ],
+                3,
+            ),
+            session("quiet", vec![], 0),
+        ]);
+        let running: Vec<&str> = running_agents(&state, now)
+            .into_iter()
+            .map(|(chat, _)| chat.id.as_str())
+            .collect();
+        assert_eq!(running, ["busy"]);
+        let work: Vec<(WorkKind, String)> = background_work(&state, "busy", now)
+            .into_iter()
+            .map(|child| (child.kind, child.label))
+            .collect();
+        assert_eq!(
+            work,
+            [
+                (WorkKind::Agent, "audit".to_owned()),
+                (WorkKind::Agent, "helper".to_owned()),
+                (WorkKind::Agent, "2 subagents".to_owned()),
+                (WorkKind::Shell, "build".to_owned()),
+            ]
+        );
+        assert_eq!(
+            work_totals(background_work(&state, "busy", now).iter()).as_deref(),
+            Some("4 subagents · 1 shell")
         );
     }
 

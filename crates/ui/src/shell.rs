@@ -17514,6 +17514,12 @@ impl Shell {
                         crate::home::HomeEvent::OpenChat(chat_id) => {
                             this.open_chat(chat_id.clone(), cx)
                         }
+                        crate::home::HomeEvent::OpenChatPanel(chat_id, panel) => {
+                            this.composer.update(cx, |composer, _| {
+                                composer.open_panel_when_bound(chat_id.clone(), *panel)
+                            });
+                            this.open_chat(chat_id.clone(), cx)
+                        }
                         crate::home::HomeEvent::OpenPullRequest(url) => {
                             crate::pull_request_detail::open_on_device(url, None, window, cx)
                         }
