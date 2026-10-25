@@ -43,6 +43,9 @@ protocol RowViewDelegate: AnyObject {
     func rowView(_ view: RowView, perform action: String)
     func rowView(_ view: RowView, pageFor id: String, deviceId: String, path: String) -> UIView?
     func rowView(_ view: RowView, expandPage title: String, deviceId: String, path: String)
+    /// A subagent card was tapped: its transcript doc, title, and whether it
+    /// still runs.
+    func rowView(_ view: RowView, openSubagent docId: String, title: String, running: Bool)
 }
 
 /// A reusable transcript row: canvas + horizontal scrollers + native widgets.
@@ -323,6 +326,21 @@ final class RowView: UIView {
                 })
                 b.accessibilityIdentifier = "transcript-action-\(action)"
                 view = b
+            case let .subagent(docId, title, running, failed):
+                let card = SubagentCardControl()
+                card.accessibilityTraits = .button
+                card.accessibilityLabel = "Subagent: \(title)"
+                card.accessibilityValue = running ? "Working" : failed ? "Failed" : "Done"
+                card.accessibilityIdentifier = "subagent-card"
+                card.isEnabled = docId != nil
+                if let docId {
+                    card.addAction(UIAction { [weak self] _ in
+                        guard let self else { return }
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        self.delegate?.rowView(self, openSubagent: docId, title: title, running: running)
+                    }, for: .touchUpInside)
+                }
+                view = card
             case .shimmer:
                 view = ShimmerView(model: model!, rect: rect)
             case let .cardButton(action):

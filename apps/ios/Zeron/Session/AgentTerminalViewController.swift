@@ -1,11 +1,11 @@
 import UIKit
 
-final class TerminalViewController: UIViewController {
+final class AgentTerminalViewController: UIViewController {
     static let pollInterval: Duration = .seconds(1)
 
     private let source: SessionSource
     private var selected: String?
-    private var tabs: [TerminalTab] = []
+    private var tabs: [AgentTerminalTab] = []
     private var poll: Task<Void, Never>?
     private let tabScroll = UIScrollView()
     private let tabStack = UIStackView()
@@ -167,7 +167,7 @@ final class TerminalViewController: UIViewController {
         }
     }
 
-    private func paint(_ screen: TerminalView) {
+    private func paint(_ screen: AgentTerminalScreen) {
         output.backgroundColor = Self.color(screen.background)
         let regular = Fonts.ui(.mono, 12)
         let text = NSMutableAttributedString()

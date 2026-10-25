@@ -56,6 +56,11 @@ final class CoreSessionSource: SessionSource {
         handle.setViewAttached(attached: false)
     }
 
+    var isUnused: Bool {
+        let t = handle.transcriptStatus()
+        return t.entryCount == 0 && t.pendingCount == 0 && handle.composer().queue.isEmpty
+    }
+
     func reattach() {
         handle.setViewAttached(attached: true)
     }
@@ -234,6 +239,7 @@ final class CoreSessionSource: SessionSource {
         do {
             if mode == .interrupt, chrome.running { try handle.interrupt() }
             _ = try handle.send(request: SendRequest(text: text, attachments: images.map(\.outgoing), worktree: nil, busy: mode == .steer ? .steer : .queue))
+            app?.forgetFreshSideChat(chatId)
             app?.noteDeliveryActivity()
             sendFailure = nil
             compactNotice = nil
@@ -286,8 +292,8 @@ final class CoreSessionSource: SessionSource {
     }
 
     func computerStop() async throws -> Bool { try await handle.computerStop() }
-    func terminals() async throws -> [TerminalTab] { try await handle.listTerminals() }
-    func terminal(_ id: String, dark: Bool) async throws -> TerminalView { try await handle.readTerminal(terminalId: id, dark: dark) }
+    func terminals() async throws -> [AgentTerminalTab] { try await handle.listTerminals() }
+    func terminal(_ id: String, dark: Bool) async throws -> AgentTerminalScreen { try await handle.readTerminal(terminalId: id, dark: dark) }
     func projectActions() async throws -> ProjectActions? { try await handle.listProjectActions() }
     func runProjectAction(_ id: String) async throws -> String { try await handle.runProjectAction(actionId: id) }
 

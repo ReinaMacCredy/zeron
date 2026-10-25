@@ -75,6 +75,12 @@ pub(crate) struct AgentExtra {
     pub meta: Option<PText>,
     pub route: Option<RouteBadge>,
     pub open: Option<String>,
+    pub spawn: Option<SpawnLink>,
+}
+
+pub(crate) struct SpawnLink {
+    pub doc_id: Option<String>,
+    pub title: String,
 }
 
 pub(crate) struct RouteBadge {
@@ -1016,6 +1022,7 @@ impl RowBuilder {
                                 (label.into(), detail)
                             }
                         };
+                        let agent_title = detail.clone();
                         // Subagent lifecycle is distinct from `resolved`: under
                         // eager-done the spawn call resolves while the subagent
                         // still runs (desktop transcript.rs `running`/`failed`).
@@ -1077,6 +1084,7 @@ impl RowBuilder {
                             meta: None,
                             route: None,
                             open: None,
+                            spawn: Some(SpawnLink { doc_id: subagent_ref.clone(), title: agent_title }),
                         });
                         lines.push(ToolLine {
                             icon: match (&computer, agents) {
@@ -1227,6 +1235,7 @@ fn delegate_line(
             meta: meta.map(|m| prepare_plain(ctx, &m, small, small_lh, ColorRole::TextFaint, WhiteSpace::Pre)),
             route: route_badge,
             open: child.map(|id| if limited { limit_link(id) } else { chat_link(id) }),
+            spawn: None,
         }),
         link: None,
     }
@@ -1520,6 +1529,18 @@ fn place_agents(t: &ToolGroup, px: Px, x: f32, y: f32, cw: f32, mut out: Option<
             right -= s;
             o.widget(WidgetKind::Spinner, (right, card_y + (head - s) / 2.0, s, s), None);
             right -= d(px, 8.0);
+        } else if extra.and_then(|a| a.spawn.as_ref()).is_some_and(|s| s.doc_id.is_some()) {
+            let s = d(px, 14.0);
+            right -= s;
+            o.widget(
+                WidgetKind::Icon {
+                    name: "chevron.right".into(),
+                    color: ColorRole::TextFaint,
+                },
+                (right + d(px, 2.0), card_y + (head - s) / 2.0 + d(px, 1.0), s - d(px, 4.0), s - d(px, 4.0)),
+                None,
+            );
+            right -= d(px, 8.0);
         }
         if let Some(trailing) = extra.and_then(|a| a.trailing.as_ref()) {
             let w = trailing.p.max_content_width().min((right - lx - lw - d(px, 40.0)).max(0.0));
@@ -1535,6 +1556,18 @@ fn place_agents(t: &ToolGroup, px: Px, x: f32, y: f32, cw: f32, mut out: Option<
             if avail > 1.0 {
                 place_text_lines(detail, dx, card_y + (head - detail.lh) / 2.0, avail, 1, px, o);
             }
+        }
+        if let Some(spawn) = extra.and_then(|a| a.spawn.as_ref()) {
+            o.widget(
+                WidgetKind::Subagent {
+                    doc_id: spawn.doc_id.clone(),
+                    title: spawn.title.clone(),
+                    running: line.running,
+                    failed: line.failed,
+                },
+                (x, card_y, cw, card_h),
+                None,
+            );
         }
         let Some(extra) = extra.filter(|a| a.meta.is_some() || a.route.is_some()) else { continue };
         let sy = card_y + head - d(px, 3.0);
@@ -1576,6 +1609,7 @@ pub(crate) fn heap_bytes(t: &ToolGroup) -> usize {
                         a.trailing.as_ref().map_or(0, |t| t.p.heap_bytes())
                             + a.meta.as_ref().map_or(0, |t| t.p.heap_bytes())
                             + a.route.as_ref().map_or(0, |r| r.label.p.heap_bytes() + r.detail.len())
+                            + a.spawn.as_ref().map_or(0, |s| s.title.len())
                     })
                     + l.body
                         .iter()

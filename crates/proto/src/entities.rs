@@ -2517,6 +2517,11 @@ pub struct TerminalSession {
     pub cwd: String,
     /// Shell basename (`zsh`, `bash`, …) for the tab label.
     pub shell: String,
+    /// The host answers the terminal's queries itself (device attributes,
+    /// cursor position, …), so a viewer must not answer them too. Absent
+    /// from hosts that predate it, whose viewers answer as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub host_replies: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

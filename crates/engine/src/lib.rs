@@ -56,6 +56,7 @@ pub mod project_actions;
 pub mod provider_instances;
 pub mod provider_switch;
 pub mod registry;
+pub mod remote_terminals;
 pub mod repos;
 pub mod resume_schedule;
 pub mod review;
@@ -191,6 +192,8 @@ pub struct EngineCore {
     pub repos: Repos,
     pub workspace_files: WorkspaceFiles,
     pub terminals: Terminals,
+    /// I/O routing for terminals on other devices (direct link or relay).
+    pub remote_terminals: remote_terminals::RemoteTerminals,
     pub project_actions: ProjectActionsStore,
     pub agent_profiles: AgentProfilesStore,
     pub provider_instances: ProviderInstancesStore,
@@ -406,6 +409,10 @@ impl EngineCore {
             local_device_name(&device_id),
         )
         .map_err(|e| EngineError::Other(e.to_string()))?;
+        previews.serve_streams(
+            terminals::link::SERVICE_PREFIX,
+            Arc::new(terminals::link::Service::new(terminals.clone())),
+        );
         let uploads = Uploads::from_root_with_fallback(
             profile.uploads_root(),
             legacy_uploads_root.as_deref(),
@@ -479,6 +486,7 @@ impl EngineCore {
             repos,
             workspace_files,
             terminals,
+            remote_terminals: Default::default(),
             project_actions,
             agent_profiles,
             provider_instances,
@@ -642,6 +650,7 @@ impl EngineCore {
         .with_computer(self.computer.clone())
         .with_device_hub(self.device_hub.clone())
         .with_html_preview(self.html_preview.clone())
+        .with_remote_terminals(self.remote_terminals.clone())
         .with_harness_updates(self.harness_updates.clone())
         .with_resume_schedule(self.resume_schedule.clone())
         .with_viewport_focus(self.viewport_focus.clone());

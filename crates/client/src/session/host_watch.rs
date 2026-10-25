@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
-use zeron_rpc::RpcError;
 
 use super::SessionCore;
 
@@ -43,7 +42,7 @@ pub(super) fn spawn(
                     let Some(core) = weak.upgrade() else { return };
                     apply(&core, item);
                 },
-                Err(RpcError::UnknownMethod(_)) => return,
+                Err(crate::ClientError::Unsupported(_)) => return,
                 Err(_) => {}
             }
             tokio::select! {

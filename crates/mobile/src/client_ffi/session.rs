@@ -643,35 +643,37 @@ impl SessionHandle {
         Ok(on_runtime(async move { inner.computer_stop().await }).await?)
     }
 
-    pub async fn list_terminals(&self) -> CoreResult<Vec<crate::terminal::TerminalTab>> {
+    pub async fn list_terminals(&self) -> CoreResult<Vec<crate::agent_terminal::AgentTerminalTab>> {
         let inner = self.inner.clone();
         let infos = on_runtime(async move { inner.list_terminals().await }).await?;
-        Ok(infos.iter().map(crate::terminal::tab).collect())
+        Ok(infos.iter().map(crate::agent_terminal::tab).collect())
     }
 
     pub async fn read_terminal(
         &self,
         terminal_id: String,
         dark: bool,
-    ) -> CoreResult<crate::terminal::TerminalView> {
+    ) -> CoreResult<crate::agent_terminal::AgentTerminalScreen> {
         let inner = self.inner.clone();
         let screen = on_runtime(async move { inner.read_terminal(&terminal_id).await }).await?;
-        Ok(crate::terminal::view(&screen, dark))
+        Ok(crate::agent_terminal::view(&screen, dark))
     }
 
     pub async fn list_project_actions(
         &self,
-    ) -> CoreResult<Option<crate::terminal::ProjectActions>> {
+    ) -> CoreResult<Option<crate::agent_terminal::ProjectActions>> {
         let inner = self.inner.clone();
         let snapshot = on_runtime(async move { inner.list_project_actions().await }).await?;
-        Ok(snapshot.map(|snapshot| crate::terminal::ProjectActions {
-            actions: snapshot
-                .actions
-                .iter()
-                .map(crate::terminal::action_item)
-                .collect(),
-            issue: snapshot.project_file_issue,
-        }))
+        Ok(
+            snapshot.map(|snapshot| crate::agent_terminal::ProjectActions {
+                actions: snapshot
+                    .actions
+                    .iter()
+                    .map(crate::agent_terminal::action_item)
+                    .collect(),
+                issue: snapshot.project_file_issue,
+            }),
+        )
     }
 
     pub async fn run_project_action(&self, action_id: String) -> CoreResult<String> {

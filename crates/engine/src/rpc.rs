@@ -741,6 +741,10 @@ struct SubscribeTerminalParams {
     terminal_id: String,
     #[serde(default)]
     after_seq: Option<u64>,
+    /// The viewer leaves terminal queries to the host
+    /// (`TerminalSession::host_replies`); older viewers answer them itself.
+    #[serde(default)]
+    host_replies: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -749,6 +753,12 @@ struct WriteTerminalParams {
     terminal_id: String,
     /// Base64 input bytes (plain UTF-8 accepted leniently).
     data: String,
+    /// Remote viewers number their input so a replay after a path change
+    /// is applied once ([`Terminals::write_sequenced`]).
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    input_seq: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1210,6 +1220,7 @@ pub struct EngineRpc {
     repos: Repos,
     workspace_files: crate::WorkspaceFiles,
     terminals: Terminals,
+    remote_terminals: crate::remote_terminals::RemoteTerminals,
     project_actions: ProjectActionsStore,
     agent_profiles: Option<AgentProfilesStore>,
     provider_instances: Option<ProviderInstancesStore>,
@@ -1278,6 +1289,7 @@ impl EngineRpc {
             repos,
             workspace_files,
             terminals,
+            remote_terminals: Default::default(),
             project_actions,
             agent_profiles: None,
             provider_instances: None,
@@ -1361,6 +1373,15 @@ impl EngineRpc {
 
     pub fn with_previews(mut self, previews: zeron_preview::PreviewService) -> Self {
         self.previews = Some(previews);
+        self
+    }
+
+    /// Share the engine-wide routing state for terminals on other devices.
+    pub fn with_remote_terminals(
+        mut self,
+        remote_terminals: crate::remote_terminals::RemoteTerminals,
+    ) -> Self {
+        self.remote_terminals = remote_terminals;
         self
     }
 
@@ -1679,11 +1700,14 @@ impl EngineRpc {
         // writes the delegate's row — a machine writes only rows it hosts).
         if let Some(session) = crate::runner::session() {
             let parent = parent_chat_id.ok_or_else(|| {
-                RpcError::Failed("A Cloud machine starts Cloud chats only as children of its chat.".into())
+                RpcError::Failed(
+                    "A Cloud machine starts Cloud chats only as children of its chat.".into(),
+                )
             })?;
             if parent != session.chat_id {
                 return Err(RpcError::Failed(
-                    "A Cloud machine starts Cloud chats only as children of the chat it runs.".into(),
+                    "A Cloud machine starts Cloud chats only as children of the chat it runs."
+                        .into(),
                 ));
             }
             let started = self
@@ -2709,6 +2733,72 @@ impl EngineRpc {
         }
     }
 
+    /// Terminal I/O for a terminal on `target`: a direct link when the two
+    /// devices can reach each other, the relay otherwise
+    /// ([`crate::remote_terminals`]). Writes never wait on the network.
+    async fn remote_terminal(
+        &self,
+        target: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<RpcReply, RpcError> {
+        use crate::remote_terminals::Write;
+        let relay: std::sync::Arc<dyn crate::remote_terminals::Relay> =
+            std::sync::Arc::new(self.clone());
+        let ok = || RpcReply::value(&serde_json::json!({ "ok": true }));
+        match method {
+            methods::SUBSCRIBE_TERMINAL => {
+                let p: SubscribeTerminalParams = parse_params(params)?;
+                let direct = self.previews.clone().map(|previews| {
+                    std::sync::Arc::new(previews)
+                        as std::sync::Arc<dyn crate::remote_terminals::Direct>
+                });
+                let stream = self
+                    .remote_terminals
+                    .subscribe(
+                        relay,
+                        direct,
+                        target,
+                        &p.terminal_id,
+                        p.after_seq.unwrap_or(0),
+                        p.host_replies,
+                    )
+                    .await?;
+                Ok(RpcReply::Stream(stream))
+            }
+            methods::WRITE_TERMINAL => {
+                let p: WriteTerminalParams = parse_params(params)?;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&p.data)
+                    .unwrap_or_else(|_| p.data.into_bytes());
+                self.remote_terminals
+                    .send(&relay, target, &p.terminal_id, Write::Input(bytes))?;
+                ok()
+            }
+            methods::RESIZE_TERMINAL => {
+                let p: ResizeTerminalParams = parse_params(params)?;
+                self.remote_terminals.send(
+                    &relay,
+                    target,
+                    &p.terminal_id,
+                    Write::Resize {
+                        cols: p.cols,
+                        rows: p.rows,
+                    },
+                )?;
+                ok()
+            }
+            _ => {
+                let p: TerminalIdParams = parse_params(params.clone())?;
+                let reply = self.forward(target, method, params).await;
+                if reply.is_ok() {
+                    self.remote_terminals.ended(target, &p.terminal_id);
+                }
+                reply
+            }
+        }
+    }
+
     async fn prepare_voice_bridge(
         &self,
         chat: &str,
@@ -3730,6 +3820,32 @@ impl RpcService for AuthRpc {
 }
 
 #[async_trait]
+impl crate::remote_terminals::Relay for EngineRpc {
+    async fn call(
+        &self,
+        target: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, RpcError> {
+        match self.forward(target, method, params).await? {
+            RpcReply::Value(value) => Ok(value),
+            RpcReply::Stream(_) => Err(RpcError::Failed(format!("{method} replied with a stream"))),
+        }
+    }
+    async fn subscribe(
+        &self,
+        target: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<BoxStream<'static, serde_json::Value>, RpcError> {
+        match self.forward(target, method, params).await? {
+            RpcReply::Stream(stream) => Ok(stream),
+            RpcReply::Value(_) => Err(RpcError::Failed(format!("{method} replied with a value"))),
+        }
+    }
+}
+
+#[async_trait]
 impl RpcService for EngineRpc {
     fn connection(&self) -> Option<std::sync::Arc<dyn RpcService>> {
         Some(caller::connection(self))
@@ -3769,6 +3885,22 @@ impl RpcService for EngineRpc {
                     | methods::CANCEL_AGENT_LOGIN
             ) {
                 return self.forward_agent_login(&target, method, params).await;
+            }
+            // Pair while the open crosses the relay, so the terminal's
+            // stream usually starts on the direct link.
+            if method == methods::OPEN_TERMINAL
+                && let Some(previews) = &self.previews
+            {
+                previews.warm_peer(&target);
+            }
+            if matches!(
+                method,
+                methods::SUBSCRIBE_TERMINAL
+                    | methods::WRITE_TERMINAL
+                    | methods::RESIZE_TERMINAL
+                    | methods::CLOSE_TERMINAL
+            ) {
+                return self.remote_terminal(&target, method, params).await;
             }
             return self.forward(&target, method, params).await;
         }
@@ -6881,7 +7013,7 @@ impl RpcService for EngineRpc {
                 let p: SubscribeTerminalParams = parse_params(params)?;
                 let rx = self
                     .terminals
-                    .subscribe(&p.terminal_id, p.after_seq)
+                    .subscribe_viewer(&p.terminal_id, p.after_seq, !p.host_replies)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 let stream = futures::stream::unfold(rx, |mut rx| async move {
                     let event = rx.recv().await?;
@@ -6892,9 +7024,18 @@ impl RpcService for EngineRpc {
             }
             methods::WRITE_TERMINAL => {
                 let p: WriteTerminalParams = parse_params(params)?;
-                self.terminals
-                    .write(&p.terminal_id, &p.data)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                match (p.client_id, p.input_seq) {
+                    (Some(client), Some(seq)) => {
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(&p.data)
+                            .unwrap_or_else(|_| p.data.into_bytes());
+                        self.terminals
+                            .write_sequenced(&p.terminal_id, &client, seq, &bytes)
+                            .map(|_| ())
+                    }
+                    _ => self.terminals.write(&p.terminal_id, &p.data),
+                }
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::RESIZE_TERMINAL => {

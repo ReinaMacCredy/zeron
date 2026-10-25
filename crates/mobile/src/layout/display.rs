@@ -318,6 +318,9 @@ pub enum WidgetKind {
         path: String,
         title: String,
     },
+    /// A subagent spawn's card: opens the child's transcript (`doc_id`;
+    /// `None` while the host hasn't bound one yet).
+    Subagent { doc_id: Option<String>, title: String, running: bool, failed: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]

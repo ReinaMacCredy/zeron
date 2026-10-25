@@ -18,6 +18,7 @@ mod png;
 mod review;
 mod settings;
 mod terminals;
+mod terminal;
 mod transcripts;
 mod pages;
 mod visuals;
@@ -92,18 +93,21 @@ pub(crate) struct DemoHost {
     processed: Mutex<HashSet<String>>,
     leases: Mutex<HashMap<String, Lease>>,
     uploads: Mutex<HashMap<String, Arc<Vec<u8>>>>,
-    forks: Mutex<HashMap<String, Vec<SessionMessageEntry>>>,
+    reply_forks: Mutex<HashMap<String, Vec<SessionMessageEntry>>>,
     supervisor_settings: Mutex<HashMap<String, zeron_proto::supervisor::SupervisorSettings>>,
     refused_sends: Mutex<HashSet<String>>,
     rng: Mutex<Rng>,
     cancel: Mutex<Option<CancellationToken>>,
     git: Mutex<git::GitDemo>,
     settings: Mutex<settings::HostSettings>,
-    terminals: Mutex<terminals::HostTerminals>,
+    host_terminals: Mutex<terminals::HostTerminals>,
     computer_stopped: Mutex<HashSet<String>>,
     page_reads: Mutex<HashMap<String, u32>>,
     claude_settings: Mutex<serde_json::Map<String, serde_json::Value>>,
     claude_failed: Mutex<HashSet<String>>,
+    terminals: terminal::DemoTerminals,
+    /// Forked side chats → the chat they copy.
+    forks: Mutex<HashMap<String, String>>,
 }
 
 fn doc_err(err: zeron_doc::DocError) -> ClientError {
@@ -122,18 +126,20 @@ impl DemoHost {
             processed: Mutex::new(HashSet::new()),
             leases: Mutex::new(HashMap::new()),
             uploads: Mutex::new(HashMap::new()),
-            forks: Mutex::new(HashMap::new()),
+            reply_forks: Mutex::new(HashMap::new()),
             supervisor_settings: Mutex::new(HashMap::new()),
             refused_sends: Mutex::new(HashSet::new()),
             rng: Mutex::new(Rng(0x9e37_79b9_7f4a_7c15)),
             cancel: Mutex::new(None),
             git: Mutex::new(git::GitDemo::new()),
             settings: Mutex::new(settings::HostSettings::new()),
-            terminals: Mutex::new(terminals::HostTerminals::new(now_ms())),
+            host_terminals: Mutex::new(terminals::HostTerminals::new(now_ms())),
             computer_stopped: Mutex::new(HashSet::new()),
             page_reads: Mutex::new(HashMap::new()),
             claude_settings: Mutex::new(claude::default_settings()),
             claude_failed: Mutex::new(HashSet::new()),
+            terminals: terminal::DemoTerminals::default(),
+            forks: Mutex::new(HashMap::new()),
         })
     }
 
@@ -288,9 +294,21 @@ impl DemoHost {
             .as_ref()
             .and_then(|c| c.last_message_at)
             .map_or_else(now_ms, |t| t.timestamp_millis());
-        let forked = lock(&self.forks).get(chat_id).cloned();
+        let forked = lock(&self.reply_forks).get(chat_id).cloned();
+        let fork_of = lock(&self.forks).get(chat_id).cloned();
         let entries = match (forked, chat_id, self.options.transcript_scale.turns()) {
             (Some(forked), _, _) => forked,
+            _ if fork_of.is_some() => {
+                let source = fork_of.unwrap_or_default();
+                // Through the latest completed reply, like the engine's fork.
+                let mut entries = transcripts::fixture(&source, &host, last);
+                while entries.last().is_some_and(|e| {
+                    e.role != MessageRole::Assistant || e.status != Some(MessageStatus::Complete)
+                }) {
+                    entries.pop();
+                }
+                entries
+            }
             (None, "chat-veil", Some(turns)) => {
                 transcripts::synthetic(turns, &host, now_ms() - turns as i64 * 60_000)
             }
@@ -923,7 +941,7 @@ impl DemoHost {
             last_seen_at: None,
             ..source
         };
-        lock(&self.forks).insert(new_id, entries[..end].to_vec());
+        lock(&self.reply_forks).insert(new_id, entries[..end].to_vec());
         client.registry_write(|doc| doc.upsert_chat(&chat))?;
         Ok(serde_json::to_value(&chat).unwrap_or_default())
     }
@@ -937,7 +955,7 @@ impl DemoHost {
     pub(crate) async fn host_rpc(
         self: &Arc<Self>,
         device_id: &str,
-        method: &'static str,
+        method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value> {
         use zeron_rpc::methods as m;
@@ -948,7 +966,14 @@ impl DemoHost {
         tokio::time::sleep(Duration::from_millis(80)).await;
         match method {
             m::FORK_CHAT => return self.fork_chat(&client, &params),
-            m::FETCH_TOOL_BLOB => return Ok(demo_blob(&params)),
+            m::FETCH_TOOL_BLOB
+                if !params["blobRef"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("--sub--") =>
+            {
+                return Ok(demo_blob(&params));
+            }
             m::GET_SESSION_STATS => return Ok(missions::session_stats(&params)),
             m::COMPUTER_REVOKE_DESKTOP => return self.revoke_computer(&client, &params),
             m::RESOLVE_LIMIT_OFFER | m::SET_LIMIT_RESUME => {
@@ -963,7 +988,7 @@ impl DemoHost {
             return reply;
         }
         if terminals::HostTerminals::handles(method) {
-            return lock(&self.terminals).call(method, &params, now_ms());
+            return lock(&self.host_terminals).call(method, &params, now_ms());
         }
         let plan_estimate = method == m::PREVIEW_ROUTES && params.get("roles").is_some();
         if settings::HostSettings::handles(method) && !plan_estimate {
@@ -993,6 +1018,9 @@ impl DemoHost {
             &params,
         ) {
             return reply;
+        }
+        if let Some(reply) = self.companion_rpc(&client, method, &params)? {
+            return Ok(reply);
         }
         let chat_id = params["chatId"].as_str().unwrap_or_default().to_owned();
         let id = params["id"].as_str().unwrap_or_default().to_owned();
@@ -1273,6 +1301,149 @@ impl DemoHost {
             other => return Err(ClientError::Unsupported(other.to_owned())),
         };
         Ok(reply)
+    }
+
+    /// Terminals, subagent blobs and forks: RPCs that aren't about one
+    /// chat's queue. `None` = not one of them.
+    fn companion_rpc(
+        self: &Arc<Self>,
+        client: &Arc<ClientInner>,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> Result<Option<serde_json::Value>> {
+        use zeron_rpc::methods as m;
+        let terminal = || params["terminalId"].as_str().unwrap_or_default().to_owned();
+        let ok = serde_json::json!({ "ok": true });
+        Ok(Some(match method {
+            m::OPEN_TERMINAL => {
+                let chat_id = params["chatId"].as_str().unwrap_or_default();
+                let cwd = client
+                    .workspace
+                    .chat(chat_id)
+                    .and_then(|c| c.cwd)
+                    .unwrap_or_else(|| "/Users/dev".into());
+                self.terminals.open(&cwd)
+            }
+            m::WRITE_TERMINAL => {
+                let data = params["data"].as_str().unwrap_or_default();
+                let bytes =
+                    crate::live::b64::decode(data).unwrap_or_else(|| data.as_bytes().to_vec());
+                self.terminals.write(&terminal(), &bytes)?;
+                ok
+            }
+            m::RESIZE_TERMINAL => ok,
+            m::CLOSE_TERMINAL => {
+                self.terminals.close(&terminal());
+                ok
+            }
+            m::FETCH_TOOL_BLOB => {
+                let blob = params["blobRef"].as_str().unwrap_or_default();
+                let doc_id = blob.split_once('/').map_or(blob, |(_, doc)| doc);
+                let host = self.host_of(client, "chat-veil");
+                let entries = transcripts::subagent_transcript(doc_id, &host, now_ms(), None)
+                    .ok_or_else(|| ClientError::HostError("FetchToolBlob: no such blob".into()))?;
+                serde_json::json!({ "text": serde_json::to_string(&entries).unwrap_or_default() })
+            }
+            m::FORK_SIDE_CHAT => {
+                let source_id = params["sourceChatId"].as_str().unwrap_or_default();
+                let chat_id = params["chatId"].as_str().unwrap_or_default().to_owned();
+                let parent = params["parentChatId"]
+                    .as_str()
+                    .unwrap_or(source_id)
+                    .to_owned();
+                let mut chat = client
+                    .workspace
+                    .chat(source_id)
+                    .ok_or_else(|| ClientError::HostError("Source chat no longer exists".into()))?;
+                lock(&self.forks).insert(chat_id.clone(), source_id.to_owned());
+                chat.title = chat.title.map(|t| format!("Fork of {t}"));
+                chat.id = chat_id;
+                chat.created_by_chat_id = Some(parent);
+                chat.created_at = Utc::now();
+                chat.last_message_at = Some(Utc::now());
+                chat.last_seen_at = Some(Utc::now());
+                client
+                    .registry_write(|doc| doc.upsert_chat(&chat))
+                    .map_err(|e| ClientError::Internal(e.to_string()))?;
+                serde_json::to_value(&chat).unwrap_or_default()
+            }
+            _ => return Ok(None),
+        }))
+    }
+
+    /// Host streams: terminal output, and a subagent's transcript (a
+    /// running one grows a part every couple of seconds).
+    pub(crate) async fn host_subscribe(
+        self: &Arc<Self>,
+        device_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<crate::host_stream::HostStream> {
+        use zeron_rpc::methods as m;
+        let client = self.client()?;
+        if !client.network_online() || !self.host_online(&client, device_id) {
+            return Err(ClientError::HostUnavailable(device_id.to_owned()));
+        }
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        match method {
+            m::SUBSCRIBE_TERMINAL => {
+                let id = params["terminalId"].as_str().unwrap_or_default();
+                let after = params["afterSeq"].as_u64().unwrap_or(0);
+                Ok(crate::host_stream::HostStream::Local(
+                    self.terminals.subscribe(id, after)?,
+                ))
+            }
+            m::WATCH_DOC_MESSAGES => {
+                let doc_id = params["chatId"].as_str().unwrap_or_default().to_owned();
+                let host = self.host_of(&client, "chat-veil");
+                let running = transcripts::VEIL_AGENTS
+                    .iter()
+                    .any(|(id, running)| *running && doc_id.ends_with(id));
+                let steps = transcripts::subagent_steps(&doc_id);
+                if steps == 0 {
+                    return Err(ClientError::HostError(
+                        "WatchDocMessages: no such doc".into(),
+                    ));
+                }
+                let (tx, rx) = tokio::sync::mpsc::channel(16);
+                let cancel = self.cancel_token();
+                let started = now_ms();
+                crate::runtime::shared().spawn(async move {
+                    // A running child shows its first parts at once, then
+                    // one more every couple of seconds, holding on its last
+                    // (it keeps working); a finished one is whole.
+                    let mut step = if running {
+                        steps.saturating_sub(2).max(1)
+                    } else {
+                        steps
+                    };
+                    loop {
+                        let entries = transcripts::subagent_transcript(
+                            &doc_id,
+                            &host,
+                            started,
+                            running.then_some(step),
+                        )
+                        .unwrap_or_default();
+                        let frame = serde_json::json!({ "reset": entries });
+                        if tx.send(frame).await.is_err() || !running || step >= steps {
+                            // Keep the stream open: the child is still at it.
+                            tokio::select! {
+                                _ = cancel.cancelled() => return,
+                                _ = tx.closed() => return,
+                            }
+                        }
+                        tokio::select! {
+                            _ = cancel.cancelled() => return,
+                            _ = tokio::time::sleep(Duration::from_millis(2400)) => {}
+                        }
+                        step += 1;
+                    }
+                });
+                Ok(crate::host_stream::HostStream::Local(rx))
+            }
+            other => Err(ClientError::Unsupported(other.to_owned())),
+        }
     }
 
     pub(crate) async fn list_harnesses(&self, _device_id: &str) -> Vec<HarnessInfo> {

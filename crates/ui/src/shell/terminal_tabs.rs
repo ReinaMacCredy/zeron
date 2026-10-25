@@ -329,6 +329,7 @@ impl Shell {
                             id: info.id,
                             cwd: info.cwd,
                             shell: info.shell,
+                            host_replies: true,
                         },
                         &title,
                         cx,

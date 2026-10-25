@@ -14,7 +14,7 @@ pub enum RunState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct TerminalTab {
+pub struct AgentTerminalTab {
     pub id: String,
     pub title: String,
     pub state: RunState,
@@ -33,8 +33,8 @@ pub struct TerminalSpan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct TerminalView {
-    pub tab: TerminalTab,
+pub struct AgentTerminalScreen {
+    pub tab: AgentTerminalTab,
     pub lines: Vec<Vec<TerminalSpan>>,
     pub background: u32,
     pub foreground: u32,
@@ -71,8 +71,8 @@ pub fn run_status(exit_code: Option<i32>) -> String {
     }
 }
 
-pub fn tab(info: &TerminalInfo) -> TerminalTab {
-    TerminalTab {
+pub fn tab(info: &TerminalInfo) -> AgentTerminalTab {
+    AgentTerminalTab {
         id: info.id.clone(),
         title: info
             .title
@@ -145,7 +145,7 @@ fn span(run: &TerminalRun, palette: &TerminalPalette, dark: bool) -> TerminalSpa
     }
 }
 
-pub fn view(screen: &TerminalScreen, dark: bool) -> TerminalView {
+pub fn view(screen: &TerminalScreen, dark: bool) -> AgentTerminalScreen {
     let palette = palette(dark);
     let lines = if screen.styled_lines.is_empty() {
         screen
@@ -169,7 +169,7 @@ pub fn view(screen: &TerminalScreen, dark: bool) -> TerminalView {
             .map(|line| line.iter().map(|run| span(run, palette, dark)).collect())
             .collect()
     };
-    TerminalView {
+    AgentTerminalScreen {
         tab: tab(&screen.terminal),
         lines,
         background: rgba(palette.background, 1.0),

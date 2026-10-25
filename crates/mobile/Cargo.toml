@@ -45,3 +45,4 @@ zeron-theme.workspace = true
 zatex = { workspace = true, features = ["bundled"] }
 resvg = { version = "0.46", default-features = false }
 thiserror.workspace = true
+zeron-term.workspace = true

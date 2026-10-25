@@ -255,6 +255,7 @@ impl HostTerminals {
                     id: format!("term-demo-{}", self.seq),
                     cwd: "/Users/dev/zeron".into(),
                     shell: "zsh".into(),
+                    host_replies: true,
                 };
                 self.by_chat.entry(chat_id).or_default().push(Terminal {
                     info: TerminalInfo {
