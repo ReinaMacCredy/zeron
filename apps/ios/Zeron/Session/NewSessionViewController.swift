@@ -727,6 +727,7 @@ extension NewSessionViewController {
             return false
         }
         created = true
+        PushNotifications.shared.askAfterFirstSession()
         app.newSessionText = ""
         app.newSessionImages = []
         let client = app.client
