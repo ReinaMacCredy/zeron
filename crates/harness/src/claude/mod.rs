@@ -708,6 +708,17 @@ impl Harness for ClaudeHarness {
     fn compacts_in_place(&self) -> bool {
         true
     }
+    /// `/compact` preserves the last assistant message after its summary (`compactMetadata.preservedMessages`).
+    fn compaction_keeps_last_reply(&self) -> bool {
+        true
+    }
+    fn compaction_summary(&self, session_id: &str, pre_tokens: u64) -> Option<String> {
+        normalize::compact_summary(
+            &config_root(&launch_env(&self.launch, &Default::default())),
+            session_id,
+            pre_tokens,
+        )
+    }
     /// Same launch arguments and cwd. The CLI ignores the sandbox level, and
     /// option spellings that launch the same flags are the same runtime.
     fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {

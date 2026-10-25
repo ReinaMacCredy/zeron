@@ -1056,10 +1056,15 @@ fn an_idle_chat_waiting_on_compaction_shows_the_wait_row() {
     assert_eq!(
         shown(
             &mut w,
-            Some(CompactionWait::Compacting(Some((120_000, true))))
+            Some(CompactionWait::Compacting(Some(zeron_proto::transcript::Boundary {
+                tokens: 120_000,
+                carry: true,
+                cause: zeron_doc::DecidedBy::Streak.compaction_cause(),
+            })))
         ),
         Some((
-            "Compacting 120.0k, carrying the last turns over".to_owned(),
+            "Compacting 120.0k after three same-task verdicts, carrying the last turns over"
+                .to_owned(),
             Some(1_000),
             None,
             true

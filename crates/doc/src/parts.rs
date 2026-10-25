@@ -191,6 +191,19 @@ impl DecidedBy {
             Self::AgentNote => "Agent note, compacted without asking",
         }
     }
+
+    pub fn asked(self) -> bool {
+        matches!(self, Self::Stage1 | Self::Stage2)
+    }
+
+    pub fn compaction_cause(self) -> Option<&'static str> {
+        match self {
+            Self::Stage1 | Self::Stage2 => None,
+            Self::Streak => Some("after three same-task verdicts"),
+            Self::Ceiling => Some("near the context window"),
+            Self::AgentNote => Some("at the agent's request"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -214,6 +227,27 @@ pub struct ClassifierRecord {
     pub input_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+pub fn classifier_part_id(entry_id: &str) -> String {
+    format!("{entry_id}-classifier")
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CompactionRecord {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub carried: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,6 +314,11 @@ pub enum MessagePart {
     Classifier {
         id: String,
         record: ClassifierRecord,
+    },
+    /// Rides a compaction's system entry whose text part is the label older readers show.
+    Compaction {
+        id: String,
+        record: CompactionRecord,
     },
     #[serde(rename_all = "camelCase")]
     Tool {
@@ -397,6 +436,7 @@ impl MessagePart {
             | MessagePart::Reasoning { id, .. }
             | MessagePart::Handoff { id, .. }
             | MessagePart::Classifier { id, .. }
+            | MessagePart::Compaction { id, .. }
             | MessagePart::Tool { id, .. }
             | MessagePart::Input { id, .. }
             | MessagePart::Error { id, .. }
@@ -411,6 +451,9 @@ impl MessagePart {
             | MessagePart::Reasoning { text, .. }
             | MessagePart::Handoff { text, .. } => text.len(),
             MessagePart::Classifier { record, .. } => {
+                serde_json::to_vec(record).map_or(0, |v| v.len())
+            }
+            MessagePart::Compaction { record, .. } => {
                 serde_json::to_vec(record).map_or(0, |v| v.len())
             }
             MessagePart::Tool {

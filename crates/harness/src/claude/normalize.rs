@@ -618,19 +618,7 @@ impl Normalizer {
     fn restore_spawns(config_root: &std::path::Path, session_id: &str) -> (Self, Transcript) {
         use std::io::BufRead as _;
         let mut norm = Self::new();
-        if session_id.is_empty()
-            || !session_id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-')
-        {
-            return (norm, Transcript::Unknown);
-        }
-        let Ok(projects) = std::fs::read_dir(config_root.join("projects")) else {
-            return (norm, Transcript::Unknown);
-        };
-        let Some(file) = projects.flatten().find_map(|project| {
-            std::fs::File::open(project.path().join(format!("{session_id}.jsonl"))).ok()
-        }) else {
+        let Some(file) = session_file(config_root, session_id) else {
             return (norm, Transcript::Unknown);
         };
         let mut transcript = Transcript::Empty;
@@ -1482,6 +1470,91 @@ impl Normalizer {
             | Frame::Other => Vec::new(),
         }
     }
+}
+
+fn session_file(config_root: &std::path::Path, session_id: &str) -> Option<std::fs::File> {
+    if session_id.is_empty()
+        || !session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return None;
+    }
+    std::fs::read_dir(config_root.join("projects"))
+        .ok()?
+        .flatten()
+        .find_map(|project| {
+            std::fs::File::open(project.path().join(format!("{session_id}.jsonl"))).ok()
+        })
+}
+
+const SUMMARY_TAIL_BYTES: u64 = 8 << 20;
+const SUMMARY_CHARS: usize = 6_000;
+
+/// Matched on the boundary's `preTokens`, so an earlier compaction's summary is never taken for this one.
+pub(crate) fn compact_summary(
+    config_root: &std::path::Path,
+    session_id: &str,
+    pre_tokens: u64,
+) -> Option<String> {
+    use std::io::{Read as _, Seek as _};
+    let mut file = session_file(config_root, session_id)?;
+    let len = file.metadata().ok()?.len();
+    file.seek(std::io::SeekFrom::Start(
+        len.saturating_sub(SUMMARY_TAIL_BYTES),
+    ))
+    .ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    let tail = String::from_utf8_lossy(&tail);
+    let mut lines = tail.lines().rev().peekable();
+    let mut summary = None;
+    while let Some(line) = lines.next() {
+        if line.contains("\"isCompactSummary\":true") {
+            summary = Some(line);
+            continue;
+        }
+        if !line.contains("\"compact_boundary\"") {
+            continue;
+        }
+        let boundary: Value = serde_json::from_str(line).ok()?;
+        if boundary
+            .pointer("/compactMetadata/preTokens")
+            .and_then(Value::as_u64)
+            != Some(pre_tokens)
+        {
+            return None;
+        }
+        let record: Value = serde_json::from_str(summary?).ok()?;
+        let content = record.pointer("/message/content")?;
+        let text = match content {
+            Value::String(text) => text.clone(),
+            Value::Array(blocks) => blocks
+                .iter()
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => return None,
+        };
+        return Some(summary_body(&text));
+    }
+    None
+}
+
+fn summary_body(text: &str) -> String {
+    let body = text
+        .split_once("</tools-used-before-summary>")
+        .map_or(text, |(_, rest)| rest);
+    let body = body
+        .split_once("\n\nIf you need specific details from before compaction")
+        .map_or(body, |(head, _)| head)
+        .trim();
+    let body = body.strip_prefix("This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.").unwrap_or(body).trim();
+    if body.chars().count() <= SUMMARY_CHARS {
+        return body.to_owned();
+    }
+    let cut: String = body.chars().take(SUMMARY_CHARS).collect();
+    format!("{}...", cut.trim_end())
 }
 
 #[cfg(test)]
@@ -2835,6 +2908,45 @@ mod tests {
                 AgentEvent::Subagent { parent_tool_use_id, .. } if parent_tool_use_id == "toolu_spawn"
             )), "{events:?}");
         }
+    }
+
+    #[test]
+    fn compact_summary_is_the_one_written_at_this_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("projects/encoded-project");
+        std::fs::create_dir_all(&project).unwrap();
+        let summary = |text: &str| {
+            json!({"type":"user","isCompactSummary":true,"message":{"role":"user","content":format!(
+                "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n<tools-used-before-summary>Bash</tools-used-before-summary>\n{text}\n\nIf you need specific details from before compaction, read the full transcript at: /x.jsonl"
+            )}})
+            .to_string()
+        };
+        let boundary = |pre: u64| {
+            json!({"type":"system","subtype":"compact_boundary","compactMetadata":{"preTokens":pre}}).to_string()
+        };
+        let old = [
+            boundary(100),
+            summary("Older summary."),
+            r#"{"type":"assistant"}"#.to_string(),
+        ];
+        let file = project.join("s-1.jsonl");
+        std::fs::write(&file, old.join("\n") + "\n").unwrap();
+        assert_eq!(
+            compact_summary(root.path(), "s-1", 100).as_deref(),
+            Some("Older summary.")
+        );
+        assert_eq!(
+            compact_summary(root.path(), "s-1", 250),
+            None,
+            "the new summary is not on disk yet"
+        );
+        let new = [boundary(250), summary("Summary:\n1. Newer.")];
+        std::fs::write(&file, old.join("\n") + "\n" + &new.join("\n") + "\n").unwrap();
+        assert_eq!(
+            compact_summary(root.path(), "s-1", 250).as_deref(),
+            Some("Summary:\n1. Newer.")
+        );
+        assert_eq!(compact_summary(root.path(), "../s-1", 250), None);
     }
 
     #[tokio::test]

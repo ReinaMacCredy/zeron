@@ -43,10 +43,16 @@ const STAGE2_SUFFIX: &str = "Before answering, check carefully whether CARRY cov
 
 const STAGE2_NOTE_SUFFIX: &str = "Before answering, check carefully whether CARRY covers the new message. Compaction would keep only the last 2 user/agent pairs above, word for word, plus a summary of everything older (requests, decisions, files touched, pending work). Does the note, or the work it asks for, need anything else: a detail from an older turn, an option or number given earlier, or a command's output? Work the agent started that is still running does not count: it keeps running through compaction and reports after it. Reason briefly, then end with a final line containing only CARRY or CONTINUE. NEW is not an option here.";
 
+/// Asked after the verdict is final: a reason line inside the verdict prompt moved Haiku's verdicts toward NEW
+/// (.maestro/topic/streak-valve/reason-bench.md).
+const REASON_INSTRUCTIONS: &str = "A chat is compacted before its next message when its conversation grows long: the conversation so far is replaced by a short summary. A classifier has already decided what to do before the new message below is answered. Explain that decision to the person in one plain English sentence of at most 20 words, naming what the new message needs from the conversation. Do not repeat the decision's name and do not hedge. Reply with the sentence only.";
+const REASON_CHARS: usize = 240;
+
 const PERSON_HEAD: &str = "New message (from the person):";
 const NOTE_HEAD: &str = "New message (the agent's own note, written when it asked to compact):";
 const NOTE_TRAILER: &str = "The agent asked to compact itself, so work it started that is still running (builds, tests, background jobs, sub-agents, delegates) is not a reason for CONTINUE: it keeps running through compaction, its ids are listed next to the carried text, and its results arrive after it.";
 
+const KEPT_REPLY: &str = "(its final reply is the message right before this one)";
 const TURNS: usize = 4;
 const CLIP_CHARS: usize = 800;
 const CARRY_TURNS: usize = 2;
@@ -170,6 +176,7 @@ pub(crate) async fn classifier_target(
 async fn ask(
     registry: &HarnessRegistry,
     target: &OneShotTarget,
+    instructions: &'static str,
     prompt: String,
     attempt_timeout: std::time::Duration,
 ) -> Result<crate::titles::OneShotReply, crate::EngineError> {
@@ -181,7 +188,7 @@ async fn ask(
             harness: target.harness_id,
             model: target.model.clone(),
             prompt,
-            instructions: INSTRUCTIONS,
+            instructions,
             attempt_timeout,
             retry_delays_ms: &[],
         },
@@ -201,7 +208,7 @@ fn add_usage(record: &mut ClassifierRecord, reply: &crate::titles::OneShotReply)
 /// Any failure reads as a follow-up: a missed compaction is retried later.
 pub(crate) async fn classify(
     registry: &HarnessRegistry,
-    target: OneShotTarget,
+    target: &OneShotTarget,
     input: String,
     agent_note: bool,
 ) -> ClassifierRecord {
@@ -212,7 +219,15 @@ pub(crate) async fn classify(
         input: input.clone(),
         ..Default::default()
     };
-    match ask(registry, &target, input.clone(), STAGE1_TIMEOUT).await {
+    match ask(
+        registry,
+        target,
+        INSTRUCTIONS,
+        input.clone(),
+        STAGE1_TIMEOUT,
+    )
+    .await
+    {
         Ok(reply) => {
             add_usage(&mut record, &reply);
             record.verdict = parse_stage1(&reply.text).unwrap_or(ClassifierVerdict::Failed);
@@ -225,7 +240,15 @@ pub(crate) async fn classify(
     }
     if record.verdict == ClassifierVerdict::Continue {
         record.decided_by = DecidedBy::Stage2;
-        match ask(registry, &target, stage2_prompt(&input, agent_note), STAGE2_TIMEOUT).await {
+        match ask(
+            registry,
+            target,
+            INSTRUCTIONS,
+            stage2_prompt(&input, agent_note),
+            STAGE2_TIMEOUT,
+        )
+        .await
+        {
             Ok(reply) => {
                 add_usage(&mut record, &reply);
                 record.verdict = parse_stage2(&reply.text);
@@ -240,6 +263,50 @@ pub(crate) async fn classify(
     }
     record.duration_ms = started.elapsed().as_millis() as u64;
     record
+}
+
+pub(crate) async fn explain(
+    registry: &HarnessRegistry,
+    target: &OneShotTarget,
+    input: &str,
+    verdict: ClassifierVerdict,
+) -> Option<String> {
+    let decision = match verdict {
+        ClassifierVerdict::New => {
+            "compact to a summary only, because the new message starts a different task."
+        }
+        ClassifierVerdict::Carry => "compact, but keep the last 2 user/agent turns word for word.",
+        ClassifierVerdict::Continue => "do not compact yet; everything stays.",
+        ClassifierVerdict::Failed => return None,
+    };
+    let prompt = format!("{input}\n\nDecision: {decision}");
+    let reply = ask(
+        registry,
+        target,
+        REASON_INSTRUCTIONS,
+        prompt,
+        STAGE1_TIMEOUT,
+    )
+    .await
+    .map_err(|err| tracing::debug!(error = %err, "classifier reason skipped"))
+    .ok()?;
+    reason_line(&reply.text)
+}
+
+fn reason_line(reply: &str) -> Option<String> {
+    let line = reply
+        .lines()
+        .map(|line| line.trim().trim_matches(|c| c == '"' || c == '*').trim())
+        .find(|line| !line.is_empty())?;
+    Some(clip_end(line, REASON_CHARS))
+}
+
+fn clip_end(text: &str, budget: usize) -> String {
+    if text.chars().count() <= budget {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(budget).collect();
+    format!("{}...", cut.trim_end())
 }
 
 /// A note never starts fresh: prompt wording alone let one through on the bench (carry/prompts.md, A13).
@@ -339,6 +406,7 @@ pub(crate) fn carry_block(
     entries: &[SessionMessageEntry],
     chat_id: &str,
     jobs: &[OpenJob],
+    keeps_last_reply: bool,
 ) -> Option<String> {
     let mut turns: Vec<(&'static str, String, Option<&str>)> = Vec::new();
     for entry in entries {
@@ -359,8 +427,12 @@ pub(crate) fn carry_block(
     }
     let mut budget = CARRY_CHARS;
     let mut kept: Vec<String> = Vec::new();
-    for (from, message, agent) in turns.iter().rev().take(CARRY_TURNS) {
+    for (newest, (from, message, agent)) in turns.iter().rev().take(CARRY_TURNS).enumerate() {
         let mut lines: Vec<String> = Vec::new();
+        let agent = match agent {
+            Some(_) if newest == 0 && keeps_last_reply => Some(KEPT_REPLY),
+            agent => *agent,
+        };
         let pieces = [
             agent.map(|text| ("agent", text)),
             (!message.is_empty()).then_some((*from, message.as_str())),
@@ -385,7 +457,7 @@ pub(crate) fn carry_block(
         return None;
     }
     Some(format!(
-        "<carried_over>\nThe last turns of this conversation from before the compaction, verbatim: each turn's message and the agent's final reply. Tool calls, their output and thinking are left out.\n\n{}\n</carried_over>",
+        "<carried_over>\nThe last turns of this conversation from before the compaction, verbatim and oldest first: each turn's message and the agent's final reply. Tool calls, their output and thinking are left out. A later turn may have finished what an earlier one planned or listed as next, and the agent's last reply was already delivered to the person.\n\n{}\n</carried_over>",
         kept.join("\n\n")
     ))
 }
@@ -493,6 +565,11 @@ mod tests {
         assert_eq!(parse_stage1("I think so"), None);
         assert_eq!(parse_stage1(""), None);
         assert_eq!(parse_stage1("CARRYING on"), None);
+        assert_eq!(
+            reason_line("\n\"Asks about the option the last reply offered.\"\nmore").as_deref(),
+            Some("Asks about the option the last reply offered.")
+        );
+        assert_eq!(reason_line(" \n"), None);
         assert_eq!(parse_stage2("The plan is open.\n**CARRY**"), Carry);
         assert_eq!(parse_stage2("reasoning\n\nCONTINUE\n"), Continue);
         assert_eq!(parse_stage2("a fresh start\nNEW"), Continue);
@@ -536,12 +613,19 @@ mod tests {
             reply,
             streaming,
         ];
-        let block = carry_block(&entries, "chat", &[]).expect("a block");
+        let block = carry_block(&entries, "chat", &[], false).expect("a block");
         assert_eq!(
             block,
-            "<carried_over>\nThe last turns of this conversation from before the compaction, verbatim: each turn's message and the agent's final reply. Tool calls, their output and thinking are left out.\n\nperson: second ask\nagent: old reply\n\nagent note: phase 2 next\nagent: phase 1 merged\n</carried_over>"
+            "<carried_over>\nThe last turns of this conversation from before the compaction, verbatim and oldest first: each turn's message and the agent's final reply. Tool calls, their output and thinking are left out. A later turn may have finished what an earlier one planned or listed as next, and the agent's last reply was already delivered to the person.\n\nperson: second ask\nagent: old reply\n\nagent note: phase 2 next\nagent: phase 1 merged\n</carried_over>"
         );
-        assert_eq!(carry_block(&[], "chat", &[]), None);
+        let kept = carry_block(&entries, "chat", &[], true).expect("a block");
+        assert!(
+            kept.ends_with(&format!(
+                "agent: old reply\n\nagent note: phase 2 next\nagent: {KEPT_REPLY}\n</carried_over>"
+            )),
+            "{kept}"
+        );
+        assert_eq!(carry_block(&[], "chat", &[], false), None);
     }
 
     #[test]
@@ -552,7 +636,13 @@ mod tests {
             id: "late".into(),
             text: "tests green".into(),
         });
-        let block = carry_block(&[entry(MessageRole::User, "test it"), open], "chat", &[]).unwrap();
+        let block = carry_block(
+            &[entry(MessageRole::User, "test it"), open],
+            "chat",
+            &[],
+            false,
+        )
+        .unwrap();
         assert!(block.contains("agent: running the tests\n"), "{block}");
         assert!(!block.contains("tests green"));
 
@@ -563,7 +653,7 @@ mod tests {
             entry(MessageRole::User, "newest ask"),
             entry(MessageRole::Assistant, &long),
         ];
-        let block = carry_block(&entries, "chat", &[]).unwrap();
+        let block = carry_block(&entries, "chat", &[], false).unwrap();
         assert!(block.contains(&format!("agent: ...{}", "y".repeat(8_000))));
         assert!(!block.contains("newest ask") && !block.contains("older"));
         let body = block.split("\n\n").skip(1).collect::<Vec<_>>().join("\n\n");
@@ -605,7 +695,7 @@ mod tests {
             what: "Sleep for 4 seconds then echo hi".into(),
         }];
         jobs.extend(spawns);
-        let block = carry_block(&entries, "chat", &jobs).unwrap();
+        let block = carry_block(&entries, "chat", &jobs, false).unwrap();
         assert!(
             block.ends_with("person: review it\nagent: reviewer started\n\nStill running when the chat compacted:\n- background shell b7wb5vp5o: Sleep for 4 seconds then echo hi\n- sub-agent toolu_review: Review the diff\n</carried_over>"),
             "{block}"
@@ -617,7 +707,7 @@ mod tests {
                 what: "x".repeat(300),
             })
             .collect();
-        let block = carry_block(&[], "chat", &many).unwrap();
+        let block = carry_block(&[], "chat", &many, false).unwrap();
         assert_eq!(block.matches("- delegated task").count(), 10);
         assert!(block.contains(&format!("- delegated task t0: {}\n", "x".repeat(160))));
         assert!(block.contains("- and 2 more\n</carried_over>"));

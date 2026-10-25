@@ -380,12 +380,19 @@ pub enum CompactionWait {
         model: Option<String>,
         agent_note: bool,
     },
-    Compacting(Option<(u64, bool)>),
+    Compacting(Option<Boundary>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Boundary {
+    pub tokens: u64,
+    pub carry: bool,
+    pub cause: Option<&'static str>,
 }
 
 impl CompactionWait {
     pub fn of(
-        compacting: Option<Option<(u64, bool)>>,
+        compacting: Option<Option<Boundary>>,
         classifying: Option<&crate::Classifying>,
         plan: Option<crate::CompactPlan>,
         idle: bool,
@@ -419,10 +426,15 @@ impl CompactionWait {
                     "· checking if this is a new task"
                 }),
             ),
-            Self::Compacting(Some((tokens, carry))) => (
+            Self::Compacting(Some(Boundary {
+                tokens,
+                carry,
+                cause,
+            })) => (
                 format!(
-                    "Compacting {}{}",
+                    "Compacting {}{}{}",
                     compact_count(*tokens),
+                    cause.map(|cause| format!(" {cause}")).unwrap_or_default(),
                     if *carry {
                         ", carrying the last turns over"
                     } else {

@@ -1226,8 +1226,27 @@ fn seams(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                     stage2_reply: None,
                     input_tokens: Some(1_240),
                     output_tokens: Some(12),
+                    reason: Some("A follow-up on the benchmark the last reply reported.".into()),
                 },
             }],
+        ),
+        system(
+            "m5c",
+            host,
+            now - 398_000,
+            vec![
+                text("t0", "Compacted, last turns carried over · 48.2k → 6.1k tokens"),
+                MessagePart::Compaction {
+                    id: "compaction".into(),
+                    record: zeron_doc::parts::CompactionRecord {
+                        pre_tokens: Some(48_200),
+                        post_tokens: Some(6_100),
+                        duration_ms: Some(31_000),
+                        carried: Some("person: Bench the layout pass\nagent: Layout pass is 1.4ms at p95.".into()),
+                        summary: Some("- The layout pass was benchmarked at 1.4ms p95.\n- Next: profile the scroll path.".into()),
+                    },
+                },
+            ],
         ),
         assistant(
             "m6",

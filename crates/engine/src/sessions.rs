@@ -322,8 +322,23 @@ fn binary_identity(harness: &dyn Harness) -> Option<String> {
     ))
 }
 
+#[derive(Clone)]
+struct CompactionNote {
+    label: &'static str,
+    carried: Option<String>,
+    started: Option<std::time::Instant>,
+}
+
+impl CompactionNote {
+    const UNASKED: Self = Self {
+        label: COMPACTED_NOTE,
+        carried: None,
+        started: None,
+    };
+}
+
 struct QueuedCompaction {
-    note: &'static str,
+    note: CompactionNote,
     started: bool,
     compacted: Option<(Option<u64>, Option<u64>)>,
     done: oneshot::Sender<CompactionDrain>,
@@ -2542,11 +2557,12 @@ impl SessionsEngine {
         chat_id: &str,
         focus: Option<String>,
     ) -> Result<CompactOutcome, EngineError> {
-        self.compact_noting(chat_id, focus, COMPACTED_NOTE).await
+        self.compact_noting(chat_id, focus, COMPACTED_NOTE, None)
+            .await
     }
 
     pub async fn compact_idle(&self, chat_id: &str) -> Result<CompactOutcome, EngineError> {
-        self.compact_noting(chat_id, None, COMPACTED_IDLE_NOTE)
+        self.compact_noting(chat_id, None, COMPACTED_IDLE_NOTE, None)
             .await
     }
 
@@ -2608,23 +2624,29 @@ impl SessionsEngine {
             .get(chat_id)
             .copied()
             .unwrap_or_default();
-        let mut record = if streak.count >= crate::compact_boundary::STREAK_LIMIT {
-            zeron_doc::ClassifierRecord {
-                verdict: ClassifierVerdict::Carry,
-                decided_by: zeron_doc::DecidedBy::Streak,
-                input,
-                ..Default::default()
-            }
+        let (mut record, target) = if streak.count >= crate::compact_boundary::STREAK_LIMIT {
+            (
+                zeron_doc::ClassifierRecord {
+                    verdict: ClassifierVerdict::Carry,
+                    decided_by: zeron_doc::DecidedBy::Streak,
+                    input,
+                    ..Default::default()
+                },
+                None,
+            )
         } else if let Some(source) = settings.jev {
-            crate::jev::classify(&self.inner.registry, source, input).await
+            (
+                crate::jev::classify(&self.inner.registry, source, input).await,
+                None,
+            )
         } else {
-            let Some(record) = self
+            let Some((record, target)) = self
                 .run_classifier(chat_id, harness_id, settings.classifier, input, false)
                 .await
             else {
                 return false;
             };
-            record
+            (record, Some(target))
         };
         record.context_tokens = tokens;
         let verdict = record.verdict;
@@ -2633,17 +2655,17 @@ impl SessionsEngine {
             let next = crate::compact_boundary::next_streak(streak, verdict, tokens);
             streaks.insert(chat_id.to_string(), next);
         }
-        self.write_classifier_record(chat_id, record);
+        self.write_classifier_record(chat_id, record, target);
         let (note, fresh_note, focus) = match verdict {
             ClassifierVerdict::New => (
                 COMPACTED_BOUNDARY_NOTE,
                 FRESH_SESSION_NOTE,
-                "The next message starts a new task. Keep only what it may need from this conversation.",
+                "The next message starts a new task. Keep only what it may need from this conversation. The agent's last reply was already delivered to the person: do not list it as pending.",
             ),
             ClassifierVerdict::Carry => (
                 COMPACTED_CARRY_NOTE,
                 FRESH_SESSION_CARRY_NOTE,
-                "The last two turns go along verbatim after this compaction. Keep what the next message may need from everything before them.",
+                "The last two turns go along verbatim after this compaction. Keep what the next message may need from everything before them. The agent's last reply was already delivered to the person: do not list it as pending.",
             ),
             ClassifierVerdict::Continue | ClassifierVerdict::Failed => {
                 lock(&self.inner.nudged_at).insert(chat_id.to_string(), tokens);
@@ -2654,19 +2676,23 @@ impl SessionsEngine {
         if blocked() || self.inner.past_floor(chat_id, config.as_ref()).is_none() {
             return false;
         }
+        let harness = self
+            .inner
+            .resolve_for_chat(chat_id, harness_id)
+            .map(|(harness, _)| harness);
         let carry = (verdict == ClassifierVerdict::Carry)
             .then(|| {
                 crate::compact_boundary::carry_block(
                     &entries,
                     chat_id,
                     &self.open_jobs(chat_id, &entries),
+                    harness
+                        .as_ref()
+                        .is_ok_and(|harness| harness.compaction_keeps_last_reply()),
                 )
             })
             .flatten();
-        let compaction = self
-            .inner
-            .resolve_for_chat(chat_id, harness_id)
-            .map(|(harness, _)| harness.compaction());
+        let compaction = harness.map(|harness| harness.compaction());
         if matches!(compaction, Ok(Compaction::None)) {
             return match self
                 .start_fresh_session(chat_id, harness_id, &entries, fresh_note)
@@ -2686,7 +2712,10 @@ impl SessionsEngine {
             "{focus} The message: {}",
             crate::predictions::tail(prompt.trim(), 2000)
         );
-        match self.compact_noting(chat_id, Some(focus), note).await {
+        match self
+            .compact_noting(chat_id, Some(focus), note, carry.clone())
+            .await
+        {
             Ok(outcome) => {
                 if outcome.compacted {
                     self.inner.owe_carry(chat_id, carry);
@@ -2707,7 +2736,7 @@ impl SessionsEngine {
         classifier: crate::registry::TitleSettings,
         input: String,
         agent_note: bool,
-    ) -> Option<zeron_doc::ClassifierRecord> {
+    ) -> Option<(zeron_doc::ClassifierRecord, crate::titles::OneShotTarget)> {
         // The person's message waits on this, and a pending CLI update would hold the lease until it installs.
         const TARGET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
         let target = tokio::time::timeout(
@@ -2728,9 +2757,11 @@ impl SessionsEngine {
                 model: target.model.clone(),
             }),
         );
-        let record = crate::compact_boundary::classify(&self.inner.registry, target, input, agent_note).await;
+        let record =
+            crate::compact_boundary::classify(&self.inner.registry, &target, input, agent_note)
+                .await;
         self.inner.set_classifying(chat_id, None);
-        Some(record)
+        Some((record, target))
     }
 
     fn open_jobs(
@@ -2787,13 +2818,50 @@ impl SessionsEngine {
         jobs
     }
 
-    fn write_classifier_record(&self, chat_id: &str, record: zeron_doc::ClassifierRecord) {
+    fn write_classifier_record(
+        &self,
+        chat_id: &str,
+        record: zeron_doc::ClassifierRecord,
+        target: Option<crate::titles::OneShotTarget>,
+    ) {
+        let id = new_id();
         if let Err(err) = self
             .doc_handle(chat_id)
-            .and_then(|handle| Ok(handle.write_classifier_record(&new_id(), record, now_ms())?))
+            .and_then(|handle| Ok(handle.write_classifier_record(&id, record.clone(), now_ms())?))
         {
             tracing::warn!(chat = %chat_id, error = %err, "classifier record write failed");
+            return;
         }
+        let Some(target) = target else {
+            return;
+        };
+        let (inner, chat_id) = (self.inner.clone(), chat_id.to_string());
+        tokio::spawn(async move {
+            let Some(reason) = crate::compact_boundary::explain(
+                &inner.registry,
+                &target,
+                &record.input,
+                record.verdict,
+            )
+            .await
+            else {
+                return;
+            };
+            let part = MessagePart::Classifier {
+                id: zeron_doc::classifier_part_id(&id),
+                record: zeron_doc::ClassifierRecord {
+                    reason: Some(reason),
+                    ..record
+                },
+            };
+            if let Some(Err(err)) = inner
+                .doc_host()
+                .and_then(|host| host.open(&chat_id).ok())
+                .map(|handle| handle.update_record_part(&id, &part))
+            {
+                tracing::warn!(chat = %chat_id, error = %err, "classifier reason write failed");
+            }
+        });
     }
 
     async fn start_fresh_session(
@@ -2952,7 +3020,13 @@ impl SessionsEngine {
         &self,
         chat_id: &str,
         note: &str,
-    ) -> (ClassifierVerdict, Option<zeron_doc::ClassifierRecord>) {
+    ) -> (
+        ClassifierVerdict,
+        Option<(
+            zeron_doc::ClassifierRecord,
+            Option<crate::titles::OneShotTarget>,
+        )>,
+    ) {
         let settings = self.inner.registry.compaction_settings();
         if settings.mode != CompactionMode::Classifier {
             return (ClassifierVerdict::New, None);
@@ -2990,24 +3064,27 @@ impl SessionsEngine {
             )
             .await
         };
-        let mut record = match classified {
-            Some(mut record) => {
+        let (mut record, target) = match classified {
+            Some((mut record, target)) => {
                 crate::compact_boundary::cap_agent_note(&mut record);
-                record
+                (record, Some(target))
             }
-            None => zeron_doc::ClassifierRecord {
-                verdict: ClassifierVerdict::Carry,
-                decided_by: if at_ceiling {
-                    zeron_doc::DecidedBy::Ceiling
-                } else {
-                    zeron_doc::DecidedBy::AgentNote
+            None => (
+                zeron_doc::ClassifierRecord {
+                    verdict: ClassifierVerdict::Carry,
+                    decided_by: if at_ceiling {
+                        zeron_doc::DecidedBy::Ceiling
+                    } else {
+                        zeron_doc::DecidedBy::AgentNote
+                    },
+                    input,
+                    ..Default::default()
                 },
-                input,
-                ..Default::default()
-            },
+                None,
+            ),
         };
         record.context_tokens = tokens;
-        (record.verdict, Some(record))
+        (record.verdict, Some((record, target)))
     }
 
     pub(crate) async fn compact_for_agent(
@@ -3033,8 +3110,8 @@ impl SessionsEngine {
                 if !self.agent_compact_due(chat_id, &request).await {
                     return Ok(None);
                 }
-                if let Some(record) = record {
-                    self.write_classifier_record(chat_id, record);
+                if let Some((record, target)) = record {
+                    self.write_classifier_record(chat_id, record, target);
                 }
                 verdict
             }
@@ -3052,6 +3129,8 @@ impl SessionsEngine {
                             &entries,
                             chat_id,
                             &self.open_jobs(chat_id, &entries),
+                            self.compaction_harness(chat_id)
+                                .is_some_and(|harness| harness.compaction_keeps_last_reply()),
                         )
                     }),
             ),
@@ -3064,7 +3143,7 @@ impl SessionsEngine {
             lock(&self.inner.compact_owed).insert(chat_id.to_string(), unsent_note(text));
         }
         let ran = self
-            .compact_noting(chat_id, request.focus.clone(), note)
+            .compact_noting(chat_id, request.focus.clone(), note, carry.clone())
             .await;
         if ran.is_err() {
             lock(&self.inner.compact_owed).remove(chat_id);
@@ -3125,10 +3204,15 @@ impl SessionsEngine {
     /// Whether the chat's harness compacts inside its live run, leaving
     /// background shells and sub-agents running.
     pub(crate) fn compacts_in_place(&self, chat_id: &str) -> bool {
+        self.compaction_harness(chat_id)
+            .is_some_and(|harness| harness.compacts_in_place())
+    }
+
+    fn compaction_harness(&self, chat_id: &str) -> Option<Arc<dyn Harness>> {
         self.compaction_request(chat_id)
             .ok()
             .and_then(|(harness_id, _)| self.inner.resolve_for_chat(chat_id, harness_id).ok())
-            .is_some_and(|(harness, _)| harness.compacts_in_place())
+            .map(|(harness, _)| harness)
     }
 
     pub(crate) fn set_compact_plan(&self, chat_id: &str, plan: Option<zeron_proto::CompactPlan>) {
@@ -3145,8 +3229,14 @@ impl SessionsEngine {
         &self,
         chat_id: &str,
         focus: Option<String>,
-        note: &'static str,
+        label: &'static str,
+        carried: Option<String>,
     ) -> Result<CompactOutcome, EngineError> {
+        let note = CompactionNote {
+            label,
+            carried,
+            started: Some(std::time::Instant::now()),
+        };
         {
             let mut pending = lock(&self.inner.compacting);
             if pending.contains(chat_id) {
@@ -3206,7 +3296,7 @@ impl SessionsEngine {
         {
             let (done, finished) = oneshot::channel();
             *lock(&queued) = Some(QueuedCompaction {
-                note,
+                note: note.clone(),
                 started: false,
                 compacted: None,
                 done,
@@ -3287,7 +3377,7 @@ impl SessionsEngine {
                         lock(&self.inner.compaction_timed_out).insert(chat_id.to_string());
                         Err(EngineError::Other("Context compaction timed out.".into()))
                     }
-                    Ok(drain) => self.settle_compaction(&handle, drain, note),
+                    Ok(drain) => self.settle_compaction(&handle, &harness, drain, &note),
                 }
             }
         }
@@ -3298,17 +3388,19 @@ impl SessionsEngine {
     fn settle_compaction(
         &self,
         handle: &ChatDocHandle,
+        harness: &Arc<dyn Harness>,
         drain: CompactionDrain,
-        note: &str,
+        note: &CompactionNote,
     ) -> Result<CompactOutcome, EngineError> {
         if let Some((pre_tokens, post_tokens)) = drain.compacted {
-            record_compaction(
+            let written = record_compaction(
                 handle.doc(),
                 &self.inner.device_id,
                 note,
                 pre_tokens,
                 post_tokens,
             )?;
+            attach_compaction_summary(&self.inner, harness, handle.chat_id(), written);
             lock(&self.inner.streaks).remove(handle.chat_id());
         }
         self.compaction_outcome(handle.chat_id(), drain)
@@ -6033,20 +6125,34 @@ fn queued_compaction(
 fn record_compaction(
     doc: &SessionDoc,
     device_id: &str,
-    note: &str,
+    note: &CompactionNote,
     pre_tokens: Option<u64>,
     post_tokens: Option<u64>,
-) -> Result<(), DocError> {
+) -> Result<(String, zeron_doc::CompactionRecord), DocError> {
     // Read the window BEFORE clearing: the meter stores tokens and window
     // as one atomic value, so the clear takes the window with it.
     let window = doc.context_usage().and_then(|usage| usage.window);
+    let id = new_id();
+    let record = zeron_doc::CompactionRecord {
+        pre_tokens,
+        post_tokens,
+        duration_ms: note.started.map(|at| at.elapsed().as_millis() as u64),
+        carried: note.carried.clone(),
+        summary: None,
+    };
     doc.push_message(&SessionMessageEntry {
-        id: new_id(),
+        id: id.clone(),
         role: MessageRole::System,
-        parts: vec![MessagePart::Text {
-            id: "t0".into(),
-            text: compaction_note(note, pre_tokens, post_tokens),
-        }],
+        parts: vec![
+            MessagePart::Text {
+                id: "t0".into(),
+                text: compaction_note(note.label, pre_tokens, post_tokens),
+            },
+            MessagePart::Compaction {
+                id: COMPACTION_PART.into(),
+                record: record.clone(),
+            },
+        ],
         created_at: now_ms(),
         device_id: device_id.to_string(),
         status: Some(MessageStatus::Complete),
@@ -6061,7 +6167,60 @@ fn record_compaction(
     if let Some(post_tokens) = post_tokens {
         doc.update_context_usage(Some(post_tokens), window)?;
     }
-    Ok(())
+    Ok((id, record))
+}
+
+/// The CLI may write its summary to disk a beat after the boundary frame reaches us.
+const SUMMARY_READ_DELAYS: [std::time::Duration; 3] = [
+    std::time::Duration::from_millis(200),
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(3),
+];
+
+const COMPACTION_PART: &str = "compaction";
+
+fn attach_compaction_summary(
+    inner: &Arc<Inner>,
+    harness: &Arc<dyn Harness>,
+    chat_id: &str,
+    (entry_id, record): (String, zeron_doc::CompactionRecord),
+) {
+    let (Some(pre_tokens), Some((session_id, _, _))) =
+        (record.pre_tokens, inner.stored_harness_session(chat_id))
+    else {
+        return;
+    };
+    let (inner, harness, chat_id) = (inner.clone(), harness.clone(), chat_id.to_string());
+    tokio::spawn(async move {
+        for delay in SUMMARY_READ_DELAYS {
+            tokio::time::sleep(delay).await;
+            let (harness, session_id) = (harness.clone(), session_id.clone());
+            let summary = tokio::task::spawn_blocking(move || {
+                harness.compaction_summary(&session_id, pre_tokens)
+            })
+            .await
+            .ok()
+            .flatten();
+            let Some(summary) = summary else {
+                continue;
+            };
+            let part = MessagePart::Compaction {
+                id: COMPACTION_PART.into(),
+                record: zeron_doc::CompactionRecord {
+                    summary: Some(summary),
+                    ..record
+                },
+            };
+            if let Some(Err(err)) = inner
+                .doc_host()
+                .and_then(|host| host.open(&chat_id).ok())
+                .map(|handle| handle.update_record_part(&entry_id, &part))
+            {
+                tracing::warn!(chat = %chat_id, error = %err, "compaction summary write failed");
+            }
+            return;
+        }
+    });
 }
 
 /// The system entry's text: the boundary, plus the harness's own before/after
@@ -8086,13 +8245,14 @@ async fn drive_run(
                     let mut queued = lock(&queued);
                     let queued = queued.as_mut().filter(|queued| queued.started)?;
                     queued.compacted = Some((*pre_tokens, *post_tokens));
-                    Some(queued.note)
+                    Some(queued.note.clone())
                 })
-                .unwrap_or(COMPACTED_NOTE);
-            if let Err(err) =
-                record_compaction(doc_ref, &device_id, note, *pre_tokens, *post_tokens)
-            {
-                tracing::warn!(chat = %chat_id, error = %err, "compaction note write failed");
+                .unwrap_or(CompactionNote::UNASKED);
+            match record_compaction(doc_ref, &device_id, &note, *pre_tokens, *post_tokens) {
+                Ok(written) => attach_compaction_summary(&inner, &harness, &chat_id, written),
+                Err(err) => {
+                    tracing::warn!(chat = %chat_id, error = %err, "compaction note write failed")
+                }
             }
             lock(&inner.streaks).remove(&chat_id);
             continue;

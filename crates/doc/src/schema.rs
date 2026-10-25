@@ -172,6 +172,8 @@ struct DocPartJson {
     handoff_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     classifier: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compaction: Option<serde_json::Value>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -232,6 +234,12 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             id: id.clone(),
             kind: "classifier".into(),
             classifier: Some(serde_json::to_value(record)?),
+            ..Default::default()
+        },
+        MessagePart::Compaction { id, record } => DocPartJson {
+            id: id.clone(),
+            kind: "compaction".into(),
+            compaction: Some(serde_json::to_value(record)?),
             ..Default::default()
         },
         MessagePart::Tool {
@@ -424,6 +432,13 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
         },
         "classifier" => match p.classifier.and_then(|c| serde_json::from_value(c).ok()) {
             Some(record) => MessagePart::Classifier { id: p.id, record },
+            None => MessagePart::Text {
+                id: p.id,
+                text: String::new(),
+            },
+        },
+        "compaction" => match p.compaction.and_then(|c| serde_json::from_value(c).ok()) {
+            Some(record) => MessagePart::Compaction { id: p.id, record },
             None => MessagePart::Text {
                 id: p.id,
                 text: String::new(),
@@ -1069,46 +1084,77 @@ impl SessionDoc {
         )
     }
 
-    /// Append `part` to an existing entry, idempotent per part id. Returns
-    /// `false` when no entry matches.
-    pub fn append_part(&self, message_id: &str, part: &MessagePart) -> Result<bool, DocError> {
-        let part_id = part.id();
+    fn entry_parts(&self, message_id: &str) -> Option<LoroList> {
         let messages = self.doc.get_list("messages");
-        for i in 0..messages.len() {
+        (0..messages.len()).find_map(|i| {
             let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
                 messages.get(i)
             else {
-                continue;
+                return None;
             };
             let id_matches = matches!(
                 entry.get("id"),
                 Some(loro::ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == message_id
             );
-            if !id_matches {
-                continue;
-            }
-            let Some(loro::ValueOrContainer::Container(loro::Container::List(parts))) =
-                entry.get("parts")
-            else {
-                continue;
-            };
-            // Idempotent per part id (recovery may re-run on a crash loop).
-            for j in 0..parts.len() {
-                if let Some(loro::ValueOrContainer::Container(loro::Container::Map(part))) =
-                    parts.get(j)
-                    && matches!(
-                        part.get("id"),
-                        Some(loro::ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == part_id
-                    )
+            match entry.get("parts") {
+                Some(loro::ValueOrContainer::Container(loro::Container::List(parts)))
+                    if id_matches =>
                 {
-                    return Ok(true);
+                    Some(parts)
                 }
+                _ => None,
             }
+        })
+    }
+
+    fn part_map(parts: &LoroList, part_id: &str) -> Option<LoroMap> {
+        (0..parts.len()).find_map(|j| match parts.get(j) {
+            Some(loro::ValueOrContainer::Container(loro::Container::Map(part)))
+                if matches!(
+                    part.get("id"),
+                    Some(loro::ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == part_id
+                ) =>
+            {
+                Some(part)
+            }
+            _ => None,
+        })
+    }
+
+    /// Append `part` to an existing entry, idempotent per part id. Returns
+    /// `false` when no entry matches.
+    pub fn append_part(&self, message_id: &str, part: &MessagePart) -> Result<bool, DocError> {
+        let Some(parts) = self.entry_parts(message_id) else {
+            return Ok(false);
+        };
+        // Idempotent per part id (recovery may re-run on a crash loop).
+        if Self::part_map(&parts, part.id()).is_none() {
             push_part(&parts, part)?;
             self.doc.commit();
-            return Ok(true);
         }
-        Ok(false)
+        Ok(true)
+    }
+
+    pub fn update_record_part(
+        &self,
+        message_id: &str,
+        part: &MessagePart,
+    ) -> Result<bool, DocError> {
+        let doc_part = to_doc_part(part)?;
+        let (key, value) = match (&doc_part.classifier, &doc_part.compaction) {
+            (Some(value), _) => ("classifier", value),
+            (None, Some(value)) => ("compaction", value),
+            (None, None) => return Ok(false),
+        };
+        let Some(map) = self
+            .entry_parts(message_id)
+            .and_then(|parts| Self::part_map(&parts, &doc_part.id))
+        else {
+            return Ok(false);
+        };
+        map.insert(key, loro_value_from_json(value))?;
+        self.doc.commit();
+        Ok(true)
     }
 
     /// Mark the input part carrying `request_id` resolved, wherever it lives
@@ -1394,6 +1440,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(classifier) = &doc_part.classifier {
         map.insert("classifier", loro_value_from_json(classifier))?;
     }
+    if let Some(compaction) = &doc_part.compaction {
+        map.insert("compaction", loro_value_from_json(compaction))?;
+    }
     Ok(())
 }
 
@@ -1593,7 +1642,7 @@ pub fn turn_stopped(last: &SessionMessageEntry) -> bool {
             && matches!(last.parts.last(), Some(MessagePart::Error { .. })))
 }
 
-pub fn boundary_compaction<'a, I>(transcript: I) -> Option<(u64, bool)>
+pub fn boundary_compaction<'a, I>(transcript: I) -> Option<zeron_proto::transcript::Boundary>
 where
     I: IntoIterator<Item = &'a SessionMessageEntry>,
     I::IntoIter: DoubleEndedIterator,
@@ -1603,11 +1652,18 @@ where
         .rev()
         .find(|entry| entry.role != MessageRole::User)?;
     entry.parts.iter().find_map(|part| match part {
-        MessagePart::Classifier { record, .. } => match record.verdict {
-            crate::parts::ClassifierVerdict::New => Some((record.context_tokens, false)),
-            crate::parts::ClassifierVerdict::Carry => Some((record.context_tokens, true)),
-            _ => None,
-        },
+        MessagePart::Classifier { record, .. } => {
+            let carry = match record.verdict {
+                crate::parts::ClassifierVerdict::New => false,
+                crate::parts::ClassifierVerdict::Carry => true,
+                _ => return None,
+            };
+            Some(zeron_proto::transcript::Boundary {
+                tokens: record.context_tokens,
+                carry,
+                cause: record.decided_by.compaction_cause(),
+            })
+        }
         _ => None,
     })
 }
@@ -2017,6 +2073,17 @@ mod tests {
                     stage2_reply: Some("CARRY".into()),
                     input_tokens: Some(2100),
                     output_tokens: Some(2),
+                    reason: Some("A follow-up on the last reply".into()),
+                },
+            },
+            MessagePart::Compaction {
+                id: "compaction".into(),
+                record: crate::parts::CompactionRecord {
+                    pre_tokens: Some(263_100),
+                    post_tokens: Some(18_500),
+                    duration_ms: Some(41_000),
+                    carried: Some("<carried_over>".into()),
+                    summary: None,
                 },
             },
         ];
