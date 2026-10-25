@@ -192,9 +192,9 @@ fn step_threads_and_opened_chats_nest_under_their_lead() {
         nested("chat-lead-shelf"),
         ["chat-shelf-3", "chat-shelf-4", "chat-shelf-2", "chat-shelf-1"]
     );
-    assert_eq!(nested("chat-veil"), ["chat-side"]);
+    assert_eq!(nested("chat-veil"), ["chat-side-easing", "chat-side"]);
     for lists in [&ws.front.recent, &ws.front.settled, &ws.front.pinned] {
-        assert!(!ids(lists).iter().any(|id| id.starts_with("chat-shelf-") || *id == "chat-side"));
+        assert!(!ids(lists).iter().any(|id| id.starts_with("chat-shelf-") || id.starts_with("chat-side")));
     }
 }
 
