@@ -111,13 +111,9 @@ pub const SIDECHAT_NEEDS_CHAT: &str = "Start a chat before opening a sidechat.";
 
 pub const CONFIG_NEEDS_CHAT: &str = "Start a chat before opening Claude Code settings.";
 
-pub const CARD_NEEDS_CHAT: &str = "Send a first message, then run Claude Code commands.";
-
 pub fn draft_command_refusal(text: &str, claude_code: bool) -> Option<&'static str> {
     if claude_code && opens_config_panel(text) {
         Some(CONFIG_NEEDS_CHAT)
-    } else if claude_code && claude_card_command(text, |_| false).is_some() {
-        Some(CARD_NEEDS_CHAT)
     } else if compact_focus(text).is_some() {
         Some(COMPACT_NEEDS_CHAT)
     } else if sidechat_prompt(text).is_some() {

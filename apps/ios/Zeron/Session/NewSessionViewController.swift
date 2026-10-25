@@ -193,6 +193,14 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
                 Toast.show(refusal, in: self.view.window, above: self.composer)
                 return .kept
             }
+            let skills = self.invocationCatalogs.filter { $0.key.hasSuffix("|true") }.values.flatMap { $0.entries.map(\.name) }
+            if self.draft.harness == "claude-code", !self.mission, !self.runsOnCloud, isClaudeCardCommand(text: text, skills: skills) {
+                if let host = self.offlineHost {
+                    Toast.show("\(host) is offline, so Claude Code can't answer \(text.trimmingCharacters(in: .whitespaces)).", in: self.view.window, above: self.composer)
+                    return .kept
+                }
+                return self.createForCard(text: text, skills: skills) ? .sent : .kept
+            }
             if self.mission {
                 self.startMission(text: text, images: images)
                 return .kept
@@ -332,6 +340,11 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     private var project: ProjectOption? { app.projectOptions.first { $0.id == draft.projectId } }
     private var deviceId: String { project?.device ?? draft.hostId ?? "" }
+    private var offlineHost: String? {
+        if let project { return project.online ? nil : project.deviceName }
+        let host = app.hostOptions.first { $0.id == draft.hostId }
+        return host.flatMap { $0.online ? nil : $0.name }
+    }
 
     /// Checkouts of the picked project, one per row of the host menu.
     private var checkouts: [ProjectOption] {
@@ -707,6 +720,31 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 }
 
 extension NewSessionViewController {
+    fileprivate func createForCard(text: String, skills: [String]) -> Bool {
+        app.lastDraft = draft
+        guard let chatId = app.createChat(draft: draft) else {
+            showCreateFailed()
+            return false
+        }
+        created = true
+        app.newSessionText = ""
+        app.newSessionImages = []
+        let client = app.client
+        var config = draft.config
+        Task { @MainActor in
+            do {
+                if let model = try await client?.runClaudeCard(chatId: chatId, text: text, skills: skills)?.model {
+                    config.model = model
+                    try client?.setSessionConfig(chatId: chatId, config: config)
+                }
+            } catch {
+                NSLog("Claude Code card failed: \(error)")
+            }
+        }
+        onCreated(chatId, nil)
+        return true
+    }
+
     /// Cloud: the edge mints the machine first (a moment), then the chat
     /// takes over as for any session; the text stays put until then.
     fileprivate func createOnCloud(text: String, images: [StagedImage]) {

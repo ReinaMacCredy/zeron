@@ -152,6 +152,9 @@ protocol SessionSource: AnyObject {
     func usagePage() -> UIViewController?
     var skillNames: [String] { get }
     func runClaudeCard(_ text: String)
+    func retryClaudeCard(messageId: String, command: String)
+    func claudeSettingsFile() async throws -> SkillFile
+    func exportMarkdown() -> ChatExport?
 }
 
 extension SessionSource {
@@ -161,6 +164,9 @@ extension SessionSource {
     func usagePage() -> UIViewController? { nil }
     var skillNames: [String] { [] }
     func runClaudeCard(_ text: String) {}
+    func retryClaudeCard(messageId: String, command: String) {}
+    func claudeSettingsFile() async throws -> SkillFile { throw CancellationError() }
+    func exportMarkdown() -> ChatExport? { nil }
     func clearQueueError() {}
     func chipSheet(_ id: String) -> UIViewController? { nil }
     @MainActor

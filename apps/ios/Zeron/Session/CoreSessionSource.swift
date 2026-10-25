@@ -750,6 +750,25 @@ final class CoreSessionSource: SessionSource {
         }
     }
 
+    func retryClaudeCard(messageId: String, command: String) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.client.retryClaudeCard(chatId: self.chatId, messageId: messageId, command: command)
+            } catch {
+                self.alert("\(error)")
+            }
+        }
+    }
+
+    func claudeSettingsFile() async throws -> SkillFile {
+        try await client.claudeSettingsFile(chatId: chatId)
+    }
+
+    func exportMarkdown() -> ChatExport? {
+        handle.exportMarkdown()
+    }
+
     func usagePage() -> UIViewController? {
         guard let app, !hostDevice.isEmpty else { return nil }
         return HostPageViewController(app: app, deviceId: hostDevice, page: "usage", title: "Usage")

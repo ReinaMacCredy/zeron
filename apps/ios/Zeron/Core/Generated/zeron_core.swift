@@ -1554,6 +1554,10 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func claudeConfigPanel(chatId: String)  -> ClaudeConfigPanel
     
+    func claudeSettingsFile(chatId: String) async throws  -> SkillFile
+    
+    func retryClaudeCard(chatId: String, messageId: String, command: String) async throws 
+    
     func runClaudeCard(chatId: String, text: String, skills: [String]) async throws  -> ChipWrite?
     
     /**
@@ -2790,6 +2794,38 @@ open func claudeConfigPanel(chatId: String) -> ClaudeConfigPanel  {
         FfiConverterString.lower(chatId),uniffiCallStatus
     )
 })
+}
+    
+open func claudeSettingsFile(chatId: String)async throws  -> SkillFile  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_claude_settings_file(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeSkillFile_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func retryClaudeCard(chatId: String, messageId: String, command: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_retry_claude_card(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId),FfiConverterString.lower(messageId),FfiConverterString.lower(command)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
 open func runClaudeCard(chatId: String, text: String, skills: [String])async throws  -> ChipWrite?  {
@@ -6440,6 +6476,8 @@ public protocol SessionHandleProtocol: AnyObject, Sendable {
      */
     func enqueue(text: String, attachments: [String], holdForTurnEnd: Bool) throws  -> String
     
+    func exportMarkdown()  -> ChatExport
+    
     func finishQueuedEdit(lease: QueueEditLease, action: QueueEditAction, text: String?) async  -> QueueEditFinish
     
     func forkFrom(entryId: String) async throws  -> String
@@ -7000,6 +7038,15 @@ open func enqueue(text: String, attachments: [String], holdForTurnEnd: Bool)thro
         FfiConverterString.lower(text),
         FfiConverterSequenceString.lower(attachments),
         FfiConverterBool.lower(holdForTurnEnd),uniffiCallStatus
+    )
+})
+}
+    
+open func exportMarkdown() -> ChatExport  {
+    return try!  FfiConverterTypeChatExport_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_sessionhandle_export_markdown(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -10685,6 +10732,60 @@ public func FfiConverterTypeChatConfig_lift(_ buf: RustBuffer) throws -> ChatCon
 #endif
 public func FfiConverterTypeChatConfig_lower(_ value: ChatConfig) -> RustBuffer {
     return FfiConverterTypeChatConfig.lower(value)
+}
+
+
+public struct ChatExport: Equatable, Hashable {
+    public var fileName: String
+    public var markdown: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(fileName: String, markdown: String) {
+        self.fileName = fileName
+        self.markdown = markdown
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ChatExport: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeChatExport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChatExport {
+        return
+            try ChatExport(
+                fileName: FfiConverterString.read(from: &buf), 
+                markdown: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ChatExport, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.fileName, into: &buf)
+        FfiConverterString.write(value.markdown, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatExport_lift(_ buf: RustBuffer) throws -> ChatExport {
+    return try FfiConverterTypeChatExport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatExport_lower(_ value: ChatExport) -> RustBuffer {
+    return FfiConverterTypeChatExport.lower(value)
 }
 
 
@@ -26733,6 +26834,10 @@ public enum CardAction: Equatable, Hashable {
     )
     case copyText(text: String
     )
+    case retryCard(messageId: String, command: String
+    )
+    case openClaudeHooks
+    case exportChat
 
 
 
@@ -26778,6 +26883,13 @@ public struct FfiConverterTypeCardAction: FfiConverterRustBuffer {
         
         case 11: return .copyText(text: try FfiConverterString.read(from: &buf)
         )
+        
+        case 12: return .retryCard(messageId: try FfiConverterString.read(from: &buf), command: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 13: return .openClaudeHooks
+        
+        case 14: return .exportChat
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -26837,6 +26949,20 @@ public struct FfiConverterTypeCardAction: FfiConverterRustBuffer {
             writeInt(&buf, Int32(11))
             FfiConverterString.write(text, into: &buf)
             
+        
+        case let .retryCard(messageId,command):
+            writeInt(&buf, Int32(12))
+            FfiConverterString.write(messageId, into: &buf)
+            FfiConverterString.write(command, into: &buf)
+            
+        
+        case .openClaudeHooks:
+            writeInt(&buf, Int32(13))
+        
+        
+        case .exportChat:
+            writeInt(&buf, Int32(14))
+        
         }
     }
 }
@@ -40296,6 +40422,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_claude_config_panel() != 5201) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_claude_settings_file() != 38573) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_retry_claude_card() != 26517) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_run_claude_card() != 2600) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -40861,6 +40993,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_enqueue() != 37832) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_sessionhandle_export_markdown() != 8551) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_finish_queued_edit() != 60901) {

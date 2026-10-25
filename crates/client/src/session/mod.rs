@@ -1271,6 +1271,23 @@ impl SessionHandle {
         self.core.snapshot()
     }
 
+    pub fn export_markdown(&self) -> (String, String) {
+        let title = self
+            .core
+            .client()
+            .ok()
+            .and_then(|client| client.workspace.chat(&self.core.chat_id))
+            .and_then(|chat| chat.title)
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| "Chat".into());
+        let snapshot = self.snapshot();
+        let markdown = zeron_doc::transcript_markdown(
+            &title,
+            snapshot.transcript().iter().map(|entry| entry.message.as_ref()),
+        );
+        (zeron_doc::export_file_name(&title), markdown)
+    }
+
     /// Transcript subscription for Rust consumers (the layout engine). The
     /// watch coalesces: after `changed()`, diff with
     /// [`SessionSnapshot::changes_since`] against the last snapshot you

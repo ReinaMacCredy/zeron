@@ -517,8 +517,47 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             source.applyChip(ChipWrite(model: id, modelLabel: label, reasoning: nil, permission: nil))
         case let .copyText(text):
             UIPasteboard.general.string = text
-            Toast.show("Copied", in: view.window, above: bottom)
+        case let .retryCard(messageId, command):
+            source.retryClaudeCard(messageId: messageId, command: command)
+        case .openClaudeHooks:
+            openClaudeSettingsFile()
+        case .exportChat:
+            exportChat()
         }
+    }
+
+    private func openClaudeSettingsFile() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let file = try await self.source.claudeSettingsFile()
+                let name = (file.path as NSString).lastPathComponent
+                let sheet = SelectTextViewController(text: file.text, title: name, mono: true)
+                self.present(UINavigationController(rootViewController: sheet), animated: true)
+            } catch {
+                let message: String
+                switch error as? CoreError {
+                case let .NotFound(text), let .HostError(text): message = text
+                default: message = "Couldn't open Claude Code's settings.json. Try again."
+                }
+                Toast.show(message, in: self.view.window, above: self.bottom)
+            }
+        }
+    }
+
+    private func exportChat() {
+        guard let export = source.exportMarkdown() else { return }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(export.fileName)
+        do {
+            try export.markdown.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            Toast.show("Couldn't export the chat. Try again.", in: view.window, above: bottom)
+            return
+        }
+        let share = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        share.popoverPresentationController?.sourceView = bottom
+        share.popoverPresentationController?.sourceRect = bottom.bounds
+        present(share, animated: true)
     }
 
     private func openClaudeConfig(tab: ConfigTab = .config, query: String = "") {

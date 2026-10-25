@@ -787,6 +787,38 @@ fn actions(frame: &LayoutFrame, row: u32) -> Vec<display::CardAction> {
 }
 
 #[test]
+fn command_cards_tick_while_running_and_offer_retry_once_the_answer_never_came() {
+    use zeron_doc::schema::MessageRole::System;
+    use zeron_proto::claude_cards::{STALE_PENDING_MS, pending_card, side_headline};
+    let now = chrono::Utc::now().timestamp_millis();
+    let note = |id: &str, payloads: Vec<String>| {
+        let mut parts = vec![text_part("t0", &side_headline("context"))];
+        parts.extend(payloads.iter().enumerate().map(|(ix, p)| text_part(&format!("h{ix}"), p)));
+        message(id, System, parts)
+    };
+    let json = |card: zeron_proto::claude_config::CommandCard| serde_json::to_string(&card).unwrap();
+    let running = note("live", vec![json(pending_card("context", now))]);
+    let stale = note("stale", vec![json(pending_card("context", now - STALE_PENDING_MS - 1))]);
+    let retried = note("again", vec![json(pending_card("context", now - STALE_PENDING_MS - 1)), json(pending_card("context", now))]);
+    let frame = frame_of(vec![running, stale, retried], 390.0);
+    let working = |row: u32| frame.display(row).unwrap().widgets.iter().any(|w| matches!(w.kind, display::WidgetKind::Working { .. }));
+    assert!(working(0) && working(2), "the newest part is the card shown");
+    assert!(!working(1));
+    assert_eq!(
+        actions(&frame, 1).first(),
+        Some(&display::CardAction::RetryCard { message_id: "stale".into(), command: "/context".into() })
+    );
+
+    let notice = |name: &str| {
+        let card = zeron_proto::claude_config::CommandCard { command: format!("/{name}"), ..Default::default() };
+        message(name, System, vec![text_part("t0", &side_headline(name)), text_part("h0", &json(card))])
+    };
+    let frame = frame_of(vec![notice("hooks"), notice("export")], 390.0);
+    assert_eq!(actions(&frame, 0), [display::CardAction::OpenClaudeHooks]);
+    assert_eq!(actions(&frame, 1), [display::CardAction::ExportChat]);
+}
+
+#[test]
 fn computer_notes_take_the_desktop_shapes_and_other_system_text_is_a_divider() {
     use zeron_doc::schema::MessageRole::System;
     use zeron_proto::computer::cards::{

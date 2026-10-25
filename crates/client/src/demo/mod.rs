@@ -53,6 +53,7 @@ const HEARTBEAT: Duration = Duration::from_secs(10);
 const LEASE_MS: i64 = 60_000;
 const DEMO_TOKEN_RATE: u32 = 58;
 const COMPUTER_CHAT: &str = "chat-computer";
+const ERRORED_CHAT: &str = "chat-errored";
 const DEMO_SKILL_PATH: &str = "/Users/dev/.claude/skills/review/SKILL.md";
 const DEMO_SKILL_MD: &str = "---\nname: review\ndescription: Review the current diff before it merges.\n---\n\n# Review\n\n1. Read the diff against `main`.\n2. Flag behavior changes without a test.\n3. Report findings as `file:line` with a one-line fix.\n";
 
@@ -102,6 +103,7 @@ pub(crate) struct DemoHost {
     computer_stopped: Mutex<HashSet<String>>,
     page_reads: Mutex<HashMap<String, u32>>,
     claude_settings: Mutex<serde_json::Map<String, serde_json::Value>>,
+    claude_failed: Mutex<HashSet<String>>,
 }
 
 fn doc_err(err: zeron_doc::DocError) -> ClientError {
@@ -131,6 +133,7 @@ impl DemoHost {
             computer_stopped: Mutex::new(HashSet::new()),
             page_reads: Mutex::new(HashMap::new()),
             claude_settings: Mutex::new(claude::default_settings()),
+            claude_failed: Mutex::new(HashSet::new()),
         })
     }
 
@@ -1128,16 +1131,20 @@ impl DemoHost {
             }]),
             m::READ_WORKSPACE_FILE => {
                 let path = params["path"].as_str().unwrap_or_default();
-                if path != DEMO_SKILL_PATH {
-                    return Err(ClientError::HostError(format!(
-                        "{path} is not on this host"
-                    )));
-                }
+                let text = match path {
+                    DEMO_SKILL_PATH => DEMO_SKILL_MD.to_owned(),
+                    claude::SETTINGS_FILE => claude::settings_text(&lock(&self.claude_settings)),
+                    _ => {
+                        return Err(ClientError::HostError(format!(
+                            "{path} is not on this host"
+                        )));
+                    }
+                };
                 serde_json::json!({
                     "checkoutId": "demo",
                     "path": path,
-                    "text": DEMO_SKILL_MD,
-                    "size": DEMO_SKILL_MD.len(),
+                    "size": text.len(),
+                    "text": text,
                     "encoding": "utf8",
                     "readOnlyReason": "outsideWorkspace",
                     "truncated": false,
@@ -1172,6 +1179,16 @@ impl DemoHost {
             }
             m::RUN_CLAUDE_LOCAL_COMMAND => {
                 let command = params["command"].as_str().unwrap_or_default();
+                if claude::side_command(command) {
+                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                    if chat_id == ERRORED_CHAT
+                        && lock(&self.claude_failed).insert(command.to_owned())
+                    {
+                        return Err(ClientError::HostError(
+                            "Claude Code exited before answering (status 1).".into(),
+                        ));
+                    }
+                }
                 serde_json::to_value(claude::run(&mut lock(&self.claude_settings), command))
                     .unwrap_or_default()
             }
@@ -1187,7 +1204,7 @@ impl DemoHost {
                         core.write(|doc| doc.push_message(&entry))?;
                     }
                     None => {
-                        for part in hint {
+                        if let Some(part) = hint {
                             core.write(|doc| doc.append_part(message_id, &part))?;
                         }
                     }

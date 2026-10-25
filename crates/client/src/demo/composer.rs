@@ -150,23 +150,6 @@ pub(super) fn invocation_catalog(
                 "Show the total cost and duration of the current session",
                 None,
             ),
-            command(
-                "status",
-                "Show Claude Code status including version, model, account",
-                None,
-            ),
-            command(
-                "permissions",
-                "Manage allow & deny tool permission rules",
-                None,
-            ),
-            command("hooks", "Manage hook configurations for tool events", None),
-            command(
-                "export",
-                "Export the current conversation to a file or clipboard",
-                None,
-            ),
-            command("help", "Show help and available commands", None),
         ]),
         (zeron_rpc::methods::LIST_SKILLS, "pi" | "cursor") => {
             serde_json::to_value(None::<Vec<Skill>>)

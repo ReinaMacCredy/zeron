@@ -783,17 +783,9 @@ final class AppModel {
 
     /// Create the chat, open it, and send the first message.
     func createSession(draft: NewSessionDraft, text: String, images: [StagedImage]) -> String? {
-        guard let client else { return nil }
-        let target: SessionTarget
-        if let p = draft.projectId {
-            target = .project(spaceId: p)
-        } else if let h = draft.hostId {
-            target = .projectless(deviceId: h)
-        } else {
-            return nil
-        }
+        guard let client, let session = newSession(draft) else { return nil }
         do {
-            let chatId = try client.createSession(newSession: NewSession(target: target, config: draft.config, branch: draft.worktree ? nil : draft.branch, cwd: nil, title: nil))
+            let chatId = try client.createSession(newSession: session)
             let handle = try client.openSession(chatId: chatId)
             let project = rawProjects.first { $0.id == draft.projectId }
             let worktree = draft.worktree ? project.map { WorktreeSpec(repoPath: $0.path, base: draft.branch ?? "HEAD", spaceId: $0.id) } : nil
@@ -805,6 +797,31 @@ final class AppModel {
             NSLog("create session failed: \(error)")
             return nil
         }
+    }
+
+    func createChat(draft: NewSessionDraft) -> String? {
+        guard let client, let session = newSession(draft) else { return nil }
+        do {
+            let chatId = try client.createSession(newSession: session)
+            _ = try client.openSession(chatId: chatId)
+            refreshWorkspace()
+            return chatId
+        } catch {
+            NSLog("create chat failed: \(error)")
+            return nil
+        }
+    }
+
+    private func newSession(_ draft: NewSessionDraft) -> NewSession? {
+        let target: SessionTarget
+        if let p = draft.projectId {
+            target = .project(spaceId: p)
+        } else if let h = draft.hostId {
+            target = .projectless(deviceId: h)
+        } else {
+            return nil
+        }
+        return NewSession(target: target, config: draft.config, branch: draft.worktree ? nil : draft.branch, cwd: nil, title: nil)
     }
 }
 

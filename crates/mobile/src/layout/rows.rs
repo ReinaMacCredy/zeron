@@ -428,7 +428,11 @@ impl RowBuilder {
         };
         let sig = if entry.role == MessageRole::System && seams::user_text(entry).starts_with(zeron_proto::claude_config::COMMAND_NOTE_PREFIX) {
             let model = input.chat_id.as_deref().and_then(|id| input.chats.get(id)).and_then(|c| c.model.as_deref());
-            sig.rotate_left(7) ^ model.map_or(0, quick_hash)
+            let stale = command_payload(entry)
+                .filter(|payload| payload.contains("\"pending\":true"))
+                .and_then(|payload| zeron_proto::claude_config::CommandCard::from_note(zeron_proto::claude_config::COMMAND_NOTE_PREFIX, Some(payload)))
+                .is_some_and(|card| zeron_proto::claude_cards::stale_card(&card, chrono::Utc::now().timestamp_millis()).is_some());
+            sig.rotate_left(7) ^ model.map_or(0, quick_hash) ^ stale as u64
         } else {
             sig
         };
@@ -537,11 +541,8 @@ impl RowBuilder {
                 }
                 return rows;
             }
-            let payload = entry.parts.iter().filter_map(|p| match p {
-                MessagePart::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            }).skip(1).last();
-            if let Some(card) = zeron_proto::claude_config::CommandCard::from_note(text, payload) {
+            if let Some(card) = zeron_proto::claude_config::CommandCard::from_note(text, command_payload(entry)) {
+                let card = zeron_proto::claude_cards::stale_card(&card, chrono::Utc::now().timestamp_millis()).unwrap_or(card);
                 let live = own.and_then(|id| chats.get(id)).and_then(|c| c.model.as_deref());
                 let core = super::command_cards::command_card(ctx, &format!("{}#command", entry.id), &entry.id, &card, live);
                 rows.push(Placed { core: Arc::new(core), gap });
@@ -1354,6 +1355,18 @@ pub(crate) fn place_row(
         }
     };
     top + body
+}
+
+fn command_payload(entry: &SessionMessageEntry) -> Option<&str> {
+    entry
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            MessagePart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .skip(1)
+        .last()
 }
 
 /// Draw at most `max_lines` of `t`; returns the drawn height. Overflow

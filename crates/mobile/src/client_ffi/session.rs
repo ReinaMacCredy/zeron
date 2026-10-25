@@ -429,6 +429,12 @@ pub struct TranscriptStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ChatExport {
+    pub file_name: String,
+    pub markdown: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct SkillFile {
     pub path: String,
     pub text: String,
@@ -777,6 +783,14 @@ impl SessionHandle {
     pub async fn rewind_to(&self, entry_id: String) -> CoreResult<String> {
         let inner = self.inner.clone();
         on_runtime(async move { inner.rewind_to(&entry_id).await }).await
+    }
+
+    pub fn export_markdown(&self) -> ChatExport {
+        let (file_name, markdown) = self.inner.export_markdown();
+        ChatExport {
+            file_name,
+            markdown,
+        }
     }
 
     pub async fn skill_file(&self, name: String, path: Option<String>) -> CoreResult<SkillFile> {

@@ -24,7 +24,7 @@ pub mod workspace;
 
 pub use commands::*;
 pub use constants::*;
-pub use export::transcript_markdown;
+pub use export::{export_file_name, transcript_markdown};
 pub use parts::*;
 pub use queue::*;
 pub use rebuild::*;

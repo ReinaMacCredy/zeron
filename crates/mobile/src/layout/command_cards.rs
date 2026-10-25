@@ -25,6 +25,7 @@ const LEAD_W: f32 = 46.0;
 const DOT: f32 = 7.0;
 const BUTTON_H: f32 = 32.0;
 const BUTTON_PAD: f32 = 13.0;
+const RUNNING_H: f32 = 22.0;
 
 pub(crate) enum Item {
     Meter {
@@ -62,6 +63,7 @@ pub(crate) struct CommandCardView {
     pub items: Vec<Item>,
     pub buttons: Vec<CardButton>,
     pub notice: bool,
+    pub running: Option<i64>,
 }
 
 struct Builder<'a, 'c> {
@@ -136,6 +138,7 @@ struct Spec {
     items: Vec<Item>,
     buttons: Vec<CardButton>,
     notice: bool,
+    running: Option<i64>,
 }
 
 fn series_color(name: &str) -> ColorRole {
@@ -218,6 +221,7 @@ fn context(b: &mut Builder<'_, '_>, card: &CommandCard) -> Option<Spec> {
         items,
         buttons,
         notice: false,
+        running: None,
     })
 }
 
@@ -272,6 +276,7 @@ fn usage(b: &mut Builder<'_, '_>, card: &CommandCard) -> Option<Spec> {
         items,
         buttons,
         notice: false,
+        running: None,
     })
 }
 
@@ -306,6 +311,7 @@ fn model(b: &mut Builder<'_, '_>, card: &CommandCard, live: Option<&str>) -> Spe
         items: vec![Item::Choices(choices), b.note(&note)],
         buttons: Vec::new(),
         notice: false,
+        running: None,
     }
 }
 
@@ -339,19 +345,21 @@ fn mcp(b: &mut Builder<'_, '_>, card: &CommandCard) -> Option<Spec> {
         items,
         buttons,
         notice: false,
+        running: None,
     })
 }
 
 fn notice(b: &mut Builder<'_, '_>, name: &str) -> Spec {
     let buttons = cards::terminal_action(name)
-        .and_then(|(label, action)| {
+        .map(|(label, action)| {
             let action = match action {
                 TerminalAction::Status => CardAction::OpenClaudeStatus,
                 TerminalAction::Permissions => CardAction::OpenClaudePermissions,
                 TerminalAction::Help => CardAction::OpenDocs,
-                TerminalAction::Hooks | TerminalAction::Export => return None,
+                TerminalAction::Hooks => CardAction::OpenClaudeHooks,
+                TerminalAction::Export => CardAction::ExportChat,
             };
-            Some(b.button(label, action, false))
+            b.button(label, action, false)
         })
         .into_iter()
         .collect();
@@ -363,10 +371,11 @@ fn notice(b: &mut Builder<'_, '_>, name: &str) -> Spec {
         items: Vec::new(),
         buttons,
         notice: true,
+        running: None,
     }
 }
 
-fn generic(b: &mut Builder<'_, '_>, card: &CommandCard) -> Spec {
+fn generic(b: &mut Builder<'_, '_>, card: &CommandCard, entry_id: &str) -> Spec {
     let failed = card.error.is_some();
     let text = card.error.clone().unwrap_or_else(|| card.text.clone());
     let body = b.styled(
@@ -379,8 +388,21 @@ fn generic(b: &mut Builder<'_, '_>, card: &CommandCard) -> Spec {
             ColorRole::Text
         },
     );
-    let items = vec![Item::Text(body), b.note(LOCAL_FOOTNOTE)];
-    let buttons = vec![b.copy_button(&text)];
+    let (items, buttons) = if failed {
+        let retry = CardAction::RetryCard {
+            message_id: entry_id.into(),
+            command: card.command.clone(),
+        };
+        (
+            vec![Item::Text(body)],
+            vec![b.button("Retry", retry, true), b.copy_button(&text)],
+        )
+    } else {
+        (
+            vec![Item::Text(body), b.note(LOCAL_FOOTNOTE)],
+            vec![b.copy_button(&text)],
+        )
+    };
     Spec {
         icon: "apple.terminal",
         title: card.command.clone(),
@@ -389,6 +411,7 @@ fn generic(b: &mut Builder<'_, '_>, card: &CommandCard) -> Spec {
         items,
         buttons,
         notice: false,
+        running: None,
     }
 }
 
@@ -407,11 +430,15 @@ pub(crate) fn command_card(
         Spec {
             icon: "apple.terminal",
             title: card.command.clone(),
-            subtitle: Some("Asking Claude Code…".into()),
+            subtitle: None,
             pill: None,
             items: Vec::new(),
             buttons: Vec::new(),
             notice: false,
+            running: Some(
+                card.started_at
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
+            ),
         }
     } else if let Some(name) = cards::terminal_only(card) {
         notice(&mut b, name)
@@ -424,7 +451,7 @@ pub(crate) fn command_card(
             (None, "/mcp") => mcp(&mut b, card),
             _ => None,
         };
-        spec.unwrap_or_else(|| generic(&mut b, card))
+        spec.unwrap_or_else(|| generic(&mut b, card, entry_id))
     };
     finish(b, key, entry_id, spec)
 }
@@ -459,12 +486,16 @@ pub(crate) fn summary_card(
         items,
         buttons,
         notice: false,
+        running: None,
     };
     Some(finish(b, key, entry_id, spec))
 }
 
 fn finish(mut b: Builder<'_, '_>, key: &str, entry_id: &str, spec: Spec) -> RowCore {
     let title = b.text(&spec.title, Weight::Medium, ColorRole::Text);
+    if spec.running.is_some() {
+        b.copy.push(cards::RUNNING.into());
+    }
     let subtitle = spec
         .subtitle
         .as_deref()
@@ -487,6 +518,7 @@ fn finish(mut b: Builder<'_, '_>, key: &str, entry_id: &str, spec: Spec) -> RowC
             items: spec.items,
             buttons: spec.buttons,
             notice: spec.notice,
+            running: spec.running,
         }),
     }
 }
@@ -633,6 +665,22 @@ fn layout(
     y += place_text(&card.title, title_x, y, title_w, out.as_deref_mut());
     if let Some(sub) = &card.subtitle {
         y += place_text(sub, title_x, y, title_w, out.as_deref_mut());
+    }
+    if let Some(since) = card.running {
+        let h = px.v(RUNNING_H);
+        if let Some(o) = out.as_deref_mut() {
+            o.widget(
+                WidgetKind::Working {
+                    since_ms: Some(since),
+                    word: cards::RUNNING.trim_end_matches('…').into(),
+                    rate: None,
+                    divider: false,
+                },
+                (title_x, y, title_w, h),
+                None,
+            );
+        }
+        y += h;
     }
     if !card.items.is_empty() {
         y += pad;

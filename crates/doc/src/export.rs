@@ -28,6 +28,20 @@ pub fn transcript_markdown<'a>(
     out
 }
 
+pub fn export_file_name(title: &str) -> String {
+    let name: String = title
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{}.md", name.trim())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -131,7 +131,32 @@ final class SlashCommandFlowTests: XCTestCase {
         snapshot(app, "new-session-compact-refused")
         input.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 8) + "/context")
         app.buttons["composer-send"].tap()
-        XCTAssertTrue(app.staticTexts["Send a first message, then run Claude Code commands."].waitForExistence(timeout: 3))
-        XCTAssertEqual(input.value as? String, "/context", "kept, not sent")
+        XCTAssertTrue(app.staticTexts["Mac Studio is offline, so Claude Code can't answer /context."].waitForExistence(timeout: 3))
+        XCTAssertEqual(input.value as? String, "/context", "kept for an online host")
+        snapshot(app, "new-session-context-offline")
+        app.buttons["composer-chip-project"].tap()
+        let edge = app.buttons.matching(NSPredicate(format: "label == 'edge' OR label BEGINSWITH 'edge,'")).firstMatch
+        XCTAssertTrue(edge.waitForExistence(timeout: 5))
+        edge.tap()
+        app.buttons["composer-send"].tap()
+        XCTAssertTrue(app.buttons["card-compact"].waitForExistence(timeout: 20), "a Claude command creates the chat and answers with its card")
+        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label == 'You: /context'")).firstMatch.exists, "never a turn")
+        snapshot(app, "new-session-context-card")
+    }
+
+    func testClaudeTerminalCommandsListAtTheBottomTagged() {
+        let (app, input) = open("chat-deploy")
+        input.typeText("/perm")
+        let permissions = row(app, "/permissions")
+        XCTAssertTrue(permissions.waitForExistence(timeout: 5), "listed though the catalog leaves it out")
+        XCTAssertEqual(permissions.value as? String, "Runs only in Claude Code's terminal")
+        snapshot(app, "slash-terminal-permissions")
+        input.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 4) + "stat")
+        XCTAssertTrue(row(app, "/status").waitForExistence(timeout: 5))
+        snapshot(app, "slash-terminal-status")
+        input.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 4))
+        let first = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'invocation-'")).firstMatch
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        XCTAssertNotEqual(first.value as? String, "Runs only in Claude Code's terminal", "terminal rows sink below the rest")
     }
 }

@@ -6,6 +6,7 @@ use zeron_proto::claude_panel::{
 };
 use zeron_proto::usage::{UsageSummary, format_tokens};
 
+use super::session::SkillFile;
 use super::{CoreClient, CoreResult, PermissionMode, on_runtime, zc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -251,6 +252,32 @@ impl CoreClient {
             reasoning: None,
             permission: None,
         }))
+    }
+
+    pub async fn retry_claude_card(
+        &self,
+        chat_id: String,
+        message_id: String,
+        command: String,
+    ) -> CoreResult<()> {
+        let client = self.client.clone();
+        on_runtime(async move {
+            client
+                .retry_claude_card(&chat_id, &message_id, &command)
+                .await
+        })
+        .await?;
+        Ok(())
+    }
+
+    pub async fn claude_settings_file(&self, chat_id: String) -> CoreResult<SkillFile> {
+        let client = self.client.clone();
+        let file = on_runtime(async move { client.claude_settings_file(&chat_id).await }).await?;
+        Ok(SkillFile {
+            path: file.path,
+            text: file.text.unwrap_or_default(),
+            truncated: file.truncated,
+        })
     }
 }
 

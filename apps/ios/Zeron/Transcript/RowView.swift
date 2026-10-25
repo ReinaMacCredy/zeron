@@ -327,9 +327,10 @@ final class RowView: UIView {
                 view = ShimmerView(model: model!, rect: rect)
             case let .cardButton(action):
                 let b = CardButtonControl(action: action, label: w.payload ?? "")
-                b.addAction(UIAction { [weak self] _ in
+                b.addAction(UIAction { [weak self, weak b] _ in
                     guard let self else { return }
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    if case .copyText = action { b?.flashCopied() }
                     self.delegate?.rowView(self, perform: action)
                 }, for: .touchUpInside)
                 view = b
@@ -453,13 +454,50 @@ final class DisclosureControl: UIControl {
 }
 
 final class CardButtonControl: UIControl {
+    private let label: String
+    private var copied: UIView?
+
     init(action: CardAction, label: String) {
+        self.label = label
         super.init(frame: .zero)
         isAccessibilityElement = true
         accessibilityTraits = .button
         accessibilityLabel = label
         accessibilityIdentifier = Self.identifier(action)
         layer.cornerCurve = .continuous
+    }
+
+    // The label is painted by the row canvas, so the check covers it instead of replacing it.
+    func flashCopied() {
+        copied?.removeFromSuperview()
+        let cover = UIView(frame: bounds)
+        cover.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        cover.isUserInteractionEnabled = false
+        cover.backgroundColor = Palette.background
+        cover.layer.cornerRadius = bounds.height / 2
+        cover.clipsToBounds = true
+        let wash = UIView(frame: cover.bounds)
+        wash.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        wash.backgroundColor = Palette.color(.accentWash)
+        cover.addSubview(wash)
+        cover.layer.cornerCurve = .continuous
+        cover.layer.borderWidth = 1
+        cover.layer.borderColor = Palette.accent.cgColor
+        let check = UIImageView(image: UIImage(systemName: "checkmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)))
+        check.tintColor = Palette.accent
+        check.contentMode = .center
+        check.frame = cover.bounds
+        check.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        cover.addSubview(check)
+        addSubview(cover)
+        copied = cover
+        accessibilityLabel = "Copied"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self, weak cover] in
+            guard let self, let cover, self.copied === cover else { return }
+            UIView.animate(withDuration: 0.2, animations: { cover.alpha = 0 }) { _ in cover.removeFromSuperview() }
+            self.copied = nil
+            self.accessibilityLabel = self.label
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -477,6 +515,9 @@ final class CardButtonControl: UIControl {
         case .compact: "card-compact"
         case let .pickModel(id, _): "card-model-\(id)"
         case .copyText: "card-copy"
+        case .retryCard: "card-retry"
+        case .openClaudeHooks: "card-open-claude-hooks"
+        case .exportChat: "card-export-chat"
         }
     }
 

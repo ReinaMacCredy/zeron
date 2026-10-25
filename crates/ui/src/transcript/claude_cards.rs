@@ -430,21 +430,11 @@ impl Transcript {
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| "Chat".into());
         let markdown = zeron_doc::transcript_markdown(&title, &state.transcript);
-        let name: String = title
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == ' ' || c == '-' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
         let downloads = std::env::var_os("HOME")
             .map(std::path::PathBuf::from)
             .map(|home| home.join("Downloads"))
             .unwrap_or_else(std::env::temp_dir);
-        let chosen = cx.prompt_for_new_path(&downloads, Some(&format!("{}.md", name.trim())));
+        let chosen = cx.prompt_for_new_path(&downloads, Some(&zeron_doc::export_file_name(&title)));
         cx.spawn(async move |_, _| {
             if let Ok(Ok(Some(path))) = chosen.await
                 && let Err(error) = std::fs::write(&path, markdown.as_bytes())

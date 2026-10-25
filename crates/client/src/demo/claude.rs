@@ -3,7 +3,7 @@ use zeron_proto::claude_config::{
     self as cc, ClaudeConfigSnapshot, Kind, LocalCommandOutput, Sources,
 };
 
-const SETTINGS_FILE: &str = "/Users/demo/.claude/settings.json";
+pub(super) const SETTINGS_FILE: &str = "/Users/demo/.claude/settings.json";
 
 const USAGE: &str = "You are currently using your subscription to power your Claude Code usage
 
@@ -59,6 +59,10 @@ const CONTEXT: &str = "## Context Usage
 
 const MCP: &str = "7 MCP server(s): 4 connected, 3 not connected, 0 disabled. Use `/mcp` in the terminal for details.";
 
+pub(super) fn side_command(command: &str) -> bool {
+    command_reply(command).is_some()
+}
+
 fn command_reply(command: &str) -> Option<&'static str> {
     Some(match command {
         "/context" => CONTEXT,
@@ -98,6 +102,10 @@ pub(super) fn default_settings() -> Map<String, Value> {
     map.insert("autoCompactEnabled".into(), true.into());
     map.insert("switchModelsOnFlag".into(), false.into());
     map
+}
+
+pub(super) fn settings_text(settings: &Map<String, Value>) -> String {
+    serde_json::to_string_pretty(settings).unwrap_or_default()
 }
 
 pub(super) fn snapshot(settings: &Map<String, Value>) -> ClaudeConfigSnapshot {

@@ -97,6 +97,9 @@ pub enum CardAction {
     Compact,
     PickModel { id: String, label: String },
     CopyText { text: String },
+    RetryCard { message_id: String, command: String },
+    OpenClaudeHooks,
+    ExportChat,
 }
 
 /// Text decorations, painted relative to the run's baseline.

@@ -1,8 +1,9 @@
+use zeron_proto::WorkspaceFileText;
 use zeron_proto::app_commands::ClaudeCardCommand;
 use zeron_proto::claude_cards::{
-    FORKED, LOST_SESSION, NO_SESSION, lost_session, model_card, model_headline, model_match,
-    no_match_note, output_card, pending_card, side_headline, side_run, switched_note,
-    terminal_card,
+    FORKED, LOST_SESSION, NO_SESSION, SideRun, lost_session, model_card, model_headline,
+    model_match, no_match_note, output_card, pending_card, side_command, side_headline, side_run,
+    switched_note, terminal_card,
 };
 use zeron_proto::claude_config::{ClaudeConfigSnapshot, CommandCard, LocalCommandOutput};
 use zeron_proto::claude_panel::{ChipChoices, STATS_DAYS};
@@ -173,11 +174,33 @@ impl Client {
                 .await?;
             return Ok(switch);
         };
+        self.side_card(chat_id, &message_id, run, true).await?;
+        Ok(None)
+    }
+
+    pub async fn retry_claude_card(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        command: &str,
+    ) -> Result<()> {
+        let run = side_command(command)
+            .ok_or_else(|| ClientError::NotFound(format!("{command} can't be retried")))?;
+        self.side_card(chat_id, message_id, run, false).await
+    }
+
+    async fn side_card(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        run: SideRun,
+        headline: bool,
+    ) -> Result<()> {
         let now = chrono::Utc::now().timestamp_millis();
         self.write_card(
             chat_id,
-            &message_id,
-            Some(&side_headline(run.name)),
+            message_id,
+            headline.then(|| side_headline(run.name)).as_deref(),
             pending_card(run.name, now),
         )
         .await?;
@@ -204,11 +227,23 @@ impl Client {
         }
         self.write_card(
             chat_id,
-            &message_id,
+            message_id,
             None,
             output_card(run.name, reply, note),
         )
-        .await?;
-        Ok(None)
+        .await
+    }
+
+    pub async fn claude_settings_file(&self, chat_id: &str) -> Result<WorkspaceFileText> {
+        let snapshot = self.read_claude_config(chat_id).await?;
+        if snapshot.user_settings.is_empty() {
+            return Err(ClientError::NotFound(
+                "Claude Code has no settings file here".into(),
+            ));
+        }
+        let (device, mut params) = self.claude_target(chat_id)?;
+        params["path"] = snapshot.user_settings.into();
+        self.host_call(&device, methods::READ_WORKSPACE_FILE, params)
+            .await
     }
 }

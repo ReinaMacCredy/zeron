@@ -126,6 +126,47 @@ final class ClaudeConfigFlowTests: XCTestCase {
         snapshot(app, "card-open-status")
     }
 
+    func testARunningCardTicksThenFailsWithRetryAndCopyChecks() {
+        let (app, input) = open("chat-errored")
+        send(app, input, "/context")
+        XCTAssertTrue(card(app, containing: "Running in Claude Code").waitForExistence(timeout: 5), "the placeholder shows at once")
+        snapshot(app, "card-running")
+        let retry = app.buttons["card-retry"].firstMatch
+        XCTAssertTrue(retry.waitForExistence(timeout: 15))
+        XCTAssertTrue(card(app, containing: "exited before answering").exists)
+        snapshot(app, "card-error")
+        retry.tap()
+        XCTAssertTrue(card(app, containing: "Running in Claude Code").waitForExistence(timeout: 5), "Retry runs it again in place")
+        XCTAssertTrue(app.buttons["card-compact"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.buttons["card-retry"].exists, "the answer replaced the error card")
+        let copy = app.buttons["card-copy"].firstMatch
+        copy.tap()
+        XCTAssertEqual(copy.label, "Copied")
+        snapshot(app, "card-copied")
+        let restored = NSPredicate(format: "label == 'Copy as Markdown'")
+        wait(for: [expectation(for: restored, evaluatedWith: copy)], timeout: 3)
+    }
+
+    func testHooksOpensSettingsJsonAndExportSharesTheChat() {
+        let (app, input) = open("chat-deploy")
+        send(app, input, "/hooks")
+        let hooks = app.buttons["card-open-claude-hooks"].firstMatch
+        XCTAssertTrue(hooks.waitForExistence(timeout: 15))
+        hooks.tap()
+        XCTAssertTrue(app.navigationBars["settings.json"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.textViews.element(matching: NSPredicate(format: "value CONTAINS 'autoCompactEnabled'")).waitForExistence(timeout: 5))
+        snapshot(app, "card-hooks-settings")
+        app.swipeDown(velocity: .fast)
+        XCTAssertTrue(app.navigationBars["settings.json"].waitForNonExistence(timeout: 5))
+        send(app, input, "/export")
+        let export = app.buttons["card-export-chat"].firstMatch
+        XCTAssertTrue(export.waitForExistence(timeout: 15))
+        export.tap()
+        let sheet = app.descendants(matching: .any).matching(NSPredicate(format: "identifier == 'ActivityListView' OR label CONTAINS '.md'")).firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 10), "the share sheet opens with the Markdown file")
+        snapshot(app, "card-export-share")
+    }
+
     func testConfigWithArgumentsStaysATurn() {
         let (app, input) = open("chat-deploy")
         send(app, input, "/config theme=dark")
