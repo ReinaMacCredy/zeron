@@ -95,6 +95,10 @@ struct Seeds<'a> {
 }
 
 fn variant(seed: Seeds<'_>) -> ThemeVariant {
+    seal(unsealed(seed))
+}
+
+fn unsealed(seed: Seeds<'_>) -> ThemeVariant {
     let background = c(seed.background);
     let shell = c(seed.shell);
     let raised = c(seed.raised);
@@ -142,7 +146,7 @@ fn variant(seed: Seeds<'_>) -> ThemeVariant {
         diff_hunk: accent.primary.with_alpha(if dark { 0.08 } else { 0.07 }),
     };
     let terminal_background = c(seed.terminal_background);
-    let mut variant = ThemeVariant {
+    ThemeVariant {
         id: seed.id.into(),
         family_id: seed.family_id.into(),
         name: seed.name.into(),
@@ -158,7 +162,10 @@ fn variant(seed: Seeds<'_>) -> ThemeVariant {
             ansi: seed.ansi.map(c),
         },
         source: seed.source,
-    };
+    }
+}
+
+fn seal(mut variant: ThemeVariant) -> ThemeVariant {
     // Hash the checked-in resolved definition itself (with the hash field
     // blanked), not merely its source URL. This makes provenance sensitive to
     // curation edits as well as upstream revision changes.
@@ -237,7 +244,7 @@ const ANSI_LIGHT: [&str; 16] = [
 ];
 
 fn zeron_dark() -> ThemeVariant {
-    variant(Seeds {
+    let mut variant = unsealed(Seeds {
         id: "zeron-dark",
         family_id: "zeron",
         name: "Zeron Dark",
@@ -246,9 +253,9 @@ fn zeron_dark() -> ThemeVariant {
         background: "#060606",
         shell: "#0d0d0d",
         raised: "#343438",
-        card: "#0e0e0e",
+        card: "#111111",
         text: "#e8e8ea",
-        muted: "#a9a9ae",
+        muted: "#a3a3a3",
         faint: "#85858a",
         accent: "#8b7cf6",
         danger: "#f87171",
@@ -267,7 +274,9 @@ fn zeron_dark() -> ThemeVariant {
             "d138049",
             "MIT",
         ),
-    })
+    });
+    variant.colors.border = Color::WHITE.with_alpha(0.08);
+    seal(variant)
 }
 
 fn zeron_light() -> ThemeVariant {

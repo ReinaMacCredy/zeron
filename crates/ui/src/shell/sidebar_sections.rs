@@ -331,7 +331,7 @@ impl Shell {
             theme,
             None,
             section.name.clone().into(),
-            (!open).then_some(session_count),
+            Some(session_count),
             menu_button,
             chevron,
         )

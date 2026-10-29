@@ -2771,13 +2771,13 @@ fn sidebar_show_more_row(
         .px(px(Theme::SPACE_SM))
         .rounded(px(6.0))
         .text_size(crate::typography::ui_rems(13.0))
-        .text_color(theme.text_muted.opacity(0.55))
+        .text_color(theme.text_muted)
         .cursor_pointer()
         .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
         .child(
-            crate::icons::icon(crate::icons::PLUS)
+            crate::icons::icon(crate::icons::LUCIDE_CHEVRON_DOWN)
                 .size(px(14.0))
-                .text_color(theme.text_muted.opacity(0.55)),
+                .text_color(theme.text_muted),
         )
         .child(SharedString::from(format!("Show {remaining} more")))
 }
@@ -3038,9 +3038,8 @@ pub(super) fn sidebar_separator(theme: &Theme) -> gpui::Div {
 
 /// `icon` leads the label — a project group's icon, which its rows then omit.
 /// Every sidebar section's header (Pinned, Sessions, Archived, project
-/// groups and custom sections): a muted label, `count` as a muted badge
-/// beside it while the section is collapsed, then any action and the
-/// disclosure chevron.
+/// groups, shelves and custom sections): a muted label, its trailing `count`,
+/// then any action and the disclosure chevron.
 pub(super) fn sidebar_disclosure_header(
     theme: &Theme,
     icon: Option<AnyElement>,
@@ -3049,10 +3048,6 @@ pub(super) fn sidebar_disclosure_header(
     action: Option<AnyElement>,
     chevron: AnyElement,
 ) -> gpui::Div {
-    let label: SharedString = match count {
-        Some(count) => format!("{label} ({count})").into(),
-        None => label,
-    };
     div()
         .flex()
         .flex_row()
@@ -3063,6 +3058,9 @@ pub(super) fn sidebar_disclosure_header(
         .px(px(8.0))
         .rounded(px(8.0))
         .cursor_pointer()
+        .text_size(crate::typography::ui_rems(12.0))
+        .line_height(px(16.0))
+        .text_color(sidebar_header_glyph(theme))
         .children(icon)
         .child(
             div()
@@ -3071,27 +3069,22 @@ pub(super) fn sidebar_disclosure_header(
                 .child(super::sidebar_faded_label(
                     "sidebar-disclosure-label".into(),
                     false,
-                    div()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .line_height(px(16.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(sidebar_header_glyph(theme))
-                        .child(label),
+                    div().font_weight(gpui::FontWeight::MEDIUM).child(label),
                 )),
         )
-        .child(
+        .child(div().flex_1().min_w(px(8.0)))
+        .children(count.map(|count| {
             div()
-                .flex_1()
-                .min_w(px(8.0))
-                .h(px(1.0))
-                .bg(theme.border.opacity(0.6)),
-        )
+                .flex_none()
+                .font_weight(gpui::FontWeight::NORMAL)
+                .child(SharedString::from(count.to_string()))
+        }))
         .children(action)
         .child(chevron)
 }
 
 pub(super) fn sidebar_header_glyph(theme: &Theme) -> gpui::Hsla {
-    theme.text_muted.opacity(0.6)
+    theme.text_muted
 }
 
 /// One activatable row of the open dropdown, in nav order. `AddSpace` names
@@ -3783,7 +3776,7 @@ impl Shell {
         frame
             .with_animation(
                 SharedString::from(format!("sidebar-disclosure-{key}-{}", tween.epoch)),
-                motion::COLLAPSE.animation(),
+                tween.spec().animation(),
                 move |el, t| {
                     let height = motion::lerp(tween.from, tween.to, t);
                     let reveal = (height / denominator).clamp(0.0, 1.0);
@@ -3802,7 +3795,7 @@ impl Shell {
         open: bool,
         theme: &Theme,
     ) -> AnyElement {
-        self.turned_disclosure_chevron(key, open, 0.5, theme)
+        self.turned_disclosure_chevron(key, open, -0.25, theme)
     }
 
     pub(super) fn turned_disclosure_chevron(
@@ -3830,7 +3823,7 @@ impl Shell {
                 .size(px(12.0))
                 .child(chevron.with_animation(
                     SharedString::from(format!("sidebar-chevron-{key}-{}", tween.epoch)),
-                    motion::COLLAPSE.animation(),
+                    tween.spec().animation(),
                     move |el, t| {
                         let reveal = motion::lerp(from, to, t);
                         el.with_transformation(gpui::Transformation::rotate(gpui::radians(
@@ -6108,32 +6101,26 @@ impl Shell {
         self.begin_queued_sidebar_reveal(&motion_key, !collapsed, body_height);
         let chevron = self.sidebar_disclosure_chevron(&motion_key, !collapsed, theme);
         let toggle_motion_key = motion_key.clone();
-        let header = sidebar_disclosure_header(
-            theme,
-            None,
-            "Drafts".into(),
-            collapsed.then_some(row_count),
-            None,
-            chevron,
-        )
-        .id("sidebar-group-drafts")
-        .role(gpui::Role::Button)
-        .aria_label("Drafts")
-        .aria_expanded(!collapsed)
-        .on_click(cx.listener(move |this, _, _, cx| {
-            let was_open = !this.sidebar_collapsed_groups.contains(key);
-            this.begin_sidebar_disclosure_motion(
-                &toggle_motion_key,
-                if was_open { body_height } else { 0.0 },
-                if was_open { 0.0 } else { body_height },
-            );
-            if was_open {
-                this.sidebar_collapsed_groups.insert(key.to_owned());
-            } else {
-                this.sidebar_collapsed_groups.remove(key);
-            }
-            cx.notify();
-        }));
+        let header =
+            sidebar_disclosure_header(theme, None, "Drafts".into(), Some(row_count), None, chevron)
+                .id("sidebar-group-drafts")
+                .role(gpui::Role::Button)
+                .aria_label("Drafts")
+                .aria_expanded(!collapsed)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let was_open = !this.sidebar_collapsed_groups.contains(key);
+                    this.begin_sidebar_disclosure_motion(
+                        &toggle_motion_key,
+                        if was_open { body_height } else { 0.0 },
+                        if was_open { 0.0 } else { body_height },
+                    );
+                    if was_open {
+                        this.sidebar_collapsed_groups.insert(key.to_owned());
+                    } else {
+                        this.sidebar_collapsed_groups.remove(key);
+                    }
+                    cx.notify();
+                }));
         let body = div()
             .w_full()
             .flex()
@@ -7643,7 +7630,7 @@ impl Shell {
                     theme,
                     group_icon,
                     visible_label.clone(),
-                    collapsed.then_some(session_count),
+                    Some(session_count),
                     new_chat_button,
                     chevron,
                 )
@@ -7709,7 +7696,7 @@ impl Shell {
     ) -> AnyElement {
         let open = self.pinned_open;
         self.begin_queued_sidebar_reveal("pinned", open, body_height);
-        let count = (!open).then_some(items.len());
+        let count = Some(items.len());
         let chevron = self.sidebar_disclosure_chevron("pinned", open, theme);
         let header = sidebar_disclosure_header(theme, None, "Pinned".into(), count, None, chevron)
             .id("pinned-toggle")
@@ -7794,7 +7781,7 @@ impl Shell {
             theme,
             None,
             "Sessions".into(),
-            (!open).then_some(count),
+            Some(count),
             None,
             chevron,
         )
@@ -7928,14 +7915,13 @@ impl Shell {
                 0.0
             };
         self.begin_queued_sidebar_reveal("archived", open, body_height);
-        // Match Pinned: a muted label with a right-aligned disclosure chevron.
-        // The count only shows while collapsed.
+        // Match Pinned: a muted label, its count and a right-aligned chevron.
         let chevron = self.sidebar_disclosure_chevron("archived", open, theme);
         let header = sidebar_disclosure_header(
             theme,
             None,
             "Archived".into(),
-            (!open).then_some(total),
+            Some(total),
             None,
             chevron,
         )

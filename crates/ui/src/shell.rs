@@ -13141,9 +13141,23 @@ impl Shell {
         let row_id = format!("chat-{id}");
         let fade_key = format!("{row_id}-hover");
         let now = Utc::now();
+        let worktree;
+        let diff;
         let (device, remote, queued, undelivered, expired, started_at, subagents, asks, mission) = {
             let state = self.state.read(cx);
             let chat = state.chats.iter().find(|chat| chat.id == id);
+            worktree = chat
+                .and_then(|chat| Some((chat, state.space_for_chat(chat)?)))
+                .is_some_and(|(chat, space)| {
+                    space.git_detected && chat.cwd.as_deref().is_some_and(|cwd| cwd != space.path)
+                });
+            diff = state.reviews.get(&id).and_then(|review| {
+                review.changes(
+                    review
+                        .scope
+                        .unwrap_or_else(|| crate::review::ReviewScope::default_for(worktree)),
+                )
+            });
             (
                 chat.map(|chat| chat.device_id.clone()),
                 chat.is_some_and(|chat| {
@@ -13222,7 +13236,10 @@ impl Shell {
                 || lead
                     .as_ref()
                     .is_some_and(|fold| !fold.open && fold.holds_selected));
-        let bg = if selected {
+        let light_active = selected && !theme.appearance.is_dark();
+        let bg = if light_active {
+            gpui::white()
+        } else if selected {
             crate::theme::glass_selected_bg()
         } else if secondary {
             crate::theme::glass_secondary_bg()
@@ -13234,6 +13251,7 @@ impl Shell {
             crate::theme::wash(0.0)
         };
         let sec = theme.text_muted;
+        let meta = theme.text_meta();
         let faint = theme.text_muted.opacity(0.4);
         let rename_input = (!preview)
             .then(|| self.rename_input_for(&id, ChatRenameSurface::Sidebar))
@@ -13429,7 +13447,7 @@ impl Shell {
 
         if slim {
             let lifted = hovered || selected;
-            let rest = sec.opacity(0.7);
+            let rest = meta;
             let slot: AnyElement = if let Some(badge) = jump_badge {
                 badge
             } else if hovered && !preview {
@@ -13464,8 +13482,11 @@ impl Shell {
                 .when(nested || lead.is_some(), |el| {
                     el.pl(px(10.0 + SIDEBAR_NESTED_INDENT))
                 })
-                .rounded(px(8.0))
+                .rounded(px(6.0))
                 .bg(bg)
+                .when(light_active, |el| {
+                    el.shadow(crate::theme::card_selected_shadows())
+                })
                 .children(lead_chevron)
                 .children(project_icon.map(|icon| {
                     div()
@@ -13596,14 +13617,10 @@ impl Shell {
         } else {
             gpui::FontWeight::MEDIUM
         };
-        let title_color = if recede {
-            sec
-        } else if unread {
-            theme.text
-        } else if failed {
-            theme.text.opacity(0.95)
+        let title_color = if recede && !hovered {
+            theme.text.opacity(0.75)
         } else {
-            theme.text.opacity(0.9)
+            theme.text
         };
         let line_one = div()
             .h(px(20.0))
@@ -13621,12 +13638,7 @@ impl Shell {
                         div()
                             .text_size(crate::typography::ui_rems(12.0))
                             .line_height(px(16.0))
-                            .font_weight(if recede {
-                                gpui::FontWeight::NORMAL
-                            } else {
-                                gpui::FontWeight::MEDIUM
-                            })
-                            .text_color(sec)
+                            .text_color(meta)
                             .child(space_name.clone()),
                     ))
                 } else {
@@ -13637,6 +13649,48 @@ impl Shell {
             .children(split_glyph)
             .child(slot);
         let presence = crate::computer::presence::chat_glyph("chat-row", &id, 14.0, 0.6, theme, cx);
+        let worktree_icon = worktree.then(|| {
+            icon(icons::WORKTREE)
+                .size(px(14.0))
+                .flex_none()
+                .text_color(meta)
+        });
+        let diff_counts = diff
+            .filter(|(add, del)| *add > 0 || *del > 0)
+            .map(|(add, del)| {
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .gap(px(4.0))
+                    .font_family(theme.font_mono.clone())
+                    .child(
+                        div()
+                            .text_color(theme.diff_add)
+                            .child(SharedString::from(format!("+{add}"))),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme.diff_del)
+                            .child(SharedString::from(format!("\u{2212}{del}"))),
+                    )
+            });
+        let branch_line = branch.map(|branch| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .children(worktree_icon)
+                .child(div().min_w_0().child(sidebar_faded_label(
+                    format!("chat-branch-{id}").into(),
+                    true,
+                    div().child(branch),
+                )))
+                .children(diff_counts)
+        });
         let line_three = div()
             .mt(px(2.0))
             .h(px(16.0))
@@ -13647,8 +13701,8 @@ impl Shell {
             .gap(px(6.0))
             .text_size(crate::typography::ui_rems(12.0))
             .line_height(px(16.0))
-            .text_color(sec)
-            .map(|el| match (created_by, branch) {
+            .text_color(meta)
+            .map(|el| match (created_by, branch_line) {
                 (Some(creator), _) => el.child(
                     div()
                         .flex_1()
@@ -13670,13 +13724,7 @@ impl Shell {
                             div().child(creator),
                         )),
                 ),
-                (None, Some(branch)) => el.child(div().flex_1().min_w_0().text_color(faint).child(
-                    sidebar_faded_label(
-                        format!("chat-branch-{id}").into(),
-                        true,
-                        div().child(branch),
-                    ),
-                )),
+                (None, Some(branch)) => el.child(branch),
                 (None, None) => el.child(div().flex_1().min_w_0()),
             })
             .when_some(change_request, |el, summary| {
@@ -13743,7 +13791,7 @@ impl Shell {
             .child(
                 div()
                     .size_full()
-                    .rounded(px(8.0))
+                    .rounded(px(6.0))
                     .px(px(10.0))
                     .when(nested || lead.is_some(), |el| {
                         el.pl(px(10.0 + SIDEBAR_NESTED_INDENT))
@@ -13752,6 +13800,9 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .bg(bg)
+                    .when(light_active, |el| {
+                        el.shadow(crate::theme::card_selected_shadows())
+                    })
                     .when(recede && working && !hovered, |el| el.opacity(0.7))
                     .children(lead_chevron)
                     .child(line_one)
@@ -22517,7 +22568,7 @@ mod tests {
     #[test]
     fn sidebar_disclosure_motion_lands_exactly_on_its_target() {
         let mut tween = SidebarDisclosureMotion::new(1, 240.0, 0.0);
-        tween.started = std::time::Instant::now() - motion::COLLAPSE.total().mul_f32(2.0);
+        tween.started = std::time::Instant::now() - tween.spec().total().mul_f32(2.0);
         assert_eq!(tween.current(), 0.0);
         assert!(!tween.animating());
     }

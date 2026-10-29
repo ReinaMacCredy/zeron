@@ -580,6 +580,8 @@ pub const SEGMENT_SLIDE: MotionSpec = MotionSpec::new(260, EASE_OUT_QUINT);
 pub const TAB_GROUP: MotionSpec = MotionSpec::new(240, EASE_OUT);
 /// Diff-pane per-file collapse: 180ms height (§1.11).
 pub const COLLAPSE: MotionSpec = MotionSpec::new(180, EASE_OUT);
+pub const SHELF_OPEN: MotionSpec = MotionSpec::new(240, EASE_OUT);
+pub const SHELF_CLOSE: MotionSpec = MotionSpec::new(220, EASE_OUT);
 /// Stepped-slider snap — CSS `cubic-bezier(0.22, 1.1, 0.36, 1)`: quick, with
 /// a touch of overshoot so the thumb visibly lands on the stop instead of
 /// teleporting. Drive it through [`CubicBezier::eval_unclamped`].
@@ -933,21 +935,29 @@ impl DisclosureMotion {
     }
 
     pub(crate) fn current(self) -> f32 {
-        let total = Self::span().as_secs_f32();
+        let total = self.span().as_secs_f32();
         let raw = if total > 0.0 {
             since(self.started).as_secs_f32() / total
         } else {
             1.0
         };
-        lerp(self.from, self.to, COLLAPSE.progress(raw))
+        lerp(self.from, self.to, self.spec().progress(raw))
     }
 
     pub(crate) fn animating(self) -> bool {
-        since(self.started) < Self::span() + Duration::from_millis(120)
+        since(self.started) < self.span() + Duration::from_millis(120)
     }
 
-    fn span() -> Duration {
-        COLLAPSE.total().mul_f32(speed_scale())
+    pub(crate) fn spec(self) -> MotionSpec {
+        if self.to >= self.from {
+            SHELF_OPEN
+        } else {
+            SHELF_CLOSE
+        }
+    }
+
+    fn span(self) -> Duration {
+        self.spec().total().mul_f32(speed_scale())
     }
 }
 
