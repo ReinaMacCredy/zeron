@@ -1461,7 +1461,6 @@ fn phone_stops_resumes_and_starts_supervisors() {
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-                permission_mode: Default::default(),
                 instructions: String::new(),
                 profile_id: None,
                 instance_id: None,
@@ -1711,7 +1710,6 @@ fn a_new_chat_draft_takes_and_drops_a_profile() {
         reasoning: None,
         model_options: Default::default(),
         sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-        permission_mode: Default::default(),
         instructions: String::new(),
         profile_id: None,
         instance_id: None,
@@ -1730,7 +1728,7 @@ fn a_new_chat_draft_takes_and_drops_a_profile() {
     assert_eq!(planned.harness, zeron_proto::HarnessId::Codex);
     assert_eq!(planned.profile_id.as_deref(), Some("planner"));
     assert_eq!(planned.instructions, "Plan first; do not edit files.");
-    assert_eq!(planned.permission_mode, zeron_proto::PermissionMode::Ask);
+    assert_eq!(planned.access, zeron_proto::AccessMode::Supervised);
     let rows = rt
         .block_on(client.draft_profile_rows(&device, planned))
         .unwrap();

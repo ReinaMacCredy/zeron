@@ -1463,7 +1463,7 @@ impl SessionHandle {
                     cwd: chat.cwd.clone().unwrap_or_else(|| "~".into()),
                     sandbox: config.map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox),
                     auto_approve: false,
-                    access: config.map(|c| c.permission_mode.access()).unwrap_or_default(),
+                    access: config.map(|c| c.access).unwrap_or_default(),
                     plan: config.is_some_and(|c| c.plan),
                     resume: None,
                     attachments: refs.clone(),
@@ -1472,7 +1472,6 @@ impl SessionHandle {
                     branch: None,
                     forked_at: None,
                     computer_control: false,
-                    permission_mode: config.map(|c| c.permission_mode).unwrap_or_default(),
                     disabled_tools: config.map(|c| c.disabled_tools.clone()).unwrap_or_default(),
                     env: Default::default(),
                 };

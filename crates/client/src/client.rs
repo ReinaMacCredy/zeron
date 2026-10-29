@@ -432,12 +432,13 @@ impl ClientInner {
             return HostCapabilities::default();
         };
         let has = |cap: &str| device.capabilities.iter().any(|c| c == cap);
-        let mid_turn_steering = harness.and_then(|harness| {
+        let info = harness.and_then(|harness| {
             lock(&self.harness_catalogs)
                 .get(device_id)
-                .and_then(|list| list.iter().find(|h| h.id == harness))
-                .and_then(HarnessInfo::mid_turn_steering)
+                .and_then(|list| list.iter().find(|h| h.id == harness).cloned())
         });
+        let mid_turn_steering = info.as_ref().and_then(HarnessInfo::mid_turn_steering);
+        let access_modes = info.and_then(|info| info.access_modes);
         HostCapabilities {
             message_queue: has(capability::MESSAGE_QUEUE_V1),
             queue_actions: has(capability::MESSAGE_QUEUE_ACTIONS_V1),
@@ -450,6 +451,7 @@ impl ClientInner {
                 .and_then(zeron_proto::version_triple)
                 .is_some_and(|v| v >= QUEUED_ATTACHMENTS_MIN),
             mid_turn_steering,
+            access_modes,
             provider_switch: has(capability::PROVIDER_SWITCH_V1),
         }
     }
@@ -1536,7 +1538,7 @@ impl Client {
             })
             .or_else(|| {
                 fallback.map(|mut config| {
-                    config.permission_mode = zeron_proto::PermissionMode::Full;
+                    config.access = zeron_proto::AccessMode::FullAccess;
                     config
                 })
             })

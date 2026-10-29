@@ -279,6 +279,8 @@ pub struct HostCapabilities {
     pub queued_attachments: bool,
     /// The chat's harness steers mid-turn (unknown until a live catalog).
     pub mid_turn_steering: Option<bool>,
+    /// The access modes the chat's harness honors (unknown until a live catalog).
+    pub access_modes: Option<Vec<zeron_proto::AccessMode>>,
     /// The host moves the chat to another provider between turns; older
     /// hosts would resume one provider's session under another.
     pub provider_switch: bool,
