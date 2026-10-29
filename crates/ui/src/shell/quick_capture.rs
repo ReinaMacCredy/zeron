@@ -46,13 +46,13 @@ impl Shell {
                 bar
             }
         };
-        let size = gpui::size(px(qc::CARD_WIDTH + 2.0 * qc::MARGIN), px(qc::PANEL_HEIGHT));
+        let size = gpui::size(px(qc::CARD_WIDTH), px(qc::BAR_HEIGHT));
         let Some(options) = panel_options(size, true, cx) else {
             return;
         };
         let opened = cx.open_window(options, |window, cx| {
             #[cfg(target_os = "macos")]
-            qc::macos::keep_on_deactivate(window);
+            qc::macos::style_panel(window, 16.0);
             bar.update(cx, |bar, cx| bar.opened(window, cx));
             bar.clone()
         });
@@ -175,10 +175,7 @@ impl Shell {
     }
 
     fn open_capture_toast_window(&mut self, toast: CaptureToast, cx: &mut Context<Self>) {
-        let size = gpui::size(
-            px(qc::TOAST_WIDTH + 2.0 * qc::MARGIN),
-            px(qc::TOAST_HEIGHT + 2.0 * qc::MARGIN),
-        );
+        let size = gpui::size(px(qc::TOAST_WIDTH), px(qc::TOAST_HEIGHT));
         let Some(options) = panel_options(size, false, cx) else {
             return;
         };
@@ -205,7 +202,7 @@ impl Shell {
         };
         let opened = cx.open_window(options, |window, cx| {
             #[cfg(target_os = "macos")]
-            qc::macos::keep_on_deactivate(window);
+            qc::macos::style_panel(window, 10.0);
             cx.new(|_| panel)
         });
         let Ok(handle) = opened else {
@@ -524,7 +521,7 @@ fn panel_options(size: gpui::Size<Pixels>, focus: bool, cx: &App) -> Option<gpui
     let screen = display.bounds().size;
     let origin = gpui::point(
         (screen.width - size.width) / 2.0,
-        screen.height * qc::FROM_TOP - px(qc::MARGIN),
+        screen.height * qc::FROM_TOP,
     );
     Some(gpui::WindowOptions {
         window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::new(
@@ -538,7 +535,7 @@ fn panel_options(size: gpui::Size<Pixels>, focus: bool, cx: &App) -> Option<gpui
         is_resizable: false,
         is_minimizable: false,
         display_id: Some(display.id()),
-        window_background: gpui::WindowBackgroundAppearance::Transparent,
+        window_background: gpui::WindowBackgroundAppearance::Blurred,
         ..Default::default()
     })
 }

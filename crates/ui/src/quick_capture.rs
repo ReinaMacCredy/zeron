@@ -19,11 +19,10 @@ use crate::typography::ui_rems;
 pub(crate) mod macos;
 
 pub(crate) const CARD_WIDTH: f32 = 640.0;
-pub(crate) const MARGIN: f32 = 24.0;
-pub(crate) const PANEL_HEIGHT: f32 = 420.0;
+pub(crate) const BAR_HEIGHT: f32 = 96.0;
 pub(crate) const FROM_TOP: f32 = 0.18;
 pub(crate) const TOAST_WIDTH: f32 = 460.0;
-pub(crate) const TOAST_HEIGHT: f32 = 40.0;
+pub(crate) const TOAST_HEIGHT: f32 = 36.0;
 pub(crate) const TICK: Duration = Duration::from_millis(180);
 pub(crate) const FADE: Duration = Duration::from_millis(120);
 pub(crate) const TOAST_FOR: Duration = Duration::from_millis(2600);
@@ -204,10 +203,6 @@ impl QuickCaptureBar {
         }));
         window.focus(&self.input.focus_handle(cx), cx);
         cx.notify();
-    }
-
-    pub(crate) fn is_saving(&self) -> bool {
-        self.saved.is_some()
     }
 
     fn space_id(&self, cx: &App) -> Option<String> {
@@ -400,7 +395,12 @@ impl QuickCaptureBar {
         let _ = window;
     }
 
-    fn render_card(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_card(
+        &mut self,
+        menu: Option<AnyElement>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let state = self.state.read(cx);
         let space_id = self.space_id(cx);
         let project = project_label(state, space_id.as_deref());
@@ -469,15 +469,16 @@ impl QuickCaptureBar {
         div()
             .id("quick-capture-card")
             .debug_selector(|| "quick-capture-card".into())
+            .relative()
             .w(px(CARD_WIDTH))
             .flex()
             .flex_col()
             .rounded(px(16.0))
             .border_1()
             .border_color(theme.text.opacity(0.12))
-            .bg(theme.surface_dialog)
-            .shadow_xl()
+            .bg(panel_surface(theme))
             .text_color(theme.text)
+            .child(fit_panel())
             .child(
                 div()
                     .flex()
@@ -562,6 +563,7 @@ impl QuickCaptureBar {
                             .child(hint("Esc", "")),
                     ),
             )
+            .children(menu)
             .into_any_element()
     }
 
@@ -570,17 +572,14 @@ impl QuickCaptureBar {
         div()
             .id("quick-capture-projects")
             .debug_selector(|| "quick-capture-projects".into())
-            .ml(px(40.0))
-            .mt(px(6.0))
+            .ml(px(36.0))
+            .mb(px(8.0))
             .w(px(220.0))
             .p(px(4.0))
             .flex()
             .flex_col()
             .rounded(px(10.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface_dialog)
-            .shadow_lg()
+            .bg(theme.text.opacity(0.04))
             .text_size(ui_rems(13.0))
             .text_color(theme.text)
             .children(rows.into_iter().enumerate().map(|(ix, (_, name))| {
@@ -605,7 +604,6 @@ impl QuickCaptureBar {
 impl Render for QuickCaptureBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_popup();
-        let reduced = cx.reduce_motion();
         let fade = self.saved.map_or(1.0, |saved| {
             let after_tick = motion::since(saved).saturating_sub(TICK);
             1.0 - (after_tick.as_secs_f32() / FADE.as_secs_f32()).clamp(0.0, 1.0)
@@ -613,14 +611,13 @@ impl Render for QuickCaptureBar {
         if self.saved.is_some() && fade > 0.0 {
             window.request_animation_frame();
         }
-        let card = self.render_card(&theme, cx);
         let menu = self.menu.map(|active| self.render_menu(active, &theme, cx));
+        let card = self.render_card(menu, &theme, cx);
         let opens = self.opens;
         div()
             .id("quick-capture")
             .key_context("QuickCapture")
             .size_full()
-            .p(px(MARGIN))
             .font_family(theme.font_sans.clone())
             .on_key_down(cx.listener(Self::on_key))
             .capture_action(cx.listener(|bar, _: &crate::composer::Up, _, cx| {
@@ -633,31 +630,47 @@ impl Render for QuickCaptureBar {
                     cx.stop_propagation();
                 }
             }))
-            .child(
-                div()
-                    .id("quick-capture-body")
-                    .flex()
-                    .flex_col()
-                    .on_mouse_down_out(cx.listener(|bar, _, _, cx| {
-                        if !bar.is_saving() {
-                            cx.emit(BarEvent::Dismiss);
-                        }
-                    }))
-                    .child(card)
-                    .children(menu)
-                    .with_animation(
-                        ("quick-capture-open", opens),
-                        OPEN.animation(),
-                        move |el, t| {
-                            if reduced {
-                                el.opacity(t * fade)
-                            } else {
-                                el.relative().opacity(t * fade).top(px(-8.0 * (1.0 - t)))
-                            }
-                        },
-                    ),
-            )
+            .child(div().id("quick-capture-body").child(card).with_animation(
+                ("quick-capture-open", opens),
+                OPEN.animation(),
+                move |el, t| el.opacity(t * fade),
+            ))
     }
+}
+
+fn panel_surface(theme: &Theme) -> gpui::Hsla {
+    if cfg!(target_os = "macos") {
+        theme.surface_dialog.opacity(0.82)
+    } else {
+        theme.surface_dialog
+    }
+}
+
+fn fit_panel() -> impl IntoElement {
+    gpui::canvas(
+        |bounds, window, cx| {
+            #[cfg(all(target_os = "macos", not(test)))]
+            {
+                let have = window.viewport_size();
+                let off = (bounds.size.width - have.width).abs() > px(0.5)
+                    || (bounds.size.height - have.height).abs() > px(0.5);
+                if off && let Some(resize) = macos::resize_panel(window) {
+                    let (width, height) = (
+                        f64::from(f32::from(bounds.size.width)),
+                        f64::from(f32::from(bounds.size.height)),
+                    );
+                    cx.spawn(async move |_| resize(width, height)).detach();
+                }
+            }
+            #[cfg(any(not(target_os = "macos"), test))]
+            let _ = (bounds, window, cx);
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 pub(crate) fn is_panel(window: gpui::AnyWindowHandle) -> bool {
@@ -696,6 +709,7 @@ pub(crate) fn toast_card(
         .border_color(theme.border)
         .bg(theme.surface_dialog)
         .shadow_lg()
+        .flex_none()
         .text_size(ui_rems(12.5))
         .text_color(theme.text)
         .child(
@@ -722,9 +736,7 @@ impl Render for ToastPanel {
         let (undo, open) = (self.on_undo.clone(), self.on_open.clone());
         div()
             .size_full()
-            .p(px(MARGIN))
             .flex()
-            .justify_center()
             .items_start()
             .font_family(theme.font_sans.clone())
             .child(motion::fade_quick(
@@ -734,7 +746,10 @@ impl Render for ToastPanel {
                     &theme,
                     move |_, window, cx| undo(window, cx),
                     move |_, window, cx| open(window, cx),
-                ),
+                )
+                .relative()
+                .bg(panel_surface(&theme))
+                .child(fit_panel()),
             ))
     }
 }
