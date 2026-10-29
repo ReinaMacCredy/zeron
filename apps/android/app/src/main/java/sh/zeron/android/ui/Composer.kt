@@ -141,6 +141,7 @@ fun Composer(
     onCompact: (String?) -> Unit = {},
     onSidechat: (String?) -> Unit = {},
     onOpenFindings: () -> Unit = {},
+    onOpenChanges: (String) -> Unit = {},
     quotes: kotlinx.coroutines.flow.Flow<String> = kotlinx.coroutines.flow.emptyFlow(),
 ) {
     val scope = rememberCoroutineScope()
@@ -253,7 +254,7 @@ fun Composer(
             WorkspaceCommand.RESUME -> onOpenRoute("search")
             WorkspaceCommand.SETTINGS -> onOpenRoute("settings")
             WorkspaceCommand.DIFF -> scope.launch {
-                if (runCatching { handle.chatChanges() }.getOrNull() == null) model.toast("No changes in this chat yet") else onOpenRoute("git")
+                runCatching { handle.chatChanges() }.getOrNull()?.let { onOpenChanges(it.title) } ?: model.toast("No changes in this chat yet")
             }
             WorkspaceCommand.FILES -> {
                 draft.beginFileMention()

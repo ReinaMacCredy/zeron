@@ -542,6 +542,7 @@ fun SessionScreen(
                         onCompact = { extras.compact(it) },
                         onSidechat = { sidechat = SidechatRequest(it) },
                         onOpenFindings = { findings = FindingsRequest(null) },
+                        onOpenChanges = { changes = it },
                         quotes = quotes,
                     )
                 }
