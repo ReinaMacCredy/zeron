@@ -2228,6 +2228,14 @@ impl ShortcutId {
     }
 }
 
+pub fn default_quick_capture() -> &'static str {
+    if cfg!(target_os = "macos") {
+        crate::appshots::ChordModifier::Option.combo()
+    } else {
+        crate::appshots::NO_HOTKEY
+    }
+}
+
 /// Persisted shortcut combos. Stored platform-neutral ("mod-s"); translated to
 /// "cmd-s"/"ctrl-s" at bind time by [`platform_combo`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2236,6 +2244,7 @@ pub struct KeymapConfig {
     pub toggle_dictation: String,
     #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), serde(skip))]
     pub capture_appshot: String,
+    pub quick_capture: String,
     pub random_wallpaper: String,
     pub save_file: String,
     pub browser_reload: String,
@@ -2308,6 +2317,7 @@ impl Default for KeymapConfig {
         Self {
             toggle_dictation: ShortcutId::ToggleDictation.default_combo().into(),
             capture_appshot: ShortcutId::CaptureAppshot.default_combo().into(),
+            quick_capture: default_quick_capture().into(),
             random_wallpaper: ShortcutId::RandomWallpaper.default_combo().into(),
             save_file: ShortcutId::SaveFile.default_combo().into(),
             browser_reload: ShortcutId::BrowserReload.default_combo().into(),

@@ -133,12 +133,13 @@ impl Shell {
         &mut self,
         task_id: &str,
         title: &str,
+        notes: &str,
         space_id: Option<String>,
         due_on: Option<String>,
         images: &[String],
         cx: &mut Context<Self>,
     ) {
-        let mut params = Self::create_task_params(task_id, title, "", space_id, due_on);
+        let mut params = Self::create_task_params(task_id, title, notes, space_id, due_on);
         if !images.is_empty() {
             params["images"] = images.into();
         }
@@ -489,6 +490,26 @@ impl Shell {
         page.update(cx, |page, cx| page.open_card(task_id, window, cx));
     }
 
+    pub(super) fn open_captured_task(
+        &mut self,
+        task_id: String,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_tasks(cx);
+        let card = self.tasks_page(window, cx).read(cx).card().clone();
+        card.update(cx, |card, cx| {
+            card.open(
+                task_id,
+                Some(title),
+                crate::tasks::CardFocus::Notes,
+                Some(window),
+                cx,
+            )
+        });
+    }
+
     pub(super) fn defer_open_task(&mut self, task_id: String, cx: &mut Context<Self>) {
         self.defer_in_active_window(cx, move |shell, window, cx| {
             shell.open_task(task_id, window, cx)
@@ -524,7 +545,7 @@ impl Shell {
                 title,
                 space_id,
                 images,
-            } => self.create_task(task_id, title, space_id.clone(), None, images, cx),
+            } => self.create_task(task_id, title, "", space_id.clone(), None, images, cx),
             TasksEvent::Update { task_id, patch } => {
                 self.update_card_task(&card, task_id, patch, cx)
             }

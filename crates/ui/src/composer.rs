@@ -1663,6 +1663,7 @@ impl TextProjection {
                     path: link.task_id,
                     kind: ChipKind::Task,
                     attachment: None,
+                    annotation: None,
                 }),
         );
         links.extend(

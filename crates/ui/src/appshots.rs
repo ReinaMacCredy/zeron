@@ -22,7 +22,10 @@ mod macos;
 
 mod shortcut;
 pub(crate) use shortcut::capture_allowed;
-pub use shortcut::{ChordModifier, NO_HOTKEY, set_recording, set_shortcut, validate_shortcut};
+pub use shortcut::{
+    ChordModifier, NO_HOTKEY, chords_conflict, set_quick_capture, set_recording, set_shortcut,
+    validate_shortcut,
+};
 
 pub const fn is_desktop() -> bool {
     cfg!(any(target_os = "macos", target_os = "linux"))
@@ -662,6 +665,13 @@ pub fn start_global_shortcut(
     activation_dir: PathBuf,
 ) -> futures::channel::mpsc::UnboundedReceiver<()> {
     backend().start_global_shortcut(&activation_dir)
+}
+
+pub fn start_quick_capture() -> futures::channel::mpsc::UnboundedReceiver<()> {
+    #[cfg(target_os = "macos")]
+    return macos::start_quick_capture();
+    #[cfg(not(target_os = "macos"))]
+    futures::channel::mpsc::unbounded().1
 }
 
 pub async fn capture_active_window() -> Result<CapturedAppshot, CaptureError> {

@@ -958,6 +958,7 @@ pub struct AppState {
     pub spaces: Vec<Space>,
     pub tasks: Vec<zeron_proto::Task>,
     pub task_steps: Vec<zeron_proto::TaskStep>,
+    pub quick_captured: crate::quick_capture::Captured,
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
     pub chats: Vec<Chat>,
     /// Fork RPC may arrive ahead of its registry row on a remote device.
@@ -1209,6 +1210,7 @@ impl AppState {
             spaces: Vec::new(),
             tasks: Vec::new(),
             task_steps: Vec::new(),
+            quick_captured: Default::default(),
             chats: Vec::new(),
             pending_side_chat: None,
             unsaved_side_chat: false,
