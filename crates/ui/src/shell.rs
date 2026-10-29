@@ -105,6 +105,7 @@ use panel_layout::{AuxiliaryPanel, FitInputs, HorizontalPanelFit, panel_content_
 #[cfg(test)]
 mod panel_interaction_tests;
 mod pr_chat;
+mod quick_capture;
 pub(crate) mod project_icon;
 mod sidebar_peek;
 mod side_chats;
@@ -230,7 +231,8 @@ actions!(
         PrevSession,
         ArchiveSession,
         IncreaseReasoning,
-        DecreaseReasoning
+        DecreaseReasoning,
+        QuickCapture
     ]
 );
 
@@ -532,6 +534,7 @@ pub fn apply_keymap(
     }
     let equivalents = crate::settings::key_equivalents(cx);
     crate::appshots::set_shortcut(&keymap.capture_appshot, &equivalents);
+    crate::appshots::set_quick_capture(&keymap.quick_capture);
     cx.clear_key_bindings();
     // `clear_key_bindings` also removes the contextual editing actions that
     // gpui-base installed at startup. Reinitialize the component layer before
@@ -1389,6 +1392,11 @@ impl SettingsSection {
                     "Permission status",
                     &["recheck", "grant"],
                     Some(Target::Setting(SettingId::AppshotPermissions)),
+                ),
+                (
+                    "Quick capture",
+                    &["task", "idea", "hotkey", "chord", "option"],
+                    Some(Target::Setting(SettingId::QuickCapture)),
                 ),
             ],
             SettingsSection::Computer => &[
@@ -3336,6 +3344,7 @@ pub struct Shell {
     _accounts_cache: Subscription,
     rail_usage_menu: popover::Popup<HarnessId>,
     rail_usage_hover: app_rail::RingHover,
+    quick_capture: quick_capture::Host,
     continuing: std::collections::HashSet<String>,
     harnesses_page: Option<Entity<HarnessesPage>>,
     harnesses_sub: Option<Subscription>,
@@ -4121,6 +4130,7 @@ impl Shell {
             _accounts_cache: accounts_cache_observation,
             rail_usage_menu: popover::Popup::default(),
             rail_usage_hover: app_rail::RingHover::default(),
+            quick_capture: Default::default(),
             continuing: Default::default(),
             harnesses_page: None,
             harnesses_sub: None,
@@ -9268,6 +9278,10 @@ impl Shell {
             self.close_rail_usage(cx);
             return true;
         }
+        if self.rail_capture_open() {
+            self.close_rail_capture(cx);
+            return true;
+        }
         let Route::Settings(section) = self.route else {
             return false;
         };
@@ -9406,6 +9420,7 @@ impl Shell {
 
     fn enter_tasks_route(&mut self, cx: &mut Context<Self>) {
         self.set_route(Route::Tasks, cx);
+        self.quick_capture_tasks_opened(cx);
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
         cx.notify();
@@ -16149,7 +16164,9 @@ impl Shell {
             .then(|| crate::inbox::awaiting_chats(self.state.read(cx), Utc::now()).len())
             .filter(|count| *count > 0);
         let needs_you = match item {
-            RailItem::Tasks => Some(crate::tasks::needs_you_count(self.state.read(cx))),
+            RailItem::Tasks => Some(
+                crate::tasks::needs_you_count(self.state.read(cx)) + self.quick_capture_unseen(cx),
+            ),
             RailItem::Supervisor => self
                 .state
                 .read(cx)
@@ -16218,10 +16235,13 @@ impl Shell {
     /// Never deferred: a deferred draw would capture all native browser input.
     fn render_app_rail(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let top: Vec<AnyElement> = app_rail::TOP
-            .iter()
-            .map(|entry| self.render_rail_button(entry, &theme, cx))
-            .collect();
+        let mut top: Vec<AnyElement> = Vec::new();
+        for entry in app_rail::TOP.iter() {
+            top.push(self.render_rail_button(entry, &theme, cx));
+            if entry.item == RailItem::Tasks {
+                top.push(self.render_rail_capture(cx));
+            }
+        }
         let rings = self.render_rail_rings(&theme, cx);
         let voice = self.render_voice_trigger(&theme, cx);
         let account = self.render_user_menu(&theme, cx);
@@ -17229,7 +17249,8 @@ impl Shell {
         let on_sidebar_control = (self.sidebar_peek_focus.contains_focused(window, cx)
             || self.rail_focus.contains_focused(window, cx))
             && self.chat_rename.is_none()
-            && self.spaces_menu.get().is_none();
+            && self.spaces_menu.get().is_none()
+            && !self.rail_capture_open();
         if !in_right
             && !on_sidebar_control
             && !self.sidebar_view_trigger_focus.is_focused(window)
@@ -20921,6 +20942,9 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &RandomWallpaper, _, cx| {
                 this.random_wallpaper(cx);
             }))
+            .on_action(cx.listener(|this, _: &QuickCapture, window, cx| {
+                this.toggle_quick_capture(window, cx);
+            }))
             .on_action(cx.listener(
                 |this, _: &crate::pull_requests::OpenSourceControlSettings, _, cx| {
                     this.open_settings(SettingsSection::SourceControl, cx)
@@ -21893,6 +21917,7 @@ impl Render for Shell {
             root
         };
         // Toasts float over every phase and route.
+        let root = root.children(self.render_capture_toast(cx));
         let root = root.children(crate::toast::render_toaster(window, cx));
         let root = root.children(crate::ui_driver::record_tap(window));
 

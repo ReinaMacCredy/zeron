@@ -590,23 +590,23 @@ case "$turnline" in
   emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
   ;;
 
-*scenario:auto-mode*)
-  # Auto: the workspace is writable (network on), codex's own reviewer
-  # answers its escalations, and whatever still reaches Zeron is asked (the
-  # test answers No).
-  for want in '"approvalPolicy":"on-request"' '"sandbox":"workspace-write"' '"approvalsReviewer":"auto_review"'; do
-    has "$thread_line" "$want" || { fail_turn "$tid" "auto thread param missing: $want"; exit 0; }
+*scenario:auto-edits*)
+  # Auto-accept edits: the workspace is writable (network on) and codex asks
+  # to step outside it. A file change is accepted without asking; a command
+  # and a permission grant are asked (the test answers No).
+  for want in '"approvalPolicy":"untrusted"' '"sandbox":"workspace-write"' '"approvalsReviewer":"user"'; do
+    has "$thread_line" "$want" || { fail_turn "$tid" "auto-edits thread param missing: $want"; exit 0; }
   done
-  for want in '"approvalPolicy":"on-request"' '"type":"workspaceWrite"' '"networkAccess":true' '"approvalsReviewer":"auto_review"'; do
-    has "$turnline" "$want" || { fail_turn "$tid" "auto turn param missing: $want"; exit 0; }
+  for want in '"approvalPolicy":"untrusted"' '"type":"workspaceWrite"' '"networkAccess":true' '"approvalsReviewer":"user"'; do
+    has "$turnline" "$want" || { fail_turn "$tid" "auto-edits turn param missing: $want"; exit 0; }
   done
   has "$turnline" 'collaborationMode' && { fail_turn "$tid" "collaborationMode without plan"; exit 0; }
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
   emit '{"id":401,"method":"item/fileChange/requestApproval","params":{"itemId":"f1","changes":[{"path":"/outside/a.rs","kind":"update"}]}}'
   read -r a1 || exit 1
-  { has "$a1" '"id":401' && has "$a1" '"decision":"decline"'; } ||
-    { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"file change not declined"}}}}'; exit 0; }
+  { has "$a1" '"id":401' && has "$a1" '"decision":"accept"'; } ||
+    { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"file change not accepted"}}}}'; exit 0; }
   emit '{"id":402,"method":"item/commandExecution/requestApproval","params":{"itemId":"c1","command":"git push"}}'
   read -r a2 || exit 1
   { has "$a2" '"id":402' && has "$a2" '"decision":"decline"'; } ||

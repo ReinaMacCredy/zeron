@@ -7,8 +7,8 @@ use zeron_proto::supervisor::{
     SupervisorIntervention, SupervisorItem, SupervisorState, SupervisorWake, WakeDelivery,
 };
 use zeron_proto::{
-    Chat, DelegationDelivery, DelegationStatus, PermissionMode, Session, SessionStatus,
-    StepTurnEnd, Task, TaskPatch, TaskStep, ToolCall, UserInputQuestion,
+    AccessMode, Chat, DelegationDelivery, DelegationStatus, Session, SessionStatus, StepTurnEnd,
+    Task, TaskPatch, TaskStep, ToolCall, UserInputQuestion,
 };
 
 use super::delegation::{TITLE_CHARS, WAKE_QUESTION_CHARS, one_line, question_lines};
@@ -1701,7 +1701,7 @@ impl DocHost {
         let permission = supervisor
             .config
             .as_ref()
-            .map_or(PermissionMode::Full, |config| config.permission_mode);
+            .map_or(AccessMode::FullAccess, |config| config.access);
         let recent = store
             .wake_times()
             .into_iter()
@@ -2164,7 +2164,7 @@ impl DocHost {
         events: &[&SupervisorEvent],
         dropped: &[SupervisorEventSummary],
         settings: zeron_proto::supervisor::SupervisorSettings,
-        permission: PermissionMode,
+        permission: AccessMode,
     ) -> String {
         let mut quoted = HashSet::new();
         let entries: Vec<WakeEntry> = events

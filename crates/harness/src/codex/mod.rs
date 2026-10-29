@@ -21,16 +21,15 @@
 //!   `thread/tokenUsage/updated` → Usage, turn/completed|failed|aborted → Done.
 //!   An `error` Codex will retry is progress, not an error; a final one is
 //!   reported once, by the turn's Done.
-//! - Approvals + sandbox follow the run's [`zeron_proto::PermissionMode`]:
-//!   Full is yolo (`approvalPolicy: "never"` + `danger-full-access`, the
-//!   unattended behavior), Auto is codex's own auto mode (`on-request` +
-//!   `workspace-write` + `approvalsReviewer: "auto_review"`, the CLI's
-//!   `--approve-for-me`), Ask is `untrusted` + `workspace-write`. Under
-//!   Ask/Auto the `item/commandExecution/requestApproval` +
-//!   `item/fileChange/requestApproval` requests round-trip through
-//!   [`RunControls::request_input`] as a synthesized yes/no question; under
-//!   Full a stray one is accepted outright. `item/permissions/requestApproval`
-//!   rides the same path. MCP elicitations (sent whatever the policy) are
+//! - Approvals + sandbox follow the run's [`zeron_proto::AccessMode`]
+//!   ([`permissions`]): full access is yolo (`approvalPolicy: "never"` +
+//!   `danger-full-access`, the unattended behavior), auto-accept edits is
+//!   `untrusted` + `workspace-write` with file changes accepted, supervised
+//!   is `untrusted` + `read-only`. Any other
+//!   `item/commandExecution/requestApproval`,
+//!   `item/fileChange/requestApproval` or `item/permissions/requestApproval`
+//!   round-trips through [`RunControls::request_input`] as a synthesized
+//!   yes/no question; under full access a stray one is accepted outright. MCP elicitations (sent whatever the policy) are
 //!   asked when they are a flat form and declined otherwise.
 //! - Plan mode is Codex's `plan` collaboration mode. It sticks to the thread
 //!   (across a resume too), so once a thread has planned every turn names
@@ -87,8 +86,7 @@ use crate::jsonrpc::{Incoming, RpcClient, transport_lost};
 use crate::process::{Child, Command, Stdio};
 use crate::{Harness, HarnessError, RunControls, ToolServer};
 use catalog::{
-    REASONING_LEVELS, approval_policy, approvals_reviewer, sandbox_mode, sandbox_policy_value,
-    static_models, to_effort,
+    REASONING_LEVELS, permissions, sandbox_mode, sandbox_policy_value, static_models, to_effort,
 };
 use normalize::{
     ChildRoute, Phase, RateLimitWindows, ReasoningStream, UsageTally, delta_text, item_id,
@@ -428,6 +426,26 @@ impl CodexHarness {
     }
 }
 
+/// What a request may do without asking: `auto_approve` still means full
+/// access.
+fn run_access(request: &RunRequest) -> AccessMode {
+    if request.auto_approve {
+        AccessMode::FullAccess
+    } else {
+        request.access
+    }
+}
+
+/// What an approval request asks to do, for
+/// [`crate::approval::allowed_without_asking`].
+fn approval_action(method: &str) -> crate::approval::Action {
+    if method == "item/fileChange/requestApproval" {
+        crate::approval::Action::Edit
+    } else {
+        crate::approval::Action::Other
+    }
+}
+
 /// The `serviceTier` a request runs with; "default" (Standard) is omitted.
 fn service_tier(request: &RunRequest) -> Option<String> {
     request
@@ -752,12 +770,12 @@ impl Harness for CodexHarness {
     /// for later turns — so a change applies from the next turn without a
     /// new app-server. Clearing one back to the default cannot be expressed
     /// that way (an omitted parameter keeps the previous value). The
-    /// permission mode, the computer grant and a branch cut are fixed when
+    /// access mode, the computer grant and a branch cut are fixed when
     /// the thread starts.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
             && live.auto_approve == next.auto_approve
-            && live.permission_mode == next.permission_mode
+            && run_access(live) == run_access(next)
             && live.computer_control == next.computer_control
             && (next.branch.is_none() || next.branch == live.branch)
             && (next.model.is_some() || live.model.is_none())
@@ -890,17 +908,9 @@ impl CodexHarness {
                 "Codex commands cannot include attachments; send them in a separate prompt".into(),
             ));
         }
-        // The sandbox follows the permission mode (Full = danger-full-access,
-        // codex's --dangerously-bypass-approvals-and-sandbox equivalent
-        // together with approvalPolicy "never" below). Codex ≤0.144.x had a
-        // workspace-write bug where a linked worktree on a slash-named branch
-        // derived a malformed mount that killed every command; re-probed
-        // clean on 0.154.0, so Ask/Auto run workspace-write.
-        request.sandbox = if one_shot.is_some() {
-            zeron_proto::SandboxLevel::ReadOnly
-        } else {
-            request.permission_mode.sandbox()
-        };
+        // The sandbox is the access mode's (see [`permissions`]), never the
+        // request's own level.
+        request.sandbox = permissions(run_access(&request), one_shot.is_some()).1;
         let AppServer {
             executable,
             child,
@@ -1400,7 +1410,7 @@ fn thread_params(
         // wait_threads blocks up to 30 min; Codex's own per-call ceiling
         // would cut it short (`tool_timeout_sec` in the 0.154.0 schema).
         overrides.insert("mcp_servers.zeron.tool_timeout_sec".into(), json!(1800));
-        let drive_unprompted = request.permission_mode == zeron_proto::PermissionMode::Full;
+        let drive_unprompted = run_access(request).is_full_access();
         for tool in PREAPPROVED_ZERON_TOOLS
             .into_iter()
             .chain(drive_unprompted.then_some(UI_DRIVE_TOOL))
@@ -1425,10 +1435,7 @@ fn thread_params(
     }
     p.insert("cwd".into(), Value::String(request.cwd.clone()));
     p.insert("approvalPolicy".into(), approval_policy.into());
-    p.insert(
-        "approvalsReviewer".into(),
-        approvals_reviewer(request.permission_mode).into(),
-    );
+    p.insert("approvalsReviewer".into(), "user".into());
     p.insert("sandbox".into(), sandbox_mode(request.sandbox).into());
     if let Some(model) = &request.model {
         p.insert("model".into(), Value::String(model.clone()));
@@ -1589,17 +1596,8 @@ async fn run_session(session: Session) {
     let title_only = one_shot.is_some();
 
     // ---- wire params ------------------------------------------------------
-    // Full never surfaces wire approvals (with the sandbox above this is
-    // codex's yolo mode). Under Ask/Auto every approval the server raises
-    // becomes a yes/no question through the input bridge — and "on-request"
-    // once turned every command into a yes/no question (user report: "asking
-    // me for approval at every step"), so Auto may prompt often. A title-only
-    // run has no tools at all, so it keeps the pre-mode wire ("never").
-    let approval_policy = if title_only {
-        "never"
-    } else {
-        approval_policy(request.permission_mode)
-    };
+    // `approvalsReviewer: "user"` keeps a configured AI reviewer from answering for the person.
+    let approval_policy = permissions(run_access(&request), title_only).0;
     let start_tier = service_tier(&request);
 
     let start_params = thread_params(
@@ -1877,10 +1875,7 @@ async fn run_session(session: Session) {
         p.insert("threadId".into(), Value::String(thread_id.clone()));
         p.insert("input".into(), prompt_input(text));
         p.insert("approvalPolicy".into(), approval_policy.into());
-        p.insert(
-            "approvalsReviewer".into(),
-            approvals_reviewer(request.permission_mode).into(),
-        );
+        p.insert("approvalsReviewer".into(), "user".into());
         p.insert(
             "sandboxPolicy".into(),
             sandbox_policy_value(request.sandbox),
@@ -2499,7 +2494,7 @@ async fn run_session(session: Session) {
                         id,
                         &method,
                         &params,
-                        request.permission_mode.auto_approve(),
+                        run_access(&request),
                         request.computer_control,
                         &request_input,
                         &request_slots,
@@ -2993,7 +2988,7 @@ async fn compact_session(session: CompactSession) {
                         id,
                         &method,
                         &params,
-                        true,
+                        AccessMode::FullAccess,
                         false,
                         &request_input,
                         &request_slots,
@@ -3227,7 +3222,7 @@ fn handle_server_request(
     id: Value,
     method: &str,
     params: &Value,
-    auto_approve: bool,
+    access: AccessMode,
     computer_control: bool,
     request_input: &Arc<RequestInputFn>,
     slots: &Arc<tokio::sync::Semaphore>,
@@ -3251,7 +3246,7 @@ fn handle_server_request(
             return;
         }
         if tool == Some(UI_DRIVE_TOOL) {
-            if auto_approve {
+            if access.is_full_access() {
                 client.respond(&id, json!({ "action": "accept" }));
             } else {
                 let question = crate::approval::question(
@@ -3348,7 +3343,7 @@ fn handle_server_request(
             return;
         }
     };
-    if auto_approve {
+    if crate::approval::allowed_without_asking(access, approval_action(method)) {
         client.respond(&id, reply(params, true));
         return;
     }
@@ -3607,7 +3602,7 @@ mod tests {
         assert!(!legacy_model_page(&json!({"data":[]})));
     }
 
-    fn run_request(permission_mode: zeron_proto::PermissionMode, plan: bool) -> RunRequest {
+    fn run_request(permission_mode: zeron_proto::AccessMode, plan: bool) -> RunRequest {
         RunRequest {
             mcp: None,
             prompt: String::new(),
@@ -3616,10 +3611,9 @@ mod tests {
             reasoning: None,
             model_options: serde_json::Map::new(),
             cwd: "/repo".into(),
-            sandbox: permission_mode.sandbox(),
-            auto_approve: permission_mode.auto_approve(),
-            permission_mode,
-            access: permission_mode.access(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            access: permission_mode,
             plan,
             attachments: Vec::new(),
             worktree: None,
@@ -3634,16 +3628,16 @@ mod tests {
 
     #[test]
     fn plan_changes_apply_in_place_and_permission_changes_relaunch() {
-        use zeron_proto::PermissionMode;
+        use zeron_proto::AccessMode;
         let harness = CodexHarness::new();
-        let live = run_request(PermissionMode::Full, false);
-        let plan = run_request(PermissionMode::Full, true);
+        let live = run_request(AccessMode::FullAccess, false);
+        let plan = run_request(AccessMode::FullAccess, true);
         assert!(!harness.same_runtime(&live, &plan));
         assert!(harness.reconfigures_in_place(&live, &plan));
-        for mode in [PermissionMode::Ask, PermissionMode::Auto] {
+        for mode in [AccessMode::Supervised, AccessMode::AutoAcceptEdits] {
             assert!(!harness.reconfigures_in_place(&live, &run_request(mode, false)));
         }
-        let mut moved = run_request(PermissionMode::Full, false);
+        let mut moved = run_request(AccessMode::FullAccess, false);
         moved.cwd = "/elsewhere".into();
         assert!(!harness.reconfigures_in_place(&live, &moved));
         assert!(harness.supports_plan());
@@ -3800,7 +3794,6 @@ mod tests {
             model_options: serde_json::Map::new(),
             cwd: "/w".into(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-            permission_mode: zeron_proto::PermissionMode::Ask,
             access: zeron_proto::AccessMode::Supervised,
             plan: false,
             auto_approve: false,
@@ -3863,15 +3856,15 @@ mod tests {
             assert!(off["config"].get(key.as_str()).is_none());
         }
         let mut full_request = computer_request(false);
-        full_request.permission_mode = zeron_proto::PermissionMode::Full;
+        full_request.access = zeron_proto::AccessMode::FullAccess;
         let full = thread_params(&full_request, Some(&tool_server(None)), None, "never", None);
         let mut auto_request = computer_request(false);
-        auto_request.permission_mode = zeron_proto::PermissionMode::Auto;
+        auto_request.access = zeron_proto::AccessMode::AutoAcceptEdits;
         let auto = thread_params(
             &auto_request,
             Some(&tool_server(None)),
             None,
-            "on-request",
+            "untrusted",
             None,
         );
         let approval = |params: &serde_json::Map<String, Value>, tool: &str| {
@@ -3915,14 +3908,25 @@ mod tests {
     }
 
     #[test]
-    fn approve_for_me_routes_escalations_to_codex_auto_review() {
+    fn approvals_go_to_the_person_and_auto_accept_edits_accepts_file_changes() {
+        use zeron_proto::AccessMode::*;
         let mut request = computer_request(false);
-        request.permission_mode = zeron_proto::PermissionMode::Auto;
-        let auto = thread_params(&request, None, None, "on-request", None);
-        assert_eq!(auto["approvalsReviewer"], "auto_review");
-        request.permission_mode = zeron_proto::PermissionMode::Ask;
-        let ask = thread_params(&request, None, None, "untrusted", None);
-        assert_eq!(ask["approvalsReviewer"], "user");
+        for access in AccessMode::ALL {
+            request.access = access;
+            let params = thread_params(&request, None, None, permissions(access, false).0, None);
+            assert_eq!(params["approvalsReviewer"], "user");
+        }
+        let allowed = |access| {
+            [
+                "item/fileChange/requestApproval",
+                "item/commandExecution/requestApproval",
+                "item/permissions/requestApproval",
+            ]
+            .map(|method| crate::approval::allowed_without_asking(access, approval_action(method)))
+        };
+        assert_eq!(allowed(FullAccess), [true, true, true]);
+        assert_eq!(allowed(AutoAcceptEdits), [true, false, false]);
+        assert_eq!(allowed(Supervised), [false, false, false]);
     }
 
     fn is_zeron_computer_tool_approval(params: &Value) -> bool {

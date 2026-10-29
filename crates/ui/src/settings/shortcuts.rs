@@ -2006,24 +2006,66 @@ mod tests {
             page
         });
         cx.run_until_parked();
-        let trigger = cx
-            .debug_bounds("appshots-appshot-hotkey")
-            .expect("hotkey trigger painted");
-        cx.simulate_click(trigger.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        // Row order follows HOTKEY_CHOICES: ⌘, ⌥, ⇧, None.
-        let option_row = cx
-            .debug_bounds("appshots-appshot-hotkey-option-1")
-            .expect("menu open with the ⌥ + ⌥ row");
-        cx.simulate_click(option_row.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
+        let pick =
+            |cx: &mut gpui::VisualTestContext, trigger: &'static str, option: &'static str| {
+                let bounds = cx.debug_bounds(trigger).expect("hotkey trigger painted");
+                cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+                cx.run_until_parked();
+                // Row order follows HOTKEY_CHOICES: ⌘, ⌥, ⇧, None.
+                let option = cx.debug_bounds(option).expect("menu open");
+                cx.simulate_click(option.center(), gpui::Modifiers::default());
+                cx.run_until_parked();
+                // Let the closing menu's exit run out before the next pick.
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                cx.executor()
+                    .advance_clock(std::time::Duration::from_millis(200));
+                cx.run_until_parked();
+            };
+        // ⌥ + ⌥ is quick capture's default, so Appshots cannot take it.
+        pick(
+            cx,
+            "appshots-appshot-hotkey",
+            "appshots-appshot-hotkey-option-1",
+        );
         page.update(cx, |page, _| {
             assert_eq!(
                 page.keymap.capture_appshot,
-                crate::appshots::ChordModifier::Option.combo()
+                ShortcutId::CaptureAppshot.default_combo()
             );
-            // The menu is closing (its exit tween still paints for ~100ms).
+            assert!(
+                page.conflict_notice
+                    .as_ref()
+                    .is_some_and(|n| n.contains("Quick capture"))
+            );
             assert!(!page.permissions_hotkey_menu_open());
+        });
+        pick(
+            cx,
+            "appshots-appshot-hotkey",
+            "appshots-appshot-hotkey-option-2",
+        );
+        page.update(cx, |page, _| {
+            assert_eq!(
+                page.keymap.capture_appshot,
+                crate::appshots::ChordModifier::Shift.combo()
+            );
+            assert_eq!(page.conflict_notice, None);
+        });
+        pick(
+            cx,
+            "appshots-quick-capture-hotkey",
+            "appshots-quick-capture-hotkey-option-2",
+        );
+        page.update(cx, |page, _| {
+            assert_eq!(
+                page.keymap.quick_capture,
+                crate::settings::default_quick_capture()
+            );
+            assert!(
+                page.conflict_notice
+                    .as_ref()
+                    .is_some_and(|n| n.contains("Appshot"))
+            );
         });
     }
 

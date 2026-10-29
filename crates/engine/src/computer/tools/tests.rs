@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
-use zeron_proto::PermissionMode;
+use zeron_proto::AccessMode;
 use zeron_proto::computer::McpToolResult;
 
 use super::results::tool_result_payload;
@@ -46,7 +46,7 @@ pub(crate) const TURN: &str = "turn-computer";
 pub(crate) type Decide = Arc<dyn Fn(&ComputerConsentCard) -> ApprovalDecision + Send + Sync>;
 
 pub(crate) struct Approvals {
-    pub mode: Mutex<Option<PermissionMode>>,
+    pub mode: Mutex<Option<AccessMode>>,
     pub decide: Mutex<Option<Decide>>,
     pub gate: ComputerApprovalGate,
     pub cards: Mutex<Vec<ComputerConsentCard>>,
@@ -59,7 +59,7 @@ impl ComputerManagerSeams for Approvals {
         &self,
         _chat_id: &str,
         _turn_id: Option<&str>,
-    ) -> Result<Option<PermissionMode>, ComputerError> {
+    ) -> Result<Option<AccessMode>, ComputerError> {
         if self.turn_inactive.load(Ordering::SeqCst) {
             return Err(ComputerError::Other(
                 "The turn that made this call has ended.".into(),
@@ -163,7 +163,7 @@ pub(crate) struct Harness {
 
 pub(crate) struct HarnessOptions {
     pub backend: Arc<Scripted>,
-    pub mode: PermissionMode,
+    pub mode: AccessMode,
     pub action_settle_ms: u64,
     pub dialect: Option<ComputerAgentDialect>,
 }
@@ -172,7 +172,7 @@ impl Default for HarnessOptions {
     fn default() -> Self {
         Self {
             backend: Scripted::default_fake(),
-            mode: PermissionMode::Full,
+            mode: AccessMode::FullAccess,
             action_settle_ms: 0,
             dialect: None,
         }
@@ -264,7 +264,7 @@ impl Harness {
     }
 
     pub fn decide(&self, decision: ApprovalDecision) {
-        *self.approvals.mode.lock().unwrap() = Some(PermissionMode::Ask);
+        *self.approvals.mode.lock().unwrap() = Some(AccessMode::Supervised);
         *self.approvals.decide.lock().unwrap() = Some(Arc::new(move |_| decision));
     }
 

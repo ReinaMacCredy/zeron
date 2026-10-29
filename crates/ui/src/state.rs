@@ -958,6 +958,7 @@ pub struct AppState {
     pub spaces: Vec<Space>,
     pub tasks: Vec<zeron_proto::Task>,
     pub task_steps: Vec<zeron_proto::TaskStep>,
+    pub quick_captured: crate::quick_capture::Captured,
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
     pub chats: Vec<Chat>,
     /// Fork RPC may arrive ahead of its registry row on a remote device.
@@ -1209,6 +1210,7 @@ impl AppState {
             spaces: Vec::new(),
             tasks: Vec::new(),
             task_steps: Vec::new(),
+            quick_captured: Default::default(),
             chats: Vec::new(),
             pending_side_chat: None,
             unsaved_side_chat: false,
@@ -8612,12 +8614,11 @@ mod tests {
             reasoning: Some(zeron_proto::ReasoningLevel::XHigh),
             model_options: serde_json::Map::new(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-            permission_mode: zeron_proto::PermissionMode::Full,
             instructions: String::new(),
             profile_id: None,
             instance_id: None,
             disabled_tools: Vec::new(),
-            access: zeron_proto::PermissionMode::Full.access(),
+            access: zeron_proto::AccessMode::FullAccess,
             plan: false,
         };
         state.apply_chat_config("a", config.clone());
@@ -8643,12 +8644,11 @@ mod tests {
                 reasoning: None,
                 model_options: serde_json::Map::new(),
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-                permission_mode: zeron_proto::PermissionMode::Full,
                 instructions: String::new(),
                 profile_id: None,
                 instance_id: None,
                 disabled_tools: Vec::new(),
-                access: zeron_proto::PermissionMode::Full.access(),
+                access: zeron_proto::AccessMode::FullAccess,
                 plan: false,
             },
         );

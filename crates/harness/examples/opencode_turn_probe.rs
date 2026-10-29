@@ -50,13 +50,12 @@ async fn main() {
         model_options,
         cwd,
         sandbox: SandboxLevel::WorkspaceWrite,
-        permission_mode: if answer_yes {
-            zeron_proto::PermissionMode::Ask
-        } else {
-            zeron_proto::PermissionMode::Full
-        },
         auto_approve: !answer_yes,
-        access: Default::default(),
+        access: if answer_yes {
+            zeron_proto::AccessMode::Supervised
+        } else {
+            zeron_proto::AccessMode::FullAccess
+        },
         plan: false,
         attachments: Vec::new(),
         resume: None,

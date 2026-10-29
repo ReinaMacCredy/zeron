@@ -19,7 +19,7 @@ fn args(value: Value) -> Map<String, Value> {
     value.as_object().unwrap().clone()
 }
 
-fn with_mode(mode: Option<PermissionMode>) -> Built {
+fn with_mode(mode: Option<AccessMode>) -> Built {
     let built = settled(Scripted::default_fake());
     *built.seams.mode.lock().unwrap() = mode;
     built
@@ -84,7 +84,7 @@ async fn answer(
 
 #[tokio::test]
 async fn ask_raises_exactly_one_task_card_for_the_first_gated_call_of_a_turn() {
-    let Built { manager, seams, .. } = with_mode(Some(PermissionMode::Ask));
+    let Built { manager, seams, .. } = with_mode(Some(AccessMode::Supervised));
     let first = authorize(&manager, "computer_click", Some("turn-1"));
     settle().await;
     let cards = opened(&seams);
@@ -109,7 +109,7 @@ async fn ask_raises_exactly_one_task_card_for_the_first_gated_call_of_a_turn() {
 
 #[tokio::test]
 async fn a_decline_is_not_re_asked_within_the_turn() {
-    let Built { manager, seams, .. } = with_mode(Some(PermissionMode::Ask));
+    let Built { manager, seams, .. } = with_mode(Some(AccessMode::Supervised));
     let first = authorize(&manager, "computer_click", Some("turn-1"));
     assert!(
         !answer(&manager, &seams, first, ApprovalDecision::Decline)
@@ -127,7 +127,7 @@ async fn a_decline_is_not_re_asked_within_the_turn() {
 
 #[tokio::test]
 async fn a_new_turn_asks_again() {
-    let Built { manager, seams, .. } = with_mode(Some(PermissionMode::Ask));
+    let Built { manager, seams, .. } = with_mode(Some(AccessMode::Supervised));
     let first = authorize(&manager, "computer_click", Some("turn-1"));
     assert!(
         answer(&manager, &seams, first, ApprovalDecision::Accept)
@@ -150,7 +150,7 @@ async fn a_new_turn_asks_again() {
 
 #[tokio::test]
 async fn read_clipboard_raises_its_own_per_call_card_every_time_in_ask() {
-    let Built { manager, seams, .. } = with_mode(Some(PermissionMode::Ask));
+    let Built { manager, seams, .. } = with_mode(Some(AccessMode::Supervised));
     let task = authorize(&manager, "computer_click", Some("turn-1"));
     assert!(
         answer(&manager, &seams, task, ApprovalDecision::Accept)
@@ -175,7 +175,7 @@ async fn read_clipboard_raises_its_own_per_call_card_every_time_in_ask() {
 
 #[tokio::test]
 async fn auto_and_full_raise_no_card_and_return_true() {
-    for mode in [PermissionMode::Auto, PermissionMode::Full] {
+    for mode in [AccessMode::AutoAcceptEdits, AccessMode::FullAccess] {
         let Built { manager, seams, .. } = with_mode(Some(mode));
         for tool in [
             "computer_click",
@@ -196,7 +196,7 @@ async fn auto_and_full_raise_no_card_and_return_true() {
 
 #[tokio::test]
 async fn params_display_omits_text_value_and_prompt_text() {
-    let Built { manager, seams, .. } = with_mode(Some(PermissionMode::Ask));
+    let Built { manager, seams, .. } = with_mode(Some(AccessMode::Supervised));
     let pending = tokio::spawn({
         let manager = manager.clone();
         async move {
@@ -238,7 +238,7 @@ async fn params_display_omits_text_value_and_prompt_text() {
 
 #[tokio::test]
 async fn the_ninth_pending_clipboard_card_in_one_chat_fails_with_approval_queue_full() {
-    let Built { manager, seams, .. } = with_mode(Some(PermissionMode::Ask));
+    let Built { manager, seams, .. } = with_mode(Some(AccessMode::Supervised));
     let waiting: Vec<_> = (0..8)
         .map(|_| authorize(&manager, "computer_read_clipboard", Some("turn-1")))
         .collect();
@@ -276,7 +276,7 @@ async fn a_chat_that_is_gone_is_declined_without_a_card() {
 async fn stop_thread_and_thread_removal_settle_an_open_card_as_declined() {
     for route in ["stop_thread", "handle_thread_removed"] {
         for tool in ["computer_click", "computer_read_clipboard"] {
-            let Built { manager, seams, .. } = with_mode(Some(PermissionMode::Ask));
+            let Built { manager, seams, .. } = with_mode(Some(AccessMode::Supervised));
             let pending = authorize(&manager, tool, Some("turn-1"));
             settle().await;
             let card = opened(&seams).pop().unwrap();
@@ -309,7 +309,7 @@ async fn a_desktop_interrupted_event_revokes_the_task_grant_so_the_next_gated_ca
         manager,
         backend,
         seams,
-    } = with_mode(Some(PermissionMode::Ask));
+    } = with_mode(Some(AccessMode::Supervised));
     let first = authorize(&manager, "computer_click", Some("turn-1"));
     assert!(
         answer(&manager, &seams, first, ApprovalDecision::Accept)

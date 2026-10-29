@@ -971,7 +971,6 @@ pub(crate) fn seed(
                     reasoning: Some(demo.reasoning),
                     model_options: Default::default(),
                     sandbox: SandboxLevel::WorkspaceWrite,
-                    permission_mode: Default::default(),
                     instructions: String::new(),
                     profile_id: None,
                     instance_id: demo.instance.map(str::to_owned),

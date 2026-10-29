@@ -24,7 +24,7 @@ use futures::future::{BoxFuture, Shared};
 use serde_json::Value;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use zeron_proto::PermissionMode;
+use zeron_proto::AccessMode;
 use zeron_proto::computer::{
     ComputerApp, ComputerAvailability, ComputerEvent, ComputerHealth, ComputerHealthStatus,
     ComputerInputModifier, ComputerInputPause, ComputerPendingRequest, ComputerPoint, ComputerRect,
@@ -193,7 +193,7 @@ pub trait ComputerManagerSeams: Send + Sync {
         &self,
         _chat_id: &str,
         _turn_id: Option<&str>,
-    ) -> Result<Option<PermissionMode>, ComputerError> {
+    ) -> Result<Option<AccessMode>, ComputerError> {
         Ok(None)
     }
 

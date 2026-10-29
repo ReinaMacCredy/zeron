@@ -7,7 +7,7 @@ use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
-use zeron_proto::PermissionMode;
+use zeron_proto::AccessMode;
 use zeron_proto::computer::{
     ComputerApp, ComputerAvailability, ComputerBuildSignature, ComputerCapabilities, ComputerEvent,
     ComputerHealth, ComputerInputModifier, ComputerLaunchAppResult, ComputerPermission,
@@ -696,7 +696,7 @@ impl ComputerBackend for Scripted {
 
 #[derive(Default)]
 pub(crate) struct Seams {
-    pub mode: Mutex<Option<PermissionMode>>,
+    pub mode: Mutex<Option<AccessMode>>,
     pub turn_inactive: AtomicBool,
     pub consent: Mutex<Vec<(ComputerConsentCard, Option<ApprovalDecision>)>>,
     pub bumps: Mutex<Vec<(String, u64)>>,
@@ -711,7 +711,7 @@ impl ComputerManagerSeams for Seams {
         &self,
         _chat_id: &str,
         _turn_id: Option<&str>,
-    ) -> Result<Option<PermissionMode>, ComputerError> {
+    ) -> Result<Option<AccessMode>, ComputerError> {
         if self.turn_inactive.load(Ordering::SeqCst) {
             return Err(ComputerError::Other("original turn ended".into()));
         }

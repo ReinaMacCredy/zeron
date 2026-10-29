@@ -21,7 +21,7 @@ Zeron remembers your choice for the next canvas.
 
 ## Pick the project, device, and checkout
 
-The headline above the composer names the target: "What should we build in" and the project. Click the project name to search your projects (**Search projects…**). At the bottom of that list, **New project** adds one (Cmd+Shift+N) and **Don't work in a project** switches to a projectless chat, where the headline reads "What should we work on?". Under the composer, the device chip picks which machine runs the agent (**This device** by default), and the permission chip at the right names the permission mode.
+The headline above the composer names the target: "What should we build in" and the project. Click the project name to search your projects (**Search projects…**). At the bottom of that list, **New project** adds one (Cmd+Shift+N) and **Don't work in a project** switches to a projectless chat, where the headline reads "What should we work on?". Under the composer, the device chip picks which machine runs the agent (**This device** by default), and the permission chip at the right names the access mode (**Supervised**, **Auto-accept edits** or **Full access**) and shows **Plan** when plan mode is on.
 
 ![The new chat canvas: the project in the headline, the device, branch, checkout, and permission chips under the composer](new-chat-canvas.jpg)
 

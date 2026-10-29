@@ -275,6 +275,7 @@ struct HotKeyRegistration {
     target: EventTargetRef,
     hot_key: EventHotKeyRef,
     shortcut: Option<super::shortcut::Shortcut>,
+    quick_capture: Option<super::ChordModifier>,
     sender: mpsc::UnboundedSender<()>,
     chord_tap: Option<ModifierChordTap>,
     /// The retry loop re-attempts the chord tap every poll; log the missing
@@ -282,24 +283,67 @@ struct HotKeyRegistration {
     chord_warned: bool,
 }
 
+struct ChordWatch {
+    keys: ChordKeys,
+    left_down: std::cell::Cell<bool>,
+    right_down: std::cell::Cell<bool>,
+    latched: std::cell::Cell<bool>,
+    sender: mpsc::UnboundedSender<()>,
+}
+
+impl ChordWatch {
+    fn reset(&self) {
+        self.left_down.set(false);
+        self.right_down.set(false);
+        self.latched.set(false);
+    }
+
+    fn flags_changed(&self, code: i64, flags: u64) {
+        let keys = &self.keys;
+        if code != keys.left_code && code != keys.right_code {
+            return;
+        }
+        if flags & keys.flag == 0 {
+            self.reset();
+            return;
+        }
+        self.left_down.set(flags & keys.left_mask != 0);
+        self.right_down.set(flags & keys.right_mask != 0);
+        let both = self.left_down.get() && self.right_down.get();
+        if both && !self.latched.get() {
+            self.latched.set(true);
+            let _ = self.sender.unbounded_send(());
+        } else if !both {
+            self.latched.set(false);
+        }
+    }
+}
+
 /// Synara's `OptionChordMonitor`, generalized: a listen-only session event
-/// tap on `flagsChanged` that fires once when both keys of the chosen modifier
-/// are down together and re-arms once either is released. macOS disables a
-/// tap it considers slow; the callback re-enables it in place.
+/// tap on `flagsChanged` that fires once when both keys of a watched modifier
+/// are down together and re-arms once either is released. One tap serves the
+/// Appshot and quick-capture chords. macOS disables a tap it considers slow;
+/// the callback re-enables it in place.
 struct ModifierChordTap {
     tap: CGEventTap<'static>,
     source: CFRunLoopSource,
 }
 
 impl ModifierChordTap {
-    fn install(modifier: super::ChordModifier, sender: mpsc::UnboundedSender<()>) -> Option<Self> {
-        if !unsafe { CGPreflightListenEventAccess() } {
+    fn install(chords: Vec<(super::ChordModifier, mpsc::UnboundedSender<()>)>) -> Option<Self> {
+        if chords.is_empty() || !unsafe { CGPreflightListenEventAccess() } {
             return None;
         }
-        let keys = ChordKeys::for_modifier(modifier);
-        let left_down = std::cell::Cell::new(false);
-        let right_down = std::cell::Cell::new(false);
-        let latched = std::cell::Cell::new(false);
+        let watches: Vec<ChordWatch> = chords
+            .into_iter()
+            .map(|(modifier, sender)| ChordWatch {
+                keys: ChordKeys::for_modifier(modifier),
+                left_down: std::cell::Cell::new(false),
+                right_down: std::cell::Cell::new(false),
+                latched: std::cell::Cell::new(false),
+                sender,
+            })
+            .collect();
         let port: std::cell::Cell<Option<core_foundation::mach_port::CFMachPortRef>> =
             std::cell::Cell::new(None);
         let port_for_callback = std::rc::Rc::new(port);
@@ -314,9 +358,7 @@ impl ModifierChordTap {
             move |_, kind, event| {
                 match kind {
                     CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
-                        left_down.set(false);
-                        right_down.set(false);
-                        latched.set(false);
+                        watches.iter().for_each(ChordWatch::reset);
                         if let Some(port) = port_for_callback.get() {
                             unsafe { CGEventTapEnable(port, true) };
                         }
@@ -327,24 +369,8 @@ impl ModifierChordTap {
                 }
                 let flags = event.get_flags().bits();
                 let code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
-                if code == keys.left_code || code == keys.right_code {
-                    left_down.set(flags & keys.left_mask != 0);
-                    right_down.set(flags & keys.right_mask != 0);
-                } else {
-                    return None;
-                }
-                if flags & keys.flag == 0 {
-                    left_down.set(false);
-                    right_down.set(false);
-                    latched.set(false);
-                    return None;
-                }
-                let both = left_down.get() && right_down.get();
-                if both && !latched.get() {
-                    latched.set(true);
-                    let _ = sender.unbounded_send(());
-                } else if !both {
-                    latched.set(false);
+                for watch in &watches {
+                    watch.flags_changed(code, flags);
                 }
                 None
             },
@@ -373,6 +399,17 @@ unsafe extern "C" {
 thread_local! {
     // Carbon registration and replacement always run on GPUI's main thread.
     static HOT_KEY: RefCell<Option<HotKeyRegistration>> = const { RefCell::new(None) };
+    static QUICK_CAPTURE: RefCell<Option<mpsc::UnboundedSender<()>>> = const { RefCell::new(None) };
+}
+
+pub(super) fn start_quick_capture() -> mpsc::UnboundedReceiver<()> {
+    let (tx, rx) = mpsc::unbounded();
+    QUICK_CAPTURE.with(|sender| *sender.borrow_mut() = Some(tx));
+    refresh_global_shortcut(
+        super::shortcut::current(),
+        super::shortcut::current_quick_capture(),
+    );
+    rx
 }
 
 fn start_global_shortcut() -> mpsc::UnboundedReceiver<()> {
@@ -404,25 +441,37 @@ fn start_global_shortcut() -> mpsc::UnboundedReceiver<()> {
             target,
             hot_key: ptr::null_mut(),
             shortcut: None,
+            quick_capture: None,
             sender: tx,
             chord_tap: None,
             chord_warned: false,
         })
     });
-    refresh_global_shortcut(super::shortcut::current());
+    refresh_global_shortcut(
+        super::shortcut::current(),
+        super::shortcut::current_quick_capture(),
+    );
     rx
 }
 
-pub(super) fn refresh_global_shortcut(shortcut: Option<super::shortcut::Shortcut>) {
+pub(super) fn refresh_global_shortcut(
+    shortcut: Option<super::shortcut::Shortcut>,
+    quick_capture: Option<super::ChordModifier>,
+) {
+    let quick_sender = QUICK_CAPTURE.with(|sender| sender.borrow().clone());
+    let quick_capture = quick_capture.filter(|_| quick_sender.is_some());
     HOT_KEY.with(|registration| {
         let mut registration = registration.borrow_mut();
         let Some(registration) = registration.as_mut() else {
             return;
         };
-        let chord_wanted = shortcut.as_ref().is_some_and(|s| s.chord.is_some());
+        let appshot_chord = shortcut.as_ref().and_then(|s| s.chord);
+        let chord_wanted = appshot_chord.is_some() || quick_capture.is_some();
         // A chord tap that could not install (Input Monitoring still pending)
         // is retried on every refresh; everything else is idempotent.
-        if registration.shortcut == shortcut && (!chord_wanted || registration.chord_tap.is_some())
+        if registration.shortcut == shortcut
+            && registration.quick_capture == quick_capture
+            && (!chord_wanted || registration.chord_tap.is_some())
         {
             return;
         }
@@ -434,22 +483,28 @@ pub(super) fn refresh_global_shortcut(shortcut: Option<super::shortcut::Shortcut
         }
         registration.chord_tap = None;
         registration.shortcut = shortcut.clone();
-        let Some(shortcut) = shortcut else {
-            return;
-        };
-        if let Some(modifier) = shortcut.chord {
-            registration.chord_tap =
-                ModifierChordTap::install(modifier, registration.sender.clone());
+        registration.quick_capture = quick_capture;
+        let mut chords = Vec::new();
+        if let Some(modifier) = appshot_chord {
+            chords.push((modifier, registration.sender.clone()));
+        }
+        if let (Some(modifier), Some(sender)) = (quick_capture, quick_sender) {
+            chords.push((modifier, sender));
+        }
+        if chord_wanted {
+            registration.chord_tap = ModifierChordTap::install(chords);
             let ready = registration.chord_tap.is_some();
-            SHORTCUT_READY.store(ready, Ordering::Relaxed);
             if !ready && !registration.chord_warned {
-                tracing::warn!(
-                    "Appshot hotkey chord unavailable until Input Monitoring is granted"
-                );
+                tracing::warn!("Hotkey chords unavailable until Input Monitoring is granted");
             }
             registration.chord_warned = !ready;
-            return;
+            if appshot_chord.is_some() {
+                SHORTCUT_READY.store(ready, Ordering::Relaxed);
+            }
         }
+        let Some(shortcut) = shortcut.filter(|shortcut| shortcut.chord.is_none()) else {
+            return;
+        };
         let Some(key_code) = shortcut_keycode(&shortcut.key) else {
             SHORTCUT_READY.store(false, Ordering::Relaxed);
             return;

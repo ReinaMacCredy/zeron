@@ -10,8 +10,8 @@ use zeron_doc::{SessionCommandEntry, SessionCommandPayload, SessionCommandStatus
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::computer::{ComputerSettings, McpToolResult};
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, PermissionMode, ReasoningLevel, RunRequest,
-    SandboxLevel, SteeringMode,
+    AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
+    SteeringMode,
 };
 use zeron_rpc::{RpcClient, methods};
 
@@ -130,9 +130,8 @@ fn request(prompt: &str) -> RunRequest {
         model_options: Default::default(),
         cwd: "/tmp".into(),
         sandbox: SandboxLevel::WorkspaceWrite,
-        permission_mode: PermissionMode::Full,
         auto_approve: false,
-        access: PermissionMode::Full.access(),
+        access: AccessMode::FullAccess,
         plan: false,
         attachments: Vec::new(),
         worktree: None,

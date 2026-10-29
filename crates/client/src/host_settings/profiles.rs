@@ -1,6 +1,6 @@
 use zeron_proto::{
-    AgentProfile, AgentProfileDraft, AgentProfilesSnapshot, HarnessId, PermissionMode,
-    ReasoningLevel, profile_line,
+    AccessMode, AgentProfile, AgentProfileDraft, AgentProfilesSnapshot, HarnessId, ReasoningLevel,
+    profile_line,
 };
 use zeron_rpc::methods;
 
@@ -8,12 +8,6 @@ use super::{Page, Row, RowAction, RowKind, Section};
 use crate::catalog::{HarnessInfo, ModelInfo, reasoning_label};
 use crate::client::Client;
 use crate::error::{ClientError, Result};
-
-const MODES: [PermissionMode; 3] = [
-    PermissionMode::Ask,
-    PermissionMode::Auto,
-    PermissionMode::Full,
-];
 
 async fn snapshot(client: &Client, device_id: &str) -> Result<AgentProfilesSnapshot> {
     client
@@ -91,7 +85,11 @@ pub(super) async fn page(client: &Client, device_id: &str, page: &str) -> Result
         None => editor_page(profile, &models),
         Some("agent") => agent_page(profile, &client.list_harnesses(device_id).await),
         Some("model") => model_page(profile, &models),
-        Some("mode") => mode_page(profile),
+        Some("mode") => {
+            let harnesses = client.list_harnesses(device_id).await;
+            let harness = harnesses.iter().find(|h| h.id == wire(profile.harness));
+            mode_page(profile, harness.and_then(|h| h.access_modes.as_deref()))
+        }
         Some("effort") => effort_page(profile, &models),
         Some(tools) if tools == "tools" || tools.starts_with("tools:") => {
             super::profile_tools::page(client, device_id, profile, tools).await?
@@ -229,7 +227,7 @@ fn blank(harness: HarnessId) -> AgentProfileDraft {
         harness,
         model: None,
         reasoning: None,
-        permission_mode: None,
+        access: None,
         model_options: Default::default(),
         notes: String::new(),
         instructions: String::new(),
@@ -288,10 +286,10 @@ fn edit(
                     draft.reasoning = None;
                 }
             } else if let Some(mode) = action.strip_prefix("mode:") {
-                draft.permission_mode = if mode.is_empty() {
+                draft.access = if mode.is_empty() {
                     None
                 } else {
-                    match parse::<PermissionMode>(mode) {
+                    match parse::<AccessMode>(mode) {
                         Some(mode) => Some(mode),
                         None => return false,
                     }
@@ -332,7 +330,7 @@ fn list_page(snapshot: &AgentProfilesSnapshot, labels: &[Option<String>], prompt
             .subtitle(Some(profile_line(
                 profile.harness.display_name(),
                 label.as_deref(),
-                profile.permission_mode,
+                profile.access,
                 profile.reasoning,
                 profile.disabled_tools.len(),
             )));
@@ -452,8 +450,8 @@ fn editor_page(profile: &AgentProfile, models: &[ModelInfo]) -> Page {
                         "Mode",
                         Some(
                             profile
-                                .permission_mode
-                                .map_or("Default", PermissionMode::short_label)
+                                .access
+                                .map_or("Default", AccessMode::label)
                                 .to_owned(),
                         ),
                     ),
@@ -557,27 +555,33 @@ fn model_page(profile: &AgentProfile, models: &[ModelInfo]) -> Page {
     choice_page("Model", rows)
 }
 
-fn mode_page(profile: &AgentProfile) -> Page {
+fn mode_page(profile: &AgentProfile, offered: Option<&[AccessMode]>) -> Page {
     let mut rows = vec![
         Row::new(
             "mode:",
             "Default",
             RowKind::Check {
-                on: profile.permission_mode.is_none(),
+                on: profile.access.is_none(),
             },
         )
         .subtitle(Some("The chat's own mode".to_owned())),
     ];
-    rows.extend(MODES.iter().map(|mode| {
-        Row::new(
-            format!("mode:{}", wire(*mode)),
-            mode.short_label(),
-            RowKind::Check {
-                on: profile.permission_mode == Some(*mode),
-            },
-        )
-        .subtitle(Some(mode.label().to_owned()))
-    }));
+    let offered = offered.filter(|offered| !offered.is_empty());
+    rows.extend(
+        AccessMode::ALL
+            .iter()
+            .filter(|mode| offered.is_none_or(|offered| offered.contains(mode)))
+            .map(|mode| {
+                Row::new(
+                    format!("mode:{}", wire(*mode)),
+                    mode.label(),
+                    RowKind::Check {
+                        on: profile.access == Some(*mode),
+                    },
+                )
+                .subtitle(Some(mode.description().to_owned()))
+            }),
+    );
     choice_page("Mode", rows)
 }
 
@@ -624,16 +628,16 @@ mod tests {
         let models = [model("big", &["low", "high"]), model("small", &["low"])];
         assert!(edit(&mut draft, "model:big", None, &models));
         assert!(edit(&mut draft, "effort:high", None, &models));
-        assert!(edit(&mut draft, "mode:auto", None, &models));
+        assert!(edit(&mut draft, "mode:auto-accept-edits", None, &models));
         assert_eq!(
             profile_line(
                 "Claude Code",
                 draft.model.as_deref(),
-                draft.permission_mode,
+                draft.access,
                 draft.reasoning,
                 0
             ),
-            "Claude Code · big · Auto · High"
+            "Claude Code · big · Auto-accept edits · High"
         );
         assert!(edit(&mut draft, "model:small", None, &models));
         assert_eq!(draft.reasoning, None);

@@ -89,6 +89,13 @@ title = "Several tasks in one thread"
 description = "Select tasks with Cmd-click, Shift-click or the box left of a row, then Start in one thread: one chat gets a single message listing them in order, and a card pinned at the top of the chat ticks each task off as the agent marks it done. Add to thread hands them to a chat you already have."
 visual = "gather-tasks"
 
+[[entry.features]]
+id = "quick-capture"
+title = "Quick capture to Tasks"
+description = "Press both Option keys in any app and a bar opens over it: type an idea, press Enter, and it lands at the top of To do in your selected project while you stay where you were. Shift+Enter adds notes, # picks a project, Today sets the due date, Cmd+V attaches an image, and Cmd+Enter saves and opens the task. The + under Tasks on the rail opens the same capture inside Zeron and stays open for several ideas."
+details = "Change or turn off the chord in Settings > Appshots, under Quick capture to Tasks; it needs Input Monitoring, like the Appshot chord, and cannot share its chord. After a save, Undo removes the task and Open shows it. Captured tasks carry a New tag and the rail's Tasks icon counts them until you open Tasks. The hotkey is macOS only."
+image = "quick-capture.jpg"
+
 [[entry.improvements]]
 text = "The update button in the rail moves: an arrow drops into the tray while the update downloads, then the button checks and turns into restart."
 visual = "rail-update"
@@ -129,6 +136,9 @@ text = "New chat asks \"What should we build in\" your project, with the machine
 
 [[entry.improvements]]
 text = "Zeron's tools take about half the agent context they did: 31 tools instead of 38, shorter descriptions, and long references behind the docs tool, about 9K tokens of tool text instead of 17K."
+
+[[entry.improvements]]
+text = "Permissions now use Supervised, Auto-accept edits and Full access, and the Permissions row in the model picker has the Plan mode switch. Auto-accept edits only approves file edits on its own and still asks before commands, unlike the old Approve for me. Grok, Devin, Hermes and other ACP agents can't ask before acting, so they now always run with Full access. Chats set to Ask, Auto or Full open as Supervised, Auto-accept edits and Full access."
 
 [[entry]]
 version = "0.2.120"

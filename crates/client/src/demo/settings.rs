@@ -40,15 +40,15 @@ impl HostSettings {
         .expect("demo routing decodes");
         let mut profiles: AgentProfilesSnapshot = serde_json::from_value(json!({ "profiles": [
             { "id": "ui-work", "name": "UI work", "harness": "claude-code", "model": "claude-opus-5-5",
-              "permissionMode": "auto", "reasoning": "high",
+              "access": "auto-accept-edits", "reasoning": "high",
               "instructions": "Match the kit; prove UI with a screenshot.",
               "disabledTools": ["mcp__zeron__computer", "mcp__zeron__device_open", "WebSearch",
                                 "mcp__figma", "mcp__retired_server"] },
             { "id": "reviewer", "name": "reviewer", "harness": "codex", "model": "gpt-5.5",
-              "permissionMode": "ask", "reasoning": "high", "byAgent": true,
+              "access": "supervised", "reasoning": "high", "byAgent": true,
               "notes": "Review a finished diff before it lands." },
             { "id": "quick-fix", "name": "Quick fix", "harness": "grok", "model": "grok-4",
-              "permissionMode": "full", "reasoning": "low" }
+              "access": "full-access", "reasoning": "low" }
         ]}))
         .expect("demo profiles decode");
         profiles.profiles.splice(0..0, super::composer::profiles());
@@ -207,7 +207,7 @@ impl HostSettings {
                     harness: draft.harness,
                     model: draft.model,
                     reasoning: draft.reasoning,
-                    permission_mode: draft.permission_mode,
+                    access: draft.access,
                     model_options: draft.model_options,
                     notes: draft.notes,
                     instructions: draft.instructions,

@@ -1249,7 +1249,7 @@ async fn retains_clipboard_refusal_and_dead_turn_checks_before_dispatch() {
 #[tokio::test]
 async fn passes_cancellation_to_a_pending_canonical_clipboard_approval() {
     let h = harness();
-    *h.approvals.mode.lock().unwrap() = Some(PermissionMode::Ask);
+    *h.approvals.mode.lock().unwrap() = Some(AccessMode::Supervised);
     let context = h.context();
     let signal = context.signal.clone();
     let pending = spawn_call(

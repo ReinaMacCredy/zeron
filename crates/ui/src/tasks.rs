@@ -44,6 +44,7 @@ pub use card::{CardFocus, Orchestrate, TaskCard, TaskCardEvent};
 pub use center::{LiveThread, PlanEdit, Selection, TaskCenter, TaskCenterEvent};
 pub(crate) use index::tree_index;
 use logic::COLUMNS;
+pub(crate) use logic::top_order_key;
 use morph::{Key, Morph, Painted, Rects};
 pub(crate) use strip_tree::{SampleRow, StripTree, StripTreeEvent, TreeHost};
 pub(crate) use tree::{Status as TreeStatus, StatusTone, glyph as tree_glyph, kind_badge};
@@ -147,6 +148,7 @@ struct Row {
     project: Option<SharedString>,
     linked: Option<Linked>,
     plan: Rollup,
+    captured: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1140,12 +1142,19 @@ impl TasksPage {
                     .flex_col()
                     .child(
                         div()
-                            .truncate()
-                            .text_size(ui_rems(13.5))
-                            .line_height(ui_rems(18.0))
-                            .text_color(if done { theme.text_muted } else { theme.text })
-                            .when(done, |el| el.line_through())
-                            .child(SharedString::from(row.task.title.clone())),
+                            .flex()
+                            .items_center()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(ui_rems(13.5))
+                                    .line_height(ui_rems(18.0))
+                                    .text_color(if done { theme.text_muted } else { theme.text })
+                                    .when(done, |el| el.line_through())
+                                    .child(SharedString::from(row.task.title.clone())),
+                            )
+                            .when(row.captured, |el| el.child(new_tag(theme))),
                     )
                     .when(!meta.is_empty(), |el| {
                         el.child(widgets::meta_line(theme, meta))
@@ -2214,7 +2223,8 @@ impl TasksPage {
                         theme.text
                     })
                     .line_clamp(3)
-                    .child(title),
+                    .child(title)
+                    .when(row.captured, |el| el.child(new_tag(theme))),
             )
             .children(bar)
             .child(footer)
@@ -2523,6 +2533,7 @@ fn row_for(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> Ro
             .and_then(|id| state.spaces.iter().find(|space| space.id == id))
             .map(|space| SharedString::from(space.display_name().to_string())),
         linked,
+        captured: state.quick_captured.is_new(&task.id),
         task: task.clone(),
     }
 }
@@ -2602,6 +2613,16 @@ pub(crate) fn column_tone(
         TaskStatus::NeedsYou => crate::shell::chat_status_tone(ChatIndicator::AwaitingInput, theme),
         TaskStatus::Done => crate::shell::chat_status_tone(ChatIndicator::Completed, theme),
     }
+}
+
+fn new_tag(theme: &Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        .ml(px(6.0))
+        .text_size(ui_rems(10.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.accent)
+        .child("New")
 }
 
 pub(crate) fn dashed_circle(theme: &Theme) -> AnyElement {

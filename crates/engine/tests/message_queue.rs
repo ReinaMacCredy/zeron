@@ -1868,12 +1868,11 @@ async fn queued_turn_uses_current_config_at_turn_end_and_send_now() {
             reasoning: Some(ReasoningLevel::Medium),
             model_options: Default::default(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-            permission_mode: zeron_proto::PermissionMode::Full,
             instructions: String::new(),
             profile_id: None,
             instance_id: None,
             disabled_tools: Vec::new(),
-            access: zeron_proto::PermissionMode::Full.access(),
+            access: zeron_proto::AccessMode::FullAccess,
             plan: false,
         };
         core.workspace.set_chat_config(CHAT, &config).unwrap();

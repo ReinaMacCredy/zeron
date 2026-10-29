@@ -993,12 +993,11 @@ mod tests {
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: SandboxLevel::WorkspaceWrite,
-                permission_mode: zeron_proto::PermissionMode::Full,
                 instructions: String::new(),
                 profile_id: None,
                 instance_id: None,
                 disabled_tools: Vec::new(),
-                access: Default::default(),
+                access: zeron_proto::AccessMode::FullAccess,
                 plan: false,
             }),
             last_message_preview: None,
@@ -1068,6 +1067,61 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_stored_with_the_old_permission_mode_reads_as_its_access_mode() {
+        let access = |extra: serde_json::Value| {
+            let mut config = serde_json::json!({
+                "harness": "claude-code", "model": null, "reasoning": null,
+                "sandbox": "workspace-write",
+            });
+            config
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let raw: RawChat = serde_json::from_value(serde_json::json!({
+                "id": "c", "deviceId": "dev-a", "config": config,
+            }))
+            .unwrap();
+            Chat::from(raw).config.expect("config kept").access
+        };
+        use zeron_proto::AccessMode::*;
+        assert_eq!(
+            access(serde_json::json!({ "permissionMode": "ask" })),
+            Supervised
+        );
+        assert_eq!(
+            access(serde_json::json!({ "permissionMode": "auto", "access": "auto-accept-edits" })),
+            AutoAcceptEdits
+        );
+        assert_eq!(
+            access(serde_json::json!({ "access": "supervised" })),
+            Supervised
+        );
+        assert_eq!(access(serde_json::json!({})), FullAccess);
+
+        let ws = WorkspaceDoc::new();
+        ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+        let legacy = serde_json::json!({
+            "harness": "codex", "model": null, "reasoning": null,
+            "sandbox": "workspace-write", "permissionMode": "ask",
+        });
+        ws.row("chats", "chat-1")
+            .unwrap()
+            .insert("config", LoroValue::from(legacy))
+            .unwrap();
+        ws.doc().commit();
+        let config = ws.chat("chat-1").unwrap().unwrap().config.unwrap();
+        assert_eq!(config.access, Supervised);
+        assert!(ws.set_chat_config("chat-1", &config).unwrap());
+        let stored = ws
+            .row("chats", "chat-1")
+            .unwrap()
+            .get_deep_value()
+            .to_json_value();
+        assert_eq!(stored["config"]["access"], "supervised");
+        assert!(stored["config"].get("permissionMode").is_none());
+    }
+
+    #[test]
     fn set_chat_config_round_trips_and_ignores_missing_rows() {
         let ws = WorkspaceDoc::new();
         ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
@@ -1082,12 +1136,11 @@ mod tests {
             reasoning: Some(zeron_proto::ReasoningLevel::XHigh),
             model_options: options,
             sandbox: SandboxLevel::WorkspaceWrite,
-            permission_mode: zeron_proto::PermissionMode::Full,
             instructions: String::new(),
             profile_id: None,
             instance_id: None,
             disabled_tools: Vec::new(),
-            access: Default::default(),
+            access: zeron_proto::AccessMode::FullAccess,
             plan: false,
         };
         assert!(ws.set_chat_config("chat-1", &config).unwrap());

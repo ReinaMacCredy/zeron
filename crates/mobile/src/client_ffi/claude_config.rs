@@ -7,7 +7,7 @@ use zeron_proto::claude_panel::{
 use zeron_proto::usage::{UsageSummary, format_tokens};
 
 use super::session::SkillFile;
-use super::{CoreClient, CoreResult, PermissionMode, on_runtime, zc};
+use super::{AccessMode, CoreClient, CoreResult, on_runtime, zc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum ConfigTab {
@@ -106,7 +106,7 @@ pub struct ChipWrite {
     pub model: Option<String>,
     pub model_label: Option<String>,
     pub reasoning: Option<String>,
-    pub permission: Option<PermissionMode>,
+    pub permission: Option<AccessMode>,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -481,7 +481,7 @@ impl ClaudeConfigPanel {
                             model: None,
                             model_label: None,
                             reasoning: None,
-                            permission: zeron_proto::PermissionMode::ALL
+                            permission: zeron_proto::AccessMode::ALL
                                 .into_iter()
                                 .find(|m| m.label() == value)
                                 .map(Into::into),

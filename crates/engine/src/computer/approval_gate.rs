@@ -7,7 +7,7 @@ use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
-use zeron_proto::PermissionMode;
+use zeron_proto::AccessMode;
 use zeron_proto::computer::ComputerAllowedApp;
 
 pub const COMPUTER_APPROVAL_QUEUE_FULL_CODE: &str = "approval_queue_full";
@@ -52,8 +52,8 @@ impl ComputerApprovalError {
     }
 }
 
-pub fn computer_consent_card_required(mode: PermissionMode) -> bool {
-    mode == PermissionMode::Ask
+pub fn computer_consent_card_required(mode: AccessMode) -> bool {
+    mode == AccessMode::Supervised
 }
 
 pub type ApprovalPublish = Arc<
@@ -74,7 +74,7 @@ pub type AlwaysAllowHook = Arc<dyn Fn(ComputerAllowedApp) + Send + Sync>;
 pub struct ApprovalRequest {
     pub chat_id: String,
     pub turn_id: Option<String>,
-    pub mode: PermissionMode,
+    pub mode: AccessMode,
     pub signal: CancellationToken,
     pub publish: ApprovalPublish,
     pub app: Option<AppGrant>,
@@ -476,7 +476,7 @@ mod tests {
         ApprovalRequest {
             chat_id: chat_id.to_owned(),
             turn_id: turn_id.map(str::to_owned),
-            mode: PermissionMode::Ask,
+            mode: AccessMode::Supervised,
             signal: CancellationToken::new(),
             publish,
             app: None,
@@ -896,7 +896,7 @@ mod tests {
     #[tokio::test]
     async fn auto_and_full_raise_no_task_or_clipboard_card() {
         let gate = ComputerApprovalGate::default();
-        for mode in [PermissionMode::Auto, PermissionMode::Full] {
+        for mode in [AccessMode::AutoAcceptEdits, AccessMode::FullAccess] {
             let log = Log::default();
             let input = ApprovalRequest {
                 mode,
@@ -919,9 +919,9 @@ mod tests {
         assert_eq!(gate.request(input.clone()).await, Ok(true));
         assert_eq!(gate.request(input).await, Ok(true));
         assert_eq!(opened(&log).len(), 3);
-        assert!(computer_consent_card_required(PermissionMode::Ask));
-        assert!(!computer_consent_card_required(PermissionMode::Auto));
-        assert!(!computer_consent_card_required(PermissionMode::Full));
+        assert!(computer_consent_card_required(AccessMode::Supervised));
+        assert!(!computer_consent_card_required(AccessMode::AutoAcceptEdits));
+        assert!(!computer_consent_card_required(AccessMode::FullAccess));
     }
 
     fn for_app(

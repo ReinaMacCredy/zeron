@@ -1,5 +1,5 @@
 use serde_json::json;
-use zeron_proto::PermissionMode;
+use zeron_proto::AccessMode;
 
 use super::{THREAD, harness, result_json};
 use crate::computer::approval_gate::ApprovalDecision;
@@ -33,7 +33,7 @@ async fn an_intervening_explicit_screenshot_prevents_unrelated_image_reuse() {
 #[tokio::test]
 async fn routes_every_harness_through_the_same_task_gate() {
     let h = harness();
-    *h.approvals.mode.lock().unwrap() = Some(PermissionMode::Ask);
+    *h.approvals.mode.lock().unwrap() = Some(AccessMode::Supervised);
     h.decide(ApprovalDecision::Accept);
     for (index, harness_id) in ["claude", "codex", "acp"].into_iter().enumerate() {
         let mut context = h.context_for(THREAD, None);

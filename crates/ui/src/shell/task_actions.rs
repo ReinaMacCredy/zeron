@@ -145,6 +145,28 @@ impl Shell {
         self.mutate_task_row(params, cx);
     }
 
+    pub(super) fn create_captured_task(
+        &mut self,
+        capture: &crate::quick_capture::Capture,
+        cx: &mut Context<Self>,
+    ) {
+        let mut params = Self::create_task_params(
+            &capture.task_id,
+            &capture.title,
+            &capture.notes,
+            capture.space_id.clone(),
+            capture.due_on.clone(),
+        );
+        let (open, _) = zeron_proto::mission::split_tasks(&self.state.read(cx).tasks);
+        if let Some(key) = crate::tasks::top_order_key(&open, &capture.task_id) {
+            params["orderKey"] = key.into();
+        }
+        if !capture.images.is_empty() {
+            params["images"] = capture.images.clone().into();
+        }
+        self.mutate_task_row(params, cx);
+    }
+
     pub(super) fn start_mission(
         &mut self,
         start: crate::composer::MissionStart,
@@ -487,6 +509,26 @@ impl Shell {
         self.open_tasks(cx);
         let page = self.tasks_page(window, cx);
         page.update(cx, |page, cx| page.open_card(task_id, window, cx));
+    }
+
+    pub(super) fn open_captured_task(
+        &mut self,
+        task_id: String,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_tasks(cx);
+        let card = self.tasks_page(window, cx).read(cx).card().clone();
+        card.update(cx, |card, cx| {
+            card.open(
+                task_id,
+                Some(title),
+                crate::tasks::CardFocus::Notes,
+                Some(window),
+                cx,
+            )
+        });
     }
 
     pub(super) fn defer_open_task(&mut self, task_id: String, cx: &mut Context<Self>) {

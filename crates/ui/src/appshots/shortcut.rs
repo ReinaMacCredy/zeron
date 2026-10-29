@@ -159,6 +159,7 @@ impl Shortcut {
 
 struct Preferences {
     shortcut: Shortcut,
+    quick_capture: Option<ChordModifier>,
     recording: bool,
     subscribers: Vec<mpsc::UnboundedSender<Option<Shortcut>>>,
 }
@@ -169,6 +170,7 @@ fn preferences() -> &'static Mutex<Preferences> {
         Mutex::new(Preferences {
             shortcut: Shortcut::parse(crate::settings::ShortcutId::CaptureAppshot.default_combo())
                 .unwrap(),
+            quick_capture: ChordModifier::from_combo(crate::settings::default_quick_capture()),
             recording: false,
             subscribers: Vec::new(),
         })
@@ -180,6 +182,15 @@ impl Preferences {
         (super::enabled() && !self.recording && !self.shortcut.is_none())
             .then(|| self.shortcut.clone())
     }
+
+    fn quick_capture(&self) -> Option<ChordModifier> {
+        self.quick_capture
+            .filter(|chord| self.active().and_then(|active| active.chord) != Some(*chord))
+    }
+}
+
+pub fn chords_conflict(quick_capture: &str, appshot: &str) -> bool {
+    ChordModifier::from_combo(quick_capture).is_some() && quick_capture == appshot
 }
 
 pub(crate) fn current() -> Option<Shortcut> {
@@ -195,20 +206,32 @@ pub(crate) fn subscribe() -> mpsc::UnboundedReceiver<Option<Shortcut>> {
     rx
 }
 
+pub(crate) fn current_quick_capture() -> Option<ChordModifier> {
+    preferences().lock().unwrap().quick_capture()
+}
+
 fn update(mutate: impl FnOnce(&mut Preferences)) {
-    let active = {
+    let (active, quick_capture) = {
         let mut preferences = preferences().lock().unwrap();
         mutate(&mut preferences);
         let active = preferences.active();
         preferences
             .subscribers
             .retain(|tx| tx.unbounded_send(active.clone()).is_ok());
-        active
+        (active, preferences.quick_capture())
     };
     #[cfg(target_os = "macos")]
-    super::macos::refresh_global_shortcut(active);
+    super::macos::refresh_global_shortcut(active, quick_capture);
     #[cfg(not(target_os = "macos"))]
-    let _ = active;
+    let _ = (active, quick_capture);
+}
+
+pub fn set_quick_capture(combo: &str) {
+    let chord = ChordModifier::from_combo(combo).filter(|_| cfg!(target_os = "macos"));
+    if preferences().lock().unwrap().quick_capture == chord {
+        return;
+    }
+    update(|preferences| preferences.quick_capture = chord);
 }
 
 pub(super) fn enabled_changed() {
@@ -275,6 +298,13 @@ mod tests {
             assert!(Shortcut::parse(NO_HOTKEY).is_err());
             assert!(Shortcut::parse("command-command").is_err());
         }
+    }
+
+    #[test]
+    fn quick_capture_cannot_take_the_appshot_chord() {
+        assert!(chords_conflict("option-option", "option-option"));
+        assert!(!chords_conflict("option-option", "command-command"));
+        assert!(!chords_conflict(NO_HOTKEY, NO_HOTKEY));
     }
 
     #[test]

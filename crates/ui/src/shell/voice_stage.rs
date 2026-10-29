@@ -53,12 +53,11 @@ impl Shell {
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-                permission_mode: Default::default(),
                 instructions: String::new(),
                 profile_id: None,
                 instance_id: None,
                 disabled_tools: Vec::new(),
-                access: zeron_proto::PermissionMode::default().access(),
+                access: Default::default(),
                 plan: false,
             });
         let saved = settings::current(cx);

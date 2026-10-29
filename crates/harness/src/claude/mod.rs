@@ -11,14 +11,15 @@
 //!   live against 2.1.228: `can_use_tool` control requests arrive and
 //!   allow/deny responses are honored). The alternative channel — an MCP
 //!   permission tool — needs a server process and was rejected. The run's
-//!   [`zeron_proto::PermissionMode`] picks the CLI mode (Ask and Full →
-//!   `default`, Auto → `auto`) and whether a `can_use_tool` auto-allows
-//!   (Full) or becomes a yes/no question; `AskUserQuestion` always
+//!   [`AccessMode`] picks the CLI mode (supervised and full access →
+//!   `default`, auto-accept edits → `acceptEdits`) and whether a
+//!   `can_use_tool` is allowed (full access, or an edit under auto-accept
+//!   edits) or becomes a yes/no question; `AskUserQuestion` always
 //!   round-trips through [`RunControls::request_input`].
 //! - PLAN MODE is the CLI's `--permission-mode plan` ([`permission_mode`]),
 //!   switched on the live process with `set_permission_mode`. Plan mode ends
 //!   when the person approves `ExitPlanMode`; the run then continues in its
-//!   permission mode, and the next turn returns to plan mode while the chat
+//!   access mode, and the next turn returns to plan mode while the chat
 //!   is still in it.
 //! - DONE is the CLI's own `result` frame, eagerly: background work (a
 //!   spawned subagent) never holds the turn. The CLI natively runs a second
@@ -255,17 +256,17 @@ fn option_is_on(options: &serde_json::Map<String, Value>, key: &str) -> bool {
     }
 }
 
-/// The CLI permission mode a run's [`zeron_proto::PermissionMode`] works
-/// in, and the one approving a plan returns to.
+/// The CLI permission mode a run's [`AccessMode`] works in, and the one
+/// approving a plan returns to.
 fn access_permission_mode(request: &RunRequest) -> &'static str {
-    match request.permission_mode {
-        zeron_proto::PermissionMode::Ask | zeron_proto::PermissionMode::Full => "default",
-        zeron_proto::PermissionMode::Auto => "auto",
+    match request.access {
+        AccessMode::AutoAcceptEdits => "acceptEdits",
+        AccessMode::Supervised | AccessMode::FullAccess => "default",
     }
 }
 
 /// The `--permission-mode` a run launches (or is switched) with: plan mode
-/// over its permission mode.
+/// over its access mode.
 fn permission_mode(request: &RunRequest) -> &'static str {
     if request.plan {
         "plan"
@@ -278,37 +279,42 @@ fn permission_mode(request: &RunRequest) -> &'static str {
 fn strictness(mode: &str) -> u8 {
     match mode {
         "bypassPermissions" => 0,
-        "acceptEdits" | "auto" => 1,
+        "acceptEdits" => 1,
         "default" => 2,
         _ => 3, // plan
     }
 }
 
-/// Claude's file-changing tools, asked about by the files they change.
+/// Claude's file-changing tools: auto-accept edits allows these unasked.
 const EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
 /// What a `can_use_tool` request has to ask the person before it is
-/// allowed; `None` allows it now. Full allows everything; under Ask and
-/// Auto the CLI's own mode already let through what it covers, so whatever
-/// reaches stdio is asked. `ExitPlanMode` (the plan is ready) asks whether
-/// to start implementing it.
+/// allowed, in `access`; `None` allows it now. `ExitPlanMode` (the plan is
+/// ready) asks whether to start implementing it.
 fn approval_question(
     tool: &str,
     display_name: Option<&str>,
     description: Option<&str>,
     input: &Value,
-    mode: zeron_proto::PermissionMode,
+    access: AccessMode,
 ) -> Option<UserInputQuestion> {
-    if mode == zeron_proto::PermissionMode::Full {
-        return None;
-    }
     if tool == "ExitPlanMode" {
-        return Some(approval::question(
-            "Approve plan",
-            "Claude wants to start implementing its plan. Allow it?",
-        ));
+        return (!access.is_full_access()).then(|| {
+            approval::question(
+                "Approve plan",
+                "Claude wants to start implementing its plan. Allow it?",
+            )
+        });
     }
     let edit = EDIT_TOOLS.contains(&tool);
+    let action = if edit {
+        approval::Action::Edit
+    } else {
+        approval::Action::Other
+    };
+    if approval::allowed_without_asking(access, action) {
+        return None;
+    }
     let field = |key: &str| input.get(key).and_then(Value::as_str);
     Some(if tool == "Bash" {
         approval::command("Claude", field("command").unwrap_or_default())
@@ -463,15 +469,7 @@ impl ClaudeHarness {
         if let Some(effort) = to_effort(request.reasoning, request.model.as_deref()) {
             args.extend(["--effort".into(), effort.into()]);
         }
-        // The CLI decides what asks under each mode (default asks for
-        // everything but its own read-only safe list, `auto` lets its
-        // classifier clear what it deems safe and falls back to `default` on
-        // models without auto mode — verified live against 2.1.284); every
-        // `can_use_tool` that does reach stdio is a question for the user
-        // unless the mode is Full, where the handler auto-allows — Full keeps
-        // the `default` flag zeron always ran with, so the unattended path is
-        // byte-for-byte the old one (`bypassPermissions` would also be refused
-        // under a managed disableBypassPermissionsMode).
+        // Full access allows each `can_use_tool` itself: `bypassPermissions` is refused under a managed disableBypassPermissionsMode.
         args.extend(["--permission-mode".into(), permission_mode(request).into()]);
         let mut settings = serde_json::Map::new();
         if option_is_on(&request.model_options, "fastMode") {
@@ -807,7 +805,7 @@ impl Harness for ClaudeHarness {
     /// Model, context window, effort, fast mode, thinking, ultracode and
     /// plan mode all change on the live process (`set_model`,
     /// `apply_flag_settings`, `set_permission_mode`). The directory, the
-    /// permission mode, the computer grant, a fork or branch cut, the 200K
+    /// access mode, the computer grant, a fork or branch cut, the 200K
     /// env switch, the auto-compact window and the disallowed tools it
     /// launched with need a new one, and so does entering plan mode: the
     /// prompt follows the switch on stdin, so a switch the CLI refused would
@@ -815,7 +813,7 @@ impl Harness for ClaudeHarness {
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
             && live.auto_approve == next.auto_approve
-            && live.permission_mode == next.permission_mode
+            && live.access == next.access
             && live.computer_control == next.computer_control
             && (next.forked_at.is_none() || next.forked_at == live.forked_at)
             && (next.branch.is_none() || next.branch == live.branch)
@@ -2256,7 +2254,7 @@ fn handle_control_request(
             body.display_name.as_deref(),
             body.description.as_deref(),
             &body.input,
-            config.permission_mode,
+            config.access,
         )
         .filter(|_| !computer_call);
         let Some(question) = question else {
@@ -2422,8 +2420,7 @@ mod tests {
             model_options: serde_json::Map::new(),
             cwd: String::new(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-            permission_mode: zeron_proto::PermissionMode::Full,
-            access: Default::default(),
+            access: zeron_proto::AccessMode::FullAccess,
             plan: false,
             auto_approve: false,
             resume: None,
@@ -2495,8 +2492,7 @@ mod tests {
                 model_options: serde_json::Map::new(),
                 cwd: String::new(),
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-                permission_mode: zeron_proto::PermissionMode::Full,
-                access: Default::default(),
+                access: zeron_proto::AccessMode::FullAccess,
                 plan: false,
                 auto_approve: false,
                 resume: None,
@@ -2556,8 +2552,7 @@ mod tests {
                 model_options: options,
                 cwd: String::new(),
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-                permission_mode: zeron_proto::PermissionMode::Full,
-                access: Default::default(),
+                access: zeron_proto::AccessMode::FullAccess,
                 plan: false,
                 auto_approve: false,
                 resume: None,
@@ -2626,8 +2621,7 @@ mod tests {
             model_options: serde_json::Map::new(),
             cwd: String::new(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-            permission_mode: zeron_proto::PermissionMode::Full,
-            access: Default::default(),
+            access: zeron_proto::AccessMode::FullAccess,
             plan: false,
             auto_approve: false,
             resume: None,
@@ -2658,11 +2652,11 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn permission_mode_selects_the_cli_flags() {
-        use zeron_proto::PermissionMode;
+    fn access_mode_selects_the_cli_flags() {
+        use zeron_proto::AccessMode;
         let harness = ClaudeHarness::new();
         let exe = PathBuf::from("/bin/claude");
-        let args = |mode: PermissionMode| -> Vec<String> {
+        let args = |mode: AccessMode| -> Vec<String> {
             let request = RunRequest {
                 prompt: String::new(),
                 harness: None,
@@ -2670,9 +2664,8 @@ mod tests {
                 reasoning: None,
                 model_options: serde_json::Map::new(),
                 cwd: String::new(),
-                sandbox: mode.sandbox(),
-                permission_mode: mode,
-                access: Default::default(),
+                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                access: mode,
                 plan: false,
                 auto_approve: false,
                 resume: None,
@@ -2698,14 +2691,13 @@ mod tests {
                 .position(|a| a == "--permission-mode")
                 .map(|i| args[i + 1].clone())
         };
-        let ask = args(PermissionMode::Ask);
+        let ask = args(AccessMode::Supervised);
         assert_eq!(mode_of(&ask).as_deref(), Some("default"));
         assert!(!ask.iter().any(|a| a == "--dangerously-skip-permissions"));
-        let auto = args(PermissionMode::Auto);
-        assert_eq!(mode_of(&auto).as_deref(), Some("auto"));
+        let auto = args(AccessMode::AutoAcceptEdits);
+        assert_eq!(mode_of(&auto).as_deref(), Some("acceptEdits"));
         assert!(!auto.iter().any(|a| a == "--dangerously-skip-permissions"));
-        // Full is the pre-mode wire: `default` plus the handler's auto-allow.
-        let full = args(PermissionMode::Full);
+        let full = args(AccessMode::FullAccess);
         assert_eq!(mode_of(&full).as_deref(), Some("default"));
         assert!(!full.iter().any(|a| a == "--dangerously-skip-permissions"));
     }
@@ -2713,7 +2705,7 @@ mod tests {
     #[tokio::test]
     async fn zeron_computer_tools_skip_the_harness_prompt_in_every_mode() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use zeron_proto::PermissionMode;
+        use zeron_proto::AccessMode;
         let asked = Arc::new(AtomicUsize::new(0));
         let request_input: Arc<RequestInputFn> = {
             let asked = Arc::clone(&asked);
@@ -2733,7 +2725,7 @@ mod tests {
                 ..Default::default()
             },
         };
-        let answer = |tool: &str, mode: PermissionMode, computer_control: bool| {
+        let answer = |tool: &str, mode: AccessMode, computer_control: bool| {
             let (tx, mut rx) = mpsc::unbounded_channel();
             let mut config = access_tests::request(mode, false);
             config.computer_control = computer_control;
@@ -2746,9 +2738,9 @@ mod tests {
             }
         };
         for mode in [
-            PermissionMode::Ask,
-            PermissionMode::Auto,
-            PermissionMode::Full,
+            AccessMode::Supervised,
+            AccessMode::AutoAcceptEdits,
+            AccessMode::FullAccess,
         ] {
             for tool in [
                 "mcp__zeron__computer_click",
@@ -2770,7 +2762,7 @@ mod tests {
             ("mcp__other__computer_click", true),
             ("mcp__zeron__computer_click", false),
         ] {
-            for mode in [PermissionMode::Ask, PermissionMode::Auto] {
+            for mode in [AccessMode::Supervised, AccessMode::AutoAcceptEdits] {
                 let line = answer(tool, mode, computer_control).await;
                 assert!(
                     line.contains(r#""behavior":"deny""#),
@@ -2779,7 +2771,7 @@ mod tests {
             }
         }
         assert_eq!(asked.load(Ordering::SeqCst), 8);
-        let line = answer("Bash", PermissionMode::Full, true).await;
+        let line = answer("Bash", AccessMode::FullAccess, true).await;
         assert!(line.contains(r#""behavior":"allow""#));
         assert_eq!(asked.load(Ordering::SeqCst), 8);
     }
@@ -2797,8 +2789,7 @@ mod tests {
             model_options: serde_json::Map::new(),
             cwd: String::new(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-            permission_mode: zeron_proto::PermissionMode::Full,
-            access: Default::default(),
+            access: zeron_proto::AccessMode::FullAccess,
             plan: false,
             auto_approve: false,
             resume: Some("sess-a".into()),
@@ -2883,8 +2874,7 @@ mod tests {
             model_options: serde_json::Map::new(),
             cwd: String::new(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-            permission_mode: zeron_proto::PermissionMode::Full,
-            access: Default::default(),
+            access: zeron_proto::AccessMode::FullAccess,
             plan: false,
             auto_approve: false,
             resume: Some("sess-source".into()),
@@ -3002,7 +2992,7 @@ mod tests {
 
     #[test]
     fn runs_ask_the_cli_to_forward_subagent_text() {
-        let request = access_tests::request(zeron_proto::PermissionMode::Full, false);
+        let request = access_tests::request(zeron_proto::AccessMode::FullAccess, false);
         let harness = ClaudeHarness::new();
         let mut cmd = harness
             .launcher(std::path::Path::new("claude"))
@@ -3020,9 +3010,9 @@ mod tests {
 mod access_tests {
     use super::*;
     use serde_json::json;
-    use zeron_proto::PermissionMode;
+    use zeron_proto::AccessMode;
 
-    pub(super) fn request(permission_mode: PermissionMode, plan: bool) -> RunRequest {
+    pub(super) fn request(permission_mode: AccessMode, plan: bool) -> RunRequest {
         RunRequest {
             mcp: None,
             prompt: "hi".into(),
@@ -3031,10 +3021,9 @@ mod access_tests {
             reasoning: None,
             model_options: serde_json::Map::new(),
             cwd: "/work".into(),
-            sandbox: permission_mode.sandbox(),
-            auto_approve: permission_mode.auto_approve(),
-            permission_mode,
-            access: permission_mode.access(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            access: permission_mode,
             plan,
             attachments: Vec::new(),
             worktree: None,
@@ -3048,22 +3037,22 @@ mod access_tests {
     }
 
     #[test]
-    fn plan_mode_launches_over_the_permission_mode() {
+    fn plan_mode_launches_over_the_access_mode() {
         let mode_of = |request: &RunRequest| {
             let args = ClaudeHarness::launch_args(request, None);
             args.iter()
                 .position(|a| a == "--permission-mode")
                 .map(|i| args[i + 1].clone())
         };
-        for mode in PermissionMode::ALL {
+        for mode in AccessMode::ALL {
             assert_eq!(mode_of(&request(mode, true)).as_deref(), Some("plan"));
         }
         assert_eq!(
-            access_permission_mode(&request(PermissionMode::Auto, true)),
-            "auto"
+            access_permission_mode(&request(AccessMode::AutoAcceptEdits, true)),
+            "acceptEdits"
         );
         assert_eq!(
-            access_permission_mode(&request(PermissionMode::Ask, true)),
+            access_permission_mode(&request(AccessMode::Supervised, true)),
             "default"
         );
     }
@@ -3071,14 +3060,14 @@ mod access_tests {
     #[test]
     fn plan_changes_reconfigure_the_live_process() {
         let harness = ClaudeHarness::new();
-        let ask = request(PermissionMode::Ask, false);
-        let planning = request(PermissionMode::Ask, true);
+        let ask = request(AccessMode::Supervised, false);
+        let planning = request(AccessMode::Supervised, true);
         assert!(!harness.same_runtime(&planning, &ask));
         assert!(harness.reconfigures_in_place(&planning, &ask));
         // A stricter CLI mode relaunches: a refused switch must not leave
         // the next prompt running with less asked.
         assert!(!harness.reconfigures_in_place(&ask, &planning));
-        assert!(!harness.reconfigures_in_place(&ask, &request(PermissionMode::Full, false)));
+        assert!(!harness.reconfigures_in_place(&ask, &request(AccessMode::FullAccess, false)));
         assert!(harness.supports_plan());
     }
 
@@ -3087,22 +3076,22 @@ mod access_tests {
         let bash = json!({"command": "cargo test", "description": "Run tests"});
         let edit = json!({"file_path": "/work/src/lib.rs", "old_string": "a"});
         let notebook = json!({"notebook_path": "/work/a.ipynb"});
-        let ask = |tool: &str, input: &Value, mode: PermissionMode| {
+        let ask = |tool: &str, input: &Value, mode: AccessMode| {
             approval_question(tool, None, None, input, mode).map(|q| q.question)
         };
         for tool in ["Bash", "Edit", "WebFetch", "ExitPlanMode", "mcp__x__y"] {
-            assert_eq!(ask(tool, &bash, PermissionMode::Full), None, "{tool}");
+            assert_eq!(ask(tool, &bash, AccessMode::FullAccess), None, "{tool}");
         }
         assert_eq!(
-            ask("Bash", &bash, PermissionMode::Auto).as_deref(),
+            ask("Bash", &bash, AccessMode::AutoAcceptEdits).as_deref(),
             Some("Claude wants to run `cargo test`. Allow it?")
         );
         assert_eq!(
-            ask("Write", &edit, PermissionMode::Ask).as_deref(),
+            ask("Write", &edit, AccessMode::Supervised).as_deref(),
             Some("Claude wants to modify /work/src/lib.rs. Allow it?")
         );
         assert_eq!(
-            ask("NotebookEdit", &notebook, PermissionMode::Ask).as_deref(),
+            ask("NotebookEdit", &notebook, AccessMode::Supervised).as_deref(),
             Some("Claude wants to modify /work/a.ipynb. Allow it?")
         );
         let mcp = approval_question(
@@ -3110,7 +3099,7 @@ mod access_tests {
             Some("search (linear)"),
             Some("Find the bug"),
             &json!({}),
-            PermissionMode::Ask,
+            AccessMode::Supervised,
         )
         .unwrap();
         assert_eq!(mcp.header, "Approve tool");
@@ -3123,7 +3112,7 @@ mod access_tests {
             None,
             None,
             &json!({"plan": "p"}),
-            PermissionMode::Auto,
+            AccessMode::AutoAcceptEdits,
         )
         .unwrap();
         assert_eq!(

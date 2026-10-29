@@ -19,8 +19,8 @@ use zeron_proto::computer::{
     ComputerSettings,
 };
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, PermissionMode, ReasoningLevel, RunRequest,
-    SandboxLevel, SessionStatus, SteeringMode, UserInputAnswer, UserInputKind, UserInputQuestion,
+    AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
+    SessionStatus, SteeringMode, UserInputAnswer, UserInputKind, UserInputQuestion,
 };
 use zeron_rpc::methods;
 
@@ -264,7 +264,7 @@ where
     }
 }
 
-fn request(prompt: &str, mode: PermissionMode) -> RunRequest {
+fn request(prompt: &str, mode: AccessMode) -> RunRequest {
     RunRequest {
         prompt: prompt.into(),
         harness: None,
@@ -273,8 +273,7 @@ fn request(prompt: &str, mode: PermissionMode) -> RunRequest {
         model_options: Default::default(),
         cwd: "/tmp".into(),
         sandbox: SandboxLevel::WorkspaceWrite,
-        permission_mode: mode,
-        access: mode.access(),
+        access: mode,
         plan: false,
         auto_approve: false,
         attachments: Vec::new(),
@@ -319,7 +318,7 @@ impl Rig {
             .expect("queue command");
     }
 
-    fn run(&self, id: &str, prompt: &str, mode: PermissionMode, generation: Option<u64>) {
+    fn run(&self, id: &str, prompt: &str, mode: AccessMode, generation: Option<u64>) {
         self.command(
             id,
             SessionCommandPayload::Run {
@@ -458,7 +457,7 @@ fn entry_text(entry: &SessionMessageEntry) -> String {
 #[tokio::test]
 async fn settings_off_activates_only_the_user_authored_slash_turn_and_restarts_with_resume() {
     let rig = rig();
-    rig.run("c1", "plain", PermissionMode::Full, None);
+    rig.run("c1", "plain", AccessMode::FullAccess, None);
     let first = rig.saw(1).await;
     assert!(!first.computer && no_computer_guidance(&first));
     rig.finish_turn().await;
@@ -466,7 +465,7 @@ async fn settings_off_activates_only_the_user_authored_slash_turn_and_restarts_w
     rig.run(
         "c2",
         "/computer-use open Calculator",
-        PermissionMode::Full,
+        AccessMode::FullAccess,
         None,
     );
     let second = rig.saw(2).await;
@@ -485,7 +484,7 @@ async fn settings_off_activates_only_the_user_authored_slash_turn_and_restarts_w
     assert!(live.run_computer_control && live.turn_computer_control);
     rig.finish_turn().await;
 
-    rig.run("c3", "plain again", PermissionMode::Full, None);
+    rig.run("c3", "plain again", AccessMode::FullAccess, None);
     let third = rig.saw(3).await;
     assert!(!third.computer && third.resumed && !third.steer && no_computer_guidance(&third));
     rig.finish_turn().await;
@@ -543,7 +542,7 @@ async fn an_agent_delivered_slash_never_activates_while_settings_on_covers_every
     )
     .await;
 
-    rig.run("c1", "plain", PermissionMode::Full, None);
+    rig.run("c1", "plain", AccessMode::FullAccess, None);
     let plain = rig.saw(3).await;
     assert!(plain.computer && !plain.steer);
     rig.finish_turn().await;
@@ -553,7 +552,7 @@ async fn an_agent_delivered_slash_never_activates_while_settings_on_covers_every
 #[tokio::test]
 async fn a_stop_fences_a_queued_slash_row_and_the_next_message_does_not_revive_it() {
     let rig = rig();
-    rig.run("c1", "plain", PermissionMode::Full, None);
+    rig.run("c1", "plain", AccessMode::FullAccess, None);
     rig.saw(1).await;
     let row = rig
         .core
@@ -582,7 +581,7 @@ async fn a_stop_fences_a_queued_slash_row_and_the_next_message_does_not_revive_i
     assert!(!rig.in_flight());
     assert_eq!(rig.generation(), 1);
 
-    rig.run("c2", "unrelated", PermissionMode::Full, Some(1));
+    rig.run("c2", "unrelated", AccessMode::FullAccess, Some(1));
     let unrelated = rig.saw(2).await;
     assert!(!unrelated.computer);
     rig.finish();
@@ -598,7 +597,7 @@ async fn a_stop_fences_a_queued_slash_row_and_the_next_message_does_not_revive_i
 async fn with_settings_on_a_turn_queued_before_stop_keeps_the_catalog() {
     let rig = rig();
     rig.settings(true);
-    rig.run("c1", "plain", PermissionMode::Full, None);
+    rig.run("c1", "plain", AccessMode::FullAccess, None);
     assert!(rig.saw(1).await.computer);
     rig.core
         .doc_host
@@ -606,7 +605,7 @@ async fn with_settings_on_a_turn_queued_before_stop_keeps_the_catalog() {
         .unwrap();
     rig.command("stop", SessionCommandPayload::Interrupt { teardown: false }, None);
     rig.applied("stop").await;
-    rig.run("c2", "unrelated", PermissionMode::Full, Some(1));
+    rig.run("c2", "unrelated", AccessMode::FullAccess, Some(1));
     assert!(rig.saw(2).await.computer);
     rig.finish();
     let replayed = rig.saw(3).await;
@@ -633,7 +632,7 @@ async fn a_stop_before_any_dispatch_in_this_engine_lifetime_still_fences() {
     rig.run(
         "c1",
         "/computer-use open Calculator",
-        PermissionMode::Full,
+        AccessMode::FullAccess,
         Some(3),
     );
     let stale = rig.saw(1).await;
@@ -644,7 +643,7 @@ async fn a_stop_before_any_dispatch_in_this_engine_lifetime_still_fences() {
     rig.run(
         "c2",
         "/computer-use open Calculator",
-        PermissionMode::Full,
+        AccessMode::FullAccess,
         Some(4),
     );
     assert!(rig.saw(2).await.computer);
@@ -655,7 +654,7 @@ async fn a_stop_before_any_dispatch_in_this_engine_lifetime_still_fences() {
 #[tokio::test]
 async fn a_mid_turn_flip_waits_for_the_boundary_and_is_never_steered() {
     let rig = rig();
-    rig.run("c1", "plain", PermissionMode::Full, None);
+    rig.run("c1", "plain", AccessMode::FullAccess, None);
     rig.saw(1).await;
     assert_eq!(
         rig.core
@@ -679,7 +678,7 @@ async fn a_mid_turn_flip_waits_for_the_boundary_and_is_never_steered() {
     rig.run(
         "c2",
         "/computer-use open Safari",
-        PermissionMode::Full,
+        AccessMode::FullAccess,
         Some(0),
     );
     let (_, resolution) = rig.applied("c2").await;
@@ -697,13 +696,13 @@ async fn a_mid_turn_flip_waits_for_the_boundary_and_is_never_steered() {
 #[tokio::test]
 async fn an_agent_that_cannot_reload_its_session_refuses_the_flip_visibly() {
     let rig = rig_with(Some(false));
-    rig.run("c1", "plain", PermissionMode::Full, None);
+    rig.run("c1", "plain", AccessMode::FullAccess, None);
     rig.saw(1).await;
     rig.finish_turn().await;
     rig.run(
         "c2",
         "/computer-use open Calculator",
-        PermissionMode::Full,
+        AccessMode::FullAccess,
         None,
     );
     let steered = rig.saw(2).await;
@@ -726,7 +725,7 @@ async fn an_agent_that_cannot_see_the_computer_tools_refuses_computer_visibly() 
     rig.run(
         "c1",
         "/computer-use open Calculator",
-        PermissionMode::Full,
+        AccessMode::FullAccess,
         None,
     );
     let seen = rig.saw(1).await;
@@ -747,10 +746,10 @@ async fn an_agent_that_cannot_see_the_computer_tools_refuses_computer_visibly() 
 #[tokio::test]
 async fn the_run_secret_names_only_the_live_run_and_is_revoked_by_a_stop() {
     let rig = rig();
-    rig.run("c1", "plain", PermissionMode::Ask, None);
+    rig.run("c1", "plain", AccessMode::Supervised, None);
     let secret = rig.saw(1).await.secret.expect("the run carries a secret");
     let live = rig.core.sessions.computer_run(CHAT, &secret).unwrap();
-    assert_eq!(live.permission_mode, PermissionMode::Ask);
+    assert_eq!(live.access, AccessMode::Supervised);
     assert_eq!(live.turn_id.as_deref(), Some("m-c1"));
     assert!(!live.run_computer_control);
     assert_eq!(rig.core.sessions.computer_run(CHAT, "forged"), None);
@@ -770,7 +769,7 @@ async fn the_run_secret_names_only_the_live_run_and_is_revoked_by_a_stop() {
 #[tokio::test]
 async fn only_a_connection_bound_to_a_live_run_speaks_for_its_chat() {
     let rig = rig();
-    rig.run("c1", "plain", PermissionMode::Ask, None);
+    rig.run("c1", "plain", AccessMode::Supervised, None);
     let secret = rig.saw(1).await.secret.expect("the run carries a secret");
     let client = zeron_rpc::memory_client(rig.core.rpc_service());
     let send = |from: &str| json!({ "chatId": LEAD, "fromChatId": from, "text": "status?" });
@@ -884,7 +883,7 @@ fn answer(rig: &Rig, id: &str, request_id: &str, label: &str) {
 #[tokio::test]
 async fn ask_mode_raises_one_task_card_a_clipboard_card_and_never_discloses_in_the_transcript() {
     let rig = rig();
-    rig.run("c1", "plain", PermissionMode::Ask, None);
+    rig.run("c1", "plain", AccessMode::Supervised, None);
     rig.saw(1).await;
     let manager = manager(&rig).await;
     let caller = caller(&rig).await;
@@ -964,7 +963,7 @@ async fn ask_mode_raises_one_task_card_a_clipboard_card_and_never_discloses_in_t
 
 #[tokio::test]
 async fn auto_and_full_raise_no_card_and_never_disclose_in_the_transcript() {
-    for mode in [PermissionMode::Auto, PermissionMode::Full] {
+    for mode in [AccessMode::AutoAcceptEdits, AccessMode::FullAccess] {
         let rig = rig();
         rig.run("c1", "plain", mode, None);
         rig.saw(1).await;
@@ -1103,7 +1102,7 @@ async fn a_consent_card_left_open_by_a_dead_run_is_never_answered_as_a_new_turn(
 async fn a_physical_escape_revokes_the_desktop_and_the_turn_keeps_running() {
     let rig = rig();
     rig.settings(true);
-    rig.run("c1", "plain", PermissionMode::Full, None);
+    rig.run("c1", "plain", AccessMode::FullAccess, None);
     let secret = rig.saw(1).await.secret.unwrap();
     let manager = manager(&rig).await;
     let (release, released) = tokio::sync::oneshot::channel::<()>();
@@ -1151,7 +1150,7 @@ async fn a_physical_escape_revokes_the_desktop_and_the_turn_keeps_running() {
     let _ = release.send(());
     let _ = activity.await;
 
-    rig.run("c2", "next", PermissionMode::Full, None);
+    rig.run("c2", "next", AccessMode::FullAccess, None);
     assert!(rig.saw(2).await.steer);
     caller_for(&rig, "m-c2").await;
     let run = rig.core.sessions.computer_run(CHAT, &secret).unwrap();
@@ -1166,7 +1165,7 @@ async fn a_physical_escape_revokes_the_desktop_and_the_turn_keeps_running() {
 async fn the_strip_stop_revokes_only_its_chat() {
     let rig = rig();
     rig.settings(true);
-    rig.run("c1", "plain", PermissionMode::Full, None);
+    rig.run("c1", "plain", AccessMode::FullAccess, None);
     let secret = rig.saw(1).await.secret.unwrap();
     manager(&rig).await;
     let client = zeron_rpc::memory_client(rig.core.rpc_service());
@@ -1242,7 +1241,7 @@ fn card_resolved(rig: &Rig, card: &str) -> bool {
 #[tokio::test]
 async fn a_decline_holds_for_the_turn_and_turn_end_and_stop_cancel_an_open_card() {
     let rig = rig();
-    rig.run("c1", "plain", PermissionMode::Ask, None);
+    rig.run("c1", "plain", AccessMode::Supervised, None);
     rig.saw(1).await;
     let manager = manager(&rig).await;
 
@@ -1260,7 +1259,7 @@ async fn a_decline_holds_for_the_turn_and_turn_end_and_stop_cancel_an_open_card(
     assert_eq!(rig.consent_cards().len(), 1, "a decline is not re-asked");
     rig.finish_turn().await;
 
-    rig.run("c2", "second", PermissionMode::Ask, None);
+    rig.run("c2", "second", AccessMode::Supervised, None);
     assert!(rig.saw(2).await.steer);
     let second = caller_for(&rig, "m-c2").await;
     let click = authorize(&manager, "computer_click", &second);
@@ -1276,7 +1275,7 @@ async fn a_decline_holds_for_the_turn_and_turn_end_and_stop_cancel_an_open_card(
     )
     .await;
 
-    rig.run("c3", "third", PermissionMode::Ask, None);
+    rig.run("c3", "third", AccessMode::Supervised, None);
     assert!(rig.saw(3).await.steer);
     let third = caller_for(&rig, "m-c3").await;
     let click = authorize(&manager, "computer_click", &third);
@@ -1303,7 +1302,7 @@ async fn a_decline_holds_for_the_turn_and_turn_end_and_stop_cancel_an_open_card(
 #[tokio::test]
 async fn archiving_a_chat_suspends_its_computer_control_and_restoring_lifts_it() {
     let rig = rig();
-    rig.run("c1", "plain", PermissionMode::Full, None);
+    rig.run("c1", "plain", AccessMode::FullAccess, None);
     rig.saw(1).await;
     let manager = manager(&rig).await;
     let generation = manager.control_state().generation(CHAT);
@@ -1375,7 +1374,7 @@ fn crashed_slash_turn(root: &std::path::Path, chat: &str, text: &str, stamp: Opt
     doc.queue_command(&SessionCommandEntry {
         id: format!("c-{chat}"),
         payload: SessionCommandPayload::Run {
-            request: request(text, PermissionMode::Full),
+            request: request(text, AccessMode::FullAccess),
             message_id: user_id,
         },
         issued_by: "viewer".into(),
@@ -1480,7 +1479,7 @@ async fn a_stop_interrupts_the_turn_without_waiting_for_the_host_teardown() {
         "the hosted service",
     )
     .await;
-    rig.run("c1", "plain", PermissionMode::Full, None);
+    rig.run("c1", "plain", AccessMode::FullAccess, None);
     rig.saw(1).await;
     let manager = manager(&rig).await;
     let (release, released) = tokio::sync::oneshot::channel::<()>();
@@ -1563,7 +1562,7 @@ fn push_open_question(rig: &Rig, request_id: &str) {
 #[tokio::test]
 async fn an_orphan_answer_that_flips_computer_waits_for_the_turn_end() {
     let rig = rig();
-    rig.run("c1", "plain", PermissionMode::Full, None);
+    rig.run("c1", "plain", AccessMode::FullAccess, None);
     assert!(!rig.saw(1).await.computer);
     push_open_question(&rig, "r-visible");
     rig.settings(true);
@@ -1594,7 +1593,7 @@ async fn an_orphan_answer_that_flips_computer_waits_for_the_turn_end() {
 #[tokio::test]
 async fn a_thread_message_held_for_a_computer_flip_leaves_no_delivered_entry() {
     let rig = rig();
-    rig.run("c1", "plain", PermissionMode::Full, None);
+    rig.run("c1", "plain", AccessMode::FullAccess, None);
     assert!(!rig.saw(1).await.computer);
     rig.settings(true);
     let row = rig
@@ -1644,12 +1643,12 @@ async fn an_orphaned_steer_is_redispatched_with_its_own_computer_flag() {
         .swallow_steers
         .store(true, std::sync::atomic::Ordering::SeqCst);
     rig.settings(true);
-    rig.run("c1", "plain", PermissionMode::Full, None);
+    rig.run("c1", "plain", AccessMode::FullAccess, None);
     assert!(rig.saw(1).await.computer);
     rig.finish_turn().await;
 
     rig.settings(false);
-    rig.run("c2", "second", PermissionMode::Full, None);
+    rig.run("c2", "second", AccessMode::FullAccess, None);
     assert!(rig.saw(2).await.steer);
     rig.ctl().exit.notify_one();
     let redispatched = rig.saw(3).await;
@@ -1667,14 +1666,14 @@ async fn an_orphaned_steer_is_redispatched_with_its_own_computer_flag() {
 async fn a_self_continued_turn_keeps_the_last_turns_computer_flag() {
     let rig = rig_with(Some(false));
     rig.settings(true);
-    rig.run("c1", "plain", PermissionMode::Full, None);
+    rig.run("c1", "plain", AccessMode::FullAccess, None);
     let first = rig.saw(1).await;
     assert!(first.computer);
     let secret = first.secret.unwrap();
     rig.finish_turn().await;
 
     rig.settings(false);
-    rig.run("c2", "second", PermissionMode::Full, None);
+    rig.run("c2", "second", AccessMode::FullAccess, None);
     assert!(rig.saw(2).await.steer);
     let turn = || {
         rig.core
@@ -1701,7 +1700,7 @@ async fn a_self_continued_turn_keeps_the_last_turns_computer_flag() {
 #[tokio::test]
 async fn an_input_request_with_no_questions_still_parks_the_composer() {
     let rig = rig();
-    rig.run("c1", "ask-empty", PermissionMode::Full, None);
+    rig.run("c1", "ask-empty", AccessMode::FullAccess, None);
     rig.saw(1).await;
     wait_for(
         || {
@@ -1719,7 +1718,7 @@ async fn an_input_request_with_no_questions_still_parks_the_composer() {
 #[tokio::test]
 async fn answering_a_consent_card_keeps_an_open_question_awaiting_input() {
     let rig = rig();
-    rig.run("c1", "ask-kept", PermissionMode::Ask, None);
+    rig.run("c1", "ask-kept", AccessMode::Supervised, None);
     rig.saw(1).await;
     let awaiting =
         || rig.core.sessions.session_status(CHAT).unwrap().status == SessionStatus::AwaitingInput;
@@ -1739,7 +1738,7 @@ async fn answering_a_consent_card_keeps_an_open_question_awaiting_input() {
 #[tokio::test]
 async fn a_question_the_agent_withdrew_does_not_hold_awaiting_input() {
     let rig = rig();
-    rig.run("c1", "ask-withdrawn", PermissionMode::Full, None);
+    rig.run("c1", "ask-withdrawn", AccessMode::FullAccess, None);
     rig.saw(1).await;
     let kept = || {
         rig.entries(CHAT)
@@ -1789,7 +1788,7 @@ async fn a_question_the_agent_withdrew_does_not_hold_awaiting_input() {
 #[tokio::test]
 async fn ask_user_parks_a_multi_select_card_and_returns_every_picked_label() {
     let rig = rig();
-    rig.run("c1", "plain", PermissionMode::Ask, None);
+    rig.run("c1", "plain", AccessMode::Supervised, None);
     let secret = rig.saw(1).await.secret.expect("the run carries a secret");
     assert_eq!(
         rig.core
@@ -1961,7 +1960,7 @@ async fn request_secret_saves_a_private_file_and_the_value_stays_out_of_the_chat
             .finish(),
     );
     let rig = rig();
-    rig.run("c1", "plain", PermissionMode::Ask, None);
+    rig.run("c1", "plain", AccessMode::Supervised, None);
     let secret = rig.saw(1).await.secret.expect("the run carries a secret");
     let client = zeron_rpc::memory_client(rig.core.rpc_service());
     let tools = zeron_mcp::ThreadTools::new(zeron_rpc::memory_client(rig.core.rpc_service()), CHAT)
@@ -2063,7 +2062,7 @@ async fn request_secret_saves_a_private_file_and_the_value_stays_out_of_the_chat
 async fn declined_timed_out_and_cancelled_secrets_leave_no_file() {
     use zeron_proto::view::SecretStatus;
     let rig = rig();
-    rig.run("c1", "plain", PermissionMode::Ask, None);
+    rig.run("c1", "plain", AccessMode::Supervised, None);
     let secret = rig.saw(1).await.secret.expect("the run carries a secret");
     let client = Arc::new(zeron_rpc::memory_client(rig.core.rpc_service()));
     let ask = |timeout_ms: Option<u64>| {

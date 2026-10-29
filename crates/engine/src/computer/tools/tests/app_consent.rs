@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use zeron_proto::PermissionMode;
+use zeron_proto::AccessMode;
 
 use super::{HarnessOptions, THREAD, fake_with, harness, harness_with, result_json};
 use crate::computer::approval_gate::ApprovalDecision;
@@ -26,7 +26,7 @@ fn decide_by_app(
     h: &Harness,
     decide: impl Fn(Option<&str>) -> ApprovalDecision + Send + Sync + 'static,
 ) {
-    *h.approvals.mode.lock().unwrap() = Some(PermissionMode::Ask);
+    *h.approvals.mode.lock().unwrap() = Some(AccessMode::Supervised);
     *h.approvals.decide.lock().unwrap() = Some(Arc::new(move |card: &ComputerConsentCard| {
         decide(bundle(card))
     }));

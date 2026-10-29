@@ -104,12 +104,11 @@ impl Rig {
                     reasoning: None,
                     model_options: Default::default(),
                     sandbox: SandboxLevel::DangerFullAccess,
-                    permission_mode: Default::default(),
                     instructions: String::new(),
                     profile_id: None,
                     instance_id: None,
                     disabled_tools: Vec::new(),
-                    access: zeron_proto::PermissionMode::default().access(),
+                    access: Default::default(),
                     plan: false,
                 },
             )
@@ -143,7 +142,6 @@ impl Rig {
             branch: None,
             forked_at: None,
             computer_control: false,
-            permission_mode: Default::default(),
             disabled_tools: Vec::new(),
             env: Default::default(),
         }

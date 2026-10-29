@@ -291,8 +291,7 @@ fn queue_run(core: &EngineCore, chat_id: &str, command_id: &str, message_id: &st
                     model_options: Default::default(),
                     cwd: "/tmp".into(),
                     sandbox: SandboxLevel::WorkspaceWrite,
-                    permission_mode: zeron_proto::PermissionMode::Full,
-                    access: zeron_proto::PermissionMode::Full.access(),
+                    access: zeron_proto::AccessMode::FullAccess,
                     plan: false,
                     auto_approve: true,
                     attachments: Vec::new(),
@@ -388,8 +387,7 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
         reasoning: Some(ReasoningLevel::High),
         model_options: Default::default(),
         sandbox: SandboxLevel::ReadOnly,
-        permission_mode: zeron_proto::PermissionMode::Auto,
-        access: zeron_proto::PermissionMode::Auto.access(),
+        access: zeron_proto::AccessMode::AutoAcceptEdits,
         plan: false,
         instructions: String::new(),
         profile_id: None,
@@ -539,8 +537,7 @@ async fn create_thread_never_copies_the_creators_profile_and_applies_the_one_ask
         reasoning: Some(ReasoningLevel::High),
         model_options: options("fast"),
         sandbox: SandboxLevel::WorkspaceWrite,
-        permission_mode: zeron_proto::PermissionMode::Auto,
-        access: zeron_proto::PermissionMode::Auto.access(),
+        access: zeron_proto::AccessMode::AutoAcceptEdits,
         plan: false,
         instructions: "Coordinate only.".into(),
         profile_id: Some("orchestrator".into()),
@@ -589,7 +586,7 @@ async fn create_thread_never_copies_the_creators_profile_and_applies_the_one_ask
     );
 
     let reviewer = create(zeron_engine::doc_host::ProfileParams {
-        permission_mode: Some(zeron_proto::PermissionMode::Ask),
+        access: Some(zeron_proto::AccessMode::Supervised),
         model_options: Some(options("slow")),
         instructions: Some("Review only.".into()),
         profile_id: Some("reviewer".into()),
@@ -601,8 +598,7 @@ async fn create_thread_never_copies_the_creators_profile_and_applies_the_one_ask
         config_of(&reviewer),
         Some(zeron_proto::ChatConfig {
             model_options: options("slow"),
-            sandbox: zeron_proto::PermissionMode::Ask.sandbox(),
-            permission_mode: zeron_proto::PermissionMode::Ask,
+            access: zeron_proto::AccessMode::Supervised,
             instructions: "Review only.".into(),
             profile_id: Some("reviewer".into()),
             disabled_tools: vec!["mcp__xcode".into(), "WebFetch".into()],
@@ -611,7 +607,7 @@ async fn create_thread_never_copies_the_creators_profile_and_applies_the_one_ask
     );
 
     let wider = create(zeron_engine::doc_host::ProfileParams {
-        permission_mode: Some(zeron_proto::PermissionMode::Full),
+        access: Some(zeron_proto::AccessMode::FullAccess),
         profile_id: Some("builder".into()),
         ..Default::default()
     })
@@ -1244,8 +1240,7 @@ async fn an_exhausted_route_follows_the_out_of_quota_policy() {
         reasoning: None,
         model_options: Default::default(),
         sandbox: SandboxLevel::WorkspaceWrite,
-        permission_mode: zeron_proto::PermissionMode::Ask,
-        access: zeron_proto::PermissionMode::Ask.access(),
+        access: zeron_proto::AccessMode::Supervised,
         plan: false,
         instructions: String::new(),
         profile_id: None,
@@ -1366,8 +1361,7 @@ fn codex_rig_that_limits() -> Rig {
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: SandboxLevel::WorkspaceWrite,
-                permission_mode: zeron_proto::PermissionMode::Ask,
-                access: zeron_proto::PermissionMode::Ask.access(),
+                access: zeron_proto::AccessMode::Supervised,
                 plan: false,
                 instructions: String::new(),
                 profile_id: None,
@@ -1770,8 +1764,7 @@ async fn a_delegated_child_names_its_own_profile_never_the_owners() {
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: SandboxLevel::WorkspaceWrite,
-                permission_mode: Default::default(),
-                access: zeron_proto::PermissionMode::default().access(),
+                access: Default::default(),
                 plan: false,
                 instructions: "Plan only.".into(),
                 profile_id: Some("planner".into()),
@@ -3199,8 +3192,7 @@ async fn a_run_carries_the_host_prompt_then_the_chat_instructions() {
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: SandboxLevel::WorkspaceWrite,
-                permission_mode: Default::default(),
-                access: zeron_proto::PermissionMode::default().access(),
+                access: Default::default(),
                 plan: false,
                 instructions: "Review only.".into(),
                 profile_id: None,

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use zeron_client as zc;
 
-use super::types::{CoreResult, SendState};
+use super::types::{AccessMode, CoreResult, SendState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum BusyPolicy {
@@ -98,6 +98,8 @@ pub struct HostCapabilities {
     pub queued_attachments: bool,
     /// The chat's harness steers mid-turn (unknown until a live catalog).
     pub mid_turn_steering: Option<bool>,
+    /// The access modes the chat's harness honors (unknown until a live catalog).
+    pub access_modes: Option<Vec<AccessMode>>,
     /// The host moves the chat to another provider between turns.
     pub provider_switch: bool,
 }
@@ -335,6 +337,10 @@ impl From<&zc::ComposerState> for ComposerState {
                     queue_edit_lease: caps.queue_edit_lease,
                     queued_attachments: caps.queued_attachments,
                     mid_turn_steering: caps.mid_turn_steering,
+                    access_modes: caps
+                        .access_modes
+                        .as_ref()
+                        .map(|modes| modes.iter().copied().map(Into::into).collect()),
                     provider_switch: caps.provider_switch,
                 },
             },

@@ -93,9 +93,10 @@ final class CoreSessionSource: SessionSource {
             let fast = model.flatMap { m in config.map { fastModeOn(model: m, config: $0) } } ?? false
             chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: r), symbol: fast ? "bolt.fill" : "gauge.with.dots.needle.67percent"))
         }
-        let mode = config?.permissionMode ?? .full
-        if let info = permissionModes().first(where: { $0.mode == mode }) {
-            chips.append(ComposerChip(id: "permission", title: info.shortLabel, symbol: Self.permissionSymbol(mode), tint: mode == .full ? Palette.warning : nil))
+        let offered = c.host.capabilities.accessModes
+        let mode = resolveAccess(wanted: config?.access ?? .fullAccess, offered: offered)
+        if let info = accessModes(offered: nil).first(where: { $0.mode == mode }) {
+            chips.append(ComposerChip(id: "permission", title: info.label, symbol: Self.accessSymbol(mode), tint: mode == .fullAccess ? Palette.warning : nil))
         }
         if let pr = row?.pullRequest {
             let state: SessionRowVM.PR = switch pr.state { case .open: .open; case .merged: .merged; case .closed: .closed }
@@ -404,10 +405,11 @@ final class CoreSessionSource: SessionSource {
                 }
             }])
         case "permission":
-            let current = client.sessionConfig(chatId: chatId)?.permissionMode ?? .full
-            return UIMenu(title: "Approve agent actions", children: permissionModes().map { m in
-                UIAction(title: m.label, subtitle: m.description, image: UIImage(systemName: Self.permissionSymbol(m.mode)), state: m.mode == current ? .on : .off) { [weak self] _ in
-                    self?.setConfig { $0.permissionMode = m.mode }
+            let offered = handle.composer().host.capabilities.accessModes
+            let current = resolveAccess(wanted: client.sessionConfig(chatId: chatId)?.access ?? .fullAccess, offered: offered)
+            return UIMenu(title: "Access", children: accessModes(offered: offered).map { m in
+                UIAction(title: m.label, subtitle: m.description, image: UIImage(systemName: Self.accessSymbol(m.mode)), state: m.mode == current ? .on : .off) { [weak self] _ in
+                    self?.setConfig { $0.access = m.mode }
                 }
             })
         case "pr":
@@ -462,11 +464,11 @@ final class CoreSessionSource: SessionSource {
         return defaultModels[key]
     }
 
-    static func permissionSymbol(_ mode: PermissionMode) -> String {
+    static func accessSymbol(_ mode: AccessMode) -> String {
         switch mode {
-        case .ask: "checklist"
-        case .auto: "wand.and.sparkles"
-        case .full: "exclamationmark.triangle"
+        case .supervised: "checklist"
+        case .autoAcceptEdits: "wand.and.sparkles"
+        case .fullAccess: "exclamationmark.triangle"
         }
     }
 
@@ -735,7 +737,7 @@ final class CoreSessionSource: SessionSource {
             confirmSwitch(client.modelSwitchPrompt(chatId: chatId, toModel: model, fromLabel: from, toLabel: write.modelLabel ?? model)) { $0.model = model }
         }
         if let reasoning = write.reasoning { setConfig { $0.reasoning = reasoning } }
-        if let permission = write.permission { setConfig { $0.permissionMode = permission } }
+        if let permission = write.permission { setConfig { $0.access = permission } }
     }
 
     var skillNames: [String] {

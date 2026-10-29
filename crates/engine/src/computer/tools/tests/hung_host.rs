@@ -17,7 +17,7 @@ async fn a_hung_host_fails_the_tool_call_at_its_deadline_instead_of_hanging() {
     fixture.gate_type_text(Some(held));
     let mut options = ComputerManagerOptions::new(fixture.backend.clone());
     options.seams = Arc::new(Approvals {
-        mode: std::sync::Mutex::new(Some(zeron_proto::PermissionMode::Full)),
+        mode: std::sync::Mutex::new(Some(zeron_proto::AccessMode::FullAccess)),
         decide: std::sync::Mutex::new(None),
         gate: options.approval_gate.clone(),
         cards: std::sync::Mutex::default(),

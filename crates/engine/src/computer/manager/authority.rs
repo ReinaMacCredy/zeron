@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use futures::FutureExt;
 use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
-use zeron_proto::PermissionMode;
+use zeron_proto::AccessMode;
 use zeron_proto::computer::{
     COMPUTER_MESSAGE_MAX_LENGTH, ComputerAllowedApp, ComputerPendingRequest, CuaComputerTask,
 };
@@ -711,7 +711,7 @@ impl ComputerManager {
         else {
             return Ok(ComputerConsent::Denied(None));
         };
-        if mode != PermissionMode::Ask {
+        if mode != AccessMode::Supervised {
             return Ok(ComputerConsent::Granted);
         }
         if target == Some(&ComputerConsentTarget::Unscoped) {
