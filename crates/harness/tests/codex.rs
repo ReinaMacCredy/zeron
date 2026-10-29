@@ -1867,6 +1867,35 @@ async fn compaction_is_native_and_compact_maps_thread_compacted() {
 }
 
 #[tokio::test]
+async fn a_copy_compaction_forks_at_the_kept_turn_and_names_the_fork() {
+    let h = harness();
+    assert!(h.compacts_a_copy());
+    let (controls, _steer, _token) = controls("Yes");
+    let mut req = request("");
+    req.resume = Some("resume-ok".into());
+    req.branch = Some(zeron_proto::SessionBranch {
+        keep: Some("t-keep".into()),
+        drop: None,
+    });
+    let events = collect_until_done(h.compact(req, controls).await.unwrap()).await;
+    assert!(
+        matches!(events.first(), Some(AgentEvent::Compacted { .. })),
+        "{events:?}"
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                session_id: Some(id),
+                ..
+            }) if id == "th-forked"
+        ),
+        "Done names the fork, never the source: {events:?}"
+    );
+}
+
+#[tokio::test]
 async fn compact_without_a_thread_to_resume_is_refused() {
     let (controls, _steer, _token) = controls("Yes");
     let started = harness().compact(request(""), controls).await;

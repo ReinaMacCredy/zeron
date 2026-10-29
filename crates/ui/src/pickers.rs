@@ -71,6 +71,50 @@ const FOOTER_CHIP_RADIUS: f32 = 6.0;
 
 /// Both sides of the composer handoff share one leading-aligned workspace
 /// cluster. Available width belongs after the pair, never between its labels.
+fn copy_chip_label(
+    plan: zeron_proto::CompactPlan,
+    now_ms: i64,
+    working: bool,
+) -> Option<(SharedString, bool)> {
+    let zeron_proto::CompactPlan::Copy { since, ready } = plan else {
+        return None;
+    };
+    let label = match (ready, working) {
+        (false, _) => {
+            let secs = ((now_ms - since) / 1000).max(0);
+            format!("Compacting a copy · {}:{:02}", secs / 60, secs % 60)
+        }
+        (true, true) => "Copy ready · swaps when the turn ends".into(),
+        (true, false) => "Copy ready · waits for background work".into(),
+    };
+    Some((label.into(), ready))
+}
+
+fn copy_chip(label: SharedString, ready: bool, theme: &Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .ml(px(6.0))
+        .px(px(7.0))
+        .h(px(20.0))
+        .rounded(px(6.0))
+        .bg(theme.warning.opacity(0.12))
+        .text_size(crate::typography::ui_rems(11.5))
+        .text_color(theme.warning)
+        .child(
+            crate::icons::icon(if ready {
+                crate::icons::LUCIDE_CHECK
+            } else {
+                crate::icons::LUCIDE_CIRCLE_DASHED
+            })
+            .size(px(12.0))
+            .text_color(theme.warning),
+        )
+        .child(label)
+}
+
 fn workspace_footer_row() -> gpui::Div {
     div()
         .w_full()
@@ -6204,6 +6248,17 @@ impl Pickers {
                 .turn_in_flight(&chat.id, chrono::Utc::now());
             self.stats_chip
                 .update(cx, |chip, cx| chip.set(stats, working, cx));
+            let copy = self
+                .state
+                .read(cx)
+                .session_for(&chat.id)
+                .and_then(|session| session.compact_plan)
+                .and_then(|plan| {
+                    copy_chip_label(plan, chrono::Utc::now().timestamp_millis(), working)
+                });
+            if copy.as_ref().is_some_and(|(_, ready)| !ready) {
+                crate::motion::pulse_lease(cx.entity_id(), cx);
+            }
             return Some(
                 row()
                     .pr_0()
@@ -6211,6 +6266,9 @@ impl Pickers {
                     .child(left)
                     .child(right)
                     .child(self.stats_chip.clone())
+                    .when_some(copy, |el, (label, ready)| {
+                        el.child(copy_chip(label, ready, &theme))
+                    })
                     .child(div().flex_1().min_w_0())
                     .when_some(change_request, |el, summary| {
                         el.child(div().flex_none().child(
@@ -10328,6 +10386,29 @@ mod tests {
     use super::*;
     use zeron_proto::model_switch::{provider_switch_hint, provider_switch_warning, switch_warning};
     use zeron_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
+
+    #[test]
+    fn the_copy_chip_counts_then_says_what_the_swap_waits_for() {
+        use zeron_proto::CompactPlan;
+        let copy = |ready| CompactPlan::Copy {
+            since: 10_000,
+            ready,
+        };
+        let label = |plan, working| copy_chip_label(plan, 33_400, working).map(|(l, _)| l);
+        assert_eq!(
+            label(copy(false), true).as_deref(),
+            Some("Compacting a copy · 0:23")
+        );
+        assert_eq!(
+            label(copy(true), true).as_deref(),
+            Some("Copy ready · swaps when the turn ends")
+        );
+        assert_eq!(
+            label(copy(true), false).as_deref(),
+            Some("Copy ready · waits for background work")
+        );
+        assert_eq!(label(CompactPlan::Agent, false), None);
+    }
 
     #[test]
     fn a_model_pick_warns_only_on_a_chat_with_history_and_a_real_change() {

@@ -5,8 +5,8 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 
 use zeron_proto::{
-    AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode,
-    UserInputQuestion,
+    AccessMode, AgentEvent, Compaction, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest,
+    SteeringMode, UserInputQuestion,
 };
 
 use crate::{Harness, HarnessError, RunControls};
@@ -15,6 +15,132 @@ mod script;
 
 pub struct MockHarness {
     pub script: Vec<AgentEvent>,
+}
+
+/// Dev knobs: `ZERON_MOCK_COMPACT=claude|codex`, `ZERON_MOCK_CONTEXT` tokens, `ZERON_MOCK_SHELL=1`, `ZERON_MOCK_COMPACT_MS`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompactKnob {
+    Claude,
+    Codex,
+}
+
+fn compact_knob() -> Option<CompactKnob> {
+    match std::env::var("ZERON_MOCK_COMPACT").ok().as_deref() {
+        Some("claude") => Some(CompactKnob::Claude),
+        Some("codex") => Some(CompactKnob::Codex),
+        _ => None,
+    }
+}
+
+fn knob_number(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+const KNOB_POST_TOKENS: u64 = 69_000;
+
+fn compacted_events(session_id: String) -> Vec<AgentEvent> {
+    vec![
+        AgentEvent::Compacted {
+            pre_tokens: Some(knob_number("ZERON_MOCK_CONTEXT", 212_000)),
+            post_tokens: Some(KNOB_POST_TOKENS),
+        },
+        AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: Some(String::new()),
+            error: None,
+            session_id: Some(session_id),
+        },
+    ]
+}
+
+fn compact_knob_run(
+    knob: CompactKnob,
+    request: RunRequest,
+) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
+    static TURNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let session_id = request
+        .resume
+        .clone()
+        .unwrap_or_else(|| format!("mock-{}", uuid_like()));
+    let compacting = request.prompt.starts_with("/compact");
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    tokio::spawn(async move {
+        let _ = tx.send(AgentEvent::SessionStarted {
+            harness: HarnessId::Mock,
+            model: "mock-1".into(),
+            tools: vec![],
+            cwd: request.cwd.clone(),
+            session_id: session_id.clone(),
+            assistant_message_id: uuid_like(),
+        });
+        if compacting {
+            let _ = tx.send(AgentEvent::Compacting { active: true });
+            tokio::time::sleep(std::time::Duration::from_millis(knob_number(
+                "ZERON_MOCK_COMPACT_MS",
+                30_000,
+            )))
+            .await;
+            for event in compacted_events(session_id) {
+                let _ = tx.send(event);
+            }
+            return;
+        }
+        let shells = std::env::var("ZERON_MOCK_SHELL").is_ok_and(|v| v == "1");
+        let _ = tx.send(AgentEvent::BackgroundTasks {
+            tasks: shells
+                .then(|| zeron_proto::BackgroundTask {
+                    id: "mock-shell".into(),
+                    kind: zeron_proto::BackgroundTaskKind::Shell,
+                    label: "npm run dev".into(),
+                    started_at: None,
+                    output_path: None,
+                })
+                .into_iter()
+                .collect(),
+        });
+        tokio::time::sleep(mock_delay()).await;
+        let _ = tx.send(AgentEvent::ContextUsage {
+            tokens: Some(knob_number("ZERON_MOCK_CONTEXT", 212_000)),
+            window: Some(1_000_000),
+        });
+        let _ = tx.send(AgentEvent::TextDelta {
+            text: format!(
+                "Done: {}",
+                request.prompt.lines().last().unwrap_or_default()
+            ),
+        });
+        if knob == CompactKnob::Codex {
+            let turn = TURNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let _ = tx.send(AgentEvent::Anchor {
+                role: zeron_proto::AnchorRole::Assistant,
+                id: format!("mock-turn-{turn}"),
+                entry_id: None,
+            });
+        }
+        let _ = tx.send(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: Some(session_id),
+        });
+    });
+    futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|event| (Ok(event), rx))
+    })
+    .boxed()
+}
+
+fn uuid_like() -> String {
+    format!(
+        "{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    )
 }
 
 fn mock_usage() -> bool {
@@ -97,6 +223,43 @@ impl Harness for MockHarness {
     fn supports_plan(&self) -> bool {
         true
     }
+    fn compaction(&self) -> Compaction {
+        match compact_knob() {
+            Some(CompactKnob::Claude) => Compaction::SlashText("/compact".into()),
+            Some(CompactKnob::Codex) => Compaction::Native,
+            None => Compaction::None,
+        }
+    }
+    fn compacts_in_place(&self) -> bool {
+        compact_knob() == Some(CompactKnob::Claude)
+    }
+    fn compacts_a_copy(&self) -> bool {
+        compact_knob() == Some(CompactKnob::Codex)
+    }
+    async fn compact(
+        &self,
+        request: RunRequest,
+        _controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        if compact_knob().is_none() {
+            return Err(HarnessError::Protocol(
+                "compaction is not supported by this harness".into(),
+            ));
+        }
+        let base = request.resume.clone().unwrap_or_default();
+        let session_id = if request.branch.is_some() {
+            format!("{base}-copy-{}", uuid_like())
+        } else {
+            base
+        };
+        let wait = std::time::Duration::from_millis(knob_number("ZERON_MOCK_COMPACT_MS", 30_000));
+        Ok(futures::stream::once(async move {
+            tokio::time::sleep(wait).await;
+            futures::stream::iter(compacted_events(session_id).into_iter().map(Ok))
+        })
+        .flatten()
+        .boxed())
+    }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![
             Model {
@@ -142,6 +305,9 @@ impl Harness for MockHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        if let Some(knob) = compact_knob() {
+            return Ok(compact_knob_run(knob, request));
+        }
         match std::env::var("ZERON_MOCK_SCRIPT") {
             Ok(path) if !path.is_empty() => Ok(script::run(&path, &request, controls)),
             _ => self.knob_run(request, controls).await,

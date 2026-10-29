@@ -176,6 +176,8 @@ pub enum DecidedBy {
     Streak,
     Ceiling,
     AgentNote,
+    TurnEnd,
+    BackgroundCopy,
     #[default]
     #[serde(other)]
     Stage1,
@@ -189,6 +191,8 @@ impl DecidedBy {
             Self::Streak => "Three same-task verdicts in a row",
             Self::Ceiling => "Context near the window, not asked",
             Self::AgentNote => "Agent note, compacted without asking",
+            Self::TurnEnd => "Past the check when the turn ended, not asked",
+            Self::BackgroundCopy => "A copy compacted in the background, not asked",
         }
     }
 
@@ -202,6 +206,8 @@ impl DecidedBy {
             Self::Streak => Some("after three same-task verdicts"),
             Self::Ceiling => Some("near the context window"),
             Self::AgentNote => Some("at the agent's request"),
+            Self::TurnEnd => Some("when the turn ended"),
+            Self::BackgroundCopy => Some("in the background"),
         }
     }
 }

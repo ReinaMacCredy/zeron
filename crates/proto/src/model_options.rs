@@ -46,6 +46,18 @@ pub fn chat_budget(config: &ChatConfig) -> Option<u64> {
     compact.or(window)
 }
 
+pub fn chat_compact_threshold(
+    config: Option<&ChatConfig>,
+    reported_window: Option<u64>,
+) -> Option<u64> {
+    match config {
+        Some(config) if config.harness == HarnessId::ClaudeCode => chat_budget(config)
+            .or(reported_window)
+            .map(|window| window.saturating_sub(AUTO_COMPACT_HEADROOM)),
+        _ => reported_window,
+    }
+}
+
 pub fn compact_applies(window_choice: &str) -> bool {
     context_window_tokens(window_choice).is_some_and(|tokens| tokens > 200_000)
 }
@@ -179,6 +191,43 @@ mod tests {
         assert_eq!(at("200k", "auto").as_deref(), Some("167K"));
         assert_eq!(at("200k", "800k").as_deref(), Some("167K"));
         assert_eq!(at("standard", "auto"), None);
+
+        let config = |harness: &str, picks: serde_json::Value| -> ChatConfig {
+            serde_json::from_value(serde_json::json!({
+                "harness": harness,
+                "model": null,
+                "reasoning": null,
+                "modelOptions": picks,
+                "sandbox": "workspace-write",
+            }))
+            .unwrap()
+        };
+        let claude_200k = config("claude-code", serde_json::json!({"contextWindow": "200k"}));
+        let claude_400k = config(
+            "claude-code",
+            serde_json::json!({"contextWindow": "1m", "autoCompact": "400k"}),
+        );
+        assert_eq!(
+            chat_compact_threshold(Some(&claude_200k), Some(1_000_000)),
+            compact_threshold("200k", "auto")
+        );
+        assert_eq!(
+            chat_compact_threshold(Some(&claude_400k), Some(1_000_000)),
+            compact_threshold("1m", "400k")
+        );
+        assert_eq!(
+            chat_compact_threshold(
+                Some(&config("claude-code", serde_json::json!({}))),
+                Some(200_000)
+            ),
+            Some(167_000),
+            "no picks: the reported window minus the CLI's headroom"
+        );
+        assert_eq!(
+            chat_compact_threshold(Some(&config("codex", serde_json::json!({}))), Some(272_000)),
+            Some(272_000)
+        );
+        assert_eq!(chat_compact_threshold(None, Some(272_000)), Some(272_000));
     }
 
     #[test]
