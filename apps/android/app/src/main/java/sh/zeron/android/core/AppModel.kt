@@ -196,6 +196,7 @@ class AppModel(private val app: Application) {
                     .putString("draft.model", value.model)
                     .putString("draft.effort", value.effort)
                     .putBoolean("draft.cloud", value.cloud)
+                    .putString("draft.config", value.configJson())
                     .apply()
             }
         }
@@ -207,7 +208,7 @@ class AppModel(private val app: Application) {
         model = settings.getString("draft.model", null),
         effort = settings.getString("draft.effort", null),
         cloud = settings.getBoolean("draft.cloud", false),
-    )
+    ).withConfigJson(settings.getString("draft.config", null))
 
     var launch = LaunchOptions()
         private set
@@ -679,7 +680,7 @@ class AppModel(private val app: Application) {
     suspend fun createCloudSession(draft: NewSessionDraft, text: String, attachments: List<uniffi.zeron_core.OutgoingAttachment>): String {
         val client = _client.value ?: throw uniffi.zeron_core.CoreException.Closed()
         val spaceId = draft.projectId ?: throw uniffi.zeron_core.CoreException.InvalidArgument("Choose a project")
-        val config = ChatConfig(draft.harness, draft.model, draft.effort, emptyMap(), SandboxLevel.WORKSPACE_WRITE)
+        val config = draft.config()
         // A retry after a failed first send reuses that chat (and machine), while nothing it was made with changed.
         val key = "$spaceId|${draft.branch.orEmpty()}|${draft.harness}|${draft.model.orEmpty()}"
         val chatId = unsentCloudChat?.takeIf { it.first == key && client.sessionRow(it.second) != null }?.second
@@ -694,14 +695,8 @@ class AppModel(private val app: Application) {
     /** Create the chat and send its first message. */
     fun createSession(draft: NewSessionDraft, text: String, attachments: List<uniffi.zeron_core.OutgoingAttachment> = emptyList()): String? {
         val client = _client.value ?: return null
-        val target = when {
-            draft.projectId != null -> SessionTarget.Project(draft.projectId)
-            draft.hostId != null -> SessionTarget.Projectless(draft.hostId)
-            else -> return null
-        }
-        val config = ChatConfig(draft.harness, draft.model, draft.effort, emptyMap(), SandboxLevel.WORKSPACE_WRITE)
         return try {
-            val chatId = client.createSession(NewSession(target, config, if (draft.worktree) null else draft.branch, null, null))
+            val chatId = client.createSession(newSession(draft) ?: return null)
             val handle = client.openSession(chatId)
             val project = _workspace.value?.projects?.firstOrNull { it.id == draft.projectId }
             val worktree = if (draft.worktree && project != null) WorktreeSpec(project.path, draft.branch ?: "HEAD", project.id) else null
@@ -713,6 +708,34 @@ class AppModel(private val app: Application) {
             Log.w("Zeron", "create session failed", e)
             null
         }
+    }
+
+    fun createForCard(draft: NewSessionDraft, text: String, skills: List<String>): String? {
+        val client = _client.value ?: return null
+        val chatId = try {
+            client.createSession(newSession(draft) ?: return null).also { client.openSession(it) }
+        } catch (e: Exception) {
+            Log.w("Zeron", "create chat failed", e)
+            return null
+        }
+        refreshWorkspace()
+        scope.launch {
+            try {
+                client.runClaudeCard(chatId, text, skills)?.model?.let { client.setSessionConfig(chatId, draft.config().copy(model = it)) }
+            } catch (e: Exception) {
+                Log.w("Zeron", "Claude Code card failed", e)
+            }
+        }
+        return chatId
+    }
+
+    private fun newSession(draft: NewSessionDraft): NewSession? {
+        val target = when {
+            draft.projectId != null -> SessionTarget.Project(draft.projectId)
+            draft.hostId != null -> SessionTarget.Projectless(draft.hostId)
+            else -> return null
+        }
+        return NewSession(target, draft.config(), if (draft.worktree) null else draft.branch, null, null)
     }
 }
 
@@ -755,4 +778,50 @@ data class NewSessionDraft(
     val worktree: Boolean = false,
     /** Run on its own Cloud machine (a project whose repository Cloud reaches). */
     val cloud: Boolean = false,
-)
+    val access: uniffi.zeron_core.AccessMode? = null,
+    val plan: Boolean = false,
+    val profileId: String? = null,
+    val instructions: String = "",
+    val disabledTools: List<String> = emptyList(),
+    val modelOptions: Map<String, String> = emptyMap(),
+) {
+    fun config() = ChatConfig(
+        harness, model, effort, modelOptions, SandboxLevel.WORKSPACE_WRITE,
+        profileId = profileId, access = access, instructions = instructions, disabledTools = disabledTools, plan = plan,
+    )
+
+    fun adopt(config: ChatConfig) = copy(
+        harness = config.harness,
+        model = config.model,
+        effort = config.reasoning,
+        modelOptions = config.modelOptions,
+        access = config.access,
+        plan = config.plan ?: plan,
+        profileId = config.profileId,
+        instructions = config.instructions,
+        disabledTools = config.disabledTools,
+    )
+
+    fun configJson(): String = org.json.JSONObject()
+        .put("access", access?.name)
+        .put("plan", plan)
+        .put("profileId", profileId)
+        .put("instructions", instructions)
+        .put("disabledTools", org.json.JSONArray(disabledTools))
+        .put("modelOptions", org.json.JSONObject(modelOptions))
+        .toString()
+
+    fun withConfigJson(json: String?): NewSessionDraft {
+        val o = json?.let { runCatching { org.json.JSONObject(it) }.getOrNull() } ?: return this
+        val tools = o.optJSONArray("disabledTools")
+        val options = o.optJSONObject("modelOptions")
+        return copy(
+            access = o.optString("access").let { name -> uniffi.zeron_core.AccessMode.entries.firstOrNull { it.name == name } },
+            plan = o.optBoolean("plan"),
+            profileId = if (o.isNull("profileId")) null else o.optString("profileId"),
+            instructions = o.optString("instructions"),
+            disabledTools = tools?.let { a -> List(a.length()) { a.getString(it) } }.orEmpty(),
+            modelOptions = options?.let { m -> m.keys().asSequence().associateWith { m.getString(it) } }.orEmpty(),
+        )
+    }
+}

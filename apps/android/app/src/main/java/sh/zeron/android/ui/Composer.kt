@@ -943,7 +943,7 @@ private fun SessionModelPicker(client: CoreClient, c: ComposerState, row: Sessio
         host = if (cloud) "Cloud" else c.host.name ?: "This computer",
         hostIcon = if (cloud) ZIcons.Cloud else ZIcons.Laptop,
         note = note,
-        header = if (switches.profiles.isEmpty()) null else ({ ProfilesRow(switches) }),
+        header = if (switches.profiles.isEmpty()) null else ({ ProfilesRow(switches.profiles, switches::applyProfile, switches::saveProfile, switches::detachProfile) }),
         onPick = pick@{ key, picked ->
             if (picked.id.startsWith(RETRY)) {
                 val inst = instances.firstOrNull { it.id == picked.id.removePrefix(RETRY) } ?: return@pick
@@ -972,33 +972,33 @@ private const val INSTANCE = "instance:"
 private const val RETRY = "retry:"
 
 @Composable
-private fun ProfilesRow(switches: ConfigSwitches) {
+fun ProfilesRow(profiles: List<ProfileRow>, onApply: suspend (String) -> Unit, onSave: suspend (String) -> Unit, onDetach: suspend () -> Unit) {
     val scope = rememberCoroutineScope()
     val labels = remember { profileMenuLabels() }
-    val none = switches.profiles.none { it.active }
+    val none = profiles.none { it.active }
     Column(Modifier.padding(start = 24.dp, end = 16.dp, top = 14.dp)) {
         Text(labels.title, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.size(6.dp))
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            switches.profiles.forEach { p ->
+            profiles.forEach { p ->
                 var menu by remember { mutableStateOf(false) }
                 val edited = p.active && p.drift != null
                 ContextChip(
                     if (edited) "${p.name} · ${labels.edited}" else p.name,
                     leading = { ZIcon(if (p.active) ZIcons.Check else R.drawable.zi_lucide_user_round, null, Modifier.size(16.dp)) },
-                    onClick = { if (edited) menu = true else if (!p.active) scope.launch { switches.applyProfile(p.id) } },
+                    onClick = { if (edited) menu = true else if (!p.active) scope.launch { onApply(p.id) } },
                     tint = if (p.active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                 ) {
                     GroupedActionMenu(menu, { menu = false }, listOf(listOfNotNull(
-                        MenuAction(labels.revert, R.drawable.zi_lucide_undo_2) { scope.launch { switches.applyProfile(p.id) } },
-                        if (p.savable) MenuAction(labels.save, R.drawable.zi_floppy_disk) { scope.launch { switches.saveProfile(p.id) } } else null,
+                        MenuAction(labels.revert, R.drawable.zi_lucide_undo_2) { scope.launch { onApply(p.id) } },
+                        if (p.savable) MenuAction(labels.save, R.drawable.zi_floppy_disk) { scope.launch { onSave(p.id) } } else null,
                     )), header = p.drift)
                 }
             }
             ContextChip(
                 labels.none,
                 leading = { ZIcon(if (none) ZIcons.Check else ZIcons.Close, null, Modifier.size(16.dp)) },
-                onClick = { if (!none) scope.launch { switches.detachProfile() } },
+                onClick = { if (!none) scope.launch { onDetach() } },
                 tint = if (none) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
