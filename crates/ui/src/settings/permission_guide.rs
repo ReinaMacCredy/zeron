@@ -269,13 +269,9 @@ pub fn choice_button(
 }
 
 pub fn section_label(theme: &Theme, title: &'static str) -> gpui::Div {
-    div()
-        .mt(px(24.0))
-        .px(px(8.0))
-        .py(px(4.0))
-        .text_size(crate::typography::ui_rems(13.0))
-        .text_color(theme.text_muted.opacity(0.58))
-        .child(SharedString::from(title))
+    widgets::section_title(theme, title)
+        .mt(px(32.0))
+        .mb(px(10.0))
 }
 
 /// Synara's `SettingsRow`: title (+ optional reset glyph) and description on

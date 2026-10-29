@@ -44,7 +44,7 @@ When the agent wrote a next-message note and **Compact new tasks** is **Classifi
 
 - With **Agent model**, the classifier reads the note against the recent conversation. It can carry the last turns over or decline. It never compacts to the summary alone. When it declines, the agent is told why and keeps working.
 - With Jev, or when no agent can run the check, the note is not sent anywhere: the chat compacts and carries the last two turns over.
-- When the context is at 85% of the window or more, the chat compacts and carries the last turns over without asking.
+- When the context is at 85% of the point where the agent's CLI compacts by itself (for Claude, the window minus 33K), the chat compacts and carries the last turns over without asking.
 
 Without a note, or in Reminder mode, the compaction runs as the agent asked.
 
@@ -70,6 +70,18 @@ The carried turns are your message and the agent's final reply for each of the l
 With **Agent model**, a **Same task** answer gets a second look that can only change it to **Carry over**. After three **Same task** answers in a row while the context keeps growing, the next check carries over without asking. If the classifier gives no answer, the chat is not compacted, and it tries again on a later message.
 
 For an agent that cannot compact, a **New task** or **Carry over** answer starts a fresh session instead. The earlier conversation goes along as text, the most recent 24,000 characters of it; tool results and file contents do not.
+
+## Compact ahead of time (Experimental)
+
+**Compact ahead of time** sits under **Compact new tasks** and is off by default. It moves the compaction off the moment you send: instead of checking your next message, Zeron compacts as soon as a turn ends past the trigger and nothing is queued. The trigger is **Check from**, or 85% of the point where the agent's own CLI would compact by itself, whichever comes first. For Claude that point is the window set in the model picker minus 33K, so a 200K chat triggers at about 142K and a 1M chat with a 400K window at the 150K check, long before 367K.
+
+How it compacts depends on the agent:
+
+- **Claude Code** compacts in place right after the reply, with the last two turns carried over word for word. No model is asked first. Background shells and subagents keep running. The card under the reply reads **Compacting · Carry over · 212K · 0:30, usually ~0:53**, then **Compacted**. A message you send meanwhile waits in the queue, marked **Sends after compaction · 0:23 left**, and goes out with the carried turns as soon as the compaction ends.
+- **Codex** forks the conversation at the last reply and compacts the copy on a second Codex process, while the chat itself keeps working. The session footer shows **Compacting a copy · 0:23**. When the copy is ready and the chat is idle, Zeron swaps it in: the next turn resumes from the compacted copy, and any turns that ran after the fork go along as text (their tool calls, output and thinking do not). The card reads **Compacted in the background · Swapped in · 212K → 69K · 1 turn as text**. While a turn runs the chip reads **Copy ready · swaps when the turn ends**; while background work runs, **Copy ready · waits for background work**, because the swap restarts Codex. If the chat compacts some other way first, or Codex compacts by itself mid-turn, the copy is thrown away. Codex cannot take a focus for its summary.
+- Other agents keep the behavior described above.
+
+A chat that could not compact at the turn end, because a message was already queued or the agent was busy, is still checked when you send, as described in **Compact new tasks**.
 
 ## Which messages are checked
 
@@ -114,6 +126,8 @@ Each classifier check shows as one card in the transcript that follows the compa
 2. **Compacting** with the answer, such as **Carry over** or **New task**, the context size and the time taken so far. The classifier's reason and a progress bar sit under it.
 3. **Compacted** with the context before and after, such as "120.0k → 40.2k". The card then slims to one line.
 
+With **Compact ahead of time** on, the same card follows a compaction at the end of a turn: **Compacting** with **Carry over** right under the reply, then **Compacted**. A Codex copy that was swapped in reads **Compacted in the background** with **Swapped in** and how many turns went along as text.
+
 When the classifier answers **Same task**, the card reads **Not compacted** and the context is kept; **No answer** reads **Not compacted** too. A compaction that runs without asking, such as after three **Same task** answers in a row or with the context near the window, says why in place of the reason.
 
 Click the card to open it. **What the agent kept** has the summary the agent wrote and what was carried over word for word. **Classifier** has the decision, the reason, the model and how long it took, the context size, and the tokens used. **What the classifier saw** shows exactly what was sent, and the reply.
@@ -139,6 +153,7 @@ In [Settings > General](zeron://settings/general):
 | **Idle threshold** (100K, 150K, 200K) | 100K |
 | **Let agents compact themselves** | On |
 | **Compact new tasks** (Reminder, Classifier) | Classifier |
+| **Compact ahead of time** (Experimental) | Off |
 | **In missions** | On |
 | **Check from** or **Remind at** (Off, 100K, 150K, 200K) | 150K |
 | **Classifier** (Agent model, Jev · TypeSafe, Jev · OpenRouter), Classifier mode only | Agent model |

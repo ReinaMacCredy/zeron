@@ -2,7 +2,7 @@ The composer is the message box at the bottom of every chat. You type your promp
 
 ## Sending
 
-Press Enter to send and Shift+Enter for a new line. To send with Cmd+Enter instead, change **Send messages with** in [Settings > General](zeron://settings/general).
+Press Enter to send and Shift+Enter for a new line. To send with Cmd+Enter instead, change **Send messages with** in [Settings > Chat](zeron://settings/chat).
 
 Press Up on the first line to bring back your earlier prompts in this chat, and Down to return to your draft.
 
@@ -32,7 +32,7 @@ Text you quote from the transcript or the terminal shows as a **1 selection** or
 
 ## When the agent is still working
 
-While a run is going, the send button's tooltip reads **Queue message**. What a follow-up does depends on **Follow-up behavior** in Settings > General:
+While a run is going, the send button's tooltip reads **Queue message**. What a follow-up does depends on **Follow-up behavior** in Settings > Chat:
 
 - **Queue** (the default) holds your message and sends it when the current turn ends.
 - **Steer** delivers it into the running turn right away. Some agents only take input between turns; with one of those, a caption under the composer says **This agent can't be steered mid-turn. Your message will be queued and sent when the current turn finishes.**
@@ -51,7 +51,7 @@ With an empty composer, Cmd+Enter does the same as clicking the newest row's but
 
 ## Stopping the agent
 
-With an empty composer during a run, the send button becomes **Stop**. You can also type `/stop`. To stop with Escape, turn on **Stop agent with Escape** in Settings > General; it is off by default. Enter never stops a run. Stop ends the agent's current turn only: subagents and background shells it started keep running and report back when they finish. Stop those from their pill above the composer (see [Delegation and subagents](zeron://docs/delegation)). On Pi, and when a stop does not take effect within 15 seconds, Stop ends the agent's process instead, and its subagents and background shells end with it. A task the agent delegated to another chat during the stopped turn keeps running either way, but it does not wake the agent when it finishes: its chip and the agents pill show the result.
+With an empty composer during a run, the send button becomes **Stop**. You can also type `/stop`. To stop with Escape, turn on **Stop active agent with Escape** in Settings > Chat; it is off by default. Enter never stops a run. Stop ends the agent's current turn only: subagents and background shells it started keep running and report back when they finish. Stop those from their pill above the composer (see [Delegation and subagents](zeron://docs/delegation)). On Pi, and when a stop does not take effect within 15 seconds, Stop ends the agent's process instead, and its subagents and background shells end with it. A task the agent delegated to another chat during the stopped turn keeps running either way, but it does not wake the agent when it finishes: its chip and the agents pill show the result.
 
 When a turn stopped short (you stopped it, or it ended with an error) and the composer is empty, the button becomes a play triangle (**Resume**). Click it to have the agent pick up where it left off.
 
@@ -79,7 +79,7 @@ In an open chat, a row under the composer carries, from left to right:
 - **Mission Control**, which turns your message into a mission (see above).
 - For a git project, where the chat works: **Local checkout** or **Worktree**, then the branch (**No ref** when it is not known).
 - For a git project, the session stats chip (see [Usage and cost](zeron://docs/usage)) and a pull request badge when the branch has one.
-- The permission chip, which sets how often the agent asks you. See [When an agent asks](zeron://docs/agent-questions).
+- The permission chip, when the chat is not at **Full access**, which sets how often the agent asks you. See [When an agent asks](zeron://docs/agent-questions).
 - The context ring, which shows how full the context window is. See [Compaction and context](zeron://docs/compaction).
 - The terminal button, which opens the terminal drawer. See [Terminal](zeron://docs/terminal).
 

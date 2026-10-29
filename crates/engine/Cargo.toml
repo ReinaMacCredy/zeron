@@ -61,6 +61,7 @@ dunce = "1"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [dev-dependencies]
+zeron-mcp.workspace = true
 dunce = "1"
 tracing-subscriber.workspace = true
 zeron-harness = { workspace = true, features = ["installer-fixture"] }

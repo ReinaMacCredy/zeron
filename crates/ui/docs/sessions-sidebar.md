@@ -18,7 +18,7 @@ An idle session shows how long ago it was active instead. While the agent runs b
 A card row carries more than the title:
 
 - Above the title, the location: the project, or the device for a chat without one (when **Show > Location** is on).
-- Below the title, the branch. A chat that another chat opened shows "↳" and the name of the chat that opened it instead (see [Agents and other threads](zeron://docs/threads)).
+- Below the title, the branch, after a worktree icon when the chat runs in a worktree, then the chat's changes such as **+7 −1** once Review has counted them. A chat that another chat opened shows "↳" and the name of the chat that opened it instead (see [Agents and other threads](zeron://docs/threads)).
 - On the right of that line: the pull request badge, a bot icon with the number of subagents, and a monitor icon when the chat runs on another device.
 - An amber pen and a faint amber wash mean the chat has unsent text in its composer.
 
@@ -49,7 +49,7 @@ Double-click a row, or choose **Rename**. Type the new title, then press Enter o
 
 ## Pinning
 
-Pinned sessions sit in a **Pinned** group at the top. Pin from the hover button or the right-click menu, or drag a row into the group. Drag pinned rows to reorder them, or drag one out to unpin it. You can pin up to 200 sessions. Click the **Pinned** header to collapse the group; it then shows the count.
+Pinned sessions sit in a **Pinned** group at the top. Pin from the hover button or the right-click menu, or drag a row into the group. Drag pinned rows to reorder them, or drag one out to unpin it. You can pin up to 200 sessions. The **Pinned** header shows the count; click it to collapse the group.
 
 ## Archiving
 
@@ -99,7 +99,7 @@ Sections and pins follow your account in a synced workspace, and stay on this de
 
 With **Organize** set to **Inbox**, the list splits into shelves: **Inbox** for open sessions, **Working** for running ones (when **Show > Working** is on), and **Settled** for sessions you are done with. Click a shelf's header to collapse it. A session with no activity for three days settles on its own; choose **Settle** from the hover button or right-click menu to do it now. Sessions that are working or waiting for you never settle. On a settled row, the hover button **Un-settle** takes the place of Archive and brings it back to **Inbox**.
 
-![Sidebar in Inbox mode with a custom section](sidebar-inbox-shelves.jpg)
+![Sidebar in Inbox mode with the Working and Settled shelves open](sidebar-inbox-shelves.jpg)
 
 **Settled** rows are slim one-liners: the shelf shows ten, then a "Show N more" row loads 25 at a time. The **Archived** group is hidden in this mode.
 

@@ -888,9 +888,8 @@ impl Render for DeviceHubPage {
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll.scroll)
                         .child(
-                            widgets::page_column()
-                                .child(widgets::page_header(&theme, "Device hub", None))
-                                .child(div().mt(px(24.0)).child(card))
+                            widgets::settings_page()
+                                .child(widgets::section(&theme, "Device hub", card).mt_0())
                                 .children(
                                     update_banner.map(|banner| div().mt(px(12.0)).child(banner)),
                                 ),

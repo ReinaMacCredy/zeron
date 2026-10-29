@@ -50,6 +50,11 @@ struct TestHarness {
     background: Mutex<Vec<zeron_proto::BackgroundTask>>,
     /// Background work counted on the runtime only, the way Codex counts its open commands.
     shells: std::sync::atomic::AtomicUsize,
+    copies: AtomicBool,
+    copy_requests: Mutex<Vec<RunRequest>>,
+    copy_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    compact_gate: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
+    turn: Mutex<Option<zeron_harness::TurnControl>>,
 }
 
 impl TestHarness {
@@ -69,6 +74,11 @@ impl TestHarness {
             tokens: AtomicU64::new(22_762),
             background: Mutex::new(Vec::new()),
             shells: std::sync::atomic::AtomicUsize::new(0),
+            copies: AtomicBool::new(false),
+            copy_requests: Mutex::new(Vec::new()),
+            copy_gate: Mutex::new(None),
+            compact_gate: Arc::new(Mutex::new(None)),
+            turn: Mutex::new(None),
         }
     }
 }
@@ -99,6 +109,36 @@ impl Harness for TestHarness {
     }
     fn compacts_in_place(&self) -> bool {
         self.in_place.load(Ordering::SeqCst)
+    }
+    fn compacts_a_copy(&self) -> bool {
+        self.copies.load(Ordering::SeqCst)
+    }
+    async fn compact(
+        &self,
+        request: RunRequest,
+        _controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.copy_requests.lock().unwrap().push(request);
+        let gate = self.copy_gate.lock().unwrap().take();
+        Ok(futures::stream::once(async move {
+            if let Some(gate) = gate {
+                let _ = gate.await;
+            }
+            futures::stream::iter([
+                Ok(AgentEvent::Compacted {
+                    pre_tokens: Some(22_762),
+                    post_tokens: Some(3_000),
+                }),
+                Ok(AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: Some("sess-copy".into()),
+                }),
+            ])
+        })
+        .flatten()
+        .boxed())
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![])
@@ -168,6 +208,7 @@ impl Harness for TestHarness {
             controls
                 .turn
                 .set_background(self.shells.load(Ordering::SeqCst));
+            *self.turn.lock().unwrap() = Some(controls.turn.clone());
             let tasks = self.background.lock().unwrap().clone();
             if !tasks.is_empty() {
                 events.push(Ok(AgentEvent::BackgroundTasks { tasks }));
@@ -181,6 +222,13 @@ impl Harness for TestHarness {
             events.push(Ok(AgentEvent::TextDelta {
                 text: format!("ack: {}", request.prompt),
             }));
+            if self.copies.load(Ordering::SeqCst) {
+                events.push(Ok(AgentEvent::Anchor {
+                    role: zeron_proto::AnchorRole::Assistant,
+                    id: format!("turn-{}", self.requests.lock().unwrap().len()),
+                    entry_id: None,
+                }));
+            }
             events.push(Ok(AgentEvent::Done {
                 status: DoneStatus::Completed,
                 result: None,
@@ -189,7 +237,12 @@ impl Harness for TestHarness {
             }));
         }
         if self.in_place.load(Ordering::SeqCst) && !compacting {
-            return Ok(live_run(events, controls, self.mailbox.clone()));
+            return Ok(live_run(
+                events,
+                controls,
+                self.mailbox.clone(),
+                self.compact_gate.clone(),
+            ));
         }
         // The child stays warm after `Done` and ends only on its interrupt
         // token — the persistent-session shape a parked run depends on.
@@ -217,6 +270,7 @@ fn live_run(
     events: Vec<Result<AgentEvent, HarnessError>>,
     controls: RunControls,
     mailbox: Arc<Mutex<Vec<String>>>,
+    compact_gate: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
 ) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
     let (tx, rx) = futures::channel::mpsc::unbounded();
     let RunControls {
@@ -257,9 +311,12 @@ fn live_run(
                 }
                 command = turn.compact_requested() => {
                     mailbox.lock().unwrap().push(command);
+                    send(vec![steered(), AgentEvent::Compacting { active: true }]);
+                    let gate = compact_gate.lock().unwrap().take();
+                    if let Some(gate) = gate {
+                        let _ = gate.await;
+                    }
                     send(vec![
-                        steered(),
-                        AgentEvent::Compacting { active: true },
                         AgentEvent::Compacted {
                             pre_tokens: Some(22_762),
                             post_tokens: Some(2_326),
@@ -358,10 +415,21 @@ async fn engine_with_one_turn_on(
 }
 
 async fn engine_with_one_turn_by(dir: &std::path::Path, harness: Arc<TestHarness>) -> EngineCore {
+    engine_with_one_turn_under(dir, harness, None).await
+}
+
+async fn engine_with_one_turn_under(
+    dir: &std::path::Path,
+    harness: Arc<TestHarness>,
+    settings: Option<CompactionSettings>,
+) -> EngineCore {
     let registry = HarnessRegistry::new();
     registry.register(harness.clone());
     let core = EngineCore::assemble(&dir.join("data"), Arc::new(registry), HarnessId::Mock, None)
         .expect("engine core assembles");
+    if let Some(settings) = settings {
+        core.registry.set_compaction_settings(settings).unwrap();
+    }
     let client = zeron_rpc::memory_client(core.rpc_service());
     client
         .call(
@@ -381,8 +449,18 @@ async fn engine_with_one_turn_by(dir: &std::path::Path, harness: Arc<TestHarness
     core.doc_host
         .queue_command(CHAT, run_payload("msg-1", &dir.to_string_lossy()))
         .expect("queue run");
-    wait_for(|| entries(&core).len() == 2, "first turn").await;
-    wait_for(|| !core.sessions.turn_in_flight(CHAT), "first turn settles").await;
+    wait_for(|| entries(&core).len() >= 2, "first turn").await;
+    wait_for(
+        || {
+            !core.sessions.turn_in_flight(CHAT)
+                || core
+                    .sessions
+                    .session_status(CHAT)
+                    .is_some_and(|s| s.compacting)
+        },
+        "first turn settles",
+    )
+    .await;
     core
 }
 
@@ -1777,4 +1855,258 @@ async fn cancelling_compaction_releases_its_run_slot() {
     assert!(compact.await.unwrap_err().is_cancelled());
     assert!(!core.sessions.turn_in_flight(CHAT));
     assert!(core.sessions.compact(CHAT, None).await.unwrap().compacted);
+}
+
+fn ahead() -> CompactionSettings {
+    CompactionSettings {
+        nudge_tokens: 20_000,
+        compact_ahead: true,
+        ..Default::default()
+    }
+}
+
+fn copy_entries(core: &EngineCore) -> Vec<SessionMessageEntry> {
+    system_entries(core)
+        .into_iter()
+        .filter(|e| entry_text(e).starts_with("Compacted in the background"))
+        .collect()
+}
+
+fn plan(core: &EngineCore) -> Option<zeron_proto::CompactPlan> {
+    core.sessions
+        .session_status(CHAT)
+        .and_then(|s| s.compact_plan)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_past_the_check_compacts_in_place_once_and_a_send_waits_for_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let requests: Arc<Mutex<Vec<RunRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let harness = Arc::new(TestHarness::new(requests.clone(), true));
+    harness.in_place.store(true, Ordering::SeqCst);
+    *harness.background.lock().unwrap() = sleeping_shell();
+    let (release, gate) = tokio::sync::oneshot::channel();
+    *harness.compact_gate.lock().unwrap() = Some(gate);
+    let core = engine_with_one_turn_under(tmp.path(), harness.clone(), Some(ahead())).await;
+    let mailbox = || harness.mailbox.lock().unwrap().clone();
+
+    wait_for(|| !mailbox().is_empty(), "the turn-end compaction").await;
+    assert!(
+        mailbox()[0].starts_with("/compact The last two turns go along verbatim")
+            && !mailbox()[0].contains("The message:"),
+        "{:?}",
+        mailbox()
+    );
+    let record = system_entries(&core)
+        .iter()
+        .find_map(|e| record_of(e).cloned())
+        .expect("the turn-end decision");
+    assert_eq!(
+        (record.verdict, record.decided_by, record.context_tokens),
+        (ClassifierVerdict::Carry, DecidedBy::TurnEnd, 22_762)
+    );
+    assert!(harness.one_shots.lock().unwrap().is_empty(), "nobody asked");
+
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-2", &tmp.path().to_string_lossy()))
+        .expect("queue run");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(mailbox().len(), 1, "the send waits for the compaction");
+    release.send(()).unwrap();
+
+    wait_for(|| mailbox().len() == 2, "the send after the compaction").await;
+    assert_eq!(
+        mailbox()[1],
+        format!(
+            "{CARRY_HEAD}person: hello\nagent: ack: hello\n\nStill running when the chat compacted:\n- background shell b7wb5vp5o: sleep 300 && echo done\n</carried_over>\n\nhello"
+        )
+    );
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "compacted in place, no restart"
+    );
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let compactions = mailbox()
+        .iter()
+        .filter(|m| m.starts_with("/compact"))
+        .count();
+    assert_eq!(compactions, 1, "fires once per turn end: {:?}", mailbox());
+    let boundaries: Vec<String> = system_entries(&core)
+        .iter()
+        .filter(|e| record_of(e).is_none())
+        .map(entry_text)
+        .collect();
+    assert_eq!(
+        boundaries,
+        ["Compacted, last turns carried over · 22.8k → 2.3k tokens"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_switch_off_leaves_a_turn_end_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let requests: Arc<Mutex<Vec<RunRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let harness = Arc::new(TestHarness::new(requests.clone(), true));
+    harness.in_place.store(true, Ordering::SeqCst);
+    harness.copies.store(true, Ordering::SeqCst);
+    let off = CompactionSettings {
+        compact_ahead: false,
+        ..ahead()
+    };
+    let core = engine_with_one_turn_under(tmp.path(), harness.clone(), Some(off)).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(harness.mailbox.lock().unwrap().is_empty());
+    assert!(harness.copy_requests.lock().unwrap().is_empty());
+    assert!(system_entries(&core).is_empty());
+    assert_eq!(plan(&core), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_compacts_beside_the_live_thread_and_swaps_in_at_idle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let requests: Arc<Mutex<Vec<RunRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let harness = Arc::new(TestHarness::new(requests.clone(), true));
+    harness.copies.store(true, Ordering::SeqCst);
+    let (release, gate) = tokio::sync::oneshot::channel();
+    *harness.copy_gate.lock().unwrap() = Some(gate);
+    let core = engine_with_one_turn_under(tmp.path(), harness.clone(), Some(ahead())).await;
+
+    wait_for(
+        || harness.copy_requests.lock().unwrap().len() == 1,
+        "the copy starts",
+    )
+    .await;
+    let copy = harness.copy_requests.lock().unwrap()[0].clone();
+    assert_eq!(copy.resume.as_deref(), Some("sess-compact"));
+    assert_eq!(
+        copy.branch.and_then(|branch| branch.keep).as_deref(),
+        Some("turn-1")
+    );
+    assert!(matches!(
+        plan(&core),
+        Some(zeron_proto::CompactPlan::Copy { ready: false, .. })
+    ));
+
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-2", &tmp.path().to_string_lossy()))
+        .expect("queue run");
+    wait_for(
+        || requests.lock().unwrap().len() == 2,
+        "the live thread keeps working",
+    )
+    .await;
+    assert_eq!(
+        requests.lock().unwrap()[1].resume.as_deref(),
+        Some("sess-compact")
+    );
+    wait_for(|| entries(&core).len() == 4, "its reply").await;
+    wait_for(|| !core.sessions.turn_in_flight(CHAT), "it settles").await;
+    release.send(()).unwrap();
+
+    wait_for(|| !copy_entries(&core).is_empty(), "the swap").await;
+    assert_eq!(harness.copy_requests.lock().unwrap().len(), 1, "one copy");
+    let record = system_entries(&core)
+        .iter()
+        .rev()
+        .find_map(|e| record_of(e).cloned())
+        .expect("the swap's decision");
+    assert_eq!(record.decided_by, DecidedBy::BackgroundCopy);
+    let swapped = &copy_entries(&core)[0];
+    assert_eq!(
+        entry_text(swapped),
+        "Compacted in the background, later turns carried over · 22.8k → 3.0k tokens"
+    );
+    assert_eq!(plan(&core), None);
+
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-3", &tmp.path().to_string_lossy()))
+        .expect("queue run");
+    wait_for(|| requests.lock().unwrap().len() == 3, "the next message").await;
+    let next = requests.lock().unwrap()[2].clone();
+    assert_eq!(
+        next.resume.as_deref(),
+        Some("sess-copy"),
+        "the copy is the chat's session now"
+    );
+    assert_eq!(
+        next.prompt,
+        format!("{CARRY_HEAD}person: hello\nagent: ack: hello\n</carried_over>\n\nhello"),
+        "only the turn after the fork rides as text"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ready_copy_waits_while_background_work_runs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let requests: Arc<Mutex<Vec<RunRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let harness = Arc::new(TestHarness::new(requests.clone(), true));
+    harness.copies.store(true, Ordering::SeqCst);
+    harness.shells.store(1, Ordering::SeqCst);
+    let core = engine_with_one_turn_under(tmp.path(), harness.clone(), Some(ahead())).await;
+
+    wait_for(
+        || {
+            matches!(
+                plan(&core),
+                Some(zeron_proto::CompactPlan::Copy { ready: true, .. })
+            )
+        },
+        "the copy is ready",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(copy_entries(&core).is_empty(), "a swap would end the shell");
+    assert!(core.sessions.copy_ready(CHAT));
+
+    harness
+        .turn
+        .lock()
+        .unwrap()
+        .as_ref()
+        .expect("the live run")
+        .set_background(0);
+    wait_for(
+        || !copy_entries(&core).is_empty(),
+        "the swap once the shell ends",
+    )
+    .await;
+    let swapped = &copy_entries(&core)[0];
+    let carried = swapped.parts.iter().find_map(|part| match part {
+        MessagePart::Compaction { record, .. } => Some(record.carried.clone()),
+        _ => None,
+    });
+    assert_eq!(carried, Some(None), "nothing ran after the fork");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_overtaken_by_a_compaction_is_discarded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let requests: Arc<Mutex<Vec<RunRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let harness = Arc::new(TestHarness::new(requests.clone(), true));
+    harness.copies.store(true, Ordering::SeqCst);
+    let (release, gate) = tokio::sync::oneshot::channel();
+    *harness.copy_gate.lock().unwrap() = Some(gate);
+    let core = engine_with_one_turn_under(tmp.path(), harness.clone(), Some(ahead())).await;
+    wait_for(
+        || harness.copy_requests.lock().unwrap().len() == 1,
+        "the copy starts",
+    )
+    .await;
+
+    let outcome = core.sessions.compact(CHAT, None).await.expect("compacts");
+    assert!(outcome.compacted);
+    release.send(()).unwrap();
+
+    wait_for(|| !core.sessions.copy_pending(CHAT), "the copy is dropped").await;
+    assert!(copy_entries(&core).is_empty());
+    assert_eq!(plan(&core), None);
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-2", &tmp.path().to_string_lossy()))
+        .expect("queue run");
+    wait_for(|| requests.lock().unwrap().len() == 3, "the next message").await;
+    assert_eq!(
+        requests.lock().unwrap()[2].resume.as_deref(),
+        Some("sess-compact")
+    );
 }

@@ -763,6 +763,7 @@ pub struct AgentRunRow {
     pub can_stop: bool,
     pub delegated: bool,
     pub review: Option<String>,
+    pub depth: u32,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -789,8 +790,8 @@ pub struct BackgroundRosterView {
 impl SessionHandle {
     pub fn background_roster(&self, now_ms: i64) -> BackgroundRosterView {
         use zeron_proto::background::{
-            RunState, aggregate, roster_heading, roster_summary, shell_line, shells_section,
-            stoppable, subagents_section,
+            RunState, aggregate, roster_heading, roster_summary, run_depths, shell_line,
+            shells_section, stoppable, subagents_section,
         };
         let roster = self.inner.background_roster();
         let stoppable = stoppable(roster.harness);
@@ -824,7 +825,8 @@ impl SessionHandle {
             agents: roster
                 .agents
                 .iter()
-                .map(|run| AgentRunRow {
+                .zip(run_depths(&roster.agents))
+                .map(|(run, depth)| AgentRunRow {
                     task_id: run.part_id.clone(),
                     title: run.title.clone(),
                     line: run.line(roster.harness, now_ms),
@@ -832,6 +834,7 @@ impl SessionHandle {
                     can_stop: run.can_stop(stoppable),
                     delegated: run.delegated,
                     review: review_of(&run.part_id),
+                    depth,
                 })
                 .collect(),
             shells_section: shells_section(roster.shells.len()),

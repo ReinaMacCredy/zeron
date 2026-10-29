@@ -54,10 +54,11 @@ use crate::settings::computer::ComputerPage;
 use crate::settings::device_hub::DeviceHubPage;
 use crate::settings::devices::DevicesPage;
 use crate::settings::files::{FilesSettingsEvent, FilesSettingsPage};
-use crate::settings::harnesses::HarnessesPage;
+use crate::settings::harnesses::{HarnessesEvent, HarnessesPage};
 use crate::settings::home::HomeSettingsPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
-use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
+use crate::settings::search::{SettingId, Target};
+use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage, Shown as ShortcutsShown};
 use crate::settings::source_control::SourceControlPage;
 use crate::settings::tools::{ToolsPage, ToolsPageEvent};
 use crate::settings::{
@@ -107,7 +108,6 @@ mod pr_chat;
 mod quick_capture;
 pub(crate) mod project_icon;
 mod sidebar_peek;
-mod settings_search;
 mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
@@ -122,6 +122,7 @@ mod whats_new;
 mod task_actions;
 mod thread_search;
 use side_chats::SideChatTab;
+mod settings_updates;
 mod tabs;
 mod terminal_tabs;
 mod update_glyph;
@@ -765,12 +766,15 @@ pub enum SettingsSection {
     SourceControl,
     Home,
     Archived,
+    Chat,
+    Updates,
 }
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 20] = [
+    pub const ALL: [SettingsSection; 22] = [
         SettingsSection::General,
+        SettingsSection::Chat,
         SettingsSection::Home,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
@@ -781,14 +785,15 @@ impl SettingsSection {
         SettingsSection::AgentProfiles,
         SettingsSection::Routing,
         SettingsSection::CodeReview,
+        SettingsSection::Computer,
+        SettingsSection::SourceControl,
+        SettingsSection::Files,
         SettingsSection::Devices,
+        SettingsSection::DeviceHub,
         SettingsSection::Cloud,
         SettingsSection::Billing,
-        SettingsSection::Files,
+        SettingsSection::Updates,
         SettingsSection::Appshots,
-        SettingsSection::Computer,
-        SettingsSection::DeviceHub,
-        SettingsSection::SourceControl,
         SettingsSection::Archived,
     ];
 
@@ -853,6 +858,8 @@ impl SettingsSection {
             SettingsSection::SourceControl => "source-control",
             SettingsSection::Home => "home",
             SettingsSection::Archived => "archived",
+            SettingsSection::Chat => "chat",
+            SettingsSection::Updates => "updates",
         }
     }
 
@@ -880,14 +887,26 @@ impl SettingsSection {
             "source-control" => SettingsSection::SourceControl,
             "home" => SettingsSection::Home,
             "archived" => SettingsSection::Archived,
+            "chat" => SettingsSection::Chat,
+            "updates" => SettingsSection::Updates,
             _ => return None,
         })
     }
 
-    /// Nav groups are separated by spacing alone: preferences, providers and
-    /// devices, then workspace data.
     fn starts_nav_group(self) -> bool {
-        matches!(self, Self::Harnesses | Self::Files)
+        matches!(
+            self,
+            Self::Harnesses | Self::SourceControl | Self::Devices | Self::Updates
+        )
+    }
+
+    fn nav_heading(self) -> Option<&'static str> {
+        match self {
+            Self::Harnesses => Some("Agents"),
+            Self::SourceControl => Some("Code"),
+            Self::Devices => Some("Connections"),
+            _ => None,
+        }
     }
 
     /// Sidebar + header label (zeron settings-sidebar.tsx SECTIONS / __root.tsx
@@ -915,6 +934,8 @@ impl SettingsSection {
             SettingsSection::SourceControl => "Source Control",
             SettingsSection::Home => "Home",
             SettingsSection::Archived => "Archived sessions",
+            SettingsSection::Chat => "Chat",
+            SettingsSection::Updates => "Updates",
         }
     }
 
@@ -942,8 +963,537 @@ impl SettingsSection {
             SettingsSection::SourceControl => icons::GIT_BRANCH,
             SettingsSection::Home => icons::HOME,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
+            SettingsSection::Chat => icons::CHAT_ROUND_LINE,
+            SettingsSection::Updates => icons::REFRESH,
         }
     }
+
+    /// Words the settings search matches on the section itself, for pages
+    /// whose content is a list rather than titled rows.
+    fn keywords(self) -> &'static [&'static str] {
+        match self {
+            SettingsSection::Devices => &["device", "remote"],
+            SettingsSection::Harnesses => &[
+                "agent", "harness", "account", "usage", "claude", "codex", "cursor", "opencode",
+            ],
+            SettingsSection::Agents => &["account", "login", "usage", "provider"],
+            SettingsSection::Tools => &["mcp", "zeron tools", "delegate", "thread tools"],
+            SettingsSection::AgentProfiles => &["profile", "preset", "delegate", "model"],
+            SettingsSection::Routing => &[
+                "model",
+                "route",
+                "quota",
+                "sub-agent",
+                "delegate",
+                "delegation",
+            ],
+            SettingsSection::CodeReview => &["review", "reviewer", "findings", "model"],
+            SettingsSection::Shortcuts => &["keyboard", "keybinding"],
+            SettingsSection::Appshots => &["screenshot", "capture"],
+            SettingsSection::Computer => &["computer use", "desktop", "cursor", "permission"],
+            SettingsSection::DeviceHub => &["simulator", "emulator", "ios", "android"],
+            SettingsSection::SourceControl => &["git", "commit", "pull request"],
+            SettingsSection::Home => &["widget", "dashboard", "new thread", "customize"],
+            SettingsSection::Archived => &["archive", "old sessions"],
+            SettingsSection::Updates => &["update", "version", "upgrade"],
+            _ => &[],
+        }
+    }
+
+    /// The page's titled rows: the title is what a search result shows
+    /// under the section, the keywords are what else finds it.
+    fn rows(self) -> &'static [SettingsSearchRow] {
+        match self {
+            SettingsSection::General => &[
+                (
+                    "Session switcher shows",
+                    &["switcher", "recency"],
+                    Some(Target::Setting(SettingId::SessionSwitcher)),
+                ),
+                (
+                    "Session switcher shows at most",
+                    &["switcher"],
+                    Some(Target::Setting(SettingId::SessionSwitcherLimit)),
+                ),
+                (
+                    "Ctrl+Tab cycles tabs",
+                    &["switcher", "tabs", "keyboard"],
+                    Some(Target::Setting(SettingId::CtrlTabCyclesTabs)),
+                ),
+                (
+                    "Thinking level shortcut",
+                    &["reasoning", "effort", "modifier"],
+                    Some(Target::Setting(SettingId::ThinkingLevelShortcut)),
+                ),
+                (
+                    "Compact model picker",
+                    &["effort", "reasoning", "model list"],
+                    Some(Target::Setting(SettingId::CompactModelPicker)),
+                ),
+                (
+                    "Effort slider",
+                    &["reasoning", "compact style"],
+                    Some(Target::Setting(SettingId::EffortSlider)),
+                ),
+                (
+                    "Open pull requests in",
+                    &["pr", "pull request", "browser", "github"],
+                    Some(Target::Setting(SettingId::PullRequestDestination)),
+                ),
+                (
+                    "Show predictions",
+                    &["next message", "autocomplete", "suggestions"],
+                    Some(Target::Setting(SettingId::ShowPredictions)),
+                ),
+                (
+                    "Custom worktree location",
+                    &["folder", "directory", "checkout", "branches"],
+                    Some(Target::Setting(SettingId::WorktreeLocation)),
+                ),
+                (
+                    "Credit Zeron in commits",
+                    &["co-author", "coauthor", "attribution", "commit message"],
+                    Some(Target::Setting(SettingId::CommitCredit)),
+                ),
+            ],
+            SettingsSection::Chat => &[
+                (
+                    "Send messages with",
+                    &["enter", "submit"],
+                    Some(Target::Setting(SettingId::SendMessagesWith)),
+                ),
+                (
+                    "Follow-up behavior",
+                    &["queue", "steer", "interrupt"],
+                    Some(Target::Setting(SettingId::FollowUpBehavior)),
+                ),
+                (
+                    "Stop active agent with Escape",
+                    &["escape", "cancel"],
+                    Some(Target::Setting(SettingId::EscapeStopsAgent)),
+                ),
+                (
+                    "Compact mode",
+                    &["transcript"],
+                    Some(Target::Setting(SettingId::CompactMode)),
+                ),
+                (
+                    "Thread naming",
+                    &["title", "automatic"],
+                    Some(Target::Setting(SettingId::ThreadNaming)),
+                ),
+            ],
+            SettingsSection::Routing => &[
+                (
+                    zeron_proto::mission::CHAT_MISSION_TITLE,
+                    &["mission", "lead"],
+                    Some(Target::Setting(SettingId::ChatMission)),
+                ),
+                ("Delegation depth", &["delegate", "subagent", "nest"], None),
+                (
+                    "Delegated tasks per chat",
+                    &["delegate", "subagent", "limit"],
+                    None,
+                ),
+            ],
+            SettingsSection::Updates => &[
+                ("Version", &["check for updates", "restart"], None),
+                ("Automatic updates", &["auto", "install on quit"], None),
+                (
+                    "Agent CLIs",
+                    &["claude", "codex", "policy", "update all"],
+                    None,
+                ),
+                ("Devices", &["device", "remote"], None),
+            ],
+            SettingsSection::Harnesses => &[
+                ("Add account", &["sign in", "api key", "login"], None),
+                (
+                    "Use $ for skills",
+                    &["dollar", "skill picker", "autocomplete"],
+                    Some(Target::Setting(SettingId::SkillDollar)),
+                ),
+                (
+                    "Separate / commands",
+                    &["slash menu", "skills", "autocomplete"],
+                    Some(Target::Setting(SettingId::SkillSlash)),
+                ),
+            ],
+            SettingsSection::Appearance => &[
+                (
+                    "Color scheme",
+                    &["system", "light", "dark mode"],
+                    Some(Target::Setting(SettingId::ColorScheme)),
+                ),
+                (
+                    "Light theme",
+                    &["theme"],
+                    Some(Target::Setting(SettingId::LightTheme)),
+                ),
+                (
+                    "Dark theme",
+                    &["theme"],
+                    Some(Target::Setting(SettingId::DarkTheme)),
+                ),
+                (
+                    "Theme library",
+                    &["theme", "import", "custom"],
+                    Some(Target::Setting(SettingId::ThemeLibrary)),
+                ),
+                (
+                    "Interface font",
+                    &["font size"],
+                    Some(Target::Setting(SettingId::InterfaceFont)),
+                ),
+                (
+                    "Terminal font",
+                    &["font size"],
+                    Some(Target::Setting(SettingId::TerminalFont)),
+                ),
+                (
+                    "Code font",
+                    &["font size"],
+                    Some(Target::Setting(SettingId::CodeFont)),
+                ),
+                (
+                    "Conversation width",
+                    &["transcript", "column", "maximum"],
+                    Some(Target::Setting(SettingId::ConversationWidth)),
+                ),
+                (
+                    "Render math",
+                    &["latex", "formulas", "equations"],
+                    Some(Target::Setting(SettingId::RenderMath)),
+                ),
+                (
+                    "Math font",
+                    &["latex", "font"],
+                    Some(Target::Setting(SettingId::MathFont)),
+                ),
+                (
+                    "Math size",
+                    &["latex", "scale"],
+                    Some(Target::Setting(SettingId::MathSize)),
+                ),
+                (
+                    "Accent color",
+                    &["color"],
+                    Some(Target::Setting(SettingId::AccentColor)),
+                ),
+                (
+                    "Match wallpaper colors",
+                    &["tint", "accent", "desktop"],
+                    Some(Target::Setting(SettingId::WallpaperColors)),
+                ),
+                (
+                    "Glass",
+                    &["blur", "opacity", "scrim", "frosted"],
+                    Some(Target::Setting(SettingId::Glass)),
+                ),
+                (
+                    "Inset card",
+                    &["rounded", "sidebar", "window background"],
+                    Some(Target::Setting(SettingId::InsetCard)),
+                ),
+                (
+                    "Reveal sidebar on hover",
+                    &["collapsed sidebar", "left edge", "peek"],
+                    Some(Target::Setting(SettingId::SidebarHoverReveal)),
+                ),
+                (
+                    "New thread composer background",
+                    &["image"],
+                    Some(Target::Setting(SettingId::NewThreadBackground)),
+                ),
+                (
+                    "Wallpaper folder",
+                    &["random", "shuffle", "images"],
+                    Some(Target::Setting(SettingId::WallpaperFolder)),
+                ),
+                ("Chat background", &["image", "placement"], None),
+                (
+                    "Background effect",
+                    &["dither", "ascii", "halftone", "scanlines"],
+                    Some(Target::Setting(SettingId::BackgroundEffect)),
+                ),
+                (
+                    "Reduce motion",
+                    &["animations", "accessibility"],
+                    Some(Target::Setting(SettingId::ReduceMotion)),
+                ),
+                (
+                    "Pause animations in background",
+                    &["unfocused", "inactive window", "battery"],
+                    Some(Target::Setting(SettingId::PauseAnimations)),
+                ),
+                (
+                    "Smooth scrolling",
+                    &["mouse wheel", "glide", "ease"],
+                    Some(Target::Setting(SettingId::SmoothScrolling)),
+                ),
+            ],
+            SettingsSection::Files => &[
+                (
+                    "Autosave",
+                    &["save"],
+                    Some(Target::Setting(SettingId::Autosave)),
+                ),
+                (
+                    "Autosave delay",
+                    &["save"],
+                    Some(Target::Setting(SettingId::AutosaveDelay)),
+                ),
+                (
+                    "Word wrap",
+                    &["editor"],
+                    Some(Target::Setting(SettingId::WordWrap)),
+                ),
+                (
+                    "Show all files",
+                    &["hidden", "ignored"],
+                    Some(Target::Setting(SettingId::ShowAllFiles)),
+                ),
+            ],
+            SettingsSection::Notifications => &[
+                (
+                    "Session sounds",
+                    &["sound", "chime"],
+                    Some(Target::Setting(SettingId::SessionSounds)),
+                ),
+                (
+                    "Task completed",
+                    &["sound", "done"],
+                    Some(Target::Setting(SettingId::TaskCompletedSound)),
+                ),
+                (
+                    "Input required",
+                    &["sound", "question"],
+                    Some(Target::Setting(SettingId::InputRequiredSound)),
+                ),
+                (
+                    "Errors and disconnections",
+                    &["sound"],
+                    Some(Target::Setting(SettingId::ErrorSound)),
+                ),
+                (
+                    "Desktop notifications",
+                    &["banner"],
+                    Some(Target::Setting(SettingId::DesktopNotifications)),
+                ),
+                (
+                    "Agent updates",
+                    &["cli", "banner", "new version"],
+                    Some(Target::Setting(SettingId::AgentUpdates)),
+                ),
+                (
+                    "Only when in the background",
+                    &["focus"],
+                    Some(Target::Setting(SettingId::BackgroundOnly)),
+                ),
+            ],
+            SettingsSection::Voice => &[
+                (
+                    "Codex voice device",
+                    &["remote", "host", "machine"],
+                    Some(Target::Setting(SettingId::CodexVoiceDevice)),
+                ),
+                (
+                    "Codex voice style",
+                    &["speech", "tone"],
+                    Some(Target::Setting(SettingId::CodexVoiceStyle)),
+                ),
+                (
+                    "Dictation",
+                    &["speech to text", "transcribe", "talk"],
+                    Some(Target::Setting(SettingId::Dictation)),
+                ),
+                (
+                    "Dictation shortcut",
+                    &["hold to dictate", "keybinding", "hotkey"],
+                    Some(Target::Shortcut(ShortcutId::ToggleDictation)),
+                ),
+                (
+                    "Microphone",
+                    &["input", "audio", "mic"],
+                    Some(Target::Setting(SettingId::Microphone)),
+                ),
+                (
+                    "Speech model",
+                    &["parakeet", "download"],
+                    Some(Target::Setting(SettingId::SpeechModel)),
+                ),
+            ],
+            SettingsSection::Cloud => &[
+                (
+                    "Usage",
+                    &["hours", "consumption"],
+                    Some(Target::Setting(SettingId::CloudUsage)),
+                ),
+                (
+                    "GitHub",
+                    &["connect", "repositories"],
+                    Some(Target::Setting(SettingId::CloudGitHub)),
+                ),
+            ],
+            SettingsSection::Billing => &[
+                (
+                    "Credits",
+                    &["balance"],
+                    Some(Target::Setting(SettingId::Credits)),
+                ),
+                (
+                    "Plan",
+                    &["subscription", "upgrade", "stripe"],
+                    Some(Target::Setting(SettingId::Plan)),
+                ),
+                (
+                    "Extra credits",
+                    &["buy", "packs", "top up"],
+                    Some(Target::Setting(SettingId::ExtraCredits)),
+                ),
+            ],
+            SettingsSection::Appshots => &[
+                (
+                    "Enable Appshots",
+                    &["capture", "screenshot", "listener"],
+                    Some(Target::Setting(SettingId::CaptureAppshots)),
+                ),
+                (
+                    "Hotkey",
+                    &["capture appshot", "shortcut", "keyboard"],
+                    Some(Target::Shortcut(ShortcutId::CaptureAppshot)),
+                ),
+                (
+                    "Capture sound",
+                    &["shutter", "audio"],
+                    Some(Target::Setting(SettingId::AppshotSound)),
+                ),
+                (
+                    "Destination",
+                    &["session", "composer"],
+                    Some(Target::Setting(SettingId::AppshotDestination)),
+                ),
+                (
+                    "Screen Recording",
+                    &["window capture", "permission"],
+                    Some(Target::Setting(SettingId::WindowCapture)),
+                ),
+                (
+                    "Input Monitoring",
+                    &["double modifier", "chord", "permission"],
+                    Some(Target::Setting(SettingId::InputMonitoring)),
+                ),
+                (
+                    "Accessibility",
+                    &["application text", "permission"],
+                    Some(Target::Setting(SettingId::ApplicationText)),
+                ),
+                (
+                    "Permission status",
+                    &["recheck", "grant"],
+                    Some(Target::Setting(SettingId::AppshotPermissions)),
+                ),
+            ],
+            SettingsSection::Computer => &[
+                ("Computer control", &["computer use", "desktop"], None),
+                ("Cursor colors", &["cursor", "color"], None),
+                ("Preview", &["compact", "large"], None),
+                ("Placement", &["rail", "floating"], None),
+                ("Developer access", &["javascript", "browser"], None),
+                ("Always-allowed apps", &["consent", "allow"], None),
+                ("Click sounds", &[], None),
+                ("Getting started", &[], None),
+                ("Recent Computer actions", &["history", "audit"], None),
+                ("Advanced", &["permission", "driver"], None),
+            ],
+            SettingsSection::DeviceHub => &[
+                ("Device hub", &["simulator", "emulator", "version"], None),
+                ("Platform support", &["xcode", "android sdk"], None),
+                ("Agent device access", &["agent"], None),
+                ("Device hosts", &["ssh", "remote"], None),
+                ("Auto-show floating preview", &["float"], None),
+            ],
+            SettingsSection::SourceControl => &[
+                (
+                    "Instruction",
+                    &["commit message", "prompt", "conventional"],
+                    None,
+                ),
+                ("Default model", &["commit message", "haiku"], None),
+                ("Chat history", &["pr chat", "keep per pr", "fresh"], None),
+                ("New chat when idle", &["pr chat", "idle", "expiry"], None),
+                ("While an agent is running", &["git", "agent", "busy"], None),
+            ],
+            SettingsSection::Home => &[
+                ("Working now", &["running", "agents"], None),
+                ("Pull requests", &["review"], None),
+                ("Git activity", &["commits"], None),
+                ("This Mac", &["cpu", "memory", "disk"], None),
+                ("Running services", &["ports", "server"], None),
+                ("Recent areas", &["worktree", "project"], None),
+                ("CI failures", &["checks"], None),
+                ("Show ports", &["by zeron", "all ports"], None),
+            ],
+            _ => &[],
+        }
+    }
+
+    fn search_rows(self) -> Vec<SettingsSearchRow> {
+        if self != SettingsSection::Shortcuts {
+            return self.rows().to_vec();
+        }
+        ShortcutId::ALL
+            .into_iter()
+            .filter(|id| {
+                id.available()
+                    && !matches!(id, ShortcutId::ToggleDictation | ShortcutId::CaptureAppshot)
+            })
+            .map(|id| {
+                let keywords: &'static [&'static str] = match id {
+                    ShortcutId::NextSession | ShortcutId::PrevSession => &["switcher"],
+                    _ => &[],
+                };
+                (id.label(), keywords, Some(Target::Shortcut(id)))
+            })
+            .collect()
+    }
+
+    /// Rows the query finds on this page, in page order, with the row each
+    /// one lands on. Empty for an empty query: nothing is expanded until the
+    /// user types.
+    pub fn matching_rows(self, query: &str) -> Vec<(&'static str, Option<Target>)> {
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        self.search_rows()
+            .into_iter()
+            .filter(|(title, keywords, _)| search_row_matches(title, keywords, &query))
+            .map(|(title, _, target)| (title, target))
+            .collect()
+    }
+
+    /// Case-insensitive substring match over the label, keywords, and rows;
+    /// an empty query matches every section.
+    pub fn matches(self, query: &str) -> bool {
+        let query = query.trim().to_lowercase();
+        query.is_empty()
+            || self.label().to_lowercase().contains(&query)
+            || self.keywords().iter().any(|word| word.contains(&query))
+            || self
+                .search_rows()
+                .iter()
+                .any(|(title, keywords, _)| search_row_matches(title, keywords, &query))
+    }
+}
+
+/// A titled settings row, the extra words that find it, and the row a pick
+/// lands on (none: the page opens at its top).
+type SettingsSearchRow = (&'static str, &'static [&'static str], Option<Target>);
+
+/// `query` is already trimmed and lowercased.
+fn search_row_matches(title: &str, keywords: &[&str], query: &str) -> bool {
+    title.to_lowercase().contains(query) || keywords.iter().any(|word| word.contains(query))
 }
 
 /// Persisted as [`crate::settings::UiSettings::settings_section`].
@@ -973,6 +1523,83 @@ fn settings_open_route(route: &str, remembered: SettingsSection) -> Option<Setti
         .strip_prefix("settings/")
         .and_then(SettingsSection::from_slug)
         .map(SettingsSection::canonical)
+}
+
+const SETTINGS_NAV_WIDTH: f32 = 238.0;
+const SETTINGS_PANEL_RADIUS: f32 = 14.0;
+const SETTINGS_PANEL_MAX_WIDTH: f32 = 1280.0;
+const SETTINGS_PANEL_MIN_SIDE: f32 = 24.0;
+const SETTINGS_PANEL_BOTTOM: f32 = 40.0;
+
+fn settings_panel_bounds(viewport: gpui::Size<Pixels>) -> gpui::Bounds<Pixels> {
+    let width = f32::from(viewport.width);
+    let height = f32::from(viewport.height);
+    let panel_width = (width - 2.0 * SETTINGS_PANEL_MIN_SIDE)
+        .min(SETTINGS_PANEL_MAX_WIDTH)
+        .max(0.0);
+    let top = Theme::TITLEBAR_HEIGHT;
+    let panel_height = (height - top - SETTINGS_PANEL_BOTTOM).max(0.0);
+    gpui::Bounds::new(
+        gpui::point(px((width - panel_width) / 2.0), px(top)),
+        gpui::size(px(panel_width), px(panel_height)),
+    )
+}
+
+fn settings_fade<E>(id: &'static str, reduced: bool, element: E) -> gpui::AnimationElement<E>
+where
+    E: Styled + IntoElement + 'static,
+{
+    let animation = if reduced {
+        gpui::Animation::new(Duration::from_millis(120))
+    } else {
+        motion::DIALOG_IN.animation()
+    };
+    element.with_animation(id, animation, |el, t| el.opacity(t))
+}
+
+fn settings_panel_in(
+    reduced: bool,
+    panel: gpui::Bounds<Pixels>,
+    element: gpui::Stateful<gpui::Div>,
+) -> gpui::AnimationElement<gpui::Stateful<gpui::Div>> {
+    if reduced {
+        return settings_fade("settings-panel-in", true, element);
+    }
+    element.with_animation(
+        "settings-panel-in",
+        motion::DIALOG_IN.animation(),
+        move |el, t| {
+            let shrink = 0.02 * (1.0 - t);
+            let dx = panel.size.width * (shrink / 2.0);
+            let dy = panel.size.height * (shrink / 2.0);
+            el.opacity(t)
+                .left(panel.origin.x + dx)
+                .top(panel.origin.y + dy)
+                .w(panel.size.width - dx * 2.0)
+                .h(panel.size.height - dy * 2.0)
+        },
+    )
+}
+
+fn settings_close_duration(reduced: bool) -> Duration {
+    if reduced {
+        Duration::from_millis(120)
+    } else {
+        motion::MENU_OUT.total()
+    }
+}
+
+fn settings_panel_out(reduced: bool, panel: AnyElement) -> AnyElement {
+    div()
+        .absolute()
+        .inset_0()
+        .child(panel)
+        .with_animation(
+            "settings-panel-out",
+            gpui::Animation::new(settings_close_duration(reduced)),
+            |el, t| el.opacity(1.0 - t),
+        )
+        .into_any_element()
 }
 
 /// What the main outlet shows.
@@ -2651,8 +3278,6 @@ pub struct Shell {
     settings_focus_pending: bool,
     settings_restore_pending: bool,
     settings_return_route: Route,
-    /// The field atop the Settings sidebar, made on its first render.
-    settings_search: Option<settings_search::SettingsSearch>,
     /// Route history behind the titlebar back/forward buttons (§ nav history).
     nav: NavHistory,
     nav_focus: Option<NavEntry>,
@@ -2717,6 +3342,11 @@ pub struct Shell {
     quick_capture: quick_capture::Host,
     continuing: std::collections::HashSet<String>,
     harnesses_page: Option<Entity<HarnessesPage>>,
+    harnesses_sub: Option<Subscription>,
+    settings_closing: Option<SettingsSection>,
+    /// Filters the settings nav; cleared when settings close.
+    settings_search: Entity<ComposerInput>,
+    _settings_search_sub: Subscription,
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
     files_settings_sub: Option<Subscription>,
@@ -2834,7 +3464,10 @@ pub struct Shell {
     harness_update_geometry: [Option<WidthTween>; 2],
     harness_update_scroll: settings::widgets::PageScroll,
     /// Open Update-all dialog; the value is its "continue threads" box.
-    update_all_dialog: Option<bool>,
+    update_all_dialog: Option<harness_updates::UpdateAllDialog>,
+    updates_scroll: settings::widgets::PageScroll,
+    updates_policy_selects:
+        std::collections::HashMap<zeron_proto::HarnessId, settings::widgets::SelectState>,
     /// An Update all that restarts the app: the local agents it waits on and
     /// whether its engine calls have returned.
     update_all_restart: Option<(Vec<zeron_proto::HarnessId>, bool)>,
@@ -3048,6 +3681,13 @@ impl Shell {
             .collect();
         state.update(cx, |s, cx| s.set_hidden_chats(hidden, cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        let settings_search =
+            cx.new(|cx| ComposerInput::with_context("Search settings…", "PaletteSearch", cx));
+        let settings_search_sub = cx.subscribe(&settings_search, |_: &mut Shell, _, event, cx| {
+            if matches!(event, ComposerInputEvent::Edited) {
+                cx.notify();
+            }
+        });
         let docs_search =
             cx.new(|cx| ComposerInput::with_context("Search docs…", "PaletteSearch", cx));
         let docs_search_sub = cx.subscribe(&docs_search, |_: &mut Shell, _, event, cx| {
@@ -3431,7 +4071,6 @@ impl Shell {
             settings_focus_pending: matches!(route, Route::Settings(_)),
             settings_restore_pending: false,
             settings_return_route: Route::Chat,
-            settings_search: None,
             nav,
             nav_focus: None,
             swipe: swipe_nav::SwipeNav::default(),
@@ -3489,6 +4128,10 @@ impl Shell {
             quick_capture: Default::default(),
             continuing: Default::default(),
             harnesses_page: None,
+            harnesses_sub: None,
+            settings_closing: None,
+            settings_search,
+            _settings_search_sub: settings_search_sub,
             shortcuts_sub: None,
             notifications_sub: None,
             files_settings_sub: None,
@@ -3559,6 +4202,8 @@ impl Shell {
             harness_update_geometry: [None; 2],
             harness_update_scroll: settings::widgets::PageScroll::default(),
             update_all_dialog: None,
+            updates_scroll: Default::default(),
+            updates_policy_selects: Default::default(),
             update_all_restart: None,
             user_menu: popover::Popup::default(),
             help_menu: popover::Popup::default(),
@@ -3827,11 +4472,14 @@ impl Shell {
             self.debug_dialog = None;
             self.open_add_space(cx);
         }
-        if self.debug_dialog.as_deref() == Some("update-all")
-            && self.update_all_plan(cx).items() > 0
+        if let Some(this_mac) = match self.debug_dialog.as_deref() {
+            Some("update-all") => Some(false),
+            Some("update-everything") => Some(true),
+            _ => None,
+        } && self.update_all_plan(this_mac, cx).items() > 0
         {
             self.debug_dialog = None;
-            self.open_update_all(cx);
+            self.open_update_all(this_mac, cx);
         }
         // Capture knob: pop the requested dialog once chats have landed.
         if let Some(which) = self.debug_dialog.clone()
@@ -8068,8 +8716,12 @@ impl Shell {
         if route != self.route {
             settings::search::clear_reveal();
         }
-        if matches!(self.route, Route::Settings(_)) && !matches!(route, Route::Settings(_)) {
-            self.reset_settings_search(cx);
+        if matches!(self.route, Route::Settings(_))
+            && !matches!(route, Route::Settings(_))
+            && !self.settings_search.read(cx).text().is_empty()
+        {
+            self.settings_search
+                .update(cx, |input, cx| input.set_text("", cx));
         }
         let was_pull_requests = matches!(self.route, Route::PullRequests);
         let will_show_pull_requests = matches!(route, Route::PullRequests);
@@ -8568,12 +9220,18 @@ impl Shell {
     /// Whether a dialog or menu that Escape would close is open over Settings:
     /// [`Self::dismiss_settings_escape_surface`] without the dismissing.
     fn settings_escape_surface_open(&self, cx: &App) -> bool {
-        if self.sync_flow.has_visible_overlay() || self.user_menu.is_open() {
+        if self.sync_flow.has_visible_overlay()
+            || self.user_menu.is_open()
+            || self.rail_usage_menu.is_open()
+        {
             return true;
         }
         let Route::Settings(section) = self.route else {
             return false;
         };
+        if self.update_all_dialog.is_some() {
+            return true;
+        }
         match section.canonical() {
             SettingsSection::Devices => self
                 .devices_page
@@ -8622,6 +9280,10 @@ impl Shell {
         let Route::Settings(section) = self.route else {
             return false;
         };
+        if self.update_all_dialog.take().is_some() {
+            cx.notify();
+            return true;
+        }
         match section.canonical() {
             SettingsSection::Devices => self
                 .devices_page
@@ -8936,6 +9598,23 @@ impl Shell {
     }
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
+        if let Route::Settings(section) = self.route {
+            self.settings_closing = Some(section);
+            let linger = settings_close_duration(self.reduced_motion);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(linger).await;
+                this.update(cx, |shell, cx| {
+                    if !matches!(shell.route, Route::Settings(_)) {
+                        shell.settings_closing = None;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+        self.settings_search
+            .update(cx, |input, cx| input.set_text("", cx));
         self.settings_focus_pending = false;
         self.settings_restore_pending = true;
         let route = self.settings_return_route;
@@ -9130,7 +9809,16 @@ impl Shell {
             SettingsSection::Harnesses => {
                 if self.harnesses_page.is_none() {
                     let state = self.state.clone();
-                    self.harnesses_page = Some(cx.new(|cx| HarnessesPage::new(state, cx)));
+                    let page = cx.new(|cx| HarnessesPage::new(state, cx));
+                    self.harnesses_sub = Some(cx.subscribe(
+                        &page,
+                        |this: &mut Shell, _, event: &HarnessesEvent, cx| match event {
+                            HarnessesEvent::OpenUpdates => {
+                                this.open_settings(SettingsSection::Updates, cx)
+                            }
+                        },
+                    ));
+                    self.harnesses_page = Some(page);
                 }
                 match &self.harnesses_page {
                     Some(page) => page.clone().into_any_element(),
@@ -9285,7 +9973,10 @@ impl Shell {
                 }
                 card.into_any_element()
             }
-            SettingsSection::Shortcuts | SettingsSection::General | SettingsSection::Appshots => {
+            SettingsSection::Shortcuts
+            | SettingsSection::General
+            | SettingsSection::Chat
+            | SettingsSection::Appshots => {
                 if self.shortcuts_page.is_none() {
                     let state = self.state.clone();
                     let keymap = self.settings.keymap.clone();
@@ -9369,14 +10060,16 @@ impl Shell {
                     ));
                     self.shortcuts_page = Some(page);
                 }
-                let keep_focus = self.settings_search_focused(window, cx);
+                let keep_focus = self.settings_search.focus_handle(cx).is_focused(window);
                 match &self.shortcuts_page {
                     Some(page) => {
                         page.update(cx, |page, _| {
-                            page.show_section(
-                                section == SettingsSection::Appshots,
-                                section == SettingsSection::General,
-                            );
+                            page.show_section(match section {
+                                SettingsSection::Appshots => ShortcutsShown::Appshots,
+                                SettingsSection::General => ShortcutsShown::General,
+                                SettingsSection::Chat => ShortcutsShown::Chat,
+                                _ => ShortcutsShown::Shortcuts,
+                            });
                             if keep_focus {
                                 page.keep_focus();
                             }
@@ -9435,6 +10128,7 @@ impl Shell {
                 .get_or_insert_with(|| cx.new(|_| HomeSettingsPage::default()))
                 .clone()
                 .into_any_element(),
+            SettingsSection::Updates => self.render_updates_page(window, cx),
             SettingsSection::Archived => {
                 if self.archived_page.is_none() {
                     let state = self.state.clone();
@@ -11958,9 +12652,10 @@ impl Shell {
             .border_color(seam)
     }
 
-    /// Settings takes over the window: the section list stands where the
-    /// chat sidebar was, the page fills the rest. Opening a preference never
-    /// adds a route-history entry or changes the selected conversation.
+    /// Settings floats over the app as a centered panel: the section list
+    /// and the page sit inside it, the app stays dimmed behind. Opening a
+    /// preference never adds a route-history entry or changes the selected
+    /// conversation. X, Escape or a click on the backdrop closes it.
     fn render_settings_page(
         &mut self,
         section: SettingsSection,
@@ -11976,17 +12671,95 @@ impl Shell {
             // Tab remains the explicit way to enter its navigation or content.
             window.focus(&self.settings_focus, cx);
         }
-        let sidebar_width = self.settings.sidebar_width;
-        // Dropdowns contain themselves to the page pane beside this column.
-        settings::widgets::set_sidebar_width(self.content_left() + sidebar_width, cx);
-        let search_field = self.render_settings_search_field(&theme, window, cx);
-        let nav = if self.settings_searching(cx) {
-            self.render_settings_search_results(&theme, cx)
-        } else {
-            self.render_settings_nav(section, &theme, window, cx)
-        };
+        // The route underneath renders too; its composers must not take focus from Settings.
+        if matches!(self.route, Route::Settings(_)) {
+            for composer in std::iter::once(&self.composer)
+                .chain(self.side_chats.values().map(|tab| &tab.composer))
+            {
+                composer.update(cx, |composer, _| composer.focus_pending = false);
+            }
+        }
+        let viewport = window.viewport_size();
+        let panel = settings_panel_bounds(viewport);
+        let header = settings::widgets::SETTINGS_HEADER_HEIGHT;
+        settings::widgets::set_page_pane(
+            gpui::Bounds::new(
+                panel.origin + gpui::point(px(SETTINGS_NAV_WIDTH + 1.0), px(header)),
+                gpui::size(
+                    (panel.size.width - px(SETTINGS_NAV_WIDTH + 1.0)).max(px(0.0)),
+                    (panel.size.height - px(header)).max(px(0.0)),
+                ),
+            ),
+            cx,
+        );
+        let nav = self.render_settings_nav(section, &theme, window, cx);
         let outlet = self.settings_outlet(section, window, cx);
-        div()
+        let action = self.settings_header_action(section, &theme, window, cx);
+        let header_row = div()
+            .id("settings-header")
+            .h(px(header))
+            .flex_none()
+            .pl(px(20.0))
+            .pr(px(12.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .child(div().text_color(theme.text_muted).child("Settings"))
+                    .child(
+                        icon(icons::ALT_ARROW_RIGHT)
+                            .size(px(14.0))
+                            .text_color(theme.text_faint),
+                    )
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(SharedString::from(section.label())),
+                    ),
+            )
+            .child(
+                div()
+                    .ml_auto()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .children(action)
+                    .child(
+                        div()
+                            .id("settings-close")
+                            .debug_selector(|| "settings-close".into())
+                            .role(gpui::Role::Button)
+                            .aria_label("Close settings")
+                            .tab_index(0)
+                            .size(px(28.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(7.0))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.glass_hover()))
+                            .focus_visible(|s| s.border_2().border_color(theme.accent))
+                            .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
+                            .child(
+                                icon(icons::LUCIDE_X)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            ),
+                    ),
+            );
+        let body = div()
             .id("settings-page")
             .role(gpui::Role::Group)
             .aria_label("Settings")
@@ -12010,9 +12783,17 @@ impl Shell {
                 {
                     // A dialog over the page keeps the keyboard.
                     if !this.settings_escape_surface_open(cx) {
-                        this.focus_settings_search(window, cx);
+                        let search = this.settings_search.clone();
+                        window.focus(&search.focus_handle(cx), cx);
+                        search.update(cx, |input, cx| input.select_all_text(cx));
                     }
                     cx.stop_propagation();
+                } else if key == "/" && !event.keystroke.modifiers.modified() {
+                    let search = this.settings_search.focus_handle(cx);
+                    if !search.contains_focused(window, cx) {
+                        window.focus(&search, cx);
+                        cx.stop_propagation();
+                    }
                 } else if key == "tab" {
                     move_settings_focus(
                         &this.settings_focus,
@@ -12026,45 +12807,15 @@ impl Shell {
             }))
             .child(
                 div()
-                    .w(px(sidebar_width))
+                    .w(px(SETTINGS_NAV_WIDTH))
                     .h_full()
                     .flex_none()
                     .flex()
                     .flex_col()
-                    .pt(px(Theme::TITLEBAR_HEIGHT))
                     .pb(px(Theme::SPACE_SM))
-                    .child(
-                        div().flex_none().px(px(Theme::SPACE_SM)).child(
-                            settings::widgets::section_tab(
-                                &theme,
-                                false,
-                                0.0,
-                                "settings-back",
-                                "settings-back-hover",
-                            )
-                            .role(gpui::Role::Button)
-                            .aria_label("Back")
-                            .tab_index(0)
-                            .focus_visible(|s| s.border_2().border_color(theme.accent))
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
-                            .child(icon(icons::ARROW_LEFT).size(px(16.0)).text_color(
-                                motion::hover_blend(
-                                    "settings-back-hover",
-                                    theme.text_muted,
-                                    theme.text,
-                                ),
-                            ))
-                            .child("Back"),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .px(px(Theme::SPACE_SM))
-                            .pt(px(Theme::SPACE_SM))
-                            .child(search_field),
-                    )
+                    .bg(theme.wash(0.025))
+                    .border_r_1()
+                    .border_color(theme.border)
                     .child(div().flex_1().min_h_0().child(nav)),
             )
             .child(
@@ -12072,11 +12823,10 @@ impl Shell {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    // Pages scroll to the window's top edge; `page_column`
-                    // carries the titlebar clearance inside the scroll.
                     .flex()
                     .flex_col()
                     .opacity(self.voice_stage_underlay_opacity(cx))
+                    .child(header_row)
                     .child(div().flex_1().min_h_0().child(outlet)),
             )
             .child(
@@ -12085,12 +12835,146 @@ impl Shell {
                     .track_focus(&self.settings_end_focus)
                     .tab_index(0)
                     .tab_stop(false),
-            )
+            );
+        let card = div()
+            .size_full()
+            .rounded(px(SETTINGS_PANEL_RADIUS))
+            .overflow_hidden()
+            .bg(crate::theme::flatten(popover::surface_bg(&theme), theme.bg))
+            .border_1()
+            .border_color(crate::theme::hairline(0.10))
+            .when(!theme.is_frost(), |el| el.shadow_lg())
+            .text_color(theme.text)
+            .child(body);
+        let panel_el = div()
+            .id("settings-panel")
+            .debug_selector(|| "settings-panel".into())
+            .absolute()
+            .left(panel.origin.x)
+            .top(panel.origin.y)
+            .w(panel.size.width)
+            .h(panel.size.height)
+            .occlude()
+            .child(crate::frost::frosted(
+                SETTINGS_PANEL_RADIUS,
+                crate::frost::MENU_BLUR,
+                card,
+            ));
+        let backdrop = div()
+            .id("settings-backdrop")
+            .debug_selector(|| "settings-backdrop".into())
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(crate::theme::scrim(0.45))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.close_settings(cx)),
+            );
+        let drag = self.titlebar_drag_region(
+            "settings-titlebar",
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(px(Theme::TITLEBAR_HEIGHT)),
+            cx,
+        );
+        let reduced = motion::reduced_motion(cx);
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .w(viewport.width)
+            .h(viewport.height)
+            .child(settings_fade(
+                "settings-backdrop-in",
+                reduced,
+                div()
+                    .absolute()
+                    .inset_0()
+                    .child(crate::frost::frosted(0.0, 8.0, backdrop)),
+            ))
+            .child(drag)
+            .child(settings_panel_in(reduced, panel, panel_el))
             .into_any_element()
     }
 
-    /// Roving section tabs, grouped by spacing alone: preferences, agents and
-    /// devices, then workspace data.
+    fn render_settings_search(
+        &self,
+        theme: &Theme,
+        query: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let trailing = if query.is_empty() {
+            div()
+                .h(px(20.0))
+                .min_w(px(20.0))
+                .px(px(5.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.0))
+                .bg(theme.wash(0.07))
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.text_muted)
+                .child("/")
+                .into_any_element()
+        } else {
+            div()
+                .id("settings-search-clear")
+                .role(gpui::Role::Button)
+                .aria_label("Clear settings search")
+                .size(px(20.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.0))
+                .bg(theme.wash(0.07))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.settings_search
+                        .update(cx, |input, cx| input.set_text(String::new(), cx));
+                    window.focus(&this.settings_search.focus_handle(cx), cx);
+                    cx.notify();
+                }))
+                .child(
+                    icon(icons::CLOSE)
+                        .size(px(12.0))
+                        .text_color(theme.text_muted),
+                )
+                .into_any_element()
+        };
+        div()
+            .flex_none()
+            .h(px(32.0))
+            .mb(px(6.0))
+            .pl(px(8.0))
+            .pr(px(6.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(8.0))
+            .hover(|s| s.bg(theme.glass_hover()))
+            .text_size(crate::typography::ui_rems(13.0))
+            .child(
+                icon(icons::MAGNIFER)
+                    .size(px(14.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(self.settings_search.clone()),
+            )
+            .child(trailing)
+    }
+
+    /// Roving section tabs in their headed groups.
     fn render_settings_nav(
         &mut self,
         section: SettingsSection,
@@ -12099,6 +12983,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let cloud_offered = self.state.read(cx).cloud_offered();
+        let query = self.settings_search.read(cx).text().to_string();
+        let grouped = query.trim().is_empty();
         settings::widgets::scroll_faded(
             "settings-nav-scroll",
             div()
@@ -12119,10 +13005,12 @@ impl Shell {
                         .flex()
                         .flex_col()
                         .gap(px(2.0))
+                        .child(self.render_settings_search(theme, &query, cx))
                         .children(
                             SettingsSection::ALL
                                 .into_iter()
                                 .filter(|item| item.shown_in_nav(cloud_offered))
+                                .filter(|item| item.matches(&query))
                                 .map(|item| {
                                     let index = SettingsSection::ALL
                                         .iter()
@@ -12142,14 +13030,13 @@ impl Shell {
                                         motion::mix(theme.text_muted, theme.text, selection_t),
                                         theme.text,
                                     );
-                                    settings::widgets::section_tab(
+                                    let section_tab = settings::widgets::section_tab(
                                         theme,
                                         selected,
                                         selection_t,
                                         key.clone(),
                                         hover_key,
                                     )
-                                    .when(item.starts_nav_group(), |el| el.mt(px(Theme::SPACE_LG)))
                                     .role(gpui::Role::Tab)
                                     .aria_label(item.label())
                                     .aria_selected(selected)
@@ -12160,9 +13047,11 @@ impl Shell {
                                     .tab_stop(selected)
                                     .on_key_down(cx.listener(
                                         move |this, event: &gpui::KeyDownEvent, window, cx| {
+                                            let query =
+                                                this.settings_search.read(cx).text().to_string();
                                             let items: Vec<_> = SettingsSection::ALL
                                                 .into_iter()
-                                                .filter(|s| s.shown_in_nav(cloud_offered))
+                                                .filter(|s| s.shown_in_nav(cloud_offered) && s.matches(&query))
                                                 .collect();
                                             let current =
                                                 items.iter().position(|s| *s == item).unwrap_or(0);
@@ -12191,7 +13080,61 @@ impl Shell {
                                         this.open_settings(item, cx)
                                     }))
                                     .child(icon(item.icon()).size(px(16.0)).text_color(tab_text))
-                                    .child(SharedString::from(item.label()))
+                                    .child(SharedString::from(item.label()));
+                                    // While searching, the rows the query found sit
+                                    // under their section, indented past its icon.
+                                    let hits = item.matching_rows(&query);
+                                    let heading =
+                                        item.nav_heading().filter(|_| grouped).map(|heading| {
+                                            div()
+                                                .h(px(22.0))
+                                                .px(px(Theme::SPACE_SM))
+                                                .flex()
+                                                .items_center()
+                                                .text_size(crate::typography::ui_rems(11.5))
+                                                .font_weight(gpui::FontWeight::MEDIUM)
+                                                .text_color(theme.text_faint)
+                                                .child(SharedString::from(heading))
+                                        });
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .when(grouped && item.starts_nav_group(), |el| {
+                                            el.mt(px(14.0))
+                                        })
+                                        .children(heading)
+                                        .child(section_tab)
+                                        .children(hits.into_iter().map(|(title, target)| {
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "settings-nav-{}-{title}",
+                                                    item.label()
+                                                )))
+                                                .debug_selector(move || {
+                                                    format!("settings-hit-{title}")
+                                                })
+                                                .role(gpui::Role::Button)
+                                                .aria_label(SharedString::from(title))
+                                                .rounded(px(8.0))
+                                                .pl(px(Theme::SPACE_SM + 24.0))
+                                                .pr(px(Theme::SPACE_SM))
+                                                .py(px(4.0))
+                                                .text_size(crate::typography::ui_rems(13.0))
+                                                .text_color(theme.text)
+                                                .cursor_pointer()
+                                                .hover(|s| s.bg(theme.glass_hover()))
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        this.open_settings(item, cx);
+                                                        if let Some(target) = target {
+                                                            settings::search::reveal(
+                                                                target, window,
+                                                            );
+                                                        }
+                                                    },
+                                                ))
+                                                .child(SharedString::from(title))
+                                        }))
                                 }),
                         ),
                 ),
@@ -13151,9 +14094,23 @@ impl Shell {
         let row_id = format!("chat-{id}");
         let fade_key = format!("{row_id}-hover");
         let now = Utc::now();
+        let worktree;
+        let diff;
         let (device, remote, queued, undelivered, expired, started_at, subagents, asks, mission) = {
             let state = self.state.read(cx);
             let chat = state.chats.iter().find(|chat| chat.id == id);
+            worktree = chat
+                .and_then(|chat| Some((chat, state.space_for_chat(chat)?)))
+                .is_some_and(|(chat, space)| {
+                    space.git_detected && chat.cwd.as_deref().is_some_and(|cwd| cwd != space.path)
+                });
+            diff = state.reviews.get(&id).and_then(|review| {
+                review.changes(
+                    review
+                        .scope
+                        .unwrap_or_else(|| crate::review::ReviewScope::default_for(worktree)),
+                )
+            });
             (
                 chat.map(|chat| chat.device_id.clone()),
                 chat.is_some_and(|chat| {
@@ -13232,7 +14189,10 @@ impl Shell {
                 || lead
                     .as_ref()
                     .is_some_and(|fold| !fold.open && fold.holds_selected));
-        let bg = if selected {
+        let light_active = selected && !theme.appearance.is_dark();
+        let bg = if light_active {
+            gpui::white()
+        } else if selected {
             crate::theme::glass_selected_bg()
         } else if secondary {
             crate::theme::glass_secondary_bg()
@@ -13244,6 +14204,7 @@ impl Shell {
             crate::theme::wash(0.0)
         };
         let sec = theme.text_muted;
+        let meta = theme.text_meta();
         let faint = theme.text_muted.opacity(0.4);
         let rename_input = (!preview)
             .then(|| self.rename_input_for(&id, ChatRenameSurface::Sidebar))
@@ -13439,7 +14400,7 @@ impl Shell {
 
         if slim {
             let lifted = hovered || selected;
-            let rest = sec.opacity(0.7);
+            let rest = meta;
             let slot: AnyElement = if let Some(badge) = jump_badge {
                 badge
             } else if hovered && !preview {
@@ -13474,8 +14435,11 @@ impl Shell {
                 .when(nested || lead.is_some(), |el| {
                     el.pl(px(10.0 + SIDEBAR_NESTED_INDENT))
                 })
-                .rounded(px(8.0))
+                .rounded(px(6.0))
                 .bg(bg)
+                .when(light_active, |el| {
+                    el.shadow(crate::theme::card_selected_shadows())
+                })
                 .children(lead_chevron)
                 .children(project_icon.map(|icon| {
                     div()
@@ -13606,14 +14570,10 @@ impl Shell {
         } else {
             gpui::FontWeight::MEDIUM
         };
-        let title_color = if recede {
-            sec
-        } else if unread {
-            theme.text
-        } else if failed {
-            theme.text.opacity(0.95)
+        let title_color = if recede && !hovered {
+            theme.text.opacity(0.75)
         } else {
-            theme.text.opacity(0.9)
+            theme.text
         };
         let line_one = div()
             .h(px(20.0))
@@ -13631,12 +14591,7 @@ impl Shell {
                         div()
                             .text_size(crate::typography::ui_rems(12.0))
                             .line_height(px(16.0))
-                            .font_weight(if recede {
-                                gpui::FontWeight::NORMAL
-                            } else {
-                                gpui::FontWeight::MEDIUM
-                            })
-                            .text_color(sec)
+                            .text_color(meta)
                             .child(space_name.clone()),
                     ))
                 } else {
@@ -13647,6 +14602,48 @@ impl Shell {
             .children(split_glyph)
             .child(slot);
         let presence = crate::computer::presence::chat_glyph("chat-row", &id, 14.0, 0.6, theme, cx);
+        let worktree_icon = worktree.then(|| {
+            icon(icons::WORKTREE)
+                .size(px(14.0))
+                .flex_none()
+                .text_color(meta)
+        });
+        let diff_counts = diff
+            .filter(|(add, del)| *add > 0 || *del > 0)
+            .map(|(add, del)| {
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .gap(px(4.0))
+                    .font_family(theme.font_mono.clone())
+                    .child(
+                        div()
+                            .text_color(theme.diff_add)
+                            .child(SharedString::from(format!("+{add}"))),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme.diff_del)
+                            .child(SharedString::from(format!("\u{2212}{del}"))),
+                    )
+            });
+        let branch_line = branch.map(|branch| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .children(worktree_icon)
+                .child(div().min_w_0().child(sidebar_faded_label(
+                    format!("chat-branch-{id}").into(),
+                    true,
+                    div().child(branch),
+                )))
+                .children(diff_counts)
+        });
         let line_three = div()
             .mt(px(2.0))
             .h(px(16.0))
@@ -13657,8 +14654,8 @@ impl Shell {
             .gap(px(6.0))
             .text_size(crate::typography::ui_rems(12.0))
             .line_height(px(16.0))
-            .text_color(sec)
-            .map(|el| match (created_by, branch) {
+            .text_color(meta)
+            .map(|el| match (created_by, branch_line) {
                 (Some(creator), _) => el.child(
                     div()
                         .flex_1()
@@ -13680,13 +14677,7 @@ impl Shell {
                             div().child(creator),
                         )),
                 ),
-                (None, Some(branch)) => el.child(div().flex_1().min_w_0().text_color(faint).child(
-                    sidebar_faded_label(
-                        format!("chat-branch-{id}").into(),
-                        true,
-                        div().child(branch),
-                    ),
-                )),
+                (None, Some(branch)) => el.child(branch),
                 (None, None) => el.child(div().flex_1().min_w_0()),
             })
             .when_some(change_request, |el, summary| {
@@ -13753,7 +14744,7 @@ impl Shell {
             .child(
                 div()
                     .size_full()
-                    .rounded(px(8.0))
+                    .rounded(px(6.0))
                     .px(px(10.0))
                     .when(nested || lead.is_some(), |el| {
                         el.pl(px(10.0 + SIDEBAR_NESTED_INDENT))
@@ -13762,6 +14753,9 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .bg(bg)
+                    .when(light_active, |el| {
+                        el.shadow(crate::theme::card_selected_shadows())
+                    })
                     .when(recede && working && !hovered, |el| el.opacity(0.7))
                     .children(lead_chevron)
                     .child(line_one)
@@ -20505,6 +21499,25 @@ impl Render for Shell {
                         .children(overlays);
                     break 'ready root.child(motion::fade_in("phase-setup", page));
                 }
+                // Settings floats over the route it came from, so that route renders underneath.
+                let settings_route = match self.route {
+                    Route::Settings(section) => Some(section),
+                    _ => None,
+                };
+                let settings_panel = match (settings_route, self.settings_closing) {
+                    (Some(section), _) => Some(self.render_settings_page(section, window, cx)),
+                    (None, Some(section)) => {
+                        let panel = self.render_settings_page(section, window, cx);
+                        Some(settings_panel_out(self.reduced_motion, panel))
+                    }
+                    (None, None) => None,
+                };
+                if settings_route.is_some() {
+                    self.route = match self.settings_return_route {
+                        Route::Settings(_) => Route::Chat,
+                        route => route,
+                    };
+                }
                 let pr_route = matches!(self.route, Route::PullRequests);
                 let chat_under = self.task_chat_slide_t().is_some();
                 let page_route = pr_route
@@ -20518,53 +21531,6 @@ impl Render for Shell {
                             | Route::Docs
                     )
                     || (self.route == Route::TaskCenter && !chat_under);
-                if let Route::Settings(section) = self.route {
-                    let settings_page = self.render_settings_page(section, window, cx);
-                    let swipe = self.swipe_layers(0.0, cx);
-                    let settings_page = div()
-                        .size_full()
-                        .relative()
-                        .overflow_hidden()
-                        .opacity(swipe.alpha)
-                        .child(
-                            div()
-                                .size_full()
-                                .relative()
-                                .left(px(swipe.shift))
-                                .child(settings_page),
-                        )
-                        .children(swipe.pill);
-                    // A call started from Settings opens its stage here too.
-                    let voice_stage = self.render_voice_stage(window, cx);
-                    let overlays = self.render_overlays(window.viewport_size(), window, cx);
-                    let flush_tone = self.flush_tone(self.settings.sidebar_width, window, cx);
-                    let theme = Theme::of(cx).clone();
-                    let settings_page =
-                        self.content_frame(self.settings.sidebar_width, settings_page, &theme);
-                    let rail = self.render_app_rail(cx);
-                    let drag = self.titlebar_drag_region(
-                        "settings-titlebar",
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .right_0()
-                            .h(px(Theme::TITLEBAR_HEIGHT)),
-                        cx,
-                    );
-                    let page = div()
-                        .size_full()
-                        .relative()
-                        .child(settings_page)
-                        .child(rail)
-                        .children(voice_stage)
-                        .child(drag)
-                        .children(overlays);
-                    break 'ready root
-                        .child(self.swipe_layer(cx))
-                        .children(flush_tone)
-                        .child(motion::fade_in("phase-app", page));
-                }
                 // The Pull requests route shares this layout without the
                 // chat's side pane.
                 let on_chat = matches!(self.route, Route::Chat) || chat_under;
@@ -20920,7 +21886,11 @@ impl Render for Shell {
                         |el| el.child(self.sidebar_peek_pointer_observer(cx)),
                     )
                     .children(self.render_sidebar_options_titlebar(cx))
+                    .children(settings_panel)
                     .children(overlays);
+                if let Some(section) = settings_route {
+                    self.route = Route::Settings(section);
+                }
                 root.child(self.swipe_layer(cx))
                     .children(flush_tone)
                     .child(motion::fade_in("phase-app", page))
@@ -21105,6 +22075,70 @@ mod tests {
             let chat = chat_with_path(cwd, None);
             assert_eq!(chat_copy_path(&chat), None);
         }
+    }
+
+    #[test]
+    fn settings_search_matches_labels_and_row_keywords() {
+        assert!(SettingsSection::ALL.iter().all(|s| s.matches("")));
+        assert!(SettingsSection::Chat.matches("Follow"));
+        assert!(SettingsSection::Chat.matches("steer"));
+        assert!(!SettingsSection::General.matches("steer"));
+        assert!(SettingsSection::Routing.matches("delegation depth"));
+        assert!(SettingsSection::Updates.matches("automatic"));
+        assert!(!SettingsSection::Shortcuts.matches("steer"));
+        assert!(SettingsSection::Appearance.matches("FONT SIZE"));
+        assert!(SettingsSection::Archived.matches("archived"));
+        assert!(!SettingsSection::Files.matches("steer"));
+        assert!(SettingsSection::ALL.iter().all(|s| !s.matches("zzz")));
+    }
+
+    #[test]
+    fn settings_search_lists_the_rows_it_found_under_the_section() {
+        let row_titles = |section: SettingsSection, query: &str| -> Vec<&'static str> {
+            section
+                .matching_rows(query)
+                .into_iter()
+                .map(|(title, _)| title)
+                .collect()
+        };
+        assert!(row_titles(SettingsSection::Appearance, "").is_empty());
+        assert_eq!(
+            row_titles(SettingsSection::Appearance, "them"),
+            vec!["Light theme", "Dark theme", "Theme library"]
+        );
+        assert_eq!(
+            row_titles(SettingsSection::Chat, "steer"),
+            vec!["Follow-up behavior"]
+        );
+        assert_eq!(
+            row_titles(SettingsSection::Computer, "rail"),
+            vec!["Placement"]
+        );
+        assert_eq!(
+            row_titles(SettingsSection::Computer, "javascript"),
+            vec!["Developer access"]
+        );
+        assert_eq!(
+            row_titles(SettingsSection::Computer, "consent"),
+            vec!["Always-allowed apps"]
+        );
+        // A label-only hit expands nothing; the section row stands alone.
+        assert!(row_titles(SettingsSection::Archived, "archived").is_empty());
+        assert!(SettingsSection::SourceControl.matches("commit"));
+        assert_eq!(
+            row_titles(SettingsSection::SourceControl, "commit"),
+            vec!["Instruction", "Default model"]
+        );
+        assert_eq!(
+            row_titles(SettingsSection::SourceControl, "pr chat"),
+            vec!["Chat history", "New chat when idle"]
+        );
+        assert!(row_titles(SettingsSection::SourceControl, "floating").is_empty());
+        assert_eq!(
+            row_titles(SettingsSection::Appshots, "capture appshot"),
+            vec!["Hotkey"]
+        );
+        assert!(row_titles(SettingsSection::Shortcuts, "appshot").is_empty());
     }
 
     #[test]
@@ -22537,7 +23571,7 @@ mod tests {
     #[test]
     fn sidebar_disclosure_motion_lands_exactly_on_its_target() {
         let mut tween = SidebarDisclosureMotion::new(1, 240.0, 0.0);
-        tween.started = std::time::Instant::now() - motion::COLLAPSE.total().mul_f32(2.0);
+        tween.started = std::time::Instant::now() - tween.spec().total().mul_f32(2.0);
         assert_eq!(tween.current(), 0.0);
         assert!(!tween.animating());
     }
@@ -25887,6 +26921,10 @@ impl Shell {
         self.set_surfaces_open(true, cx);
         self.add_browser_surface(Some(url), window, cx);
     }
+    pub fn fixture_settings_search(&mut self, query: &str, cx: &mut Context<Self>) {
+        self.settings_search
+            .update(cx, |input, cx| input.set_text(query, cx));
+    }
 }
 
 #[cfg(test)]
@@ -26125,7 +27163,7 @@ mod settings_modal_regressions {
     }
 
     #[test]
-    fn every_settings_section_round_trips_its_slug_and_device_hub_follows_computer() {
+    fn every_settings_section_round_trips_its_slug_and_device_hub_follows_devices() {
         for section in SettingsSection::ALL {
             assert_eq!(SettingsSection::from_slug(section.slug()), Some(section));
             let json = serde_json::to_string(&section).unwrap();
@@ -26134,12 +27172,12 @@ mod settings_modal_regressions {
         assert_eq!(SettingsSection::DeviceHub.slug(), "device-hub");
         assert_eq!(SettingsSection::DeviceHub.label(), "Device hub");
         assert_eq!(SettingsSection::Devices.label(), "Devices");
-        let computer = SettingsSection::ALL
+        let devices = SettingsSection::ALL
             .iter()
-            .position(|section| *section == SettingsSection::Computer)
+            .position(|section| *section == SettingsSection::Devices)
             .unwrap();
         assert_eq!(
-            SettingsSection::ALL[computer + 1],
+            SettingsSection::ALL[devices + 1],
             SettingsSection::DeviceHub
         );
     }
@@ -26364,6 +27402,86 @@ mod settings_modal_regressions {
         assert!(bound(OpenModelPicker.name()).contains(&format!("{primary}-:").as_str()));
         assert!(bound(crate::browser::Back.name()).contains(&format!("{primary}-^").as_str()));
         assert!(bound(ToggleSidebar.name()).contains(&format!("{primary}-b").as_str()));
+    }
+
+    #[gpui::test]
+    fn settings_search_rows_land_on_their_rows(cx: &mut TestAppContext) {
+        use crate::settings::search::{lit, take_anchored};
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        cx.update(|cx| {
+            crate::appearance::init(
+                crate::appearance::AppearanceMode::Dark,
+                zeron_theme::ThemeSelection::default(),
+                zeron_theme::AccentSelection::default(),
+                zeron_theme::SurfacePreference::Opaque,
+                cx,
+            )
+        });
+        let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
+        cx.update(|_, cx| motion::set_reduced_motion(cx, true));
+        cx.simulate_resize(gpui::size(px(1200.0), px(800.0)));
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+        };
+        shell.update(cx, |shell, _| {
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell.splash = SplashPhase::Gone;
+        });
+        // Routing draws its Delegation rows only once the engine answers.
+        let sections = SettingsSection::ALL.into_iter().filter(|section| {
+            section.visible_in_nav()
+                && !section.needs_account()
+                && *section != SettingsSection::Routing
+        });
+        for section in sections {
+            take_anchored();
+            shell.update(cx, |shell, cx| shell.open_settings(section, cx));
+            draw(cx);
+            let anchored = take_anchored();
+            let unanchored: Vec<_> = section
+                .search_rows()
+                .into_iter()
+                .filter_map(|(_, _, target)| target)
+                .filter(|target| {
+                    !anchored.contains(target)
+                        && target
+                            .fallback()
+                            .is_none_or(|fallback| !anchored.contains(&fallback))
+                })
+                .collect();
+            assert_eq!(unanchored, [], "{section:?} rows that land nowhere");
+        }
+
+        shell.update(cx, |shell, cx| {
+            shell.open_settings(SettingsSection::General, cx)
+        });
+        draw(cx);
+        cx.simulate_keystrokes(&platform_combo("mod-f"));
+        draw(cx);
+        assert!(cx.update(|window, cx| {
+            shell
+                .read(cx)
+                .settings_search
+                .focus_handle(cx)
+                .is_focused(window)
+        }));
+        cx.simulate_input("smooth");
+        draw(cx);
+        let hit = cx.debug_bounds("settings-hit-Smooth scrolling").unwrap();
+        cx.simulate_click(hit.center(), gpui::Modifiers::default());
+        for _ in 0..3 {
+            draw(cx);
+        }
+        assert_eq!(
+            shell.read_with(cx, |shell, _| shell.route),
+            Route::Settings(SettingsSection::Appearance)
+        );
+        assert_eq!(lit(), Some(Target::Setting(SettingId::SmoothScrolling)));
     }
 
     #[gpui::test]
@@ -26632,6 +27750,8 @@ mod settings_modal_regressions {
         });
         drop((first, second));
         shell.update(cx, |shell, cx| shell.close_settings(cx));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear());
         shell.read_with(cx, |shell, _| assert!(shell.cloud_page.is_none()));

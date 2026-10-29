@@ -54,7 +54,7 @@ A new device takes its name from the computer's name or hostname. To pick the na
 ## Run a chat on another device
 
 - **New project**: the add-project picker first asks for a device (**Search devices…**), then a location and a folder on it. A dot shows whether each device is online. The project stays tied to that device.
-- **New chat**: on the new chat canvas, the device chip next to the project chip shows where the agent runs (**This device** by default). Click it to pick another machine. The chip turns to a warning color while that device is offline.
+- **New chat**: on the new chat canvas, the device chip under the composer shows where the agent runs (**This device** by default). Click it to pick another machine. The chip turns to a warning color while that device is offline.
 
 In the sidebar, a server icon marks chats that run on another device (in compact rows, and in full rows when project labels are hidden).
 

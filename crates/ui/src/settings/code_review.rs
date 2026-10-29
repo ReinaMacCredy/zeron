@@ -356,7 +356,7 @@ impl CodeReviewPage {
         div()
             .flex()
             .flex_col()
-            .child(widgets::section_label(theme, "Review instructions").mt(px(28.0)))
+            .child(widgets::section_title(theme, "Review instructions").mt(px(28.0)))
             .child(
                 widgets::section_card(theme).mt(px(8.0)).child(
                     widgets::card_row(theme, true)
@@ -435,13 +435,9 @@ impl Render for CodeReviewPage {
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll.scroll)
                         .child(
-                            widgets::page_column()
-                                .child(widgets::page_header(&theme, "Code review", None))
-                                .child(widgets::page_subtitle(
-                                    &theme,
-                                    crate::review::SETTINGS_SUBTITLE,
-                                ))
-                                .child(card.mt(px(16.0)))
+                            widgets::settings_page()
+                                .child(widgets::page_note(&theme, crate::review::SETTINGS_SUBTITLE))
+                                .child(widgets::section(&theme, "Reviewer", card.mt_0()))
                                 .child(
                                     div()
                                         .mt(px(10.0))

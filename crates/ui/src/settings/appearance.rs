@@ -5017,8 +5017,7 @@ impl Render for AppearancePage {
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll.scroll)
                         .child(
-                            widgets::page_column()
-                                .child(widgets::page_header(&theme, "Appearance", None))
+                            widgets::settings_page()
                                 .child(
                                     widgets::section(
                                         &theme,
@@ -5028,7 +5027,7 @@ impl Render for AppearancePage {
                                             .search_anchor(SettingId::ColorScheme)
                                             .block(),
                                     )
-                                    .mt(px(24.0))
+                                    .mt_0()
                                     .gap(px(12.0)),
                                 )
                                 .child(

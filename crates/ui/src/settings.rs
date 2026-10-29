@@ -1753,6 +1753,7 @@ pub struct UiSettings {
     /// Desktop banners for newly discovered agent CLI releases. In-app chips
     /// remain enabled independently of this preference.
     pub agent_update_notifications: bool,
+    pub auto_update: bool,
     pub right_pane_width: f32,
     /// Split view: the LEFT pane's share of the conversation column.
     pub split_ratio: f32,
@@ -1974,6 +1975,7 @@ impl Default for UiSettings {
             notifications_background_only: true,
             files_panel_width: FILES_PANEL_DEFAULT,
             agent_update_notifications: true,
+            auto_update: false,
             right_pane_width: RIGHT_PANE_DEFAULT,
             split_ratio: SPLIT_RATIO_DEFAULT,
             right_pane_open: false,
@@ -2883,6 +2885,7 @@ impl UiSettings {
             notifications_background_only,
             files_panel_width,
             agent_update_notifications,
+            auto_update,
             right_pane_width,
             right_pane_open,
             terminal_height,
@@ -4503,6 +4506,7 @@ mod tests {
             notifications_background_only: false,
             files_panel_width: 310.0,
             agent_update_notifications: false,
+            auto_update: true,
             right_pane_width: 700.0,
             split_ratio: 0.35,
             right_pane_open: true,

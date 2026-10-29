@@ -114,7 +114,7 @@ When the agent asked you a question, a **Question** row stays in the transcript 
 
 ## Compact mode
 
-Turn on **Compact mode** ("Collapse thinking and tools.") in [Settings > General](zeron://settings/general) to see less of the work. Each turn's tool calls, thinking, subagent chips, and in-between text fold under one header, and only the final reply stays in view. Text the agent wrote along the way becomes **Wrote** chips. Nothing opens by itself; click the header to look inside.
+Turn on **Compact mode** ("Collapse thinking and tools.") in [Settings > Chat](zeron://settings/chat) to see less of the work. Each turn's tool calls, thinking, subagent chips, and in-between text fold under one header, and only the final reply stays in view. Text the agent wrote along the way becomes **Wrote** chips. Nothing opens by itself; click the header to look inside.
 
 While the turn runs, the header sums up the work. When the turn finishes, it changes to **Worked for** and the time, such as **Worked for 1m 35s**.
 

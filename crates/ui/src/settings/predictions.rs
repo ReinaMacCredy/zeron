@@ -452,6 +452,7 @@ impl Render for PredictionsCard {
             }
         });
         widgets::section_card(&theme)
+            .mt_0()
             .child(
                 widgets::card_row(&theme, true)
                     .child(

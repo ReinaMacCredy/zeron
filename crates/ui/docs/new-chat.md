@@ -21,9 +21,9 @@ Zeron remembers your choice for the next canvas.
 
 ## Pick the project, device, and checkout
 
-Chips above the composer show the target. Click the project chip to search your projects (**Search projects…**). At the bottom of that list, **New project** adds one (Cmd+Shift+N) and **Don't work in a project** switches to a projectless chat. The device chip picks which machine runs the agent (**This device** by default).
+The headline above the composer names the target: "What should we build in" and the project. Click the project name to search your projects (**Search projects…**). At the bottom of that list, **New project** adds one (Cmd+Shift+N) and **Don't work in a project** switches to a projectless chat, where the headline reads "What should we work on?". Under the composer, the device chip picks which machine runs the agent (**This device** by default), and the permission chip at the right names the permission mode.
 
-![The new chat canvas with project, device, and checkout chips](new-chat-canvas.jpg)
+![The new chat canvas: the project in the headline, the device, branch, checkout, and permission chips under the composer](new-chat-canvas.jpg)
 
 For a git project, chips below the composer pick the checkout and branch. Choose **Current checkout** to work in place, or **New worktree** to have Zeron cut a fresh worktree and branch for this chat.
 
@@ -31,9 +31,9 @@ To choose the agent and model, see [Models and effort](zeron://docs/models-and-e
 
 ## Send the first message
 
-Press Enter (or Cmd+Enter, depending on **Send messages with** in [Settings > General](zeron://settings/general)). The canvas becomes the new thread. Until it is named, the thread shows as **New session** in the sidebar.
+Press Enter (or Cmd+Enter, depending on **Send messages with** in [Settings > Chat](zeron://settings/chat)). The canvas becomes the new thread. Until it is named, the thread shows as **New session** in the sidebar.
 
-**Thread naming** in Settings > General decides who writes the title. It reads **Session agent** by default: a Claude Code or Codex chat is named by its own agent on that agent's cheapest model, and any other chat by the first enabled of Claude Code or Codex. Click the chip to pick one model for every title instead, and **Reset** to go back to **Session agent**. If no title comes back, the thread is named after the first words of your prompt. A thread is named once; rename it yourself from the sidebar.
+**Thread naming** in Settings > Chat decides who writes the title. It reads **Session agent** by default: a Claude Code or Codex chat is named by its own agent on that agent's cheapest model, and any other chat by the first enabled of Claude Code or Codex. Click the chip to pick one model for every title instead, and **Reset** to go back to **Session agent**. If no title comes back, the thread is named after the first words of your prompt. A thread is named once; rename it yourself from the sidebar.
 
 > With **Send messages with** set to Enter, Cmd+Enter starts the thread in the background and leaves you on a fresh canvas with the same target.
 

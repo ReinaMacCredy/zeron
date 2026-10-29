@@ -55,6 +55,8 @@ const LISTED_NOTES_PREVIEW_CHARS: usize = 500;
 /// wait re-evaluates its snapshot on a timer, not just on pushes.
 const STALE_RECHECK: Duration = Duration::from_secs(5);
 const MODEL_LIST_WAIT: Duration = Duration::from_secs(20);
+const LISTED_MODELS: usize = 8;
+const UNAVAILABLE_HARNESS: &str = "Harness is not installed or is switched off.";
 
 pub struct ThreadTools {
     client: RpcClient,
@@ -129,34 +131,17 @@ fn supervisor_tool() -> Value {
 fn compact_tool() -> Value {
     json!({
         "name": "compact",
-        "description": "Compact this chat's own context: the conversation so far is replaced by a summary, so later turns are cheaper and the context window has room again. Use it at a natural boundary (a slice done and verified, before the next phase), not in the middle of an edit. It cannot run under the turn that asks for it: it runs as soon as this turn ends, so finish your reply after calling it. Sub-agents and background shells you started keep running and report back after the compaction, so say in `continueWith` what they are doing and what to do with their results; an agent that restarts to compact refuses instead while they run. Any message that reaches you before it runs cancels it; call it again then if it still fits. `focus` tells the summary what to keep: the plan, files being changed, open failures, decisions. `continueWith` is sent to you as your next message once the compaction is done, so the work goes on without the person; leave it out to stop and wait for them.",
+        "description": "Compact this chat's context into a summary once this turn ends; finish your reply after calling it. Use it at a natural boundary, not mid-edit. `focus`: what the summary keeps (plan, files changing, open failures, decisions). `continueWith`: your next message afterwards, such as \"Continue with slice 3\", so work goes on without the person; omit it to stop and wait. Sub-agents and background shells keep running and report back, so say in `continueWith` what they do; a runtime that must restart to compact refuses while they run. A message arriving first cancels it.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "focus": { "type": "string", "maxLength": 4000, "description": "What the summary must keep." },
-                "continueWith": { "type": "string", "maxLength": 4000, "description": "Your next message after the compaction, such as \"Continue with slice 3\"." }
+                "focus": { "type": "string", "maxLength": 4000 },
+                "continueWith": { "type": "string", "maxLength": 4000 }
             },
             "additionalProperties": false
         },
         "annotations": { "title": "Compact context", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
         "_meta": { "anthropic/alwaysLoad": true }
-    })
-}
-
-fn thread_flag_tool(name: &str, description: &str, flag: &str) -> Value {
-    json!({
-        "name": name,
-        "description": description,
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "threadId": { "type": "string" },
-                "threadIds": { "type": "array", "items": { "type": "string" } },
-                flag: { "type": "boolean" }
-            },
-            "required": [flag],
-            "additionalProperties": false
-        }
     })
 }
 
@@ -166,7 +151,7 @@ fn thread_tool_list() -> Value {
     let timeout = json!({ "type": "integer", "minimum": 0, "maximum": 1800 });
     let resolve_findings = json!({
         "name": "resolve_findings",
-        "description": "Report what you did about a finished review's findings (review_changes, or a review the user handed you with Fix). The user's review card shows each outcome. Call it once you fixed or declined findings; a later call for the same id replaces its outcome. Ids are the F1, F2... that task_status lists for the review and that handed comments name.",
+        "description": "Report what you did about each finding of a finished review (review_changes, or one the person handed you with Fix); the person's review card shows each outcome, and a later call for an id replaces it. Ids are the F1, F2... that task_status lists.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -177,10 +162,10 @@ fn thread_tool_list() -> Value {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "id": { "type": "string", "description": "Finding id, such as F2." },
-                            "outcome": { "type": "string", "enum": ["fixed", "skipped", "no_change"], "description": "fixed: you changed the code; skipped: you chose not to fix it; no_change: nothing needed changing." },
-                            "note": { "type": "string", "maxLength": 2000, "description": "Why. Required for skipped and no_change." },
-                            "commit": { "type": "string", "description": "Commit sha of the fix, when you made one." }
+                            "id": { "type": "string", "description": "Such as F2." },
+                            "outcome": { "type": "string", "enum": ["fixed", "skipped", "no_change"], "description": "fixed: you changed the code; skipped: you chose not to; no_change: nothing needed changing." },
+                            "note": { "type": "string", "maxLength": 2000, "description": "Why; required for skipped and no_change." },
+                            "commit": { "type": "string", "description": "Sha of the fix, if any." }
                         },
                         "required": ["id", "outcome"],
                         "additionalProperties": false
@@ -194,29 +179,29 @@ fn thread_tool_list() -> Value {
     json!([
         {
             "name": "list_threads",
-            "description": "List the chats (threads) in the sidebar of this device, every project included (`spaceId` names each thread's project; null is a project-less chat), with their live status and the role and first 120 prose characters of their newest transcript entry. `lastRole` identifies the author only; neither an assistant entry nor idle status proves the task is complete or safe to archive. Use status for runtime state and read_thread for context. An awaiting_input row carries the question it is blocked on as `pendingInput` (answer it with respond_to_input); status is a snapshot, so a thread that keeps asking permission can read idle a moment later. `createdByChatId` names the chat whose agent opened it with create_thread; `delegatedByChatId` and `delegationStatus` name the chat that owns it as a delegate_task child and how that task stands. `parentId` keeps only threads opened or delegated by that thread (\"self\" for this chat), `spaceId` only one project's threads. Results are newest first by updatedAt, default 50 and max 200 per page; pass nextCursor as cursor for the next page. A thread that gets a new message while you page moves ahead of the cursor and is not repeated; list again from the start to see it. Archived threads are left out unless `includeArchived` is true. `settled` is true when the thread sits on the sidebar Inbox's Settled shelf (see set_thread_settled). Every row is a real sidebar chat the human can open.",
+            "description": "List the chats in this device's sidebar, every project included, newest first by updatedAt (default 50, max 200; pass `nextCursor` as `cursor`; a thread updated meanwhile moves ahead of it). Each row has its live `status` (a snapshot: neither idle nor an assistant last entry means its task is done), `spaceId` (project, null for none), the role and first 120 characters of its newest entry, `pendingInput` while awaiting_input, `createdByChatId`, `delegatedByChatId` and `delegationStatus` for delegate_task children, and `settled`. Archived threads only with `includeArchived`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "includeArchived": { "type": "boolean" },
                     "status": { "type": "string", "enum": ["idle", "working", "awaiting_input", "errored"] },
-                    "parentId": { "type": "string", "description": "A thread id, or \"self\" for this chat." },
+                    "parentId": { "type": "string", "description": "Threads that thread opened or delegated; \"self\" for this chat." },
                     "spaceId": { "type": "string", "description": "A project id from list_projects." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
-                    "cursor": { "type": "string", "description": "nextCursor from the previous page with the same filters." }
+                    "cursor": { "type": "string" }
                 },
                 "additionalProperties": false
             }
         },
         {
             "name": "read_thread",
-            "description": "Read the tail of a thread's transcript. Returns the newest `limit` entries (default 30, max 200) and a `before` cursor for older ones. Thinking is left out unless `includeReasoning` is true; each tool call is one line unless `includeTools` is false. `pendingInput` is the question or permission request the thread is blocked on (answer it with respond_to_input), or null.",
+            "description": "Read a thread's transcript tail: the newest `limit` entries (default 30, max 200) and a `before` cursor for older ones. Thinking only with `includeReasoning`; one line per tool call unless `includeTools` is false. `pendingInput` is the question it is blocked on, or null.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "threadId": thread_id,
                     "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
-                    "before": { "type": "string", "description": "An entry id from a previous page; returns entries older than it." },
+                    "before": { "type": "string" },
                     "includeReasoning": { "type": "boolean" },
                     "includeTools": { "type": "boolean" }
                 },
@@ -226,20 +211,20 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "create_thread",
-            "description": "Open a new peer thread and give it `prompt` as its first message. It opens in this chat's project and folder unless `project` names another project on this device (it then runs in that project's folder) or `cwd` names an existing directory. It runs this chat's harness, model, reasoning level, permission mode, model options and tool set, but never this chat's agent profile or its instructions. `profile` starts it on an agent profile from orchestrator_capabilities instead: that profile's harness, model, reasoning, model options, instructions and tool set (added to this chat's), and its permission mode when that is no higher than this chat's. `harness`, `model` or `reasoning` override this chat's or the profile's; picking a different harness without a `model` uses that harness's default model, and an unknown harness, model, reasoning level or profile is an error. Returns the new thread's row as list_threads reports it; with `wait`, also `turn` once its first turn ends (see send_message_to_thread). `taskStepId` runs that step of a Mission Control task this chat leads (an id from the tasks tool) and binds the new thread to it: the thread takes the step's title unless `title` is set, and Zeron messages this chat when the thread finishes a turn or fails, so it cannot be combined with `wait`.",
+            "description": "Open a new top-level peer thread with `prompt` as its first message, in this chat's project and folder unless `project` or `cwd` says otherwise. It takes this chat's harness, model, reasoning, permission mode, model options and tool set, never its profile or instructions. `profile` starts it on an agent profile instead (permission mode capped at this chat's); `harness`, `model` and `reasoning` override either, a new `harness` without `model` takes its default model, and anything unknown is an error. Returns its list_threads row; `wait` adds `turn` once its first turn ends. `taskStepId` runs that step of a Mission Control task this chat leads: the thread takes the step's title, and Zeron messages this chat when it finishes a turn, so no `wait`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "prompt": { "type": "string" },
                     "title": { "type": "string" },
-                    "project": { "type": "string", "description": "Project id, path or name from list_projects; default: this chat's." },
-                    "cwd": { "type": "string", "description": "Existing directory to run in; default: the project's folder." },
-                    "profile": { "type": "string", "description": "Agent profile id from orchestrator_capabilities; default: none." },
-                    "harness": { "type": "string", "description": "Harness id such as claude-code or codex; default: this chat's." },
-                    "model": { "type": "string", "description": "Model id as the chosen harness names it (list_models); default: this chat's." },
-                    "reasoning": { "type": "string", "enum": REASONING_LEVELS, "description": "Reasoning level; default: this chat's." },
-                    "taskStepId": { "type": "string", "description": "A step id from the tasks tool: runs that step of a task this chat leads on the new thread." },
-                    "quotaChoice": { "type": "string", "enum": ["native", "fallback", "wait"], "description": "Only after a quota_exhausted error, with the person's answer: run on the next fallback (native means this chat's own model for a step) or wait for the reset." },
+                    "project": { "type": "string", "description": "Project id, path or name from list_projects." },
+                    "cwd": { "type": "string", "description": "An existing directory." },
+                    "profile": { "type": "string", "description": "Agent profile id." },
+                    "harness": { "type": "string", "description": "Such as claude-code or codex." },
+                    "model": { "type": "string", "description": "As the harness names it." },
+                    "reasoning": { "type": "string", "enum": REASONING_LEVELS },
+                    "taskStepId": { "type": "string", "description": "A step id from the tasks tool." },
+                    "quotaChoice": { "type": "string", "enum": ["native", "fallback", "wait"], "description": "Only after a quota_exhausted error, with the person's answer: native (this chat's own model for a step), the next fallback, or wait for the reset." },
                     "wait": wait,
                     "timeoutSeconds": timeout
                 },
@@ -249,7 +234,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "send_message_to_thread",
-            "description": "Send a message to another thread on this device, in any project. An idle thread starts a turn with it; a working thread receives it inside its current turn at the next step (a wait_threads call there returns with it), or at turn end if its agent takes no mid-turn input. With `wait`, blocks until the turn that read the message ends (timeoutSeconds default 600, max 1800) and adds `turn`: `status`, `timedOut`, the assistant `replies` written after the message, and `pendingInput`. Never to this chat itself.",
+            "description": "Send a message to another thread on this device. An idle thread starts a turn with it; a working one reads it at its next step, or at turn end if it takes no mid-turn input. `wait` blocks until the turn that read it ends (`timeoutSeconds` default 600, max 1800) and adds `turn`: `status`, `timedOut`, the assistant `replies` after the message, and `pendingInput`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -264,12 +249,12 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "wait_threads",
-            "description": "Wait with mode any (default: any listed thread stops working, or an inbox message arrives), all (all listed threads stop working), or message (an inbox message arrives, even if peers are already idle). Use message after sending when you need a reply; it receives pending inbox messages too and does not correlate replies to a particular send. all requires threadIds; any with no ids waits for a message. Idle, awaiting_input and errored all mean not working, not task success. A message returned here also reaches you as a user message at your next step, so act on it once. Timeout defaults to 600s, max 1800s.",
+            "description": "Wait until a listed thread stops working or an inbox message arrives (mode any, the default; no ids waits for a message), until every listed thread stops (all), or for a message even while peers are idle (message; it does not tie a reply to a send). Stopped means idle, awaiting_input or errored, not success. A returned message also reaches you as your next user message: act on it once. Timeout default 600 s, max 1800.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "threadIds": { "type": "array", "items": { "type": "string" } },
-                    "timeoutSeconds": { "type": "integer", "minimum": 0, "maximum": 1800 },
+                    "timeoutSeconds": timeout,
                     "mode": { "type": "string", "enum": ["any", "all", "message"] }
                 },
                 "additionalProperties": false
@@ -277,7 +262,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "watch_threads",
-            "description": "Have Zeron wake this chat whenever one of these threads blocks on a question or a tool approval, even after this turn ends. The wake names the thread, its requestId and the questions: answer with respond_to_input when the answer follows from your task, otherwise ask the person. This chat's delegated tasks wake it this way without being listed. `add` and `remove` take thread ids on this device; returns the threads this chat watches now.",
+            "description": "Have Zeron wake this chat, even after this turn ends, whenever one of these threads blocks on a question or a tool approval; the wake names the thread, its requestId and the questions. Delegated tasks wake it without being listed. `add` and `remove` take thread ids; returns the watched threads.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -288,28 +273,23 @@ fn thread_tool_list() -> Value {
             }
         },
         {
-            "name": "set_thread_title",
-            "description": "Rename a thread on this device, in any project (this chat included).",
+            "name": "set_thread",
+            "description": "Change threads on this device, in any project; set exactly one of `title` (renames `threadId`, this chat included), `archived` (archives or unarchives `threadId` or `threadIds`; not while one works, never cascades) or `settled` (as the sidebar's Settle: on the Inbox's Settled shelf until its next message; not while one works or waits on a question).",
             "inputSchema": {
                 "type": "object",
-                "properties": { "threadId": thread_id, "title": { "type": "string" } },
-                "required": ["threadId", "title"],
+                "properties": {
+                    "threadId": thread_id,
+                    "threadIds": { "type": "array", "items": { "type": "string" } },
+                    "title": { "type": "string" },
+                    "archived": { "type": "boolean" },
+                    "settled": { "type": "boolean" }
+                },
                 "additionalProperties": false
             }
         },
-        thread_flag_tool(
-            "set_thread_archived",
-            "Archive or unarchive one thread (`threadId`) or several (`threadIds`) on this device, in any project. A working thread (this chat included, while its turn runs) cannot be archived; archiving never cascades to other threads.",
-            "archived",
-        ),
-        thread_flag_tool(
-            "set_thread_settled",
-            "Settle or unsettle one thread (`threadId`) or several (`threadIds`) on this device, in any project, as the sidebar's Settle button does: a settled thread moves to the Inbox's Settled shelf. It holds until the thread's next message, which brings it back. A working thread, or one waiting on a question, cannot be settled.",
-            "settled",
-        ),
         {
             "name": "interrupt_thread",
-            "description": "Stop another thread's running turn on this device, as its stop button does. Never this chat itself.",
+            "description": "Stop another thread's running turn, as its stop button does.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "threadId": thread_id },
@@ -319,7 +299,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "respond_to_input",
-            "description": "Answer the question or permission request another thread is blocked on (read_thread's `pendingInput`). `requestId` defaults to its current one. Each answer names a question id and the chosen option labels, or free text for an open question. A tool approval (`approval: true`) can only be answered while this chat runs at Full access; otherwise ask the person. Computer-use consent is the person's to give and is refused. Never this chat itself.",
+            "description": "Answer the question or permission request another thread is blocked on (its `pendingInput`); `requestId` defaults to the current one. Each answer is a question id with the chosen option labels, or free text for an open question. A tool approval (`approval: true`) needs this chat at Full access; computer-use consent is the person's and is refused.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -344,7 +324,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "ask_user",
-            "description": "Ask the person watching this chat one to four questions and wait for their answers. Set `multiSelect` on a question when more than one option may apply: the person ticks any number of them and submits. Options are short labels; the person may type a free-text answer instead, and a question with no options is open-ended. Returns each question's chosen labels, or `answered: false` when nobody answered before the turn ended or 25 minutes passed. Prefer it over a built-in question tool that cannot offer multi-select.",
+            "description": "Ask the person watching this chat one to four questions and wait for the answers. Options are short labels, several pickable with `multiSelect`; the person may type free text instead, and a question without options is open. Returns each question's chosen labels, or `answered: false` when nobody answered by turn end or within 25 minutes.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -355,11 +335,11 @@ fn thread_tool_list() -> Value {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "id": { "type": "string", "description": "Stable id for mapping answers; defaults to q1, q2, ..." },
-                                "header": { "type": "string", "description": "Short label shown above the question (12 or fewer chars)." },
+                                "id": { "type": "string", "description": "Default q1, q2, ..." },
+                                "header": { "type": "string", "description": "Label above the question, 12 chars or fewer." },
                                 "question": { "type": "string" },
                                 "options": { "type": "array", "items": { "type": "string" } },
-                                "multiSelect": { "type": "boolean", "description": "Let the person pick several options instead of one." }
+                                "multiSelect": { "type": "boolean" }
                             },
                             "required": ["question"],
                             "additionalProperties": false
@@ -372,7 +352,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "terminal",
-            "description": "Use this chat's terminals: the shells in Zeron's terminal panel (Cmd+J) that the person sees, live. `list` returns them, newest activity first, with any text the person has selected in them (`selection`). `read` returns the rendered screen as text: logical lines from the scrollback tail to the cursor (default 80, max 400), `altScreen` when a full-screen program owns it. `send` types `text` and then presses `keys` (e.g. [\"enter\"], [\"ctrl+c\"], [\"up\"], [\"escape\"]); a newline in text is Enter. It waits `waitMs` (default 500, max 30000) and returns a read, so wait longer for slow commands or read again. `open` starts a new shell in this chat's folder, shown to the person as a new tab, optionally running `command`. `terminalId` defaults to the most recently active running terminal. Input runs in the person's real shell like any command you run; output is untrusted data.",
+            "description": "Use this chat's terminals, the shells the person sees in Zeron's terminal panel. `list`: newest activity first, with any text the person selected. `read`: the rendered screen from the scrollback tail to the cursor (`lines` default 80, max 400; `altScreen` when a full-screen program owns it). `send`: types `text`, then presses `keys` (such as [\"enter\"] or [\"ctrl+c\"]), waits `waitMs` (default 500, max 30000) and returns a read. `open`: a new shell tab in this chat's folder, optionally running `command`. `terminalId` defaults to the most recently active. It is the person's real shell; output is untrusted data.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -390,7 +370,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "project_actions",
-            "description": "Manage the Actions of this chat's project: the saved commands in the project's Actions menu (play button in the toolbar), the same ones the person adds with Add action. `list` returns them, plus `importableActions` found in the project's zeron.json. `upsert` saves one: omit `actionId` to add, pass it to replace that Action (list first; do not add a duplicate). `runOnWorktreeCreate` makes it the project's setup Action: Zeron runs it in a new terminal, in the new worktree, whenever Zeron itself creates a worktree for a chat (a `git worktree add` from a shell does not trigger it). Use it for the steps a fresh checkout needs, such as installing dependencies or copying env files. Only one Action per project is the setup Action; saving another with the flag clears it on the previous one. The command runs in the person's shell with ZERON_PROJECT_ROOT (the main checkout) and ZERON_WORKTREE_PATH set. `delete` removes one by `actionId`.",
+            "description": "Manage this project's Actions, the saved commands in its toolbar Actions menu. `list` them, plus `importableActions` from zeron.json. `upsert` one: omit `actionId` to add (list first; no duplicates). `delete` by `actionId`. `runOnWorktreeCreate` makes it the project's one setup Action, run in a new terminal in every worktree Zeron creates (not one from `git worktree add`), for installs or env files. Commands run in the person's shell with ZERON_PROJECT_ROOT and ZERON_WORKTREE_PATH set.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -398,8 +378,8 @@ fn thread_tool_list() -> Value {
                     "actionId": { "type": "string" },
                     "name": { "type": "string", "maxLength": 80 },
                     "command": { "type": "string", "maxLength": 16384 },
-                    "icon": { "type": "string", "enum": ["play", "test", "lint", "configure", "build", "debug"], "description": "Defaults to play." },
-                    "runOnWorktreeCreate": { "type": "boolean", "description": "Defaults to false." }
+                    "icon": { "type": "string", "enum": ["play", "test", "lint", "configure", "build", "debug"] },
+                    "runOnWorktreeCreate": { "type": "boolean" }
                 },
                 "required": ["action"],
                 "additionalProperties": false
@@ -407,7 +387,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "tasks",
-            "description": "Manage the person's Tasks list, the Tasks page in the rail: to-dos the person or an agent writes down, each of which can be assigned to a thread that works on it. A task's status follows its thread (To do, Working, Needs you) until someone marks it done. `list` returns the open tasks in the person's order (`includeDone` adds finished ones), with notes cut to 500 characters; `taskId` returns one task whole, done or not. A `[title](zeron-task:<id>)` link in a message names a task: read it with `list` and that `taskId`, and when it is finished mark it done with `update` and `completed: true`. A task carries `sendError` when the last send to its thread failed. `create` adds one: `title` is required, `notes` and `dueOn` (YYYY-MM-DD) are optional, and it lands in this chat's project unless `projectId` names another (an id from list_projects, or \"\" for none). `update` changes `title`, `notes`, `dueOn` (\"\" clears it) or `completed`. `assign` hands a task to a thread: `threadId` is a thread on this device, or omit it for this chat itself; with `send` (default true, except for this chat) the task's title and notes are sent to that thread as a message, steering its running turn; `send: false` only links the task, so it follows that thread. A task has one thread; assigning it again moves it. `unassign` drops the link and `delete` removes the task. A Mission Control task (`mode` orchestrated) has a lead thread and steps, each run on its own thread that the lead opens with create_thread and the step's `taskStepId`: `list` gives it `progress` (steps done of steps not skipped), `planPending` while the person has not approved its plan, and with `taskId` its `plan` (the overview), `planDoc` (true when the person asked for a plan doc: an overview plus a spec in each step's notes), `context` (the threadIds of chats the person gave the lead to read before it planned) and its `steps` with their status (planned, working, needsYou, failed, done, skipped) and `threadId`; a step is done only once the lead marks it, and a step whose thread finished its turn reads planned until then. Only the task's lead uses `plan` and `step`. `plan` writes the plan for `taskId` as `steps` [{title, notes, threadId}] and an optional `overview`: steps that have not started are replaced, the rest are kept, and the new ones follow them. A step's optional `threadId` hands it to a thread the lead already started with create_thread or delegate_task, which then runs that step; a sidechat, a fork, another chat's thread or one that already runs an open step is refused. A replaced step's images go to the new step with the same title, or else to the overview, and `imagesMoved` in the reply says where; a plan whose images would not fit on the overview is refused. `plan` also takes `resources`, what the mission needs to itself while it runs: `port:<n>` for a port its servers listen on, `slot:<name>` for a quiet CPU (slot:benchmark for timing runs), `path:<path inside the project>` for files it rewrites; it replaces the declared list, `[]` clears it, and the Supervisor checks them against other missions. `step` marks `stepId` with `state` done or skipped, or open to clear that mark. Run a step with create_thread and its `taskStepId`. `escalate`, for a task's lead, puts a decision only the person can make in their Needs you list: `title`, `why` (goal, spend or decision), `detail` and one to three `options`. It returns the `itemId` at once; keep working on what does not depend on it, and the person's choice reaches you as a message.",
+            "description": "Manage the person's Tasks list (the rail's Tasks page): to-dos, each assignable to a thread whose status it follows (To do, Working, Needs you) until marked done. A `[title](zeron-task:<id>)` link names a task: read it with `list` and that `taskId`, and mark it done with `update` `completed: true` when finished. `list`: open tasks in order (`includeDone` adds done ones; notes cut to 500 characters), or one whole with `taskId`, done or not; `sendError` means the last send to its thread failed. `create`: `title`, optional `notes`, `dueOn` (YYYY-MM-DD) and `projectId` (default this chat's project, \"\" for none). `update`: `title`, `notes`, `dueOn` (\"\" clears) or `completed`. `assign` to `threadId` (default this chat), sending its title and notes there unless `send: false` (the default for this chat); a task has one thread. `unassign`, `delete`. A Mission Control task (`mode` orchestrated) has a lead thread and steps: `list` adds `progress` and `planPending`, and with `taskId` its `plan`, `planDoc`, `context` (threads the lead was given to read) and `steps` (planned, working, needsYou, failed, done or skipped, with `threadId`); a step is done only once its lead marks it. Lead only: `plan` writes `steps` [{title, notes, threadId, role}] and an optional `overview` for `taskId`, replacing unstarted steps and keeping the rest; a step's `threadId` hands it to a thread the lead started (not a sidechat, fork, another chat's thread or one on an open step); replaced steps' images move to the same-titled step or the overview (`imagesMoved`); `resources` replaces the mission's claims (port:<n>, slot:<name>, path:<path in the project>; [] clears) that the Supervisor checks against other missions. `step` marks `stepId` `state` done, skipped or open; run a step with create_thread and its `taskStepId`. `escalate` puts a decision only the person can make in their Needs you list (`title`, `why`, `detail`, one to three `options`) and returns its `itemId` at once; keep working on what does not depend on it, and the choice arrives as a message.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -430,7 +410,7 @@ fn thread_tool_list() -> Value {
                                 "title": { "type": "string", "maxLength": 500 },
                                 "notes": { "type": "string", "maxLength": 10000 },
                                 "threadId": { "type": "string" },
-                                "role": { "type": "string", "description": "worker | validator | research | design | general; Settings > Routing picks where the step's thread runs." }
+                                "role": { "type": "string", "description": "worker | validator | research | design | general; Settings > Routing picks where the step runs." }
                             },
                             "required": ["title"],
                             "additionalProperties": false
@@ -454,18 +434,18 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "agent_profiles",
-            "description": "Manage the person's agent profiles: named bundles of harness, model, reasoning, permission mode, model options, a tool set, instructions and a when-to-use note, shown in the model picker's Profiles tab and listed by orchestrator_capabilities. Use this only when the person asks to create, change, remove or switch to a profile. `list` returns them. `upsert` saves one: omit `profileId` to add (name and harness are required), or pass it to change only the fields you send; an empty string clears model, notes or instructions. `modelOptions` sets the model's options by id (choices from list_models, for example {\"contextWindow\": \"1m\", \"autoCompact\": \"400k\"}); an empty string drops one back to its default. `disabledTools` replaces the profile's tool set: tools a chat on this profile runs without, in Claude Code's names (`WebFetch`, `Task`), `mcp__<server>` for a whole MCP server, and `mcp__zeron__<tool>` for Zeron's own tools; built-in and server entries only matter on claude-code. Turning tools off saves little context (Claude Code defers most tool schemas) but keeps the agent from using them. `instructions` are added to the agent's system prompt on every run of a chat using the profile, so write them as a role brief. `permissionMode` can never exceed this chat's own permission mode, also when editing a profile that already has a higher one. `apply` switches this chat to a profile of its own harness from the next message on; it may not raise this chat's permission mode or turn back on a tool this chat has off. `delete` removes one by `profileId`. Profiles you save stay marked as written by an agent until the person saves them in Settings.",
+            "description": "Manage the person's agent profiles (the model picker's Profiles tab): named harness, model, reasoning, permission mode, model options, tool set, instructions and when-to-use `notes`. Only when the person asks. `list`. `upsert`: omit `profileId` to add (name and harness required), else only the fields sent change; \"\" clears model, notes or instructions. `modelOptions` by option id, with ids and values from orchestrator_capabilities for that `harness`; \"\" resets one. `disabledTools` replaces the tool set: Claude Code names (`WebFetch`, `Task`), `mcp__<server>`, or `mcp__zeron__<tool>`; built-in and server entries only matter on claude-code. `instructions` join the system prompt of every run: write a role brief. `permissionMode` never exceeds this chat's. `apply` switches this chat to a profile of its own harness from the next message, never raising its permission mode or turning a tool back on. `delete` by `profileId`. Profiles you save read as agent-written until the person saves them.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "action": { "type": "string", "enum": ["list", "upsert", "apply", "delete"] },
                     "profileId": { "type": "string" },
                     "name": { "type": "string", "maxLength": 80 },
-                    "harness": { "type": "string", "description": "Harness id from orchestrator_capabilities." },
-                    "model": { "type": "string", "description": "Model id as that harness names it; empty keeps the chat's model." },
+                    "harness": { "type": "string" },
+                    "model": { "type": "string", "description": "As that harness names it; empty keeps the chat's model." },
                     "reasoning": { "type": "string", "enum": REASONING_LEVELS },
                     "permissionMode": { "type": "string", "enum": ["ask", "auto", "full"] },
-                    "notes": { "type": "string", "maxLength": 2000, "description": "When to use this profile." },
+                    "notes": { "type": "string", "maxLength": 2000 },
                     "instructions": { "type": "string", "maxLength": 16000 },
                     "modelOptions": { "type": "object", "additionalProperties": { "type": "string" } },
                     "disabledTools": { "type": "array", "items": { "type": "string" }, "maxItems": 200 }
@@ -476,7 +456,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "context_settings",
-            "description": "Read or change this chat's own context settings. Use `set` only when the person asks you to tune context for this chat. `get` returns the harness, model, context window, the auto-compact choice and its choices, and the tools this chat runs without. `set` with `autoCompact` (claude-code on a 1M context window only) picks the window Claude Code compacts at: `auto` keeps the model's own (about 967K on 1M), and a smaller window such as `300k` compacts about 33K before it, which keeps every turn cheaper at the cost of compacting sooner. The change applies from the next message: Claude Code reads it at launch, so the chat's runtime restarts and resumes, ending its background shells and sub-agents.",
+            "description": "Read or change this chat's context settings; `set` only when the person asks. `get`: harness, model, context window, the auto-compact choice and its choices, and the tools this chat runs without. `set` `autoCompact` (claude-code on a 1M window only): `auto` keeps the model's own (about 967K); a smaller window such as `300k` compacts about 33K before it, cheaper turns for sooner compaction. It applies from the next message by restarting the runtime, which ends its background shells and sub-agents.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -489,19 +469,19 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "html_preview",
-            "description": format!("Lay out an HTML page in Zeron's own web engine (the one that shows it in the thread) and get back a PNG screenshot, contentHeight (the height the page needs at this width), and its console output: log, info, warning, error, and uncaught exceptions. console.log is a fine way to report your own checks. Use it to check and iterate on a page before html_render. Pass `html`, or `path` for an .html file in this thread's folder. `tree: true` adds the page's elements as UI driver tree lines (refs w1-<n>, every line marked `web` because the page wrote it). `rect` or `select` crops the screenshot. `steps` acts on the page in UI driver syntax and returns a screenshot and tree after each step; a failed step stops the rest. Steps act through the DOM, so events they fire have isTrusted false. Needs the Zeron desktop app open on this machine. {} The page gets the theme variables and layout described in html_render.", html_render::PAGE_RULES),
+            "description": "Lay out an HTML page in Zeron's own web engine and get a PNG screenshot, `contentHeight` at this width, and its console output (log to uncaught exceptions; console.log your own checks). Check a page with it before html_render. Pass `html`, or `path` to an .html file in this thread's folder. `tree` adds the page's elements as UI driver tree lines (refs w1-<n>). `rect` or `select` crops the screenshot. `steps` act on the page in UI driver syntax through the DOM (isTrusted false), with a screenshot and tree after each; a failed step stops the rest. Needs the Zeron app open on this machine. Pages follow html_render's rules.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "html": { "type": "string", "maxLength": html_render::MAX_HTML_BYTES, "description": "A complete, self-contained HTML document. Give this or `path`." },
-                    "path": { "type": "string", "description": "An .html or .htm file inside this thread's folder, relative to it or absolute. Files outside it are refused." },
-                    "tree": { "type": "boolean", "description": "Also return the page's elements as tree lines." },
-                    "rect": { "type": "object", "properties": { "x": { "type": "number", "minimum": 0 }, "y": { "type": "number", "minimum": 0 }, "w": { "type": "number", "minimum": 1 }, "h": { "type": "number", "minimum": 1 } }, "required": ["x", "y", "w", "h"], "additionalProperties": false, "description": "Crop the screenshot to this region, in CSS pixels from the page's top-left." },
-                    "select": { "type": "string", "description": "Crop the screenshot to the element this UI driver selector names, e.g. `Button \"Save\"`." },
-                    "nth": { "type": "integer", "minimum": 0, "description": "Which match of `select`, 0-based, when it matches several." },
+                    "html": { "type": "string", "maxLength": html_render::MAX_HTML_BYTES },
+                    "path": { "type": "string" },
+                    "tree": { "type": "boolean" },
+                    "rect": { "type": "object", "properties": { "x": { "type": "number", "minimum": 0 }, "y": { "type": "number", "minimum": 0 }, "w": { "type": "number", "minimum": 1 }, "h": { "type": "number", "minimum": 1 } }, "required": ["x", "y", "w", "h"], "additionalProperties": false, "description": "CSS pixels from the page's top-left." },
+                    "select": { "type": "string", "description": "UI driver selector, such as `Button \"Save\"`." },
+                    "nth": { "type": "integer", "minimum": 0, "description": "Which match of `select`, 0-based." },
                     "steps": { "type": "array", "maxItems": html_render::MAX_PREVIEW_STEPS, "items": { "type": "object", "properties": { "action": { "type": "string", "enum": ["click", "type", "key", "wait"] } }, "required": ["action"] }, "description": "In order: {action:\"click\", select|ref, nth?}, {action:\"type\", text, select|ref?}, {action:\"key\", keys:\"enter\"}, {action:\"wait\", for:\"ms\", ms} or for:\"select\"|\"text\"|\"gone\" as in ui_driver wait." },
-                    "width": { "type": "integer", "minimum": html_render::MIN_PREVIEW_WIDTH, "maximum": html_render::MAX_PREVIEW_WIDTH, "description": format!("Viewport width in CSS pixels. Defaults to {}, the reply column; use about 390 to check phones.", html_render::COLUMN_WIDTH) },
-                    "appearance": { "type": "string", "enum": ["dark", "light"], "description": "Theme to preview. Defaults to dark." }
+                    "width": { "type": "integer", "minimum": html_render::MIN_PREVIEW_WIDTH, "maximum": html_render::MAX_PREVIEW_WIDTH, "description": format!("CSS pixels; default {}, the reply column; about 390 for phones.", html_render::COLUMN_WIDTH) },
+                    "appearance": { "type": "string", "enum": ["dark", "light"] }
                 },
                 "additionalProperties": false
             },
@@ -509,13 +489,13 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "html_render",
-            "description": format!("Show a finished HTML page (chart, table, diagram, collage, mockup) inline in this thread, above your final text reply; call it before writing that reply. The reader already sees the page, live, so the reply should not announce it, say where it is, or restate it: add only what the page doesn't say. Zeron fits the frame to the page's height. A height below the page's own height caps the frame there, and the rest scrolls inside it. Call it from the main conversation: a page published from inside a subagent does not appear in the thread. {} {} {}", html_render::PAGE_RULES, html_render::LAYOUT_GUIDE, html_render::THEME_GUIDE),
+            "description": format!("Show a finished HTML page (chart, table, diagram, collage, mockup) inline above your final reply; call it before the reply, which adds only what the page doesn't say. Call it from the main conversation, not a subagent. The frame fits the page's height; a smaller `height` caps it and the rest scrolls. {} {} {}", html_render::PAGE_RULES, html_render::LAYOUT_GUIDE, html_render::THEME_GUIDE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "html": { "type": "string", "maxLength": html_render::MAX_HTML_BYTES, "description": "A complete, self-contained HTML document." },
-                    "title": { "type": "string", "maxLength": html_render::MAX_TITLE_CHARS, "description": "Short name for the page." },
-                    "height": { "type": "integer", "minimum": html_render::MIN_HEIGHT, "maximum": html_render::MAX_HEIGHT, "description": "The frame height in CSS pixels. Use the page's height, or less to make long content scroll inside the frame." }
+                    "html": { "type": "string", "maxLength": html_render::MAX_HTML_BYTES },
+                    "title": { "type": "string", "maxLength": html_render::MAX_TITLE_CHARS },
+                    "height": { "type": "integer", "minimum": html_render::MIN_HEIGHT, "maximum": html_render::MAX_HEIGHT, "description": "CSS pixels." }
                 },
                 "required": ["html", "title", "height"],
                 "additionalProperties": false
@@ -523,107 +503,63 @@ fn thread_tool_list() -> Value {
             "annotations": { "title": "Render HTML", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": false, "openWorldHint": true }
         },
         {
-            "name": "device_list",
-            "description": "List iOS Simulators and Android Emulators on this environment's device hosts, which platforms each host can run, and which devices are already open in this thread's Device panel. Call this before device_open when you do not know a device id.",
+            "name": "device",
+            "description": "iOS Simulators and Android Emulators on this environment's device hosts. `list`: the devices, each host's platforms, and which are open in this thread's Device panel. `open`: boots `deviceId` (or the booted or last used one for `platform`) and shows it live in the person's Device panel; returns the agent-device CLI invocation pinned to it. `screenshot`: an open device's screen as a PNG (default the last opened). `close`: removes `deviceId` (default every device) from the panel; `shutdown` also powers it off. `hostId` defaults to local, or every host for `list`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "hostId": { "type": "string", "description": "Limit to one device host. Defaults to all hosts." }
-                },
-                "additionalProperties": false
-            },
-            "annotations": { "title": "List devices", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }
-        },
-        {
-            "name": "device_open",
-            "description": "Open a simulator or emulator for this thread: boots it if needed, starts its live stream, and shows it in the user's Device panel so they can watch. Returns the agent-device CLI invocation pinned to the device; drive the device with that CLI afterwards.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "deviceId": { "type": "string", "description": "Simulator udid or emulator serial from device_list. Omit to use the booted device for the platform, or the most recently used one." },
-                    "platform": { "type": "string", "enum": ["ios", "android"], "description": "Required when deviceId is omitted and both platforms are available." },
-                    "hostId": { "type": "string", "description": "Device host from device_list. Defaults to local." }
-                },
-                "additionalProperties": false
-            },
-            "annotations": { "title": "Open device", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true }
-        },
-        {
-            "name": "device_screenshot",
-            "description": "Capture the current screen of an open device as a PNG image. Use it to see what the user sees; for taps and text use the agent-device CLI.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "deviceId": { "type": "string", "description": "Device from device_list. Omit to use the device most recently opened in this thread." },
-                    "hostId": { "type": "string" }
-                },
-                "additionalProperties": false
-            },
-            "annotations": { "title": "Screenshot device", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true }
-        },
-        {
-            "name": "device_close",
-            "description": "Remove a device from this thread's Device panel. Pass shutdown=true to also power the simulator or emulator off.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "deviceId": { "type": "string", "description": "Device to close. Omit to close every device in this thread." },
+                    "action": { "type": "string", "enum": ["list", "open", "screenshot", "close"] },
+                    "deviceId": { "type": "string", "description": "Simulator udid or emulator serial." },
+                    "platform": { "type": "string", "enum": ["ios", "android"] },
                     "hostId": { "type": "string" },
-                    "shutdown": { "type": "boolean", "description": "Also power the simulator or emulator off. Defaults to false." }
+                    "shutdown": { "type": "boolean" }
                 },
+                "required": ["action"],
                 "additionalProperties": false
             },
-            "annotations": { "title": "Close device", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true }
+            "annotations": { "title": "Devices", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true }
         },
         {
             "name": "list_projects",
-            "description": "List the projects on this device: id, name, folder path, and whether it is a git repository. Pass one as create_thread's `project`.",
+            "description": "List the projects on this device: id, name, folder path, and whether it is a git repository.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
-            "name": "list_harnesses",
-            "description": "List the agent harnesses on this device: whether each is installed and available (installed and switched on), whether it takes a message mid-turn (`steersMidTurn`; otherwise a message to its working thread waits for turn end), and its reasoning levels.",
-            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
-        },
-        {
-            "name": "list_models",
-            "description": "List the models a harness offers on this device: id, label and reasoning levels. Pass an id as create_thread's `model` with that `harness`.",
+            "name": "orchestrator_capabilities",
+            "description": format!("List what delegate_task and create_thread can run on: each harness with whether it runs now, its reasoning levels and models (pinned ones plus the first {LISTED_MODELS} in catalog order; `omittedModels` counts the rest and `search` finds any of them); the run settings a child inherits; where each delegate_task role is routed (Settings > Routing); the saved agent profiles (pick by `whenToUse`, pass the id as `profile`); and the delegation limits. `harness` narrows it to one harness and adds each model's label, reasoning levels and options."),
             "inputSchema": {
                 "type": "object",
-                "properties": { "harness": { "type": "string", "description": "Harness id from list_harnesses." } },
-                "required": ["harness"],
+                "properties": {
+                    "harness": { "type": "string" },
+                    "search": { "type": "string", "maxLength": 200, "description": "Words a model's id or label contains." }
+                },
                 "additionalProperties": false
             }
         },
         {
-            "name": "orchestrator_capabilities",
-            "description": "List the harnesses on this device and their current models from the same live catalog as the composer, the run settings a delegated task inherits from this chat, where each delegate_task role is routed (Settings > Routing), the agent profiles the user saved (pick one by its whenToUse and pass its id to delegate_task), and the delegation limits set in Settings. For a separate top-level chat use create_thread.",
-            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
-        },
-        {
             "name": "delegate_task",
-            "description": "Delegate one task to a Zeron-owned child agent/subagent of THIS chat and run it with only the supplied task prompt, without copying this chat's history. Choose harnesses and models from orchestrator_capabilities, which uses the same live catalog as the composer. Prefer native subagent tools for same-harness work only when they support the chosen model. Use this for any model missing from the native tool, including same-harness work, for cross-harness work, or for explicitly Zeron-owned child tasks. The childThreadId is backing storage, not an ordinary top-level thread. Harness, model, reasoning and permission mode inherit unless target overrides them; a role with no target or profile runs on its Settings > Routing route when one is set, and orchestrator_capabilities lists the routes. permissionMode may only narrow. Prefer mode='async' for long work; mode='wait' blocks until completion or timeout. timeoutMs on mode=wait is only this chat's wait budget and does not cancel the child. waitTimedOut on that wait call means the timeout fired; keep that taskId and read status on a later task_status. An async child's completion wakes this chat through a message, steered into an active turn where supported or queued otherwise, so end the turn instead of polling or spawning watchers; use task_status only when the result is needed mid-turn.",
+            "description": "Start a Zeron-owned child agent of this chat on `task` alone, without this chat's history. Harness, model, reasoning and permission mode inherit unless `profile` or `target` sets them; a `role` with neither runs on its Settings > Routing route, and `permissionMode` only narrows. `mode` async (default) returns its `taskId` at once and the child's completion wakes this chat; `wait`, only when this turn needs the result, blocks until it finishes or `timeoutMs` passes (`waitTimedOut` leaves the child running). `childThreadId` is the child's backing storage, not a top-level thread.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "task": { "type": "string", "description": "Self-contained task for one delegated child agent/subagent." },
-                    "profile": { "type": "string", "description": "Agent profile id from orchestrator_capabilities. It sets harness, model, reasoning, permission mode and model options; target and permissionMode override it." },
+                    "task": { "type": "string", "description": "A self-contained brief." },
+                    "profile": { "type": "string", "description": "Agent profile id; target and permissionMode override it." },
                     "target": {
                         "type": "object",
                         "properties": {
-                            "harness": { "type": "string", "description": "Harness id from orchestrator_capabilities; default: this chat's." },
-                            "model": { "type": "string", "description": "Model id as that harness names it; default: this chat's model on the same harness, else the harness default." },
+                            "harness": { "type": "string" },
+                            "model": { "type": "string", "description": "As that harness names it; default this chat's model on the same harness, else the harness default." },
                             "reasoning": { "type": "string", "enum": REASONING_LEVELS }
                         },
                         "additionalProperties": false
                     },
                     "title": { "type": "string", "maxLength": 512 },
-                    "role": { "type": "string", "description": "worker | validator | research | design | general. With no target or profile, the child runs where Settings > Routing sends this role." },
-                    "mode": { "type": "string", "enum": ["async", "wait"], "description": "Defaults to async. Use wait only when this turn needs the child's result before you can continue." },
-                    "timeoutMs": { "type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECS * 1000, "description": "Wait budget for mode=wait only. Default 10 minutes. Elapsing it returns waitTimedOut=true on that call and does not cancel the child." },
-                    "clientRequestId": { "type": "string", "maxLength": 256, "description": "Idempotency key: a retry with the same key returns the original task." },
+                    "role": { "type": "string", "description": "worker | validator | research | design | general." },
+                    "mode": { "type": "string", "enum": ["async", "wait"] },
+                    "timeoutMs": { "type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECS * 1000, "description": "For mode wait; default 10 minutes." },
+                    "clientRequestId": { "type": "string", "maxLength": 256, "description": "Idempotency key: a retry returns the original task." },
                     "permissionMode": { "type": "string", "enum": ["inherit", "ask", "auto", "full"] },
-                    "quotaChoice": { "type": "string", "enum": ["native", "fallback", "wait"], "description": "Only after a quota_exhausted error, with the person's answer: run it as your native sub-agent, on the next harness in the fallback list, or wait for the reset." }
+                    "quotaChoice": { "type": "string", "enum": ["native", "fallback", "wait"], "description": "Only after a quota_exhausted error, with the person's answer: your native sub-agent, the next fallback harness, or wait for the reset." }
                 },
                 "required": ["task"],
                 "additionalProperties": false
@@ -631,15 +567,15 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "review_changes",
-            "description": "Have a fresh reviewer agent review this chat's code changes, exactly as the user's Review button does. The reviewer, model, thinking level and review instructions default to the user's Settings > Code review. It returns at once; the findings show on the Review chip and in the Changes pane, and this chat is woken when it finishes, so end the turn instead of polling. task_status then lists the findings with ids (F1, F2...); fix or decline each and report every one with resolve_findings. Call it when you finish a change you want checked.",
+            "description": "Have a fresh reviewer agent review this chat's code changes, as the Review button does, with the person's Settings > Code review defaults. It returns at once; the findings show on the Review chip and in the Changes pane, and this chat is woken when it finishes. task_status then lists them (F1, F2...): fix or decline each and report every one with resolve_findings.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "scope": { "type": "string", "enum": ["uncommitted", "branch", "turn", "commit"], "description": "What to review. uncommitted: the working tree; branch: this branch against its base; turn: your latest turn's changes; commit: one commit (needs commit). Default uncommitted." },
-                    "commit": { "type": "string", "description": "Commit sha, for scope=commit." },
-                    "harness": { "type": "string", "description": "Reviewer harness id from list_harnesses; default: the user's setting." },
-                    "model": { "type": "string", "description": "Reviewer model, with harness." },
-                    "reasoning": { "type": "string", "enum": REASONING_LEVELS, "description": "Reviewer reasoning level, with harness." }
+                    "scope": { "type": "string", "enum": ["uncommitted", "branch", "turn", "commit"], "description": "uncommitted (default): the working tree; branch: against its base; turn: your latest turn's changes; commit: one `commit`." },
+                    "commit": { "type": "string" },
+                    "harness": { "type": "string" },
+                    "model": { "type": "string" },
+                    "reasoning": { "type": "string", "enum": REASONING_LEVELS }
                 },
                 "additionalProperties": false
             }
@@ -647,7 +583,7 @@ fn thread_tool_list() -> Value {
         resolve_findings,
         {
             "name": "task_status",
-            "description": "Read a Zeron-owned delegated task. A task another chat on this device delegated (its taskId is the child thread id, as list_threads names it) is read without touching that chat's wake, and the view adds `ownerChatId`. workState distinguishes working, waiting_for_children, and result_available; a finished turn with live nested work is not a finished task. summary is the final task result, including the error on failure, and stays stable once published. hasPendingChildRuns reports a later turn the child is running. Reading a finished result of this chat's own task acknowledges its automatic wake.",
+            "description": "Read a delegated task or review: `workState` working, waiting_for_children or result_available (a finished turn with live nested work is not a finished task); `summary`, the final result or error, stable once published; `hasPendingChildRuns` while the child runs a later turn. Another chat's task (taskId is its child thread id) reads without touching that chat's wake and adds `ownerChatId`; reading this chat's own finished task acknowledges its wake.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "taskId": { "type": "string" } },
@@ -657,7 +593,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "task_cancel",
-            "description": "Request interruption of an active Zeron-owned delegated task and dispose its automatic wake. Finished results stay readable.",
+            "description": "Interrupt an active delegated task and drop its wake. Finished results stay readable.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -793,9 +729,12 @@ impl ThreadTools {
         }
         if let Some(list) = tools.as_array_mut() {
             list.retain(|tool| {
-                tool["name"]
-                    .as_str()
-                    .is_none_or(|name| !disabled.contains(name))
+                tool["name"].as_str().is_none_or(|name| {
+                    match zeron_proto::tools::action_labels(name) {
+                        Some(labels) => !labels.iter().all(|label| disabled.contains(*label)),
+                        None => !disabled.contains(name),
+                    }
+                })
             });
         }
         tools
@@ -860,9 +799,7 @@ impl ThreadTools {
             "send_message_to_thread" => self.send_message_to_thread(args).await,
             "wait_threads" => self.wait_threads(args).await,
             "watch_threads" => self.watch_threads(args).await,
-            "set_thread_title" => self.set_thread_title(args).await,
-            "set_thread_archived" => self.set_thread_archived(args).await,
-            "set_thread_settled" => self.set_thread_settled(args).await,
+            "set_thread" => self.set_thread(args).await,
             "interrupt_thread" => self.interrupt_thread(args).await,
             "respond_to_input" => self.respond_to_input(args).await,
             "ask_user" => self.ask_user(args).await,
@@ -875,11 +812,9 @@ impl ThreadTools {
             "html_render" => self.html_render(args).await,
             visual::TOOL => self.show_visual(args).await,
             visual::IMAGE_TOOL => self.show_image(args).await,
-            "device_list" | "device_open" | "device_close" => self.device_tool(name, args).await,
+            "device" => self.device_tool(args).await,
             "list_projects" => self.list_projects().await,
-            "list_harnesses" => self.list_harnesses().await,
-            "list_models" => self.list_models(args).await,
-            "orchestrator_capabilities" => self.orchestrator_capabilities().await,
+            "orchestrator_capabilities" => self.orchestrator_capabilities(args).await,
             "delegate_task" => self.delegate_task(args).await,
             "review_changes" => self.review_changes(args).await,
             "resolve_findings" => self.resolve_findings(args).await,
@@ -1153,7 +1088,7 @@ impl ThreadTools {
         Ok(json!({ "projects": projects }))
     }
 
-    pub async fn list_harnesses(&self) -> Result<Value, String> {
+    async fn list_harnesses(&self) -> Result<Value, String> {
         let listed = self.call_engine(methods::LIST_HARNESSES, json!({})).await?;
         let harnesses: Vec<Value> = listed
             .as_array()
@@ -1179,26 +1114,6 @@ impl ThreadTools {
             .call_engine(methods::LIST_MODELS, json!({ "harness": harness }))
             .await?;
         Ok(catalog["models"].as_array().cloned().unwrap_or_default())
-    }
-
-    pub async fn list_models(&self, args: &Value) -> Result<Value, String> {
-        let harness = args["harness"]
-            .as_str()
-            .filter(|h| !h.is_empty())
-            .ok_or("harness is required")?;
-        let models: Vec<Value> = self
-            .models_of(harness)
-            .await?
-            .iter()
-            .map(|model| {
-                json!({
-                    "id": model["id"],
-                    "label": model["label"],
-                    "reasoningLevels": model["reasoningLevels"],
-                })
-            })
-            .collect();
-        Ok(json!({ "harness": harness, "models": models }))
     }
 
     async fn check_model(&self, caller: &Chat, args: &Value, prefix: &str) -> Result<(), String> {
@@ -1351,16 +1266,32 @@ impl ThreadTools {
         }
     }
 
-    pub async fn orchestrator_capabilities(&self) -> Result<Value, String> {
+    pub async fn orchestrator_capabilities(&self, args: &Value) -> Result<Value, String> {
         let (caller, _) = self.peers().await?;
-        let harnesses = self.list_harnesses().await?["harnesses"]
+        let only = args["harness"].as_str().filter(|id| !id.is_empty());
+        let terms: Vec<String> = args["search"]
+            .as_str()
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        let harnesses: Vec<Value> = self.list_harnesses().await?["harnesses"]
             .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|harness| only.is_none_or(|id| harness["id"] == id))
             .cloned()
-            .unwrap_or_default();
+            .collect();
+        if let Some(id) = only
+            && harnesses.is_empty()
+        {
+            return Err(format!("unknown harness {id}"));
+        }
+        let agent_profiles = self.agent_profiles().await.unwrap_or_default();
         let catalogs = futures::future::join_all(harnesses.iter().map(|harness| async move {
             let id = harness["id"].as_str().unwrap_or_default();
-            if harness["available"] != true {
-                return Err("Harness is not installed or is switched off.".to_string());
+            if harness["available"] != true && only.is_none() {
+                return Err(UNAVAILABLE_HARNESS.to_string());
             }
             match tokio::time::timeout(MODEL_LIST_WAIT, self.models_of(id)).await {
                 Ok(Ok(models)) => Ok(models),
@@ -1369,16 +1300,39 @@ impl ThreadTools {
             }
         }))
         .await;
+        let config = caller.config.as_ref();
         let harnesses: Vec<Value> = harnesses
             .iter()
             .zip(catalogs)
             .map(|(harness, catalog)| {
-                let (models, constraints) = match catalog {
+                let (models, mut constraints) = match catalog {
                     Ok(models) => (models, Vec::new()),
                     Err(reason) => (Vec::new(), vec![reason]),
                 };
-                let models: Vec<&Value> = models.iter().map(|model| &model["id"]).collect();
-                json!({
+                if harness["available"] != true && constraints.is_empty() {
+                    constraints.push(UNAVAILABLE_HARNESS.to_string());
+                }
+                let pinned: Vec<&str> = config
+                    .filter(|config| json!(config.harness) == harness["id"])
+                    .and_then(|config| config.model.as_deref())
+                    .into_iter()
+                    .chain(
+                        agent_profiles
+                            .iter()
+                            .filter(|profile| json!(profile.harness) == harness["id"])
+                            .filter_map(|profile| profile.model.as_deref()),
+                    )
+                    .collect();
+                let listed = listed_models(&models, &pinned, &terms);
+                let omitted = models.len() - listed.len();
+                let models: Vec<Value> = listed
+                    .into_iter()
+                    .map(|model| match only {
+                        Some(_) => model_detail(model),
+                        None => model["id"].clone(),
+                    })
+                    .collect();
+                let mut row = json!({
                     "harness": harness["id"],
                     "name": harness["name"],
                     "steersMidTurn": harness["steersMidTurn"],
@@ -1386,16 +1340,17 @@ impl ThreadTools {
                     "models": models,
                     "canRunChildTask": constraints.is_empty(),
                     "constraints": constraints,
-                })
+                });
+                if omitted > 0 {
+                    row["omittedModels"] = json!(omitted);
+                }
+                row
             })
             .collect();
         let limits = self
             .call_engine(methods::GET_DELEGATION_SETTINGS, json!({}))
             .await?;
-        let profiles: Vec<Value> = self
-            .agent_profiles()
-            .await
-            .unwrap_or_default()
+        let profiles: Vec<Value> = agent_profiles
             .iter()
             .map(|profile| {
                 json!({
@@ -1414,7 +1369,6 @@ impl ThreadTools {
             .await
             .map(|preview| preview["rows"].clone())
             .unwrap_or(Value::Null);
-        let config = caller.config.as_ref();
         Ok(json!({
             "parentThreadId": caller.id,
             "routing": routing,
@@ -2645,12 +2599,13 @@ impl ThreadTools {
         Ok(())
     }
 
-    async fn device_tool(&self, name: &str, args: &Value) -> Result<Value, String> {
-        let method = match name {
-            "device_list" => methods::DEVICE_TOOL_LIST,
-            "device_open" => methods::DEVICE_TOOL_OPEN,
-            "device_close" => methods::DEVICE_TOOL_CLOSE,
-            _ => methods::DEVICE_TOOL_SCREENSHOT,
+    async fn device_tool(&self, args: &Value) -> Result<Value, String> {
+        let method = match args["action"].as_str() {
+            Some("list") => methods::DEVICE_TOOL_LIST,
+            Some("open") => methods::DEVICE_TOOL_OPEN,
+            Some("screenshot") => methods::DEVICE_TOOL_SCREENSHOT,
+            Some("close") => methods::DEVICE_TOOL_CLOSE,
+            _ => return Err("action must be list, open, screenshot or close".into()),
         };
         let secret = self
             .run_secret
@@ -2670,7 +2625,7 @@ impl ThreadTools {
 
     // Only the image block carries the PNG: harnesses record the text block in the chat doc.
     pub async fn device_screenshot(&self, args: &Value) -> Value {
-        match self.device_tool("device_screenshot", args).await {
+        match self.device_tool(args).await {
             Ok(mut result) => {
                 let data = result["screenshot"]
                     .as_object_mut()
@@ -2718,7 +2673,24 @@ impl ThreadTools {
         .await
     }
 
-    pub async fn set_thread_title(&self, args: &Value) -> Result<Value, String> {
+    pub async fn set_thread(&self, args: &Value) -> Result<Value, String> {
+        let fields = ["title", "archived", "settled"]
+            .into_iter()
+            .filter(|field| !args[*field].is_null())
+            .count();
+        if fields != 1 {
+            return Err("set exactly one of title, archived or settled".into());
+        }
+        if !args["title"].is_null() {
+            self.set_thread_title(args).await
+        } else if !args["archived"].is_null() {
+            self.set_thread_archived(args).await
+        } else {
+            self.set_thread_settled(args).await
+        }
+    }
+
+    async fn set_thread_title(&self, args: &Value) -> Result<Value, String> {
         let thread_id = Self::thread_id(args)?;
         let title = args["title"]
             .as_str()
@@ -2747,7 +2719,7 @@ impl ThreadTools {
         Ok(ids)
     }
 
-    pub async fn set_thread_archived(&self, args: &Value) -> Result<Value, String> {
+    async fn set_thread_archived(&self, args: &Value) -> Result<Value, String> {
         let archived = args["archived"].as_bool().ok_or("archived is required")?;
         let ids = self.peer_ids(args).await?;
         if archived {
@@ -2772,7 +2744,7 @@ impl ThreadTools {
         Ok(json!({ "threadIds": ids, "archived": archived }))
     }
 
-    pub async fn set_thread_settled(&self, args: &Value) -> Result<Value, String> {
+    async fn set_thread_settled(&self, args: &Value) -> Result<Value, String> {
         let settled = args["settled"].as_bool().ok_or("settled is required")?;
         let ids = self.peer_ids(args).await?;
         if settled {
@@ -3094,6 +3066,7 @@ fn profile_draft(
 fn check_tool_names(names: &[String]) -> Result<(), String> {
     for name in names {
         if let Some(tool) = name.strip_prefix(zeron_proto::tools::ZERON_TOOL_PREFIX)
+            && zeron_proto::tools::action_labels(tool).is_none()
             && !zeron_proto::tools::TOOL_GROUPS
                 .iter()
                 .any(|group| group.tools().iter().any(|t| t.name == tool))
@@ -3156,6 +3129,50 @@ fn applied_profile(
     config.profile_id = Some(profile.id.clone());
     config.disabled_tools = profile.disabled_tools.clone();
     Ok(config)
+}
+
+fn listed_models<'a>(models: &'a [Value], pinned: &[&str], terms: &[String]) -> Vec<&'a Value> {
+    if !terms.is_empty() {
+        return models
+            .iter()
+            .filter(|model| {
+                let text = format!("{} {}", model["id"], model["label"]).to_lowercase();
+                terms.iter().all(|term| text.contains(term.as_str()))
+            })
+            .take(LISTED_MODELS)
+            .collect();
+    }
+    models
+        .iter()
+        .enumerate()
+        .filter(|(at, model)| {
+            *at < LISTED_MODELS || model["id"].as_str().is_some_and(|id| pinned.contains(&id))
+        })
+        .map(|(_, model)| model)
+        .collect()
+}
+
+fn model_detail(model: &Value) -> Value {
+    let options: Vec<Value> = model["options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|option| {
+            let values: Vec<&Value> = option["choices"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|choice| &choice["id"])
+                .collect();
+            json!({ "id": option["id"], "values": values, "default": option["defaultChoice"] })
+        })
+        .collect();
+    json!({
+        "id": model["id"],
+        "label": model["label"],
+        "reasoningLevels": model["reasoningLevels"],
+        "options": options,
+    })
 }
 
 fn wait_timeout(args: &Value) -> Duration {
@@ -3446,13 +3463,14 @@ async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
                 return Some(ok(id, result));
             }
             let disabled = tools.tool_settings().await;
+            let switch = zeron_proto::tools::action_label(name, &args).unwrap_or(name);
             if disabled
                 .as_ref()
-                .is_some_and(|disabled| disabled.contains(name))
+                .is_some_and(|disabled| disabled.contains(switch))
             {
-                return Some(ok(id, turned_off(name)));
+                return Some(ok(id, turned_off(switch)));
             }
-            if name == "device_screenshot" {
+            if name == "device" && args["action"] == "screenshot" {
                 return Some(ok(id, tools.device_screenshot(&args).await));
             }
             if name == html_render::PREVIEW_TOOL {
@@ -3587,16 +3605,14 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 38] = [
+    const THREAD_TOOLS: [&str; 31] = [
         "list_threads",
         "read_thread",
         "create_thread",
         "send_message_to_thread",
         "wait_threads",
         "watch_threads",
-        "set_thread_title",
-        "set_thread_archived",
-        "set_thread_settled",
+        "set_thread",
         "interrupt_thread",
         "respond_to_input",
         "ask_user",
@@ -3613,13 +3629,8 @@ mod tests {
         "html_render",
         "show_visual",
         "show_image",
-        "device_list",
-        "device_open",
-        "device_screenshot",
-        "device_close",
+        "device",
         "list_projects",
-        "list_harnesses",
-        "list_models",
         "orchestrator_capabilities",
         "delegate_task",
         "review_changes",
@@ -4661,12 +4672,24 @@ mod tests {
     #[tokio::test]
     async fn title_and_archive_are_registry_mutations_in_scope() {
         let rig = rig(fixture());
+        assert!(
+            rig.tools
+                .call(
+                    "set_thread",
+                    &json!({ "threadId": "b", "title": "x", "archived": true })
+                )
+                .await
+                .is_err()
+        );
         rig.tools
-            .set_thread_title(&json!({ "threadId": "b", "title": "Tests for login" }))
+            .call(
+                "set_thread",
+                &json!({ "threadId": "b", "title": "Tests for login" }),
+            )
             .await
             .unwrap();
         rig.tools
-            .set_thread_archived(&json!({ "threadId": "a", "archived": true }))
+            .call("set_thread", &json!({ "threadId": "a", "archived": true }))
             .await
             .unwrap();
         let calls = rig.calls.calls.lock().unwrap().clone();
@@ -5550,22 +5573,25 @@ mod tests {
     async fn device_tools_are_chat_scoped_and_the_screenshot_is_an_image_block() {
         let unbound = rig(fixture());
         assert_eq!(
-            unbound.tools.call("device_list", &json!({})).await,
+            unbound
+                .tools
+                .call("device", &json!({ "action": "list" }))
+                .await,
             Err("device tools need a live Zeron run".into())
         );
         assert!(logged(&unbound.calls, methods::DEVICE_TOOL_LIST).is_empty());
         let stale = computer_rig(Some("stale"));
         assert_eq!(
-            stale.tools.call("device_list", &json!({})).await,
+            stale
+                .tools
+                .call("device", &json!({ "action": "list" }))
+                .await,
             Err("device caller refused".into())
         );
         let rig = computer_rig(Some("live"));
         let mut pipe = Pipe::open(rig.tools);
         let tools = pipe.list().await;
-        let open = tools
-            .iter()
-            .find(|tool| tool["name"] == "device_open")
-            .unwrap();
+        let open = tools.iter().find(|tool| tool["name"] == "device").unwrap();
         assert_eq!(open["annotations"]["openWorldHint"], true);
         assert_eq!(
             open["inputSchema"]["properties"]["platform"]["enum"],
@@ -5573,7 +5599,11 @@ mod tests {
         );
 
         let shot = pipe
-            .call(json!(1), "device_screenshot", json!({ "chatId": "other" }))
+            .call(
+                json!(1),
+                "device",
+                json!({ "action": "screenshot", "chatId": "other" }),
+            )
             .await;
         let result = &shot["result"];
         assert_eq!(result["isError"], false);
@@ -5591,7 +5621,9 @@ mod tests {
         );
         assert_eq!(result["structuredContent"], text);
 
-        let both = pipe.call(json!(2), "device_open", json!({})).await;
+        let both = pipe
+            .call(json!(2), "device", json!({ "action": "open" }))
+            .await;
         assert_eq!(both["result"]["isError"], true);
         assert_eq!(
             both["result"]["content"][0]["text"],
@@ -5600,8 +5632,8 @@ mod tests {
         let closed = pipe
             .call(
                 json!(3),
-                "device_close",
-                json!({ "deviceId": "SIM-1", "shutdown": true, "hostId": null }),
+                "device",
+                json!({ "action": "close", "deviceId": "SIM-1", "shutdown": true, "hostId": null }),
             )
             .await;
         assert_eq!(closed["result"]["isError"], false);
@@ -6008,7 +6040,7 @@ mod tests {
     async fn capabilities_list_models_per_harness_and_the_settings_limits() {
         let out = rig(fixture())
             .tools
-            .orchestrator_capabilities()
+            .orchestrator_capabilities(&json!({}))
             .await
             .unwrap();
         let harnesses = out["harnesses"].as_array().unwrap();
@@ -6122,10 +6154,16 @@ mod tests {
             .iter()
             .filter(|info| info.group != zeron_proto::tools::ToolGroup::Computer)
             .flat_map(|info| info.tools())
-            .map(|tool| tool.name)
+            .map(|tool| {
+                zeron_proto::tools::ACTION_TOOLS
+                    .iter()
+                    .find(|(_, labels)| labels.contains(&tool.name))
+                    .map_or(tool.name, |(name, _)| *name)
+            })
             .collect();
         let mut listed = THREAD_TOOLS.to_vec();
         grouped.sort_unstable();
+        grouped.dedup();
         listed.sort_unstable();
         assert_eq!(grouped, listed);
         let computer: Vec<&str> =
@@ -6144,7 +6182,14 @@ mod tests {
             catalog_tool("computer_screenshot"),
             catalog_tool("computer_browser_click"),
         ];
-        fake.disabled = vec!["terminal", "computer_screenshot", "device_screenshot"];
+        fake.disabled = vec![
+            "terminal",
+            "computer_screenshot",
+            "device_screenshot",
+            "set_thread_title",
+            "set_thread_archived",
+            "set_thread_settled",
+        ];
         let fake = Arc::new(fake);
         let tools =
             ThreadTools::new(memory_client(fake.clone()), "a").with_run_secret(Some("live".into()));
@@ -6152,13 +6197,23 @@ mod tests {
         let listed = pipe.list().await;
         let listed = names(&listed);
         assert!(listed.contains(&"read_thread") && listed.contains(&"computer_browser_click"));
-        for name in ["terminal", "computer_screenshot", "device_screenshot"] {
-            assert!(!listed.contains(&name), "{name} listed");
-            let reply = pipe.call(json!(7), name, json!({})).await;
-            assert_eq!(reply["result"]["isError"], true, "{name}");
+        assert!(listed.contains(&"device"), "device keeps its other actions");
+        assert!(!listed.contains(&"set_thread"), "every action off hides it");
+        for (name, args, switch) in [
+            ("terminal", json!({}), "terminal"),
+            ("computer_screenshot", json!({}), "computer_screenshot"),
+            (
+                "device",
+                json!({ "action": "screenshot" }),
+                "device_screenshot",
+            ),
+        ] {
+            assert!(!listed.contains(&switch), "{switch} listed");
+            let reply = pipe.call(json!(7), name, args).await;
+            assert_eq!(reply["result"]["isError"], true, "{switch}");
             assert_eq!(
                 reply["result"]["content"][0]["text"],
-                format!("{name} is turned off in Zeron's Settings > Tools.")
+                format!("{switch} is turned off in Zeron's Settings > Tools.")
             );
         }
         assert!(logged(&fake, methods::COMPUTER_ACTION).is_empty());
@@ -6539,26 +6594,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_models_reads_the_catalogs_models() {
+    async fn capabilities_narrow_to_one_harness_with_model_details_and_search() {
         let rig = rig(fixture());
         let out = rig
             .tools
-            .list_models(&json!({ "harness": "codex" }))
+            .orchestrator_capabilities(&json!({ "harness": "codex" }))
             .await
             .unwrap();
+        assert_eq!(out["harnesses"].as_array().unwrap().len(), 1);
         assert_eq!(
-            out,
-            json!({
-                "harness": "codex",
-                "models": [
-                    { "id": "gpt-5", "label": "GPT-5", "reasoningLevels": ["high"] },
-                    { "id": "gpt-5.6-luna", "label": "Luna", "reasoningLevels": [] },
-                ]
-            })
+            out["harnesses"][0]["models"],
+            json!([
+                { "id": "gpt-5", "label": "GPT-5", "reasoningLevels": ["high"], "options": [] },
+                { "id": "gpt-5.6-luna", "label": "Luna", "reasoningLevels": [], "options": [] },
+            ])
         );
+        assert_eq!(out["harnesses"][0]["canRunChildTask"], false);
+        let out = rig
+            .tools
+            .orchestrator_capabilities(&json!({ "harness": "claude-code", "search": "OPUS 5" }))
+            .await
+            .unwrap();
+        let models = &out["harnesses"][0]["models"];
+        assert_eq!(models.as_array().unwrap().len(), 1);
         assert_eq!(
-            rig.tools.list_models(&json!({})).await.unwrap_err(),
-            "harness is required"
+            models[0]["options"][0],
+            json!({ "id": "contextWindow", "values": ["200k", "1m"], "default": "1m" })
+        );
+        assert_eq!(out["harnesses"][0]["omittedModels"], 1);
+        assert_eq!(
+            rig.tools
+                .orchestrator_capabilities(&json!({ "harness": "nope" }))
+                .await
+                .unwrap_err(),
+            "unknown harness nope"
+        );
+    }
+
+    #[test]
+    fn a_long_catalog_lists_its_head_and_the_pinned_models() {
+        let models: Vec<Value> = (0..12)
+            .map(|n| json!({ "id": format!("m{n}"), "label": format!("Model {n}") }))
+            .collect();
+        let ids = |listed: Vec<&Value>| -> Vec<String> {
+            listed
+                .iter()
+                .map(|m| m["id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let listed = ids(listed_models(&models, &["m11"], &[]));
+        assert_eq!(listed.len(), LISTED_MODELS + 1);
+        assert_eq!(listed.last().unwrap(), "m11");
+        assert_eq!(
+            ids(listed_models(&models, &[], &["model".into(), "1".into()])),
+            ["m1", "m10", "m11"]
         );
     }
 
