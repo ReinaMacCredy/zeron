@@ -14,6 +14,14 @@ final class AgentSenderTests: XCTestCase {
         add(shot)
     }
 
+    /// The fork folds a settled turn's work under one row: open it.
+    private func openWork(_ app: XCUIApplication) {
+        let fold = app.descendants(matching: .any).matching(identifier: "row-tools").firstMatch
+        guard fold.waitForExistence(timeout: 10) else { return }
+        app.buttons.matching(NSPredicate(format: "label == 'Expand'")).allElementsBoundByIndex
+            .first { fold.frame.intersects($0.frame) }?.tap()
+    }
+
     func testSenderCaptionOpensTheSendingChat() {
         let app = XCUIApplication()
         app.launchArguments = ["-demo", "-route", "chat:chat-side"]
@@ -31,6 +39,7 @@ final class AgentSenderTests: XCTestCase {
         sender.tap()
         let reply = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS 'critically damped spring'")).firstMatch
+        if !reply.waitForExistence(timeout: 5) { openWork(app) }
         XCTAssertTrue(reply.waitForExistence(timeout: 10), "the sending chat opened")
         snapshot(app, "sender-opened")
     }
@@ -40,6 +49,7 @@ final class AgentSenderTests: XCTestCase {
         app.launchArguments = ["-demo", "-route", "chat:chat-side-easing"]
         app.launch()
 
+        openWork(app)
         // The send_message call reads as one line naming the recipient: no
         // tool, and no copy of the message.
         let sent = app.descendants(matching: .any)
