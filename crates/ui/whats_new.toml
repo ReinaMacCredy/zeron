@@ -84,6 +84,9 @@ text = "On iPhone, Settings keeps its large title as you scroll, under a soft bl
 [[entry.improvements]]
 text = "Closing a device in the Device panel no longer crashes Zeron."
 
+[[entry.improvements]]
+text = "A quieter look: neutral inline code and list markers, lighter icon strokes, sidebar rows with the worktree, branch and diff on one line, shelves that always show their count, and a \"What should we build in\" headline on New chat with the machine and permissions under the composer. A thread names its permissions only when they are not Full access."
+
 [[entry]]
 version = "0.2.120"
 date = "Oct 24"

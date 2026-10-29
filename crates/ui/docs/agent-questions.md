@@ -23,7 +23,7 @@ When an agent in another chat is waiting, a pill appears above the main composer
 
 A permission request is a question with fixed answers, such as **Allow** and **Deny** for Claude Code or **Yes** and **No** for Codex.
 
-How often agents ask is set by the permission chip in the composer footer, under **Approve agent actions**:
+How often agents ask is set by the permission chip under the composer, under **Approve agent actions**. The New chat canvas always shows it; in a chat it shows only when the mode is not **Full access**:
 
 | Mode | What it does |
 | --- | --- |
