@@ -4,9 +4,10 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use gpui::{
-    AnyElement, Bounds, ClickEvent, Context, Edges, Entity, EventEmitter, FocusHandle, Focusable,
-    Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render,
-    SharedString, Subscription, Window, div, prelude::*, px,
+    AnyElement, Bounds, ClickEvent, Context, DragMoveEvent, Edges, Entity, EventEmitter,
+    FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent, Modifiers, MouseButton,
+    MouseDownEvent, Pixels, Point, Render, ScrollHandle, SharedString, Subscription, Window, div,
+    prelude::*, px,
 };
 use zeron_proto::mission::column_title;
 use zeron_proto::{
@@ -24,6 +25,7 @@ use crate::typography::ui_rems;
 
 mod card;
 mod center;
+mod drag;
 #[cfg(test)]
 mod image_paths_tests;
 pub(crate) mod images;
@@ -57,6 +59,11 @@ const ROW_BORDER: Edges<f32> = Edges {
     bottom: 0.0,
     left: 0.0,
 };
+const GUTTER: f32 = 56.0;
+const ROW_GAP: f32 = 2.0;
+const BAR_IN: motion::MotionSpec = motion::MotionSpec::new(180, motion::EASE_OUT_QUINT);
+const BAR_RISE: f32 = 14.0;
+const PENDING_ORDER: Duration = Duration::from_secs(3);
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const START_PENDING: Duration = Duration::from_secs(15);
 
@@ -73,6 +80,10 @@ pub enum TasksEvent {
     },
     Card(TaskCardEvent),
     OpenCenter(String),
+    Gather {
+        task_ids: Vec<String>,
+        chat_id: Option<String>,
+    },
 }
 
 #[derive(Clone)]
@@ -84,6 +95,14 @@ struct TaskDrag {
 
 struct TaskDragGhost {
     title: SharedString,
+}
+
+struct LiftedRowGhost;
+
+impl Render for LiftedRowGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
 }
 
 impl Render for TaskDragGhost {
@@ -107,6 +126,7 @@ impl Render for TaskDragGhost {
 }
 
 struct Linked {
+    title: SharedString,
     indicator: ChatIndicator,
     brand: (&'static str, Option<Hsla>),
     since: Option<DateTime<Utc>>,
@@ -202,6 +222,19 @@ pub struct TasksPage {
     painted: Painted,
     body: Rc<Cell<Option<Bounds<Pixels>>>>,
     menu: popover::Popup<RowMenu>,
+    drag: Option<drag::ListDrag>,
+    shifts: drag::Shifts,
+    pending: Option<(Vec<String>, Instant)>,
+    picked: Vec<String>,
+    anchor: Option<String>,
+    press: f32,
+    scroll: ScrollHandle,
+    shown: Vec<String>,
+    rects: Rects,
+    autoscroll: Option<gpui::Task<()>>,
+    bar: motion::Tween,
+    bar_count: usize,
+    thread_picker: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -266,6 +299,19 @@ impl TasksPage {
             painted: Painted::default(),
             body: Rc::default(),
             menu: popover::Popup::default(),
+            drag: None,
+            shifts: drag::Shifts::default(),
+            pending: None,
+            picked: Vec::new(),
+            anchor: None,
+            press: 0.0,
+            scroll: ScrollHandle::new(),
+            shown: Vec::new(),
+            rects: Rects::default(),
+            autoscroll: None,
+            bar: motion::Tween::at(0.0, motion::now()),
+            bar_count: 0,
+            thread_picker: false,
             _subscriptions: vec![
                 add_events,
                 state_changes,
@@ -386,7 +432,12 @@ impl TasksPage {
         self.open_card(task_id.to_string(), window, cx);
     }
 
-    pub(crate) fn open_card(&mut self, task_id: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_card(
+        &mut self,
+        task_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.card.update(cx, |card, cx| {
             card.open(task_id, None, CardFocus::Title, Some(window), cx)
         });
@@ -479,15 +530,203 @@ impl TasksPage {
         );
     }
 
-    fn reorder(&mut self, task_id: &str, before: Option<&str>, cx: &mut Context<Self>) {
-        let key = {
+    fn open_ids(&self, cx: &gpui::App) -> Vec<String> {
+        let (open, _) = zeron_proto::mission::split_tasks(&self.state.read(cx).tasks);
+        let mut ids: Vec<String> = open.iter().map(|task| task.id.clone()).collect();
+        if let Some((order, _)) = &self.pending {
+            ids.sort_by_key(|id| {
+                order
+                    .iter()
+                    .position(|known| known == id)
+                    .unwrap_or(usize::MAX)
+            });
+        }
+        ids
+    }
+
+    fn content_y(&self, window_y: f32) -> f32 {
+        window_y - f32::from(self.scroll.offset().y)
+    }
+
+    fn begin_drag(&mut self, task_id: &str, now: Instant) -> Option<drag::ListDrag> {
+        let offset = f32::from(self.scroll.offset().y);
+        let rows = self
+            .shown
+            .iter()
+            .map(|id| {
+                let rect = self.rects.get(&Key::Task(id.clone()))?;
+                let top = f32::from(rect.top()) - offset - self.shifts.offset(id, now);
+                Some((top, f32::from(rect.size.height) + ROW_GAP))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let primary = self.shown.iter().position(|id| id == task_id)?;
+        drag::ListDrag::new(
+            self.shown.clone(),
+            rows,
+            primary,
+            &self.picked,
+            self.content_y(self.press),
+        )
+    }
+
+    fn drag_rows(&mut self, task_id: &str, y: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let now = motion::now();
+        if self
+            .drag
+            .as_ref()
+            .is_none_or(|drag| drag.primary_id() != task_id)
+        {
+            self.drag = self.begin_drag(task_id, now);
+            if let Some(drag) = &self.drag {
+                if drag.count() == 1 {
+                    self.picked.clear();
+                }
+                window.focus(&self.focus, cx);
+            }
+        }
+        let content = self.content_y(y);
+        let Some(drag) = &mut self.drag else {
+            return;
+        };
+        drag.pointer = y;
+        drag.drag_to(content);
+        self.aim_shifts(now, cx);
+        self.autoscroll(cx);
+        cx.notify();
+    }
+
+    fn aim_shifts(&mut self, now: Instant, cx: &gpui::App) {
+        let Some(drag) = &self.drag else {
+            return;
+        };
+        let mut targets = drag.shifts();
+        let primary = drag.primary_id().to_string();
+        if let Some(dy) = targets.remove(&primary) {
+            self.shifts.snap(&primary, dy, now);
+        }
+        self.shifts
+            .aim(&targets, drag::SHIFT, motion::reduced_motion(cx), now);
+    }
+
+    fn autoscroll(&mut self, cx: &mut Context<Self>) {
+        if self.autoscroll.is_some() || self.scroll_speed() == 0.0 {
+            return;
+        }
+        self.autoscroll = Some(cx.spawn(async move |page, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+                let going = page
+                    .update(cx, |page, cx| {
+                        let speed = page.scroll_speed();
+                        if speed == 0.0 {
+                            page.autoscroll = None;
+                            return false;
+                        }
+                        let offset = page.scroll.offset();
+                        let max = f32::from(page.scroll.max_offset().y);
+                        let y = (f32::from(offset.y) - speed).clamp(-max, 0.0);
+                        page.scroll.set_offset(gpui::point(offset.x, px(y)));
+                        let now = motion::now();
+                        if let Some(drag) = &mut page.drag {
+                            let pointer = drag.pointer;
+                            drag.drag_to(pointer - y);
+                        }
+                        page.aim_shifts(now, cx);
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !going {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn scroll_speed(&self) -> f32 {
+        let Some(drag) = &self.drag else {
+            return 0.0;
+        };
+        let bounds = self.scroll.bounds();
+        let (top, bottom) = (f32::from(bounds.top()), f32::from(bounds.bottom()));
+        let offset = f32::from(self.scroll.offset().y);
+        let max = f32::from(self.scroll.max_offset().y);
+        let speed = drag::edge_speed(drag.pointer, top, bottom);
+        if (speed < 0.0 && offset >= 0.0) || (speed > 0.0 && -offset >= max) {
+            0.0
+        } else {
+            speed
+        }
+    }
+
+    fn drop_rows(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+        self.autoscroll = None;
+        let now = motion::now();
+        let reduced = motion::reduced_motion(cx);
+        let shown = self.shifts.current(now);
+        if drag.noop() {
+            let home = drag.flip(&drag.ids, &shown);
+            self.shifts.settle(&home, reduced, now);
+            cx.notify();
+            return;
+        }
+        let moving: Vec<String> = drag
+            .order()
+            .into_iter()
+            .filter(|id| drag.is_moving(id))
+            .collect();
+        let global = self.open_ids(cx);
+        let before = drag.before().or_else(|| {
+            let last = drag.last_rest()?;
+            let rest: Vec<&String> = global.iter().filter(|id| !moving.contains(id)).collect();
+            let at = rest.iter().position(|id| **id == last)?;
+            rest.get(at + 1).map(|id| (*id).clone())
+        });
+        let keys = {
             let state = self.state.read(cx);
             let (open, _) = zeron_proto::mission::split_tasks(&state.tasks);
-            logic::reorder_key(&open, task_id, before, &uuid::Uuid::new_v4().to_string())
+            logic::reorder_keys(
+                &open,
+                &moving,
+                before.as_deref(),
+                &uuid::Uuid::new_v4().to_string(),
+            )
         };
-        if let Some(key) = key {
+        if keys.is_empty() {
+            let home = drag.flip(&drag.ids, &shown);
+            self.shifts.settle(&home, reduced, now);
+            cx.notify();
+            return;
+        }
+        let mut order: Vec<String> = global
+            .into_iter()
+            .filter(|id| !moving.contains(id))
+            .collect();
+        let at = before
+            .as_ref()
+            .and_then(|before| order.iter().position(|id| id == before))
+            .unwrap_or(order.len());
+        order.splice(at..at, moving.iter().cloned());
+        self.pending = Some((order, Instant::now()));
+        let landed = drag.order();
+        let from = drag.flip(&landed, &shown);
+        self.shifts.settle(&from, reduced, now);
+        self.shifts.fade_in(
+            moving
+                .iter()
+                .filter(|id| **id != drag.primary_id())
+                .cloned(),
+            reduced,
+            now,
+        );
+        for (task_id, key) in keys {
             self.update(
-                task_id,
+                &task_id,
                 TaskPatch {
                     order_key: Some(key),
                     ..Default::default()
@@ -495,6 +734,121 @@ impl TasksPage {
                 cx,
             );
         }
+        cx.notify();
+    }
+
+    fn cancel_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(drag) = self.drag.take() else {
+            return false;
+        };
+        cx.stop_active_drag(window);
+        self.autoscroll = None;
+        let now = motion::now();
+        let home = drag.flip(&drag.ids, &self.shifts.current(now));
+        self.shifts.settle(&home, motion::reduced_motion(cx), now);
+        self.shifts.fade_in(
+            drag.ids
+                .iter()
+                .filter(|id| drag.is_moving(id) && *id != drag.primary_id())
+                .cloned(),
+            motion::reduced_motion(cx),
+            now,
+        );
+        cx.notify();
+        true
+    }
+
+    fn settle_pending(&mut self, cx: &gpui::App) {
+        let Some((order, since)) = &self.pending else {
+            return;
+        };
+        let (open, _) = zeron_proto::mission::split_tasks(&self.state.read(cx).tasks);
+        let now: Vec<&str> = open.iter().map(|task| task.id.as_str()).collect();
+        let wanted: Vec<&str> = order
+            .iter()
+            .map(String::as_str)
+            .filter(|id| now.contains(id))
+            .collect();
+        if wanted == now || since.elapsed() > PENDING_ORDER {
+            self.pending = None;
+        }
+    }
+
+    fn click_row(
+        &mut self,
+        task_id: &str,
+        paged: bool,
+        done: bool,
+        modifiers: Modifiers,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !done && modifiers.platform {
+            self.toggle_pick(task_id, cx);
+            return;
+        }
+        if !done && modifiers.shift && self.anchor.is_some() {
+            self.pick_range(task_id, cx);
+            return;
+        }
+        self.clear_picks(cx);
+        self.anchor = Some(task_id.to_string());
+        self.open_row(task_id, paged, window, cx);
+    }
+
+    fn toggle_pick(&mut self, task_id: &str, cx: &mut Context<Self>) {
+        match self.picked.iter().position(|id| id == task_id) {
+            Some(at) => {
+                self.picked.remove(at);
+            }
+            None => self.picked.push(task_id.to_string()),
+        }
+        self.anchor = Some(task_id.to_string());
+        self.thread_picker = false;
+        cx.notify();
+    }
+
+    fn pick_range(&mut self, task_id: &str, cx: &mut Context<Self>) {
+        let Some(anchor) = self.anchor.clone() else {
+            return;
+        };
+        let at = |id: &str| self.shown.iter().position(|known| known == id);
+        let (Some(a), Some(b)) = (at(&anchor), at(task_id)) else {
+            return;
+        };
+        for id in &self.shown[a.min(b)..=a.max(b)] {
+            if !self.picked.contains(id) {
+                self.picked.push(id.clone());
+            }
+        }
+        cx.notify();
+    }
+
+    fn clear_picks(&mut self, cx: &mut Context<Self>) {
+        if !self.picked.is_empty() || self.thread_picker {
+            self.picked.clear();
+            self.thread_picker = false;
+            cx.notify();
+        }
+    }
+
+    fn ordered_picks(&self) -> Vec<String> {
+        self.shown
+            .iter()
+            .filter(|id| self.picked.contains(id))
+            .cloned()
+            .collect()
+    }
+
+    fn gather(&mut self, chat_id: Option<String>, cx: &mut Context<Self>) {
+        let task_ids = self.ordered_picks();
+        if task_ids.is_empty() {
+            return;
+        }
+        self.picked.clear();
+        self.thread_picker = false;
+        cx.emit(TasksEvent::Gather { task_ids, chat_id });
+        cx.notify();
     }
 
     fn drop_on_column(&mut self, drag: &TaskDrag, column: TaskStatus, cx: &mut Context<Self>) {
@@ -506,7 +860,15 @@ impl TasksPage {
     fn rows(&self, cx: &gpui::App) -> (Vec<Row>, Vec<Row>) {
         let state = self.state.read(cx);
         let now = Utc::now();
-        let (open, done) = zeron_proto::mission::split_tasks(&state.tasks);
+        let (mut open, done) = zeron_proto::mission::split_tasks(&state.tasks);
+        if let Some((order, _)) = &self.pending {
+            open.sort_by_key(|task| {
+                order
+                    .iter()
+                    .position(|id| *id == task.id)
+                    .unwrap_or(usize::MAX)
+            });
+        }
         (
             open.into_iter()
                 .map(|task| row_for(state, task, now))
@@ -712,17 +1074,26 @@ impl TasksPage {
             };
             fragments.push(
                 div()
+                    .min_w_0()
                     .flex()
                     .items_center()
                     .gap(px(5.0))
                     .child(
                         icon(mark)
+                            .flex_none()
                             .size(px(12.0))
                             .text_color(tint.unwrap_or(theme.text_muted)),
                     )
-                    .child(label)
+                    .child(
+                        div()
+                            .debug_selector(|| format!("task-row-thread-{}", row.task.id))
+                            .max_w(px(220.0))
+                            .truncate()
+                            .child(linked.title.clone()),
+                    )
                     .into_any_element(),
             );
+            fragments.push(label);
         } else if row.task.chat_id.is_some() && row.linked.is_none() {
             fragments.push(div().child("Chat deleted").into_any_element());
         }
@@ -782,53 +1153,465 @@ impl TasksPage {
         let task_id = row.task.id.clone();
         let done = row.status == TaskStatus::Done;
         let selected = self.card.read(cx).task_id() == Some(task_id.as_str());
+        let picked = !done && self.picked.contains(&task_id);
         let hover = theme.glass_hover();
-        let accent = theme.accent;
         let open_id = task_id.clone();
         let menu_id = task_id.clone();
         let paged = row.linked.is_some();
-        let drop_before = task_id.clone();
-        let drag = TaskDrag {
-            task_id: task_id.clone(),
-            title: SharedString::from(row.task.title.clone()),
-            status: row.status,
-        };
+        let now = motion::now();
+        let lifted = self
+            .drag
+            .as_ref()
+            .filter(|drag| drag.primary_id() == task_id);
+        let hidden = self
+            .drag
+            .as_ref()
+            .is_some_and(|drag| drag.is_moving(&task_id) && drag.primary_id() != task_id);
+        let lane_key = SharedString::from(format!("task-lane-{task_id}"));
+        let gutter = (!done).then(|| {
+            self.row_gutter(
+                row,
+                motion::hover_t(&lane_key),
+                picked,
+                lifted.is_some(),
+                theme,
+                cx,
+            )
+        });
         let check = self.checkbox(row, theme, cx);
         let thumbs = self.row_images("task-row", row, theme, cx);
-        Self::row_content(row, check, selected, today, theme)
+        let content = Self::row_content(row, check, selected, today, theme)
             .children(thumbs)
             .id(SharedString::from(format!("task-row-{task_id}")))
             .debug_selector(|| format!("task-row-{}", row.task.id))
             .role(gpui::Role::ListItem)
+            .aria_selected(picked)
+            .relative()
+            .flex_1()
+            .min_w_0()
             .cursor_pointer()
-            .when(!selected, |el| el.hover(move |s| s.bg(hover)))
+            .when(picked, |el| el.bg(theme.accent.opacity(0.16)))
+            .when(!selected && !picked && self.drag.is_none(), |el| {
+                el.hover(move |s| s.bg(hover))
+            })
             .when(morphing, |el| el.opacity(0.0))
+            .when_some(lifted, |el, drag| {
+                el.bg(theme.surface_raised)
+                    .shadow(vec![
+                        gpui::BoxShadow {
+                            color: theme.border_strong,
+                            offset: gpui::point(px(0.0), px(0.0)),
+                            blur_radius: px(0.0),
+                            spread_radius: px(1.0),
+                            inset: false,
+                        },
+                        gpui::BoxShadow {
+                            color: gpui::black().opacity(0.35),
+                            offset: gpui::point(px(0.0), px(12.0)),
+                            blur_radius: px(28.0),
+                            spread_radius: px(0.0),
+                            inset: false,
+                        },
+                    ])
+                    .when(drag.count() > 1, |el| {
+                        el.child(Self::drag_count(drag.count(), theme))
+                    })
+            })
             .child(morph::record(
                 &self.painted,
                 Key::Task(task_id.clone()),
                 ROW_BORDER,
             ))
-            .on_click(cx.listener(move |page, _: &ClickEvent, window, cx| {
-                page.open_row(&open_id, paged, window, cx)
+            .on_click(cx.listener(move |page, event: &ClickEvent, window, cx| {
+                page.click_row(&open_id, paged, done, event.modifiers(), window, cx)
             }))
-            .on_mouse_down(MouseButton::Right, Self::row_menu_listener(menu_id, cx))
-            .when(!done, |el| {
-                el.on_drag(drag, |drag, _, _, cx| {
-                    cx.stop_propagation();
-                    let title = drag.title.clone();
-                    cx.new(|_| TaskDragGhost { title })
-                })
-                .drag_over::<TaskDrag>(move |style, drag, _, _| {
-                    if drag.status == TaskStatus::Done {
-                        style
-                    } else {
-                        style.border_color(accent)
-                    }
-                })
-                .on_drop(cx.listener(move |page, drag: &TaskDrag, _, cx| {
-                    page.reorder(&drag.task_id, Some(&drop_before), cx);
-                }))
+            .on_mouse_down(MouseButton::Right, Self::row_menu_listener(menu_id, cx));
+        let lane = div()
+            .id(lane_key.clone())
+            .relative()
+            .top(px(self.shifts.offset(&task_id, now)))
+            .flex()
+            .items_center()
+            .ml(px(-GUTTER))
+            .pl(px(GUTTER))
+            .opacity(if hidden {
+                0.0
+            } else {
+                self.shifts.opacity(&task_id, now)
             })
+            .on_hover(motion::hover_listener(lane_key))
+            .children(gutter)
+            .child(content);
+        if lifted.is_some() {
+            gpui::deferred(lane).with_priority(1).into_any_element()
+        } else {
+            lane.into_any_element()
+        }
+    }
+
+    fn drag_count(count: usize, theme: &Theme) -> AnyElement {
+        div()
+            .debug_selector(|| "task-drag-count".into())
+            .absolute()
+            .top(px(-8.0))
+            .right(px(-8.0))
+            .min_w(px(20.0))
+            .h(px(20.0))
+            .px(px(6.0))
+            .rounded_full()
+            .bg(theme.accent)
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(ui_rems(11.0))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(theme.on_accent)
+            .child(count.to_string())
+            .into_any_element()
+    }
+
+    fn row_gutter(
+        &self,
+        row: &Row,
+        hover: f32,
+        picked: bool,
+        lifted: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let task_id = row.task.id.clone();
+        let pick_t = if picked || !self.picked.is_empty() {
+            1.0
+        } else {
+            hover
+        };
+        let grip_t = match (lifted, self.drag.is_some()) {
+            (true, _) => 1.0,
+            (false, true) => 0.0,
+            (false, false) => hover,
+        };
+        let pick_id = task_id.clone();
+        let drag = TaskDrag {
+            task_id: task_id.clone(),
+            title: SharedString::from(row.task.title.clone()),
+            status: row.status,
+        };
+        let faint = theme.text_faint;
+        let grip_hover = theme.glass_hover();
+        let check = div()
+            .id(SharedString::from(format!("task-pick-{task_id}")))
+            .debug_selector(move || format!("task-pick-{pick_id}"))
+            .role(gpui::Role::CheckBox)
+            .aria_label("Select")
+            .aria_selected(picked)
+            .flex_none()
+            .ml(px(4.0))
+            .size(px(18.0))
+            .rounded(px(5.0))
+            .border_1()
+            .border_color(if picked { theme.accent } else { faint })
+            .bg(if picked { theme.accent } else { theme.bg })
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .opacity(pick_t)
+            .when(picked, |el| {
+                el.child(
+                    icon(icons::CHECK)
+                        .size(px(11.0))
+                        .text_color(theme.on_accent),
+                )
+            })
+            .on_click(cx.listener({
+                let task_id = task_id.clone();
+                move |page, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    page.toggle_pick(&task_id, cx);
+                }
+            }));
+        let grip_id = task_id.clone();
+        let grip = div()
+            .id(SharedString::from(format!("task-grip-{task_id}")))
+            .debug_selector(move || format!("task-grip-{grip_id}"))
+            .role(gpui::Role::Button)
+            .aria_label("Drag to reorder")
+            .flex_none()
+            .ml(px(8.0))
+            .w(px(20.0))
+            .h(px(24.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .opacity(grip_t)
+            .cursor(gpui::CursorStyle::OpenHand)
+            .hover(move |s| s.bg(grip_hover))
+            .child(icon(icons::DRAG_HANDLE).size(px(16.0)).text_color(faint))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|page, event: &MouseDownEvent, _, _| {
+                    page.press = f32::from(event.position.y);
+                }),
+            )
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .on_drag(drag, |_, _, _, cx| cx.new(|_| LiftedRowGhost));
+        div()
+            .absolute()
+            .left_0()
+            .top_0()
+            .bottom_0()
+            .w(px(GUTTER))
+            .flex()
+            .items_center()
+            .child(check)
+            .child(grip)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_selection_bar(
+        &mut self,
+        view: TasksView,
+        reduced: bool,
+        now: Instant,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let show = view == TasksView::List && !self.picked.is_empty();
+        if show {
+            self.bar_count = self.picked.len();
+        } else {
+            self.thread_picker = false;
+        }
+        let target = if show { 1.0 } else { 0.0 };
+        if self.bar.target() != target {
+            let spec = if reduced { drag::REDUCED_FADE } else { BAR_IN };
+            self.bar.retarget(target, spec, false, now);
+        }
+        if !self.bar.settled_at(now) {
+            window.request_animation_frame();
+        }
+        let t = self.bar.value_at(now);
+        if t <= 0.0 {
+            return None;
+        }
+        let theme = theme.for_popup();
+        let rise = if reduced { 0.0 } else { BAR_RISE * (1.0 - t) };
+        let button = |id: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .role(gpui::Role::Button)
+                .aria_label(label)
+                .h(px(30.0))
+                .px(px(10.0))
+                .rounded(px(8.0))
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .child(label)
+        };
+        let hover = theme.glass_hover();
+        let primary = theme.text;
+        let bar = div()
+            .debug_selector(|| "tasks-selection-bar".into())
+            .h(px(44.0))
+            .pl(px(14.0))
+            .pr(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .whitespace_nowrap()
+            .text_size(ui_rems(13.0))
+            .text_color(theme.text)
+            .child(
+                div()
+                    .debug_selector(|| "tasks-selection-count".into())
+                    .min_w(px(70.0))
+                    .mr(px(6.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child(format!("{} selected", self.bar_count)),
+            )
+            .child(
+                button("tasks-gather-start", "Start in one thread")
+                    .bg(primary)
+                    .text_color(theme.bg)
+                    .hover(move |s| s.bg(primary.opacity(0.88)))
+                    .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.gather(None, cx))),
+            )
+            .child(
+                button("tasks-gather-add", "Add to thread…")
+                    .when(self.thread_picker, |el| el.bg(hover))
+                    .hover(move |s| s.bg(hover))
+                    .on_click(cx.listener(|page, _: &ClickEvent, _, cx| {
+                        page.thread_picker = !page.thread_picker;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                button("tasks-gather-clear", "Clear")
+                    .text_color(theme.text_muted)
+                    .hover(move |s| s.bg(hover))
+                    .on_click(cx.listener(|page, _: &ClickEvent, _, cx| page.clear_picks(cx))),
+            );
+        let card = div()
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(popover::surface_bg(&theme))
+            .shadow(vec![gpui::BoxShadow {
+                color: gpui::black().opacity(0.3),
+                offset: gpui::point(px(0.0), px(12.0)),
+                blur_radius: px(32.0),
+                spread_radius: px(0.0),
+                inset: false,
+            }])
+            .child(bar);
+        let picker = (self.thread_picker && show).then(|| self.render_thread_picker(&theme, cx));
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(px(22.0 - rise))
+                .flex()
+                .justify_center()
+                .opacity(t)
+                .child(
+                    div()
+                        .relative()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .children(picker)
+                        .child(crate::frost::frosted(
+                            12.0,
+                            crate::frost::MENU_BLUR * t,
+                            card,
+                        )),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_thread_picker(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let state = self.state.read(cx);
+        let space = self
+            .picked
+            .first()
+            .and_then(|id| state.tasks.iter().find(|task| task.id == *id))
+            .and_then(|task| task.space_id.clone());
+        let threads: Vec<(String, String, Brand)> = match state.local_device_id.clone() {
+            Some(device) => crate::composer::thread_matches(
+                state.visible_chats(),
+                "",
+                crate::composer::MentionScope {
+                    device_id: &device,
+                    space_id: space.as_deref(),
+                    exclude: None,
+                },
+                |id| state.is_draft(id),
+                |_| String::new(),
+                |_| Vec::new(),
+            )
+            .into_iter()
+            .filter_map(|thread| {
+                let chat = state.chats.iter().find(|chat| chat.id == thread.chat_id)?;
+                Some((thread.chat_id, thread.title, chat_brand(chat)))
+            })
+            .collect(),
+            None => Vec::new(),
+        };
+        let now = Utc::now();
+        let statuses: Vec<Option<&'static str>> = threads
+            .iter()
+            .map(|(id, ..)| {
+                state
+                    .chats
+                    .iter()
+                    .find(|chat| chat.id == *id)
+                    .and_then(|chat| {
+                        zeron_proto::chat_mentions::thread_status_label(
+                            state.display_status_for(chat, now),
+                        )
+                    })
+            })
+            .collect();
+        let mut rows: Vec<AnyElement> =
+            vec![popover::menu_heading(theme, "Add to thread").into_any_element()];
+        for (ix, ((chat_id, title, (mark, tint)), status)) in
+            threads.into_iter().zip(statuses).enumerate()
+        {
+            rows.push(
+                popover::menu_row(theme, false, format!("tasks-thread-pick-{ix}"))
+                    .id(("tasks-thread-pick", ix))
+                    .debug_selector(move || format!("tasks-thread-pick-{ix}"))
+                    .gap(px(8.0))
+                    .on_click(cx.listener(move |page, _: &ClickEvent, _, cx| {
+                        page.gather(Some(chat_id.clone()), cx)
+                    }))
+                    .child(
+                        icon(mark)
+                            .flex_none()
+                            .size(px(14.0))
+                            .text_color(tint.unwrap_or(theme.text_muted)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.0))
+                            .text_color(theme.text)
+                            .child(title),
+                    )
+                    .children(status.map(|status| {
+                        div()
+                            .flex_none()
+                            .text_size(ui_rems(11.5))
+                            .text_color(theme.text_faint)
+                            .child(status)
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if rows.len() == 1 {
+            rows.push(
+                div()
+                    .px(px(8.0))
+                    .py(px(6.0))
+                    .text_size(ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .child("No threads on this device yet")
+                    .into_any_element(),
+            );
+        }
+        rows.push(
+            div()
+                .mt(px(4.0))
+                .px(px(8.0))
+                .pt(px(6.0))
+                .border_t_1()
+                .border_color(theme.border)
+                .text_size(ui_rems(11.0))
+                .text_color(theme.text_faint)
+                .child("A running thread gets them when its turn ends")
+                .into_any_element(),
+        );
+        div()
+            .debug_selector(|| "tasks-thread-picker".into())
+            .absolute()
+            .bottom(px(52.0))
+            .left(px(40.0))
+            .w(px(300.0))
+            .child(crate::frost::frosted(
+                12.0,
+                crate::frost::MENU_BLUR,
+                popover::popover_card(theme)
+                    .p(px(6.0))
+                    .flex()
+                    .flex_col()
+                    .children(rows),
+            ))
             .into_any_element()
     }
 
@@ -931,10 +1714,6 @@ impl TasksPage {
             .border_color(gpui::transparent_black())
             .when_some(fade, |el, fade| el.opacity(fade))
             .child(morph::record(&self.painted, Key::Add, ROW_BORDER))
-            .drag_over::<TaskDrag>(move |style, _, _, _| style.border_color(accent))
-            .on_drop(cx.listener(|page, drag: &TaskDrag, _, cx| {
-                page.reorder(&drag.task_id, None, cx);
-            }))
             .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.border_color(accent))
             .on_drop(cx.listener(|page, paths: &gpui::ExternalPaths, _, cx| {
                 cx.stop_propagation();
@@ -1243,8 +2022,31 @@ impl TasksPage {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(2.0))
-                    .children(rows)
+                    .gap(px(ROW_GAP))
+                    .child(
+                        div()
+                            .id("tasks-open-rows")
+                            .flex()
+                            .flex_col()
+                            .gap(px(ROW_GAP))
+                            .children(rows)
+                            .on_drag_move::<TaskDrag>(cx.listener(
+                                |page, event: &DragMoveEvent<TaskDrag>, window, cx| {
+                                    let task_id = event.drag(cx).task_id.clone();
+                                    page.drag_rows(
+                                        &task_id,
+                                        f32::from(event.event.position.y),
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ))
+                            .on_drop(cx.listener(|page, _: &TaskDrag, _, cx| page.drop_rows(cx)))
+                            .on_mouse_up_out(
+                                MouseButton::Left,
+                                cx.listener(|page, _, _, cx| page.drop_rows(cx)),
+                            ),
+                    )
                     .when(adding, |el| {
                         el.child(self.add_row(
                             morph.map(|elapsed| morph::extra_t(elapsed, true)),
@@ -1274,6 +2076,7 @@ impl TasksPage {
                 .debug_selector(|| "tasks-list".into())
                 .size_full()
                 .overflow_y_scroll()
+                .track_scroll(&self.scroll)
                 .child(column),
         )
         .into_any_element()
@@ -1694,6 +2497,7 @@ pub(crate) fn can_add_plan(state: &AppState, chat: &zeron_proto::Chat) -> bool {
 
 fn row_for(state: &AppState, task: &zeron_proto::Task, now: DateTime<Utc>) -> Row {
     let linked = linked_chat(&state.chats, task).map(|chat| Linked {
+        title: SharedString::from(zeron_proto::chat_mentions::chat_mention_title(chat)),
         indicator: state.display_status_for(chat, now),
         brand: chat_brand(chat),
         since: state.session_for(&chat.id).and_then(|s| s.started_at),
@@ -1723,6 +2527,34 @@ fn patched(row: &zeron_proto::Task, patch: &TaskPatch) -> zeron_proto::Task {
     task
 }
 
+pub(crate) struct Gathered {
+    pub id: String,
+    pub title: SharedString,
+    pub status: TaskStatus,
+}
+
+/// Plain tasks handed to this thread together, in the person's order; a mission's lead is not a gathering.
+pub(crate) fn gathered_tasks(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> Vec<Gathered> {
+    let mut tasks: Vec<&zeron_proto::Task> = state
+        .tasks
+        .iter()
+        .filter(|task| {
+            !task.deleted && !task.has_plan() && task.chat_id.as_deref() == Some(chat_id)
+        })
+        .collect();
+    tasks.sort_by(|a, b| {
+        (&a.order_key, a.created_at, &a.id).cmp(&(&b.order_key, b.created_at, &b.id))
+    });
+    tasks
+        .into_iter()
+        .map(|task| Gathered {
+            id: task.id.clone(),
+            title: SharedString::from(zeron_proto::view::single_line(&task.title)),
+            status: rollup(state, task, now).status,
+        })
+        .collect()
+}
+
 pub(crate) fn needs_you_count(state: &AppState) -> usize {
     let now = Utc::now();
     state
@@ -1733,7 +2565,10 @@ pub(crate) fn needs_you_count(state: &AppState) -> usize {
         .count()
 }
 
-fn column_tone(status: TaskStatus, theme: &Theme) -> (Option<SharedString>, &'static str, Hsla) {
+pub(crate) fn column_tone(
+    status: TaskStatus,
+    theme: &Theme,
+) -> (Option<SharedString>, &'static str, Hsla) {
     match status {
         TaskStatus::ToDo => (None, icons::LUCIDE_CIRCLE_DASHED, theme.text_faint),
         TaskStatus::Working => crate::shell::chat_status_tone(ChatIndicator::Working, theme),
@@ -2019,6 +2854,7 @@ pub(crate) fn tasks_view(cx: &gpui::App) -> TasksView {
 impl Render for TasksPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
+        self.settle_pending(cx);
         let (mut open, mut done) = self.rows(cx);
         let view = tasks_view(cx);
         let now = motion::now();
@@ -2059,10 +2895,18 @@ impl Render for TasksPage {
             motion::pulse_lease(cx.entity_id(), cx);
         }
         let mut targets = std::mem::take(&mut *self.painted.borrow_mut());
+        self.rects = targets.clone();
+        self.shown = match view {
+            TasksView::List => open.iter().map(|row| row.task.id.clone()).collect(),
+            TasksView::Kanban => Vec::new(),
+        };
+        self.picked
+            .retain(|id| open.iter().any(|row| row.task.id == *id));
         let elapsed = self.advance_morph(view, &open, &done, &mut targets, reduced, now);
-        if elapsed.is_some() {
+        if elapsed.is_some() || self.shifts.tick(now) {
             window.request_animation_frame();
         }
+        let selection_bar = self.render_selection_bar(view, reduced, now, &theme, window, cx);
         let body = match view {
             TasksView::List => self.render_list(&open, &done, &trees, chips, elapsed, &theme, cx),
             TasksView::Kanban => self.render_kanban(&open, &done, chips, elapsed, &theme, cx),
@@ -2088,7 +2932,13 @@ impl Render for TasksPage {
             .flex()
             .flex_row()
             .on_key_down(cx.listener(|page, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" && page.menu.is_open() {
+                if event.keystroke.key == "escape" && page.cancel_drag(window, cx) {
+                    cx.stop_propagation();
+                } else if event.keystroke.key == "escape" && page.thread_picker {
+                    cx.stop_propagation();
+                    page.thread_picker = false;
+                    cx.notify();
+                } else if event.keystroke.key == "escape" && page.menu.is_open() {
                     cx.stop_propagation();
                     page.close_row_menu(cx);
                 } else if event.keystroke.key == "escape" && page.card.read(cx).is_open() {
@@ -2098,6 +2948,9 @@ impl Render for TasksPage {
                             card.close(Some(window), cx)
                         }
                     });
+                } else if event.keystroke.key == "escape" && !page.picked.is_empty() {
+                    cx.stop_propagation();
+                    page.clear_picks(cx);
                 }
             }))
             .child(
@@ -2116,7 +2969,8 @@ impl Render for TasksPage {
                         .size_full(),
                     )
                     .child(body)
-                    .children(ghosts),
+                    .children(ghosts)
+                    .children(selection_bar),
             )
             .children(card.map(|frame| {
                 div()

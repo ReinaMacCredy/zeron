@@ -30,6 +30,7 @@ pub(super) struct TaskSlide {
     chat: bool,
     handoff: bool,
     pub(super) strip: (Option<String>, motion::Tween),
+    pub(super) folded: std::collections::HashMap<String, motion::Tween>,
 }
 
 impl TaskSlide {
@@ -41,6 +42,7 @@ impl TaskSlide {
             chat: false,
             handoff: false,
             strip: (None, motion::Tween::at(0.0, now)),
+            folded: Default::default(),
         }
     }
 
@@ -522,7 +524,67 @@ impl Shell {
             }
             TasksEvent::Card(event) => self.on_task_card_event(&card, event, cx),
             TasksEvent::OpenCenter(task_id) => self.open_task_center(task_id.clone(), cx),
+            TasksEvent::Gather { task_ids, chat_id } => {
+                let config = card.read(cx).chat_config(cx);
+                self.gather_tasks(task_ids.clone(), chat_id.clone(), config, cx)
+            }
         }
+    }
+
+    /// One thread for several tasks: a new one, or an existing one that gets them after its turn.
+    fn gather_tasks(
+        &mut self,
+        task_ids: Vec<String>,
+        chat_id: Option<String>,
+        config: Option<ChatConfig>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(engine) = self.task_engine(cx) else {
+            return;
+        };
+        let (params, chat_id) = match chat_id {
+            Some(chat_id) => (
+                serde_json::json!({ "op": "addTasksToThread", "taskIds": task_ids, "chatId": chat_id }),
+                chat_id,
+            ),
+            None => {
+                let chat_id = uuid::Uuid::new_v4().to_string();
+                (
+                    serde_json::json!({
+                        "op": "startTasks", "taskIds": task_ids, "chatId": chat_id, "config": config,
+                    }),
+                    chat_id,
+                )
+            }
+        };
+        let route = self.route;
+        cx.spawn(async move |this, cx| {
+            if let Err(err) = engine.client().call(methods::MUTATE, params).await {
+                this.update(cx, |shell, cx| {
+                    shell.show_notice(crate::toast::ToastKind::Error, format!("{err}"), cx);
+                })
+                .ok();
+                return;
+            }
+            for _ in 0..100 {
+                let opened = this
+                    .update(cx, |shell, cx| {
+                        let landed = shell.state.read(cx).chats.iter().any(|c| c.id == chat_id);
+                        if landed && shell.route == route {
+                            shell.open_chat(chat_id.clone(), cx);
+                        }
+                        landed
+                    })
+                    .unwrap_or(true);
+                if opened {
+                    return;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+            }
+        })
+        .detach();
     }
 
     pub(super) fn on_task_card_event(

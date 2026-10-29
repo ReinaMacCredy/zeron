@@ -211,6 +211,10 @@ impl TaskCard {
         self.open.as_ref().map(|open| open.task_id.as_str())
     }
 
+    pub(crate) fn chat_config(&self, cx: &gpui::App) -> Option<ChatConfig> {
+        self.agent.read(cx).resolved(cx).chat_config()
+    }
+
     pub fn is_open(&self) -> bool {
         self.open.is_some()
     }
