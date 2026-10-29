@@ -6,7 +6,7 @@
 //! newest-first order so a picker remains useful when discovery cannot run.
 
 pub(crate) use zeron_proto::model_catalog::codex::static_models;
-use zeron_proto::{PermissionMode, ReasoningLevel, SandboxLevel};
+use zeron_proto::{AccessMode, ReasoningLevel, SandboxLevel};
 
 /// The unified reasoning ladder Codex accepts (`minimal` is offered but clamped
 /// on the wire — see [`to_effort`]).
@@ -36,25 +36,18 @@ pub(crate) fn to_effort(reasoning: Option<ReasoningLevel>) -> Option<&'static st
     })
 }
 
-/// `thread/start` / `turn/start`'s `approvalPolicy` for a permission mode.
-/// `untrusted` asks for everything but codex's own trusted read-only
-/// commands; `on-request` is codex's Auto (the sandbox fences, escalations
-/// ask); `never` is yolo.
-pub(crate) fn approval_policy(mode: PermissionMode) -> &'static str {
-    match mode {
-        PermissionMode::Ask => "untrusted",
-        PermissionMode::Auto => "on-request",
-        PermissionMode::Full => "never",
-    }
-}
-
-/// `thread/start` / `turn/start`'s `approvalsReviewer`: Auto hands escalations
-/// to codex's auto-review subagent (the CLI's `--approve-for-me`); the others
-/// pin `user` so a config.toml reviewer can't answer an Ask run's prompts.
-pub(crate) fn approvals_reviewer(mode: PermissionMode) -> &'static str {
-    match mode {
-        PermissionMode::Auto => "auto_review",
-        PermissionMode::Ask | PermissionMode::Full => "user",
+/// The approval policy and sandbox a run's thread and turns get. Full access
+/// is codex's `--dangerously-bypass-approvals-and-sandbox`, as every run was
+/// before modes; auto-accept edits writes the workspace and, like
+/// supervised, asks before anything but codex's known-safe reads (under
+/// `"on-request"` a sandboxed `rm -rf` or `git push` would run unasked).
+/// A title run never asks and never writes, whatever its chat's mode.
+pub(crate) fn permissions(access: AccessMode, title_only: bool) -> (&'static str, SandboxLevel) {
+    match access {
+        _ if title_only => ("never", SandboxLevel::ReadOnly),
+        AccessMode::FullAccess => ("never", SandboxLevel::DangerFullAccess),
+        AccessMode::AutoAcceptEdits => ("untrusted", SandboxLevel::WorkspaceWrite),
+        AccessMode::Supervised => ("untrusted", SandboxLevel::ReadOnly),
     }
 }
 
@@ -93,25 +86,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn permission_mode_maps_to_codex_policy_and_sandbox() {
-        assert_eq!(approval_policy(PermissionMode::Ask), "untrusted");
-        assert_eq!(approval_policy(PermissionMode::Auto), "on-request");
-        assert_eq!(approval_policy(PermissionMode::Full), "never");
-        assert_eq!(approvals_reviewer(PermissionMode::Ask), "user");
-        assert_eq!(approvals_reviewer(PermissionMode::Auto), "auto_review");
-        assert_eq!(approvals_reviewer(PermissionMode::Full), "user");
+    fn each_access_mode_has_its_own_policy_and_sandbox() {
+        let wire = |access, title_only| {
+            let (policy, sandbox) = permissions(access, title_only);
+            (policy, sandbox_mode(sandbox))
+        };
         assert_eq!(
-            sandbox_mode(PermissionMode::Ask.sandbox()),
-            "workspace-write"
+            wire(AccessMode::FullAccess, false),
+            ("never", "danger-full-access")
         );
         assert_eq!(
-            sandbox_mode(PermissionMode::Auto.sandbox()),
-            "workspace-write"
+            wire(AccessMode::AutoAcceptEdits, false),
+            ("untrusted", "workspace-write")
         );
         assert_eq!(
-            sandbox_mode(PermissionMode::Full.sandbox()),
-            "danger-full-access"
+            wire(AccessMode::Supervised, false),
+            ("untrusted", "read-only")
         );
+        for access in AccessMode::ALL {
+            assert_eq!(wire(access, true), ("never", "read-only"));
+        }
     }
 
     #[test]

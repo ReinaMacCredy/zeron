@@ -13,7 +13,6 @@ use zeron_harness::acp::SignInProgress;
 use zeron_harness::{
     AcpHarness, CancellationToken, Harness, HarnessError, RunControls, SteerMessage,
 };
-use zeron_proto::PermissionMode;
 use zeron_proto::{
     AccessMode, AgentEvent, Compaction, DoneStatus, HarnessId, ReasoningLevel, RunRequest,
     SandboxLevel, SteeringMode, TodoItem, TodoStatus, ToolCall, UserInputAnswer,
@@ -46,9 +45,8 @@ fn request(prompt: &str) -> RunRequest {
         model_options: serde_json::Map::new(),
         cwd: "/tmp".into(),
         sandbox: SandboxLevel::WorkspaceWrite,
-        permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
-        access: Default::default(),
+        access: zeron_proto::AccessMode::FullAccess,
         plan: false,
         attachments: Vec::new(),
         worktree: None,
@@ -468,7 +466,7 @@ async fn computer_runs_get_host_context_and_skip_the_prompt_for_recorded_shapes(
             guidance: computer_control.then(|| "## Zeron computer use\nbody".to_owned()),
         });
         let mut req = request("scenario:computer");
-        req.permission_mode = zeron_proto::PermissionMode::Ask;
+        req.access = zeron_proto::AccessMode::Supervised;
         req.auto_approve = false;
         req.computer_control = computer_control;
         let events = run_to_end(&harness, req, controls).await;
@@ -483,10 +481,11 @@ async fn computer_runs_get_host_context_and_skip_the_prompt_for_recorded_shapes(
     let grok = || AcpHarness::grok().with_executable(fixture_path());
     let devin = || AcpHarness::devin().with_executable(fixture_path());
     let hermes = || AcpHarness::hermes().with_executable(fixture_path());
-    assert_eq!(outcome(grok(), true).await, "ctx=1 61:once 62:refused");
-    assert_eq!(outcome(devin(), true).await, "ctx=1 61:once 62:refused");
-    assert_eq!(outcome(grok(), false).await, "ctx=0 61:refused 62:refused");
-    assert_eq!(outcome(hermes(), true).await, "ctx=1 61:refused 62:refused");
+    // These agents offer only full access, so a supervised request runs with it.
+    assert_eq!(outcome(grok(), true).await, "ctx=1 61:once 62:other");
+    assert_eq!(outcome(devin(), true).await, "ctx=1 61:once 62:other");
+    assert_eq!(outcome(grok(), false).await, "ctx=0 61:other 62:other");
+    assert_eq!(outcome(hermes(), true).await, "ctx=1 61:other 62:other");
 }
 
 #[tokio::test]
@@ -1429,20 +1428,17 @@ fn only_antigravity_offers_access_modes_beyond_full_access() {
 }
 
 #[test]
-fn a_new_permission_mode_needs_a_new_agent() {
-    let full = request("hi");
-    let ask = RunRequest {
-        permission_mode: zeron_proto::PermissionMode::Ask,
+fn a_new_access_mode_needs_a_new_agent_only_where_it_is_offered() {
+    let full = RunRequest {
+        auto_approve: false,
+        ..request("hi")
+    };
+    let supervised = RunRequest {
         access: AccessMode::Supervised,
         ..full.clone()
     };
-    for harness in [AcpHarness::antigravity(), AcpHarness::grok()] {
-        assert!(
-            !harness.reconfigures_in_place(&full, &ask),
-            "{}",
-            harness.display_name()
-        );
-    }
+    assert!(!AcpHarness::antigravity().reconfigures_in_place(&full, &supervised));
+    assert!(AcpHarness::grok().reconfigures_in_place(&full, &supervised));
 }
 
 /// Controls whose input bridge answers every question `answer` (`None`
@@ -1482,7 +1478,7 @@ fn answering_controls(
 /// `cargo test`) in `mode`: its reply text, the questions asked, and how
 /// the run ended.
 async fn antigravity_permissions(
-    mode: zeron_proto::PermissionMode,
+    mode: zeron_proto::AccessMode,
     workspace: &str,
     answer: Option<&'static str>,
 ) -> (Vec<String>, Vec<String>, Vec<(DoneStatus, Option<String>)>) {
@@ -1494,9 +1490,8 @@ async fn antigravity_permissions(
     req.model = Some("gemini-3.7-flash".into());
     req.reasoning = Some(ReasoningLevel::Medium);
     req.cwd = workspace.path().display().to_string();
-    req.permission_mode = mode;
-    req.access = mode.access();
-    req.auto_approve = mode.auto_approve();
+    req.access = mode;
+    req.auto_approve = false;
     let (controls, asked) = answering_controls(answer);
     let events = run_to_end(&antigravity_harness(), req, controls).await;
     let texts = events
@@ -1513,7 +1508,7 @@ async fn antigravity_permissions(
 #[tokio::test]
 async fn antigravity_full_runs_in_yolo_and_allows_every_permission_unasked() {
     let (texts, asked, done) =
-        antigravity_permissions(PermissionMode::Full, "full", Some("No")).await;
+        antigravity_permissions(AccessMode::FullAccess, "full", Some("No")).await;
     assert_eq!(
         texts,
         [
@@ -1527,7 +1522,7 @@ async fn antigravity_full_runs_in_yolo_and_allows_every_permission_unasked() {
 #[tokio::test]
 async fn antigravity_ask_stays_in_default_and_asks_before_each_permission() {
     let (texts, asked, done) =
-        antigravity_permissions(PermissionMode::Ask, "ask", Some("No")).await;
+        antigravity_permissions(AccessMode::Supervised, "ask", Some("No")).await;
     // No mode set: the session opens in `default`.
     assert_eq!(
         texts,
@@ -1543,7 +1538,8 @@ async fn antigravity_ask_stays_in_default_and_asks_before_each_permission() {
     );
     assert_eq!(done, vec![(DoneStatus::Completed, None)]);
 
-    let (texts, asked, _) = antigravity_permissions(PermissionMode::Ask, "ask", Some("Yes")).await;
+    let (texts, asked, _) =
+        antigravity_permissions(AccessMode::Supervised, "ask", Some("Yes")).await;
     assert_eq!(
         texts,
         ["sets:model=gemini-3.7-flash-medium; perms:read=once;edit=once;execute=once;"]
@@ -1551,7 +1547,7 @@ async fn antigravity_ask_stays_in_default_and_asks_before_each_permission() {
     assert_eq!(asked.len(), 3, "{asked:?}");
 
     // A question closed unanswered is a refusal.
-    let (texts, _, _) = antigravity_permissions(PermissionMode::Ask, "ask", None).await;
+    let (texts, _, _) = antigravity_permissions(AccessMode::Supervised, "ask", None).await;
     assert_eq!(
         texts,
         ["sets:model=gemini-3.7-flash-medium; perms:read=no;edit=no;execute=no;"]
@@ -1560,7 +1556,8 @@ async fn antigravity_ask_stays_in_default_and_asks_before_each_permission() {
 
 #[tokio::test]
 async fn antigravity_auto_runs_in_auto_edit() {
-    let (texts, _, done) = antigravity_permissions(PermissionMode::Auto, "auto", Some("Yes")).await;
+    let (texts, _, done) =
+        antigravity_permissions(AccessMode::AutoAcceptEdits, "auto", Some("Yes")).await;
     assert_eq!(
         texts,
         [
@@ -1573,7 +1570,7 @@ async fn antigravity_auto_runs_in_auto_edit() {
 #[tokio::test]
 async fn antigravity_ask_leaves_yolo_or_does_not_start() {
     let (texts, _, done) =
-        antigravity_permissions(PermissionMode::Ask, "yolo-current", Some("No")).await;
+        antigravity_permissions(AccessMode::Supervised, "yolo-current", Some("No")).await;
     assert_eq!(
         texts,
         ["sets:model=gemini-3.7-flash-medium;mode=default; perms:read=no;edit=no;execute=no;"]
@@ -1582,7 +1579,7 @@ async fn antigravity_ask_leaves_yolo_or_does_not_start() {
 
     // Stuck in yolo, the run would never be asked anything.
     let (texts, asked, done) = antigravity_permissions(
-        PermissionMode::Ask,
+        AccessMode::Supervised,
         "yolo-current-reject-mode-",
         Some("Yes"),
     )

@@ -1424,10 +1424,14 @@ impl AcpHarness {
         }
     }
 
-    /// What a run's setup and control calls allow unasked, where no one can
-    /// be asked: the run's permission mode, for every agent.
-    fn access_for(request: &RunRequest) -> AccessMode {
-        request.permission_mode.access()
+    /// The run's access mode as this agent honors it: one it does not list
+    /// runs with full access, and `auto_approve` still means full access.
+    fn access_for(&self, request: &RunRequest) -> AccessMode {
+        if request.auto_approve || !self.spec.access_modes.contains(&request.access) {
+            AccessMode::FullAccess
+        } else {
+            request.access
+        }
     }
 
     /// Devin (`devin acp`) — Cognition's native ACP server.
@@ -2484,11 +2488,11 @@ impl Harness for AcpHarness {
     /// The session's model, effort and model options are selected over the
     /// protocol (`session/set_model`, `session/set_config_option`), so a
     /// change applies between turns without a new agent. Clearing one back
-    /// to the agent's default cannot be expressed that way. The permission
+    /// to the agent's default cannot be expressed that way. The access
     /// mode and the computer grant are fixed when the session starts.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
-            && live.permission_mode == next.permission_mode
+            && self.access_for(live) == self.access_for(next)
             && live.computer_control == next.computer_control
             && (next.model.is_some() || live.model.is_none())
             && (next.reasoning.is_some() || live.reasoning.is_none())
@@ -2502,7 +2506,7 @@ impl Harness for AcpHarness {
             && live.reasoning == next.reasoning
             && crate::same_model_options(&live.model_options, &next.model_options)
             && live.cwd == next.cwd
-            && live.permission_mode == next.permission_mode
+            && self.access_for(live) == self.access_for(next)
             && live.computer_control == next.computer_control
     }
     fn launch_reads_instructions(&self) -> bool {
@@ -2786,7 +2790,7 @@ impl Harness for AcpHarness {
             incoming,
             event_tx,
             controls,
-            access: Self::access_for(&request),
+            access: self.access_for(&request),
             request,
             skills,
             harness: self.spec.id,
@@ -3190,7 +3194,7 @@ fn config_option_sets(
     model: Option<&str>,
     efforts: &[&'static str],
     model_options: &serde_json::Map<String, Value>,
-    permission_mode: zeron_proto::PermissionMode,
+    access: zeron_proto::AccessMode,
 ) -> Vec<(String, Value)> {
     let Some(options) = session_response
         .get("configOptions")
@@ -3237,7 +3241,7 @@ fn config_option_sets(
                 .filter(|c| available.contains(c))
                 .map(|c| Value::String(c.to_owned()))
                 .or_else(|| {
-                    mode_preferences(permission_mode)
+                    mode_preferences(access)
                         .iter()
                         .find(|v| available.contains(v))
                         .map(|v| Value::String((*v).to_owned()))
@@ -3428,13 +3432,13 @@ fn prompt_turn_with_context(
 
 /// The agent mode values each permission mode prefers, most specific first
 /// (claude-agent-acp, codex-acp, Devin, generic spellings).
-fn mode_preferences(mode: zeron_proto::PermissionMode) -> &'static [&'static str] {
+fn mode_preferences(mode: zeron_proto::AccessMode) -> &'static [&'static str] {
     match mode {
-        zeron_proto::PermissionMode::Ask => &["default", "ask", "askPermissions", "read-only"],
-        zeron_proto::PermissionMode::Auto => {
+        zeron_proto::AccessMode::Supervised => &["default", "ask", "askPermissions", "read-only"],
+        zeron_proto::AccessMode::AutoAcceptEdits => {
             &["acceptEdits", "accept_edits", "auto_edit", "auto", "agent"]
         }
-        zeron_proto::PermissionMode::Full => &[
+        zeron_proto::AccessMode::FullAccess => &[
             "bypassPermissions",
             "bypass_permissions",
             "bypass",
@@ -3622,11 +3626,12 @@ fn permission_options(params: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// The live-run request handler: under Full, tool permissions auto-accept
-/// like [`handle_server_request`]; under Ask/Auto each becomes a yes/no
-/// question (see [`permission`]). Question-shaped requests block on the
-/// engine's input bridge, answered with the option whose name matches the
-/// chosen label. Either waits in a subtask so the message loop keeps
+/// The live-run request handler: under full access, tool permissions
+/// auto-accept like [`handle_server_request`]; auto-accept edits allows what
+/// [`permission::allowed_without_asking`] covers, and every other permission
+/// (each one under supervised) becomes a yes/no question. Question-shaped
+/// requests block on the engine's input bridge, answered with the option
+/// whose name matches the chosen label. Either waits in a subtask so the message loop keeps
 /// flowing, and a dropped resolver degrades to a refusal or `cancelled` —
 /// never a silent allow.
 #[allow(clippy::too_many_arguments)]
@@ -3635,7 +3640,7 @@ fn handle_server_request_live(
     id: Value,
     method: &str,
     params: &Value,
-    permission_mode: zeron_proto::PermissionMode,
+    access: zeron_proto::AccessMode,
     allow_computer_calls: bool,
     request_input: &std::sync::Arc<RequestInputFn>,
     session_id: &str,
@@ -3669,8 +3674,15 @@ fn handle_server_request_live(
             );
             return Vec::new();
         }
-        if permission_mode == zeron_proto::PermissionMode::Full {
+        if access == zeron_proto::AccessMode::FullAccess {
             return handle_server_request(client, id, method, params);
+        }
+        // Supervised asks before file reads too, unlike upstream.
+        if access != zeron_proto::AccessMode::Supervised
+            && permission::allowed_without_asking(access, params)
+        {
+            client.respond(&id, permission::outcome(&options, true));
+            return Vec::new();
         }
         let question = permission::question(agent_name, params);
         let request_input = std::sync::Arc::clone(request_input);
@@ -4431,7 +4443,7 @@ async fn select_session_config(
         requested_model.as_deref(),
         &efforts,
         &request.model_options,
-        request.permission_mode,
+        rules.access,
     );
     // Devin's effort and speed choices depend on the selected model:
     // switch the model first, then choose them from what it offers.
@@ -4513,7 +4525,7 @@ async fn select_session_config(
             requested_model.as_deref(),
             &efforts,
             &request.model_options,
-            request.permission_mode,
+            rules.access,
         );
         sets.retain(|(id, _)| !is_model_config_option(&options_snapshot, id));
     }
@@ -5080,7 +5092,7 @@ async fn run_session(session: Session) {
                                 id,
                                 &method,
                                 &params,
-                                request.permission_mode,
+                                access,
                                 allow_computer_calls,
                                 &request_input,
                                 &session_id, &mut questions,
@@ -5302,7 +5314,7 @@ async fn run_session(session: Session) {
                         id,
                         &method,
                         &params,
-                        request.permission_mode,
+                        access,
                         allow_computer_calls,
                         &request_input,
                         &session_id, &mut questions,
@@ -5415,7 +5427,7 @@ async fn run_session(session: Session) {
                                         id,
                                         &method,
                                         &params,
-                                        request.permission_mode,
+                                        access,
                                         allow_computer_calls,
                                         &request_input,
                                 &session_id, &mut questions,
@@ -6030,7 +6042,7 @@ async fn run_session(session: Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_proto::PermissionMode;
+    use zeron_proto::AccessMode;
 
     #[test]
     fn computer_permissions_match_only_the_recorded_shape() {
@@ -6871,7 +6883,7 @@ mod tests {
                 Some("claude-opus-5"),
                 &["medium"],
                 &no_opts,
-                PermissionMode::Full
+                AccessMode::FullAccess
             ),
             vec![
                 ("model".to_owned(), json!({ "value": "claude-opus-5" })),
@@ -6885,7 +6897,7 @@ mod tests {
                 None,
                 &["xhigh", "max"],
                 &no_opts,
-                PermissionMode::Full
+                AccessMode::FullAccess
             ),
             vec![("effort".to_owned(), json!({ "value": "max" }))]
         );
@@ -6900,7 +6912,7 @@ mod tests {
                 Some("claude-opus-5"),
                 &["high"],
                 &opts,
-                PermissionMode::Full
+                AccessMode::FullAccess
             ),
             vec![
                 ("model".to_owned(), json!({ "value": "claude-opus-5[1m]" })),
@@ -6917,7 +6929,7 @@ mod tests {
                 Some("claude-sonnet-5"),
                 &["high"],
                 &no_opts,
-                PermissionMode::Full
+                AccessMode::FullAccess
             ),
             Vec::new()
         );
@@ -6927,7 +6939,7 @@ mod tests {
                 Some("gpt-5.6-sol"),
                 &[],
                 &no_opts,
-                PermissionMode::Full
+                AccessMode::FullAccess
             ),
             Vec::new()
         );
@@ -6938,7 +6950,7 @@ mod tests {
                 Some("x"),
                 &["high"],
                 &no_opts,
-                PermissionMode::Full
+                AccessMode::FullAccess
             ),
             Vec::new()
         );
@@ -7385,18 +7397,18 @@ mod tests {
         });
         let no_opts = serde_json::Map::new();
         assert_eq!(
-            config_option_sets(&codex, None, &[], &no_opts, PermissionMode::Full),
+            config_option_sets(&codex, None, &[], &no_opts, AccessMode::FullAccess),
             vec![("mode".to_owned(), json!({ "value": "agent-full-access" }))]
         );
         // Auto is the agent's own default here (already current → no set);
         // Ask falls to the read-only mode; the handler still routes
         // permission requests by mode either way.
         assert_eq!(
-            config_option_sets(&codex, None, &[], &no_opts, PermissionMode::Auto),
+            config_option_sets(&codex, None, &[], &no_opts, AccessMode::AutoAcceptEdits),
             Vec::new()
         );
         assert_eq!(
-            config_option_sets(&codex, None, &[], &no_opts, PermissionMode::Ask),
+            config_option_sets(&codex, None, &[], &no_opts, AccessMode::Supervised),
             vec![("mode".to_owned(), json!({ "value": "read-only" }))]
         );
     }
@@ -7421,15 +7433,15 @@ mod tests {
         });
         let no_opts = serde_json::Map::new();
         assert_eq!(
-            config_option_sets(&claude, None, &[], &no_opts, PermissionMode::Full),
+            config_option_sets(&claude, None, &[], &no_opts, AccessMode::FullAccess),
             vec![("mode".to_owned(), json!({ "value": "bypassPermissions" }))]
         );
         assert_eq!(
-            config_option_sets(&claude, None, &[], &no_opts, PermissionMode::Auto),
+            config_option_sets(&claude, None, &[], &no_opts, AccessMode::AutoAcceptEdits),
             vec![("mode".to_owned(), json!({ "value": "acceptEdits" }))]
         );
         assert_eq!(
-            config_option_sets(&claude, None, &[], &no_opts, PermissionMode::Ask),
+            config_option_sets(&claude, None, &[], &no_opts, AccessMode::Supervised),
             Vec::new()
         );
     }
@@ -7458,12 +7470,12 @@ mod tests {
             config_option_sets(&antigravity(current), None, &[], &no_opts, permission_mode)
         };
         let mode = |value: &str| vec![("mode".to_owned(), json!({ "value": value }))];
-        assert_eq!(sets("default", PermissionMode::Full), mode("yolo"));
-        assert_eq!(sets("yolo", PermissionMode::Ask), mode("default"));
-        assert_eq!(sets("auto_edit", PermissionMode::Ask), mode("default"));
-        assert_eq!(sets("default", PermissionMode::Ask), Vec::new());
-        assert_eq!(sets("yolo", PermissionMode::Auto), mode("auto_edit"));
-        assert_eq!(sets("auto_edit", PermissionMode::Auto), Vec::new());
+        assert_eq!(sets("default", AccessMode::FullAccess), mode("yolo"));
+        assert_eq!(sets("yolo", AccessMode::Supervised), mode("default"));
+        assert_eq!(sets("auto_edit", AccessMode::Supervised), mode("default"));
+        assert_eq!(sets("default", AccessMode::Supervised), Vec::new());
+        assert_eq!(sets("yolo", AccessMode::AutoAcceptEdits), mode("auto_edit"));
+        assert_eq!(sets("auto_edit", AccessMode::AutoAcceptEdits), Vec::new());
     }
 
     fn antigravity_signed_in_catalog() -> Value {

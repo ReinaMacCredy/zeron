@@ -23,7 +23,6 @@ async fn main() -> anyhow::Result<()> {
         access: Default::default(), plan: false,
         attachments: vec![], worktree: None, resume: None,
         branch: None, forked_at: None, computer_control: false,
-        permission_mode: Default::default(),
         disabled_tools: Vec::new(),
         env: Default::default(),
     };

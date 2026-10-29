@@ -104,9 +104,8 @@ fn request(prompt: &str) -> RunRequest {
         model_options: serde_json::Map::new(),
         cwd: String::new(),
         sandbox: SandboxLevel::WorkspaceWrite,
-        permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
-        access: Default::default(),
+        access: zeron_proto::AccessMode::FullAccess,
         plan: false,
         attachments: Vec::new(),
         worktree: None,
@@ -613,7 +612,7 @@ async fn codex_tool_approvals_accept_only_zeron_computer_tools_on_a_computer_run
     let outcome = |computer_control: bool| async move {
         let (controls, _steer, _token) = controls("No");
         let mut req = request("scenario:elicit");
-        req.permission_mode = zeron_proto::PermissionMode::Ask;
+        req.access = zeron_proto::AccessMode::Supervised;
         req.auto_approve = false;
         req.computer_control = computer_control;
         let events = run_to_end(&harness(), req, controls).await;
@@ -670,7 +669,6 @@ async fn approvals_round_trip_as_input_requests() {
         turn: Default::default(),
     };
     let mut req = request("scenario:approve");
-    req.permission_mode = zeron_proto::PermissionMode::Ask;
     req.auto_approve = false;
     req.access = AccessMode::Supervised;
     let events = run_to_end(&harness(), req, controls).await;
@@ -706,7 +704,6 @@ async fn approvals_round_trip_as_input_requests() {
 async fn approval_no_answer_becomes_decline() {
     let (controls, _steer, _token) = controls("No");
     let mut req = request("scenario:decline");
-    req.permission_mode = zeron_proto::PermissionMode::Ask;
     req.auto_approve = false;
     req.access = AccessMode::Supervised;
     let events = run_to_end(&harness(), req, controls).await;
@@ -754,16 +751,15 @@ fn recording_controls(
 }
 
 #[tokio::test]
-async fn auto_mode_hands_escalations_to_codex_review_and_asks_the_rest() {
+async fn auto_accept_edits_applies_file_changes_and_asks_before_the_rest() {
     let (controls, asked, _steer) = recording_controls("No");
-    let mut req = request("scenario:auto-mode");
-    req.permission_mode = zeron_proto::PermissionMode::Auto;
+    let mut req = request("scenario:auto-edits");
     req.auto_approve = false;
     req.access = AccessMode::AutoAcceptEdits;
     let events = run_to_end(&harness(), req, controls).await;
 
-    // The fake checks the on-request / workspace-write / auto_review wire
-    // and completes only after every approval that reached Zeron is declined.
+    // The fake checks the untrusted / workspace-write wire and completes
+    // only after the file change is accepted and the rest declined.
     assert!(
         matches!(
             events.last(),
@@ -776,16 +772,9 @@ async fn auto_mode_hands_escalations_to_codex_review_and_asks_the_rest() {
     );
     let asked = asked.lock().unwrap();
     let headers: Vec<&str> = asked.iter().map(|q| q.header.as_str()).collect();
+    assert_eq!(headers, ["Approve command", "Approve permissions"]);
     assert_eq!(
-        headers,
-        [
-            "Approve file change",
-            "Approve command",
-            "Approve permissions"
-        ]
-    );
-    assert_eq!(
-        asked[1].question,
+        asked[0].question,
         "Codex wants to run `git push`. Allow it?"
     );
 }

@@ -580,11 +580,11 @@ impl Harness for OpencodeHarness {
     /// session (2.x), so a change applies from the next prompt without a new
     /// server. Clearing one back to the default cannot be expressed that way.
     /// Plan mode is opencode's `plan` agent, named on the prompt (1.x) or
-    /// set on the session (2.x), so it too changes in place. The permission
+    /// set on the session (2.x), so it too changes in place. The access
     /// mode does not: its permission rules are read when the server starts.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
-            && live.permission_mode == next.permission_mode
+            && live.access == next.access
             && (next.model.is_some() || live.model.is_none())
             && (next.reasoning.is_some() || live.reasoning.is_none())
     }
@@ -603,7 +603,7 @@ impl Harness for OpencodeHarness {
             && live.reasoning == next.reasoning
             && crate::same_model_options(&live.model_options, &next.model_options)
             && live.cwd == next.cwd
-            && live.permission_mode == next.permission_mode
+            && live.access == next.access
     }
 
     /// Live discovery off `GET /provider` (what the desktop app populates its
@@ -2726,7 +2726,7 @@ async fn run_session(session: Session) {
                 dir,
                 event_tx: &event_tx,
                 request_input: &request_input,
-                permission_mode: request.permission_mode,
+                access: access(&request),
                 main_feed: &mut main_feed,
                 children: &mut children,
                 pending_spawns: &mut pending_spawns,
@@ -3875,7 +3875,7 @@ struct BusCtx<'a> {
     dir: Option<&'a str>,
     event_tx: &'a mpsc::Sender<Result<AgentEvent, HarnessError>>,
     request_input: &'a Arc<RequestInput>,
-    permission_mode: zeron_proto::PermissionMode,
+    access: zeron_proto::AccessMode,
     main_feed: &'a mut SessionFeed,
     children: &'a mut HashMap<String, ChildRun>,
     pending_spawns: &'a mut VecDeque<PendingSpawn>,
@@ -3947,13 +3947,6 @@ fn permission_kind(props: &Value) -> Option<&str> {
         .filter(|k| !k.is_empty())
 }
 
-/// Auto mode lets the agent read and edit inside its workspace without
-/// asking; everything else (bash, network, outside the workspace, unknown
-/// kinds) asks.
-fn auto_allows(kind: &str) -> bool {
-    matches!(kind, "edit" | "write" | "read" | "glob" | "grep" | "list")
-}
-
 /// Wrap an event as subagent-attributed traffic.
 fn tag(parent: &str, event: AgentEvent) -> AgentEvent {
     AgentEvent::Subagent {
@@ -3996,7 +3989,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
         dir,
         event_tx,
         request_input,
-        permission_mode,
+        access,
         main_feed,
         children,
         pending_spawns,
@@ -4341,14 +4334,12 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             let dir_owned = dir.map(str::to_owned);
             let updates_tx = updates_tx.clone();
             let kind = permission_kind(props);
-            // Full never asks; Auto lets workspace edits/reads through and
-            // asks for the rest (commands, network, outside the workspace);
-            // Ask asks for everything. An unnamed kind is never auto-allowed.
-            let auto_allowed = match permission_mode {
-                zeron_proto::PermissionMode::Full => true,
-                zeron_proto::PermissionMode::Auto => kind.is_some_and(auto_allows),
-                zeron_proto::PermissionMode::Ask => false,
+            let action = if kind.is_some_and(is_edit_permission) {
+                crate::approval::Action::Edit
+            } else {
+                crate::approval::Action::Other
             };
+            let auto_allowed = crate::approval::allowed_without_asking(access, action);
             let reply_key = if protocol == Protocol::V2
                 && server
                     .version
@@ -6058,9 +6049,14 @@ fn mcp_config(
     Ok(config.to_string())
 }
 
-/// The permission rules `request`'s server starts with.
+/// The access mode `request` runs with; `auto_approve` still means full
+/// access.
 fn access(request: &RunRequest) -> AccessMode {
-    request.permission_mode.access()
+    if request.auto_approve {
+        AccessMode::FullAccess
+    } else {
+        request.access
+    }
 }
 
 /// opencode's permission for changing files: 1.x folds its write and patch
