@@ -500,7 +500,7 @@ private fun WallpaperSettings(model: AppModel) {
             },
             enabled = enabled,
             shapes = shapes,
-            colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+            colors = ListItemDefaults.segmentedColors(containerColor = cardColor(), disabledContainerColor = cardColor()),
             leadingContent = { IconTile(ZIcons.Laptop) },
             supportingContent = { Text(follows ?: "No Mac in this workspace") },
             trailingContent = {
@@ -517,7 +517,7 @@ private fun WallpaperSettings(model: AppModel) {
                 SegmentedListItem(
                     onClick = { macs = true },
                     shapes = shapes,
-                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor(), disabledContainerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Monitor) },
                     supportingContent = { host?.let { Text(it.name) } },
                     trailingContent = { Chevron() },
@@ -538,7 +538,7 @@ private fun WallpaperSettings(model: AppModel) {
             },
             enabled = !syncing,
             shapes = shapes,
-            colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+            colors = ListItemDefaults.segmentedColors(containerColor = cardColor(), disabledContainerColor = cardColor()),
             leadingContent = { IconTile(ZIcons.Image) },
             supportingContent = {
                 Text(
@@ -559,7 +559,7 @@ private fun WallpaperSettings(model: AppModel) {
                     onClick = { effects = true },
                     enabled = !syncing,
                     shapes = shapes,
-                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor(), disabledContainerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Magic) },
                     supportingContent = { Text("${WallpaperStore.label(state.effect)} — ${WallpaperStore.detail(state.effect)}") },
                     trailingContent = { if (!syncing) Chevron() },
@@ -574,7 +574,7 @@ private fun WallpaperSettings(model: AppModel) {
                 onClick = { store.setChat(chat.copy(enabled = !chat.enabled)) },
                 enabled = !syncing,
                 shapes = shapes,
-                colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                colors = ListItemDefaults.segmentedColors(containerColor = cardColor(), disabledContainerColor = cardColor()),
                 leadingContent = { IconTile(ZIcons.Chat) },
                 supportingContent = { Text("Show the artwork behind open conversations.") },
                 trailingContent = { Switch(chat.enabled, { store.setChat(chat.copy(enabled = it)) }, enabled = !syncing) },
@@ -586,7 +586,7 @@ private fun WallpaperSettings(model: AppModel) {
                     onClick = {},
                     enabled = !syncing,
                     shapes = shapes,
-                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor(), disabledContainerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Monitor) },
                     supportingContent = { Text(chat.placement.detail) },
                     trailingContent = {
@@ -605,7 +605,7 @@ private fun WallpaperSettings(model: AppModel) {
                 ) { Text("Placement") }
             }
             rows += { shapes ->
-                SliderRow(shapes, "Opacity", ZIcons.Sun, chat.opacity, 0f..1f, 99, "${(chat.opacity * 100).roundToInt()}%", !syncing) {
+                SliderRow(shapes, "Opacity", ZIcons.Sun, chat.opacity, 0f..1f, 0, "${(chat.opacity * 100).roundToInt()}%", !syncing) {
                     store.setChat(chat.copy(opacity = (it * 100).roundToInt() / 100f))
                 }
             }
@@ -621,7 +621,7 @@ private fun WallpaperSettings(model: AppModel) {
                     onClick = { store.setChat(chat.copy(scrim = !chat.scrim)) },
                     enabled = !syncing,
                     shapes = shapes,
-                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor(), disabledContainerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Moon) },
                     supportingContent = { Text("Darkens the artwork toward the bottom so text stays readable.") },
                     trailingContent = { Switch(chat.scrim, { store.setChat(chat.copy(scrim = it)) }, enabled = !syncing) },
@@ -633,7 +633,7 @@ private fun WallpaperSettings(model: AppModel) {
                 SegmentedListItem(
                     onClick = { store.remove() },
                     shapes = shapes,
-                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor(), disabledContainerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Delete, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer) },
                 ) { Text("Remove wallpaper", color = MaterialTheme.colorScheme.error) }
             }
@@ -660,7 +660,7 @@ private fun SliderRow(
         onClick = {},
         enabled = enabled,
         shapes = shapes,
-        colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+        colors = ListItemDefaults.segmentedColors(containerColor = cardColor(), disabledContainerColor = cardColor()),
         leadingContent = { IconTile(icon) },
         supportingContent = { Slider(value, onChange, enabled = enabled, valueRange = range, steps = steps) },
         trailingContent = { Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) },
