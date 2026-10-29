@@ -383,14 +383,12 @@ impl TasksPage {
             cx.emit(TasksEvent::OpenCenter(task_id.to_string()));
             return;
         }
+        self.open_card(task_id.to_string(), window, cx);
+    }
+
+    pub(crate) fn open_card(&mut self, task_id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.card.update(cx, |card, cx| {
-            card.open(
-                task_id.to_string(),
-                None,
-                CardFocus::Title,
-                Some(window),
-                cx,
-            )
+            card.open(task_id, None, CardFocus::Title, Some(window), cx)
         });
     }
 

@@ -459,12 +459,12 @@ impl Shell {
         .detach();
     }
 
-    pub(super) fn render_tasks_page(
+    fn tasks_page(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let page = match &self.tasks_page {
+    ) -> Entity<crate::tasks::TasksPage> {
+        match &self.tasks_page {
             Some(page) => page.clone(),
             None => {
                 let page = cx.new(|cx| crate::tasks::TasksPage::new(self.state.clone(), cx));
@@ -472,7 +472,27 @@ impl Shell {
                 self.tasks_page = Some(page.clone());
                 page
             }
-        };
+        }
+    }
+
+    /// The Tasks page with this task's card open, from a task link anywhere.
+    pub(crate) fn open_task(
+        &mut self,
+        task_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_tasks(cx);
+        let page = self.tasks_page(window, cx);
+        page.update(cx, |page, cx| page.open_card(task_id, window, cx));
+    }
+
+    pub(super) fn render_tasks_page(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let page = self.tasks_page(window, cx);
         div()
             .flex_1()
             .min_w_0()
