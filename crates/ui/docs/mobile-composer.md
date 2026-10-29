@@ -25,7 +25,7 @@ The chips under the field change this chat's settings.
 - **Start mission** comes first. Turn it on to send the message as a [mission](zeron://docs/mission-control) instead (see below).
 - **Model** reads the agent profile and the model. A dot after the profile name means you changed the profile's settings in this chat. The menu opens on your [agent profiles](zeron://docs/agent-profiles): apply one, **Revert** or **Save** an edited one, or choose **No profile**. Below them come the models of the current provider and of each provider instance; an instance that fails to load shows why, with **Retry**. On the **New session** canvas, each model shows its agent's mark, and a profile applies to the draft once its Mac is online. Switching models on a chat that already has messages asks **Switch model?** first, and the transcript notes the change.
 - **Effort** offers **Low** to **Max**, plus **Fast** where the model has it. See [Models and reasoning effort](zeron://docs/models-and-effort).
-- **Approve agent actions** sets the permission mode: **Ask for approval**, **Approve for me**, or **Full access**. It offers only the modes the agent supports.
+- **Access** sets the chat's access mode: **Supervised**, **Auto-accept edits**, or **Full access**. It offers only the modes the agent supports, and the chip shows the mode the chat runs with.
 - **Context** shows how full the context is, such as "92% context". It opens **Context and stats**.
 
 ![The permission menu, Context and stats, and the Hand off thread menu](ios-composer-menus.jpg)

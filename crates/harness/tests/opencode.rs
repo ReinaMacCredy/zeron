@@ -275,9 +275,8 @@ fn request(prompt: &str) -> RunRequest {
         model_options: serde_json::Map::new(),
         cwd: "/tmp".into(),
         sandbox: SandboxLevel::DangerFullAccess,
-        permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
-        access: Default::default(),
+        access: zeron_proto::AccessMode::FullAccess,
         plan: false,
         attachments: Vec::new(),
         resume: None,
@@ -1017,7 +1016,6 @@ async fn supervised_plan_run_names_the_plan_agent_and_asks_before_commands() {
     });
     let mut opening = request("plan the cleanup");
     opening.auto_approve = false;
-    opening.permission_mode = zeron_proto::PermissionMode::Ask;
     opening.access = AccessMode::Supervised;
     opening.plan = true;
     let mut stream = driver.run(opening, controls).await.expect("run starts");
@@ -1756,9 +1754,9 @@ async fn live_access_modes_against_a_real_opencode() {
         run.model = Some(model.clone());
         run.env = env;
         run.auto_approve = false;
-        run.permission_mode = match access {
-            AccessMode::Supervised => zeron_proto::PermissionMode::Ask,
-            _ => zeron_proto::PermissionMode::Auto,
+        run.access = match access {
+            AccessMode::Supervised => zeron_proto::AccessMode::Supervised,
+            _ => zeron_proto::AccessMode::AutoAcceptEdits,
         };
         run.access = access;
         let (mut controls, _steer, _token) = controls();

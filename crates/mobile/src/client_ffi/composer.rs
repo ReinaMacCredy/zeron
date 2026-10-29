@@ -1,29 +1,47 @@
 use serde_json::{Map, Value};
 use zeron_client::model_picks;
 
-use super::{
-    ChatConfig, CoreClient, CoreResult, ModelInfo, PermissionMode, SessionHandle, on_runtime,
-};
+use super::{AccessMode, ChatConfig, CoreClient, CoreResult, ModelInfo, SessionHandle, on_runtime};
 
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct PermissionModeInfo {
-    pub mode: PermissionMode,
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AccessModeInfo {
+    pub mode: AccessMode,
     pub label: String,
-    pub short_label: String,
     pub description: String,
 }
 
+fn proto_modes(offered: Option<Vec<AccessMode>>) -> Option<Vec<zeron_proto::AccessMode>> {
+    offered.map(|modes| modes.into_iter().map(Into::into).collect())
+}
+
+/// The modes a picker lists: those the harness `offered` (`None`, unknown
+/// until a live catalog: every mode).
 #[uniffi::export]
-pub fn permission_modes() -> Vec<PermissionModeInfo> {
-    zeron_proto::PermissionMode::ALL
+pub fn access_modes(offered: Option<Vec<AccessMode>>) -> Vec<AccessModeInfo> {
+    let offered = proto_modes(offered);
+    zeron_proto::AccessMode::ALL
         .into_iter()
-        .map(|mode| PermissionModeInfo {
+        .filter(|mode| {
+            offered
+                .as_ref()
+                .is_none_or(|offered| zeron_proto::resolve_access(*mode, offered) == *mode)
+        })
+        .map(|mode| AccessModeInfo {
             mode: mode.into(),
             label: mode.label().into(),
-            short_label: mode.short_label().into(),
             description: mode.description().into(),
         })
         .collect()
+}
+
+/// The mode a chat that `wanted` one runs with on a harness that `offered`
+/// these (`None`: unknown, so `wanted`).
+#[uniffi::export]
+pub fn resolve_access(wanted: AccessMode, offered: Option<Vec<AccessMode>>) -> AccessMode {
+    match proto_modes(offered) {
+        Some(offered) => zeron_proto::resolve_access(wanted.into(), &offered).into(),
+        None => wanted,
+    }
 }
 
 #[uniffi::export]
@@ -1212,5 +1230,32 @@ impl CoreClient {
     ) -> CoreResult<()> {
         let client = self.client.clone();
         on_runtime(async move { client.save_chat_into_profile(&chat_id, &profile_id).await }).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_picker_lists_what_the_harness_offers_and_shows_what_it_runs() {
+        use AccessMode::*;
+        let modes = |offered| -> Vec<AccessMode> {
+            access_modes(offered).into_iter().map(|m| m.mode).collect()
+        };
+        assert_eq!(modes(None), [Supervised, AutoAcceptEdits, FullAccess]);
+        assert_eq!(modes(Some(vec![FullAccess])), [FullAccess]);
+        assert_eq!(modes(Some(Vec::new())), [FullAccess]);
+        assert_eq!(resolve_access(Supervised, None), Supervised);
+        assert_eq!(
+            resolve_access(Supervised, Some(vec![FullAccess])),
+            FullAccess
+        );
+        assert_eq!(
+            resolve_access(AutoAcceptEdits, Some(vec![Supervised, FullAccess])),
+            Supervised
+        );
+        let labels: Vec<String> = access_modes(None).into_iter().map(|m| m.label).collect();
+        assert_eq!(labels, ["Supervised", "Auto-accept edits", "Full access"]);
     }
 }

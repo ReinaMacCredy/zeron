@@ -63,14 +63,11 @@ pub fn profile_config(profile: &crate::AgentProfile) -> crate::ChatConfig {
         reasoning: profile.reasoning,
         model_options: profile.model_options.clone(),
         sandbox: crate::SandboxLevel::WorkspaceWrite,
-        permission_mode: profile
-            .permission_mode
-            .unwrap_or(crate::PermissionMode::Full),
         instructions: profile.instructions.clone(),
         profile_id: Some(profile.id.clone()),
         instance_id: None,
         disabled_tools: profile.disabled_tools.clone(),
-        access: Default::default(),
+        access: profile.access.unwrap_or_default(),
         plan: false,
     }
 }

@@ -21,7 +21,7 @@ use crate::computer::tools::guidance::computer_tool_instructions;
 fn built(backend: Arc<Scripted>, env: ComputerManagerEnv, data_dir: Option<PathBuf>) -> Harness {
     let gate = ComputerApprovalGate::default();
     let approvals = Arc::new(Approvals {
-        mode: Mutex::new(Some(PermissionMode::Full)),
+        mode: Mutex::new(Some(AccessMode::FullAccess)),
         decide: Mutex::new(None),
         gate: gate.clone(),
         cards: Mutex::default(),

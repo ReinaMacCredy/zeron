@@ -16,7 +16,7 @@ Open [Settings > Agent profiles](zeron://settings/agent-profiles) and click **Ne
 
 ![Editing an agent profile](agent-profiles-editor.jpg)
 
-**Mode** is **Ask**, **Auto**, or **Full**, the same choices as the permission chip.
+**Mode** is **Supervised**, **Auto-accept edits**, or **Full access**, the same choices as the permission chip, limited to the modes the profile's agent supports.
 
 The **Tools** list has these groups:
 

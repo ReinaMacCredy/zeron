@@ -402,7 +402,6 @@ impl CoreClient {
                     reasoning: None,
                     model_options: Default::default(),
                     sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-                    permission_mode: Default::default(),
                     instructions: String::new(),
                     profile_id: None,
                     instance_id: None,

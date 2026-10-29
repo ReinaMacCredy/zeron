@@ -2188,7 +2188,11 @@ mod tests {
         assert_eq!(create["spaceId"], "s1");
         assert_eq!(create["cwd"], "/wt/x");
         assert_eq!(create["createdByChatId"], serde_json::Value::Null);
-        assert_eq!(create["config"]["permissionMode"], "full");
+        assert_eq!(
+            create["config"].get("access"),
+            None,
+            "full access is the default"
+        );
         let frames = wire.serve(&runtime, cx, |method, _| {
             (method == methods::QUEUE_COMMAND).then(|| serde_json::json!({}))
         });
@@ -2287,7 +2291,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_mini_chat_sends_with_any_agent_and_the_picked_permission_mode(cx: &mut TestAppContext) {
+    fn the_mini_chat_sends_with_any_agent_and_the_picked_access_mode(cx: &mut TestAppContext) {
         let (runtime, shell, cx, mut wire, _dir) = setup(cx);
         let _guard = runtime.enter();
         let (chat_id, composer, side_state) = open_pr_chat(&runtime, &shell, cx, &mut wire);
@@ -2306,7 +2310,7 @@ mod tests {
         let create = calls(&frames, methods::MUTATE);
         assert_eq!(create.len(), 1, "{frames:?}");
         assert_eq!(create[0].params["config"]["harness"], "pi");
-        assert_eq!(create[0].params["config"]["permissionMode"], "auto");
+        assert_eq!(create[0].params["config"]["access"], "auto-accept-edits");
         assert!(composer.read_with(cx, |composer, _| composer.failure().is_none()));
         let frames = wire.serve(&runtime, cx, |method, _| {
             (method == methods::QUEUE_COMMAND).then(|| serde_json::json!({}))
@@ -2314,8 +2318,8 @@ mod tests {
         let run = calls(&frames, methods::QUEUE_COMMAND);
         assert_eq!(run.len(), 1, "{frames:?}");
         assert_eq!(
-            run[0].params["command"]["request"]["permissionMode"],
-            "auto"
+            run[0].params["command"]["request"]["access"],
+            "auto-accept-edits"
         );
     }
 
@@ -2332,12 +2336,8 @@ mod tests {
         assert!(inside(bar, footer), "footer {footer:?} inside {bar:?}");
         assert_eq!(cx.debug_bounds("picker-permission"), None);
         assert_eq!(
-            cx.update(|_, cx| composer
-                .read(cx)
-                .pickers()
-                .read(cx)
-                .effective_permission_mode(cx)),
-            zeron_proto::PermissionMode::Full,
+            cx.update(|_, cx| composer.read(cx).pickers().read(cx).effective_access(cx)),
+            zeron_proto::AccessMode::FullAccess,
             "a new PR chat starts in the same mode as any new chat"
         );
     }

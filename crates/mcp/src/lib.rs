@@ -28,7 +28,7 @@ use zeron_proto::html_render;
 use zeron_proto::tools::ToolSettingsState;
 use zeron_proto::view::{Indicator, effective_indicator};
 use zeron_proto::{
-    AgentProfile, AgentProfileDraft, AgentProfilesSnapshot, Chat, HarnessId, PermissionMode,
+    AccessMode, AgentProfile, AgentProfileDraft, AgentProfilesSnapshot, Chat, HarnessId,
     ReasoningLevel, Session, Space, StepStatus, Task, TaskStep, UserInputAnswer,
 };
 use zeron_rpc::{RpcClient, methods};
@@ -211,7 +211,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "create_thread",
-            "description": "Open a new top-level peer thread with `prompt` as its first message, in this chat's project and folder unless `project` or `cwd` says otherwise. It takes this chat's harness, model, reasoning, permission mode, model options and tool set, never its profile or instructions. `profile` starts it on an agent profile instead (permission mode capped at this chat's); `harness`, `model` and `reasoning` override either, a new `harness` without `model` takes its default model, and anything unknown is an error. Returns its list_threads row; `wait` adds `turn` once its first turn ends. `taskStepId` runs that step of a Mission Control task this chat leads: the thread takes the step's title, and Zeron messages this chat when it finishes a turn, so no `wait`.",
+            "description": "Open a new top-level peer thread with `prompt` as its first message, in this chat's project and folder unless `project` or `cwd` says otherwise. It takes this chat's harness, model, reasoning, access mode, model options and tool set, never its profile or instructions. `profile` starts it on an agent profile instead (access mode capped at this chat's); `harness`, `model` and `reasoning` override either, a new `harness` without `model` takes its default model, and anything unknown is an error. Returns its list_threads row; `wait` adds `turn` once its first turn ends. `taskStepId` runs that step of a Mission Control task this chat leads: the thread takes the step's title, and Zeron messages this chat when it finishes a turn, so no `wait`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -434,7 +434,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "agent_profiles",
-            "description": "Manage the person's agent profiles (the model picker's Profiles tab): named harness, model, reasoning, permission mode, model options, tool set, instructions and when-to-use `notes`. Only when the person asks. `list`. `upsert`: omit `profileId` to add (name and harness required), else only the fields sent change; \"\" clears model, notes or instructions. `modelOptions` by option id, with ids and values from orchestrator_capabilities for that `harness`; \"\" resets one. `disabledTools` replaces the tool set: Claude Code names (`WebFetch`, `Task`), `mcp__<server>`, or `mcp__zeron__<tool>`; built-in and server entries only matter on claude-code. `instructions` join the system prompt of every run: write a role brief. `permissionMode` never exceeds this chat's. `apply` switches this chat to a profile of its own harness from the next message, never raising its permission mode or turning a tool back on. `delete` by `profileId`. Profiles you save read as agent-written until the person saves them.",
+            "description": "Manage the person's agent profiles (the model picker's Profiles tab): named harness, model, reasoning, access mode, model options, tool set, instructions and when-to-use `notes`. Only when the person asks. `list`. `upsert`: omit `profileId` to add (name and harness required), else only the fields sent change; \"\" clears model, notes or instructions. `modelOptions` by option id, with ids and values from orchestrator_capabilities for that `harness`; \"\" resets one. `disabledTools` replaces the tool set: Claude Code names (`WebFetch`, `Task`), `mcp__<server>`, or `mcp__zeron__<tool>`; built-in and server entries only matter on claude-code. `instructions` join the system prompt of every run: write a role brief. `access` never exceeds this chat's. `apply` switches this chat to a profile of its own harness from the next message, never raising its access mode or turning a tool back on. `delete` by `profileId`. Profiles you save read as agent-written until the person saves them.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -444,7 +444,8 @@ fn thread_tool_list() -> Value {
                     "harness": { "type": "string" },
                     "model": { "type": "string", "description": "As that harness names it; empty keeps the chat's model." },
                     "reasoning": { "type": "string", "enum": REASONING_LEVELS },
-                    "permissionMode": { "type": "string", "enum": ["ask", "auto", "full"] },
+                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "full-access"] },
+                    "permissionMode": { "type": "string", "enum": ["ask", "auto", "full"], "description": "Old name for access." },
                     "notes": { "type": "string", "maxLength": 2000 },
                     "instructions": { "type": "string", "maxLength": 16000 },
                     "modelOptions": { "type": "object", "additionalProperties": { "type": "string" } },
@@ -538,12 +539,12 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "delegate_task",
-            "description": "Start a Zeron-owned child agent of this chat on `task` alone, without this chat's history. Harness, model, reasoning and permission mode inherit unless `profile` or `target` sets them; a `role` with neither runs on its Settings > Routing route, and `permissionMode` only narrows. `mode` async (default) returns its `taskId` at once and the child's completion wakes this chat; `wait`, only when this turn needs the result, blocks until it finishes or `timeoutMs` passes (`waitTimedOut` leaves the child running). `childThreadId` is the child's backing storage, not a top-level thread.",
+            "description": "Start a Zeron-owned child agent of this chat on `task` alone, without this chat's history. Harness, model, reasoning and access mode inherit unless `profile` or `target` sets them; a `role` with neither runs on its Settings > Routing route, and `access` only narrows. `mode` async (default) returns its `taskId` at once and the child's completion wakes this chat; `wait`, only when this turn needs the result, blocks until it finishes or `timeoutMs` passes (`waitTimedOut` leaves the child running). `childThreadId` is the child's backing storage, not a top-level thread.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "task": { "type": "string", "description": "A self-contained brief." },
-                    "profile": { "type": "string", "description": "Agent profile id; target and permissionMode override it." },
+                    "profile": { "type": "string", "description": "Agent profile id; target and access override it." },
                     "target": {
                         "type": "object",
                         "properties": {
@@ -558,7 +559,8 @@ fn thread_tool_list() -> Value {
                     "mode": { "type": "string", "enum": ["async", "wait"] },
                     "timeoutMs": { "type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECS * 1000, "description": "For mode wait; default 10 minutes." },
                     "clientRequestId": { "type": "string", "maxLength": 256, "description": "Idempotency key: a retry returns the original task." },
-                    "permissionMode": { "type": "string", "enum": ["inherit", "ask", "auto", "full"] },
+                    "access": { "type": "string", "enum": ["inherit", "supervised", "auto-accept-edits", "full-access"] },
+                    "permissionMode": { "type": "string", "enum": ["ask", "auto", "full"], "description": "Old name for access." },
                     "quotaChoice": { "type": "string", "enum": ["native", "fallback", "wait"], "description": "Only after a quota_exhausted error, with the person's answer: your native sub-agent, the next fallback harness, or wait for the reset." }
                 },
                 "required": ["task"],
@@ -1359,7 +1361,7 @@ impl ThreadTools {
                     "harness": profile.harness,
                     "model": profile.model,
                     "reasoning": profile.reasoning,
-                    "permissionMode": profile.permission_mode,
+                    "access": profile.access,
                     "whenToUse": profile.notes,
                 })
             })
@@ -1375,7 +1377,7 @@ impl ThreadTools {
             "inheritedHarness": config.map(|c| c.harness),
             "inheritedModel": config.and_then(|c| c.model.as_deref()),
             "inheritedReasoning": config.and_then(|c| c.reasoning),
-            "permissionMode": config.map(|c| c.permission_mode),
+            "access": config.map(|c| c.access),
             "depth": caller.delegation.as_ref().map_or(0, |d| d.depth),
             "harnesses": harnesses,
             "profiles": profiles,
@@ -1473,11 +1475,8 @@ impl ThreadTools {
         let mut run = self
             .run_settings(&caller, args, &args["target"], "model_unavailable: ")
             .await?;
-        if let Some(mode) = args["permissionMode"]
-            .as_str()
-            .filter(|mode| *mode != "inherit")
-        {
-            run["permissionMode"] = json!(mode);
+        if let Some(mode) = access_arg(args)? {
+            run["access"] = json!(mode);
         }
         run["ownerChatId"] = json!(self.chat_id);
         run["task"] = json!(task);
@@ -1524,15 +1523,15 @@ impl ThreadTools {
         let caller_mode = caller
             .config
             .as_ref()
-            .map_or(PermissionMode::Ask, |c| c.permission_mode);
+            .map_or(AccessMode::Supervised, |c| c.access);
         let profile = profile.as_ref();
         Ok(json!({
             "harness": target["harness"].as_str(),
             "model": target["model"].as_str(),
             "reasoning": target["reasoning"].as_str(),
-            "permissionMode": profile
-                .and_then(|profile| profile.permission_mode)
-                .filter(|mode| mode.rank() <= caller_mode.rank()),
+            "access": profile
+                .and_then(|profile| profile.access)
+                .filter(|mode| *mode <= caller_mode),
             "modelOptions": profile
                 .filter(|profile| target["harness"] == json!(profile.harness))
                 .filter(|profile| !profile.model_options.is_empty())
@@ -1721,8 +1720,9 @@ impl ThreadTools {
         let caller_mode = caller
             .config
             .as_ref()
-            .map_or(PermissionMode::Ask, |config| config.permission_mode);
-        if questions.iter().any(|q| q["approval"] == true) && caller_mode != PermissionMode::Full {
+            .map_or(AccessMode::Supervised, |config| config.access);
+        if questions.iter().any(|q| q["approval"] == true) && caller_mode != AccessMode::FullAccess
+        {
             return Err(
                 "that is a tool approval and this chat does not run at Full access, so it cannot grant it; ask the person instead (ask_user), or leave it to them"
                     .into(),
@@ -2367,14 +2367,14 @@ impl ThreadTools {
                 let owner = caller
                     .config
                     .as_ref()
-                    .map_or(PermissionMode::Ask, |config| config.permission_mode);
-                if let Some(mode) = draft.permission_mode
-                    && mode.rank() > owner.rank()
+                    .map_or(AccessMode::Supervised, |config| config.access);
+                if let Some(mode) = draft.access
+                    && mode > owner
                 {
                     return Err(format!(
-                        "permission_escalation_denied: this chat runs in {} mode, so a profile it saves may not use {}",
-                        json!(owner).as_str().unwrap_or_default(),
-                        json!(mode).as_str().unwrap_or_default()
+                        "permission_escalation_denied: this chat runs with {}, so a profile it saves may not use {}",
+                        owner.label(),
+                        mode.label()
                     ));
                 }
                 let target = json!({ "harness": draft.harness, "model": draft.model });
@@ -3001,11 +3001,9 @@ fn profile_draft(
         }
         None => existing.and_then(|profile| profile.reasoning),
     };
-    let permission_mode = match parse("permissionMode")? {
-        Some(value) => {
-            Some(serde_json::from_value::<PermissionMode>(value).map_err(|err| err.to_string())?)
-        }
-        None => existing.and_then(|profile| profile.permission_mode),
+    let access = match access_arg(args)? {
+        Some(mode) => Some(mode),
+        None => existing.and_then(|profile| profile.access),
     };
     let same_harness = existing.is_some_and(|profile| profile.harness == harness);
     let model = match text("model") {
@@ -3029,7 +3027,7 @@ fn profile_draft(
         harness,
         model,
         reasoning,
-        permission_mode,
+        access,
         model_options: {
             let mut options = existing
                 .filter(|_| same_harness)
@@ -3077,6 +3075,26 @@ fn check_tool_names(names: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// `access`, or its older name `permissionMode`; either takes the old values
+/// (ask, auto, full) too. `inherit` and an absent key are `None`.
+fn access_arg(args: &Value) -> Result<Option<AccessMode>, String> {
+    let value = ["access", "permissionMode"]
+        .into_iter()
+        .map(|key| &args[key])
+        .find(|value| !value.is_null());
+    match value {
+        None => Ok(None),
+        Some(value) if value == "inherit" => Ok(None),
+        Some(value) => serde_json::from_value(value.clone())
+            .map(Some)
+            .map_err(|_| {
+                format!(
+                    "unknown access mode {value}; use supervised, auto-accept-edits or full-access"
+                )
+            }),
+    }
+}
+
 fn applied_profile(
     current: &zeron_proto::ChatConfig,
     profile: &AgentProfile,
@@ -3089,13 +3107,13 @@ fn applied_profile(
             json!(current.harness).as_str().unwrap_or_default()
         ));
     }
-    if let Some(mode) = profile.permission_mode
-        && mode.rank() > current.permission_mode.rank()
+    if let Some(mode) = profile.access
+        && mode > current.access
     {
         return Err(format!(
-            "permission_escalation_denied: this chat runs in {} mode, so it may not apply a profile in {}",
-            json!(current.permission_mode).as_str().unwrap_or_default(),
-            json!(mode).as_str().unwrap_or_default()
+            "permission_escalation_denied: this chat runs with {}, so it may not apply a profile with {}",
+            current.access.label(),
+            mode.label()
         ));
     }
     let reenabled: Vec<&str> = current
@@ -3118,9 +3136,8 @@ fn applied_profile(
     if let Some(reasoning) = profile.reasoning {
         config.reasoning = Some(reasoning);
     }
-    if let Some(mode) = profile.permission_mode {
-        config.permission_mode = mode;
-        config.sandbox = mode.sandbox();
+    if let Some(mode) = profile.access {
+        config.access = mode;
     }
     if !profile.model_options.is_empty() {
         config.model_options = profile.model_options.clone();
@@ -5739,7 +5756,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_agent_saves_profiles_within_its_own_permission_mode() {
+    async fn an_agent_saves_profiles_within_its_own_access_mode() {
         let rig = rig(fixture());
         let tools = &rig.tools;
         let created = |args: Value| async move {
@@ -5778,7 +5795,7 @@ mod tests {
         assert!(logged(&rig.calls, methods::UPSERT_AGENT_PROFILE).is_empty());
 
         created(
-            json!({ "name": "Docs", "harness": "codex", "model": "gpt-5", "permissionMode": "ask",
+            json!({ "name": "Docs", "harness": "codex", "model": "gpt-5", "access": "supervised",
             "instructions": "Write docs only." }),
         )
         .await
@@ -5792,6 +5809,7 @@ mod tests {
         assert_eq!(sent[0]["byAgent"], true);
         assert_eq!(sent[0]["profileId"], Value::Null);
         assert_eq!(sent[0]["profile"]["instructions"], "Write docs only.");
+        assert_eq!(sent[0]["profile"]["access"], "supervised");
         assert_eq!(sent[1]["profileId"], "reviewer");
         assert_eq!(sent[1]["profile"]["model"], "gpt-5.6-luna");
         assert_eq!(sent[1]["profile"]["notes"], "Review a diff.");
@@ -5865,7 +5883,8 @@ mod tests {
             sent[0]["config"]["modelOptions"],
             json!({ "contextWindow": "1m", "autoCompact": "300k" })
         );
-        assert_eq!(sent[0]["config"]["permissionMode"], "ask");
+        assert_eq!(sent[0]["config"]["access"], "supervised");
+        assert!(sent[0]["config"].get("permissionMode").is_none());
         assert_eq!(
             sent[0]["note"]["text"],
             "Auto-compact set to 300K by the agent."
@@ -5972,7 +5991,7 @@ mod tests {
         assert_eq!(config["profileId"], "reviewer");
         assert_eq!(config["instructions"], "Never edit files.");
         assert_eq!(config["modelOptions"], json!({ "speed": "fast" }));
-        assert_eq!(config["sandbox"], json!(PermissionMode::Ask.sandbox()));
+        assert_eq!(config["access"], "supervised");
 
         let narrowed = rig_with(with_caller_config(ask_codex(json!(["WebFetch"]))));
         let reopened = apply(&narrowed, "reviewer").await.unwrap_err();
@@ -6013,7 +6032,7 @@ mod tests {
         assert_eq!(sent[0]["harness"], "codex");
         assert_eq!(sent[0]["model"], "gpt-5.6-luna");
         assert_eq!(sent[0]["reasoning"], "high");
-        assert_eq!(sent[0]["permissionMode"], "ask");
+        assert_eq!(sent[0]["access"], "supervised");
         assert_eq!(sent[0]["modelOptions"], json!({ "speed": "fast" }));
         assert_eq!(sent[0]["instructions"], "Never edit files.");
         assert_eq!(sent[1]["model"], "gpt-5");
@@ -6021,7 +6040,7 @@ mod tests {
         assert_eq!(sent[2]["model"], Value::Null);
         assert_eq!(sent[2]["modelOptions"], Value::Null);
         assert_eq!(
-            sent[3]["permissionMode"],
+            sent[3]["access"],
             Value::Null,
             "a profile never widens the caller's mode"
         );
@@ -6737,12 +6756,12 @@ mod tests {
         assert_eq!(sent[1]["harness"], "codex");
         assert_eq!(sent[1]["model"], "gpt-5.6-luna");
         assert_eq!(sent[1]["reasoning"], "high");
-        assert_eq!(sent[1]["permissionMode"], "ask");
+        assert_eq!(sent[1]["access"], "supervised");
         assert_eq!(sent[1]["modelOptions"], json!({ "speed": "fast" }));
         assert_eq!(sent[1]["prompt"], "go");
         assert_eq!(sent[2]["model"], "gpt-5");
         assert_eq!(
-            sent[3]["permissionMode"],
+            sent[3]["access"],
             Value::Null,
             "a profile never widens the caller's mode"
         );

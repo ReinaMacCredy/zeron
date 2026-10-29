@@ -6,7 +6,7 @@ use crate::claude_config::{
     self as cc, ClaudeConfigSnapshot, Kind, LocalCommandOutput, Scope, Setting,
 };
 use crate::usage::UsageSummary;
-use crate::{HarnessId, PermissionMode, ReasoningLevel};
+use crate::{AccessMode, HarnessId, ReasoningLevel};
 
 pub const SUMMARY_PREFIX: &str = "Claude Code settings · ";
 pub const STATS_DAYS: u32 = 7 * 36;
@@ -100,7 +100,7 @@ pub struct ChipChoices {
     pub model: Option<String>,
     pub efforts: Vec<ReasoningLevel>,
     pub effort: Option<ReasoningLevel>,
-    pub permission: PermissionMode,
+    pub permission: AccessMode,
 }
 
 impl ChipChoices {
@@ -244,7 +244,7 @@ impl ConfigState {
                     Some(cc::Chip::Permission) => RowView {
                         setting,
                         value: chips.permission.label().to_string(),
-                        options: PermissionMode::ALL
+                        options: AccessMode::ALL
                             .iter()
                             .map(|m| m.label().to_string())
                             .collect(),

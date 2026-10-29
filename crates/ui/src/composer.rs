@@ -12464,7 +12464,7 @@ impl Composer {
             resolved.model = config.model;
             resolved.reasoning = config.reasoning;
             resolved.model_options = config.model_options;
-            resolved.permission_mode = config.permission_mode;
+            resolved.access = config.access;
         }
         if self.pr_chat && resolved.harness.is_none() {
             self.failure = Some("Pick an agent before sending.".into());
@@ -13164,9 +13164,8 @@ impl Composer {
                         model_options: resolved.model_options.clone(),
                         cwd,
                         sandbox: SandboxLevel::WorkspaceWrite,
-                        permission_mode: resolved.permission_mode,
                         auto_approve: false,
-                        access: resolved.permission_mode.access(),
+                        access: resolved.access,
                         plan: resolved.plan,
                         resume: None,
                         attachments: attachment_paths,
@@ -20011,12 +20010,11 @@ mod tests {
                             reasoning: None,
                             model_options: serde_json::Map::new(),
                             sandbox: SandboxLevel::WorkspaceWrite,
-                            permission_mode: zeron_proto::PermissionMode::Full,
                             instructions: String::new(),
                             profile_id: None,
                             instance_id: None,
                             disabled_tools: Vec::new(),
-                            access: zeron_proto::PermissionMode::Full.access(),
+                            access: zeron_proto::AccessMode::FullAccess,
                             plan: false,
                         }),
                         last_message_preview: None,
@@ -20168,12 +20166,11 @@ mod tests {
                                 reasoning: None,
                                 model_options: serde_json::Map::new(),
                                 sandbox: SandboxLevel::WorkspaceWrite,
-                                permission_mode: zeron_proto::PermissionMode::Full,
                                 instructions: String::new(),
                                 profile_id: None,
                                 instance_id: None,
                                 disabled_tools: Vec::new(),
-                                access: zeron_proto::PermissionMode::Full.access(),
+                                access: zeron_proto::AccessMode::FullAccess,
                                 plan: false,
                             });
                             chat.last_message_at =
@@ -20545,12 +20542,11 @@ mod tests {
                             reasoning: None,
                             model_options: Default::default(),
                             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-                            permission_mode: zeron_proto::PermissionMode::Full,
                             instructions: String::new(),
                             profile_id: None,
                             instance_id: None,
                             disabled_tools: Vec::new(),
-                            access: zeron_proto::PermissionMode::Full.access(),
+                            access: zeron_proto::AccessMode::FullAccess,
                             plan: false,
                         })
                     };

@@ -125,7 +125,7 @@ impl Client {
             model,
             efforts,
             effort: config.as_ref().and_then(|c| c.reasoning),
-            permission: config.map(|c| c.permission_mode).unwrap_or_default(),
+            permission: config.map(|c| c.access).unwrap_or_default(),
         }
     }
 

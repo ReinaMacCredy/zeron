@@ -46,9 +46,8 @@ fn request(prompt: &str) -> RunRequest {
         model_options: serde_json::Map::new(),
         cwd: String::new(),
         sandbox: SandboxLevel::DangerFullAccess,
-        permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
-        access: Default::default(),
+        access: zeron_proto::AccessMode::FullAccess,
         plan: false,
         attachments: Vec::new(),
         worktree: None,
@@ -2025,8 +2024,8 @@ fn done_result(events: &[AgentEvent]) -> Option<String> {
 }
 
 #[tokio::test]
-async fn permission_modes_decide_what_is_asked() {
-    use zeron_proto::PermissionMode;
+async fn access_modes_decide_what_is_asked() {
+    use zeron_proto::AccessMode;
 
     // Full asks nothing; an approved plan returns to `default`.
     let (controls, _steer, asked) = approving(&[]);
@@ -2037,16 +2036,16 @@ async fn permission_modes_decide_what_is_asked() {
     );
     assert!(asked.lock().unwrap().is_empty());
 
-    // Auto: whatever the CLI's own mode sends on is asked, and a no denies it.
+    // Auto-accept edits: edits go through unasked, the rest is asked and a
+    // no denies it.
     let (controls, _steer, asked) = approving(&[]);
     let mut req = request("scenario:approvals");
     req.auto_approve = false;
-    req.permission_mode = PermissionMode::Auto;
-    req.access = PermissionMode::Auto.access();
+    req.access = AccessMode::AutoAcceptEdits;
     let events = run_to_end(&harness(), req, controls).await;
     assert_eq!(
         done_result(&events).as_deref(),
-        Some("auto none bash=deny edit=deny plan=deny")
+        Some("acceptEdits none bash=deny edit=allow plan=deny")
     );
     let questions: Vec<_> = asked
         .lock()
@@ -2058,19 +2057,17 @@ async fn permission_modes_decide_what_is_asked() {
         questions,
         [
             "Claude wants to run `rm -rf build`. Allow it?",
-            "Claude wants to modify /tmp/a.rs. Allow it?",
             "Claude wants to start implementing its plan. Allow it?",
         ]
     );
 
-    // Ask in plan mode asks before each; a yes allows, and the approved
-    // plan continues in the permission mode's CLI mode.
+    // Supervised in plan mode asks before each; a yes allows, and the
+    // approved plan continues in the access mode's CLI mode.
     let (controls, _steer, asked) =
         approving(&["Approve command", "Approve file change", "Approve plan"]);
     let mut req = request("scenario:approvals");
     req.auto_approve = false;
-    req.permission_mode = PermissionMode::Ask;
-    req.access = PermissionMode::Ask.access();
+    req.access = AccessMode::Supervised;
     req.plan = true;
     let events = run_to_end(&harness(), req, controls).await;
     assert_eq!(
@@ -2091,13 +2088,12 @@ async fn permission_modes_decide_what_is_asked() {
 
 #[tokio::test]
 async fn plan_mode_switches_on_the_live_process() {
-    use zeron_proto::PermissionMode;
+    use zeron_proto::AccessMode;
 
     let (controls, steer, asked) = approving(&["Approve plan"]);
     let mut launch = request("scenario:mode-switch");
     launch.auto_approve = false;
-    launch.permission_mode = PermissionMode::Ask;
-    launch.access = PermissionMode::Ask.access();
+    launch.access = AccessMode::Supervised;
     launch.plan = true;
     let mut stream = harness()
         .run(launch.clone(), controls)

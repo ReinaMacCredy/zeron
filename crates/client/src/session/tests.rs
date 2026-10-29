@@ -155,12 +155,12 @@ fn a_run_carries_the_chats_permission_mode() {
     let (client, _dir) = demo(false);
     let session = client.open_session("chat-blog").unwrap();
     let mut config = client.session_config("chat-blog").unwrap();
-    config.permission_mode = zeron_proto::PermissionMode::Ask;
+    config.access = zeron_proto::AccessMode::Supervised;
     client.set_session_config("chat-blog", &config).unwrap();
     wait_for("the config", || {
         client
             .session_config("chat-blog")
-            .is_some_and(|c| c.permission_mode == zeron_proto::PermissionMode::Ask)
+            .is_some_and(|c| c.access == zeron_proto::AccessMode::Supervised)
     });
     session.send(SendRequest::text("hello")).unwrap();
     let run = session
@@ -174,7 +174,7 @@ fn a_run_carries_the_chats_permission_mode() {
             _ => None,
         })
         .unwrap();
-    assert_eq!(run.permission_mode, zeron_proto::PermissionMode::Ask);
+    assert_eq!(run.access, zeron_proto::AccessMode::Supervised);
     assert!(!run.auto_approve);
 }
 

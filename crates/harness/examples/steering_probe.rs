@@ -59,7 +59,6 @@ async fn main() -> anyhow::Result<()> {
         branch: None,
         forked_at: None,
         computer_control: false,
-        permission_mode: Default::default(),
         disabled_tools: Vec::new(),
         env: Default::default(),
     };

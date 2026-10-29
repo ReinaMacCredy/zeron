@@ -1,4 +1,4 @@
-use zeron_proto::PermissionMode;
+use zeron_proto::AccessMode;
 use zeron_proto::computer::{ComputerApp, ComputerConsentApp, ComputerWindow, CuaEffect};
 
 use super::{COMPUTER_DENYLIST_APP_CACHE_MS, ComputerConsentTarget, ComputerManager};
@@ -206,7 +206,7 @@ impl ComputerManager {
         let owner = super::agent_thread_id(thread_id)?;
         let turn = current_computer_task().and_then(|task| task.turn_id)?;
         let mode = self.seams.caller(owner, Some(&turn)).await.ok().flatten();
-        (mode == Some(PermissionMode::Ask)).then(|| (owner.to_owned(), turn))
+        (mode == Some(AccessMode::Supervised)).then(|| (owner.to_owned(), turn))
     }
 
     pub(super) async fn assert_app_consent(

@@ -19,19 +19,23 @@ When an agent in another chat is waiting, a pill appears above the main composer
 
 ![A question from another chat](agent-questions-pill.jpg)
 
-## Approvals and permission modes
+## Approvals and access modes
 
 A permission request is a question with fixed answers, such as **Allow** and **Deny** for Claude Code or **Yes** and **No** for Codex.
 
-How often agents ask is set by the **Permissions** row in the model picker, under the effort slider: click a mode, or hover one to read what it does. The permission chip under the composer opens the same choices, under **Approve agent actions**. The New chat canvas always shows the chip; in a chat it shows only when the mode is not **Full access**:
+How often agents ask is set by the **Permissions** row in the model picker, under the effort slider: click a mode, or hover one to read what it does. Where the agent has a plan mode, the same row has a **Plan mode** switch. The permission chip under the composer opens the same choices, under **Permissions**, with **Plan mode** below them. The New chat canvas always shows the chip; in a chat it shows only when the mode is not **Full access** or plan mode is on:
 
 | Mode | What it does |
 | --- | --- |
-| **Ask for approval** | Always ask before tools and commands |
-| **Approve for me** | Only ask for actions flagged as unsafe |
-| **Full access** | Any file, any command, no prompts |
+| **Supervised** | Ask before commands and file changes. |
+| **Auto-accept edits** | Apply edits, ask before other actions. |
+| **Full access** | Run commands and edits without asking. |
 
-**Full access** is the default. The mode applies to the selected chat, or to the next new chat.
+**Full access** is the default. The mode applies to the selected chat, or to the next new chat. Only the modes the chat's agent supports are listed: Grok, Devin, Hermes and other ACP agents can't ask before acting, so they always run with **Full access**.
+
+**Auto-accept edits** applies file changes on its own and still asks before commands. Chats set to **Ask for approval**, **Approve for me** or **Full** in earlier versions open as **Supervised**, **Auto-accept edits** and **Full access**.
+
+**Plan mode** has the agent explore and propose a plan before changing anything; approving the plan lets it start, in the chat's mode.
 
 ## Where waiting chats show up
 

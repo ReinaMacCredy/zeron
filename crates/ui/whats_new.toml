@@ -130,6 +130,9 @@ text = "New chat asks \"What should we build in\" your project, with the machine
 [[entry.improvements]]
 text = "Zeron's tools take about half the agent context they did: 31 tools instead of 38, shorter descriptions, and long references behind the docs tool, about 9K tokens of tool text instead of 17K."
 
+[[entry.improvements]]
+text = "Permissions now use Supervised, Auto-accept edits and Full access, and the Permissions row in the model picker has the Plan mode switch. Auto-accept edits only approves file edits on its own and still asks before commands, unlike the old Approve for me. Grok, Devin, Hermes and other ACP agents can't ask before acting, so they now always run with Full access. Chats set to Ask, Auto or Full open as Supervised, Auto-accept edits and Full access."
+
 [[entry]]
 version = "0.2.120"
 date = "Oct 24"

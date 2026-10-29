@@ -62,7 +62,6 @@ fn request(dir: &Path, scenario: &str, prompt: &str) -> RunRequest {
         ]
         .into_iter()
         .collect(),
-        permission_mode: Default::default(),
         branch: None,
         forked_at: None,
         computer_control: false,
