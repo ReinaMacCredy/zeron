@@ -281,6 +281,7 @@ pub struct HostCapabilities {
     pub mid_turn_steering: Option<bool>,
     /// The access modes the chat's harness honors (unknown until a live catalog).
     pub access_modes: Option<Vec<zeron_proto::AccessMode>>,
+    pub supports_plan: Option<bool>,
     /// The host moves the chat to another provider between turns; older
     /// hosts would resume one provider's session under another.
     pub provider_switch: bool,

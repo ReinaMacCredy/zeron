@@ -891,6 +891,9 @@ pub struct ChatConfig {
     pub instructions: String,
     #[uniffi(default = [])]
     pub disabled_tools: Vec<String>,
+    /// None keeps the chat's current plan mode (off for a new chat).
+    #[uniffi(default = None)]
+    pub plan: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -959,6 +962,7 @@ impl From<&zc::ChatConfig> for ChatConfig {
             access: Some(c.access.into()),
             instructions: c.instructions.clone(),
             disabled_tools: c.disabled_tools.clone(),
+            plan: Some(c.plan),
         }
     }
 }
@@ -991,7 +995,7 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
             instance_id: c.instance_id,
             disabled_tools: c.disabled_tools,
             access,
-            plan: false,
+            plan: c.plan.unwrap_or(false),
         })
     }
 }
@@ -999,12 +1003,15 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
 impl ChatConfig {
     pub(crate) fn over(self, existing: Option<zc::ChatConfig>) -> CoreResult<zc::ChatConfig> {
         let keep_mode = self.access.is_none();
+        let keep_plan = self.plan.is_none();
         let mut config: zc::ChatConfig = self.try_into()?;
         if let Some(existing) = existing {
             if keep_mode {
                 config.access = existing.access;
             }
-            config.plan = existing.plan;
+            if keep_plan {
+                config.plan = existing.plan;
+            }
             config.instructions = existing.instructions;
             config.disabled_tools = existing.disabled_tools;
             if existing.harness != config.harness && config.instance_id == existing.instance_id {
@@ -1072,6 +1079,7 @@ pub struct HarnessInfo {
     pub mid_turn_steering: Option<bool>,
     /// The access modes it honors (unknown until a live catalog).
     pub access_modes: Option<Vec<AccessMode>>,
+    pub supports_plan: bool,
 }
 
 impl From<zc::catalog::HarnessInfo> for HarnessInfo {
@@ -1082,6 +1090,7 @@ impl From<zc::catalog::HarnessInfo> for HarnessInfo {
             access_modes: h
                 .access_modes
                 .map(|modes| modes.into_iter().map(Into::into).collect()),
+            supports_plan: h.supports_plan,
             id: h.id,
             label: h.label,
             supports_steering: h.supports_steering,
@@ -1310,6 +1319,21 @@ mod tests {
         };
         let kept = legacy.over(Some(existing.clone())).unwrap();
         assert_eq!(kept.access, zeron_proto::AccessMode::Supervised);
+
+        let planned = ChatConfig {
+            plan: Some(true),
+            ..edit.clone()
+        };
+        assert!(planned.over(Some(existing.clone())).unwrap().plan);
+        let unsaid = ChatConfig {
+            plan: None,
+            ..edit.clone()
+        };
+        let planning = zc::ChatConfig {
+            plan: true,
+            ..existing.clone()
+        };
+        assert!(unsaid.over(Some(planning)).unwrap().plan);
 
         let changed = ChatConfig {
             profile_id: Some("reviewer".into()),

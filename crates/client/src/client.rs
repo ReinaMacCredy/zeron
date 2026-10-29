@@ -438,6 +438,7 @@ impl ClientInner {
                 .and_then(|list| list.iter().find(|h| h.id == harness).cloned())
         });
         let mid_turn_steering = info.as_ref().and_then(HarnessInfo::mid_turn_steering);
+        let supports_plan = info.as_ref().map(|info| info.supports_plan);
         let access_modes = info.and_then(|info| info.access_modes);
         HostCapabilities {
             message_queue: has(capability::MESSAGE_QUEUE_V1),
@@ -452,6 +453,7 @@ impl ClientInner {
                 .is_some_and(|v| v >= QUEUED_ATTACHMENTS_MIN),
             mid_turn_steering,
             access_modes,
+            supports_plan,
             provider_switch: has(capability::PROVIDER_SWITCH_V1),
         }
     }

@@ -31,6 +31,8 @@ pub struct HarnessInfo {
     /// catalog, or an engine predating modes.
     #[serde(default)]
     pub access_modes: Option<Vec<zeron_proto::AccessMode>>,
+    #[serde(default)]
+    pub supports_plan: bool,
 }
 
 fn default_true() -> bool {
@@ -48,6 +50,7 @@ impl HarnessInfo {
             installed: true,
             enabled: None,
             access_modes: None,
+            supports_plan: false,
         }
     }
 
