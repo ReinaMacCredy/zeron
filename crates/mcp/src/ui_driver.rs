@@ -145,6 +145,7 @@ pub fn tool(tool: Tool) -> Value {
         (observe, "depth", field("integer", "Levels of `tree` to print.")),
         (observe, "json", field("boolean", "`tree` or `compare` as JSON instead of text lines.")),
         (observe, "inline", field("boolean", "For `snapshot`: false returns only the path, no image. Defaults to true.")),
+        (observe, "native", field("boolean", "For `snapshot`: capture at the display's backing scale (2x on Retina) instead of 1 pixel per point; `rect` stays in points. Defaults to false.")),
         (drive, "theme", json!({ "type": "string", "enum": ["light", "dark", "system"], "description": "For `set`: the appearance mode, as Settings > Appearance sets it (saved to the app's settings)." })),
         (drive, "size", json!({ "type": "object", "properties": { "w": { "type": "number" }, "h": { "type": "number" } }, "required": ["w", "h"], "additionalProperties": false, "description": "For `set`: window content size {w, h} in points. The server also takes [w, h]." })),
         (drive, "motionScale", field("number", "For `set`: animation duration multiplier, 1 is normal, 5 is five times slower. Applies to animations started afterwards; loaders, pulses and disclosure rows ignore it.")),

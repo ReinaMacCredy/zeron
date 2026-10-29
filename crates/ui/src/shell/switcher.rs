@@ -39,7 +39,7 @@ pub(super) fn capture_window() -> Option<CapturedFrame> {
         .keyWindow()
         .or_else(|| app.mainWindow())
         .or_else(|| app.windows().firstObject())?;
-    crate::window_capture::capture_window_number(u32::try_from(window.windowNumber()).ok()?)
+    crate::window_capture::capture_window_number(u32::try_from(window.windowNumber()).ok()?, false)
 }
 
 #[cfg(not(target_os = "macos"))]
