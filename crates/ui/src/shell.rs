@@ -27412,9 +27412,12 @@ mod settings_modal_regressions {
             shell.debug_gate = Some(GatePhase::Ready);
             shell.splash = SplashPhase::Gone;
         });
-        let sections = SettingsSection::ALL
-            .into_iter()
-            .filter(|section| section.visible_in_nav() && !section.needs_account());
+        // Routing draws its Delegation rows only once the engine answers.
+        let sections = SettingsSection::ALL.into_iter().filter(|section| {
+            section.visible_in_nav()
+                && !section.needs_account()
+                && *section != SettingsSection::Routing
+        });
         for section in sections {
             take_anchored();
             shell.update(cx, |shell, cx| shell.open_settings(section, cx));

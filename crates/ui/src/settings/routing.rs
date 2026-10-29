@@ -1295,6 +1295,7 @@ impl Render for RoutingPage {
                 )
                 .fade_overflow_y(&self.scroll.scroll),
             )
+            .child(widgets::page_reveal(&self.scroll.scroll))
             .children(scrollbar)
     }
 }
