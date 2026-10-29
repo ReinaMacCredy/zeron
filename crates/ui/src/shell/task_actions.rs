@@ -487,6 +487,12 @@ impl Shell {
         page.update(cx, |page, cx| page.open_card(task_id, window, cx));
     }
 
+    pub(super) fn defer_open_task(&mut self, task_id: String, cx: &mut Context<Self>) {
+        self.defer_in_active_window(cx, move |shell, window, cx| {
+            shell.open_task(task_id, window, cx)
+        });
+    }
+
     pub(super) fn render_tasks_page(
         &mut self,
         window: &mut Window,

@@ -1733,7 +1733,26 @@ pub(crate) fn needs_you_count(state: &AppState) -> usize {
         .count()
 }
 
-fn column_tone(status: TaskStatus, theme: &Theme) -> (Option<SharedString>, &'static str, Hsla) {
+pub(crate) fn mention_mark(
+    state: &AppState,
+    task_id: &str,
+    theme: &Theme,
+    now: DateTime<Utc>,
+) -> (&'static str, Option<Hsla>) {
+    state
+        .tasks
+        .iter()
+        .find(|task| task.id == task_id && !task.deleted)
+        .map_or((icons::LUCIDE_CIRCLE_DASHED, None), |task| {
+            let (_, icon, color) = column_tone(rollup(state, task, now).status, theme);
+            (icon, Some(color))
+        })
+}
+
+pub(crate) fn column_tone(
+    status: TaskStatus,
+    theme: &Theme,
+) -> (Option<SharedString>, &'static str, Hsla) {
     match status {
         TaskStatus::ToDo => (None, icons::LUCIDE_CIRCLE_DASHED, theme.text_faint),
         TaskStatus::Working => crate::shell::chat_status_tone(ChatIndicator::Working, theme),

@@ -385,6 +385,7 @@ impl Shell {
             | ComposerEvent::StartMission(_)
             | ComposerEvent::OpenTaskCenter(_)
             | ComposerEvent::PlanFirst => {}
+            ComposerEvent::OpenTask(task_id) => self.defer_open_task(task_id.clone(), cx),
             ComposerEvent::OpenSubagent {
                 chat_id,
                 doc_id,

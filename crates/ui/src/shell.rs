@@ -3213,6 +3213,7 @@ impl Shell {
                 ComposerEvent::OpenTaskCenter(task_id) => {
                     this.open_task_center(task_id.clone(), cx)
                 }
+                ComposerEvent::OpenTask(task_id) => this.defer_open_task(task_id.clone(), cx),
                 ComposerEvent::OpenChanges => this
                     .defer_in_active_window(cx, |shell, window, cx| {
                         shell.focus_changes(window, cx)
@@ -5591,6 +5592,7 @@ impl Shell {
                 );
             }
             TranscriptEvent::SignIn { chat_id } => self.sign_in_for_chat(chat_id, cx),
+            TranscriptEvent::OpenTask { task_id } => self.defer_open_task(task_id.clone(), cx),
             TranscriptEvent::ClaudeCard { chat_id, action } => {
                 let composer = self.composer_for_transcript(&emitter);
                 let bound =
@@ -7362,6 +7364,7 @@ impl Shell {
             | ComposerEvent::StartMission(_)
             | ComposerEvent::OpenTaskCenter(_)
             | ComposerEvent::PlanFirst => {}
+            ComposerEvent::OpenTask(task_id) => self.defer_open_task(task_id.clone(), cx),
             ComposerEvent::OpenUsage => self.open_usage(cx),
             ComposerEvent::OpenSubagent {
                 chat_id,

@@ -62,11 +62,15 @@ pub enum ChipKind {
     Thread,
     /// Another chat, dropped from the sidebar.
     Chat,
+    Task,
 }
 
 impl ChipKind {
     pub(crate) fn in_accent_flow(self) -> bool {
-        matches!(self, Self::Thread | Self::Skill | Self::Command)
+        matches!(
+            self,
+            Self::Thread | Self::Task | Self::Skill | Self::Command
+        )
     }
 }
 
@@ -210,6 +214,7 @@ pub(crate) fn chip_icon(
         ChipKind::Command => ChipIcon::Glyph(crate::icons::COMMAND),
         ChipKind::Thread => ChipIcon::Glyph(crate::icons::CHAT_ROUND_LINE),
         ChipKind::Chat => ChipIcon::Glyph(crate::icons::CHAT_ROUND_LINE),
+        ChipKind::Task => ChipIcon::Glyph(crate::icons::LUCIDE_CIRCLE_DASHED),
         ChipKind::File => ChipIcon::FileTheme(asset_path(FileIconIdentity::file(path), appearance)),
         ChipKind::Directory => ChipIcon::FileTheme(asset_path(
             FileIconIdentity::directory(path.trim_end_matches('/'), false),

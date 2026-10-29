@@ -107,4 +107,13 @@ mod tests {
         assert!(more.starts_with("Also take this task in this thread. Mark it done"));
         assert_eq!(task_mention_links(&prompt).len(), 2);
     }
+
+    #[test]
+    fn task_links_reach_the_agent_verbatim_and_never_as_chat_ids() {
+        let text = format!("Do {} now", task_mention_link("t1", "One").unwrap());
+        for harness in [crate::HarnessId::ClaudeCode, crate::HarnessId::Codex] {
+            assert_eq!(crate::invocation::harness_prompt(&text, harness), text);
+        }
+        assert!(crate::chat_mentions::mentioned_chat_ids(&text).is_empty());
+    }
 }
