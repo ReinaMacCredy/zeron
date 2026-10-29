@@ -80,7 +80,7 @@ fun BoardPane(
     onOpen: (String) -> Unit,
 ) {
     if (devicesEmpty) return GitNoticeList("No Mac serves pull requests", "Open Zeron on a Mac signed in to GitHub with gh, then refresh.")
-    if (deviceId == null) return
+    if (deviceId == null) return GitNoticeList("Loading pull requests…", "")
     if (repository == null) {
         return if (repositoriesLoaded) GitNoticeList("No repository", "Add a project with a GitHub checkout on this Mac.") else GitNoticeList("Loading pull requests…", "")
     }
