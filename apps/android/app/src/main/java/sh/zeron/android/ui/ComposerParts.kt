@@ -61,6 +61,12 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.input.key.isCtrlPressed
@@ -168,10 +174,12 @@ fun ComposerSurface(
                             }
                         }
                     }
+                    val accent = MaterialTheme.colorScheme.primary
                     BasicTextField(
                         model.value,
                         { if (!model.stagesPaste(it)) model.value = it },
                         textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                        visualTransformation = remember(model, accent) { MentionTint(model, accent) },
                         cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                         maxLines = if (card) 8 else 2,
                         modifier = Modifier
@@ -231,6 +239,24 @@ fun ComposerSurface(
         }
     }
     if (attachOpen) sh.zeron.android.ui.composer.AttachPanel(model, onClose = ::closeAttach)
+    }
+}
+
+private class MentionTint(private val model: ComposerModel, private val accent: Color) : VisualTransformation {
+    override fun filter(text: AnnotatedString): TransformedText {
+        val tokens = model.mentionTokens
+        if (tokens.isEmpty()) return TransformedText(text, OffsetMapping.Identity)
+        val style = SpanStyle(color = accent, fontWeight = FontWeight.Medium)
+        val styled = AnnotatedString.Builder(text).apply {
+            for (token in tokens) {
+                var at = text.text.indexOf(token)
+                while (at >= 0) {
+                    addStyle(style, at, at + token.length)
+                    at = text.text.indexOf(token, at + token.length)
+                }
+            }
+        }.toAnnotatedString()
+        return TransformedText(styled, OffsetMapping.Identity)
     }
 }
 

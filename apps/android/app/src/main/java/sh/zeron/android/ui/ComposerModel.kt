@@ -49,6 +49,7 @@ class ComposerModel(initial: String = "") {
     private val tokens = LinkedHashMap<String, String>()
 
     val text: String get() = value.text
+    val mentionTokens: Set<String> get() = tokens.keys
     val staged: Int get() = images.size + pasted.size
     val hasContent: Boolean get() = value.text.isNotBlank() || images.isNotEmpty() || pasted.isNotEmpty() || quotes.isNotEmpty()
     val attachments: List<OutgoingAttachment> get() = images.map { it.outgoing } + pasted.map { it.outgoing }
