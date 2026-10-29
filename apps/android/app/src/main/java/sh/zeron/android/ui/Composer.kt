@@ -137,8 +137,10 @@ fun Composer(
     openModelPicker: Boolean = false,
     onOpenClaudeConfig: () -> Unit = {},
     onNeedsYou: () -> Unit = {},
-    onOpenChat: (String) -> Unit = {},
     onOpenRoute: (String) -> Unit = {},
+    onCompact: (String?) -> Unit = {},
+    onSidechat: (String?) -> Unit = {},
+    onOpenFindings: () -> Unit = {},
     quotes: kotlinx.coroutines.flow.Flow<String> = kotlinx.coroutines.flow.emptyFlow(),
 ) {
     val scope = rememberCoroutineScope()
@@ -163,8 +165,6 @@ fun Composer(
     val harness = row?.harness ?: "claude-code"
     val deviceId = c.host.deviceId
     var slashCatalog by remember(c.chatId) { mutableStateOf<uniffi.zeron_core.InvocationCatalog?>(null) }
-    var compactNotice by remember(c.chatId) { mutableStateOf<String?>(null) }
-    var offer by remember { mutableStateOf<uniffi.zeron_core.ResumeOffer?>(null) }
     var renaming by remember { mutableStateOf(false) }
     val missionAvailable = row?.sidechatOf == null
     val mission = remember(c.chatId) { MissionDraft() }
@@ -242,17 +242,6 @@ fun Composer(
                 focus.requestFocus()
             } finally {
                 editPending = false
-            }
-        }
-    }
-
-    fun compact(focusText: String?) {
-        compactNotice = null
-        scope.launch {
-            compactNotice = try {
-                handle.compact(focusText)
-            } catch (e: Exception) {
-                "Compaction failed: ${e.message}"
             }
         }
     }
@@ -337,16 +326,11 @@ fun Composer(
         }
         compactCommand(body)?.let {
             sent()
-            return compact(it.focus)
+            return onCompact(it.focus)
         }
-        sidechatCommand(body)?.let { command ->
+        if (row?.sidechatOf == null) sidechatCommand(body)?.let { command ->
             sent()
-            scope.launch {
-                runCatching { client.openSidechat(c.chatId, command.prompt) }
-                    .onSuccess(onOpenChat)
-                    .onFailure { model.toast("Couldn't open the side chat") }
-            }
-            return
+            return onSidechat(command.prompt)
         }
         if (!beforeSend()) return
         try {
@@ -355,7 +339,6 @@ fun Composer(
             handle.send(SendRequest(body, draft.attachments, null, if (running && mode == Delivery.Steer && canSteer) BusyPolicy.STEER else BusyPolicy.QUEUE))
             model.noteDeliveryActivity()
             sent()
-            compactNotice = null
             // An immediate send gets the runway; one queued behind a live turn
             // takes it over once its bubble lands.
             if (queued) transcript.expectQueuedTurn() else transcript.beginOwnTurn()
@@ -391,25 +374,6 @@ fun Composer(
         }
     }
     if (renaming) RenameDialog(row?.title ?: c.title, onDismiss = { renaming = false }) { model.rename(c.chatId, it) }
-    offer?.let { o ->
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = { offer = null },
-            title = { Text(o.title) },
-            text = { Text(o.body) },
-            confirmButton = {
-                TextButton(onClick = {
-                    offer = null
-                    compact(null)
-                }) { Text("Compact") }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    offer = null
-                    handle.keepFullHistory()
-                }) { Text("Keep full history") }
-            },
-        )
-    }
 
     val queueing = running && draft.hasContent && editingId == null
     Column(Modifier.padding(horizontal = 12.dp).padding(bottom = 8.dp)) {
@@ -438,15 +402,11 @@ fun Composer(
         error?.let {
             Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 16.dp, bottom = 6.dp))
         }
-        val resume = c.resumeCompaction
         when {
             editingId != null -> StatusBanner("Editing queued message", "Cancel" to {
                 finishEdit(null)
                 restoreStash()
             })
-            compactNotice != null -> StatusBanner(compactNotice!!, "OK" to { compactNotice = null })
-            c.compacting -> StatusBanner("Compacting context", null)
-            resume != null -> StatusBanner(resume.title, "Review" to { offer = resume })
             else -> followUpNotice(queueing, delivery == Delivery.Steer, canSteer)?.let { StatusBanner(it, null) }
         }
         val labels = remember { missionComposerLabels(true) }
@@ -478,7 +438,7 @@ fun Composer(
         ) {
             if (running && editingId == null) DeliveryChip(delivery, canSteer) { delivery = it }
             if (missionAvailable && editingId == null) MissionChips(mission, labels)
-            SessionChips(client, handle, c, row, switches, onOpenPicker = { picker = true })
+            SessionChips(client, handle, c, row, switches, onOpenPicker = { picker = true }, onOpenFindings = onOpenFindings)
         }
     }
 }
@@ -685,7 +645,7 @@ fun AccessChip(current: AccessMode, offered: List<AccessMode>?, onPick: (AccessM
 }
 
 @Composable
-private fun SessionChips(client: CoreClient, handle: SessionHandle, c: ComposerState, row: SessionRow?, switches: ConfigSwitches, onOpenPicker: () -> Unit) {
+private fun SessionChips(client: CoreClient, handle: SessionHandle, c: ComposerState, row: SessionRow?, switches: ConfigSwitches, onOpenPicker: () -> Unit, onOpenFindings: () -> Unit) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val harness = row?.harness ?: "claude-code"
@@ -758,6 +718,7 @@ private fun SessionChips(client: CoreClient, handle: SessionHandle, c: ComposerS
     } else if (handle.statsView(System.currentTimeMillis()) != null || handle.compactSection(System.currentTimeMillis()) != null) {
         ContextChip("Context", leading = { ZIcon(ZIcons.Context, null, Modifier.size(16.dp)) }, onClick = { contextSheet = true })
     }
+    c.review?.let { review -> ReviewChip(review, handle, onOpenFindings) }
     if (contextSheet) {
         sh.zeron.android.ui.composer.ContextSheet(
             handle,
@@ -765,6 +726,49 @@ private fun SessionChips(client: CoreClient, handle: SessionHandle, c: ComposerS
             onToggleLong = { if (current != null) switches.set(harness) { toggleLongContext(current, it) } },
             onPick = { position -> if (current != null) switches.set(harness) { pickContext(current, it, position) } },
             onDismiss = { contextSheet = false },
+        )
+    }
+}
+
+@Composable
+private fun ReviewChip(review: uniffi.zeron_core.ReviewChipView, handle: SessionHandle, onOpenFindings: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var error by remember { mutableStateOf<String?>(null) }
+    var stopMenu by remember { mutableStateOf(false) }
+    fun run(work: suspend () -> Unit) {
+        scope.launch { runCatching { work() }.onFailure { error = it.message ?: "Couldn't reach the review" } }
+    }
+    val label = buildString {
+        append(review.label)
+        review.nextReviewer?.let { append(" · $it") }
+        if (review.additions != null && review.deletions != null) append("  +${review.additions} \u2212${review.deletions}")
+        review.note?.let { append(" · $it") }
+    }
+    ContextChip(
+        label,
+        leading = { ZIcon(if (review.refresh) ZIcons.Refresh else if (review.clean) ZIcons.Check else ZIcons.TabTasks, null, Modifier.size(16.dp)) },
+        onClick = {
+            when {
+                review.busy && review.stoppable -> stopMenu = true
+                review.action == uniffi.zeron_core.ReviewChipAction.OPEN_FINDINGS -> onOpenFindings()
+                review.action == uniffi.zeron_core.ReviewChipAction.START -> run { handle.startReview() }
+                else -> {}
+            }
+        },
+        tint = when (review.tone) {
+            uniffi.zeron_core.ReviewTone.MUTED -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+            uniffi.zeron_core.ReviewTone.DANGER -> MaterialTheme.colorScheme.error
+            uniffi.zeron_core.ReviewTone.SUCCESS -> successColor()
+            uniffi.zeron_core.ReviewTone.PLAIN -> MaterialTheme.colorScheme.onSurfaceVariant
+        },
+    ) {
+        ActionMenu(stopMenu, { stopMenu = false }, listOf(MenuAction(review.stopLabel, ZIcons.Stop) { run { handle.stopReview() } }))
+    }
+    error?.let { message ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { error = null },
+            text = { Text(message) },
+            confirmButton = { TextButton(onClick = { error = null }) { Text("OK") } },
         )
     }
 }

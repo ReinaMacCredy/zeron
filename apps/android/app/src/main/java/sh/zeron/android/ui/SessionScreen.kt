@@ -532,30 +532,16 @@ fun SessionScreen(
                         model, core, handle, composer, row, transcript, draft,
                         openModelPicker = openPicker,
                         beforeSend = {
-                            val text = draft.text.trim()
-                            val side = if (row?.sidechatOf == null) uniffi.zeron_core.sidechatCommand(text) else null
-                            when {
-                                side != null -> {
-                                    sidechat = SidechatRequest(side.prompt)
-                                    draft.clear()
-                                    false
-                                }
-                                extras.runsClaudeCode && uniffi.zeron_core.isClaudeCardCommand(text, emptyList()) -> {
-                                    draft.clear()
-                                    extras.launch("Couldn't run that command. Try again.") { core.runClaudeCard(chatId, text, emptyList())?.let(extras::applyChip) }
-                                    false
-                                }
-                                else -> {
-                                    // Out of credits, a Cloud send can't wake its machine: say so instead of a send that never lands.
-                                    if (cloudOutOfCredits) nudges++
-                                    !cloudOutOfCredits
-                                }
-                            }
+                            // Out of credits, a Cloud send can't wake its machine: say so instead of a send that never lands.
+                            if (cloudOutOfCredits) nudges++ else extras.compactNotice = null
+                            !cloudOutOfCredits
                         },
                         onOpenClaudeConfig = { claudeConfig = ConfigRequest() },
                         onNeedsYou = onNeedsYou,
-                        onOpenChat = onOpenChat,
                         onOpenRoute = onOpenRoute,
+                        onCompact = { extras.compact(it) },
+                        onSidechat = { sidechat = SidechatRequest(it) },
+                        onOpenFindings = { findings = FindingsRequest(null) },
                         quotes = quotes,
                     )
                 }
