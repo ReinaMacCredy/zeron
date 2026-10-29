@@ -728,6 +728,30 @@ impl RowBuilder {
                                 }
                                 continue;
                             }
+                            if let Some(question) = questions.iter().find(|q| q.is_secret()) {
+                                let text = match zeron_proto::view::secret_status(
+                                    *resolved,
+                                    answers.as_deref(),
+                                ) {
+                                    zeron_proto::view::SecretStatus::Pending => {
+                                        format!("{}: enter it on your Mac", question.header)
+                                    }
+                                    status => format!("{} · {}", question.header, status.label()),
+                                };
+                                rows.push(Placed {
+                                    core: Arc::new(chip_row(
+                                        ctx,
+                                        &entry.id,
+                                        id,
+                                        "lock.shield",
+                                        ColorRole::Accent,
+                                        &text,
+                                        WhiteSpace::Normal,
+                                    )),
+                                    gap,
+                                });
+                                continue;
+                            }
                             use zeron_proto::view::InputOutcome;
                             let (text, white_space) = match zeron_proto::view::input_outcome(questions, *resolved, answers.as_deref()) {
                                 InputOutcome::Pending => (questions.first().map_or("Awaiting your answer…".to_owned(), |q| q.question.clone()), WhiteSpace::Normal),

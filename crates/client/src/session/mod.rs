@@ -1514,6 +1514,21 @@ impl SessionHandle {
 
     /// Answer the open question panel.
     pub fn respond_input(&self, request_id: &str, answers: Vec<UserInputAnswer>) -> Result<()> {
+        let secret = lock(&self.core.state)
+            .tracker
+            .entries()
+            .iter()
+            .any(|entry| {
+                entry.message.parts.iter().any(|part| {
+                    matches!(part, MessagePart::Input { request_id: rid, questions, .. }
+                    if rid == request_id && questions.iter().any(UserInputQuestion::is_secret))
+                })
+            });
+        if secret {
+            return Err(ClientError::Unsupported(
+                "a secret is entered on the Mac that runs the chat".into(),
+            ));
+        }
         let client = self.core.client()?;
         self.core.queue_command(
             &client.config.device_id,

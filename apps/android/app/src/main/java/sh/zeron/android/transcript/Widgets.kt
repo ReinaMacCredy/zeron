@@ -267,6 +267,7 @@ private fun AssetIcon(name: String, tint: Color) {
         "arrow.triangle.branch" -> return ZIcon(ZIcons.Branch, null, Modifier.fillMaxSize(), tint = tint)
         "exclamationmark.triangle" -> return ZIcon(ZIcons.Warning, null, Modifier.fillMaxSize(), tint = tint)
         "questionmark.bubble" -> return ZIcon(ZIcons.Chat, null, Modifier.fillMaxSize(), tint = tint)
+        "lock.shield" -> return ZIcon(ZIcons.Key, null, Modifier.fillMaxSize(), tint = tint)
         // Prompt chips: image attachments, skills, slash commands.
         "photo" -> return ZIcon(ZIcons.Gallery, null, Modifier.fillMaxSize(), tint = tint)
         "wand.and.stars" -> return ZIcon(ZIcons.Magic, null, Modifier.fillMaxSize(), tint = tint)

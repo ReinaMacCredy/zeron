@@ -531,8 +531,10 @@ impl Composer {
             .entries
             .iter()
             .find(|entry| entry.chat_id == chat_id)?;
-        let (body, footer) =
-            self.wizard_body(&entry.wizard, &self.ask_input, WizardHost::Ask, cx)?;
+        let (body, footer) = match entry.wizard.current().filter(|q| q.is_secret()) {
+            Some(question) => (secret_body(question, theme), div()),
+            None => self.wizard_body(&entry.wizard, &self.ask_input, WizardHost::Ask, cx)?,
+        };
         let open_id = chat_id.to_owned();
         let header = div()
             .h(px(36.0))
@@ -686,6 +688,44 @@ impl Composer {
             .child(footer);
         Some(card_frame(tray, motion).into_any_element())
     }
+}
+
+fn secret_body(question: &zeron_proto::UserInputQuestion, theme: &Theme) -> Div {
+    div()
+        .px(px(16.0))
+        .py(px(14.0))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(15.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(SharedString::from(question.header.clone())),
+        )
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(13.0))
+                .text_color(theme.text_muted)
+                .child(SharedString::from(question.question.clone())),
+        )
+        .child(
+            div()
+                .mt(px(4.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(theme.text_muted)
+                .child(
+                    icon(icons::LUCIDE_SHIELD)
+                        .size(px(13.0))
+                        .text_color(theme.text_muted),
+                )
+                .child("Open the thread to enter it. It stays out of chat."),
+        )
 }
 
 fn ask_pill_body(

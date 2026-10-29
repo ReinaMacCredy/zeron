@@ -175,10 +175,16 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
             b.addAction(UIAction { [weak self] _ in self?.pick(option) }, for: .touchUpInside)
             options.addArrangedSubview(b)
         }
-        options.isHidden = !quickAnswer
-        other.isHidden = q.multiline || !quickAnswer
-        editor.isHidden = !q.multiline || !quickAnswer
-        nextButton.isHidden = !quickAnswer
+        // A typed answer would cross the relay in the chat document, so a secret is entered on the Mac.
+        if q.secret {
+            header.text = q.header
+            question.text = "\(q.text)\n\nEnter it on your Mac. It stays out of chat."
+        }
+        options.isHidden = !quickAnswer || q.secret
+        other.isHidden = q.multiline || !quickAnswer || q.secret
+        editor.isHidden = !q.multiline || !quickAnswer || q.secret
+        nextButton.isHidden = !quickAnswer || q.secret
+        close.isHidden = q.secret
         other.text = custom[q.id]
         editor.text = custom[q.id]
         let opens = page == 0 && onOpenThread != nil
@@ -241,7 +247,7 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
     private var submitted = false
 
     private func advance() {
-        guard !submitted, let q = current, answered(q) else { return }
+        guard !submitted, let q = current, !q.secret, answered(q) else { return }
         if page < items.count - 1 {
             go(1)
             return

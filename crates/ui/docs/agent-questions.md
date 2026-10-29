@@ -19,6 +19,19 @@ When an agent in another chat is waiting, a pill appears above the main composer
 
 ![A question from another chat](agent-questions-pill.jpg)
 
+## When an agent needs a secret
+
+An agent that needs an API key, a token or a password asks for it with Zeron's `request_secret` tool instead of asking you to paste it into the chat. The transcript shows **Asking for a secret** and a card with what the agent needs and where to get it.
+
+![An agent asking for a secret](agent-secret-card.jpg)
+
+- Type or paste the secret in the field. It shows only dots, and it cannot be copied back out.
+- Click **Save securely**, or press Enter. **Decline** tells the agent you chose not to.
+- The secret goes to a private file on this Mac that only your user account can read. The agent gets the file's path, never the secret, and reads it inside its commands. The file is deleted after 24 hours.
+- The chat records only what happened: **Secret saved**, **Declined**, **Timed out** (no answer within the agent's wait, 10 minutes unless it set another), or **Cancelled** (the turn ended first). The secret never enters the chat, its history on your other devices, or the logs.
+
+Enter the secret on the Mac that runs the chat. Your iPhone shows the request but asks you to enter it on your Mac, since answers typed on a phone travel through the chat itself. A secret request from another chat shows in the question pill; **Open thread** takes you to its card.
+
 ## Approvals and permission modes
 
 A permission request is a question with fixed answers, such as **Allow** and **Deny** for Claude Code or **Yes** and **No** for Codex.
