@@ -2717,6 +2717,69 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_row_dragged_by_its_grip_moves_one_slot_and_escape_springs_it_back(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _dir = init(cx);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.tasks = vec![task("a", false), task("b", false), task("c", false)];
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| super::super::TasksPage::new(state, cx));
+        let moved = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = moved.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&page, move |_, event: &super::super::TasksEvent, _| {
+                if let super::super::TasksEvent::Update { task_id, patch } = event
+                    && let Some(key) = &patch.order_key
+                {
+                    sink.borrow_mut().push((task_id.clone(), key.clone()));
+                }
+            })
+            .detach();
+        });
+        cx.run_until_parked();
+        let pitch = cx.debug_bounds("task-row-c").unwrap().top()
+            - cx.debug_bounds("task-row-b").unwrap().top();
+        let grip = cx.debug_bounds("task-grip-b").unwrap().center();
+        let drag_by = |cx: &mut gpui::VisualTestContext, dy: gpui::Pixels| {
+            cx.simulate_mouse_down(grip, gpui::MouseButton::Left, gpui::Modifiers::none());
+            for step in 1..=6 {
+                let at = gpui::point(grip.x, grip.y + dy * (step as f32 / 6.0));
+                cx.simulate_mouse_move(at, gpui::MouseButton::Left, gpui::Modifiers::none());
+            }
+            cx.run_until_parked();
+        };
+        let release = |cx: &mut gpui::VisualTestContext, dy: gpui::Pixels| {
+            let at = gpui::point(grip.x, grip.y + dy);
+            cx.simulate_mouse_up(at, gpui::MouseButton::Left, gpui::Modifiers::none());
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        };
+
+        drag_by(cx, pitch * 1.6);
+        assert!(page.read_with(cx, |page, _| page.drag.is_some()));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(page.read_with(cx, |page, _| page.drag.is_none()));
+        release(cx, pitch * 1.6);
+        assert!(moved.borrow().is_empty(), "escape drops nothing");
+
+        drag_by(cx, pitch * 0.4);
+        release(cx, pitch * 0.4);
+        assert!(moved.borrow().is_empty(), "short of c's midpoint stays put");
+
+        drag_by(cx, pitch * 0.6);
+        release(cx, pitch * 0.6);
+        let moved = moved.borrow();
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].0, "b");
+        assert!(moved[0].1.as_str() > "c", "b lands after c");
+    }
+
+    #[gpui::test]
     fn an_orchestrated_row_opens_the_center_instead_of_the_card(cx: &mut gpui::TestAppContext) {
         let _dir = init(cx);
         let state = cx.new(|_| AppState::new());

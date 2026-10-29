@@ -232,6 +232,7 @@ pub struct TasksPage {
     shown: Vec<String>,
     rects: Rects,
     autoscroll: Option<gpui::Task<()>>,
+    escape: Option<Subscription>,
     bar: motion::Tween,
     bar_count: usize,
     thread_picker: bool,
@@ -309,6 +310,7 @@ impl TasksPage {
             shown: Vec::new(),
             rects: Rects::default(),
             autoscroll: None,
+            escape: None,
             bar: motion::Tween::at(0.0, motion::now()),
             bar_count: 0,
             thread_picker: false,
@@ -582,6 +584,13 @@ impl TasksPage {
                     self.picked.clear();
                 }
                 window.focus(&self.focus, cx);
+                let page = cx.entity().downgrade();
+                self.escape = Some(cx.intercept_keystrokes(move |event, window, cx| {
+                    if event.keystroke.key == "escape" {
+                        page.update(cx, |page, cx| page.cancel_drag(window, cx))
+                            .ok();
+                    }
+                }));
             }
         }
         let content = self.content_y(y);
@@ -666,6 +675,7 @@ impl TasksPage {
             return;
         };
         self.autoscroll = None;
+        self.escape = None;
         let now = motion::now();
         let reduced = motion::reduced_motion(cx);
         let shown = self.shifts.current(now);
@@ -743,6 +753,7 @@ impl TasksPage {
         };
         cx.stop_active_drag(window);
         self.autoscroll = None;
+        self.escape = None;
         let now = motion::now();
         let home = drag.flip(&drag.ids, &self.shifts.current(now));
         self.shifts.settle(&home, motion::reduced_motion(cx), now);

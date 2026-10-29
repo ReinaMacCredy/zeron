@@ -10003,7 +10003,10 @@ impl Composer {
                         .map_or(zeron_proto::TaskStatus::ToDo, |row| {
                             crate::tasks::rollup(state, row, now).status
                         });
-                    let (label, icon, color) = crate::tasks::column_tone(status, theme);
+                    let (_, icon, color) = crate::tasks::column_tone(status, theme);
+                    let label = (status != zeron_proto::TaskStatus::ToDo).then(|| {
+                        SharedString::from(zeron_proto::mission::column_title(status))
+                    });
                     let project = task
                         .space_id
                         .as_deref()
