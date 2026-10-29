@@ -22,7 +22,7 @@ Further down the rail:
 - Your **account** button, with your initial; hover it for your name, or **Local** when you are not signed in. Its menu starts with your email, or **Stored on this device** for a local workspace (**Not signed in** for a synced one without an account), then a **Usage · this device** section with each provider's plan and meters (**Refresh** updates them), **Usage** to open the Usage page, and one sync row: **Enable sync**, **Sync setup in progress**, **Finish sync setup**, or **Sign out**. On Windows and Linux it also has **Check for updates**. To sync with your other devices, see [Devices](zeron://docs/devices).
 - **Help**: recent releases, the full changelog, keybindings, and these docs. See [Updates and what's new](zeron://docs/updates).
 - A download button, when an app update is available.
-- **Settings** at the bottom. Cmd+, opens and closes it too. Settings opens as a panel over the app, with its pages grouped in a list on the left (Agents, Code, Connections) and **Search settings** on top; press / to search. The header names the page, for example **Settings › Updates**, and holds that page's actions. Close it with the **×**, Escape, or a click outside the panel.
+- **Settings** at the bottom. Cmd+, opens and closes it too. Settings opens as a panel over the app, with its pages grouped in a list on the left (Agents, Code, Connections) and **Search settings** on top; press / or Cmd+F to search, and pick a found setting to open its page at that row. The header names the page, for example **Settings › Updates**, and holds that page's actions. Close it with the **×**, Escape, or a click outside the panel.
 
 ## The sidebar
 
