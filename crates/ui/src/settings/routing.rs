@@ -70,6 +70,7 @@ pub struct RoutingPage {
     task: Option<Task<()>>,
     save_task: Option<Task<()>>,
     model_tasks: HashMap<HarnessId, Task<()>>,
+    delegation: Entity<crate::settings::delegation::DelegationCard>,
     _state: Subscription,
     _accounts: Subscription,
 }
@@ -83,6 +84,10 @@ impl RoutingPage {
         });
         let accounts_sub =
             cx.observe_global::<accounts::AccountsSnapshotCache>(|_: &mut Self, cx| cx.notify());
+        let delegation = {
+            let state = state.clone();
+            cx.new(|cx| crate::settings::delegation::DelegationCard::new(state, cx))
+        };
         let mut page = Self {
             state,
             scroll: widgets::PageScroll::default(),
@@ -97,6 +102,7 @@ impl RoutingPage {
             task: None,
             save_task: None,
             model_tasks: HashMap::new(),
+            delegation,
             _state: state_sub,
             _accounts: accounts_sub,
         };
@@ -517,7 +523,7 @@ impl RoutingPage {
                     .flex_row()
                     .items_end()
                     .justify_between()
-                    .child(widgets::section_label(theme, "Roles"))
+                    .child(widgets::section_title(theme, "Roles"))
                     .child(
                         small(theme.text_muted, "Quota refreshes with the Usage page").pr(px(4.0)),
                     ),
@@ -1226,10 +1232,9 @@ impl popover::ScrollRailHost for RoutingPage {
 impl Render for RoutingPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
-        let mut column = widgets::page_column()
+        let mut column = widgets::settings_page()
             .max_w(px(PAGE_WIDTH))
-            .child(widgets::page_header(&theme, "Routing", None))
-            .child(widgets::page_subtitle(
+            .child(widgets::page_note(
                 &theme,
                 "Which harness and model a delegated child runs on when the agent passes a role \
                  and no model. An explicit model in delegate_task always wins. Quota comes from \
@@ -1247,7 +1252,12 @@ impl Render for RoutingPage {
                 column = column
                     .child(self.render_roles(&theme, cx))
                     .child(self.render_out_of_quota(&settings, &theme, cx))
-                    .child(self.render_native(&settings, &theme, cx));
+                    .child(self.render_native(&settings, &theme, cx))
+                    .child(widgets::section(
+                        &theme,
+                        "Delegation",
+                        self.delegation.clone(),
+                    ));
             }
             None => {
                 let note = match &self.settings {

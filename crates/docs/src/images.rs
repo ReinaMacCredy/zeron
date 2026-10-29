@@ -1,5 +1,9 @@
 pub const IMAGES: &[(&str, &[u8])] = &[
     (
+        "settings-updates.jpg",
+        include_bytes!("../../ui/assets/whats_new/settings-updates.jpg"),
+    ),
+    (
         "claude-config-panel.jpg",
         include_bytes!("../../ui/assets/whats_new/claude-config-panel.jpg"),
     ),

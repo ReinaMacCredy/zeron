@@ -3436,7 +3436,7 @@ fn add_space_cloud_device(state: &crate::state::AppState) -> Option<Device> {
     })
 }
 
-fn device_glyph(platform: &str) -> &'static str {
+pub(super) fn device_glyph(platform: &str) -> &'static str {
     match platform {
         zeron_proto::CLOUD_PLATFORM => icons::CLOUD,
         "macos" | "darwin" => icons::LAPTOP,

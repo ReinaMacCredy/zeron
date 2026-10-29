@@ -31,9 +31,9 @@ To choose the agent and model, see [Models and effort](zeron://docs/models-and-e
 
 ## Send the first message
 
-Press Enter (or Cmd+Enter, depending on **Send messages with** in [Settings > General](zeron://settings/general)). The canvas becomes the new thread. Until it is named, the thread shows as **New session** in the sidebar.
+Press Enter (or Cmd+Enter, depending on **Send messages with** in [Settings > Chat](zeron://settings/chat)). The canvas becomes the new thread. Until it is named, the thread shows as **New session** in the sidebar.
 
-**Thread naming** in Settings > General decides who writes the title. It reads **Session agent** by default: a Claude Code or Codex chat is named by its own agent on that agent's cheapest model, and any other chat by the first enabled of Claude Code or Codex. Click the chip to pick one model for every title instead, and **Reset** to go back to **Session agent**. If no title comes back, the thread is named after the first words of your prompt. A thread is named once; rename it yourself from the sidebar.
+**Thread naming** in Settings > Chat decides who writes the title. It reads **Session agent** by default: a Claude Code or Codex chat is named by its own agent on that agent's cheapest model, and any other chat by the first enabled of Claude Code or Codex. Click the chip to pick one model for every title instead, and **Reset** to go back to **Session agent**. If no title comes back, the thread is named after the first words of your prompt. A thread is named once; rename it yourself from the sidebar.
 
 > With **Send messages with** set to Enter, Cmd+Enter starts the thread in the background and leaves you on a fresh canvas with the same target.
 

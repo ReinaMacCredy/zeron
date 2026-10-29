@@ -70,7 +70,7 @@ While child agents run, a pill above the composer shows how many are working. Cl
 
 ## Limits
 
-[Settings > General](zeron://settings/general) has two limits for agents that delegate:
+The **Delegation** section at the bottom of [Settings > Routing](zeron://settings/routing) has two limits for agents that delegate:
 
 | Setting | Default | Range |
 | --- | --- | --- |

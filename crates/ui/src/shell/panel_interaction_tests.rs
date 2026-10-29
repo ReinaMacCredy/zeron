@@ -347,8 +347,8 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
     change(&shell, cx, |s, _, cx| {
         s.open_settings(SettingsSection::Appearance, cx)
     });
-    draw(&shell, cx, 0);
-    assert!(cx.debug_bounds("conversation-column").is_none());
+    expect(draw(&shell, cx, 0), [300.0, 286.0, 0.0, 1014.0]);
+    assert!(cx.debug_bounds("settings-panel").is_some());
     change(&shell, cx, |s, _, cx| s.close_settings(cx));
     expect(draw(&shell, cx, 0), [300.0, 286.0, 0.0, 1014.0]);
 

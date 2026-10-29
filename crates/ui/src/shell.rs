@@ -54,10 +54,10 @@ use crate::settings::computer::ComputerPage;
 use crate::settings::device_hub::DeviceHubPage;
 use crate::settings::devices::DevicesPage;
 use crate::settings::files::{FilesSettingsEvent, FilesSettingsPage};
-use crate::settings::harnesses::HarnessesPage;
+use crate::settings::harnesses::{HarnessesEvent, HarnessesPage};
 use crate::settings::home::HomeSettingsPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
-use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
+use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage, Shown as ShortcutsShown};
 use crate::settings::source_control::SourceControlPage;
 use crate::settings::tools::{ToolsPage, ToolsPageEvent};
 use crate::settings::{
@@ -120,6 +120,7 @@ mod whats_new;
 mod task_actions;
 mod thread_search;
 use side_chats::SideChatTab;
+mod settings_updates;
 mod tabs;
 mod terminal_tabs;
 mod update_glyph;
@@ -684,12 +685,15 @@ pub enum SettingsSection {
     SourceControl,
     Home,
     Archived,
+    Chat,
+    Updates,
 }
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 20] = [
+    pub const ALL: [SettingsSection; 22] = [
         SettingsSection::General,
+        SettingsSection::Chat,
         SettingsSection::Home,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
@@ -700,14 +704,15 @@ impl SettingsSection {
         SettingsSection::AgentProfiles,
         SettingsSection::Routing,
         SettingsSection::CodeReview,
+        SettingsSection::Computer,
+        SettingsSection::SourceControl,
+        SettingsSection::Files,
         SettingsSection::Devices,
+        SettingsSection::DeviceHub,
         SettingsSection::Cloud,
         SettingsSection::Billing,
-        SettingsSection::Files,
+        SettingsSection::Updates,
         SettingsSection::Appshots,
-        SettingsSection::Computer,
-        SettingsSection::DeviceHub,
-        SettingsSection::SourceControl,
         SettingsSection::Archived,
     ];
 
@@ -772,6 +777,8 @@ impl SettingsSection {
             SettingsSection::SourceControl => "source-control",
             SettingsSection::Home => "home",
             SettingsSection::Archived => "archived",
+            SettingsSection::Chat => "chat",
+            SettingsSection::Updates => "updates",
         }
     }
 
@@ -799,14 +806,26 @@ impl SettingsSection {
             "source-control" => SettingsSection::SourceControl,
             "home" => SettingsSection::Home,
             "archived" => SettingsSection::Archived,
+            "chat" => SettingsSection::Chat,
+            "updates" => SettingsSection::Updates,
             _ => return None,
         })
     }
 
-    /// Nav groups are separated by spacing alone: preferences, providers and
-    /// devices, then workspace data.
     fn starts_nav_group(self) -> bool {
-        matches!(self, Self::Harnesses | Self::Files)
+        matches!(
+            self,
+            Self::Harnesses | Self::SourceControl | Self::Devices | Self::Updates
+        )
+    }
+
+    fn nav_heading(self) -> Option<&'static str> {
+        match self {
+            Self::Harnesses => Some("Agents"),
+            Self::SourceControl => Some("Code"),
+            Self::Devices => Some("Connections"),
+            _ => None,
+        }
     }
 
     /// Sidebar + header label (zeron settings-sidebar.tsx SECTIONS / __root.tsx
@@ -834,6 +853,8 @@ impl SettingsSection {
             SettingsSection::SourceControl => "Source Control",
             SettingsSection::Home => "Home",
             SettingsSection::Archived => "Archived sessions",
+            SettingsSection::Chat => "Chat",
+            SettingsSection::Updates => "Updates",
         }
     }
 
@@ -848,7 +869,14 @@ impl SettingsSection {
             SettingsSection::Agents => &["account", "login", "usage", "provider"],
             SettingsSection::Tools => &["mcp", "zeron tools", "delegate", "thread tools"],
             SettingsSection::AgentProfiles => &["profile", "preset", "delegate", "model"],
-            SettingsSection::Routing => &["model", "route", "quota", "sub-agent"],
+            SettingsSection::Routing => &[
+                "model",
+                "route",
+                "quota",
+                "sub-agent",
+                "delegate",
+                "delegation",
+            ],
             SettingsSection::CodeReview => &["review", "reviewer", "findings", "model"],
             SettingsSection::Shortcuts => &["keyboard", "keybinding"],
             SettingsSection::Appshots => &["screenshot", "capture"],
@@ -857,6 +885,7 @@ impl SettingsSection {
             SettingsSection::SourceControl => &["git", "commit", "pull request"],
             SettingsSection::Home => &["widget", "dashboard", "new thread", "customize"],
             SettingsSection::Archived => &["archive", "old sessions"],
+            SettingsSection::Updates => &["update", "version", "upgrade"],
             _ => &[],
         }
     }
@@ -866,18 +895,32 @@ impl SettingsSection {
     fn rows(self) -> &'static [SettingsSearchRow] {
         match self {
             SettingsSection::General => &[
-                ("Send messages with", &["enter", "submit"]),
-                ("Follow-up behavior", &["queue", "steer", "interrupt"]),
-                ("Compact mode", &["transcript"]),
-                ("Stop active agent with Escape", &["escape", "cancel"]),
                 ("Session switcher shows", &["switcher", "recency"]),
                 ("Session switcher shows at most", &["switcher"]),
+            ],
+            SettingsSection::Chat => &[
+                ("Send messages with", &["enter", "submit"]),
+                ("Follow-up behavior", &["queue", "steer", "interrupt"]),
+                ("Stop active agent with Escape", &["escape", "cancel"]),
+                ("Compact mode", &["transcript"]),
                 ("Thread naming", &["title", "automatic"]),
+            ],
+            SettingsSection::Routing => &[
+                (
+                    zeron_proto::mission::CHAT_MISSION_TITLE,
+                    &["mission", "lead"],
+                ),
                 ("Delegation depth", &["delegate", "subagent", "nest"]),
                 (
                     "Delegated tasks per chat",
                     &["delegate", "subagent", "limit"],
                 ),
+            ],
+            SettingsSection::Updates => &[
+                ("Version", &["check for updates", "restart"]),
+                ("Automatic updates", &["auto", "install on quit"]),
+                ("Agent CLIs", &["claude", "codex", "policy", "update all"]),
+                ("Devices", &["device", "remote"]),
             ],
             SettingsSection::Harnesses => &[("Add account", &["sign in", "api key", "login"])],
             SettingsSection::Appearance => &[
@@ -1024,6 +1067,83 @@ fn settings_open_route(route: &str, remembered: SettingsSection) -> Option<Setti
         .strip_prefix("settings/")
         .and_then(SettingsSection::from_slug)
         .map(SettingsSection::canonical)
+}
+
+const SETTINGS_NAV_WIDTH: f32 = 238.0;
+const SETTINGS_PANEL_RADIUS: f32 = 14.0;
+const SETTINGS_PANEL_MAX_WIDTH: f32 = 1280.0;
+const SETTINGS_PANEL_MIN_SIDE: f32 = 24.0;
+const SETTINGS_PANEL_BOTTOM: f32 = 40.0;
+
+fn settings_panel_bounds(viewport: gpui::Size<Pixels>) -> gpui::Bounds<Pixels> {
+    let width = f32::from(viewport.width);
+    let height = f32::from(viewport.height);
+    let panel_width = (width - 2.0 * SETTINGS_PANEL_MIN_SIDE)
+        .min(SETTINGS_PANEL_MAX_WIDTH)
+        .max(0.0);
+    let top = Theme::TITLEBAR_HEIGHT;
+    let panel_height = (height - top - SETTINGS_PANEL_BOTTOM).max(0.0);
+    gpui::Bounds::new(
+        gpui::point(px((width - panel_width) / 2.0), px(top)),
+        gpui::size(px(panel_width), px(panel_height)),
+    )
+}
+
+fn settings_fade<E>(id: &'static str, reduced: bool, element: E) -> gpui::AnimationElement<E>
+where
+    E: Styled + IntoElement + 'static,
+{
+    let animation = if reduced {
+        gpui::Animation::new(Duration::from_millis(120))
+    } else {
+        motion::DIALOG_IN.animation()
+    };
+    element.with_animation(id, animation, |el, t| el.opacity(t))
+}
+
+fn settings_panel_in(
+    reduced: bool,
+    panel: gpui::Bounds<Pixels>,
+    element: gpui::Stateful<gpui::Div>,
+) -> gpui::AnimationElement<gpui::Stateful<gpui::Div>> {
+    if reduced {
+        return settings_fade("settings-panel-in", true, element);
+    }
+    element.with_animation(
+        "settings-panel-in",
+        motion::DIALOG_IN.animation(),
+        move |el, t| {
+            let shrink = 0.02 * (1.0 - t);
+            let dx = panel.size.width * (shrink / 2.0);
+            let dy = panel.size.height * (shrink / 2.0);
+            el.opacity(t)
+                .left(panel.origin.x + dx)
+                .top(panel.origin.y + dy)
+                .w(panel.size.width - dx * 2.0)
+                .h(panel.size.height - dy * 2.0)
+        },
+    )
+}
+
+fn settings_close_duration(reduced: bool) -> Duration {
+    if reduced {
+        Duration::from_millis(120)
+    } else {
+        motion::MENU_OUT.total()
+    }
+}
+
+fn settings_panel_out(reduced: bool, panel: AnyElement) -> AnyElement {
+    div()
+        .absolute()
+        .inset_0()
+        .child(panel)
+        .with_animation(
+            "settings-panel-out",
+            gpui::Animation::new(settings_close_duration(reduced)),
+            |el, t| el.opacity(1.0 - t),
+        )
+        .into_any_element()
 }
 
 /// What the main outlet shows.
@@ -2766,6 +2886,8 @@ pub struct Shell {
     rail_usage_hover: app_rail::RingHover,
     continuing: std::collections::HashSet<String>,
     harnesses_page: Option<Entity<HarnessesPage>>,
+    harnesses_sub: Option<Subscription>,
+    settings_closing: Option<SettingsSection>,
     /// Filters the settings nav; cleared when settings close.
     settings_search: Entity<ComposerInput>,
     _settings_search_sub: Subscription,
@@ -2886,7 +3008,10 @@ pub struct Shell {
     harness_update_geometry: [Option<WidthTween>; 2],
     harness_update_scroll: settings::widgets::PageScroll,
     /// Open Update-all dialog; the value is its "continue threads" box.
-    update_all_dialog: Option<bool>,
+    update_all_dialog: Option<harness_updates::UpdateAllDialog>,
+    updates_scroll: settings::widgets::PageScroll,
+    updates_policy_selects:
+        std::collections::HashMap<zeron_proto::HarnessId, settings::widgets::SelectState>,
     /// An Update all that restarts the app: the local agents it waits on and
     /// whether its engine calls have returned.
     update_all_restart: Option<(Vec<zeron_proto::HarnessId>, bool)>,
@@ -3526,6 +3651,8 @@ impl Shell {
             rail_usage_hover: app_rail::RingHover::default(),
             continuing: Default::default(),
             harnesses_page: None,
+            harnesses_sub: None,
+            settings_closing: None,
             settings_search,
             _settings_search_sub: settings_search_sub,
             shortcuts_sub: None,
@@ -3598,6 +3725,8 @@ impl Shell {
             harness_update_geometry: [None; 2],
             harness_update_scroll: settings::widgets::PageScroll::default(),
             update_all_dialog: None,
+            updates_scroll: Default::default(),
+            updates_policy_selects: Default::default(),
             update_all_restart: None,
             user_menu: popover::Popup::default(),
             help_menu: popover::Popup::default(),
@@ -3867,11 +3996,14 @@ impl Shell {
             self.debug_dialog = None;
             self.open_add_space(cx);
         }
-        if self.debug_dialog.as_deref() == Some("update-all")
-            && self.update_all_plan(cx).items() > 0
+        if let Some(this_mac) = match self.debug_dialog.as_deref() {
+            Some("update-all") => Some(false),
+            Some("update-everything") => Some(true),
+            _ => None,
+        } && self.update_all_plan(this_mac, cx).items() > 0
         {
             self.debug_dialog = None;
-            self.open_update_all(cx);
+            self.open_update_all(this_mac, cx);
         }
         // Capture knob: pop the requested dialog once chats have landed.
         if let Some(which) = self.debug_dialog.clone()
@@ -8554,6 +8686,10 @@ impl Shell {
         let Route::Settings(section) = self.route else {
             return false;
         };
+        if self.update_all_dialog.take().is_some() {
+            cx.notify();
+            return true;
+        }
         match section.canonical() {
             SettingsSection::Devices => self
                 .devices_page
@@ -8867,6 +9003,21 @@ impl Shell {
     }
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
+        if let Route::Settings(section) = self.route {
+            self.settings_closing = Some(section);
+            let linger = settings_close_duration(self.reduced_motion);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(linger).await;
+                this.update(cx, |shell, cx| {
+                    if !matches!(shell.route, Route::Settings(_)) {
+                        shell.settings_closing = None;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
         self.settings_search
             .update(cx, |input, cx| input.set_text("", cx));
         self.settings_focus_pending = false;
@@ -9067,7 +9218,16 @@ impl Shell {
             SettingsSection::Harnesses => {
                 if self.harnesses_page.is_none() {
                     let state = self.state.clone();
-                    self.harnesses_page = Some(cx.new(|cx| HarnessesPage::new(state, cx)));
+                    let page = cx.new(|cx| HarnessesPage::new(state, cx));
+                    self.harnesses_sub = Some(cx.subscribe(
+                        &page,
+                        |this: &mut Shell, _, event: &HarnessesEvent, cx| match event {
+                            HarnessesEvent::OpenUpdates => {
+                                this.open_settings(SettingsSection::Updates, cx)
+                            }
+                        },
+                    ));
+                    self.harnesses_page = Some(page);
                 }
                 match &self.harnesses_page {
                     Some(page) => page.clone().into_any_element(),
@@ -9222,7 +9382,10 @@ impl Shell {
                 }
                 card.into_any_element()
             }
-            SettingsSection::Shortcuts | SettingsSection::General | SettingsSection::Appshots => {
+            SettingsSection::Shortcuts
+            | SettingsSection::General
+            | SettingsSection::Chat
+            | SettingsSection::Appshots => {
                 if self.shortcuts_page.is_none() {
                     let state = self.state.clone();
                     let keymap = self.settings.keymap.clone();
@@ -9309,10 +9472,12 @@ impl Shell {
                 match &self.shortcuts_page {
                     Some(page) => {
                         page.update(cx, |page, _| {
-                            page.show_section(
-                                section == SettingsSection::Appshots,
-                                section == SettingsSection::General,
-                            )
+                            page.show_section(match section {
+                                SettingsSection::Appshots => ShortcutsShown::Appshots,
+                                SettingsSection::General => ShortcutsShown::General,
+                                SettingsSection::Chat => ShortcutsShown::Chat,
+                                _ => ShortcutsShown::Shortcuts,
+                            })
                         });
                         page.clone().into_any_element()
                     }
@@ -9368,6 +9533,7 @@ impl Shell {
                 .get_or_insert_with(|| cx.new(|_| HomeSettingsPage::default()))
                 .clone()
                 .into_any_element(),
+            SettingsSection::Updates => self.render_updates_page(window, cx),
             SettingsSection::Archived => {
                 if self.archived_page.is_none() {
                     let state = self.state.clone();
@@ -11884,9 +12050,10 @@ impl Shell {
             .border_color(seam)
     }
 
-    /// Settings takes over the window: the section list stands where the
-    /// chat sidebar was, the page fills the rest. Opening a preference never
-    /// adds a route-history entry or changes the selected conversation.
+    /// Settings floats over the app as a centered panel: the section list
+    /// and the page sit inside it, the app stays dimmed behind. Opening a
+    /// preference never adds a route-history entry or changes the selected
+    /// conversation. X, Escape or a click on the backdrop closes it.
     fn render_settings_page(
         &mut self,
         section: SettingsSection,
@@ -11902,12 +12069,95 @@ impl Shell {
             // Tab remains the explicit way to enter its navigation or content.
             window.focus(&self.settings_focus, cx);
         }
-        let sidebar_width = self.settings.sidebar_width;
-        // Dropdowns contain themselves to the page pane beside this column.
-        settings::widgets::set_sidebar_width(self.content_left() + sidebar_width, cx);
+        // The route underneath renders too; its composers must not take focus from Settings.
+        if matches!(self.route, Route::Settings(_)) {
+            for composer in std::iter::once(&self.composer)
+                .chain(self.side_chats.values().map(|tab| &tab.composer))
+            {
+                composer.update(cx, |composer, _| composer.focus_pending = false);
+            }
+        }
+        let viewport = window.viewport_size();
+        let panel = settings_panel_bounds(viewport);
+        let header = settings::widgets::SETTINGS_HEADER_HEIGHT;
+        settings::widgets::set_page_pane(
+            gpui::Bounds::new(
+                panel.origin + gpui::point(px(SETTINGS_NAV_WIDTH + 1.0), px(header)),
+                gpui::size(
+                    (panel.size.width - px(SETTINGS_NAV_WIDTH + 1.0)).max(px(0.0)),
+                    (panel.size.height - px(header)).max(px(0.0)),
+                ),
+            ),
+            cx,
+        );
         let nav = self.render_settings_nav(section, &theme, window, cx);
         let outlet = self.settings_outlet(section, window, cx);
-        div()
+        let action = self.settings_header_action(section, &theme, window, cx);
+        let header_row = div()
+            .id("settings-header")
+            .h(px(header))
+            .flex_none()
+            .pl(px(20.0))
+            .pr(px(12.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .child(div().text_color(theme.text_muted).child("Settings"))
+                    .child(
+                        icon(icons::ALT_ARROW_RIGHT)
+                            .size(px(14.0))
+                            .text_color(theme.text_faint),
+                    )
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(SharedString::from(section.label())),
+                    ),
+            )
+            .child(
+                div()
+                    .ml_auto()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .children(action)
+                    .child(
+                        div()
+                            .id("settings-close")
+                            .debug_selector(|| "settings-close".into())
+                            .role(gpui::Role::Button)
+                            .aria_label("Close settings")
+                            .tab_index(0)
+                            .size(px(28.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(7.0))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.glass_hover()))
+                            .focus_visible(|s| s.border_2().border_color(theme.accent))
+                            .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
+                            .child(
+                                icon(icons::LUCIDE_X)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            ),
+                    ),
+            );
+        let body = div()
             .id("settings-page")
             .role(gpui::Role::Group)
             .aria_label("Settings")
@@ -11924,6 +12174,12 @@ impl Shell {
                         this.close_settings(cx);
                     }
                     cx.stop_propagation();
+                } else if key == "/" && !event.keystroke.modifiers.modified() {
+                    let search = this.settings_search.focus_handle(cx);
+                    if !search.contains_focused(window, cx) {
+                        window.focus(&search, cx);
+                        cx.stop_propagation();
+                    }
                 } else if key == "tab" {
                     move_settings_focus(
                         &this.settings_focus,
@@ -11937,38 +12193,15 @@ impl Shell {
             }))
             .child(
                 div()
-                    .w(px(sidebar_width))
+                    .w(px(SETTINGS_NAV_WIDTH))
                     .h_full()
                     .flex_none()
                     .flex()
                     .flex_col()
-                    .pt(px(Theme::TITLEBAR_HEIGHT))
                     .pb(px(Theme::SPACE_SM))
-                    .child(
-                        div().flex_none().px(px(Theme::SPACE_SM)).child(
-                            settings::widgets::section_tab(
-                                &theme,
-                                false,
-                                0.0,
-                                "settings-back",
-                                "settings-back-hover",
-                            )
-                            .role(gpui::Role::Button)
-                            .aria_label("Back")
-                            .tab_index(0)
-                            .focus_visible(|s| s.border_2().border_color(theme.accent))
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
-                            .child(icon(icons::ARROW_LEFT).size(px(16.0)).text_color(
-                                motion::hover_blend(
-                                    "settings-back-hover",
-                                    theme.text_muted,
-                                    theme.text,
-                                ),
-                            ))
-                            .child("Back"),
-                        ),
-                    )
+                    .bg(theme.wash(0.025))
+                    .border_r_1()
+                    .border_color(theme.border)
                     .child(div().flex_1().min_h_0().child(nav)),
             )
             .child(
@@ -11976,11 +12209,10 @@ impl Shell {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    // Pages scroll to the window's top edge; `page_column`
-                    // carries the titlebar clearance inside the scroll.
                     .flex()
                     .flex_col()
                     .opacity(self.voice_stage_underlay_opacity(cx))
+                    .child(header_row)
                     .child(div().flex_1().min_h_0().child(outlet)),
             )
             .child(
@@ -11989,12 +12221,146 @@ impl Shell {
                     .track_focus(&self.settings_end_focus)
                     .tab_index(0)
                     .tab_stop(false),
-            )
+            );
+        let card = div()
+            .size_full()
+            .rounded(px(SETTINGS_PANEL_RADIUS))
+            .overflow_hidden()
+            .bg(crate::theme::flatten(popover::surface_bg(&theme), theme.bg))
+            .border_1()
+            .border_color(crate::theme::hairline(0.10))
+            .when(!theme.is_frost(), |el| el.shadow_lg())
+            .text_color(theme.text)
+            .child(body);
+        let panel_el = div()
+            .id("settings-panel")
+            .debug_selector(|| "settings-panel".into())
+            .absolute()
+            .left(panel.origin.x)
+            .top(panel.origin.y)
+            .w(panel.size.width)
+            .h(panel.size.height)
+            .occlude()
+            .child(crate::frost::frosted(
+                SETTINGS_PANEL_RADIUS,
+                crate::frost::MENU_BLUR,
+                card,
+            ));
+        let backdrop = div()
+            .id("settings-backdrop")
+            .debug_selector(|| "settings-backdrop".into())
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(crate::theme::scrim(0.45))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.close_settings(cx)),
+            );
+        let drag = self.titlebar_drag_region(
+            "settings-titlebar",
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(px(Theme::TITLEBAR_HEIGHT)),
+            cx,
+        );
+        let reduced = motion::reduced_motion(cx);
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .w(viewport.width)
+            .h(viewport.height)
+            .child(settings_fade(
+                "settings-backdrop-in",
+                reduced,
+                div()
+                    .absolute()
+                    .inset_0()
+                    .child(crate::frost::frosted(0.0, 8.0, backdrop)),
+            ))
+            .child(drag)
+            .child(settings_panel_in(reduced, panel, panel_el))
             .into_any_element()
     }
 
-    /// Roving section tabs, grouped by spacing alone: preferences, agents and
-    /// devices, then workspace data.
+    fn render_settings_search(
+        &self,
+        theme: &Theme,
+        query: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let trailing = if query.is_empty() {
+            div()
+                .h(px(20.0))
+                .min_w(px(20.0))
+                .px(px(5.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.0))
+                .bg(theme.wash(0.07))
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.text_muted)
+                .child("/")
+                .into_any_element()
+        } else {
+            div()
+                .id("settings-search-clear")
+                .role(gpui::Role::Button)
+                .aria_label("Clear settings search")
+                .size(px(20.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.0))
+                .bg(theme.wash(0.07))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.settings_search
+                        .update(cx, |input, cx| input.set_text(String::new(), cx));
+                    window.focus(&this.settings_search.focus_handle(cx), cx);
+                    cx.notify();
+                }))
+                .child(
+                    icon(icons::CLOSE)
+                        .size(px(12.0))
+                        .text_color(theme.text_muted),
+                )
+                .into_any_element()
+        };
+        div()
+            .flex_none()
+            .h(px(32.0))
+            .mb(px(6.0))
+            .pl(px(8.0))
+            .pr(px(6.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(8.0))
+            .hover(|s| s.bg(theme.glass_hover()))
+            .text_size(crate::typography::ui_rems(13.0))
+            .child(
+                icon(icons::MAGNIFER)
+                    .size(px(14.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(self.settings_search.clone()),
+            )
+            .child(trailing)
+    }
+
+    /// Roving section tabs in their headed groups.
     fn render_settings_nav(
         &mut self,
         section: SettingsSection,
@@ -12025,8 +12391,11 @@ impl Shell {
             SettingsSection::SourceControl => icons::GIT_BRANCH,
             SettingsSection::Home => icons::HOME,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
+            SettingsSection::Chat => icons::CHAT_ROUND_LINE,
+            SettingsSection::Updates => icons::REFRESH,
         };
         let query = self.settings_search.read(cx).text().to_string();
+        let grouped = query.trim().is_empty();
         settings::widgets::scroll_faded(
             "settings-nav-scroll",
             div()
@@ -12047,13 +12416,7 @@ impl Shell {
                         .flex()
                         .flex_col()
                         .gap(px(2.0))
-                        .child(
-                            popover::search_input_frame(
-                                theme,
-                                self.settings_search.clone().into_any_element(),
-                            )
-                            .mb(px(6.0)),
-                        )
+                        .child(self.render_settings_search(theme, &query, cx))
                         .children(
                             SettingsSection::ALL
                                 .into_iter()
@@ -12085,7 +12448,6 @@ impl Shell {
                                         key.clone(),
                                         hover_key,
                                     )
-                                    .when(item.starts_nav_group(), |el| el.mt(px(Theme::SPACE_LG)))
                                     .role(gpui::Role::Tab)
                                     .aria_label(item.label())
                                     .aria_selected(selected)
@@ -12137,8 +12499,27 @@ impl Shell {
                                     // While searching, the rows the query found sit
                                     // under their section, indented past its icon.
                                     let hits = item.matching_rows(&query);
-                                    div().flex().flex_col().child(section_tab).children(
-                                        hits.into_iter().map(|title| {
+                                    let heading =
+                                        item.nav_heading().filter(|_| grouped).map(|heading| {
+                                            div()
+                                                .h(px(22.0))
+                                                .px(px(Theme::SPACE_SM))
+                                                .flex()
+                                                .items_center()
+                                                .text_size(crate::typography::ui_rems(11.5))
+                                                .font_weight(gpui::FontWeight::MEDIUM)
+                                                .text_color(theme.text_faint)
+                                                .child(SharedString::from(heading))
+                                        });
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .when(grouped && item.starts_nav_group(), |el| {
+                                            el.mt(px(14.0))
+                                        })
+                                        .children(heading)
+                                        .child(section_tab)
+                                        .children(hits.into_iter().map(|title| {
                                             div()
                                                 .id(SharedString::from(format!(
                                                     "settings-nav-{}-{title}",
@@ -12158,8 +12539,7 @@ impl Shell {
                                                     this.open_settings(item, cx)
                                                 }))
                                                 .child(SharedString::from(title))
-                                        }),
-                                    )
+                                        }))
                                 }),
                         ),
                 ),
@@ -20480,6 +20860,25 @@ impl Render for Shell {
                         .children(overlays);
                     break 'ready root.child(motion::fade_in("phase-setup", page));
                 }
+                // Settings floats over the route it came from, so that route renders underneath.
+                let settings_route = match self.route {
+                    Route::Settings(section) => Some(section),
+                    _ => None,
+                };
+                let settings_panel = match (settings_route, self.settings_closing) {
+                    (Some(section), _) => Some(self.render_settings_page(section, window, cx)),
+                    (None, Some(section)) => {
+                        let panel = self.render_settings_page(section, window, cx);
+                        Some(settings_panel_out(self.reduced_motion, panel))
+                    }
+                    (None, None) => None,
+                };
+                if settings_route.is_some() {
+                    self.route = match self.settings_return_route {
+                        Route::Settings(_) => Route::Chat,
+                        route => route,
+                    };
+                }
                 let pr_route = matches!(self.route, Route::PullRequests);
                 let chat_under = self.task_chat_slide_t().is_some();
                 let page_route = pr_route
@@ -20493,53 +20892,6 @@ impl Render for Shell {
                             | Route::Docs
                     )
                     || (self.route == Route::TaskCenter && !chat_under);
-                if let Route::Settings(section) = self.route {
-                    let settings_page = self.render_settings_page(section, window, cx);
-                    let swipe = self.swipe_layers(0.0, cx);
-                    let settings_page = div()
-                        .size_full()
-                        .relative()
-                        .overflow_hidden()
-                        .opacity(swipe.alpha)
-                        .child(
-                            div()
-                                .size_full()
-                                .relative()
-                                .left(px(swipe.shift))
-                                .child(settings_page),
-                        )
-                        .children(swipe.pill);
-                    // A call started from Settings opens its stage here too.
-                    let voice_stage = self.render_voice_stage(window, cx);
-                    let overlays = self.render_overlays(window.viewport_size(), window, cx);
-                    let flush_tone = self.flush_tone(self.settings.sidebar_width, window, cx);
-                    let theme = Theme::of(cx).clone();
-                    let settings_page =
-                        self.content_frame(self.settings.sidebar_width, settings_page, &theme);
-                    let rail = self.render_app_rail(cx);
-                    let drag = self.titlebar_drag_region(
-                        "settings-titlebar",
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .right_0()
-                            .h(px(Theme::TITLEBAR_HEIGHT)),
-                        cx,
-                    );
-                    let page = div()
-                        .size_full()
-                        .relative()
-                        .child(settings_page)
-                        .child(rail)
-                        .children(voice_stage)
-                        .child(drag)
-                        .children(overlays);
-                    break 'ready root
-                        .child(self.swipe_layer(cx))
-                        .children(flush_tone)
-                        .child(motion::fade_in("phase-app", page));
-                }
                 // The Pull requests route shares this layout without the
                 // chat's side pane.
                 let on_chat = matches!(self.route, Route::Chat) || chat_under;
@@ -20895,7 +21247,11 @@ impl Render for Shell {
                         |el| el.child(self.sidebar_peek_pointer_observer(cx)),
                     )
                     .children(self.render_sidebar_options_titlebar(cx))
+                    .children(settings_panel)
                     .children(overlays);
+                if let Some(section) = settings_route {
+                    self.route = Route::Settings(section);
+                }
                 root.child(self.swipe_layer(cx))
                     .children(flush_tone)
                     .child(motion::fade_in("phase-app", page))
@@ -21083,8 +21439,11 @@ mod tests {
     #[test]
     fn settings_search_matches_labels_and_row_keywords() {
         assert!(SettingsSection::ALL.iter().all(|s| s.matches("")));
-        assert!(SettingsSection::General.matches("Follow"));
-        assert!(SettingsSection::General.matches("steer"));
+        assert!(SettingsSection::Chat.matches("Follow"));
+        assert!(SettingsSection::Chat.matches("steer"));
+        assert!(!SettingsSection::General.matches("steer"));
+        assert!(SettingsSection::Routing.matches("delegation depth"));
+        assert!(SettingsSection::Updates.matches("automatic"));
         assert!(!SettingsSection::Shortcuts.matches("steer"));
         assert!(SettingsSection::Appearance.matches("FONT SIZE"));
         assert!(SettingsSection::Archived.matches("archived"));
@@ -21100,7 +21459,7 @@ mod tests {
             vec!["Light theme", "Dark theme"]
         );
         assert_eq!(
-            SettingsSection::General.matching_rows("steer"),
+            SettingsSection::Chat.matching_rows("steer"),
             vec!["Follow-up behavior"]
         );
         assert_eq!(
@@ -25985,7 +26344,7 @@ mod settings_modal_regressions {
     }
 
     #[test]
-    fn every_settings_section_round_trips_its_slug_and_device_hub_follows_computer() {
+    fn every_settings_section_round_trips_its_slug_and_device_hub_follows_devices() {
         for section in SettingsSection::ALL {
             assert_eq!(SettingsSection::from_slug(section.slug()), Some(section));
             let json = serde_json::to_string(&section).unwrap();
@@ -25994,12 +26353,12 @@ mod settings_modal_regressions {
         assert_eq!(SettingsSection::DeviceHub.slug(), "device-hub");
         assert_eq!(SettingsSection::DeviceHub.label(), "Device hub");
         assert_eq!(SettingsSection::Devices.label(), "Devices");
-        let computer = SettingsSection::ALL
+        let devices = SettingsSection::ALL
             .iter()
-            .position(|section| *section == SettingsSection::Computer)
+            .position(|section| *section == SettingsSection::Devices)
             .unwrap();
         assert_eq!(
-            SettingsSection::ALL[computer + 1],
+            SettingsSection::ALL[devices + 1],
             SettingsSection::DeviceHub
         );
     }
@@ -26386,6 +26745,8 @@ mod settings_modal_regressions {
         });
         drop((first, second));
         shell.update(cx, |shell, cx| shell.close_settings(cx));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear());
         shell.read_with(cx, |shell, _| assert!(shell.cloud_page.is_none()));

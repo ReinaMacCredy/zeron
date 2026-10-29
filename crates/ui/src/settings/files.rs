@@ -237,9 +237,8 @@ impl Render for FilesSettingsPage {
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll.scroll)
                         .child(
-                            widgets::page_column()
-                                .child(widgets::page_header(&theme, "Files", None))
-                                .child(card),
+                            widgets::settings_page()
+                                .child(widgets::section(&theme, "Files", card.mt_0()).mt_0()),
                         ),
                 )
                 .fade_overflow_y(&self.scroll.scroll),

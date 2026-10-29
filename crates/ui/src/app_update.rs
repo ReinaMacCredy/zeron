@@ -11,7 +11,8 @@
 //! release downloads in the background and is verified, the strip offers
 //! "restart to apply", and a staged update the user never restarts for is
 //! installed when the app quits — so nobody stays on a stale version just
-//! because they never clicked. Only with `ZERON_AUTO_UPDATE=1`; unset reports only.
+//! because they never clicked. Only with Settings › Updates › Automatic updates
+//! on (or `ZERON_AUTO_UPDATE=1`, which wins when set); off reports only.
 
 use std::path::{Path, PathBuf};
 
@@ -66,7 +67,8 @@ pub enum StripAction {
 pub struct AppUpdate {
     install: InstallKind,
     blocker: Option<UpdateBlocker>,
-    /// Background download + install on quit (`ZERON_AUTO_UPDATE=1`).
+    /// Background download + install on quit: the Automatic updates setting,
+    /// unless `ZERON_AUTO_UPDATE` is set.
     automatic: bool,
     edge_url: String,
     data_dir: PathBuf,
@@ -126,7 +128,8 @@ impl AppUpdate {
         let mut this = Self {
             install,
             blocker,
-            automatic: zeron_update::desktop_auto_update_enabled(),
+            automatic: zeron_update::desktop_auto_update_override()
+                .unwrap_or_else(|| crate::settings::current(cx).auto_update),
             edge_url,
             data_dir,
             checker,
@@ -134,7 +137,7 @@ impl AppUpdate {
             flow: Flow::Idle,
             prompt: None,
             dismissed: None,
-            preview: std::env::var("ZERON_UPDATE_PREVIEW").as_deref() == Ok("1"),
+            preview: std::env::var("ZERON_UPDATE_PREVIEW").is_ok_and(|value| !value.is_empty()),
             _status_watch: status_watch,
             download: None,
             user_check: None,
@@ -145,6 +148,8 @@ impl AppUpdate {
         this
     }
 
+    /// `ZERON_UPDATE_PREVIEW=1` cycles Downloading and Ready; `available`,
+    /// `failed` and `ready` hold that one state instead, for captures.
     fn start_preview(&mut self, cx: &mut Context<Self>) {
         let version = "9.9.9".to_owned();
         self.status = Some(UpdateStatus {
@@ -154,6 +159,22 @@ impl AppUpdate {
             checked_at: None,
             error: None,
         });
+        let held = match std::env::var("ZERON_UPDATE_PREVIEW").as_deref() {
+            Ok("available") => Some(Flow::Idle),
+            Ok("failed") => Some(Flow::Failed {
+                version: version.clone(),
+                message: "the download was interrupted".into(),
+            }),
+            Ok("ready") => Some(Flow::Ready {
+                version: version.clone(),
+                staged: PathBuf::new(),
+            }),
+            _ => None,
+        };
+        if let Some(flow) = held {
+            self.flow = flow;
+            return;
+        }
         self.download = Some(cx.spawn(async move |this, cx| {
             loop {
                 for (flow, secs) in [
@@ -254,6 +275,10 @@ impl AppUpdate {
     }
 
     pub fn start_download(&mut self, cx: &mut Context<Self>) {
+        if self.preview {
+            self.preview_download(cx);
+            return;
+        }
         if !self.self_updating() || matches!(self.flow, Flow::Downloading { .. }) {
             return;
         }
@@ -311,6 +336,44 @@ impl AppUpdate {
     /// hourly check), and a failed download gets a fresh attempt.
     pub fn check_for_updates(&mut self, cx: &mut Context<Self>) {
         self.prompt = Some(Prompt::Checking);
+        self.check_now(cx);
+    }
+
+    pub fn check_in_place(&mut self, cx: &mut Context<Self>) {
+        if self.preview {
+            return;
+        }
+        self.check_now(cx);
+    }
+
+    pub fn checking(&self) -> bool {
+        self.user_check.is_some()
+    }
+
+    pub fn status(&self) -> Option<&UpdateStatus> {
+        self.status.as_ref()
+    }
+
+    pub fn preview(&self) -> bool {
+        self.preview
+    }
+
+    pub fn automatic(&self) -> bool {
+        self.automatic
+    }
+
+    pub fn set_automatic(&mut self, automatic: bool, cx: &mut Context<Self>) {
+        if self.automatic == automatic {
+            return;
+        }
+        self.automatic = automatic;
+        if automatic {
+            self.download_if_needed(cx);
+        }
+        cx.notify();
+    }
+
+    fn check_now(&mut self, cx: &mut Context<Self>) {
         let checker = self.checker.clone();
         let check = Tokio::spawn(cx, async move { checker.check().await });
         self.user_check = Some(cx.spawn(async move |this, cx| {
@@ -336,8 +399,20 @@ impl AppUpdate {
                 };
                 // The user may have closed the dialog while it was checking.
                 if this.prompt.is_some() {
-                    this.prompt = Some(outcome);
+                    this.prompt = Some(outcome.clone());
                 }
+                if let Prompt::CheckFailed(message) = outcome {
+                    let mut status = this.status.clone().unwrap_or_else(|| UpdateStatus {
+                        current_version: zeron_update::current_version().to_string(),
+                        latest_version: None,
+                        update_available: false,
+                        checked_at: None,
+                        error: None,
+                    });
+                    status.error = Some(message.to_string());
+                    this.status = Some(status);
+                }
+                this.user_check = None;
                 cx.notify();
             })
             .ok();
@@ -406,6 +481,29 @@ impl AppUpdate {
             }
             Err(err) => tracing::warn!(error = %err, "installing the staged update on quit failed"),
         }
+    }
+
+    fn preview_download(&mut self, cx: &mut Context<Self>) {
+        let Some(version) = self.available().map(str::to_owned) else {
+            return;
+        };
+        self.flow = Flow::Downloading {
+            version: version.clone(),
+        };
+        self.download = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(6))
+                .await;
+            this.update(cx, |this, cx| {
+                this.flow = Flow::Ready {
+                    version,
+                    staged: PathBuf::new(),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     pub fn dismiss_advisory(&mut self, cx: &mut Context<Self>) {

@@ -72,9 +72,17 @@ pub enum ShortcutsEvent {
     },
 }
 
+/// One entity draws these pages because they share the composer and keymap working copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shown {
+    Shortcuts,
+    General,
+    Chat,
+    Appshots,
+}
+
 pub struct ShortcutsPage {
-    appshots_page: bool,
-    general_page: bool,
+    shown: Shown,
     appshots_focus_pending: bool,
     scroll: crate::settings::widgets::PageScroll,
     /// Working copy (kept in sync with the shell via change events).
@@ -103,7 +111,6 @@ pub struct ShortcutsPage {
     /// Settings → General's thread naming card (its own title-bound picker).
     thread_naming: Entity<crate::settings::thread_naming::ThreadNamingCard>,
     predictions: Entity<crate::settings::predictions::PredictionsCard>,
-    delegation: Entity<crate::settings::delegation::DelegationCard>,
     compaction: Entity<crate::settings::compaction::CompactionCard>,
     worktrees: Entity<super::worktrees::WorktreeSettingsCard>,
     _state: Entity<AppState>,
@@ -130,8 +137,7 @@ impl ShortcutsPage {
         cx.on_release(|_, _| crate::appshots::set_recording(false))
             .detach();
         Self {
-            appshots_page: false,
-            general_page: false,
+            shown: Shown::Shortcuts,
             appshots_focus_pending: false,
             scroll: crate::settings::widgets::PageScroll::default(),
             keymap,
@@ -162,10 +168,6 @@ impl ShortcutsPage {
                 let state = state.clone();
                 cx.new(|cx| crate::settings::predictions::PredictionsCard::new(state, cx))
             },
-            delegation: {
-                let state = state.clone();
-                cx.new(|cx| crate::settings::delegation::DelegationCard::new(state, cx))
-            },
             compaction: {
                 let state = state.clone();
                 cx.new(|cx| crate::settings::compaction::CompactionCard::new(state, cx))
@@ -176,15 +178,19 @@ impl ShortcutsPage {
     }
 
     pub fn show_appshots(&mut self, appshots: bool) {
-        self.show_section(appshots, false);
+        self.show_section(if appshots {
+            Shown::Appshots
+        } else {
+            Shown::Shortcuts
+        });
     }
 
-    pub fn show_section(&mut self, appshots: bool, general: bool) {
-        if self.appshots_page != appshots || self.general_page != general {
+    pub fn show_section(&mut self, shown: Shown) {
+        if self.shown != shown {
+            let appshots = shown == Shown::Appshots;
             self.stop_recording();
             self.conflict_notice = None;
-            self.appshots_page = appshots;
-            self.general_page = general;
+            self.shown = shown;
             self.appshots_focus_pending = appshots;
             // One scroll state serves these pages — rewind it so each opens
             // at the top instead of where the other was left.
@@ -192,6 +198,59 @@ impl ShortcutsPage {
             if appshots {
                 self.appshot_capabilities = crate::appshots::capabilities();
             }
+        }
+    }
+
+    pub fn render_header_action(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        match self.shown {
+            Shown::Appshots => Some(self.render_appshots_restore(theme, cx)),
+            Shown::Shortcuts => {
+                let customized = self.keymap != KeymapConfig::default()
+                    || self.escape_stops_active_agent
+                    || self.composer_send_behavior != ComposerSendBehavior::default()
+                    || self.follow_up_behavior != FollowUpBehavior::default()
+                    || self.reasoning_shortcut_modifier != ReasoningShortcutModifier::default()
+                    || self.switcher_window != SwitcherWindow::default()
+                    || self.switcher_limit != 0
+                    || self.switcher_cycles_tabs;
+                let disabled = !customized || self.recording.is_some();
+                Some(
+                    widgets::ghost_action(theme)
+                        .id("shortcuts-restore-defaults")
+                        .flex_none()
+                        .when(disabled, |el| el.opacity(0.35))
+                        .when(!disabled, |el| {
+                            el.on_click(cx.listener(|this, _, _, cx| {
+                                this.keymap = KeymapConfig::default();
+                                this.stop_recording();
+                                this.conflict_notice = None;
+                                this.commit(cx);
+                                this.set_escape_stops_active_agent(false, cx);
+                                this.set_composer_send_behavior(ComposerSendBehavior::Enter, cx);
+                                this.set_follow_up_behavior(FollowUpBehavior::Queue, cx);
+                                this.set_reasoning_shortcut_modifier(
+                                    ReasoningShortcutModifier::Command,
+                                    cx,
+                                );
+                                this.set_switcher_window(SwitcherWindow::All, cx);
+                                this.set_switcher_limit(0, cx);
+                                this.set_switcher_cycles_tabs(false, cx);
+                            }))
+                        })
+                        .child(
+                            crate::icons::icon(crate::icons::RESTART)
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(SharedString::from("Restore defaults"))
+                        .into_any_element(),
+                )
+            }
+            Shown::General | Shown::Chat => None,
         }
     }
 
@@ -430,12 +489,11 @@ impl ShortcutsPage {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let id = if self.appshots_page {
-            "appshots-settings-page-scrollbar"
-        } else if self.general_page {
-            "general-settings-page-scrollbar"
-        } else {
-            "shortcuts-page-scrollbar"
+        let id = match self.shown {
+            Shown::Appshots => "appshots-settings-page-scrollbar",
+            Shown::General => "general-settings-page-scrollbar",
+            Shown::Chat => "chat-settings-page-scrollbar",
+            Shown::Shortcuts => "shortcuts-page-scrollbar",
         };
         popover::rail(self, id, theme, cx)
     }
@@ -831,7 +889,7 @@ impl Render for ShortcutsPage {
         {
             self.keymap.clone_from(&store.current.keymap);
         }
-        if self.appshots_page {
+        if self.shown == Shown::Appshots {
             if std::mem::take(&mut self.appshots_focus_pending) {
                 window.focus(&self.focus, cx);
             }
@@ -847,14 +905,6 @@ impl Render for ShortcutsPage {
         let switcher_limit = self.switcher_limit;
         let switcher_cycles_tabs = self.switcher_cycles_tabs;
         let compact_mode = crate::settings::transcript_compact_mode(cx);
-        let customized = self.keymap != KeymapConfig::default()
-            || escape_stops_active_agent
-            || send_behavior != ComposerSendBehavior::default()
-            || follow_up_behavior != FollowUpBehavior::default()
-            || reasoning_modifier != ReasoningShortcutModifier::default()
-            || switcher_window != SwitcherWindow::default()
-            || switcher_limit != 0
-            || switcher_cycles_tabs;
         let modifier_label = modifier_send_label(cfg!(target_os = "macos"));
 
         let send_behaviors = [
@@ -993,7 +1043,7 @@ impl Render for ShortcutsPage {
                         }),
                     ),
             );
-        let reasoning_shortcut_row = widgets::card_row(&theme, false)
+        let reasoning_shortcut_row = widgets::card_row(&theme, true)
             .child(
                 div()
                     .flex_1()
@@ -1062,7 +1112,7 @@ impl Render for ShortcutsPage {
                 .child(
                     div()
                         .flex_1()
-                        .min_w_0()
+                        .min_w(px(200.0))
                         .flex()
                         .flex_col()
                         .child(widgets::row_title(&theme, "Session switcher shows"))
@@ -1274,7 +1324,7 @@ impl Render for ShortcutsPage {
                 div()
                     .flex_1()
                     .min_w(px(160.0))
-                    .child(widgets::row_title(&theme, "Stop agent with Escape"))
+                    .child(widgets::row_title(&theme, "Stop active agent with Escape"))
                     .child(widgets::meta_line(
                         &theme,
                         vec![
@@ -1306,7 +1356,7 @@ impl Render for ShortcutsPage {
                     this.set_escape_stops_active_agent(!escape_stops_active_agent, cx);
                 })),
             );
-        if self.general_page {
+        if self.shown == Shown::General {
             let pull_request_destination = crate::settings::current(cx).pull_request_destination;
             let pull_request_destination_control = widgets::select(
                 "pull-request-destination",
@@ -1364,26 +1414,35 @@ impl Render for ShortcutsPage {
                             .overflow_y_scroll()
                             .track_scroll(&self.scroll.scroll)
                             .child(
-                                widgets::page_column()
-                                    .child(widgets::page_header(&theme, "General", None))
+                                widgets::settings_page()
                                     .child(
+                                        widgets::section(
+                                            &theme,
+                                            "Session switcher",
+                                            widgets::section_card(&theme)
+                                                .mt_0()
+                                                .child(switcher_row)
+                                                .child(switcher_limit_row)
+                                                .child(cycle_tabs_row),
+                                        )
+                                        .mt_0(),
+                                    )
+                                    .child(widgets::section(
+                                        &theme,
+                                        "Model picker",
                                         widgets::section_card(&theme)
-                                            .child(send_behavior_row)
-                                            .child(follow_up_row)
+                                            .mt_0()
                                             .when(cfg!(target_os = "macos"), |card| {
                                                 card.child(reasoning_shortcut_row)
                                             })
-                                            .child(compact_mode_row)
-                                            .child(compact_model_picker_row)
-                                            .child(effort_slider_row)
-                                            .child(escape_behavior_row),
-                                    )
-                                    .child(
-                                        widgets::section_card(&theme)
-                                            .child(switcher_row)
-                                            .child(switcher_limit_row)
-                                            .child(cycle_tabs_row),
-                                    )
+                                            .child(
+                                                compact_model_picker_row
+                                                    .when(!cfg!(target_os = "macos"), |row| {
+                                                        row.border_t_0()
+                                                    }),
+                                            )
+                                            .child(effort_slider_row),
+                                    ))
                                     .child(widgets::section(
                                         &theme,
                                         "Links",
@@ -1391,11 +1450,67 @@ impl Render for ShortcutsPage {
                                             .mt_0()
                                             .child(pull_request_destination_row),
                                     ))
-                                    .child(self.thread_naming.clone())
-                                    .child(self.predictions.clone())
-                                    .child(self.delegation.clone())
-                                    .child(self.compaction.clone())
+                                    .child(widgets::section(
+                                        &theme,
+                                        "Predictions",
+                                        self.predictions.clone(),
+                                    ))
+                                    .child(widgets::section(
+                                        &theme,
+                                        "Compaction",
+                                        self.compaction.clone(),
+                                    ))
                                     .child(self.worktrees.clone()),
+                            ),
+                    )
+                    .fade_overflow_y(&self.scroll.scroll),
+                )
+                .children(scrollbar)
+                .into_any_element();
+        }
+        if self.shown == Shown::Chat {
+            let scrollbar = self.render_scrollbar(&theme, cx);
+            return div()
+                .id("chat-settings-page-host")
+                .relative()
+                .size_full()
+                .on_hover(cx.listener(Self::on_scroll_hovered))
+                .child(
+                    crate::edge_fade::edge_faded(
+                        16.0,
+                        true,
+                        true,
+                        div()
+                            .id("chat-settings-page")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll.scroll)
+                            .child(
+                                widgets::settings_page()
+                                    .child(
+                                        widgets::section(
+                                            &theme,
+                                            "Composer",
+                                            widgets::section_card(&theme)
+                                                .mt_0()
+                                                .child(send_behavior_row)
+                                                .child(follow_up_row)
+                                                .child(escape_behavior_row),
+                                        )
+                                        .mt_0(),
+                                    )
+                                    .child(widgets::section(
+                                        &theme,
+                                        "Transcript",
+                                        widgets::section_card(&theme)
+                                            .mt_0()
+                                            .child(compact_mode_row.border_t_0()),
+                                    ))
+                                    .child(widgets::section(
+                                        &theme,
+                                        "Thread naming",
+                                        self.thread_naming.clone(),
+                                    )),
                             ),
                     )
                     .fade_overflow_y(&self.scroll.scroll),
@@ -1440,108 +1555,37 @@ impl Render for ShortcutsPage {
             .size_full()
             .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
-                crate::edge_fade::edge_faded(16.0, true, true, div()
-                    .id("shortcuts-page")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll.scroll)
-                    .track_focus(&self.focus)
-                    .child(
-                        widgets::page_column()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_start()
-                                    .flex_wrap()
-                                    .justify_between()
-                                    .gap(px(24.0))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w(px(200.0))
-                                            .flex()
-                                            .flex_col()
-                                            .child(widgets::page_header(
-                                                &theme,
-                                                "Keyboard shortcuts",
-                                                None,
-                                            ))
-                                            .child(
-                                                widgets::page_subtitle(
-                                                    &theme,
-                                                    "Click a binding, then press the new key combination.",
-                                                )
-                                                .max_w(px(512.0))
-                                                .line_height(px(20.0)),
-                                            ),
-                                    )
-                                    .child({
-                                        // `disabled:opacity-35` when nothing is
-                                        // customized or while recording.
-                                        let disabled = !customized || recording.is_some();
-                                        widgets::ghost_action(&theme)
-                                            .id("shortcuts-restore-defaults")
-                                            .flex_none()
-                                            .when(disabled, |el| el.opacity(0.35))
-                                            .when(!disabled, |el| {
-                                                el.on_click(
-                                                    cx.listener(|this, _, _, cx| {
-                                                        this.keymap = KeymapConfig::default();
-                                                        this.stop_recording();
-                                                        this.conflict_notice = None;
-                                                        this.commit(cx);
-                                                        this.set_escape_stops_active_agent(
-                                                            false, cx,
-                                                        );
-                                                        this.set_composer_send_behavior(
-                                                            ComposerSendBehavior::Enter,
-                                                            cx,
-                                                        );
-                                                        this.set_follow_up_behavior(
-                                                            FollowUpBehavior::Queue,
-                                                            cx,
-                                                        );
-                                                        this.set_reasoning_shortcut_modifier(
-                                                            ReasoningShortcutModifier::Command,
-                                                            cx,
-                                                        );
-                                                        this.set_switcher_window(
-                                                            SwitcherWindow::All,
-                                                            cx,
-                                                        );
-                                                        this.set_switcher_limit(0, cx);
-                                                        this.set_switcher_cycles_tabs(false, cx);
-                                                    }),
-                                                )
-                                            })
-                                            .child(
-                                                crate::icons::icon(crate::icons::RESTART)
-                                                    .size(px(14.0))
-                                                    .text_color(theme.text_muted),
-                                            )
-                                            .child(SharedString::from("Restore defaults"))
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .children(groups),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(12.0))
-                                    .px(px(4.0))
-                                    .min_h(px(20.0))
-                                    .flex()
-                                    .justify_center()
-                                    .text_size(crate::typography::ui_rems(12.0))
-                                    .text_color(theme.text_muted)
-                                    .child(helper),
-                            )
-                            ,
-                    )).fade_overflow_y(&self.scroll.scroll),
+                crate::edge_fade::edge_faded(
+                    16.0,
+                    true,
+                    true,
+                    div()
+                        .id("shortcuts-page")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll.scroll)
+                        .track_focus(&self.focus)
+                        .child(
+                            widgets::settings_page()
+                                .child(widgets::page_note(
+                                    &theme,
+                                    "Click a binding, then press the new key combination.",
+                                ))
+                                .child(div().flex().flex_col().children(groups))
+                                .child(
+                                    div()
+                                        .mt(px(12.0))
+                                        .px(px(4.0))
+                                        .min_h(px(20.0))
+                                        .flex()
+                                        .justify_center()
+                                        .text_size(crate::typography::ui_rems(12.0))
+                                        .text_color(theme.text_muted)
+                                        .child(helper),
+                                ),
+                        ),
+                )
+                .fade_overflow_y(&self.scroll.scroll),
             )
             .children(scrollbar)
             .into_any_element()
@@ -1658,7 +1702,7 @@ mod tests {
                 AppshotDestination::Automatic,
                 cx,
             );
-            page.show_section(false, true);
+            page.show_section(Shown::Chat);
             page
         });
         cx.update(|window, cx| window.draw(cx).clear());
@@ -1685,7 +1729,7 @@ mod tests {
         page.update(cx, |page, _| {
             assert_eq!(page.composer_send_behavior, ComposerSendBehavior::ModEnter);
             assert!(page.escape_stops_active_agent);
-            page.show_section(false, false);
+            page.show_section(Shown::Shortcuts);
         });
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("composer-send-behavior").is_none());
@@ -1753,8 +1797,7 @@ mod tests {
             })
             .unwrap();
         };
-        // Sound starts off (non-default), so Restore defaults is the first stop.
-        press(cx, "tab");
+        // Restore defaults lives in the settings header, so the toggle is the first stop.
         press(cx, "tab");
         press(cx, "space");
         window

@@ -442,7 +442,7 @@ impl Render for ArchivedPage {
                 .into_any_element()
         } else {
             div()
-                .mt(px(24.0))
+                .mt(px(10.0))
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
@@ -535,28 +535,32 @@ impl Render for ArchivedPage {
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll.scroll)
                         .child(
-                            widgets::page_column()
+                            widgets::settings_page()
+                                .child(widgets::page_note(
+                                    &theme,
+                                    "Hidden from the sidebar until restored.",
+                                ))
                                 .child(
-                                    // Delete all sits bottom-right, level with
-                                    // the subtitle rather than the title.
                                     div()
+                                        .mt(px(24.0))
                                         .flex()
                                         .flex_row()
-                                        .items_end()
+                                        .items_center()
+                                        .justify_between()
                                         .gap(px(16.0))
                                         .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .child(widgets::page_header(
-                                                    &theme,
-                                                    "Archived sessions",
-                                                    (count > 0).then_some(count),
-                                                ))
-                                                .child(widgets::page_subtitle(
-                                                    &theme,
-                                                    "Hidden from the sidebar until restored.",
-                                                )),
+                                            widgets::section_title(&theme, "Sessions").child(
+                                                div()
+                                                    .ml(px(8.0))
+                                                    .font_weight(gpui::FontWeight::NORMAL)
+                                                    .text_size(crate::typography::ui_rems(13.0))
+                                                    .text_color(theme.text_muted)
+                                                    .when(count > 0, |el| {
+                                                        el.child(SharedString::from(
+                                                            count.to_string(),
+                                                        ))
+                                                    }),
+                                            ),
                                         )
                                         .children(delete_all),
                                 )

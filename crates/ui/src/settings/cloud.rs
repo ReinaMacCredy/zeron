@@ -1351,9 +1351,8 @@ impl Render for CloudPage {
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll.scroll)
                         .child(
-                            widgets::page_column()
-                                .child(widgets::page_header(&theme, "Cloud", None))
-                                .child(widgets::page_subtitle(
+                            widgets::settings_page()
+                                .child(widgets::page_note(
                                     &theme,
                                     "Run your agents in cloud sandboxes.",
                                 ))

@@ -15,6 +15,14 @@ image = "ios-claude-config.jpg"
 visual = "claude-config"
 
 [[entry.features]]
+id = "settings-updates"
+title = "Settings grouped, with an Updates page"
+description = "Settings opens as a panel over the app. Its pages sit in groups (Agents, Code, Connections), the header names the page and holds its actions, and a new Chat page holds the composer and transcript options. Settings > Updates shows this Mac's version and Automatic updates, each agent CLI with its update policy and Update all, and every device's version. Update everything in its header updates Zeron and this Mac's agents in one go."
+details = "Delegation depth, Delegated tasks per chat and In a chat, Mission Control moved to a Delegation section at the bottom of Routing. Providers now points to Updates for agent update policies."
+image = "settings-updates.jpg"
+visual = "settings-updates"
+
+[[entry.features]]
 id = "claude-command-cards"
 title = "Claude Code commands answer with cards"
 description = "/context, /usage, /model and /mcp in a Claude Code chat answer with a card, even while the agent is replying, without starting a turn. Commands that only run in Claude Code's terminal say so, and the / list tags them Terminal at the bottom. The same cards show on iPhone."

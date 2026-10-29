@@ -53,7 +53,7 @@ const DETAILS_INSET: f32 = 4.0 + 36.0 + 12.0;
 
 /// Update policies in menu order: the short label, and the note shown under
 /// the row title for the chosen one.
-const UPDATE_POLICIES: [(HarnessUpdatePolicy, &str, &str); 3] = [
+pub(crate) const UPDATE_POLICIES: [(HarnessUpdatePolicy, &str, &str); 3] = [
     (
         HarnessUpdatePolicy::Notify,
         "Notify",
@@ -129,6 +129,12 @@ fn harness_update_label(status: &HarnessUpdateStatus, theme: &Theme) -> (SharedS
     (label.into(), color)
 }
 
+pub enum HarnessesEvent {
+    OpenUpdates,
+}
+
+impl gpui::EventEmitter<HarnessesEvent> for HarnessesPage {}
+
 pub struct HarnessesPage {
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
@@ -138,7 +144,6 @@ pub struct HarnessesPage {
     /// passthrough). Retargeted by the page-header device switcher.
     target_device: Option<String>,
     device_select: widgets::SelectState,
-    policy_selects: std::collections::HashMap<HarnessId, widgets::SelectState>,
     /// Last refused/failed toggle (engine guards), shown in the error strip.
     error: Option<String>,
     load_task: Option<Task<()>>,
@@ -188,7 +193,6 @@ impl HarnessesPage {
             updates: Loadable::Idle,
             target_device: None,
             device_select: widgets::SelectState::default(),
-            policy_selects: Default::default(),
             error: None,
             load_task: None,
             toggle_task: None,
@@ -287,6 +291,73 @@ impl HarnessesPage {
     fn refresh(&mut self, cx: &mut Context<Self>) {
         self.reload(cx);
         self.check_updates(cx);
+    }
+
+    pub(crate) fn render_header_actions(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let refresh = self.render_toolbar(theme, false, cx);
+        let switcher = self.render_device_switcher(theme, cx);
+        let add_provider = widgets::action_button(theme, widgets::ActionTone::Filled)
+            .id("add-provider")
+            .flex_none()
+            .tab_index(0)
+            .role(gpui::Role::Button)
+            .focus_visible(|s| s.border_2().border_color(theme.accent))
+            .on_click(cx.listener(|page, _, _, cx| page.open_wizard(None, cx)))
+            .child(
+                crate::icons::icon(crate::icons::PLUS)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            )
+            .child("Add provider");
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .child(refresh)
+            .child(add_provider)
+            .child(switcher)
+            .into_any_element()
+    }
+
+    fn render_updates_pointer(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("providers-updates-pointer")
+            .debug_selector(|| "providers-updates-pointer".into())
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .px(px(14.0))
+            .py(px(10.0))
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(theme.border)
+            .text_size(crate::typography::ui_rems(12.5))
+            .text_color(theme.text_muted)
+            .child(
+                crate::icons::icon(crate::icons::INFO_CIRCLE)
+                    .size(px(15.0))
+                    .text_color(theme.accent),
+            )
+            .child("Agent CLI versions and update policy moved to")
+            .child(
+                div()
+                    .id("providers-updates-link")
+                    .role(gpui::Role::Link)
+                    .tab_index(0)
+                    .text_color(theme.accent)
+                    .cursor_pointer()
+                    .hover(|s| s.underline())
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(HarnessesEvent::OpenUpdates);
+                    }))
+                    .child("Settings › Updates"),
+            )
+            .into_any_element()
     }
 
     /// The page header's controls: refresh, then (when `devices`) the device
@@ -729,78 +800,12 @@ impl HarnessesPage {
             .flex_col()
             .gap(px(20.0))
             .child(self.render_completion_for(harness, theme, cx))
-            .children(self.render_updates_for(harness, theme, cx))
             .when_some(accounts, |details, accounts| details.child(accounts));
         if motion::reduced_motion(cx) {
             content.into_any_element()
         } else {
             motion::menu_in(format!("agent-details-{harness:?}"), content).into_any_element()
         }
-    }
-
-    /// The expanded provider's Updates section: the update policy, short
-    /// labels in the menu and the chosen one explained under the title.
-    fn render_updates_for(
-        &self,
-        harness: HarnessId,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let Loadable::Ready(statuses) = &self.updates else {
-            return None;
-        };
-        let status = statuses.iter().find(|status| status.harness == harness)?;
-        let selected = UPDATE_POLICIES
-            .iter()
-            .position(|(policy, ..)| *policy == status.policy)
-            .unwrap_or(0);
-        let closed = widgets::SelectState::default();
-        let policy_select = widgets::select(
-            format!("harness-update-policy-{harness:?}"),
-            "Update policy",
-            theme,
-            move |page: &mut Self| page.policy_selects.entry(harness).or_default(),
-        )
-        .options(
-            UPDATE_POLICIES
-                .iter()
-                .map(|(_, label, _)| widgets::SelectOption::new(*label)),
-            selected,
-        )
-        // Fits the longest label, so switching never resizes the trigger.
-        .width(136.0)
-        .on_select(move |page, selected, _, cx| {
-            if let Some((policy, ..)) = UPDATE_POLICIES.get(selected) {
-                page.set_update_policy(harness, *policy, cx);
-            }
-        })
-        .render(self.policy_selects.get(&harness).unwrap_or(&closed), cx);
-        let row = div()
-            .min_h(px(52.0))
-            .py(px(10.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(16.0))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(widgets::row_title(theme, "Update policy"))
-                    .child(widgets::meta_line(
-                        theme,
-                        vec![div().child(UPDATE_POLICIES[selected].2).into_any_element()],
-                    )),
-            )
-            .child(policy_select);
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .child(widgets::details_label(theme, "Updates"))
-                .child(row)
-                .into_any_element(),
-        )
     }
 
     /// Params with the `targetDeviceId` passthrough merged in.
@@ -869,7 +874,6 @@ impl HarnessesPage {
         }
         self.installing = None;
         self.install_task = None;
-        self.policy_selects.clear();
         self.target_device = target;
         if let Some(accounts) = &self.accounts_page {
             accounts.update(cx, |page, cx| {
@@ -1282,38 +1286,6 @@ impl HarnessesPage {
             let result = engine
                 .client()
                 .call(methods::SET_AUTO_RESUME_LIMITS, params)
-                .await;
-            this.update(cx, |page, cx| {
-                if let Err(error) = result {
-                    page.error = Some(error.to_string());
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-    }
-
-    fn set_update_policy(
-        &mut self,
-        harness: HarnessId,
-        policy: HarnessUpdatePolicy,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.can_control_updates(cx) {
-            return;
-        }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let params = self.with_target(serde_json::json!({
-            "harness": harness,
-            "policy": policy,
-        }));
-        self.error = None;
-        self.update_action_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::SET_HARNESS_UPDATE_POLICY, params)
                 .await;
             this.update(cx, |page, cx| {
                 if let Err(error) = result {
@@ -1840,19 +1812,6 @@ impl Render for HarnessesPage {
             self.scroll_end_knob = false;
             self.scroll.scroll.scroll_to_bottom();
         }
-        let add_provider = widgets::action_button(&theme, widgets::ActionTone::Filled)
-            .id("add-provider")
-            .flex_none()
-            .tab_index(0)
-            .role(gpui::Role::Button)
-            .focus_visible(|s| s.border_2().border_color(theme.accent))
-            .on_click(cx.listener(|page, _, _, cx| page.open_wizard(None, cx)))
-            .child(
-                crate::icons::icon(crate::icons::PLUS)
-                    .size(px(14.0))
-                    .text_color(theme.text_muted),
-            )
-            .child("Add provider");
         let instances_error = match &self.instances {
             Loadable::Error(message) => Some(widgets::error_strip(
                 &theme,
@@ -1952,8 +1911,6 @@ impl Render for HarnessesPage {
             ),
             _ => None,
         };
-        let refresh = self.render_toolbar(&theme, false, cx);
-        let switcher = self.render_device_switcher(&theme, cx);
         let limits = self.render_limit_resume_card(&theme, cx);
 
         let scrollbar = popover::rail(self, "harnesses-page-scrollbar", &theme, cx);
@@ -1974,24 +1931,8 @@ impl Render for HarnessesPage {
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll.scroll)
                         .child(
-                            widgets::page_column()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .justify_between()
-                                        .child(widgets::page_header(&theme, "Providers", None))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(6.0))
-                                                .child(refresh)
-                                                .child(add_provider)
-                                                .child(switcher),
-                                        ),
-                                )
+                            widgets::settings_page()
+                                .child(self.render_updates_pointer(&theme, cx))
                                 .children(update_error)
                                 .children(instances_error)
                                 .child(body)

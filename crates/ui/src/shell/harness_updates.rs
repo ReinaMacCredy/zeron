@@ -34,8 +34,8 @@ const MAX_MARKS: usize = 3;
 #[derive(Default)]
 pub(super) struct DeviceUpdates {
     online: bool,
-    connected: bool,
-    statuses: Vec<HarnessUpdateStatus>,
+    pub(super) connected: bool,
+    pub(super) statuses: Vec<HarnessUpdateStatus>,
     watch: Option<Task<()>>,
     limit_watch: Option<Task<()>>,
 }
@@ -103,7 +103,7 @@ fn active(status: &HarnessUpdateStatus) -> bool {
     )
 }
 
-fn action(status: &HarnessUpdateStatus) -> Option<(&'static str, Option<&'static str>)> {
+pub(super) fn action(status: &HarnessUpdateStatus) -> Option<(&'static str, Option<&'static str>)> {
     match status.phase {
         Phase::Available if status.can_apply => {
             Some(("Update", Some(methods::APPLY_HARNESS_UPDATE)))
@@ -124,7 +124,7 @@ fn right_inset(has_button: bool) -> f32 {
     if has_button { 5.0 } else { 12.0 }
 }
 
-fn detail(status: &HarnessUpdateStatus) -> String {
+pub(super) fn detail(status: &HarnessUpdateStatus) -> String {
     match status.phase {
         Phase::Available => match (&status.installed_version, &status.latest_version) {
             (Some(installed), Some(latest)) => format!("{installed} → {latest}"),
@@ -448,7 +448,7 @@ impl Shell {
             None
         };
         let has_activity = activity.is_some();
-        let update_all = self.update_all_plan(cx).items() >= 2;
+        let update_all = self.update_all_plan(false, cx).items() >= 2;
         let action_label = if update_all {
             Some("Update all")
         } else {
@@ -887,7 +887,7 @@ impl Shell {
         }
     }
 
-    fn run_harness_update_action(
+    pub(super) fn run_harness_update_action(
         &mut self,
         device: String,
         method: &'static str,
@@ -1105,39 +1105,76 @@ fn spawn_limit_watch(
 
 pub(super) struct UpdateAllPlan {
     app: Option<String>,
-    devices: Vec<(String, String, Vec<HarnessId>)>,
+    devices: Vec<PlanDevice>,
+    skipped: Vec<(String, &'static str)>,
     running: usize,
+}
+
+struct PlanDevice {
+    id: String,
+    name: String,
+    harnesses: Vec<HarnessId>,
+    local: bool,
+    running: usize,
+}
+
+pub(super) const THIS_MACHINE: &str = if cfg!(target_os = "macos") {
+    "This Mac"
+} else {
+    "This device"
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct UpdateAllDialog {
+    pub(super) this_mac: bool,
+    pub(super) skipped_open: bool,
 }
 
 impl UpdateAllPlan {
     pub(super) fn items(&self) -> usize {
-        usize::from(self.app.is_some()) + self.devices.iter().map(|d| d.2.len()).sum::<usize>()
+        usize::from(self.app.is_some())
+            + self
+                .devices
+                .iter()
+                .map(|d| d.harnesses.len())
+                .sum::<usize>()
+    }
+
+    fn agent_updates(&self) -> usize {
+        self.devices.iter().map(|d| d.harnesses.len()).sum()
+    }
+
+    fn machines(&self) -> usize {
+        let local_listed = self.devices.iter().any(|device| device.local);
+        self.devices.len() + usize::from(self.app.is_some() && !local_listed)
     }
 
     fn title(&self) -> String {
-        let agents: usize = self.devices.iter().map(|d| d.2.len()).sum();
-        let parts: Vec<String> = self
-            .app
-            .as_ref()
-            .map(|_| "this app".to_owned())
-            .into_iter()
-            .chain(
-                (agents > 0)
-                    .then(|| format!("{agents} {}", if agents == 1 { "agent" } else { "agents" })),
-            )
-            .collect();
-        format!("Update {}?", parts.join(" and "))
+        let machines = self.machines();
+        format!(
+            "Update {machines} {}?",
+            if machines == 1 { "machine" } else { "machines" }
+        )
     }
 
-    fn lines(&self) -> Vec<String> {
-        self.app
-            .iter()
-            .map(|version| format!("This app: {version}, restarts last"))
-            .chain(self.devices.iter().map(|(_, name, harnesses)| {
-                let agents: Vec<&str> = harnesses.iter().map(|h| h.display_name()).collect();
-                format!("{name}: {}", agents.join(", "))
-            }))
-            .collect()
+    fn threads_warning(&self) -> Option<String> {
+        if self.running == 0 {
+            return None;
+        }
+        let threads = if self.running == 1 {
+            "thread"
+        } else {
+            "threads"
+        };
+        let after = if self.app.is_some() {
+            "restart"
+        } else {
+            "update"
+        };
+        Some(format!(
+            "{} running {threads} will be interrupted and can resume after the {after}.",
+            self.running
+        ))
     }
 }
 
@@ -1149,7 +1186,7 @@ fn settled(status: &HarnessUpdateStatus) -> bool {
 }
 
 impl Shell {
-    pub(super) fn update_all_plan(&self, cx: &App) -> UpdateAllPlan {
+    pub(super) fn update_all_plan(&self, this_mac: bool, cx: &App) -> UpdateAllPlan {
         let state = self.state.read(cx);
         let local = state.local_device_id.as_deref();
         let app = crate::app_update::AppUpdate::global(cx).and_then(|update| {
@@ -1164,66 +1201,114 @@ impl Shell {
                 _ => None,
             }
         });
-        let devices: Vec<(String, String, Vec<HarnessId>)> = self
-            .harness_update_devices
-            .iter()
-            .filter(|(_, device)| device.online && device.connected)
-            .filter_map(|(id, device)| {
-                let harnesses: Vec<HarnessId> = device
-                    .statuses
-                    .iter()
-                    .filter(|status| status.phase == Phase::Available && status.can_apply)
-                    .map(|status| status.harness)
-                    .collect();
-                (!harnesses.is_empty()).then(|| {
-                    (
-                        id.clone(),
-                        state.device_name(id).unwrap_or(id).to_owned(),
-                        harnesses,
-                    )
-                })
-            })
-            .collect();
         let now = Utc::now();
-        let running = state
+        let working: Vec<&zeron_proto::Chat> = state
             .chats
             .iter()
             .filter(|chat| matches!(state.indicator_for(&chat.id, now), Indicator::Working))
-            .filter(|chat| {
-                (app.is_some() && local == Some(chat.device_id.as_str()))
-                    || chat.config.as_ref().is_some_and(|config| {
-                        devices.iter().any(|(id, _, harnesses)| {
-                            *id == chat.device_id && harnesses.contains(&config.harness)
-                        })
-                    })
-            })
-            .count();
+            .collect();
+        let mut skipped = Vec::new();
+        let mut devices: Vec<PlanDevice> = Vec::new();
+        for (id, device) in &self.harness_update_devices {
+            let is_local = local == Some(id.as_str());
+            if this_mac && !is_local {
+                continue;
+            }
+            let harnesses: Vec<HarnessId> = device
+                .statuses
+                .iter()
+                .filter(|status| status.phase == Phase::Available && status.can_apply)
+                .map(|status| status.harness)
+                .collect();
+            if harnesses.is_empty() {
+                continue;
+            }
+            if !(device.online && device.connected) {
+                skipped.push((
+                    state.device_name(id).unwrap_or(id).to_owned(),
+                    "not connected",
+                ));
+                continue;
+            }
+            devices.push(PlanDevice {
+                id: id.clone(),
+                name: if is_local {
+                    THIS_MACHINE.to_owned()
+                } else {
+                    state.device_name(id).unwrap_or(id).to_owned()
+                },
+                harnesses,
+                local: is_local,
+                running: 0,
+            });
+        }
+        devices.sort_by_key(|device| !device.local);
+        if this_mac {
+            for device in state.listed_devices() {
+                if local != Some(device.id.as_str()) {
+                    skipped.push((device.name.clone(), "update on that device"));
+                }
+            }
+            // A signed-out capture bundle has no fleet; the update preview stands in.
+            if crate::app_update::AppUpdate::global(cx)
+                .is_some_and(|update| update.read(cx).preview())
+            {
+                skipped.push(("Mac mini".to_owned(), "update on that device"));
+                skipped.push(("Studio box".to_owned(), "update on that device"));
+            }
+        }
+        for device in &mut devices {
+            device.running = working
+                .iter()
+                .filter(|chat| {
+                    (app.is_some() && device.local && local == Some(chat.device_id.as_str()))
+                        || (chat.device_id == device.id
+                            && chat
+                                .config
+                                .as_ref()
+                                .is_some_and(|config| device.harnesses.contains(&config.harness)))
+                })
+                .count();
+        }
+        let app_running = if app.is_some() && !devices.iter().any(|device| device.local) {
+            working
+                .iter()
+                .filter(|chat| local == Some(chat.device_id.as_str()))
+                .count()
+        } else {
+            0
+        };
+        let running = app_running + devices.iter().map(|device| device.running).sum::<usize>();
         UpdateAllPlan {
             app,
             devices,
+            skipped,
             running,
         }
     }
 
-    pub(super) fn open_update_all(&mut self, cx: &mut Context<Self>) {
-        self.update_all_dialog = Some(true);
+    pub(super) fn open_update_all(&mut self, this_mac: bool, cx: &mut Context<Self>) {
+        self.update_all_dialog = Some(UpdateAllDialog {
+            this_mac,
+            skipped_open: false,
+        });
         cx.notify();
     }
 
-    fn start_update_all(&mut self, continue_threads: bool, cx: &mut Context<Self>) {
+    fn start_update_all(&mut self, this_mac: bool, cx: &mut Context<Self>) {
         self.update_all_dialog = None;
-        let plan = self.update_all_plan(cx);
+        let continue_threads = true;
+        let plan = self.update_all_plan(this_mac, cx);
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let local = self.state.read(cx).local_device_id.clone();
         let restarts = plan.app.is_some();
         if restarts {
             let local_harnesses = plan
                 .devices
                 .iter()
-                .find(|(id, _, _)| Some(id) == local.as_ref())
-                .map(|(_, _, harnesses)| harnesses.clone())
+                .find(|device| device.local)
+                .map(|device| device.harnesses.clone())
                 .unwrap_or_default();
             self.update_all_restart = Some((local_harnesses, false));
             if let Some(update) = crate::app_update::AppUpdate::global(cx)
@@ -1245,15 +1330,15 @@ impl Shell {
             {
                 failures.push(error.to_string());
             }
-            for (device, name, harnesses) in plan.devices {
-                let continues = continue_threads && !(restarts && Some(&device) == local.as_ref());
+            for device in plan.devices {
+                let continues = continue_threads && !(restarts && device.local);
                 let params = serde_json::json!({
-                    "harnesses": harnesses,
+                    "harnesses": device.harnesses,
                     "continueThreads": continues,
-                    "targetDeviceId": device,
+                    "targetDeviceId": device.id,
                 });
                 if let Err(error) = client.call(methods::UPDATE_HARNESSES, params).await {
-                    failures.push(format!("{name}: {error}"));
+                    failures.push(format!("{}: {error}", device.name));
                 }
             }
             this.update(cx, |shell, cx| {
@@ -1322,86 +1407,248 @@ impl Shell {
         viewport: gpui::Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let continue_threads = self.update_all_dialog?;
-        let plan = self.update_all_plan(cx);
+        let dialog = self.update_all_dialog?;
+        let plan = self.update_all_plan(dialog.this_mac, cx);
         if plan.items() == 0 {
             self.update_all_dialog = None;
             return None;
         }
         let theme = Theme::of(cx).for_popup();
-        let running = (plan.running > 0).then(|| {
-            let threads = if plan.running == 1 {
-                "thread"
-            } else {
-                "threads"
-            };
+        let muted = theme.text_muted;
+        let reduced = motion::reduced_motion(cx);
+        let mut description: Vec<AnyElement> = Vec::new();
+        if let Some(version) = &plan.app {
+            description.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child("Zeron")
+                    .child(
+                        div()
+                            .font_family(theme.font_mono.clone())
+                            .text_size(crate::typography::ui_rems(11.5))
+                            .text_color(theme.text)
+                            .child(SharedString::from(version.clone())),
+                    )
+                    .into_any_element(),
+            );
+        }
+        let agents = plan.agent_updates();
+        if agents > 0 {
+            if !description.is_empty() {
+                description.push(div().child("·").into_any_element());
+            }
+            description.push(
+                div()
+                    .child(SharedString::from(format!(
+                        "{agents} agent {}",
+                        if agents == 1 { "update" } else { "updates" }
+                    )))
+                    .into_any_element(),
+            );
+        }
+        let cell = |content: AnyElement, last: bool| {
             div()
-                .mt(px(14.0))
+                .py(px(7.0))
+                .when(!last, |el| {
+                    el.border_b_1().border_color(theme.border.opacity(0.65))
+                })
+                .child(content)
+        };
+        let mut rows: Vec<(
+            String,
+            Option<(&'static str, Option<&'static str>)>,
+            String,
+            usize,
+        )> = Vec::new();
+        if plan.app.is_some() && !plan.devices.iter().any(|device| device.local) {
+            let others: usize = plan.devices.iter().map(|device| device.running).sum();
+            rows.push((
+                THIS_MACHINE.into(),
+                Some(("This app", Some("restarts last"))),
+                String::new(),
+                plan.running - others,
+            ));
+        }
+        for device in &plan.devices {
+            let zeron = if device.local && plan.app.is_some() {
+                Some(("This app", Some("restarts last")))
+            } else {
+                None
+            };
+            let agents: Vec<&str> = device.harnesses.iter().map(|h| h.display_name()).collect();
+            rows.push((
+                device.name.clone(),
+                zeron,
+                agents.join(", "),
+                device.running,
+            ));
+        }
+        let count = rows.len();
+        let header = |label: &'static str| {
+            div()
+                .pb(px(6.0))
+                .border_b_1()
+                .border_color(theme.border)
+                .text_size(crate::typography::ui_rems(11.5))
+                .text_color(muted)
+                .child(label)
+        };
+        let column = |cells: Vec<gpui::Div>, grow: bool| {
+            div()
                 .flex()
                 .flex_col()
-                .gap(px(10.0))
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .text_color(theme.text)
-                        .child(format!(
-                            "{} running {threads} will be interrupted.",
-                            plan.running
-                        )),
-                )
-                .child(
-                    div()
-                        .id("update-all-continue")
-                        .debug_selector(|| "update-all-continue".into())
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .cursor_pointer()
-                        .role(gpui::Role::CheckBox)
-                        .aria_label("Continue threads after restarts")
-                        .aria_toggled(if continue_threads {
-                            gpui::Toggled::True
-                        } else {
-                            gpui::Toggled::False
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.update_all_dialog = Some(!continue_threads);
-                            cx.notify();
+                .when(grow, |el| el.flex_1().min_w_0())
+                .when(!grow, |el| el.flex_none())
+                .children(cells)
+        };
+        let mut machine = vec![header("Machine")];
+        let mut zeron = vec![header("Zeron")];
+        let mut agents_col = vec![header("Agents")];
+        let mut running = vec![header("")];
+        for (ix, (name, app, agents, busy)) in rows.into_iter().enumerate() {
+            let last = ix + 1 == count;
+            let tall = app.and_then(|(_, sub)| sub).is_some();
+            let line = |el: gpui::Div| if tall { el.min_h(px(36.0)) } else { el };
+            machine.push(line(cell(
+                div().child(SharedString::from(name)).into_any_element(),
+                last,
+            )));
+            zeron.push(line(cell(
+                match app {
+                    Some((label, sub)) => div()
+                        .child(label)
+                        .children(sub.map(|sub| {
+                            div()
+                                .text_size(crate::typography::ui_rems(11.5))
+                                .text_color(muted)
+                                .child(sub)
                         }))
-                        .child(
-                            div()
-                                .size(px(16.0))
-                                .flex_none()
-                                .rounded(px(4.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .when(continue_threads, |el| el.bg(theme.accent))
-                                .when(!continue_threads, |el| {
-                                    el.border_1().border_color(theme.border_strong)
-                                })
-                                .when(continue_threads, |el| {
-                                    el.child(
-                                        icon(icons::CHECK)
-                                            .size(px(12.0))
-                                            .text_color(theme.on_solid),
-                                    )
-                                }),
-                        )
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(13.0))
-                                .text_color(theme.text_muted)
-                                .child("Continue threads after restarts"),
-                        ),
-                )
-        });
-        let buttons = div()
-            .mt(px(18.0))
+                        .into_any_element(),
+                    None => div().text_color(muted).child("—").into_any_element(),
+                },
+                last,
+            )));
+            agents_col.push(line(cell(
+                div()
+                    .child(SharedString::from(if agents.is_empty() {
+                        "—".to_owned()
+                    } else {
+                        agents
+                    }))
+                    .into_any_element(),
+                last,
+            )));
+            running.push(line(cell(
+                div()
+                    .flex()
+                    .justify_end()
+                    .text_color(theme.warning)
+                    .when(busy > 0, |el| {
+                        el.child(SharedString::from(format!("{busy} running")))
+                    })
+                    .into_any_element(),
+                last,
+            )));
+        }
+        let table = div()
             .flex()
             .flex_row()
-            .justify_end()
+            .gap(px(16.0))
+            .text_size(crate::typography::ui_rems(13.0))
+            .child(column(machine, false))
+            .child(column(zeron, false))
+            .child(column(agents_col, true))
+            .child(column(running, false));
+        let skipped = (!plan.skipped.is_empty()).then(|| {
+            let open = dialog.skipped_open;
+            let t = motion::state_t("update-all-skipped", open, motion::COLLAPSE, reduced);
+            let toggle = div()
+                .id("update-all-skipped")
+                .debug_selector(|| "update-all-skipped".into())
+                .role(gpui::Role::Button)
+                .aria_label(SharedString::from(format!(
+                    "{} skipped",
+                    plan.skipped.len()
+                )))
+                .aria_expanded(open)
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .py(px(2.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(muted)
+                .cursor_pointer()
+                .hover(|s| s.text_color(theme.text))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(dialog) = this.update_all_dialog.as_mut() {
+                        dialog.skipped_open = !dialog.skipped_open;
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    icon(icons::ALT_ARROW_RIGHT)
+                        .size(px(12.0))
+                        .text_color(muted)
+                        .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                            std::f32::consts::FRAC_PI_2 * t,
+                        ))),
+                )
+                .child(SharedString::from(format!(
+                    "{} skipped",
+                    plan.skipped.len()
+                )));
+            let list_height = 19.0 * plan.skipped.len() as f32 + 6.0;
+            div().flex().flex_col().child(toggle).child(
+                div()
+                    .h(px(list_height * t))
+                    .overflow_hidden()
+                    .opacity(t)
+                    .child(
+                        div()
+                            .pt(px(6.0))
+                            .pl(px(18.0))
+                            .flex()
+                            .flex_col()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .line_height(px(19.0))
+                            .text_color(muted)
+                            .children(plan.skipped.iter().map(|(name, reason)| {
+                                div()
+                                    .flex()
+                                    .gap(px(4.0))
+                                    .child(
+                                        div()
+                                            .text_color(theme.text)
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .child(SharedString::from(name.clone())),
+                                    )
+                                    .child(SharedString::from(format!("— {reason}")))
+                            })),
+                    ),
+            )
+        });
+        let this_mac = dialog.this_mac;
+        let footer = div()
+            .px(px(24.0))
+            .pt(px(14.0))
+            .pb(px(18.0))
+            .border_t_1()
+            .border_color(theme.border)
+            .flex()
+            .flex_row()
+            .items_center()
             .gap(px(8.0))
+            .child(
+                div()
+                    .mr_auto()
+                    .max_w(px(320.0))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .line_height(px(16.0))
+                    .text_color(muted)
+                    .children(plan.threads_warning().map(SharedString::from)),
+            )
             .child(
                 popover::btn_ghost(&theme, "Cancel", "update-all-cancel")
                     .id("update-all-cancel")
@@ -1414,21 +1661,45 @@ impl Shell {
                 popover::btn_primary(&theme, "Update")
                     .id("update-all-confirm")
                     .debug_selector(|| "update-all-confirm".into())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.start_update_all(continue_threads, cx)
-                    })),
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.start_update_all(this_mac, cx)),
+                    ),
             );
         let card = popover::dialog_card(&theme)
-            .child(popover::dialog_title(&theme, &plan.title()))
+            .w(px(576.0))
+            .max_w(viewport.width - px(48.0))
+            .p_0()
+            .id("update-all-dialog-card")
+            .role(gpui::Role::Dialog)
+            .aria_label(SharedString::from(plan.title()))
             .child(
-                div().mt(px(6.0)).flex().flex_col().children(
-                    plan.lines()
-                        .into_iter()
-                        .map(|line| popover::dialog_body(&theme, line)),
-                ),
+                div()
+                    .px(px(24.0))
+                    .pt(px(20.0))
+                    .pb(px(12.0))
+                    .child(popover::dialog_title(&theme, &plan.title()))
+                    .child(
+                        div()
+                            .mt(px(4.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .text_size(crate::typography::ui_rems(13.0))
+                            .text_color(muted)
+                            .children(description),
+                    ),
             )
-            .children(running)
-            .child(buttons)
+            .child(
+                div()
+                    .px(px(24.0))
+                    .pb(px(16.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.0))
+                    .child(table)
+                    .children(skipped),
+            )
+            .child(footer)
             .into_any_element();
         Some(popover::modal("update-all-dialog", viewport, card))
     }
@@ -1456,7 +1727,7 @@ fn render_update_all_button(theme: &Theme, cx: &mut Context<Shell>) -> AnyElemen
         .hover(|el| el.opacity(0.85))
         .on_click(cx.listener(|this, _, _, cx| {
             cx.stop_propagation();
-            this.open_update_all(cx);
+            this.open_update_all(false, cx);
         }))
         .child("Update all")
         .into_any_element()

@@ -9,21 +9,21 @@ use gpui::{AnyElement, Context, Pixels, ScrollHandle, SharedString, Window, div,
 use crate::popover::{self, MenuScrollbarMetrics, MenuScrollbarState, ScrollRailHost};
 use crate::theme::Theme;
 
-/// Width of the section column beside the settings page, published by the
-/// shell each frame so dropdowns and responsive pages measure the page pane.
-struct SettingsSidebarWidth(f32);
+struct SettingsPagePane(gpui::Bounds<Pixels>);
 
-impl gpui::Global for SettingsSidebarWidth {}
+impl gpui::Global for SettingsPagePane {}
 
-pub fn set_sidebar_width(width: f32, cx: &mut gpui::App) {
-    if cx.try_global::<SettingsSidebarWidth>().map(|w| w.0) != Some(width) {
-        cx.set_global(SettingsSidebarWidth(width));
+pub fn set_page_pane(bounds: gpui::Bounds<Pixels>, cx: &mut gpui::App) {
+    if cx.try_global::<SettingsPagePane>().map(|pane| pane.0) != Some(bounds) {
+        cx.set_global(SettingsPagePane(bounds));
     }
 }
 
-fn sidebar_width(cx: &gpui::App) -> f32 {
-    cx.try_global::<SettingsSidebarWidth>()
-        .map_or(crate::settings::SIDEBAR_DEFAULT, |w| w.0)
+fn page_pane(viewport: gpui::Size<Pixels>, cx: &gpui::App) -> gpui::Bounds<Pixels> {
+    cx.try_global::<SettingsPagePane>().map_or_else(
+        || pane_bounds(viewport, crate::settings::SIDEBAR_DEFAULT),
+        |pane| pane.0,
+    )
 }
 
 /// The page pane: right of the section column, below the titlebar strip.
@@ -39,11 +39,7 @@ pub fn pane_bounds(viewport: gpui::Size<Pixels>, sidebar_width: f32) -> gpui::Bo
 /// Inner width of the [`page_column`] at the current window size, for pages
 /// that choose a layout by the room they get (the Devices grid).
 pub fn column_width(window: &gpui::Window, cx: &gpui::App) -> f32 {
-    let pane = f32::from(
-        pane_bounds(window.viewport_size(), sidebar_width(cx))
-            .size
-            .width,
-    );
+    let pane = f32::from(page_pane(window.viewport_size(), cx).size.width);
     pane.min(PAGE_MAX_WIDTH) - 2.0 * PAGE_PAD_X
 }
 
@@ -74,7 +70,7 @@ struct SettingsDropdown {
 
 impl RenderOnce for SettingsDropdown {
     fn render(self, window: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
-        let limits = dropdown_limits(window.viewport_size(), sidebar_width(cx));
+        let limits = dropdown_limits(page_pane(window.viewport_size(), cx));
         popover::contained_menu(
             self.id,
             self.content,
@@ -86,8 +82,7 @@ impl RenderOnce for SettingsDropdown {
     }
 }
 
-fn dropdown_limits(viewport: gpui::Size<Pixels>, sidebar_width: f32) -> gpui::Bounds<Pixels> {
-    let pane = pane_bounds(viewport, sidebar_width);
+fn dropdown_limits(pane: gpui::Bounds<Pixels>) -> gpui::Bounds<Pixels> {
     gpui::Bounds::new(
         pane.origin + gpui::point(px(8.0), px(8.0)),
         gpui::size(
@@ -326,6 +321,12 @@ pub fn page_column() -> gpui::Div {
         .flex_col()
 }
 
+pub fn settings_page() -> gpui::Div {
+    page_column().pt(px(24.0)).pb(px(56.0))
+}
+
+pub const SETTINGS_HEADER_HEIGHT: f32 = 48.0;
+
 /// Page headline row: a large title, optionally followed by a muted count on
 /// the same baseline. Inset to line up with the section labels.
 pub fn page_header(theme: &Theme, title: &str, count: Option<usize>) -> gpui::Div {
@@ -351,6 +352,12 @@ pub fn page_header(theme: &Theme, title: &str, count: Option<usize>) -> gpui::Di
                     .child(SharedString::from(format!("{count}"))),
             )
         })
+}
+
+pub fn page_note(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div {
+    page_subtitle(theme, copy)
+        .mt_0()
+        .px(px(SECTION_TITLE_INSET))
 }
 
 /// Subtitle under the headline: `mt-1 text-[13px] text-muted-foreground`.
@@ -456,6 +463,7 @@ pub fn option_card(
 
 /// Section labels and page titles sit a little inside the blocks' edge.
 const SECTION_LABEL_INSET: f32 = 8.0;
+const SECTION_TITLE_INSET: f32 = 16.0;
 /// Air between one section and the next.
 const SECTION_GAP: f32 = 32.0;
 
@@ -485,7 +493,22 @@ pub fn details_label(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div
         .child(label.into())
 }
 
-/// A labeled section: the label, then its block tucked close underneath.
+pub fn section_title(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .px(px(SECTION_TITLE_INSET))
+        .min_h(px(28.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .text_size(crate::typography::ui_rems(15.0))
+        .line_height(crate::typography::ui_rems(20.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text)
+        .child(label.into())
+}
+
 /// Pass a [`section_card`] (or any block) as `block`.
 pub fn section(
     theme: &Theme,
@@ -496,8 +519,8 @@ pub fn section(
         .mt(px(SECTION_GAP))
         .flex()
         .flex_col()
-        .gap(px(8.0))
-        .child(section_label(theme, label))
+        .gap(px(10.0))
+        .child(section_title(theme, label))
         .child(block)
 }
 
@@ -980,7 +1003,7 @@ mod switch_tests {
         for (width, sidebar) in [(600.0, 224.0), (1200.0, 256.0), (1200.0, 400.0)] {
             let viewport = gpui::size(px(width), px(700.0));
             let pane = pane_bounds(viewport, sidebar);
-            let limits = dropdown_limits(viewport, sidebar);
+            let limits = dropdown_limits(pane);
             assert_eq!(pane.left(), px(sidebar));
             assert_eq!(pane.right(), px(width));
             assert!(limits.left() >= pane.left());
