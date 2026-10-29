@@ -2135,7 +2135,6 @@ mod tests {
         assert!(bar.bottom() <= nav.top(), "{bar:?} above {nav:?}");
         for selector in [
             "composer-footer",
-            "picker-permission",
             "pr-chat-chip-label-PullRequest",
             "pr-chat-chip-label-Diff",
         ] {
@@ -2321,24 +2320,17 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_mini_chat_composer_shows_the_footer_and_permission_chip(cx: &mut TestAppContext) {
+    fn the_mini_chat_composer_shows_the_footer_without_the_default_permission_chip(
+        cx: &mut TestAppContext,
+    ) {
         let (runtime, shell, cx, mut wire, _dir) = setup(cx);
         let _guard = runtime.enter();
         let (_, composer, _) = open_pr_chat(&runtime, &shell, cx, &mut wire);
         settle(cx);
         let bar = cx.debug_bounds("pr-chat-bar").expect("bar drawn");
-        for selector in ["composer-footer", "picker-permission"] {
-            let bounds = cx
-                .debug_bounds(selector)
-                .unwrap_or_else(|| panic!("{selector} drawn"));
-            assert!(inside(bar, bounds), "{selector} {bounds:?} inside {bar:?}");
-        }
-        let permission = cx.debug_bounds("picker-permission").unwrap();
-        let footer = cx.debug_bounds("composer-footer").unwrap();
-        assert!(
-            (permission.center().y - footer.center().y).abs() < px(4.0),
-            "one footer row: {permission:?} {footer:?}"
-        );
+        let footer = cx.debug_bounds("composer-footer").expect("footer drawn");
+        assert!(inside(bar, footer), "footer {footer:?} inside {bar:?}");
+        assert_eq!(cx.debug_bounds("picker-permission"), None);
         assert_eq!(
             cx.update(|_, cx| composer
                 .read(cx)
@@ -3421,7 +3413,7 @@ mod tests {
         assert!(cx.debug_bounds("pr-chat-orb").is_some(), "the orb stays");
 
         let card = cx.debug_bounds("pr-chat-card").expect("one card");
-        for part in ["composer-surface", "composer-footer", "picker-permission"] {
+        for part in ["composer-surface", "composer-footer"] {
             let bounds = cx.debug_bounds(part).unwrap();
             assert!(inside(card, bounds), "{part} {bounds:?} sits in {card:?}");
         }

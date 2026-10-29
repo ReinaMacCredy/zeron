@@ -15449,8 +15449,7 @@ impl Render for Composer {
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
             let permission_chip = (session_chrome_opacity > 0.0
-                && self.pickers.read(cx).effective_permission_mode(cx)
-                    != zeron_proto::PermissionMode::default())
+                && self.pickers.read(cx).names_permission(cx))
             .then(|| {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_permission_chip(cx))

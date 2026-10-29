@@ -2333,6 +2333,10 @@ impl Pickers {
         self.config.permission_mode
     }
 
+    pub fn names_permission(&self, cx: &App) -> bool {
+        self.effective_permission_mode(cx) != PermissionMode::default()
+    }
+
     fn pick_permission(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
         if self.chat_id(cx).is_some() {
             self.update_chat_config(cx, None, |config| config.permission_mode = mode);
