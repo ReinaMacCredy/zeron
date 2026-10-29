@@ -1667,8 +1667,8 @@ fn gather_tasks_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
         .relative()
         .top(px((1.0 - enter) * 6.0))
         .opacity(enter)
-        .child(message)
         .child(pinned)
+        .child(message)
         .child(composer)
         .into_any_element()
 }

@@ -64,7 +64,7 @@ When a task could not be sent to its chat, the list shows **Not sent**, and the 
 
 Cmd-click tasks to select them, Shift-click to select a range, or tick the box that appears left of a row when you point at it. Once one is selected, every open row shows its box. A bar at the bottom reads **N selected** with:
 
-- **Start in one thread**: Zeron creates one chat in the tasks' project, links every selected task to it, and sends one message: "Work through these N tasks in this thread, in order. Mark each one done with the `tasks` tool when it is finished.", followed by a link to each task. The chat opens with a card above the composer, **N tasks in this thread** and **k of N done**, that ticks each task off as the agent marks it done. Click a title to open its card, point at a row for **Mark done**, or click the header to fold the list.
+- **Start in one thread**: Zeron creates one chat in the tasks' project, links every selected task to it, and sends one message: "Work through these N tasks in this thread, in order. Mark each one done with the `tasks` tool when it is finished.", followed by a link to each task. The chat opens with a card pinned at its top, **N tasks in this thread** and **k of N done**, that ticks each task off as the agent marks it done. Click a title to open its card, point at a row for **Mark done**, or click the header to fold the list.
 - **Add to thread…**: pick an existing chat and the same list goes to it ("Also take these N tasks…"). A chat that is working gets it when its turn ends.
 - **Clear**, or press Escape, to drop the selection.
 
