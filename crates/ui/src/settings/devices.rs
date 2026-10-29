@@ -439,12 +439,12 @@ impl Render for DevicesPage {
             .flex()
             .flex_col()
             .when_some(local_block, |el, block| {
-                el.child(widgets::section_label(&theme, "This device").mt(px(28.0)))
+                el.child(widgets::section_title(&theme, "This device").mt(px(28.0)))
                     .child(block)
             })
             // A local-only workspace never has other devices to list.
             .when(workspace_scope != Some(WorkspaceScope::Local), |el| {
-                el.child(widgets::section_label(&theme, "Other devices").mt(px(28.0)))
+                el.child(widgets::section_title(&theme, "Other devices").mt(px(28.0)))
                     .child(others_block)
             });
 
@@ -465,9 +465,8 @@ impl Render for DevicesPage {
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll.scroll)
                         .child(
-                            widgets::page_column()
-                                .child(widgets::page_header(&theme, "Devices", None))
-                                .child(widgets::page_subtitle(
+                            widgets::settings_page()
+                                .child(widgets::page_note(
                                     &theme,
                                     devices_subtitle(workspace_scope),
                                 ))

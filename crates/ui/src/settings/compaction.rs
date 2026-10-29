@@ -277,7 +277,7 @@ fn key_row(
 impl Render for CompactionCard {
     fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
-        let card = widgets::section_card(&theme);
+        let card = widgets::section_card(&theme).mt_0();
         let (Some(state), Some(tools)) = (self.settings.ready().cloned(), self.tools.ready())
         else {
             let note = match (&self.settings, &self.tools) {

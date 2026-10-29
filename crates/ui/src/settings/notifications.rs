@@ -389,11 +389,8 @@ impl Render for NotificationsPage {
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll.scroll)
                         .child(
-                            widgets::page_column()
-                                .child(widgets::page_header(&theme, "Notifications", None))
-                                .child(
-                                    widgets::section(&theme, "Desktop", desktop_card).mt(px(24.0)),
-                                )
+                            widgets::settings_page()
+                                .child(widgets::section(&theme, "Desktop", desktop_card).mt_0())
                                 .child(widgets::section(&theme, "Sounds", card)),
                         ),
                 )

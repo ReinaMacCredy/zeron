@@ -89,6 +89,21 @@ pub struct AgentProfilesPage {
 }
 
 impl AgentProfilesPage {
+    pub(crate) fn render_header_action(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let default_harness = self
+            .harnesses
+            .first()
+            .map(|h| h.id)
+            .unwrap_or(HarnessId::ClaudeCode);
+        widgets::text_action(theme, widgets::ActionTone::Filled, "New profile")
+            .id("profile-new")
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_editor(None, blank_draft(default_harness), cx)
+            }))
+            .into_any_element()
+    }
+
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observer = cx.observe(&state, |page: &mut Self, _, cx| {
             if matches!(page.profiles, Loadable::Idle) {
@@ -263,7 +278,7 @@ impl AgentProfilesPage {
         div()
             .flex()
             .flex_col()
-            .child(widgets::section_label(theme, "System prompt").mt(px(28.0)))
+            .child(widgets::section_title(theme, "System prompt").mt(px(28.0)))
             .child(
                 widgets::section_card(theme).mt(px(8.0)).child(
                     widgets::card_row(theme, true)
@@ -1319,11 +1334,6 @@ impl Render for AgentProfilesPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
         let dialog = self.render_editor(window.viewport_size(), cx);
-        let default_harness = self
-            .harnesses
-            .first()
-            .map(|h| h.id)
-            .unwrap_or(HarnessId::ClaudeCode);
         let body: AnyElement = match &self.profiles {
             Loadable::Idle | Loadable::Loading => div()
                 .mt(px(16.0))
@@ -1470,30 +1480,8 @@ impl Render for AgentProfilesPage {
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll.scroll)
                         .child(
-                            widgets::page_column()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_end()
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .child(widgets::page_header(&theme, "Agent profiles", None)),
-                                        )
-                                        .child(
-                                            widgets::text_action(
-                                                &theme,
-                                                widgets::ActionTone::Filled,
-                                                "New profile",
-                                            )
-                                            .id("profile-new")
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.open_editor(None, blank_draft(default_harness), cx)
-                                            })),
-                                        ),
-                                )
-                                .child(widgets::page_subtitle(
+                            widgets::settings_page()
+                                .child(widgets::page_note(
                                     &theme,
                                     "Saved agent, model, mode and effort. Pick one from the model picker, or let an agent pick one for delegate_task.",
                                 ))

@@ -176,6 +176,41 @@ impl ShortcutsPage {
         cx.notify();
     }
 
+    pub(super) fn render_appshots_restore(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let accent = theme.accent;
+        let customized = self.keymap.get(ShortcutId::CaptureAppshot)
+            != ShortcutId::CaptureAppshot.default_combo()
+            || self.appshots_enabled
+            || !self.appshot_sound_enabled
+            || self.appshot_destination != AppshotDestination::default();
+        let restore_disabled = !customized;
+        widgets::ghost_action(theme)
+            .id("appshots-restore-defaults")
+            .role(gpui::Role::Button)
+            .aria_label("Restore Appshot defaults")
+            .aria_disabled(restore_disabled)
+            .when(!restore_disabled, |el| {
+                el.tab_index(0)
+                    .focus_visible(move |style| style.border_2().border_color(accent))
+            })
+            .flex_none()
+            .when(restore_disabled, |el| el.opacity(0.35))
+            .when(!restore_disabled, |el| {
+                el.on_click(cx.listener(|this, _, _, cx| this.restore_appshot_defaults(cx)))
+            })
+            .child(
+                crate::icons::icon(crate::icons::RESTART)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            )
+            .child(SharedString::from("Restore defaults"))
+            .into_any_element()
+    }
+
     pub(super) fn restore_appshot_defaults(&mut self, cx: &mut Context<Self>) {
         self.keymap.reset(ShortcutId::CaptureAppshot);
         self.stop_recording();
@@ -691,35 +726,6 @@ impl ShortcutsPage {
             .search_anchor(SettingId::AppshotPermissions),
         );
 
-        let customized = non_default
-            || self.appshots_enabled
-            || !self.appshot_sound_enabled
-            || self.appshot_destination != AppshotDestination::default();
-        let restore_disabled = !customized;
-        let restore = widgets::ghost_action(&theme)
-            .id("appshots-restore-defaults")
-            .role(gpui::Role::Button)
-            .aria_label("Restore Appshot defaults")
-            .aria_disabled(restore_disabled)
-            .when(!restore_disabled, |el| {
-                el.tab_index(0)
-                    .focus_visible(move |style| style.border_2().border_color(accent))
-            })
-            .flex_none()
-            .h(px(28.0))
-            .border_1()
-            .border_color(theme.border)
-            .when(restore_disabled, |el| el.opacity(0.35))
-            .when(!restore_disabled, |el| {
-                el.on_click(cx.listener(|this, _, _, cx| this.restore_appshot_defaults(cx)))
-            })
-            .child(
-                crate::icons::icon(crate::icons::RESTART)
-                    .size(px(14.0))
-                    .text_color(theme.text_muted),
-            )
-            .child(SharedString::from("Restore defaults"));
-
         let helper: SharedString = if self.recording.is_some() {
             "Press Escape to cancel.".into()
         } else {
@@ -758,33 +764,11 @@ impl ShortcutsPage {
                         }
                     })
                     .child(
-                        widgets::page_column()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_start()
-                                    .flex_wrap()
-                                    .justify_between()
-                                    .gap(px(24.0))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w(px(200.0))
-                                            .flex()
-                                            .flex_col()
-                                            .child(widgets::page_header(&theme, "Appshots", None))
-                                            .child(
-                                                widgets::page_subtitle(
-                                                    &theme,
-                                                    "Capture another app's frontmost window directly into a session.",
-                                                )
-                                                .max_w(px(512.0))
-                                                .line_height(px(20.0)),
-                                            ),
-                                    )
-                                    .child(restore),
-                            )
+                        widgets::settings_page()
+                            .child(widgets::page_note(
+                                &theme,
+                                "Capture another app's frontmost window directly into a session.",
+                            ))
                             .child(intro)
                             .child(section_label(&theme, "Capture"))
                             .child(capture_card)

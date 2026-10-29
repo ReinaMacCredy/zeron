@@ -828,26 +828,14 @@ fn disclosure(
 }
 
 fn section_header(theme: &Theme, title: &'static str, action: Option<AnyElement>) -> gpui::Div {
-    div()
-        .mt(px(24.0))
-        .px(px(8.0))
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(12.0))
-        .child(
-            div()
-                .py(px(4.0))
-                .text_size(crate::typography::ui_rems(13.0))
-                .text_color(theme.text_muted.opacity(0.58))
-                .child(SharedString::from(title)),
-        )
+    widgets::section_title(theme, title)
+        .mt(px(32.0))
         .children(action)
 }
 
 fn muted_line(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div {
     div()
-        .px(px(8.0))
+        .px(px(16.0))
         .pt(px(8.0))
         .text_size(crate::typography::ui_rems(12.0))
         .line_height(px(18.0))
@@ -1758,31 +1746,11 @@ impl Render for ComputerPage {
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll.scroll)
                     .child(
-                        widgets::page_column()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_start()
-                                    .justify_between()
-                                    .gap(px(24.0))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w(px(200.0))
-                                            .flex()
-                                            .flex_col()
-                                            .child(widgets::page_header(&theme, "Computer", None))
-                                            .child(
-                                                widgets::page_subtitle(
-                                                    &theme,
-                                                    "Let an agent see and drive this Mac's apps.",
-                                                )
-                                                .max_w(px(512.0))
-                                                .line_height(px(20.0)),
-                                            ),
-                                    ),
-                            )
+                        widgets::settings_page()
+                            .child(widgets::page_note(
+                                &theme,
+                                "Let an agent see and drive this Mac's apps.",
+                            ))
                             .child(section_header(
                                 &theme,
                                 "Computer control",
