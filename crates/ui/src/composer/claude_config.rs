@@ -10,7 +10,7 @@ use zeron_proto::claude_panel::{
     plural_days, stats_of, status_rows,
 };
 use zeron_proto::usage::{UsageSummary, format_tokens};
-use zeron_proto::{HarnessId, PermissionMode};
+use zeron_proto::{AccessMode, HarnessId};
 use zeron_rpc::methods;
 
 use super::background::{CardMotion, card_frame, card_motion};
@@ -364,8 +364,7 @@ impl Composer {
                         }
                     }
                     cc::Chip::Permission => {
-                        if let Some(mode) = PermissionMode::ALL.iter().find(|m| m.label() == value)
-                        {
+                        if let Some(mode) = AccessMode::ALL.iter().find(|m| m.label() == value) {
                             pickers.set_chip_permission(*mode, cx);
                         }
                     }

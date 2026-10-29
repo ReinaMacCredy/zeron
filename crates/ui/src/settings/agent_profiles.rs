@@ -9,14 +9,12 @@ use zeron_proto::tools::{
     HarnessToolInventory, TOOL_GROUPS, ToolGroup, ToolSettingsState, rules_on, set_rules,
     set_zeron_group, tool_group, unlisted_rules, zeron_rule, zeron_unlocked,
 };
-use zeron_proto::{
-    AgentProfile, AgentProfileDraft, HarnessId, Model, PermissionMode, ReasoningLevel,
-};
+use zeron_proto::{AgentProfile, AgentProfileDraft, HarnessId, Model, ReasoningLevel};
 use zeron_rpc::methods;
 
 use crate::agent_profiles::{
     ProfileWrite, blank_draft, brand_badge, draft_summary, expand_toggle, folded_row, in_pairs,
-    mode_label, options_for_model, summary, token_count,
+    options_for_model, summary, token_count,
 };
 use crate::composer::{ComposerInput, ComposerInputEvent, INPUT_LINE_HEIGHT, scrolling_field};
 use crate::device_panel::setup::activate;
@@ -671,26 +669,28 @@ impl AgentProfilesPage {
         })
         .render(&self.model_select, cx);
 
+        let modes = crate::pickers::offered_access_modes(
+            self.harnesses.iter().find(|h| h.id == draft.harness),
+        );
         let mode_ix = draft
-            .permission_mode
-            .and_then(|mode| PermissionMode::ALL.iter().position(|m| *m == mode))
+            .access
+            .and_then(|mode| modes.iter().position(|m| *m == mode))
             .map_or(0, |ix| ix + 1);
         let mode_select = widgets::select("profile-mode", "Mode", &theme, |page: &mut Self| {
             &mut page.mode_select
         })
         .options(
             std::iter::once(widgets::SelectOption::new("Keep current")).chain(
-                PermissionMode::ALL
-                    .iter()
-                    .map(|mode| widgets::SelectOption::new(mode_label(*mode)).detail(mode.label())),
+                modes.iter().map(|mode| {
+                    widgets::SelectOption::new(mode.label()).detail(mode.description())
+                }),
             ),
             mode_ix,
         )
         .width(196.0)
-        .on_select(|page, ix, _, cx| {
-            page.edit_draft(cx, |draft| {
-                draft.permission_mode = ix.checked_sub(1).map(|ix| PermissionMode::ALL[ix]);
-            });
+        .on_select(move |page, ix, _, cx| {
+            let mode = ix.checked_sub(1).and_then(|ix| modes.get(ix).copied());
+            page.edit_draft(cx, |draft| draft.access = mode);
         })
         .render(&self.mode_select, cx);
 

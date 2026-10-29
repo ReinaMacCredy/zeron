@@ -4,8 +4,8 @@ use zeron_proto::picker::{self, ProfileDrift, savable};
 use zeron_proto::{AgentProfile, AgentProfileDraft};
 
 use crate::agent_profiles::{
-    ProfileWrite, brand_badge, draft_summary, expand_toggle, folded_row, in_pairs, mode_label,
-    summary, token_count,
+    ProfileWrite, brand_badge, draft_summary, expand_toggle, folded_row, in_pairs, summary,
+    token_count,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -273,8 +273,8 @@ impl Pickers {
                         .remember_reasoning(pick.harness, model.as_deref(), level);
                 }
             }
-            if let Some(mode) = pick.permission_mode {
-                self.config.permission_mode = mode;
+            if let Some(mode) = pick.access {
+                self.config.access = mode;
             }
             self.config.instructions = pick.instructions.clone();
             self.config.disabled_tools = pick.disabled_tools.clone();
@@ -307,7 +307,7 @@ impl Pickers {
         );
         draft.model = resolved.model;
         draft.reasoning = resolved.reasoning;
-        draft.permission_mode = Some(resolved.permission_mode);
+        draft.access = Some(resolved.access);
         draft.model_options = resolved.model_options;
         draft.instructions = resolved.instructions;
         draft.disabled_tools = resolved.disabled_tools;
@@ -835,16 +835,13 @@ impl Pickers {
                     )
                 }))
                 .collect(),
-            EditField::Mode => {
-                std::iter::once(("Keep current".into(), draft.permission_mode.is_none()))
-                    .chain(PermissionMode::ALL.iter().map(|mode| {
-                        (
-                            SharedString::from(mode_label(*mode)),
-                            draft.permission_mode == Some(*mode),
-                        )
-                    }))
-                    .collect()
-            }
+            EditField::Mode => std::iter::once(("Keep current".into(), draft.access.is_none()))
+                .chain(
+                    self.edit_modes(draft)
+                        .into_iter()
+                        .map(|mode| (SharedString::from(mode.label()), draft.access == Some(mode))),
+                )
+                .collect(),
             EditField::Effort => {
                 std::iter::once(("Keep current".into(), draft.reasoning.is_none()))
                     .chain(self.edit_levels(draft).iter().map(|level| {
@@ -887,6 +884,14 @@ impl Pickers {
             .and_then(|l| l.ready())
             .cloned()
             .unwrap_or_default()
+    }
+
+    fn edit_modes(&self, draft: &AgentProfileDraft) -> Vec<AccessMode> {
+        crate::pickers::offered_access_modes(
+            self.harnesses
+                .ready()
+                .and_then(|list| list.iter().find(|d| d.id == draft.harness)),
+        )
     }
 
     fn edit_levels(&self, draft: &AgentProfileDraft) -> Vec<ReasoningLevel> {
@@ -947,8 +952,8 @@ impl Pickers {
             EditField::Mode => {
                 let mode = ix
                     .checked_sub(1)
-                    .and_then(|ix| PermissionMode::ALL.get(ix).copied());
-                self.edit_profile_draft(cx, |draft| draft.permission_mode = mode);
+                    .and_then(|ix| self.edit_modes(&draft).get(ix).copied());
+                self.edit_profile_draft(cx, |draft| draft.access = mode);
             }
             EditField::Effort => {
                 let level = ix
@@ -1178,8 +1183,8 @@ impl Pickers {
             .map(|model| self.profile_model_label(draft.harness, model))
             .unwrap_or_else(|| "Keep current".to_string());
         let mode_value = draft
-            .permission_mode
-            .map(|mode| mode_label(mode).to_string())
+            .access
+            .map(|mode| mode.label().to_string())
             .unwrap_or_else(|| "Keep current".to_string());
         let effort_value = draft
             .reasoning
@@ -1383,7 +1388,7 @@ impl Pickers {
                                 draft.harness = current.harness;
                                 draft.model = current.model;
                                 draft.reasoning = current.reasoning;
-                                draft.permission_mode = current.permission_mode;
+                                draft.access = current.access;
                                 draft.model_options = current.model_options;
                                 draft.disabled_tools = current.disabled_tools;
                             });
@@ -1451,7 +1456,7 @@ mod tests {
             harness: HarnessId::Codex,
             model: None,
             reasoning: None,
-            permission_mode: None,
+            access: None,
             model_options: Default::default(),
             notes: notes.into(),
             instructions: String::new(),

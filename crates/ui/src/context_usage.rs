@@ -448,12 +448,11 @@ mod tests {
                 .map(|(k, v)| ((*k).to_owned(), serde_json::json!(v)))
                 .collect(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-            permission_mode: Default::default(),
             instructions: String::new(),
             profile_id: None,
             instance_id: None,
             disabled_tools: Vec::new(),
-            access: zeron_proto::PermissionMode::default().access(),
+            access: Default::default(),
             plan: false,
         };
         let window =

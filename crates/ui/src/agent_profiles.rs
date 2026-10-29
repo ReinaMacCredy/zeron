@@ -29,7 +29,7 @@ pub fn summary(profile: &AgentProfile, harness_name: &str, model_label: Option<&
     zeron_proto::profile_line(
         harness_name,
         model_label.or(profile.model.as_deref()),
-        profile.permission_mode,
+        profile.access,
         profile.reasoning,
         profile.disabled_tools.len(),
     )
@@ -43,7 +43,7 @@ pub fn draft_summary(
     let line = zeron_proto::profile_line(
         harness_name,
         model_label.or(draft.model.as_deref()),
-        draft.permission_mode,
+        draft.access,
         draft.reasoning,
         draft.disabled_tools.len(),
     );
@@ -143,17 +143,13 @@ pub fn folded_row(id: &'static str, text: impl Into<SharedString>, muted: Hsla) 
         )
 }
 
-pub fn mode_label(mode: zeron_proto::PermissionMode) -> &'static str {
-    mode.short_label()
-}
-
 pub fn blank_draft(harness: HarnessId) -> AgentProfileDraft {
     AgentProfileDraft {
         name: String::new(),
         harness,
         model: None,
         reasoning: None,
-        permission_mode: None,
+        access: None,
         model_options: Default::default(),
         notes: String::new(),
         instructions: String::new(),
@@ -239,7 +235,7 @@ pub async fn write(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_proto::{PermissionMode, ReasoningLevel};
+    use zeron_proto::{AccessMode, ReasoningLevel};
 
     #[test]
     fn summary_names_only_the_fields_the_profile_sets() {
@@ -249,7 +245,7 @@ mod tests {
             harness: HarnessId::Codex,
             model: Some("gpt-5.6".into()),
             reasoning: Some(ReasoningLevel::XHigh),
-            permission_mode: Some(PermissionMode::Ask),
+            access: Some(AccessMode::Supervised),
             model_options: Default::default(),
             notes: String::new(),
             instructions: String::new(),
@@ -258,11 +254,11 @@ mod tests {
         };
         assert_eq!(
             summary(&profile, "Codex", Some("GPT-5.6")),
-            "Codex · GPT-5.6 · Ask · X-High"
+            "Codex · GPT-5.6 · Supervised · X-High"
         );
         profile.model = None;
         profile.reasoning = None;
-        profile.permission_mode = None;
+        profile.access = None;
         assert_eq!(summary(&profile, "Codex", None), "Codex");
         assert_eq!(profile.draft().name, "Reviewer");
         assert_eq!(
