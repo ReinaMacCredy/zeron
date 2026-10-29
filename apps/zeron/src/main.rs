@@ -6,6 +6,7 @@
 
 mod auth_cli;
 mod daemon;
+mod triage_cli;
 mod ui_scenario;
 mod update_cli;
 
@@ -117,6 +118,14 @@ enum Command {
     Update {
         #[arg(long)]
         check: bool,
+    },
+    /// Debug a Zeron problem with your own agent: writes the triage playbook
+    /// and this machine's facts, then starts Claude Code or Codex on them.
+    /// Use it when the app will not start.
+    Triage {
+        /// Write the files and print the command instead of starting an agent.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -267,6 +276,9 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Update { check }) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(update_cli::update(zeron_update::RELEASES_FEED, check))
+        }
+        Some(Command::Triage { dry_run }) => {
+            triage_cli::run(&engine_config_from_env().data_dir, dry_run)
         }
         Some(Command::Daemon { command }) => match command {
             DaemonCommand::Install => daemon::install(&engine_config_from_env().data_dir),

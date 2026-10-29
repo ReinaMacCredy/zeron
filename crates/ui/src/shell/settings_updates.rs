@@ -23,6 +23,7 @@ impl Shell {
     ) -> Option<AnyElement> {
         match section {
             SettingsSection::Updates => Some(self.render_update_everything_button(theme, cx)),
+            SettingsSection::Playbooks => Some(self.render_new_playbook_button(theme, cx)),
             SettingsSection::Harnesses => self
                 .harnesses_page
                 .clone()

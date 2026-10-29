@@ -6,6 +6,7 @@ use super::*;
 use crate::appearance::AppearanceMode;
 use crate::files::client::{FilesClientError, FilesRequestContext, WorkspaceFilesClient};
 use crate::project_actions::{ProjectActionsKey, ProjectActionsStatus, action_icon, action_label};
+use zeron_engine::playbooks::Playbook;
 use zeron_proto::{
     ProjectAction, ProjectActionDraft, SearchWorkspaceContentRequest, SearchWorkspaceFilesRequest,
     WorkspaceContentMatch, WorkspaceEntryKind, WorkspaceFileSearchMatch, WorkspaceSearchIndexState,
@@ -54,6 +55,7 @@ pub(super) struct CommandPalette {
     files_ready: Option<WorkspaceTarget>,
     /// Content matches in the focused chat's workspace.
     content: WorkspaceQuery<Vec<WorkspaceContentMatch>>,
+    playbooks: Vec<Playbook>,
     lifted: bool,
     drop_accepted: bool,
     _search_events: Subscription,
@@ -320,6 +322,7 @@ enum RowKind {
     AddAction {
         label: String,
     },
+    Playbook(Playbook),
 }
 
 impl RowKind {
@@ -363,6 +366,7 @@ impl PaletteRow {
             RowKind::RunAction { action, .. } => format!("action:{}", action.id),
             RowKind::ImportAction { draft, .. } => format!("import-action:{}", draft.name),
             RowKind::AddAction { .. } => "add-action".into(),
+            RowKind::Playbook(playbook) => format!("playbook:{}", playbook.id),
         };
         RowKey(self.section, id)
     }
@@ -424,6 +428,22 @@ fn commands_for(query: &str, is_dark: bool, can_archive: bool) -> Vec<Command> {
         .chain(can_archive.then_some(Command::ArchiveThread))
         .filter(|command| matches_query(query, command.label()))
         .collect()
+}
+
+fn playbook_label(playbook: &Playbook) -> String {
+    if playbook.id == zeron_engine::playbooks::TRIAGE_ID {
+        playbook.title.clone()
+    } else {
+        format!("Playbook: {}", playbook.title)
+    }
+}
+
+fn playbook_icon(playbook: &Playbook) -> &'static str {
+    if playbook.id == zeron_engine::playbooks::TRIAGE_ID {
+        icons::ACTION_DEBUG
+    } else {
+        icons::LUCIDE_BOOK_OPEN
+    }
 }
 
 /// A path's last segment and the folder holding it (empty at the root).
@@ -532,6 +552,7 @@ impl Shell {
             files: WorkspaceQuery::default(),
             files_ready: None,
             content: WorkspaceQuery::default(),
+            playbooks: self.playbooks(cx),
             lifted: false,
             drop_accepted: false,
             _search_events: events,
@@ -742,6 +763,19 @@ impl Shell {
                 commands_for(&query, Theme::of(cx).appearance.is_dark(), can_archive)
                     .into_iter()
                     .map(RowKind::Command)
+                    .chain(
+                        palette
+                            .playbooks
+                            .iter()
+                            .filter(|playbook| {
+                                matches_query(
+                                    &query,
+                                    &format!("playbook {}", playbook_label(playbook)),
+                                )
+                            })
+                            .cloned()
+                            .map(RowKind::Playbook),
+                    )
                     .chain(project_actions.iter().cloned()),
             )
         };
@@ -1042,6 +1076,7 @@ impl Shell {
                 self.open_project_action_editor(None, Some(draft), cx)
             }
             RowKind::AddAction { .. } => self.open_project_action_editor(None, None, cx),
+            RowKind::Playbook(playbook) => self.start_playbook(&playbook, cx),
             RowKind::File { path, is_dir } => {
                 self.open_palette_path(path, is_dir, None, window, cx)
             }
@@ -1157,6 +1192,21 @@ impl Shell {
                         )
                     })
                     .into_any_element()
+            }
+            RowKind::Playbook(playbook) => {
+                let target = row.clone();
+                command_row(
+                    theme,
+                    active,
+                    ix,
+                    playbook_icon(playbook),
+                    playbook_label(playbook).into(),
+                    query,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.activate_palette_row(target.clone(), window, cx)
+                }))
+                .into_any_element()
             }
             RowKind::File { path, is_dir } => {
                 let (name, parent) = split_path(path);

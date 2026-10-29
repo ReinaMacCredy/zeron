@@ -8,6 +8,13 @@ hero = "claude-config-panel.jpg"
 hero_visual = "claude-config"
 
 [[entry.features]]
+id = "playbooks"
+title = "Playbooks: start a chat from a saved recipe, Triage built in"
+description = "A playbook is a markdown recipe your agent follows. Pick one in Cmd+K or Settings > Playbooks and a new chat opens with it linked in the composer and its question as the headline; add your request, pick any agent and send. Triage an issue is built in: it writes this Mac's Zeron facts, clones Zeron's source for your version, and has your agent debug the problem and draft a GitHub issue, asking before it fixes, restarts or posts anything."
+details = "Write your own with New playbook in Settings > Playbooks, or keep them with a project in its .zeron/playbooks folder. When the app will not start, run zeron triage in a terminal. Playbooks are not in the iPhone palette yet."
+image = "playbooks-triage.jpg"
+
+[[entry.features]]
 id = "claude-config"
 title = "Claude Code settings inside the chat"
 description = "Type /config in a Claude Code chat and its settings open over the chat, with Status, Config, Usage and Stats tabs. Search or filter the list and change a setting in place. Closing leaves a row with what changed and Reopen. On iPhone it opens as a sheet."

@@ -122,6 +122,7 @@ mod whats_new;
 mod task_actions;
 mod thread_search;
 use side_chats::SideChatTab;
+mod playbooks;
 mod settings_updates;
 mod tabs;
 mod terminal_tabs;
@@ -768,11 +769,12 @@ pub enum SettingsSection {
     Archived,
     Chat,
     Updates,
+    Playbooks,
 }
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 22] = [
+    pub const ALL: [SettingsSection; 23] = [
         SettingsSection::General,
         SettingsSection::Chat,
         SettingsSection::Home,
@@ -785,6 +787,7 @@ impl SettingsSection {
         SettingsSection::AgentProfiles,
         SettingsSection::Routing,
         SettingsSection::CodeReview,
+        SettingsSection::Playbooks,
         SettingsSection::Computer,
         SettingsSection::SourceControl,
         SettingsSection::Files,
@@ -860,6 +863,7 @@ impl SettingsSection {
             SettingsSection::Archived => "archived",
             SettingsSection::Chat => "chat",
             SettingsSection::Updates => "updates",
+            SettingsSection::Playbooks => "playbooks",
         }
     }
 
@@ -889,6 +893,7 @@ impl SettingsSection {
             "archived" => SettingsSection::Archived,
             "chat" => SettingsSection::Chat,
             "updates" => SettingsSection::Updates,
+            "playbooks" | "triage" => SettingsSection::Playbooks,
             _ => return None,
         })
     }
@@ -936,6 +941,7 @@ impl SettingsSection {
             SettingsSection::Archived => "Archived sessions",
             SettingsSection::Chat => "Chat",
             SettingsSection::Updates => "Updates",
+            SettingsSection::Playbooks => "Playbooks",
         }
     }
 
@@ -965,6 +971,7 @@ impl SettingsSection {
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
             SettingsSection::Chat => icons::CHAT_ROUND_LINE,
             SettingsSection::Updates => icons::REFRESH,
+            SettingsSection::Playbooks => icons::LUCIDE_BOOK_OPEN,
         }
     }
 
@@ -996,6 +1003,7 @@ impl SettingsSection {
             SettingsSection::Home => &["widget", "dashboard", "new thread", "customize"],
             SettingsSection::Archived => &["archive", "old sessions"],
             SettingsSection::Updates => &["update", "version", "upgrade"],
+            SettingsSection::Playbooks => &["playbook", "recipe", "triage", "debug", "bug"],
             _ => &[],
         }
     }
@@ -1095,6 +1103,15 @@ impl SettingsSection {
                     &["delegate", "subagent", "limit"],
                     None,
                 ),
+            ],
+            SettingsSection::Playbooks => &[
+                (
+                    "Triage an issue",
+                    &["bug", "debug", "crash", "report"],
+                    None,
+                ),
+                ("New playbook", &["template", "create", "recipe"], None),
+                ("Reveal folder", &["finder", "files"], None),
             ],
             SettingsSection::Updates => &[
                 ("Version", &["check for updates", "restart"], None),
@@ -3471,6 +3488,8 @@ pub struct Shell {
     /// Open Update-all dialog; the value is its "continue threads" box.
     update_all_dialog: Option<harness_updates::UpdateAllDialog>,
     updates_scroll: settings::widgets::PageScroll,
+    playbooks_scroll: settings::widgets::PageScroll,
+    playbook_delete_armed: Option<PathBuf>,
     updates_policy_selects:
         std::collections::HashMap<zeron_proto::HarnessId, settings::widgets::SelectState>,
     /// An Update all that restarts the app: the local agents it waits on and
@@ -4208,6 +4227,8 @@ impl Shell {
             harness_update_scroll: settings::widgets::PageScroll::default(),
             update_all_dialog: None,
             updates_scroll: Default::default(),
+            playbooks_scroll: Default::default(),
+            playbook_delete_armed: None,
             updates_policy_selects: Default::default(),
             update_all_restart: None,
             user_menu: popover::Popup::default(),
@@ -10134,6 +10155,7 @@ impl Shell {
                 .clone()
                 .into_any_element(),
             SettingsSection::Updates => self.render_updates_page(window, cx),
+            SettingsSection::Playbooks => self.render_playbooks_page(window, cx),
             SettingsSection::Archived => {
                 if self.archived_page.is_none() {
                     let state = self.state.clone();
