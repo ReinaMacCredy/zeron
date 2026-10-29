@@ -2518,7 +2518,7 @@ impl Pickers {
     }
 
     pub fn names_permission(&self, cx: &App) -> bool {
-        self.effective_permission_mode(cx) != PermissionMode::default()
+        self.effective_permission_mode(cx) != PermissionMode::default() || self.effective_plan(cx)
     }
 
     fn pick_permission(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
