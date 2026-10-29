@@ -136,7 +136,7 @@ fun ProjectActionsSheet(extras: SessionExtras, onDismiss: () -> Unit) {
                     )
                 }
             }
-            val footer = actions?.issue ?: if (items.isEmpty()) null else "Each run opens a tab named after the action in Terminal."
+            val footer = actions?.issue ?: if (items.isEmpty()) null else "Each run opens a tab named after the action in Terminal. Tap a run to see its output here."
             footer?.let {
                 item("footer") {
                     Text(
