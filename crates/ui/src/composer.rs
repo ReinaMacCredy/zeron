@@ -15290,10 +15290,11 @@ impl Render for Composer {
                         .children(voice_track),
                 )
         };
-        let new_thread_project = (new_thread_chrome_opacity > 0.0).then(|| {
-            self.pickers
-                .update(cx, |pickers, cx| pickers.render_new_thread_project(cx))
-        });
+        let new_thread_project =
+            (new_thread_chrome_opacity > 0.0 && !self.state.read(cx).no_project).then(|| {
+                self.pickers
+                    .update(cx, |pickers, cx| pickers.render_new_thread_project(cx))
+            });
         let new_thread_git_selectors = (new_thread_chrome_opacity > 0.0)
             .then(|| {
                 self.pickers.update(cx, |pickers, cx| {
@@ -15364,8 +15365,7 @@ impl Render for Composer {
                 crate::home::running_agents(self.state.read(cx), chrono::Utc::now()).len();
             let tabs = (new_thread_chrome_opacity > 0.0)
                 .then(|| self.render_home_tabs(&theme, running, window, cx));
-            let no_project = self.state.read(cx).no_project;
-            let headline = new_thread_project.map(|project| {
+            let headline = (new_thread_chrome_opacity > 0.0).then(|| {
                 div()
                     .id("new-chat-headline")
                     .absolute()
@@ -15382,14 +15382,12 @@ impl Render for Composer {
                     .line_height(px(HERO_HEADLINE_LINE))
                     .text_color(theme.text)
                     .opacity(new_thread_chrome_opacity)
-                    .map(|el| {
-                        if no_project {
-                            el.child("What should we work on?")
-                        } else {
-                            el.child("What should we build in")
-                                .child(div().ml(px(4.0)).child(project))
-                                .child("?")
-                        }
+                    .map(|el| match new_thread_project {
+                        Some(project) => el
+                            .child("What should we build in")
+                            .child(div().ml(px(4.0)).min_w_0().child(project))
+                            .child("?"),
+                        None => el.child("What should we work on?"),
                     })
             });
             // Floating selectors share the surface's origin and never change its height.

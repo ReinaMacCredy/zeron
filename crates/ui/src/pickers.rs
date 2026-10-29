@@ -5777,7 +5777,7 @@ impl Pickers {
                 }),
             )
             .on_click(cx.listener(|this, _, window, cx| this.toggle(PickerKind::Space, window, cx)))
-            .child(label)
+            .child(div().min_w_0().max_w(px(360.0)).truncate().child(label))
             .child(
                 crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
                     .size(px(18.0))
