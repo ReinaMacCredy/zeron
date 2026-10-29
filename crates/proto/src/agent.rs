@@ -498,6 +498,27 @@ impl AccessMode {
     }
 }
 
+/// The mode a run gets when `wanted` is not among those the harness
+/// `offered`: the most trusting offered mode that still asks at least as
+/// much. A harness with nothing that asks as much runs in its least
+/// trusting mode — for an agent that cannot ask at all, full access, which
+/// the chip then shows. Nothing offered (an engine predating modes) runs as
+/// before, with full access.
+pub fn resolve_access(wanted: AccessMode, offered: &[AccessMode]) -> AccessMode {
+    if offered.is_empty() {
+        return AccessMode::FullAccess;
+    }
+    if offered.contains(&wanted) {
+        return wanted;
+    }
+    offered
+        .iter()
+        .copied()
+        .filter(|mode| *mode <= wanted)
+        .max()
+        .unwrap_or(offered[0])
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SteeringMode {
