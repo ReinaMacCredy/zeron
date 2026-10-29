@@ -171,7 +171,7 @@ fun VoiceSettingsScreen(controller: VoiceController, onBack: () -> Unit) {
                 if (s.live) {
                     "End the call to change devices."
                 } else {
-                    "Audio stays on this phone. Codex, its sign-in and its tools run on the device you choose."
+                    "Audio goes from this phone straight to Codex's voice service. Codex, its sign-in and its tools run on the device you choose."
                 },
             )
 
