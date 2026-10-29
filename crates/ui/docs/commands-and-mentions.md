@@ -67,10 +67,13 @@ When Claude Code loads a skill, its row in the transcript names the skill in vio
 
 ## `@` mentions
 
-Type `@` to open one menu with two sections:
+Type `@` to open one menu with three sections:
 
 - **Threads** lists up to six other threads on the same device, with their status (**Working**, **Input**, **Failed**, **Done**) and project. Threads in this chat's project come first. Type to match a title. Picking one inserts a link the agent can open with Zeron's `read_thread` tool (see [Agents and other threads](zeron://docs/threads)).
+- **Tasks** lists up to five open tasks from the [Tasks](zeron://docs/tasks) page, this chat's project first, with their status. Type to match a title, finished tasks included. Picking one inserts the task's title in the accent color with its status circle; click it to open the task's card. The agent gets a link with the task's id and reads the whole task with Zeron's `tasks` tool.
 - **Files** lists files and folders in the project, plus anything you have attached. Picking one inserts a link to its path.
+
+Type `@task ` (with the space) to search only tasks. A task already in your message reads **added**, so you can pick several in a row.
 
 ![The @ menu listing threads and files](commands-mention-menu.jpg)
 

@@ -1294,6 +1294,7 @@ impl Pickers {
             | ComposerInputEvent::PastedText { .. }
             | ComposerInputEvent::PastedLongText(_)
             | ComposerInputEvent::OpenAttachment(_)
+            | ComposerInputEvent::OpenTask(_)
             | ComposerInputEvent::CursorMoved
             | ComposerInputEvent::ViewportChanged
             | ComposerInputEvent::MentionNavigate(_)
