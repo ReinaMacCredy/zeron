@@ -7189,16 +7189,29 @@ pub(crate) fn subagent_doc_id(chat_id: &str, tool_use_id: &str) -> String {
 }
 
 /// Spawn gate: whether tagged traffic for `id` gets a subagent doc, and with
-/// it a unit on the badge. Only a spawn chip of THIS chat does, one this run
-/// folded or one already in the doc: those are the rows the lanes card lists.
-/// Claude also tags the agents a subagent starts with their own call ids,
-/// chips of that subagent's doc; sinks for them badged chats over an empty
-/// card (#999). Traffic for any other id stays in the run journal.
-fn is_chat_spawn(id: &str, folded: &[MessagePart], doc: &SessionDoc) -> bool {
-    folded.iter().any(|p| {
-        matches!(p, MessagePart::Tool { id: part, call, .. }
-            if part == id && call.is_subagent_spawn())
-    }) || doc.has_subagent_spawn(id)
+/// it a unit on the badge. A spawn chip of THIS chat does, one this run
+/// folded or one already in the doc, and so does a spawn chip in a live
+/// subagent's transcript: Claude tags the agents a subagent starts with their
+/// own call ids, and the roster lists those nested runs under their parent
+/// (`agent_tree`), so the badge counts them too. Traffic for any other id
+/// stays in the run journal (#999).
+fn is_chat_spawn(
+    id: &str,
+    folded: &[MessagePart],
+    doc: &SessionDoc,
+    sinks: &std::collections::HashMap<String, SubagentSink>,
+) -> bool {
+    let spawn_in = |parts: &[MessagePart]| {
+        parts.iter().any(|p| {
+            matches!(p, MessagePart::Tool { id: part, call, .. }
+                if part == id && call.is_subagent_spawn())
+        })
+    };
+    spawn_in(folded)
+        || doc.has_subagent_spawn(id)
+        || sinks
+            .values()
+            .any(|sink| spawn_in(&sink.folded) || sink.doc.has_subagent_spawn(id))
 }
 
 /// Test-only instrumentation: how often `drive_run`'s coalesced commit branch
@@ -8547,7 +8560,7 @@ async fn drive_run(
                 );
             let opens_sink =
                 !sink_known && !done_only && !foreign_subagents.contains(parent_tool_use_id) && {
-                    let spawn = is_chat_spawn(parent_tool_use_id, &folded, doc_ref);
+                    let spawn = is_chat_spawn(parent_tool_use_id, &folded, doc_ref, &subagents);
                     if !spawn {
                         foreign_subagents.insert(parent_tool_use_id.clone());
                     }
@@ -10943,10 +10956,11 @@ mod tests {
         core.sessions.shutdown().await;
     }
 
-    /// The badge counts what the lanes card lists: this chat's spawn chips.
-    /// In the live claude 2.1.310 shape a forked skill streams under its
-    /// Skill call, and each agent it spawns under that agent's own call, a
-    /// chip of the skill's doc (#999: a chat badged "3" over an empty card).
+    /// The badge counts what the lanes card lists: this chat's spawn chips
+    /// and the spawns inside them, which the card lists nested. In the live
+    /// claude 2.1.310 shape a forked skill streams under its Skill call, and
+    /// each agent it spawns under that agent's own call, a chip of the
+    /// skill's doc. Tagged traffic no spawn chip names stays uncounted.
     #[tokio::test]
     async fn running_subagents_count_only_this_chats_spawn_chips() {
         use super::*;
@@ -11042,7 +11056,7 @@ mod tests {
             core.sessions
                 .session_status(chat)
                 .map(|s| s.running_subagents),
-            Some(1),
+            Some(3),
             "the badge counts what the lanes card lists"
         );
         feed.send(done(DoneStatus::Completed)).unwrap();
