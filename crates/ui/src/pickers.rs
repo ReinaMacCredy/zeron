@@ -5722,39 +5722,99 @@ impl Pickers {
             )
     }
 
-    /// New-session destination controls: the project, then the device it
-    /// runs on, as a chip-only cluster floating above the composer's trailing
-    /// edge.
-    pub fn render_new_thread_target_selectors(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub fn render_new_thread_project(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let closing = (self.open.closing_since(), self.menu_geometry().below);
-        let mut overlay: Option<(PickerKind, AnyElement)> = match self.mounted_kind() {
-            Some(PickerKind::Space) => {
-                let content = self.render_space_popover(cx);
-                Some((
-                    PickerKind::Space,
-                    self.popover_frame(PickerKind::Space, 280.0, content, cx),
-                ))
-            }
-            Some(PickerKind::Device) => {
-                let content = self.render_device_popover(cx);
-                Some((
-                    PickerKind::Device,
-                    self.popover_frame(PickerKind::Device, 224.0, content, cx),
-                ))
-            }
-            _ => None,
-        };
-        let on_cloud = self.runs_on_cloud(cx);
-        let (device_label, project_label, offline, device_glyph) = {
+        let mut overlay = (self.mounted_kind() == Some(PickerKind::Space)).then(|| {
+            let content = self.render_space_popover(cx);
+            (
+                PickerKind::Space,
+                self.popover_frame(PickerKind::Space, 280.0, content, cx),
+            )
+        });
+        let label: SharedString = self
+            .state
+            .read(cx)
+            .selected_space_row()
+            .map(|space| space.display_name().to_string())
+            .unwrap_or_else(|| "No project".to_string())
+            .into();
+        let open = self.open_kind() == Some(PickerKind::Space);
+        let id: SharedString = format!("picker-project-{}", cx.entity_id()).into();
+        let trigger = div()
+            .relative()
+            .child(self.measure_trigger(PickerKind::Space, cx))
+            .id(id.clone())
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!(
+                "{}: {label}",
+                PickerKind::Space.a11y_name()
+            )))
+            .aria_expanded(open)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(4.0))
+            .rounded(px(8.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .bg(if open {
+                theme.element_hover
+            } else {
+                motion::hover_blend(&id, gpui::transparent_black(), theme.element_hover)
+            })
+            .on_hover(motion::hover_listener(id.clone()))
+            .cursor_pointer()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, _| {
+                    this.open
+                        .note_trigger_press_matching(|open| *open == PickerKind::Space)
+                }),
+            )
+            .on_click(cx.listener(|this, _, window, cx| this.toggle(PickerKind::Space, window, cx)))
+            .child(label)
+            .child(
+                crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                    .size(px(18.0))
+                    .flex_none()
+                    .text_color(theme.text_muted.opacity(0.7)),
+            );
+        attach_overlay(
+            trigger,
+            &mut overlay,
+            PickerKind::Space,
+            "project-popover",
+            closing,
+        )
+        .into_any_element()
+    }
+
+    pub fn render_new_thread_device_chip(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let closing = (self.open.closing_since(), self.menu_geometry().below);
+        let mut overlay = (self.mounted_kind() == Some(PickerKind::Device)).then(|| {
+            let content = self.render_device_popover(cx);
+            (
+                PickerKind::Device,
+                self.popover_frame(PickerKind::Device, 224.0, content, cx),
+            )
+        });
+        let (label, offline, glyph) = if self.runs_on_cloud(cx) {
+            (
+                SharedString::from(crate::cloud::CLOUD_LABEL),
+                false,
+                crate::icons::CLOUD,
+            )
+        } else {
             let state = self.state.read(cx);
             let device_id = state.effective_device_id();
-            let device_glyph = device_id
+            let glyph = device_id
                 .as_deref()
                 .and_then(|id| state.devices.iter().find(|d| d.id == id))
                 .filter(|device| crate::cloud::is_cloud(device))
                 .map_or(crate::icons::MONITOR, |_| crate::icons::CLOUD);
-            let device_label: SharedString = device_id
+            let label: SharedString = device_id
                 .as_deref()
                 .and_then(|id| state.device_name(id))
                 .map(str::to_string)
@@ -5763,61 +5823,26 @@ impl Pickers {
             let offline = device_id
                 .as_deref()
                 .is_some_and(|id| state.device_presence(id, chrono::Utc::now()).warns());
-            let project_label: SharedString = state
-                .selected_space_row()
-                .map(|s| s.display_name().to_string())
-                .unwrap_or_else(|| "No project".to_string())
-                .into();
-            if on_cloud {
-                (
-                    SharedString::from(crate::cloud::CLOUD_LABEL),
-                    project_label,
-                    false,
-                    crate::icons::CLOUD,
-                )
-            } else {
-                (device_label, project_label, offline, device_glyph)
-            }
+            (label, offline, glyph)
         };
-        let device_chip = self
+        let chip = self
             .footer_chip(
                 PickerKind::Device,
                 "picker-device",
-                device_glyph,
-                device_label,
+                glyph,
+                label,
                 &theme,
                 cx,
             )
             .when(offline, |el| el.text_color(theme.warning.opacity(0.8)));
-        let project_chip = self.footer_chip(
-            PickerKind::Space,
-            "picker-project",
-            crate::icons::FOLDER,
-            project_label,
-            &theme,
-            cx,
-        );
-        div()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.0))
-            .child(attach_overlay_end(
-                project_chip,
-                &mut overlay,
-                PickerKind::Space,
-                "project-popover",
-                closing,
-            ))
-            .child(attach_overlay_end(
-                device_chip,
-                &mut overlay,
-                PickerKind::Device,
-                "device-popover",
-                closing,
-            ))
-            .into_any_element()
+        attach_overlay(
+            chip,
+            &mut overlay,
+            PickerKind::Device,
+            "device-popover",
+            closing,
+        )
+        .into_any_element()
     }
 
     /// New-session Git controls. Checkout mode and branch form the original
@@ -6450,11 +6475,7 @@ impl Pickers {
             _ => None,
         };
         let open = self.open_kind() == Some(PickerKind::Permission);
-        let tone = if mode == PermissionMode::Full {
-            theme.warning
-        } else {
-            theme.text_muted
-        };
+        let tone = theme.text_muted;
         let chip = div()
             .id("picker-permission")
             .debug_selector(|| "picker-permission".into())

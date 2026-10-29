@@ -100,6 +100,8 @@ const SIDECHAT_TAB_RADIUS: f32 = 10.0;
 /// The original floating selector rows use the same 20px chip height as the
 /// established-thread footer. Their surrounding rows own no plate or border.
 const NEW_THREAD_SELECTOR_ROW_HEIGHT: f32 = 20.0;
+const HERO_HEADLINE_LINE: f32 = 38.0;
+const HERO_HEADLINE_GAP: f32 = 18.0;
 const RUNNING_TAB_FADE: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_OUT);
 const MISSION_BORDER: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE);
 const MISSION_PLACEHOLDER: motion::MotionSpec = motion::MotionSpec::new(220, motion::EASE);
@@ -6753,7 +6755,7 @@ pub struct Composer {
     /// the draft's attachments.
     queue_edit_attachment_draft: Option<AttachmentDraft>,
     /// Composer actions row plus the new-session floating target tab
-    /// ([`Pickers::render_new_thread_target_selectors`]).
+    /// ([`Pickers::render_new_thread_project`]).
     pickers: Entity<Pickers>,
     /// Stale stored drafts are dropped once, after the first chats frame.
     drafts_pruned: bool,
@@ -15288,10 +15290,9 @@ impl Render for Composer {
                         .children(voice_track),
                 )
         };
-        let new_thread_target_selectors = (new_thread_chrome_opacity > 0.0).then(|| {
-            self.pickers.update(cx, |pickers, cx| {
-                pickers.render_new_thread_target_selectors(cx)
-            })
+        let new_thread_project = (new_thread_chrome_opacity > 0.0).then(|| {
+            self.pickers
+                .update(cx, |pickers, cx| pickers.render_new_thread_project(cx))
         });
         let new_thread_git_selectors = (new_thread_chrome_opacity > 0.0)
             .then(|| {
@@ -15300,11 +15301,6 @@ impl Render for Composer {
                 })
             })
             .flatten();
-        let has_new_thread_git_selectors = self
-            .state
-            .read(cx)
-            .selected_space_row()
-            .is_some_and(|space| space.git_detected);
         // The file dropzone lives in the shell (the whole conversation column,
         // not just the pill — shell.rs `chat-dropzone`); drops land back here
         // via `add_paths`.
@@ -15368,8 +15364,36 @@ impl Render for Composer {
                 crate::home::running_agents(self.state.read(cx), chrono::Utc::now()).len();
             let tabs = (new_thread_chrome_opacity > 0.0)
                 .then(|| self.render_home_tabs(&theme, running, window, cx));
+            let no_project = self.state.read(cx).no_project;
+            let headline = new_thread_project.map(|project| {
+                div()
+                    .id("new-chat-headline")
+                    .absolute()
+                    .top(px(-28.0 - HERO_HEADLINE_GAP - HERO_HEADLINE_LINE))
+                    .left_0()
+                    .right_0()
+                    .h(px(HERO_HEADLINE_LINE))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
+                    .whitespace_nowrap()
+                    .text_size(crate::typography::ui_rems(30.0))
+                    .line_height(px(HERO_HEADLINE_LINE))
+                    .text_color(theme.text)
+                    .opacity(new_thread_chrome_opacity)
+                    .map(|el| {
+                        if no_project {
+                            el.child("What should we work on?")
+                        } else {
+                            el.child("What should we build in")
+                                .child(div().ml(px(4.0)).child(project))
+                                .child("?")
+                        }
+                    })
+            });
             // Floating selectors share the surface's origin and never change its height.
-            container.relative().child(
+            container.relative().children(headline).child(
                 div()
                     .id("dock-target-selectors")
                     .absolute()
@@ -15379,10 +15403,8 @@ impl Render for Composer {
                     .h(px(NEW_THREAD_SELECTOR_ROW_HEIGHT))
                     .flex()
                     .items_start()
-                    .justify_between()
                     .opacity(new_thread_chrome_opacity)
-                    .children(tabs)
-                    .child(div().flex().children(new_thread_target_selectors)),
+                    .children(tabs),
             )
         } else if new_thread_chrome > 0.0 {
             container.child(
@@ -15395,7 +15417,7 @@ impl Render for Composer {
                     .items_start()
                     .justify_end()
                     .opacity(new_thread_chrome_opacity)
-                    .children(new_thread_target_selectors),
+                    .children(new_thread_project),
             )
         } else {
             container
@@ -15415,16 +15437,9 @@ impl Render for Composer {
             .child(pill_surface)
             .children(dictation_status);
 
-        // The lower slot keeps a stable footprint for Git projects while its
-        // old floating checkout/ref controls dissolve into the session footer.
-        // Non-Git sessions grow the slot continuously from zero.
-        let session_chrome = 1.0 - new_thread_chrome;
-        let bottom_slot = if has_new_thread_git_selectors || self.dock_frame.is_some() {
-            1.0
-        } else {
-            session_chrome
-        };
-        let footer_slot = if bottom_slot > 0.0 {
+        // The lower slot keeps a stable footprint while the new-chat strip
+        // dissolves into the session footer.
+        let footer_slot = {
             // The pickers carry the composer's chat binding, so a bound
             // composer's footer reads and writes ITS chat (split partner,
             // sidechat), never the selection's.
@@ -15433,9 +15448,20 @@ impl Render for Composer {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
-            let permission_chip = (session_chrome_opacity > 0.0).then(|| {
+            let permission_chip = (session_chrome_opacity > 0.0
+                && self.pickers.read(cx).effective_permission_mode(cx)
+                    != zeron_proto::PermissionMode::default())
+            .then(|| {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_permission_chip(cx))
+            });
+            let new_thread_strip = (new_thread_chrome_opacity > 0.0 && !self.mission).then(|| {
+                self.pickers.update(cx, |pickers, cx| {
+                    (
+                        pickers.render_new_thread_device_chip(cx),
+                        pickers.render_permission_chip(cx),
+                    )
+                })
             });
             let terminal_button = self.pickers.read(cx).render_terminal_button(cx);
             let mission_chip = (session_chrome_opacity > 0.0
@@ -15449,11 +15475,8 @@ impl Render for Composer {
             Some(
                 div()
                     .w_full()
-                    .h(px(SESSION_FOOTER_HEIGHT * bottom_slot))
-                    .when(!self.pr_chat, |slot| {
-                        slot.mt(px(-Theme::SPACE_SM * (1.0 - bottom_slot)))
-                            .mb(px(-Theme::SPACE_SM * bottom_slot))
-                    })
+                    .h(px(SESSION_FOOTER_HEIGHT))
+                    .when(!self.pr_chat, |slot| slot.mb(px(-Theme::SPACE_SM)))
                     .relative()
                     .when(new_thread_chrome_opacity > 0.0, |slot| {
                         slot.child(
@@ -15473,7 +15496,19 @@ impl Render for Composer {
                                                 .child("⇧Tab: back to New task"),
                                         )
                                     } else {
-                                        row.children(new_thread_git_selectors)
+                                        row.gap(px(4.0)).when_some(
+                                            new_thread_strip,
+                                            |row, (device, permission)| {
+                                                row.child(div().flex_none().child(device))
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .children(new_thread_git_selectors),
+                                                    )
+                                                    .child(div().flex_none().child(permission))
+                                            },
+                                        )
                                     }
                                 }),
                         )
@@ -15508,8 +15543,6 @@ impl Render for Composer {
                         )
                     }),
             )
-        } else {
-            None
         };
         let container = if self.pr_chat {
             container.child(crate::frost::frosted(
