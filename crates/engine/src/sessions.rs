@@ -326,6 +326,39 @@ fn binary_identity(harness: &dyn Harness) -> Option<String> {
     ))
 }
 
+struct CopyCompaction {
+    source: String,
+    harness: HarnessId,
+    cwd: String,
+    fork_after: String,
+    since: i64,
+    cancel: CancellationToken,
+    ready: Option<CopyReady>,
+    swapping: bool,
+}
+
+#[derive(Clone)]
+struct CopyReady {
+    session_id: String,
+    post_tokens: Option<u64>,
+    took: std::time::Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CopySwap {
+    Swapped,
+    Waiting,
+    Discarded,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ContextReading {
+    tokens: u64,
+    baseline: u64,
+    window: Option<u64>,
+    threshold: Option<u64>,
+}
+
 #[derive(Clone)]
 struct CompactionNote {
     label: &'static str,
@@ -729,6 +762,8 @@ struct Inner {
     nudged_at: Mutex<HashMap<String, u64>>,
     /// The last message the boundary classifier saw per chat: a steer falling back to dispatch is not judged twice.
     boundary_checked: Mutex<HashMap<String, String>>,
+    ahead_checked: Mutex<HashMap<String, String>>,
+    copies: Mutex<HashMap<String, CopyCompaction>>,
     streaks: Mutex<HashMap<String, crate::compact_boundary::Streak>>,
     /// Chats `recover_stale` is re-dispatching: their Idle + aborted reply is not an ending.
     reviving: Mutex<std::collections::HashSet<String>>,
@@ -1064,6 +1099,8 @@ impl SessionsEngine {
                 carry_owed: Mutex::new(HashMap::new()),
                 nudged_at: Mutex::new(HashMap::new()),
                 boundary_checked: Mutex::new(HashMap::new()),
+                ahead_checked: Mutex::new(HashMap::new()),
+                copies: Mutex::new(HashMap::new()),
                 streaks: Mutex::new(HashMap::new()),
                 reviving: Mutex::new(std::collections::HashSet::new()),
                 rejected_resumes: Mutex::new(HashMap::new()),
@@ -2633,6 +2670,7 @@ impl SessionsEngine {
                 || self.turn_in_flight(chat_id)
                 || lock(&self.inner.compacting).contains(chat_id)
                 || lock(&self.inner.agent_compacted).contains(chat_id)
+                || lock(&self.inner.copies).contains_key(chat_id)
                 || self.inner.session_tombstoned(chat_id)
         };
         if zeron_proto::invocation::leading_command(prompt).is_some() || blocked() {
@@ -2714,11 +2752,9 @@ impl SessionsEngine {
                 FRESH_SESSION_NOTE,
                 "The next message starts a new task. Keep only what it may need from this conversation. The agent's last reply was already delivered to the person: do not list it as pending.",
             ),
-            ClassifierVerdict::Carry => (
-                COMPACTED_CARRY_NOTE,
-                FRESH_SESSION_CARRY_NOTE,
-                "The last two turns go along verbatim after this compaction. Keep what the next message may need from everything before them. The agent's last reply was already delivered to the person: do not list it as pending.",
-            ),
+            ClassifierVerdict::Carry => {
+                (COMPACTED_CARRY_NOTE, FRESH_SESSION_CARRY_NOTE, CARRY_FOCUS)
+            }
             ClassifierVerdict::Continue | ClassifierVerdict::Failed => {
                 lock(&self.inner.nudged_at).insert(chat_id.to_string(), tokens);
                 return false;
@@ -3087,7 +3123,9 @@ impl SessionsEngine {
             .inner
             .workspace()
             .and_then(|workspace| workspace.chat_config(chat_id));
-        let (tokens, _, window) = self
+        let ContextReading {
+            tokens, threshold, ..
+        } = self
             .inner
             .context_reading(chat_id, config.as_ref())
             .unwrap_or_default();
@@ -3103,7 +3141,7 @@ impl SessionsEngine {
             &entries,
             crate::compact_boundary::NewMessage::AgentNote(note),
         );
-        let at_ceiling = crate::compact_boundary::at_ceiling(tokens, window);
+        let at_ceiling = crate::compact_boundary::at_ceiling(tokens, threshold);
         let classified = if at_ceiling || settings.jev.is_some() {
             None
         } else {
@@ -3234,6 +3272,327 @@ impl SessionsEngine {
                 Err(err)
             }
         }
+    }
+
+    pub(crate) async fn compact_ahead(&self, chat_id: &str) -> Result<bool, EngineError> {
+        let settings = self.inner.registry.compaction_settings();
+        if !settings.compact_ahead
+            || !self.inner.auto_compacts(chat_id)
+            || self.agent_compact_busy(chat_id)
+            || self.agent_compact_waiting(chat_id)
+            || lock(&self.inner.copies).contains_key(chat_id)
+            || self.inner.session_tombstoned(chat_id)
+        {
+            return Ok(false);
+        }
+        let Some(harness) = self.compaction_harness(chat_id) else {
+            return Ok(false);
+        };
+        let copies = harness.compacts_a_copy();
+        if !copies && !(harness.compacts_in_place() && harness.compaction() != Compaction::None) {
+            return Ok(false);
+        }
+        let config = self
+            .inner
+            .workspace()
+            .and_then(|workspace| workspace.chat_config(chat_id));
+        let Some(reading) = self.inner.context_reading(chat_id, config.as_ref()) else {
+            return Ok(false);
+        };
+        if !crate::compact_boundary::past_trigger(
+            reading.tokens,
+            reading.baseline,
+            reading.window,
+            reading.threshold,
+            settings.nudge_tokens,
+        ) {
+            return Ok(false);
+        }
+        let entries = self.doc_handle(chat_id)?.doc().read_entries()?;
+        let Some(reply) = entries
+            .iter()
+            .rev()
+            .find(|entry| entry.role != MessageRole::System)
+            .filter(|entry| {
+                entry.role == MessageRole::Assistant
+                    && entry.status != Some(MessageStatus::Streaming)
+            })
+        else {
+            return Ok(false);
+        };
+        if lock(&self.inner.ahead_checked).insert(chat_id.to_string(), reply.id.clone())
+            == Some(reply.id.clone())
+        {
+            return Ok(false);
+        }
+        let Some(host) = self.inner.doc_host() else {
+            return Ok(false);
+        };
+        let last_user = host.last_user_entry(chat_id)?;
+        if host.since_user(chat_id, last_user.as_deref()).await? != Since::Quiet {
+            return Ok(false);
+        }
+        if copies {
+            return self.start_copy(chat_id, &entries).await;
+        }
+        self.write_classifier_record(
+            chat_id,
+            zeron_doc::ClassifierRecord {
+                verdict: ClassifierVerdict::Carry,
+                decided_by: zeron_doc::DecidedBy::TurnEnd,
+                context_tokens: reading.tokens,
+                ..Default::default()
+            },
+            None,
+        );
+        let carry = crate::compact_boundary::carry_block(
+            &entries,
+            chat_id,
+            &self.open_jobs(chat_id, &entries),
+            harness.compaction_keeps_last_reply(),
+        );
+        let outcome = self
+            .compact_noting(
+                chat_id,
+                Some(CARRY_FOCUS.into()),
+                COMPACTED_CARRY_NOTE,
+                carry.clone(),
+            )
+            .await?;
+        if outcome.compacted {
+            self.inner.owe_carry(chat_id, carry);
+        }
+        Ok(outcome.compacted)
+    }
+
+    async fn start_copy(
+        &self,
+        chat_id: &str,
+        entries: &[SessionMessageEntry],
+    ) -> Result<bool, EngineError> {
+        let (harness_id, mut request) = self.compaction_request(chat_id)?;
+        let (harness, instance_id) = self.inner.resolve_for_chat(chat_id, harness_id)?;
+        let Some(source) = self.inner.resume_for(chat_id, &request.cwd, harness_id) else {
+            return Ok(false);
+        };
+        let anchors = self.inner.anchors(chat_id);
+        let Some((fork_after, keep)) = entries
+            .iter()
+            .rev()
+            .filter(|entry| entry.role == MessageRole::Assistant)
+            .find_map(|entry| {
+                anchors
+                    .live
+                    .get(&entry.id)
+                    .map(|keep| (entry.id.clone(), keep.clone()))
+            })
+        else {
+            return Ok(false);
+        };
+        request.prompt = String::new();
+        request.resume = Some(source.clone());
+        request.branch = Some(zeron_proto::SessionBranch {
+            keep: Some(keep),
+            drop: None,
+        });
+        let setup = RunSetup::new(
+            harness_id,
+            instance_id,
+            harness.clone(),
+            &request,
+            RunMode::Compaction,
+        );
+        let cancel = setup.handle.interrupt_token.clone();
+        let since = now_ms();
+        lock(&self.inner.copies).insert(
+            chat_id.to_string(),
+            CopyCompaction {
+                source,
+                harness: harness_id,
+                cwd: request.cwd.clone(),
+                fork_after,
+                since,
+                cancel: cancel.clone(),
+                ready: None,
+                swapping: false,
+            },
+        );
+        self.inner.set_compact_plan(
+            chat_id,
+            Some(zeron_proto::CompactPlan::Copy {
+                since,
+                ready: false,
+            }),
+        );
+        let (sessions, chat_id) = (self.clone(), chat_id.to_string());
+        tokio::spawn(async move {
+            let RunSetup {
+                handle, controls, ..
+            } = setup;
+            let started = std::time::Instant::now();
+            let compacted = async {
+                let stream = harness
+                    .compact(request, controls)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                drain_copy(stream).await
+            };
+            let result = tokio::select! {
+                result = tokio::time::timeout(COMPACT_TIMEOUT, compacted) => {
+                    result.unwrap_or_else(|_| Err("the copy's compaction timed out".into()))
+                }
+                _ = cancel.cancelled() => Err("the copy was discarded".into()),
+            };
+            cancel.cancel();
+            drop(handle);
+            match result {
+                Ok((session_id, post_tokens)) => {
+                    let ready = CopyReady {
+                        session_id,
+                        post_tokens,
+                        took: started.elapsed(),
+                    };
+                    let since = {
+                        let mut copies = lock(&sessions.inner.copies);
+                        let Some(copy) = copies.get_mut(&chat_id) else {
+                            return;
+                        };
+                        copy.ready = Some(ready);
+                        copy.since
+                    };
+                    tracing::info!(chat = %chat_id, ms = started.elapsed().as_millis() as u64, "background copy compacted");
+                    sessions.inner.set_compact_plan(
+                        &chat_id,
+                        Some(zeron_proto::CompactPlan::Copy { since, ready: true }),
+                    );
+                    sessions.swap_copy(&chat_id).await;
+                }
+                Err(reason) => sessions.discard_copy(&chat_id, &reason),
+            }
+        });
+        Ok(true)
+    }
+
+    pub fn copy_ready(&self, chat_id: &str) -> bool {
+        lock(&self.inner.copies)
+            .get(chat_id)
+            .is_some_and(|copy| copy.ready.is_some())
+    }
+
+    pub fn copy_pending(&self, chat_id: &str) -> bool {
+        lock(&self.inner.copies).contains_key(chat_id)
+    }
+
+    fn discard_copy(&self, chat_id: &str, reason: &str) {
+        let Some(copy) = lock(&self.inner.copies).remove(chat_id) else {
+            return;
+        };
+        copy.cancel.cancel();
+        if matches!(
+            self.session_status(chat_id).and_then(|s| s.compact_plan),
+            Some(zeron_proto::CompactPlan::Copy { .. })
+        ) {
+            self.inner.set_compact_plan(chat_id, None);
+        }
+        tracing::info!(chat = %chat_id, reason, "background copy discarded");
+    }
+
+    pub(crate) async fn swap_copy(&self, chat_id: &str) -> CopySwap {
+        let Some((source, harness_id, cwd, fork_after, ready)) = lock(&self.inner.copies)
+            .get(chat_id)
+            .filter(|copy| !copy.swapping)
+            .and_then(|copy| {
+                Some((
+                    copy.source.clone(),
+                    copy.harness,
+                    copy.cwd.clone(),
+                    copy.fork_after.clone(),
+                    copy.ready.clone()?,
+                ))
+            })
+        else {
+            return CopySwap::Waiting;
+        };
+        let Ok(handle) = self.doc_handle(chat_id) else {
+            return CopySwap::Waiting;
+        };
+        let entries = handle.doc().read_entries().unwrap_or_default();
+        let later = entries
+            .iter()
+            .position(|entry| entry.id == fork_after)
+            .map(|at| &entries[at + 1..]);
+        let compacted_since = |later: &[SessionMessageEntry]| {
+            later.iter().any(|entry| {
+                entry
+                    .parts
+                    .iter()
+                    .any(|part| matches!(part, MessagePart::Compaction { .. }))
+            })
+        };
+        let current = self
+            .inner
+            .stored_harness_session(chat_id)
+            .map(|(session, ..)| session);
+        let Some(later) = later
+            .filter(|later| !compacted_since(later) && current.as_deref() == Some(source.as_str()))
+        else {
+            self.discard_copy(chat_id, "a newer compaction or session overtook it");
+            return CopySwap::Discarded;
+        };
+        if self.turn_in_flight(chat_id)
+            || lock(&self.inner.compacting).contains(chat_id)
+            || self.restart_ends_work(chat_id, false)
+        {
+            return CopySwap::Waiting;
+        }
+        // Held in the map while it swaps, so the turn-end trigger cannot fork again before the meter drops.
+        match lock(&self.inner.copies).get_mut(chat_id) {
+            Some(copy) if !copy.swapping => copy.swapping = true,
+            _ => return CopySwap::Waiting,
+        }
+        if let Err(err) = self.interrupt(chat_id).await {
+            tracing::warn!(chat = %chat_id, error = %err, "background copy swap could not retire the warm child");
+        }
+        let tokens = handle.doc().context_usage().and_then(|usage| usage.tokens);
+        self.inner
+            .remember_harness_session(chat_id, &ready.session_id, &cwd, harness_id);
+        let carry = crate::compact_boundary::carry_block(later, chat_id, &[], false);
+        self.write_classifier_record(
+            chat_id,
+            zeron_doc::ClassifierRecord {
+                verdict: ClassifierVerdict::Carry,
+                decided_by: zeron_doc::DecidedBy::BackgroundCopy,
+                context_tokens: tokens.unwrap_or_default(),
+                ..Default::default()
+            },
+            None,
+        );
+        let note = CompactionNote {
+            label: COMPACTED_COPY_NOTE,
+            carried: carry.clone(),
+            started: std::time::Instant::now().checked_sub(ready.took),
+        };
+        match record_compaction(
+            handle.doc(),
+            &self.inner.device_id,
+            &note,
+            tokens,
+            ready.post_tokens,
+        ) {
+            Ok(written) => {
+                if let Ok((harness, _)) = self.inner.resolve_for_chat(chat_id, harness_id) {
+                    attach_compaction_summary(&self.inner, &harness, chat_id, written);
+                }
+            }
+            Err(err) => {
+                tracing::warn!(chat = %chat_id, error = %err, "compaction note write failed")
+            }
+        }
+        self.inner.owe_carry(chat_id, carry);
+        lock(&self.inner.streaks).remove(chat_id);
+        lock(&self.inner.copies).remove(chat_id);
+        self.inner.set_compact_plan(chat_id, None);
+        CopySwap::Swapped
     }
 
     fn decline_agent_compact(
@@ -4763,21 +5122,26 @@ impl Inner {
 
     fn past_floor(&self, chat_id: &str, config: Option<&zeron_proto::ChatConfig>) -> Option<u64> {
         let nudge = self.registry.compaction_settings().nudge_tokens;
-        let (tokens, baseline, window) = self.context_reading(chat_id, config)?;
-        crate::compact_boundary::past_floor(tokens, baseline, window, nudge).then_some(tokens)
+        let reading = self.context_reading(chat_id, config)?;
+        crate::compact_boundary::past_floor(reading.tokens, reading.baseline, reading.window, nudge)
+            .then_some(reading.tokens)
     }
 
     fn context_reading(
         &self,
         chat_id: &str,
         config: Option<&zeron_proto::ChatConfig>,
-    ) -> Option<(u64, u64, Option<u64>)> {
+    ) -> Option<ContextReading> {
         let handle = self.doc_host()?.open(chat_id).ok()?;
         let usage = handle.doc().context_usage()?;
-        let window = config
-            .and_then(zeron_proto::model_options::chat_budget)
-            .or(usage.window);
-        Some((usage.tokens?, handle.doc().context_baseline(), window))
+        Some(ContextReading {
+            tokens: usage.tokens?,
+            baseline: handle.doc().context_baseline(),
+            window: config
+                .and_then(zeron_proto::model_options::chat_budget)
+                .or(usage.window),
+            threshold: zeron_proto::model_options::chat_compact_threshold(config, usage.window),
+        })
     }
 
     fn tool_disabled(&self, config: Option<&zeron_proto::ChatConfig>, tool: &str) -> bool {
@@ -6169,6 +6533,32 @@ async fn drain_compaction(
     drain
 }
 
+/// Unlike `drain_compaction`, nothing is remembered on the chat until the swap.
+async fn drain_copy(
+    mut stream: futures::stream::BoxStream<'static, Result<AgentEvent, HarnessError>>,
+) -> Result<(String, Option<u64>), String> {
+    let mut compacted = None;
+    while let Some(event) = stream.next().await {
+        match event.map_err(|err| err.to_string())? {
+            AgentEvent::Compacted { post_tokens, .. } => compacted = Some(post_tokens),
+            AgentEvent::Error { message } => return Err(message),
+            AgentEvent::Done {
+                session_id, error, ..
+            } => {
+                if let Some(error) = error {
+                    return Err(error);
+                }
+                return match (compacted, session_id) {
+                    (Some(post_tokens), Some(session_id)) => Ok((session_id, post_tokens)),
+                    _ => Err("the copy did not compact".into()),
+                };
+            }
+            _ => {}
+        }
+    }
+    Err("harness stream ended without Done".into())
+}
+
 fn queued_compaction(
     inner: &Inner,
     chat_id: &str,
@@ -6289,6 +6679,8 @@ const COMPACTED_AGENT_NOTE: &str = "Agent compacted";
 const COMPACTED_BOUNDARY_NOTE: &str = "Compacted before a new task";
 const COMPACTED_CARRY_NOTE: &str = "Compacted, last turns carried over";
 const COMPACTED_AGENT_CARRY_NOTE: &str = "Agent compacted, last turns carried over";
+const COMPACTED_COPY_NOTE: &str = "Compacted in the background, later turns carried over";
+const CARRY_FOCUS: &str = "The last two turns go along verbatim after this compaction. Keep what the next message may need from everything before them. The agent's last reply was already delivered to the person: do not list it as pending.";
 const FRESH_SESSION_NOTE: &str = "Fresh session before a new task";
 const FRESH_SESSION_CARRY_NOTE: &str = "Fresh session, last turns carried over";
 

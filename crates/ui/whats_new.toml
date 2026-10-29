@@ -37,6 +37,12 @@ description = "When a chat compacts, one card follows it: a small model checks w
 visual = "compaction-card"
 
 [[entry.features]]
+id = "compact-ahead"
+title = "Compact ahead of time (Experimental)"
+description = "Turn on Compact ahead of time in Settings > General, under Compact new tasks. A chat past the check compacts as soon as a turn ends instead of when you send: Claude compacts in place and a message you send meanwhile waits for it, and Codex compacts a copy in the background and swaps it in at the next pause. Off by default."
+visual = "compact-ahead"
+
+[[entry.features]]
 id = "working-now-tree"
 title = "What each chat is still running"
 description = "The Working now card on Home lists each chat's subagents, delegated chats and shells under it, and keeps a chat whose turn is done while they still run. Click a subagent or shell line to open the chat with its agents or shells showing."

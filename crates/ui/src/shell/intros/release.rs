@@ -5,6 +5,7 @@ use gpui::{linear_color_stop, linear_gradient, relative};
 const CLAUDE_CONFIG: &str = "claude-config";
 const COMMAND_CARDS: &str = "claude-command-cards";
 const COMPACTION_CARD: &str = "compaction-card";
+const COMPACT_AHEAD: &str = "compact-ahead";
 const WORKING_TREE: &str = "working-now-tree";
 const PHONE_SLASH: &str = "phone-slash-popup";
 const PHONE_SUBAGENTS: &str = "phone-subagents-pill";
@@ -15,10 +16,11 @@ const GATHER_TASKS: &str = "gather-tasks";
 const TASK_DRAG: &str = "task-drag";
 const SETTINGS_UPDATES: &str = "settings-updates";
 
-pub(super) const VISUALS: [(&str, f32, f32); 12] = [
+pub(super) const VISUALS: [(&str, f32, f32); 13] = [
     (CLAUDE_CONFIG, 7.0, 3.4),
     (COMMAND_CARDS, 6.6, 4.5),
     (COMPACTION_CARD, 7.6, 5.4),
+    (COMPACT_AHEAD, 8.0, 2.2),
     (WORKING_TREE, 6.6, 2.0),
     (PHONE_SLASH, 7.0, 2.6),
     (PHONE_SUBAGENTS, 6.6, 2.6),
@@ -35,6 +37,7 @@ pub(super) fn visual(id: &str, theme: &Theme, t: f32, reduced: bool) -> AnyEleme
         CLAUDE_CONFIG => config_visual(theme, t),
         COMMAND_CARDS => command_cards_visual(theme, t, reduced),
         COMPACTION_CARD => compaction_visual(theme, t, reduced),
+        COMPACT_AHEAD => compact_ahead_visual(theme, t, reduced),
         WORKING_TREE => working_tree_visual(theme, t, reduced),
         PHONE_SLASH => phone_slash_visual(theme, t),
         PHONE_SUBAGENTS => phone_subagents_visual(theme, t, reduced),
@@ -575,6 +578,181 @@ fn compaction_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
                 t if t < COMPACT_AT => "A small model checks first",
                 t if t < DONE_AT => "Its verdict and reason, then the compaction",
                 _ => "Open it for the summary and what was kept",
+            },
+        ))
+        .into_any_element()
+}
+
+fn compact_ahead_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
+    const QUEUE_AT: f32 = 1.0;
+    const DONE_AT: f32 = 3.0;
+    const CODEX_AT: f32 = 4.2;
+    const SWAP_AT: f32 = 6.4;
+    let meta = |copy: String| text(11.5, theme.text_faint, copy);
+    let strong =
+        |copy: &'static str| text(12.5, theme.text, copy).font_weight(gpui::FontWeight::SEMIBOLD);
+    let reply = |copy: &'static str| text(12.0, theme.text, copy);
+    let bubble = |copy: &'static str| {
+        div().flex().justify_end().child(
+            div()
+                .px(px(10.0))
+                .py(px(5.0))
+                .rounded(px(10.0))
+                .bg(crate::theme::ink(0.06))
+                .child(text(12.0, theme.text, copy)),
+        )
+    };
+    let frame = |head: gpui::Div, bar: Option<f32>| {
+        div()
+            .p(px(9.0))
+            .px(px(10.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_card.opacity(0.85))
+            .child(head)
+            .children(bar.map(|fill| {
+                div()
+                    .ml(px(21.0))
+                    .h(px(2.0))
+                    .rounded_full()
+                    .bg(crate::theme::ink(0.06))
+                    .child(
+                        div()
+                            .h_full()
+                            .w(relative(fill))
+                            .rounded_full()
+                            .bg(theme.accent),
+                    )
+            }))
+    };
+    let head = || div().flex().flex_wrap().items_center().gap(px(7.0));
+    let claude = t < CODEX_AT;
+    let mut chat = div().flex().flex_col().gap(px(10.0));
+    if claude {
+        chat = chat.child(reply("Done: the receipt matches the order page."));
+        let card = if t < DONE_AT {
+            let secs = (t * 10.0).floor() as u32 + 1;
+            frame(
+                head()
+                    .child(running(theme, reduced))
+                    .child(strong("Compacting"))
+                    .child(pill("Carry over", theme.accent))
+                    .child(meta(format!("\u{b7} 212.0k \u{b7} {secs}s, usually ~40s"))),
+                Some(0.92 * ramp(t, 0.0, 2800.0, motion::EASE_OUT)),
+            )
+        } else {
+            let post = 212.0 - 143.0 * ramp(t, DONE_AT, 600.0, motion::EASE_OUT);
+            frame(
+                head()
+                    .child(glyph(icons::LUCIDE_CHECK, 14.0, theme.success))
+                    .child(strong("Compacted"))
+                    .child(pill("Carry over", theme.accent))
+                    .child(meta(format!(
+                        "\u{b7} 212.0k \u{2192} {post:.1}k \u{b7} 40s"
+                    ))),
+                None,
+            )
+        };
+        chat = chat.child(card);
+        if t >= DONE_AT + 0.4 {
+            chat = chat.child(rise(bubble("Add a refund button."), t, DONE_AT + 0.4));
+        }
+    } else {
+        chat = chat
+            .child(bubble("Add a refund button."))
+            .child(reply("Refund button added."));
+        if t >= SWAP_AT {
+            let post = 212.0 - 143.0 * ramp(t, SWAP_AT, 600.0, motion::EASE_OUT);
+            chat = chat.child(rise(
+                frame(
+                    head()
+                        .child(glyph(icons::LUCIDE_CHECK, 14.0, theme.success))
+                        .child(strong("Compacted in the background"))
+                        .child(pill("Swapped in", theme.warning))
+                        .child(meta(format!(
+                            "\u{b7} 212k \u{2192} {post:.0}k \u{b7} 1 turn as text"
+                        ))),
+                    None,
+                ),
+                t,
+                SWAP_AT,
+            ));
+        }
+    }
+    let queued = (claude && (QUEUE_AT..DONE_AT + 0.4).contains(&t)).then(|| {
+        let left = (DONE_AT - t).max(0.0) * 10.0;
+        rise(
+            div()
+                .h(px(30.0))
+                .px(px(10.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(theme.border)
+                .child(text(12.0, theme.text, "Add a refund button."))
+                .child(div().flex_1())
+                .child(meta(format!(
+                    "Sends after compaction \u{b7} 0:{:02}",
+                    left.ceil() as u32
+                ))),
+            t,
+            QUEUE_AT,
+        )
+    });
+    let chip = (!claude && t < SWAP_AT).then(|| {
+        let ready = t >= SWAP_AT - 0.6;
+        div()
+            .flex_none()
+            .h(px(20.0))
+            .px(px(7.0))
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .rounded(px(6.0))
+            .bg(theme.warning.opacity(0.12))
+            .child(glyph(
+                if ready {
+                    icons::LUCIDE_CHECK
+                } else {
+                    icons::LUCIDE_CIRCLE_DASHED
+                },
+                12.0,
+                theme.warning,
+            ))
+            .child(text(
+                11.0,
+                theme.warning,
+                if ready {
+                    "Copy ready \u{b7} swaps now".to_string()
+                } else {
+                    format!(
+                        "Compacting a copy \u{b7} 0:{:02}",
+                        ((t - CODEX_AT) * 10.0) as u32
+                    )
+                },
+            ))
+    });
+    div()
+        .w(px(380.0))
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .child(chat)
+        .children(queued)
+        .children(chip.map(|chip| div().flex().child(chip)))
+        .child(text(
+            11.0,
+            theme.text_faint,
+            if claude {
+                "Claude compacts in place as the turn ends; a message waits for it"
+            } else {
+                "Codex compacts a copy while it works, then swaps it in"
             },
         ))
         .into_any_element()

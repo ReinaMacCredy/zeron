@@ -474,10 +474,21 @@ pub(crate) fn past_floor(tokens: u64, baseline: u64, window: Option<u64>, nudge:
     tokens - baseline >= floor
 }
 
-pub(crate) fn at_ceiling(tokens: u64, window: Option<u64>) -> bool {
-    window
-        .filter(|window| *window > 0)
-        .is_some_and(|window| tokens * 100 >= window * 85)
+/// `threshold` is where the CLI compacts on its own (`chat_compact_threshold`), not the window.
+pub(crate) fn at_ceiling(tokens: u64, threshold: Option<u64>) -> bool {
+    threshold
+        .filter(|threshold| *threshold > 0)
+        .is_some_and(|threshold| tokens * 100 >= threshold * 85)
+}
+
+pub(crate) fn past_trigger(
+    tokens: u64,
+    baseline: u64,
+    window: Option<u64>,
+    threshold: Option<u64>,
+    nudge: u64,
+) -> bool {
+    past_floor(tokens, baseline, window, nudge) || at_ceiling(tokens, threshold)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -754,9 +765,46 @@ mod tests {
             !past_floor(40_000, 90_000, None, 30_000),
             "a baseline above the reading frees nothing"
         );
-        assert!(!at_ceiling(169_999, Some(200_000)));
-        assert!(at_ceiling(170_000, Some(200_000)));
         assert!(!at_ceiling(900_000, None));
+    }
+
+    #[test]
+    fn the_ceiling_sits_below_the_clis_own_threshold() {
+        use zeron_proto::model_options::compact_threshold;
+        let small = compact_threshold("200k", "auto");
+        assert_eq!(small, Some(167_000));
+        assert!(!at_ceiling(141_949, small));
+        assert!(at_ceiling(141_950, small));
+        assert!(
+            at_ceiling(166_999, small),
+            "the CLI compacts at 167K; the old 85% of the 200K window (170K) came after it"
+        );
+        let large = compact_threshold("1m", "400k");
+        assert_eq!(large, Some(367_000));
+        assert!(!at_ceiling(311_949, large));
+        assert!(at_ceiling(311_950, large));
+        assert!(311_950 < 367_000);
+
+        assert!(
+            past_trigger(141_950, 20_000, Some(200_000), small, 150_000),
+            "200K after a compaction: 85% of 167K comes before the floor"
+        );
+        assert!(!past_trigger(
+            141_000,
+            20_000,
+            Some(200_000),
+            small,
+            150_000
+        ));
+        assert!(
+            past_trigger(212_000, 0, Some(400_000), large, 150_000),
+            "1M/400K: the floor comes first"
+        );
+        assert!(!past_trigger(149_999, 0, Some(400_000), large, 150_000));
+        assert!(
+            past_trigger(141_950, 0, Some(200_000), small, 0),
+            "Check from Off leaves only the ceiling"
+        );
     }
 
     #[test]
