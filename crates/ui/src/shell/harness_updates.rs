@@ -1127,6 +1127,7 @@ pub(super) const THIS_MACHINE: &str = if cfg!(target_os = "macos") {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct UpdateAllDialog {
     pub(super) this_mac: bool,
+    pub(super) continue_threads: bool,
     pub(super) skipped_open: bool,
 }
 
@@ -1157,7 +1158,7 @@ impl UpdateAllPlan {
         )
     }
 
-    fn threads_warning(&self) -> Option<String> {
+    fn threads_warning(&self, continue_threads: bool) -> Option<String> {
         if self.running == 0 {
             return None;
         }
@@ -1172,12 +1173,16 @@ impl UpdateAllPlan {
             "update"
         };
         Some(format!(
-            "{} running {threads} will be interrupted and can resume after the {after}.",
-            self.running
+            "{} running {threads} will be interrupted{}",
+            self.running,
+            if continue_threads {
+                format!(" and can resume after the {after}.")
+            } else {
+                ".".to_owned()
+            }
         ))
     }
 }
-
 fn settled(status: &HarnessUpdateStatus) -> bool {
     matches!(
         status.phase,
@@ -1291,13 +1296,13 @@ impl Shell {
         self.update_all_dialog = Some(UpdateAllDialog {
             this_mac,
             skipped_open: false,
+            continue_threads: true,
         });
         cx.notify();
     }
 
-    fn start_update_all(&mut self, this_mac: bool, cx: &mut Context<Self>) {
+    fn start_update_all(&mut self, this_mac: bool, continue_threads: bool, cx: &mut Context<Self>) {
         self.update_all_dialog = None;
-        let continue_threads = true;
         let plan = self.update_all_plan(this_mac, cx);
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
@@ -1630,6 +1635,47 @@ impl Shell {
             )
         });
         let this_mac = dialog.this_mac;
+        let continue_threads = dialog.continue_threads;
+        let continue_box = (plan.running > 0).then(|| {
+            div()
+                .id("update-all-continue")
+                .debug_selector(|| "update-all-continue".into())
+                .mt(px(6.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .cursor_pointer()
+                .role(gpui::Role::CheckBox)
+                .aria_label("Continue threads after restarts")
+                .aria_toggled(if continue_threads {
+                    gpui::Toggled::True
+                } else {
+                    gpui::Toggled::False
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(dialog) = this.update_all_dialog.as_mut() {
+                        dialog.continue_threads = !dialog.continue_threads;
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .size(px(14.0))
+                        .flex_none()
+                        .rounded(px(4.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(continue_threads, |el| el.bg(theme.accent))
+                        .when(!continue_threads, |el| {
+                            el.border_1().border_color(theme.border_strong)
+                        })
+                        .when(continue_threads, |el| {
+                            el.child(icon(icons::CHECK).size(px(10.0)).text_color(theme.on_solid))
+                        }),
+                )
+                .child("Continue threads after restarts")
+        });
         let footer = div()
             .px(px(24.0))
             .pt(px(14.0))
@@ -1644,10 +1690,16 @@ impl Shell {
                 div()
                     .mr_auto()
                     .max_w(px(320.0))
+                    .flex()
+                    .flex_col()
                     .text_size(crate::typography::ui_rems(12.0))
                     .line_height(px(16.0))
                     .text_color(muted)
-                    .children(plan.threads_warning().map(SharedString::from)),
+                    .children(
+                        plan.threads_warning(continue_threads)
+                            .map(SharedString::from),
+                    )
+                    .children(continue_box),
             )
             .child(
                 popover::btn_ghost(&theme, "Cancel", "update-all-cancel")
@@ -1661,9 +1713,9 @@ impl Shell {
                 popover::btn_primary(&theme, "Update")
                     .id("update-all-confirm")
                     .debug_selector(|| "update-all-confirm".into())
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.start_update_all(this_mac, cx)),
-                    ),
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.start_update_all(this_mac, continue_threads, cx)
+                    })),
             );
         let card = popover::dialog_card(&theme)
             .w(px(576.0))
