@@ -102,10 +102,12 @@ fn compact_knob_run(
                 .collect(),
         });
         tokio::time::sleep(mock_delay()).await;
-        let _ = tx.send(AgentEvent::ContextUsage {
-            tokens: Some(knob_number("ZERON_MOCK_CONTEXT", 212_000)),
-            window: Some(1_000_000),
-        });
+        for tokens in [18_000, knob_number("ZERON_MOCK_CONTEXT", 212_000)] {
+            let _ = tx.send(AgentEvent::ContextUsage {
+                tokens: Some(tokens),
+                window: Some(1_000_000),
+            });
+        }
         let _ = tx.send(AgentEvent::TextDelta {
             text: format!(
                 "Done: {}",
