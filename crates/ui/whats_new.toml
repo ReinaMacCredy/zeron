@@ -56,9 +56,25 @@ description = "Settings > Wallpaper on iPhone has the Mac's chat background cont
 image = "ios-chat-background.jpg"
 visual = "phone-chat-background"
 
+[[entry.features]]
+id = "task-mentions"
+title = "Mention a task with @"
+description = "Type @ in the composer and a Tasks group lists your open tasks next to Threads; type @task and a space to list only tasks. A picked task shows as its title with its status circle, and the agent gets a link it reads with the tasks tool. Click the mention to open the task."
+visual = "task-mentions"
+
+[[entry.features]]
+id = "gather-tasks"
+title = "Several tasks in one thread"
+description = "Select tasks with Cmd-click, Shift-click or the box left of a row, then Start in one thread: one chat gets a single message listing them in order, and a card above its composer ticks each task off as the agent marks it done. Add to thread hands them to a chat you already have."
+visual = "gather-tasks"
+
 [[entry.improvements]]
 text = "The update button in the rail moves: an arrow drops into the tray while the update downloads, then the button checks and turns into restart."
 visual = "rail-update"
+
+[[entry.improvements]]
+text = "Drag a task by the grip that appears left of its row: the row lifts and follows the pointer, the others slide apart to show where it lands, and Escape sends it back. Selected tasks move together."
+visual = "task-drag"
 
 [[entry.improvements]]
 text = "Project Actions an agent adds or changes show at once in the sidecar, the toolbar menu and Cmd+K, without reopening the chat."
