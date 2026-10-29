@@ -230,7 +230,8 @@ actions!(
         PrevSession,
         ArchiveSession,
         IncreaseReasoning,
-        DecreaseReasoning
+        DecreaseReasoning,
+        QuickCapture
     ]
 );
 
@@ -8726,7 +8727,7 @@ impl Shell {
                     .read(cx)
                     .selected_space_row()
                     .map(|space| space.id.clone());
-                self.create_task(task_id, title, "", space_id, Some(due_on.clone()), &[], cx);
+                self.create_task(task_id, title, space_id, Some(due_on.clone()), &[], cx);
             }
             crate::inbox::InboxEvent::SetTaskCompleted { task_id, completed } => {
                 let patch = zeron_proto::TaskPatch {
@@ -19940,6 +19941,9 @@ impl Render for Shell {
             }))
             .on_action(cx.listener(|this, _: &RandomWallpaper, _, cx| {
                 this.random_wallpaper(cx);
+            }))
+            .on_action(cx.listener(|this, _: &QuickCapture, window, cx| {
+                this.toggle_quick_capture(window, cx);
             }))
             .on_action(cx.listener(
                 |this, _: &crate::pull_requests::OpenSourceControlSettings, _, cx| {

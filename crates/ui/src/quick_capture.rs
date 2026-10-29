@@ -148,7 +148,6 @@ pub(crate) struct QuickCaptureBar {
     opens: u64,
     seen_active: bool,
     activation: Option<Subscription>,
-    focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -186,7 +185,6 @@ impl QuickCaptureBar {
             opens: 0,
             seen_active: false,
             activation: None,
-            focus: cx.focus_handle(),
             _subscriptions: vec![events],
         }
     }
@@ -269,9 +267,21 @@ impl QuickCaptureBar {
     fn refresh_menu(&mut self, cx: &mut Context<Self>) {
         let typing = hash_query(self.input.read(cx).text()).is_some();
         if typing {
+            let fresh = self.menu.is_none() || self.menu_from_chip;
             self.menu_from_chip = false;
-            let count = self.menu_rows(cx).len();
-            self.menu = (count > 0).then(|| self.menu.unwrap_or(0).min(count - 1));
+            let current = self.space_id(cx);
+            let rows = self.menu_rows(cx);
+            let start = rows
+                .iter()
+                .position(|(id, _)| fresh && Some(id) == current.as_ref())
+                .unwrap_or(0);
+            self.menu = (!rows.is_empty()).then(|| {
+                if fresh {
+                    start
+                } else {
+                    self.menu.unwrap_or(0).min(rows.len() - 1)
+                }
+            });
         } else if !self.menu_from_chip {
             self.menu = None;
         }
@@ -497,7 +507,11 @@ impl QuickCaptureBar {
                         chip("quick-capture-project", false)
                             .role(gpui::Role::Button)
                             .aria_label(SharedString::from(format!("Project: {project}")))
-                            .child(icon(icons::LUCIDE_FOLDER).size(px(12.0)))
+                            .child(
+                                icon(icons::LUCIDE_FOLDER)
+                                    .size(px(12.0))
+                                    .text_color(theme.text_muted),
+                            )
                             .child(project)
                             .on_click(
                                 cx.listener(|bar, _: &ClickEvent, _, cx| bar.toggle_menu(cx)),
@@ -517,7 +531,13 @@ impl QuickCaptureBar {
                         chip("quick-capture-image", image_count > 0)
                             .role(gpui::Role::Button)
                             .aria_label("Add image (or paste with ⌘V)")
-                            .child(icon(icons::GALLERY).size(px(12.0)))
+                            .child(icon(icons::GALLERY).size(px(12.0)).text_color(
+                                if image_count > 0 {
+                                    theme.accent
+                                } else {
+                                    theme.text_muted
+                                },
+                            ))
                             .when(image_count > 0, |el| el.child(image_count.to_string()))
                             .on_click(
                                 cx.listener(|bar, _: &ClickEvent, _, cx| bar.pick_images(cx)),
@@ -592,7 +612,6 @@ impl Render for QuickCaptureBar {
         div()
             .id("quick-capture")
             .key_context("QuickCapture")
-            .track_focus(&self.focus)
             .size_full()
             .p(px(MARGIN))
             .font_family(theme.font_sans.clone())
@@ -612,7 +631,6 @@ impl Render for QuickCaptureBar {
                     .id("quick-capture-body")
                     .flex()
                     .flex_col()
-                    .opacity(fade)
                     .on_mouse_down_out(cx.listener(|bar, _, _, cx| {
                         if !bar.is_saving() {
                             cx.emit(BarEvent::Dismiss);
@@ -625,9 +643,9 @@ impl Render for QuickCaptureBar {
                         OPEN.animation(),
                         move |el, t| {
                             if reduced {
-                                el.opacity(t)
+                                el.opacity(t * fade)
                             } else {
-                                el.relative().opacity(t).top(px(-8.0 * (1.0 - t)))
+                                el.relative().opacity(t * fade).top(px(-8.0 * (1.0 - t)))
                             }
                         },
                     ),
@@ -738,6 +756,49 @@ mod tests {
         assert_eq!(hash_query("issue#12"), None);
         assert_eq!(hash_query("#ship it"), None);
         assert_eq!(hash_query("no hash"), None);
+    }
+
+    #[gpui::test]
+    fn escape_keeps_the_draft_and_a_save_clears_it(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::composer::init(cx, Default::default());
+        });
+        let state = cx.new(|_| AppState::new());
+        let (bar, cx) = cx.add_window_view(|_, cx| QuickCaptureBar::new(state, cx));
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&bar, move |_, event: &BarEvent, _| {
+                sink.borrow_mut().push(match event {
+                    BarEvent::Saved { capture, open } => {
+                        format!("saved {} | {} | {open}", capture.title, capture.notes)
+                    }
+                    BarEvent::Dismiss => "dismiss".into(),
+                    BarEvent::Blurred => "blurred".into(),
+                })
+            })
+            .detach();
+        });
+        bar.update_in(cx, |bar, window, cx| {
+            bar.opened(window, cx);
+            bar.input
+                .update(cx, |input, cx| input.set_text("Save carts\nfor later", cx));
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        let draft = bar.read_with(cx, |bar, cx| bar.input.read(cx).text().to_string());
+        assert_eq!(draft, "Save carts\nfor later");
+        cx.simulate_keystrokes("cmd-enter");
+        let draft = bar.read_with(cx, |bar, cx| bar.input.read(cx).text().to_string());
+        assert_eq!(draft, "");
+        assert_eq!(
+            *events.borrow(),
+            ["dismiss", "saved Save carts | for later | true"]
+        );
     }
 
     #[test]

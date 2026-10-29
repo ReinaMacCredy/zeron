@@ -301,6 +301,13 @@ mod tests {
     }
 
     #[test]
+    fn quick_capture_cannot_take_the_appshot_chord() {
+        assert!(chords_conflict("option-option", "option-option"));
+        assert!(!chords_conflict("option-option", "command-command"));
+        assert!(!chords_conflict(NO_HOTKEY, NO_HOTKEY));
+    }
+
+    #[test]
     fn hotkeys_validate_us_keys_and_register_printed_ones() {
         let azerty = crate::settings::azerty_key_equivalents();
         // AZERTY prints its ⌘1 key as &, which validation alone refuses.

@@ -44,6 +44,7 @@ pub use card::{CardFocus, Orchestrate, TaskCard, TaskCardEvent};
 pub use center::{LiveThread, PlanEdit, Selection, TaskCenter, TaskCenterEvent};
 pub(crate) use index::tree_index;
 use logic::COLUMNS;
+pub(crate) use logic::top_order_key;
 use morph::{Key, Morph, Painted, Rects};
 pub(crate) use strip_tree::{SampleRow, StripTree, StripTreeEvent, TreeHost};
 pub(crate) use tree::{Status as TreeStatus, StatusTone, glyph as tree_glyph, kind_badge};

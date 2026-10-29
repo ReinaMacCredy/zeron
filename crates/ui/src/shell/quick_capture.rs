@@ -21,9 +21,12 @@ pub(super) struct Host {
 
 impl Shell {
     pub(crate) fn toggle_quick_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.quick_capture.bar_window.is_some() {
-            self.dismiss_quick_capture(cx);
-            return;
+        if let Some(handle) = self.quick_capture.bar_window {
+            if handle.update(cx, |_, _, _| ()).is_ok() {
+                self.dismiss_quick_capture(cx);
+                return;
+            }
+            self.quick_capture.bar_window = None;
         }
         self.quick_capture.shell_window = Some(window.window_handle());
         self.close_capture_toast_window(cx);
@@ -108,15 +111,7 @@ impl Shell {
     }
 
     fn file_capture(&mut self, capture: &Capture, cx: &mut Context<Self>) {
-        self.create_task(
-            &capture.task_id,
-            &capture.title,
-            &capture.notes,
-            capture.space_id.clone(),
-            capture.due_on.clone(),
-            &capture.images,
-            cx,
-        );
+        self.create_captured_task(capture, cx);
         let on_tasks = matches!(self.route, Route::Tasks);
         self.state.update(cx, |state, cx| {
             state.quick_captured.record(&capture.task_id, on_tasks);

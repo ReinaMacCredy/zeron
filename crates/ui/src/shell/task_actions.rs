@@ -133,15 +133,36 @@ impl Shell {
         &mut self,
         task_id: &str,
         title: &str,
-        notes: &str,
         space_id: Option<String>,
         due_on: Option<String>,
         images: &[String],
         cx: &mut Context<Self>,
     ) {
-        let mut params = Self::create_task_params(task_id, title, notes, space_id, due_on);
+        let mut params = Self::create_task_params(task_id, title, "", space_id, due_on);
         if !images.is_empty() {
             params["images"] = images.into();
+        }
+        self.mutate_task_row(params, cx);
+    }
+
+    pub(super) fn create_captured_task(
+        &mut self,
+        capture: &crate::quick_capture::Capture,
+        cx: &mut Context<Self>,
+    ) {
+        let mut params = Self::create_task_params(
+            &capture.task_id,
+            &capture.title,
+            &capture.notes,
+            capture.space_id.clone(),
+            capture.due_on.clone(),
+        );
+        let (open, _) = zeron_proto::mission::split_tasks(&self.state.read(cx).tasks);
+        if let Some(key) = crate::tasks::top_order_key(&open, &capture.task_id) {
+            params["orderKey"] = key.into();
+        }
+        if !capture.images.is_empty() {
+            params["images"] = capture.images.clone().into();
         }
         self.mutate_task_row(params, cx);
     }
@@ -545,7 +566,7 @@ impl Shell {
                 title,
                 space_id,
                 images,
-            } => self.create_task(task_id, title, "", space_id.clone(), None, images, cx),
+            } => self.create_task(task_id, title, space_id.clone(), None, images, cx),
             TasksEvent::Update { task_id, patch } => {
                 self.update_card_task(&card, task_id, patch, cx)
             }
