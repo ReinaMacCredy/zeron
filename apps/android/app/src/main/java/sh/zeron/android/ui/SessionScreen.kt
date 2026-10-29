@@ -532,9 +532,25 @@ fun SessionScreen(
                         model, core, handle, composer, row, transcript, draft,
                         openModelPicker = openPicker,
                         beforeSend = {
-                            // Out of credits, a Cloud send can't wake its machine: say so instead of a send that never lands.
-                            if (cloudOutOfCredits) nudges++
-                            !cloudOutOfCredits
+                            val text = draft.text.trim()
+                            val side = if (row?.sidechatOf == null) uniffi.zeron_core.sidechatCommand(text) else null
+                            when {
+                                side != null -> {
+                                    sidechat = SidechatRequest(side.prompt)
+                                    draft.clear()
+                                    false
+                                }
+                                extras.runsClaudeCode && uniffi.zeron_core.isClaudeCardCommand(text, emptyList()) -> {
+                                    draft.clear()
+                                    extras.launch("Couldn't run that command. Try again.") { core.runClaudeCard(chatId, text, emptyList())?.let(extras::applyChip) }
+                                    false
+                                }
+                                else -> {
+                                    // Out of credits, a Cloud send can't wake its machine: say so instead of a send that never lands.
+                                    if (cloudOutOfCredits) nudges++
+                                    !cloudOutOfCredits
+                                }
+                            }
                         },
                         onOpenClaudeConfig = { claudeConfig = ConfigRequest() },
                         onNeedsYou = onNeedsYou,
@@ -549,7 +565,7 @@ fun SessionScreen(
 
     viewing?.let { ImageViewer(it) { viewing = null } }
 
-    claudeConfig?.let { c -> sh.zeron.android.ui.session.ClaudeConfigSheet(model, chatId, extras, c.tab, c.query) { claudeConfig = null } }
+    claudeConfig?.let { c -> sh.zeron.android.ui.session.ClaudeConfigSheet(model, chatId, extras, c.tab, c.query, onOpenUsage = { onOpenRoute(usageRoute(handle)) }) { claudeConfig = null } }
     sh.zeron.android.ui.session.SwitchPromptDialog(extras)
     branchOffer?.let { offer ->
         sh.zeron.android.ui.session.BranchDialog(offer, onDismiss = { branchOffer = null }, onConfirm = {
