@@ -17,17 +17,19 @@ pub const AGENT_ACCESS_OFF: &str = "Agent device access is turned off for this e
 pub const TOOL_SUPPORT_OFF: &str = "Device support is off. Ask the user to enable it in the Device panel before installing or starting device tools.";
 pub const BOTH_PLATFORMS: &str =
     "Both iOS and Android devices are available; pass platform or deviceId.";
-const NO_OPEN_DEVICE: &str = "No device is open in this thread. Call device_open first.";
-const NOT_OPEN_HERE: &str = "That device is not open in this thread. Call device_open first.";
+const NO_OPEN_DEVICE: &str =
+    "No device is open in this thread. Call the device tool with action open first.";
+const NOT_OPEN_HERE: &str =
+    "That device is not open in this thread. Call the device tool with action open first.";
 pub const DEVICE_CALLER_REFUSED: &str =
     "Device access refused: this call does not come from the chat's live run.";
 const FOREIGN_DAEMON: &str =
     "An agent-device daemon that Zeron did not start is running and could not be stopped.";
 pub(crate) const LAUNCHER_REFUSAL: &str =
-    "Call device_open first and include its --config and --session flags.";
+    "Call the device tool with action open first and include its --config and --session flags.";
 pub const DEVICE_TOOL_INSTRUCTIONS: &str = "## Zeron devices
 
-The `zeron` MCP server also exposes `device_*` tools for iOS Simulators and Android Emulators on this environment. For mobile verification, call `device_list`, then `device_open` so the user can watch the device in their Device panel; its result explains how to drive the device. Driving happens through the `agent-device` CLI, using the exact launcher path returned by `device_open`. Keep the host config and session flags returned by `device_open` on every command so concurrent devices stay independent: prefer `agent-device snapshot -i` refs over coordinates, and use `device_screenshot` when you need to see the screen. Prefer these tools and `agent-device` for opening and driving devices. Platform tools such as `xcrun simctl` and `adb` remain available for anything they do not cover, such as builds, logs, or port forwarding. If `device_list` reports a platform as unavailable, say so.";
+For mobile verification use the zeron `device` tool: `list`, then `open` so the person watches the device in their Device panel. Drive it with the `agent-device` CLI at the exact launcher path `open` returns, keeping its config and session flags on every command so devices stay independent; prefer `agent-device snapshot -i` refs over coordinates, and `device` `screenshot` to see the screen. `xcrun simctl` and `adb` remain for builds, logs and port forwarding. If `list` reports a platform unavailable, say so.";
 const SHIM: &str = "agent-device";
 const LAUNCHER: &str = "agent-device-launcher.mjs";
 const DAEMON_FILE: &str = "daemon.json";
@@ -351,7 +353,7 @@ pub(crate) fn pick_device<'a>(
             .find(|device| device.host_id == host_id && device.id == device_id)
             .ok_or_else(|| {
                 format!(
-                    "No device {device_id} on host {host_id}. Call device_list for current ids."
+                    "No device {device_id} on host {host_id}. Call the device tool with action list for current ids."
                 )
             });
     }
@@ -361,9 +363,9 @@ pub(crate) fn pick_device<'a>(
         .collect();
     let Some(first) = candidates.first() else {
         return Err(match platform {
-            None => "No simulators or emulators were found. Call device_list to see why.".into(),
+            None => "No simulators or emulators were found. Call the device tool with action list to see why.".into(),
             Some(platform) => format!(
-                "No {} devices were found on host {host_id}. Call device_list to see why.",
+                "No {} devices were found on host {host_id}. Call the device tool with action list to see why.",
                 platform_name(platform)
             ),
         });
@@ -432,7 +434,7 @@ pub(crate) fn quick_start(device: &HubDevice, target_args: &[String], command: &
         format!("  {exe} snapshot -i {target}                     # accessibility tree with @eN refs"),
         format!("  {exe} click @e3 {target}"),
         format!("  {exe} fill @e5 \"text\" {target}"),
-        format!("  {exe} screenshot /tmp/shot.png {target}        # or call device_screenshot"),
+        format!("  {exe} screenshot /tmp/shot.png {target}        # or the device tool, action screenshot"),
         format!("  {exe} install <app> <path-to-.app-or-.apk> {target}"),
         format!(
             "Prefer snapshot refs over coordinates. Run {exe} help for workflow guides and {exe} <command> --help for flags."
@@ -1010,15 +1012,15 @@ if (args[0] === "daemon" && args[1] === "stop") {
         );
         assert_eq!(
             pick_device(&devices, Some("GONE"), None, None),
-            Err("No device GONE on host local. Call device_list for current ids.".into())
+            Err("No device GONE on host local. Call the device tool with action list for current ids.".into())
         );
         assert_eq!(
             pick_device(&devices[..2], None, Some(DevicePlatform::Android), None),
-            Err("No android devices were found on host local. Call device_list to see why.".into())
+            Err("No android devices were found on host local. Call the device tool with action list to see why.".into())
         );
         assert_eq!(
             pick_device(&[], None, None, None),
-            Err("No simulators or emulators were found. Call device_list to see why.".into())
+            Err("No simulators or emulators were found. Call the device tool with action list to see why.".into())
         );
     }
 

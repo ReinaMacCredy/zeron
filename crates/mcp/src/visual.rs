@@ -12,13 +12,15 @@ use zeron_proto::{
 
 pub const TOOL: &str = "show_visual";
 
-pub const DESCRIPTION: &str = "\
-Show an interactive visual (chart, table, dashboard, diagram, simulation, 3D view) inline in this \
-chat, above your final text reply; call it before writing that reply. Use it when a visual says more \
-than prose. The reader already sees it, so the reply should not announce, locate, or restate it: add \
-only what the visual doesn't say. To show an image file as it is (a screenshot, a photo), use \
-show_image instead.\n\
-\n\
+pub const DESCRIPTION: &str = "Show an interactive native visual (chart, table, dashboard, diagram, \
+simulation, 3D scene, shader) inline above your final reply; call it before the reply, which adds only \
+what the visual doesn't say. An image file goes to show_image instead. The script is sandboxed Luau \
+that returns a view function of ui.* nodes; Zeron runs it first and returns the first error with its \
+line. Read the ui API and style rules once with the docs tool (action read, id show_visual).";
+
+pub const REFERENCE: &str = "\
+# show_visual
+
 A visual is a Luau script (Lua 5.1 plus `+=`, `continue`, and `if` expressions). Zeron runs it in a \
 sandbox (no I/O or network; math.random is seeded, so data is the same on every render) and renders \
 what it returns with Zeron's own native interface. Build data and state at the top level, then return \
@@ -87,7 +89,8 @@ color }, s:line(a, b, { color, width }), s:path(points, { color, width }), s:poi
 color, hint = \"shown on hover\" }), s:label(at, text, { color, size }), s:grid { size = 10, step = 1 }, \
 s:axes { size = 1, labels = { \"x\", \"y\", \"z\" } }. Physical colors may be \"#rrggbb\" in scenes \
 (a material's own color: gold, glass, wood), and only there.\n\
-- Assets: pass real files in show_visual's assets (name -> path) and scripts use them by name. \
+- Assets: pass real files in show_visual's assets (name -> path, relative to your working directory; \
+a .gltf must embed everything) and scripts use them by name. \
 s:model { asset = \"prism.glb\", at, rotate = { x, y, z } degrees, scale, fit = 2 (center it and size \
 its longest side), color and material props override the model's own } draws a glTF model with its \
 materials and textures. Solids take texture = \"wood.jpg\" (multiplied by color; mesh takes uvs = { { u, v \
@@ -147,12 +150,12 @@ pub fn tool() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "script": { "type": "string", "description": "The Luau visual script: setup at the top level, ending with `return function() return ui.column { ... } end`." },
+                "script": { "type": "string", "description": "Setup at the top level, ending with `return function() return ui.column { ... } end`." },
                 "title": { "type": "string", "description": "Short name for the visual." },
                 "assets": {
                     "type": "object",
                     "additionalProperties": { "type": "string" },
-                    "description": "Files the script uses, by the name it uses them: { \"prism.glb\": \"models/prism.glb\", \"sky.hdr\": \"/tmp/sky.hdr\" }. Paths are on this machine, relative to your working directory. glTF models (.glb, or .gltf with everything embedded), PNG, JPEG, WebP, and Radiance .hdr images; at most 16 files, 8 MB each, 10 MB together."
+                    "description": "Name -> file path on this machine: glTF, PNG, JPEG, WebP or .hdr; at most 16 files, 8 MB each, 10 MB together."
                 }
             },
             "required": ["script", "title"],
@@ -164,13 +167,9 @@ pub fn tool() -> Value {
 
 pub const IMAGE_TOOL: &str = "show_image";
 
-const IMAGE_DESCRIPTION: &str = "\
-Show an image file (a screenshot, a rendered chart or diagram, a photo) inline in this chat, above \
-your final text reply; call it before writing that reply, once per image, in the order they should \
-appear. PNG, JPEG, WebP, or GIF, at most 10 MB and 4096 pixels on a side. Zeron copies the file \
-into the chat, so it stays visible after the file changes or is deleted. The reader \
-already sees the image, so the reply should not announce or describe it: add only what the image \
-doesn't show.";
+const IMAGE_DESCRIPTION: &str = "Show an image file (screenshot, rendered chart, photo) inline above \
+your final reply; call it before the reply, once per image in display order, and don't describe the image \
+there. PNG, JPEG, WebP or GIF, up to 10 MB and 4096 px a side; Zeron keeps a copy.";
 
 pub fn image_tool() -> Value {
     json!({
@@ -181,7 +180,7 @@ pub fn image_tool() -> Value {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "The image file on this machine, absolute or relative to your working directory."
+                    "description": "Absolute, or relative to your working directory."
                 }
             },
             "required": ["path"],
@@ -283,19 +282,19 @@ mod tests {
 
     #[test]
     fn the_example_passes_its_own_check() {
-        let start = DESCRIPTION.find("local s = ui.state").unwrap();
+        let start = REFERENCE.find("local s = ui.state").unwrap();
         let end = start
-            + DESCRIPTION[start..]
+            + REFERENCE[start..]
                 .find("\n\nZeron runs the script")
                 .unwrap();
-        let report = zeron_visual::check(&DESCRIPTION[start..end], 1).unwrap();
+        let report = zeron_visual::check(&REFERENCE[start..end], 1).unwrap();
         assert_eq!(report.interactions, 2, "both tabs");
     }
 
     #[test]
     fn the_guidance_names_every_color_the_runtime_accepts() {
         for name in zeron_visual::TOKEN_NAMES {
-            assert!(DESCRIPTION.contains(name), "{name}");
+            assert!(REFERENCE.contains(name), "{name}");
         }
     }
 }

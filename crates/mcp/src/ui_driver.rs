@@ -62,7 +62,7 @@ impl Tool {
     }
 }
 
-pub fn tool(tool: Tool) -> Value {
+fn fields() -> Vec<(&'static [Tool], &'static str, Value)> {
     let field = |kind: &str, description: &str| json!({ "type": kind, "description": description });
     let end = |which: &str| {
         json!({
@@ -83,20 +83,7 @@ pub fn tool(tool: Tool) -> Value {
         &[Tool::Drive][..],
         &[Tool::Observe, Tool::Drive][..],
     );
-    let actions: Vec<&str> = match tool {
-        Tool::Observe => std::iter::once(&"list")
-            .chain(OBSERVE_ACTIONS)
-            .copied()
-            .collect(),
-        Tool::Drive => DRIVE_ACTIONS
-            .iter()
-            .chain(RECORDERS)
-            .chain(PROCESS_ACTIONS)
-            .copied()
-            .collect(),
-    };
-    let properties: Map<String, Value> = [
-        (both, "action", json!({ "type": "string", "enum": actions })),
+    [
         (observe, "target", field("string", "A pid or label from `list` (exact, or a unique substring such as `dev`), a socket path, or `self`. Defaults to the app serving this chat.")),
         (drive, "target", field("string", "The Zeron Dev bundle to drive or `quit`: a pid or label from `ui_driver` `list` (exact, or a unique substring such as `dev`), or a socket path. Never the app serving this chat. `launch` takes none.")),
         (both, "window", field("integer", "Window id from `state`. Defaults to the frontmost window.")),
@@ -151,19 +138,78 @@ pub fn tool(tool: Tool) -> Value {
         (drive, "motionScale", field("number", "For `set`: animation duration multiplier, 1 is normal, 5 is five times slower. Applies to animations started afterwards; loaders, pulses and disclosure rows ignore it.")),
     ]
     .into_iter()
-    .filter(|(uses, ..)| uses.contains(&tool))
-    .map(|(_, name, schema)| (name.to_owned(), schema))
-    .collect();
+    .collect()
+}
+
+fn actions(tool: Tool) -> Vec<&'static str> {
+    match tool {
+        Tool::Observe => std::iter::once(&"list")
+            .chain(OBSERVE_ACTIONS)
+            .copied()
+            .collect(),
+        Tool::Drive => DRIVE_ACTIONS
+            .iter()
+            .chain(RECORDERS)
+            .chain(PROCESS_ACTIONS)
+            .copied()
+            .collect(),
+    }
+}
+
+pub fn reference() -> String {
+    let mut out = String::from("# ui_driver and ui_driver_drive\n");
+    for tool in [Tool::Observe, Tool::Drive] {
+        let name = if tool == Tool::Observe {
+            TOOL
+        } else {
+            DRIVE_TOOL
+        };
+        out.push_str(&format!(
+            "\n## {name}\nActions: {}\n",
+            actions(tool).join(", ")
+        ));
+        for (uses, field, schema) in fields() {
+            if uses.contains(&tool)
+                && let Some(description) = schema["description"].as_str()
+            {
+                out.push_str(&format!("- `{field}`: {description}\n"));
+            }
+        }
+    }
+    out
+}
+
+fn without_descriptions(mut schema: Value) -> Value {
+    if let Some(map) = schema.as_object_mut() {
+        map.remove("description");
+        for value in map.values_mut() {
+            *value = without_descriptions(value.take());
+        }
+    }
+    schema
+}
+
+pub fn tool(tool: Tool) -> Value {
+    let mut properties: Map<String, Value> = Map::new();
+    properties.insert(
+        "action".into(),
+        json!({ "type": "string", "enum": actions(tool) }),
+    );
+    for (uses, name, schema) in fields() {
+        if uses.contains(&tool) {
+            properties.insert(name.to_owned(), without_descriptions(schema));
+        }
+    }
     let (name, title, description) = match tool {
         Tool::Observe => (
             TOOL,
             "Inspect the Zeron UI",
-            "Inspect a running Zeron app from inside it: read its UI as text, wait for it, measure its frames, and snapshot it. This tool never clicks or types; `ui_driver_drive` does, in Zeron Dev bundles. `list` shows the running apps (pid, label, build, ipcPort, input). Omit `target` for the app serving this chat. Prefer `tree` with `query` over snapshots: it is cheap text, and each line carries a `ref`. Name an element by `ref` from `tree`, or by `select` (`Button \"New chat\"`, or a bare `\"label substring\"`, plus `nth`). `frames` measures drawn frames for `ms` (fps, interval percentiles, long frames, draw time); `track` samples one element's bounds every drawn frame and reports jumps and when it settled. Use `wait` (`for`: idle, frame, ms, text, select, gone) instead of sleeping. Take a `snapshot` only for a visual check: it returns the PNG, or only its path with `inline: false`.",
+            "Read a running Zeron app's UI from inside it. Never clicks or types: ui_driver_drive does, in Zeron Dev bundles. `list` the apps; omit `target` for the app serving this chat. Prefer `tree` (cheap text lines, each with a `ref`; filter with `query`) over a `snapshot` PNG. Name an element by `ref` or `select` (`Button \"New chat\"` or `\"label\"`, plus `nth`). `wait` instead of sleeping; `frames` and `track` measure motion; `compare` checks against a mockup. Field details: docs tool, read id ui_driver.",
         ),
         Tool::Drive => (
             DRIVE_TOOL,
             "Drive the Zeron UI",
-            "Drive a Zeron Dev bundle's UI as a person would: click, move, drag, scroll, press keys, type, perform an accessibility action, dispatch a gpui action, `set` theme, window size and motion scale, or pause and step animation time with `clock`. Only debug builds (Zeron Dev bundles) take input, and this tool refuses the app serving this chat, so pass a Dev bundle's label or pid from `ui_driver` `list` as `target`. Act on an element by `ref` from `ui_driver` `tree`, or by `select` (`Button \"New chat\"`, or a bare `\"label substring\"`, plus `nth`); fall back to `x`,`y` window points. Each action replies after the next frame is drawn; an action addressed by `ref` or `select` first waits up to 1 s for the element to hold still across two frames, and replies `unsettled: true` if it never did. `press` performs an accessibility action given in `do` (click, focus, setValue with `value`, expand, ...) without moving the pointer. `frames` or `track` with a `during` drive request measures the transition it starts. Check the result with `ui_driver` (`tree`, `wait`, `snapshot`).",
+            "Drive a Zeron Dev bundle's UI as a person would: click, drag, scroll, keys, type, accessibility `press`, gpui `action`, `set` theme, size or motion, `clock`, `launch` and `quit`. Refuses the app serving this chat: `target` is a Dev bundle's label or pid from ui_driver `list`. Address an element by `ref` or `select` from ui_driver, else `x`,`y` window points; it first waits up to 1 s for the element to settle (`unsettled: true` if not). Replies after the next frame. `frames` or `track` with `during` measure the transition it starts. Field details: docs tool, read id ui_driver.",
         ),
     };
     json!({

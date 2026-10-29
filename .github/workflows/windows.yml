@@ -98,6 +98,8 @@ jobs:
         run: cargo test --release --locked -p zeron-engine --lib
       - name: Harness catalog and login tests
         run: cargo test --release --locked -p zeron-engine --test codex_catalog --test codex_login_resolution
+      - name: Agent context budget
+        run: cargo test --release --locked -p zeron-engine --test agent_context_budget
       - name: Auth integration tests
         run: cargo test --release --locked -p zeron-engine --test auth
 

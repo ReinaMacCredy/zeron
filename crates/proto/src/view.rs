@@ -769,7 +769,17 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
             let done = items.iter().filter(|i| i.done).count();
             ("Todo", format!("{done}/{} done", items.len()))
         }
-        ToolCall::Mcp { server, tool, .. } => ("MCP", format!("{server} · {tool}")),
+        ToolCall::Mcp {
+            server,
+            tool,
+            input,
+        } => {
+            let action = input
+                .as_ref()
+                .filter(|_| server == "zeron")
+                .and_then(|input| crate::tools::action_label(tool, input));
+            ("MCP", format!("{server} · {}", action.unwrap_or(tool)))
+        }
         call if call.is_advisor() => ("Advisor", String::new()),
         // Subagent spawns decode as Unknown named "Agent[: <description>]"
         // (every native driver's convention): label them "Agent" with the
