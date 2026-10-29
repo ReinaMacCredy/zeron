@@ -9950,6 +9950,64 @@ public func FfiConverterTypeVoiceSessionListener_lower(_ value: VoiceSessionList
 
 
 
+public struct AccessModeInfo: Equatable, Hashable {
+    public var mode: AccessMode
+    public var label: String
+    public var description: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(mode: AccessMode, label: String, description: String) {
+        self.mode = mode
+        self.label = label
+        self.description = description
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension AccessModeInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAccessModeInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AccessModeInfo {
+        return
+            try AccessModeInfo(
+                mode: FfiConverterTypeAccessMode.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                description: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AccessModeInfo, into buf: inout [UInt8]) {
+        FfiConverterTypeAccessMode.write(value.mode, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterString.write(value.description, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccessModeInfo_lift(_ buf: RustBuffer) throws -> AccessModeInfo {
+    return try FfiConverterTypeAccessModeInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccessModeInfo_lower(_ value: AccessModeInfo) -> RustBuffer {
+    return FfiConverterTypeAccessModeInfo.lower(value)
+}
+
+
 /**
  * How an agent signs in, from the rules every platform's Providers follows.
  */
@@ -11624,9 +11682,9 @@ public struct ChatConfig: Equatable, Hashable {
      */
     public var instanceId: String?
     /**
-     * None keeps the chat's current mode (Full for a new chat).
+     * None keeps the chat's current mode (full access for a new chat).
      */
-    public var permissionMode: PermissionMode?
+    public var access: AccessMode?
     /**
      * A new chat's profile instructions; an existing chat keeps its own.
      */
@@ -11649,8 +11707,8 @@ public struct ChatConfig: Equatable, Hashable {
          * None runs the harness's default instance.
          */instanceId: String? = nil, 
         /**
-         * None keeps the chat's current mode (Full for a new chat).
-         */permissionMode: PermissionMode? = nil, 
+         * None keeps the chat's current mode (full access for a new chat).
+         */access: AccessMode? = nil, 
         /**
          * A new chat's profile instructions; an existing chat keeps its own.
          */instructions: String = "", disabledTools: [String] = []) {
@@ -11661,7 +11719,7 @@ public struct ChatConfig: Equatable, Hashable {
         self.sandbox = sandbox
         self.profileId = profileId
         self.instanceId = instanceId
-        self.permissionMode = permissionMode
+        self.access = access
         self.instructions = instructions
         self.disabledTools = disabledTools
     }
@@ -11689,7 +11747,7 @@ public struct FfiConverterTypeChatConfig: FfiConverterRustBuffer {
                 sandbox: FfiConverterTypeSandboxLevel.read(from: &buf), 
                 profileId: FfiConverterOptionString.read(from: &buf), 
                 instanceId: FfiConverterOptionString.read(from: &buf), 
-                permissionMode: FfiConverterOptionTypePermissionMode.read(from: &buf), 
+                access: FfiConverterOptionTypeAccessMode.read(from: &buf), 
                 instructions: FfiConverterString.read(from: &buf), 
                 disabledTools: FfiConverterSequenceString.read(from: &buf)
         )
@@ -11703,7 +11761,7 @@ public struct FfiConverterTypeChatConfig: FfiConverterRustBuffer {
         FfiConverterTypeSandboxLevel.write(value.sandbox, into: &buf)
         FfiConverterOptionString.write(value.profileId, into: &buf)
         FfiConverterOptionString.write(value.instanceId, into: &buf)
-        FfiConverterOptionTypePermissionMode.write(value.permissionMode, into: &buf)
+        FfiConverterOptionTypeAccessMode.write(value.access, into: &buf)
         FfiConverterString.write(value.instructions, into: &buf)
         FfiConverterSequenceString.write(value.disabledTools, into: &buf)
     }
@@ -11845,11 +11903,11 @@ public struct ChipWrite: Equatable, Hashable {
     public var model: String?
     public var modelLabel: String?
     public var reasoning: String?
-    public var permission: PermissionMode?
+    public var permission: AccessMode?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(model: String?, modelLabel: String?, reasoning: String?, permission: PermissionMode?) {
+    public init(model: String?, modelLabel: String?, reasoning: String?, permission: AccessMode?) {
         self.model = model
         self.modelLabel = modelLabel
         self.reasoning = reasoning
@@ -11875,7 +11933,7 @@ public struct FfiConverterTypeChipWrite: FfiConverterRustBuffer {
                 model: FfiConverterOptionString.read(from: &buf), 
                 modelLabel: FfiConverterOptionString.read(from: &buf), 
                 reasoning: FfiConverterOptionString.read(from: &buf), 
-                permission: FfiConverterOptionTypePermissionMode.read(from: &buf)
+                permission: FfiConverterOptionTypeAccessMode.read(from: &buf)
         )
     }
 
@@ -11883,7 +11941,7 @@ public struct FfiConverterTypeChipWrite: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.model, into: &buf)
         FfiConverterOptionString.write(value.modelLabel, into: &buf)
         FfiConverterOptionString.write(value.reasoning, into: &buf)
-        FfiConverterOptionTypePermissionMode.write(value.permission, into: &buf)
+        FfiConverterOptionTypeAccessMode.write(value.permission, into: &buf)
     }
 }
 
@@ -15945,6 +16003,10 @@ public struct HarnessInfo: Equatable, Hashable {
      * Steers mid-turn (unknown until a live catalog).
      */
     public var midTurnSteering: Bool?
+    /**
+     * The access modes it honors (unknown until a live catalog).
+     */
+    public var accessModes: [AccessMode]?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -15957,7 +16019,10 @@ public struct HarnessInfo: Equatable, Hashable {
          */offered: Bool, 
         /**
          * Steers mid-turn (unknown until a live catalog).
-         */midTurnSteering: Bool?) {
+         */midTurnSteering: Bool?, 
+        /**
+         * The access modes it honors (unknown until a live catalog).
+         */accessModes: [AccessMode]?) {
         self.id = id
         self.label = label
         self.supportsSteering = supportsSteering
@@ -15967,6 +16032,7 @@ public struct HarnessInfo: Equatable, Hashable {
         self.enabled = enabled
         self.offered = offered
         self.midTurnSteering = midTurnSteering
+        self.accessModes = accessModes
     }
 
     
@@ -15993,7 +16059,8 @@ public struct FfiConverterTypeHarnessInfo: FfiConverterRustBuffer {
                 installed: FfiConverterBool.read(from: &buf), 
                 enabled: FfiConverterOptionBool.read(from: &buf), 
                 offered: FfiConverterBool.read(from: &buf), 
-                midTurnSteering: FfiConverterOptionBool.read(from: &buf)
+                midTurnSteering: FfiConverterOptionBool.read(from: &buf), 
+                accessModes: FfiConverterOptionSequenceTypeAccessMode.read(from: &buf)
         )
     }
 
@@ -16007,6 +16074,7 @@ public struct FfiConverterTypeHarnessInfo: FfiConverterRustBuffer {
         FfiConverterOptionBool.write(value.enabled, into: &buf)
         FfiConverterBool.write(value.offered, into: &buf)
         FfiConverterOptionBool.write(value.midTurnSteering, into: &buf)
+        FfiConverterOptionSequenceTypeAccessMode.write(value.accessModes, into: &buf)
     }
 }
 
@@ -16099,6 +16167,10 @@ public struct HostCapabilities: Equatable, Hashable {
      */
     public var midTurnSteering: Bool?
     /**
+     * The access modes the chat's harness honors (unknown until a live catalog).
+     */
+    public var accessModes: [AccessMode]?
+    /**
      * The host moves the chat to another provider between turns.
      */
     public var providerSwitch: Bool
@@ -16113,6 +16185,9 @@ public struct HostCapabilities: Equatable, Hashable {
          * The chat's harness steers mid-turn (unknown until a live catalog).
          */midTurnSteering: Bool?, 
         /**
+         * The access modes the chat's harness honors (unknown until a live catalog).
+         */accessModes: [AccessMode]?, 
+        /**
          * The host moves the chat to another provider between turns.
          */providerSwitch: Bool) {
         self.messageQueue = messageQueue
@@ -16122,6 +16197,7 @@ public struct HostCapabilities: Equatable, Hashable {
         self.queueEditLease = queueEditLease
         self.queuedAttachments = queuedAttachments
         self.midTurnSteering = midTurnSteering
+        self.accessModes = accessModes
         self.providerSwitch = providerSwitch
     }
 
@@ -16148,6 +16224,7 @@ public struct FfiConverterTypeHostCapabilities: FfiConverterRustBuffer {
                 queueEditLease: FfiConverterBool.read(from: &buf), 
                 queuedAttachments: FfiConverterBool.read(from: &buf), 
                 midTurnSteering: FfiConverterOptionBool.read(from: &buf), 
+                accessModes: FfiConverterOptionSequenceTypeAccessMode.read(from: &buf), 
                 providerSwitch: FfiConverterBool.read(from: &buf)
         )
     }
@@ -16160,6 +16237,7 @@ public struct FfiConverterTypeHostCapabilities: FfiConverterRustBuffer {
         FfiConverterBool.write(value.queueEditLease, into: &buf)
         FfiConverterBool.write(value.queuedAttachments, into: &buf)
         FfiConverterOptionBool.write(value.midTurnSteering, into: &buf)
+        FfiConverterOptionSequenceTypeAccessMode.write(value.accessModes, into: &buf)
         FfiConverterBool.write(value.providerSwitch, into: &buf)
     }
 }
@@ -18808,68 +18886,6 @@ public func FfiConverterTypePendingSend_lift(_ buf: RustBuffer) throws -> Pendin
 #endif
 public func FfiConverterTypePendingSend_lower(_ value: PendingSend) -> RustBuffer {
     return FfiConverterTypePendingSend.lower(value)
-}
-
-
-public struct PermissionModeInfo: Equatable, Hashable {
-    public var mode: PermissionMode
-    public var label: String
-    public var shortLabel: String
-    public var description: String
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(mode: PermissionMode, label: String, shortLabel: String, description: String) {
-        self.mode = mode
-        self.label = label
-        self.shortLabel = shortLabel
-        self.description = description
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension PermissionModeInfo: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypePermissionModeInfo: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PermissionModeInfo {
-        return
-            try PermissionModeInfo(
-                mode: FfiConverterTypePermissionMode.read(from: &buf), 
-                label: FfiConverterString.read(from: &buf), 
-                shortLabel: FfiConverterString.read(from: &buf), 
-                description: FfiConverterString.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: PermissionModeInfo, into buf: inout [UInt8]) {
-        FfiConverterTypePermissionMode.write(value.mode, into: &buf)
-        FfiConverterString.write(value.label, into: &buf)
-        FfiConverterString.write(value.shortLabel, into: &buf)
-        FfiConverterString.write(value.description, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypePermissionModeInfo_lift(_ buf: RustBuffer) throws -> PermissionModeInfo {
-    return try FfiConverterTypePermissionModeInfo.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypePermissionModeInfo_lower(_ value: PermissionModeInfo) -> RustBuffer {
-    return FfiConverterTypePermissionModeInfo.lower(value)
 }
 
 
@@ -28044,6 +28060,79 @@ public func FfiConverterTypeWorktreeSpec_lower(_ value: WorktreeSpec) -> RustBuf
 
 
 
+public enum AccessMode: Equatable, Hashable {
+    
+    case supervised
+    case autoAcceptEdits
+    case fullAccess
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension AccessMode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAccessMode: FfiConverterRustBuffer {
+    typealias SwiftType = AccessMode
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AccessMode {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .supervised
+        
+        case 2: return .autoAcceptEdits
+        
+        case 3: return .fullAccess
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AccessMode, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .supervised:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .autoAcceptEdits:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .fullAccess:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccessMode_lift(_ buf: RustBuffer) throws -> AccessMode {
+    return try FfiConverterTypeAccessMode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccessMode_lower(_ value: AccessMode) -> RustBuffer {
+    return FfiConverterTypeAccessMode.lower(value)
+}
+
+
+
+
 public enum AgentRunState: Equatable, Hashable {
     
     case working
@@ -31104,79 +31193,6 @@ public func FfiConverterTypePendingKind_lift(_ buf: RustBuffer) throws -> Pendin
 #endif
 public func FfiConverterTypePendingKind_lower(_ value: PendingKind) -> RustBuffer {
     return FfiConverterTypePendingKind.lower(value)
-}
-
-
-
-
-public enum PermissionMode: Equatable, Hashable {
-    
-    case ask
-    case auto
-    case full
-
-
-
-
-
-}
-
-#if compiler(>=6)
-extension PermissionMode: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypePermissionMode: FfiConverterRustBuffer {
-    typealias SwiftType = PermissionMode
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PermissionMode {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-        
-        case 1: return .ask
-        
-        case 2: return .auto
-        
-        case 3: return .full
-        
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: PermissionMode, into buf: inout [UInt8]) {
-        switch value {
-        
-        
-        case .ask:
-            writeInt(&buf, Int32(1))
-        
-        
-        case .auto:
-            writeInt(&buf, Int32(2))
-        
-        
-        case .full:
-            writeInt(&buf, Int32(3))
-        
-        }
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypePermissionMode_lift(_ buf: RustBuffer) throws -> PermissionMode {
-    return try FfiConverterTypePermissionMode.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypePermissionMode_lower(_ value: PermissionMode) -> RustBuffer {
-    return FfiConverterTypePermissionMode.lower(value)
 }
 
 
@@ -37731,6 +37747,30 @@ fileprivate struct FfiConverterOptionTypeWorktreeSpec: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeAccessMode: FfiConverterRustBuffer {
+    typealias SwiftType = AccessMode?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeAccessMode.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeAccessMode.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeAuthCallback: FfiConverterRustBuffer {
     typealias SwiftType = AuthCallback?
 
@@ -37771,30 +37811,6 @@ fileprivate struct FfiConverterOptionTypeItemSend: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeItemSend.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterOptionTypePermissionMode: FfiConverterRustBuffer {
-    typealias SwiftType = PermissionMode?
-
-    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterTypePermissionMode.write(value, into: &buf)
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterTypePermissionMode.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -37995,6 +38011,30 @@ fileprivate struct FfiConverterOptionTypeWorkspaceCommand: FfiConverterRustBuffe
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionSequenceTypeAccessMode: FfiConverterRustBuffer {
+    typealias SwiftType = [AccessMode]?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterSequenceTypeAccessMode.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterSequenceTypeAccessMode.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceUInt32: FfiConverterRustBuffer {
     typealias SwiftType = [UInt32]
 
@@ -38062,6 +38102,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeAccessModeInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [AccessModeInfo]
+
+    public static func write(_ value: [AccessModeInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAccessModeInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AccessModeInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AccessModeInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAccessModeInfo.read(from: &buf))
         }
         return seq
     }
@@ -39487,31 +39552,6 @@ fileprivate struct FfiConverterSequenceTypePendingSend: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypePendingSend.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterSequenceTypePermissionModeInfo: FfiConverterRustBuffer {
-    typealias SwiftType = [PermissionModeInfo]
-
-    public static func write(_ value: [PermissionModeInfo], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypePermissionModeInfo.write(item, into: &buf)
-        }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PermissionModeInfo] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [PermissionModeInfo]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            seq.append(try FfiConverterTypePermissionModeInfo.read(from: &buf))
         }
         return seq
     }
@@ -41070,6 +41110,31 @@ fileprivate struct FfiConverterSequenceTypeWidget: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeAccessMode: FfiConverterRustBuffer {
+    typealias SwiftType = [AccessMode]
+
+    public static func write(_ value: [AccessMode], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAccessMode.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AccessMode] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AccessMode]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAccessMode.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeStepStatus: FfiConverterRustBuffer {
     typealias SwiftType = [StepStatus]
 
@@ -41537,6 +41602,18 @@ public func opensConfigPanel(text: String) -> Bool  {
     )
 })
 }
+/**
+ * The modes a picker lists: those the harness `offered` (`None`, unknown
+ * until a live catalog: every mode).
+ */
+public func accessModes(offered: [AccessMode]?) -> [AccessModeInfo]  {
+    return try!  FfiConverterSequenceTypeAccessModeInfo.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_access_modes(
+        FfiConverterOptionSequenceTypeAccessMode.lower(offered),uniffiCallStatus
+    )
+})
+}
 public func chatMissionLabels() -> ChatMissionLabels  {
     return try!  FfiConverterTypeChatMissionLabels_lift(try! rustCall() {
         uniffiCallStatus in
@@ -41698,13 +41775,6 @@ public func pastesAsFile(pasted: String, draft: String) -> Bool  {
     )
 })
 }
-public func permissionModes() -> [PermissionModeInfo]  {
-    return try!  FfiConverterSequenceTypePermissionModeInfo.lift(try! rustCall() {
-        uniffiCallStatus in
-    uniffi_zeron_mobile_fn_func_permission_modes(uniffiCallStatus
-    )
-})
-}
 public func pickContext(model: ModelInfo, config: ChatConfig, position: UInt32) -> ChatConfig  {
     return try!  FfiConverterTypeChatConfig_lift(try! rustCall() {
         uniffiCallStatus in
@@ -41740,6 +41810,19 @@ public func quoteChipLabel(count: UInt32) -> String  {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_func_quote_chip_label(
         FfiConverterUInt32.lower(count),uniffiCallStatus
+    )
+})
+}
+/**
+ * The mode a chat that `wanted` one runs with on a harness that `offered`
+ * these (`None`: unknown, so `wanted`).
+ */
+public func resolveAccess(wanted: AccessMode, offered: [AccessMode]?) -> AccessMode  {
+    return try!  FfiConverterTypeAccessMode_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_resolve_access(
+        FfiConverterTypeAccessMode_lower(wanted),
+        FfiConverterOptionSequenceTypeAccessMode.lower(offered),uniffiCallStatus
     )
 })
 }
@@ -42139,6 +42222,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_opens_config_panel() != 1331) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_func_access_modes() != 16601) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_func_chat_mission_labels() != 14897) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -42196,9 +42282,6 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_pastes_as_file() != 3613) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_zeron_mobile_checksum_func_permission_modes() != 56977) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_zeron_mobile_checksum_func_pick_context() != 60832) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -42209,6 +42292,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_quote_chip_label() != 38057) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_resolve_access() != 57672) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_sidechat_command() != 31806) {

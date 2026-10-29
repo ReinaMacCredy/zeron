@@ -909,7 +909,7 @@ final class AppModel {
 
 extension NewSessionDraft {
     var config: ChatConfig {
-        ChatConfig(harness: harness, model: model, reasoning: effort, modelOptions: modelOptions ?? [:], sandbox: .workspaceWrite, profileId: profileId, permissionMode: permission.flatMap(Self.permissionMode), instructions: instructions ?? "", disabledTools: disabledTools ?? [])
+        ChatConfig(harness: harness, model: model, reasoning: effort, modelOptions: modelOptions ?? [:], sandbox: .workspaceWrite, profileId: profileId, access: permission.flatMap(Self.access), instructions: instructions ?? "", disabledTools: disabledTools ?? [])
     }
 
     mutating func adopt(_ config: ChatConfig) {
@@ -917,11 +917,11 @@ extension NewSessionDraft {
         model = config.model
         effort = config.reasoning
         modelOptions = config.modelOptions
-        permission = config.permissionMode.map { mode in
+        permission = config.access.map { mode in
             switch mode {
-            case .ask: "ask"
-            case .auto: "auto"
-            case .full: "full"
+            case .supervised: "supervised"
+            case .autoAcceptEdits: "auto-accept-edits"
+            case .fullAccess: "full-access"
             }
         }
         profileId = config.profileId
@@ -929,11 +929,12 @@ extension NewSessionDraft {
         disabledTools = config.disabledTools
     }
 
-    private static func permissionMode(_ wire: String) -> PermissionMode? {
+    /// Drafts saved before access modes hold ask, auto or full.
+    private static func access(_ wire: String) -> AccessMode? {
         switch wire {
-        case "ask": .ask
-        case "auto": .auto
-        case "full": .full
+        case "supervised", "ask": .supervised
+        case "auto-accept-edits", "auto": .autoAcceptEdits
+        case "full-access", "full": .fullAccess
         default: nil
         }
     }
