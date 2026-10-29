@@ -438,6 +438,14 @@ fun SessionScreen(
                 }
             }
         }
+        val missionStrip = remember(workspace, composer) { core.missionStrip(chatId) }
+        missionStrip?.let { st ->
+            sh.zeron.android.ui.session.MissionStripPill(
+                st,
+                onClick = { onOpenRoute("tasks:mission:${st.taskId}") },
+                modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
+            )
+        }
         // The transcript runs on under the chips and composer and fades out
         // behind them (iOS's edge fade), instead of stopping at a hard line.
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -446,14 +454,6 @@ fun SessionScreen(
             LaunchedEffect(stack) { transcript.bottomInset = stack.value + 12f }
             sh.zeron.android.design.ChatBackground(model, chatId, Modifier.matchParentSize())
             Transcript(transcript, actions, Modifier.fillMaxSize())
-            val strip = remember(workspace, composer) { core.missionStrip(chatId) }
-            strip?.let { st ->
-                sh.zeron.android.ui.session.MissionStripPill(
-                    st,
-                    onClick = { onOpenRoute("tasks:mission:${st.taskId}") },
-                    modifier = Modifier.align(Alignment.TopStart).padding(start = 12.dp, top = 8.dp, end = 120.dp),
-                )
-            }
             sh.zeron.android.ui.session.ComputerStillPreview(
                 extras,
                 working = composer.live.turnRunning,
@@ -759,7 +759,7 @@ private fun Banner(
     }
     if (text != null) return StatusBanner(text, if (c.sendState == SendState.FAILED) "Retry" to onRetry else null)
     c.limitPill?.let { return TapBanner(it.text, onClick = onLimit) }
-    c.resumeCompaction?.let { TapBanner(it.title, onClick = onOffer) }
+    c.resumeCompaction?.let { TapBanner("${it.title} \u00B7 ${it.body}", onClick = onOffer) }
 }
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
