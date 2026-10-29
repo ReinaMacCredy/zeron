@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
@@ -115,7 +116,7 @@ private fun Widget(state: TranscriptState, model: RowModel, w: Widget, palette: 
         }
         is WidgetKind.Image -> RemoteImage(kind.reference, w, actions) { state.uploadProgress }
         WidgetKind.Spinner -> CircularProgressIndicator(Modifier.fillMaxSize().padding(1.dp), strokeWidth = 1.5.dp, color = Color(palette[ColorRole.TEXT_TERTIARY]))
-        is WidgetKind.Working -> WorkingIndicator(kind.sinceMs, false, palette)
+        is WidgetKind.Working -> WorkingIndicator(kind, palette)
         is WidgetKind.Detail -> Tap("${kind.title} details") { actions.showText(kind.title, w.payload ?: "", true) }
         is WidgetKind.Icon -> AssetIcon(kind.name, Color(palette[kind.color]))
         is WidgetKind.Chevron -> ZIcon(
@@ -217,10 +218,10 @@ private fun CopyButton(payload: String, palette: TranscriptPalette) {
     }
 }
 
-/** Tail-of-turn indicator: the expressive loading shape + "Working…" and elapsed time. */
+/** Tail-of-turn indicator: "Working…", elapsed, tok/s; a centered hairline row while compaction waits (`divider`). */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun WorkingIndicator(sinceMs: Long?, streaming: Boolean, palette: TranscriptPalette) {
+private fun WorkingIndicator(kind: WidgetKind.Working, palette: TranscriptPalette) {
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
         while (true) {
@@ -228,19 +229,40 @@ private fun WorkingIndicator(sinceMs: Long?, streaming: Boolean, palette: Transc
             now = System.currentTimeMillis()
         }
     }
-    val secs = sinceMs?.let { max(0L, (now - it) / 1000) } ?: 0L
-    Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        LoadingIndicator(Modifier.size(24.dp), color = MaterialTheme.colorScheme.primary)
+    val secs = kind.sinceMs?.let { max(0L, (now - it) / 1000) }
+    val tertiary = Color(palette[ColorRole.TEXT_TERTIARY])
+    val text = buildAnnotatedString {
+        append(if (kind.divider) kind.word else kind.word + "\u2026")
+        if (kind.divider && secs != null) withStyle(SpanStyle(color = tertiary)) { append(" \u00B7 " + elapsed(secs)) }
+        else if (secs != null && secs > 0) withStyle(SpanStyle(color = tertiary)) { append("  " + elapsed(secs)) }
+        kind.rate?.let { withStyle(SpanStyle(color = tertiary.copy(alpha = tertiary.alpha * 0.8f), fontSize = 11.sp)) { append("  $it") } }
+    }
+    val label = @Composable {
         Text(
-            buildAnnotatedString {
-                append(if (streaming) "Writing…" else "Working…")
-                if (secs > 0) withStyle(SpanStyle(color = Color(palette[ColorRole.TEXT_TERTIARY]))) { append("  " + elapsed(secs)) }
-            },
+            text,
             color = Color(palette[ColorRole.TEXT_SECONDARY]),
             fontFamily = Geist,
-            fontSize = 13.5.sp,
-            style = MaterialTheme.typography.labelLarge.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.Medium),
+            fontSize = if (kind.divider) 11.5.sp else 13.5.sp,
+            maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.labelLarge.copy(fontWeight = if (kind.divider) androidx.compose.ui.text.font.FontWeight.Normal else androidx.compose.ui.text.font.FontWeight.Medium),
         )
+    }
+    if (!kind.divider) {
+        Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            LoadingIndicator(Modifier.size(24.dp), color = MaterialTheme.colorScheme.primary)
+            label()
+        }
+        return
+    }
+    val rule = Color(palette[ColorRole.RULE])
+    Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.weight(1f).height(1.dp).background(rule))
+        Row(Modifier.padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp, color = tertiary)
+            label()
+        }
+        Box(Modifier.weight(1f).height(1.dp).background(rule))
     }
 }
 

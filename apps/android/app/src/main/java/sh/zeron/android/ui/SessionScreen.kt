@@ -91,6 +91,8 @@ private data class TextSheet(val title: String, val text: String, val mono: Bool
 
 private data class FindingsRequest(val taskId: String?)
 
+private data class SidechatRequest(val prompt: String?)
+
 private data class ConfigRequest(val tab: uniffi.zeron_core.ConfigTab = uniffi.zeron_core.ConfigTab.CONFIG, val query: String = "")
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
@@ -172,6 +174,12 @@ fun SessionScreen(
     var findings by remember(chatId) { mutableStateOf<FindingsRequest?>(null) }
     var changes by remember(chatId) { mutableStateOf<String?>(null) }
     var agentsSheet by remember(chatId) { mutableStateOf(false) }
+    var info by remember(chatId) { mutableStateOf(false) }
+    var projectActions by remember(chatId) { mutableStateOf(false) }
+    var limitFor by remember(chatId) { mutableStateOf<String?>(null) }
+    var sidechat by remember(chatId) { mutableStateOf<SidechatRequest?>(null) }
+    var stopComputer by remember(chatId) { mutableStateOf(false) }
+    var stillReceiving by remember(chatId) { mutableStateOf(false) }
     val quotes = remember(chatId) { kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 4) }
     val actions = remember(chatId) {
         suspend fun load(ref: String): ImageBitmap? {
@@ -260,6 +268,11 @@ fun SessionScreen(
             which == "findings" -> findings = FindingsRequest(null)
             which == "changes" -> changes = "Changes"
             which == "agents-sheet" -> agentsSheet = true
+            which == "info" -> info = true
+            which == "actions" -> projectActions = true
+            which == "stop" -> stopComputer = true
+            which == "limit" -> limitFor = chatId
+            which == "sidechat" -> sidechat = SidechatRequest(null)
             which.startsWith("side-chat:") -> onOpenSideChat(which.removePrefix("side-chat:"))
             which.startsWith("subagent:") -> {
                 val tool = which.removePrefix("subagent:")
@@ -352,6 +365,12 @@ fun SessionScreen(
             LaunchedEffect(stack) { transcript.bottomInset = stack.value + 12f }
             sh.zeron.android.design.ChatBackground(model, chatId, Modifier.matchParentSize())
             Transcript(transcript, actions, Modifier.fillMaxSize())
+            sh.zeron.android.ui.session.ComputerStillPreview(
+                extras,
+                working = composer.live.turnRunning,
+                onReceiving = { stillReceiving = it },
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = 12.dp, end = 12.dp),
+            )
             val page = MaterialTheme.colorScheme.background
             Box(
                 Modifier
@@ -435,6 +454,17 @@ fun SessionScreen(
     if (reviewOptions) sh.zeron.android.ui.review.ReviewOptionsSheet(extras) { reviewOptions = false }
     findings?.let { f -> sh.zeron.android.ui.review.ReviewFindingsSheet(extras, f.taskId) { findings = null } }
     changes?.let { t -> sh.zeron.android.ui.review.ChangesSheet(extras, t) { changes = null } }
+    if (info) {
+        sh.zeron.android.ui.session.SessionInfoSheet(
+            extras,
+            sources = remember(transcript.frame) { transcript.frame?.sources().orEmpty() },
+            onOpenChanges = { changes = it },
+            onOpenImage = { ref -> scope.launch { actions.loadImage(ref)?.let { viewing = it } } },
+        ) { info = false }
+    }
+    if (projectActions) sh.zeron.android.ui.session.ProjectActionsSheet(extras, onOpenTerminal = { onOpenTerminal(chatId, it) }) { projectActions = false }
+    limitFor?.let { id -> sh.zeron.android.ui.session.LimitCardSheet(extras, id, onOpenChat = { if (it != chatId) onOpenChat(it) }) { limitFor = null } }
+    sidechat?.let { r -> sh.zeron.android.ui.session.SidechatSheet(extras, r.prompt, onOpenChat = onOpenSideChat) { sidechat = null } }
     if (agentsSheet) {
         sh.zeron.android.ui.session.AgentsSheet(
             model,
