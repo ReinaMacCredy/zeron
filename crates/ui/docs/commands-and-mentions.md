@@ -22,6 +22,36 @@ Inside a chat you also get `/diff` (open changes), `/files` (open project files)
 
 Type a request after `/computer-use`. With nothing after it, the message is not sent and the composer shows **Add a request after /computer-use.**
 
+## Claude Code's commands
+
+In a Claude Code chat, some of Claude Code's own commands answer with a card instead of starting a turn. They run on the chat's computer, use no tokens, and work while the agent is still replying, without steering, queueing or stopping the run.
+
+| Command | The card |
+| --- | --- |
+| `/context` | What fills the context: a bar and a legend by kind (system prompt, MCP tools, memory files, skills, messages and the rest), the free space, and the largest tools, memory files, agents and skills in lists you can open. **Compact now** compacts the chat. |
+| `/usage` or `/cost` | Your plan's limits and when each resets, then what used them over **24h** or **7d** on this Mac. **Open Usage page** opens [Usage](zeron://docs/usage). |
+| `/model` | The models to pick from. Picking one changes this chat's model chip. |
+| `/mcp` | The folder's MCP servers, connected or not. |
+
+![The /context card](claude-context-card.jpg)
+
+While a command runs, a row reads **Running in Claude Code…** with the seconds so far, and the card replaces it. If it fails, the card shows the error with **Retry**. **Copy** on a card copies what it shows.
+
+Commands that only run in Claude Code's terminal, such as `/status` or `/theme`, answer with a note saying so, and some offer a button to the same thing in Zeron: `/hooks` opens `settings.json` and `/export` saves the chat as Markdown. In the `/` menu these commands sit at the bottom, dimmed, with a **Terminal** tag.
+
+### Claude Code settings
+
+Type `/config` in a Claude Code chat to open Claude Code's settings over the chat, with **Status**, **Config**, **Usage** and **Stats** tabs. On the new chat page the panel opens under **New task** and pushes the composer down.
+
+![Claude Code's settings over a chat](claude-config-panel.jpg)
+
+- **Config** lists each setting with its key and value. Search with **Search settings…** (press `/`), or narrow the list with **All**, **Affects Zeron chats** and **Terminal only**. Click a row, or press Enter or Space, to change it: a switch flips, a choice cycles or opens a list, and text opens a field with **Save**. **Model**, **Effort** and **Permission mode** are tagged **= chip** and follow this chat's chips. Settings Claude Code only changes from its terminal are dimmed.
+- **Status** has Claude Code's version, the session, folder, model, permission mode, output style, MCP servers, memory and plugins.
+- **Usage** has the same meters as `/usage`.
+- **Stats** has your Claude Code activity over the last 36 weeks, your favorite model, sessions, active days, current streak and tokens.
+
+Changes save one at a time through Claude Code itself; the footer reads **Saving…**, then **1 change, saved**. Close the panel with Escape or ×. When you changed something, a row stays in the chat, such as "Claude Code settings · Auto-compact → false", with **Reopen**.
+
 ## `$` skills
 
 Type `$` to pick one of the skills the agent finds for this project, such as the skill folders in `.claude/skills` or `.agents/skills`. Each row shows the skill's name and description, with the name in Title Case (`my-skill` reads **My Skill**). Zeron passes your pick to the agent in the form that agent expects.
@@ -37,10 +67,13 @@ When Claude Code loads a skill, its row in the transcript names the skill in vio
 
 ## `@` mentions
 
-Type `@` to open one menu with two sections:
+Type `@` to open one menu with three sections:
 
 - **Threads** lists up to six other threads on the same device, with their status (**Working**, **Input**, **Failed**, **Done**) and project. Threads in this chat's project come first. Type to match a title. Picking one inserts a link the agent can open with Zeron's `read_thread` tool (see [Agents and other threads](zeron://docs/threads)).
+- **Tasks** lists up to five open tasks from the [Tasks](zeron://docs/tasks) page, this chat's project first, with their status. Type to match a title, finished tasks included. Picking one inserts the task's title in the accent color with its status circle; click it to open the task's card. The agent gets a link with the task's id and reads the whole task with Zeron's `tasks` tool.
 - **Files** lists files and folders in the project, plus anything you have attached. Picking one inserts a link to its path.
+
+Type `@task ` (with the space) to search only tasks. A task already in your message reads **added**, so you can pick several in a row.
 
 ![The @ menu listing threads and files](commands-mention-menu.jpg)
 

@@ -21,6 +21,16 @@ pub struct Entry {
     #[serde(default)]
     pub hero_visual: Option<String>,
     pub features: Vec<Feature>,
+    #[serde(default)]
+    pub improvements: Vec<Improvement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Improvement {
+    pub text: String,
+    #[serde(default)]
+    pub visual: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -108,6 +118,7 @@ mod tests {
             hero: None,
             hero_visual: None,
             features: Vec::new(),
+            improvements: Vec::new(),
         }
     }
 

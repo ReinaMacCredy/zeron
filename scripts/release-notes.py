@@ -69,6 +69,7 @@ def main():
     # upstream-* items summarize the upstream lines already listed above.
     features = [f for f in entry['features'] if not f['id'].startswith('upstream-')] if entry else []
     fork = [f"* {feature['title']} by @{OWNER}" for feature in features]
+    fork += [f"* {item['text'].rstrip('.')} by @{OWNER}" for item in (entry or {}).get('improvements', [])]
     if not entry:
         print(f'::warning::{WHATS_NEW.name} has no entry for {tag[1:]}; the release body has no fork lines')
 

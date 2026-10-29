@@ -43,11 +43,15 @@ See [Providers](zeron://docs/providers).
 ## The phone's own settings
 
 - **Account** and **Devices**: who you are signed in as, and your Macs with **Online** or **Offline**.
-- **Appearance**: **System**, **Light** or **Dark**; a **Wallpaper**; **Chat background** to show the wallpaper behind open conversations; and **Render Math**, **Math Font** and **Math Size**.
+- **Appearance**: **System**, **Light** or **Dark**.
+- **Wallpaper**: **Choose Wallpaper…** and its **Effect**; **Chat background** to show the wallpaper behind open conversations, with **Placement** (**Hero** or **Full**), **Opacity**, **Blur** and **Scrim**, as on the Mac (see [Appearance](zeron://docs/appearance)). Turn on **Sync with Mac** to use a Mac's wallpaper and chat background settings instead; with more than one Mac, **Mac** picks which.
+- **Math**: **Render Math**, **Math Font** and **Math Size**.
 - **Sessions**: **Archived Sessions**.
 - **Composer**: **Queue** or **Steer** for messages you send while the agent runs, and **In a chat, Mission Control** (see [The composer on iPhone](zeron://docs/mobile-composer)).
 - **Voice** and **Notifications** (see [Zeron on iPhone](zeron://docs/mobile)).
 - **Sign Out**.
+
+![Wallpaper with Sync with Mac, and the chat background controls](ios-chat-background.jpg)
 
 ## What's New and Docs
 

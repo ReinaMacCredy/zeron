@@ -36,6 +36,8 @@ Actions are saved commands for a project, such as a dev server, a build, or test
 - Click an action to run it. It opens in a new tab of the chat's terminal, in the chat's folder, and shows **Running**, **Done**, or **Failed**.
 - Hover an action and click the gear to edit or delete it.
 
+Agents can add, change and delete actions too, with the `project_actions` tool. Their changes show right away in the Live state column, the toolbar's Actions menu and Cmd+K, without reopening the chat.
+
 Check **Run automatically on worktree creation** to make an action the project's setup action. Only one action per project can have it. It runs in each new worktree that Zeron creates for a chat.
 
 > Zeron also reads a `zeron.json` file at the project root and offers its actions with an **Import** tag.

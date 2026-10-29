@@ -1,7 +1,7 @@
 use super::intros;
 use super::*;
 use crate::motion::{CubicBezier, MotionSpec};
-use crate::whats_new::{self, CURRENT_VERSION, Entry, Feature, Resolution};
+use crate::whats_new::{self, CURRENT_VERSION, Entry, Feature, Improvement, Resolution};
 use gpui::{
     Animation, AnimationExt as _, Div, ObjectFit, img, linear_color_stop, linear_gradient, relative,
 };
@@ -21,6 +21,7 @@ const DIALOG_WIDTH: f32 = 480.0;
 const DIALOG_BODY_MAX: f32 = 520.0;
 const HELP_RELEASES: usize = 3;
 const HELP_MENU_WIDTH: f32 = 264.0;
+const IMPROVEMENT_VISUAL_HEIGHT: f32 = 104.0;
 
 pub(super) struct WhatsNewCard {
     entry: &'static Entry,
@@ -128,17 +129,7 @@ fn feature_section(theme: &Theme, feature: &'static Feature, clock: Option<f32>)
                 ),
         )
         .when_some(visual, |el, id| {
-            el.child(
-                div()
-                    .w_full()
-                    .h(px(intros::VISUAL_HEIGHT))
-                    .overflow_hidden()
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(crate::theme::ink(0.04))
-                    .child(visual_stage(theme, id, clock)),
-            )
+            el.child(visual_frame(theme, id, intros::VISUAL_HEIGHT, clock))
         })
         .when_some(
             feature
@@ -172,6 +163,114 @@ fn feature_section(theme: &Theme, feature: &'static Feature, clock: Option<f32>)
                     .child(SharedString::from(details)),
             )
         })
+}
+
+fn visual_frame(theme: &Theme, id: &'static str, height: f32, clock: Option<f32>) -> Div {
+    div()
+        .w_full()
+        .h(px(height))
+        .overflow_hidden()
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(theme.border)
+        .bg(crate::theme::ink(0.04))
+        .child(visual_stage(theme, id, clock))
+}
+
+fn improvements_section(
+    theme: &Theme,
+    improvements: &'static [Improvement],
+    clock: Option<f32>,
+) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(15.0))
+                .line_height(px(20.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child("Improvements and fixes"),
+        )
+        .children(improvements.iter().map(|improvement| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .flex_none()
+                                .h(px(19.0))
+                                .flex()
+                                .items_center()
+                                .child(div().size(px(4.0)).rounded_full().bg(theme.text_faint)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(crate::typography::ui_rems(13.0))
+                                .line_height(px(19.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(improvement.text.as_str())),
+                        ),
+                )
+                .when_some(visual_id(improvement.visual.as_deref()), |el, id| {
+                    el.child(div().pl(px(12.0)).child(visual_frame(
+                        theme,
+                        id,
+                        IMPROVEMENT_VISUAL_HEIGHT,
+                        clock,
+                    )))
+                })
+        }))
+}
+
+fn release_sections(
+    theme: &Theme,
+    prefix: &str,
+    release: &'static Entry,
+    clock: Option<f32>,
+) -> Vec<AnyElement> {
+    let features = release
+        .features
+        .iter()
+        .map(|feature| feature_section(theme, feature, clock));
+    let improvements = (!release.improvements.is_empty())
+        .then(|| improvements_section(theme, &release.improvements, clock));
+    features
+        .chain(improvements)
+        .enumerate()
+        .map(|(ix, section)| {
+            staggered(
+                format!("{prefix}-{}-{ix}", release.version).into(),
+                ix,
+                section,
+            )
+        })
+        .collect()
+}
+
+fn animates(release: &'static Entry) -> bool {
+    release
+        .features
+        .iter()
+        .filter_map(|feature| feature.visual.as_deref())
+        .chain(
+            release
+                .improvements
+                .iter()
+                .filter_map(|improvement| improvement.visual.as_deref()),
+        )
+        .any(|id| visual_id(Some(id)).is_some())
 }
 
 fn help_row(
@@ -516,6 +615,23 @@ impl Shell {
                     .line_clamp(2)
                     .child(title),
             )
+            .when(!entry.improvements.is_empty(), |el| {
+                let count = entry.improvements.len();
+                el.child(
+                    div()
+                        .mt(px(3.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(format!(
+                            "+ {count} {}",
+                            if count == 1 {
+                                "improvement or fix"
+                            } else {
+                                "improvements and fixes"
+                            }
+                        ))),
+                )
+            })
             .child(
                 div()
                     .mt(px(10.0))
@@ -605,8 +721,7 @@ impl Shell {
                 .collect(),
         }
         .iter()
-        .flat_map(|release| &release.features)
-        .any(|feature| visual_id(feature.visual.as_deref()).is_some());
+        .any(|release| animates(release));
         if clock.is_some() && animated {
             window.request_animation_frame();
         }
@@ -673,15 +788,12 @@ impl Shell {
             ),
         };
         let content = match dialog.view {
-            WhatsNewView::Highlights => div().py(px(4.0)).flex().flex_col().gap(px(28.0)).children(
-                entry.features.iter().enumerate().map(|(ix, feature)| {
-                    staggered(
-                        format!("whats-new-feature-{}-{ix}", entry.version).into(),
-                        ix,
-                        feature_section(theme, feature, clock),
-                    )
-                }),
-            ),
+            WhatsNewView::Highlights => div()
+                .py(px(4.0))
+                .flex()
+                .flex_col()
+                .gap(px(28.0))
+                .children(release_sections(theme, "whats-new-feature", entry, clock)),
             WhatsNewView::Changelog => {
                 let entries = whats_new::entries();
                 div()
@@ -689,7 +801,7 @@ impl Shell {
                     .flex_col()
                     .children(entries.iter().enumerate().map(|(row, release)| {
                         let open = dialog.expanded.contains(release.version.as_str());
-                        let count = release.features.len();
+                        let count = release.features.len() + release.improvements.len();
                         let version: &'static str = release.version.as_str();
                         div()
                             .flex()
@@ -750,18 +862,11 @@ impl Shell {
                                         .flex()
                                         .flex_col()
                                         .gap(px(24.0))
-                                        .children(release.features.iter().enumerate().map(
-                                            |(ix, feature)| {
-                                                staggered(
-                                                    format!(
-                                                        "whats-new-release-{}-{ix}",
-                                                        release.version
-                                                    )
-                                                    .into(),
-                                                    ix,
-                                                    feature_section(theme, feature, clock),
-                                                )
-                                            },
+                                        .children(release_sections(
+                                            theme,
+                                            "whats-new-release",
+                                            release,
+                                            clock,
                                         )),
                                 )
                             })
@@ -834,7 +939,8 @@ mod tests {
             let ids = entry
                 .hero_visual
                 .iter()
-                .chain(entry.features.iter().filter_map(|f| f.visual.as_ref()));
+                .chain(entry.features.iter().filter_map(|f| f.visual.as_ref()))
+                .chain(entry.improvements.iter().filter_map(|i| i.visual.as_ref()));
             for id in ids {
                 assert!(
                     super::intros::is_since_visual(id),

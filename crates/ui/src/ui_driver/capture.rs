@@ -9,6 +9,7 @@ pub(super) fn snapshot(
     handle: AnyWindowHandle,
     rect: Option<Bounds>,
     path: Option<PathBuf>,
+    native: bool,
     cx: &mut App,
 ) -> Result<Value, String> {
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -26,7 +27,7 @@ pub(super) fn snapshot(
                 SEQ.fetch_add(1, Ordering::Relaxed) + 1
             )),
     };
-    let image = region(handle, rect, cx)?;
+    let image = region(handle, rect, native, cx)?;
     let (w, h) = image.dimensions();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
@@ -40,21 +41,31 @@ pub(super) fn snapshot(
 pub(super) fn region(
     handle: AnyWindowHandle,
     rect: Option<Bounds>,
+    native: bool,
     cx: &mut App,
 ) -> Result<RgbaImage, String> {
-    let frame = handle
-        .update(cx, |_, window, _| grab(window))
+    let (frame, scale) = handle
+        .update(cx, |_, window, _| {
+            let scale = if native { window.scale_factor() } else { 1.0 };
+            grab(window, native).map(|frame| (frame, scale))
+        })
         .map_err(|error| format!("window is gone: {error}"))??;
+    let rect = rect.map(|rect| Bounds {
+        x: rect.x * scale,
+        y: rect.y * scale,
+        w: rect.w * scale,
+        h: rect.h * scale,
+    });
     let (x, y, w, h) = crop(frame.width(), frame.height(), rect)?;
     Ok(image::imageops::crop_imm(&frame, x, y, w, h).to_image())
 }
 
 #[cfg(target_os = "macos")]
-fn grab(window: &mut gpui::Window) -> Result<RgbaImage, String> {
+fn grab(window: &mut gpui::Window, native: bool) -> Result<RgbaImage, String> {
     use crate::window_capture;
     let number =
         window_capture::window_number(window).ok_or("this window has no window-server id")?;
-    let frame = window_capture::capture_window_number(number)
+    let frame = window_capture::capture_window_number(number, native)
         .ok_or_else(|| format!("the window server returned no image for window {number}"))?;
     let rgba = frame
         .bgra
@@ -66,7 +77,7 @@ fn grab(window: &mut gpui::Window) -> Result<RgbaImage, String> {
 }
 
 #[cfg(windows)]
-fn grab(window: &mut gpui::Window) -> Result<RgbaImage, String> {
+fn grab(window: &mut gpui::Window, native: bool) -> Result<RgbaImage, String> {
     use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
     use windows_sys::Win32::Foundation::{HWND, RECT};
     use windows_sys::Win32::Graphics::Gdi::{
@@ -149,11 +160,15 @@ fn grab(window: &mut gpui::Window) -> Result<RgbaImage, String> {
         .collect();
     let image = RgbaImage::from_raw(width as u32, height as u32, rgba)
         .ok_or("captured pixels do not fit")?;
-    Ok(to_points(image, window.scale_factor()))
+    Ok(if native {
+        image
+    } else {
+        to_points(image, window.scale_factor())
+    })
 }
 
 #[cfg(target_os = "linux")]
-fn grab(window: &mut gpui::Window) -> Result<RgbaImage, String> {
+fn grab(window: &mut gpui::Window, native: bool) -> Result<RgbaImage, String> {
     use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
     let xid = match window
         .window_handle()
@@ -170,7 +185,11 @@ fn grab(window: &mut gpui::Window) -> Result<RgbaImage, String> {
         other => return Err(format!("`snapshot` cannot read a {other:?} window")),
     };
     let image = x11_window(xid)?;
-    Ok(to_points(image, window.scale_factor()))
+    Ok(if native {
+        image
+    } else {
+        to_points(image, window.scale_factor())
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -212,7 +231,7 @@ fn x11_window(xid: u32) -> Result<RgbaImage, String> {
 }
 
 #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
-fn grab(_: &mut gpui::Window) -> Result<RgbaImage, String> {
+fn grab(_: &mut gpui::Window, _: bool) -> Result<RgbaImage, String> {
     Err("`snapshot` is only implemented on macOS, Windows and Linux".into())
 }
 

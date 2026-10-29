@@ -723,6 +723,163 @@ impl EngineRpc {
         Ok(())
     }
 
+    fn gathered(&self, task_ids: &[String]) -> Result<Vec<Task>, RpcError> {
+        if task_ids.is_empty() {
+            return Err(refused("Pick at least one task"));
+        }
+        let mut tasks: Vec<Task> = Vec::with_capacity(task_ids.len());
+        for id in task_ids {
+            let task = self.task_or_refuse(id)?;
+            if task.has_plan() {
+                return Err(refused(&format!(
+                    "\"{}\" is a mission; start it on its own",
+                    task.title
+                )));
+            }
+            if !tasks.iter().any(|known| known.id == task.id) {
+                tasks.push(task);
+            }
+        }
+        Ok(tasks)
+    }
+
+    fn link_gathered(
+        &self,
+        tasks: &[Task],
+        chat_id: &str,
+        space_id: Option<String>,
+    ) -> Result<(), RpcError> {
+        for task in tasks {
+            self.update_task(
+                &task.id,
+                &TaskPatch {
+                    send_error: task.send_error.is_some().then_some(None),
+                    ..lead_patch(chat_id, space_id.clone(), task, None)
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    fn gathered_message(tasks: &[Task], existing: bool) -> (String, Vec<String>) {
+        let text = zeron_proto::task_mentions::gathered_tasks_prompt(
+            tasks
+                .iter()
+                .map(|task| (task.id.as_str(), task.title.as_str())),
+            existing,
+        );
+        let images = tasks.iter().flat_map(|task| task.images.clone()).collect();
+        crate::doc_host::images_here(&text, images)
+    }
+
+    /// One new thread for several tasks: every task links to it and one message lists them in order.
+    pub(super) async fn start_tasks(
+        &self,
+        task_ids: &[String],
+        chat_id: &str,
+        config: Option<ChatConfig>,
+    ) -> Result<(), RpcError> {
+        let mut starting = Vec::new();
+        for task_id in task_ids {
+            let first = self
+                .starting_tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(task_id.clone());
+            if !first {
+                return Err(refused("One of these tasks is already starting"));
+            }
+            starting.push(Starting {
+                tasks: &self.starting_tasks,
+                task_id: task_id.clone(),
+            });
+        }
+        let tasks = self.gathered(task_ids)?;
+        let space = match tasks.iter().find_map(|task| task.space_id.clone()) {
+            Some(id) => self.workspace.space(&id).map_err(failed)?,
+            None => None,
+        };
+        let device = self.doc_host.device_id().to_string();
+        if space
+            .as_ref()
+            .is_some_and(|space| space.device_id != device)
+        {
+            return Err(refused(
+                "Start the tasks on the device that owns their project",
+            ));
+        }
+        let space_id = space.map(|space| space.id);
+        self.workspace
+            .create_chat_from(
+                chat_id,
+                space_id.as_deref(),
+                Some(&device),
+                config,
+                None,
+                None,
+            )
+            .map_err(failed)?;
+        let title = match tasks.len() {
+            1 => tasks[0].title.clone(),
+            n => format!("{} +{}", tasks[0].title, n - 1),
+        };
+        let started = self
+            .workspace
+            .rename_chat(chat_id, &title)
+            .map_err(failed)
+            .and_then(|_| self.link_gathered(&tasks, chat_id, space_id))
+            .and_then(|_| {
+                let (text, images) = Self::gathered_message(&tasks, false);
+                self.doc_host
+                    .queue_message_detached(chat_id, &text, images)
+                    .map_err(failed)
+            });
+        if started.is_err() {
+            for task in &tasks {
+                if self
+                    .workspace
+                    .task(&task.id)
+                    .and_then(|t| t.chat_id)
+                    .as_deref()
+                    == Some(chat_id)
+                {
+                    let restore = TaskPatch {
+                        chat_id: Some(task.chat_id.clone()),
+                        space_id: task.space_id.is_none().then_some(None),
+                        ..Default::default()
+                    };
+                    self.workspace.update_task(&task.id, &restore).ok();
+                }
+            }
+            self.delete_chat(chat_id).ok();
+        }
+        drop(starting);
+        started.map(drop)
+    }
+
+    /// Several tasks handed to an existing thread in one message; a busy thread gets it after its turn.
+    pub(super) fn add_tasks_to_thread(
+        &self,
+        task_ids: &[String],
+        chat_id: &str,
+    ) -> Result<(), RpcError> {
+        let tasks = self.gathered(task_ids)?;
+        let chat = self
+            .workspace
+            .chat(chat_id)
+            .map_err(failed)?
+            .ok_or_else(|| refused("That thread no longer exists"))?;
+        if chat.device_id != self.doc_host.device_id() {
+            return Err(refused("Add the tasks to a thread on this device"));
+        }
+        self.link_gathered(&tasks, chat_id, chat.space_id)?;
+        let (text, images) = Self::gathered_message(&tasks, true);
+        self.doc_host
+            .queue_message_after_turn(chat_id, &text, images)
+            .map_err(failed)
+            .map(drop)
+    }
+
     pub(super) async fn send_to_task_thread(
         &self,
         task: &Task,

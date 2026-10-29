@@ -51,6 +51,7 @@ use zeron_proto::{HarnessId, ToolCall};
 use zeron_proto::device_tools::{
     device_call, device_call_detail, device_call_label, device_group_label,
 };
+use zeron_proto::task_mentions::TASK_MENTION_SCHEME;
 
 use crate::route_badge::{self, RouteInfo};
 
@@ -4663,6 +4664,9 @@ pub enum TranscriptEvent {
     ApprovePlan {
         task_id: String,
     },
+    OpenTask {
+        task_id: String,
+    },
     OpenClaudeConfig {
         chat_id: String,
     },
@@ -8335,12 +8339,24 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> Vec<ChipOverlay> {
         use crate::attachments::AttachmentSnapshot;
-        if mentions.iter().all(|span| span.upload.is_none()) {
+        use crate::composer::ChipKind;
+        if mentions
+            .iter()
+            .all(|span| span.upload.is_none() && span.kind != ChipKind::Task)
+        {
             return Vec::new();
         }
         let device_ids = self.attachment_device_ids(cx);
         let mut overlays = Vec::new();
         for (ix, span) in mentions.iter().enumerate() {
+            if span.kind == ChipKind::Task {
+                overlays.push(ChipOverlay {
+                    range: span.range.clone(),
+                    open: Some(format!("{TASK_MENTION_SCHEME}{}", span.path).into()),
+                    status: None,
+                });
+                continue;
+            }
             let Some(upload) = &span.upload else {
                 continue;
             };
@@ -8807,18 +8823,23 @@ impl Transcript {
         // here (the sent Markdown carries only the id).
         let thread_icons: Vec<(Range<usize>, (&'static str, Option<gpui::Hsla>))> = {
             let state = self.state.read(cx);
+            let now = chrono::Utc::now();
             mentions
                 .iter()
-                .filter(|span| span.kind == crate::composer::ChipKind::Thread)
-                .map(|span| {
-                    let chat = state
-                        .chats
-                        .iter()
-                        .find(|chat| chat.id == span.path.as_ref());
-                    (
-                        crate::composer::thread_icon_slot(&span.range),
-                        crate::composer::thread_chip_icon(chat),
-                    )
+                .filter_map(|span| {
+                    let icon = match span.kind {
+                        crate::composer::ChipKind::Thread => crate::composer::thread_chip_icon(
+                            state
+                                .chats
+                                .iter()
+                                .find(|chat| chat.id == span.path.as_ref()),
+                        ),
+                        crate::composer::ChipKind::Task => {
+                            crate::tasks::mention_mark(state, &span.path, theme, now)
+                        }
+                        _ => return None,
+                    };
+                    Some((crate::composer::thread_icon_slot(&span.range), icon))
                 })
                 .collect()
         };
@@ -8924,6 +8945,12 @@ impl Transcript {
                     cx.entity_id(),
                     chip_overlays,
                     Rc::new(cx.listener(|this, path: &SharedString, window, cx| {
+                        if let Some(task_id) = path.strip_prefix(TASK_MENTION_SCHEME) {
+                            cx.emit(TranscriptEvent::OpenTask {
+                                task_id: task_id.to_string(),
+                            });
+                            return;
+                        }
                         match zeron_proto::attachment_mentions::pasted_text_index_from_name(path) {
                             Some(index) => this.open_pasted_text(
                                 path.clone(),
@@ -13345,12 +13372,16 @@ impl gpui::Element for ChipOverlays {
                     .h(rect.size.height)
                     .cursor_pointer()
                     .role(gpui::Role::Button)
-                    .aria_label(format!(
-                        "Preview {}",
-                        crate::attachments::attachment_display_name(
-                            path.rsplit(['/', '\\']).next().unwrap_or(&path),
+                    .aria_label(if path.starts_with(TASK_MENTION_SCHEME) {
+                        "Open task".to_string()
+                    } else {
+                        format!(
+                            "Preview {}",
+                            crate::attachments::attachment_display_name(
+                                path.rsplit(['/', '\\']).next().unwrap_or(&path),
+                            )
                         )
-                    ))
+                    })
                     .on_click(move |event, window, cx| {
                         // A drag that selects text across the chip is not a click.
                         if event.click_count() == 1

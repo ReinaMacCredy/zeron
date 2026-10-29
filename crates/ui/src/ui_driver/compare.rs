@@ -416,7 +416,7 @@ pub(super) async fn run(
     let drawn = super::fresh_frame(handle, Duration::from_millis(500), cx).await?;
     let tree = super::tree::read(handle, cx).await?;
     let area = locate(&region, &tree)?;
-    let native_image = cx.update(|cx| super::capture::region(handle, Some(area), cx))?;
+    let native_image = cx.update(|cx| super::capture::region(handle, Some(area), false, cx))?;
     let native_items = items(&tree.nodes, &area);
     let mock_area = Bounds {
         x: 0.0,

@@ -4,6 +4,8 @@ use crate::tasks::{SampleRow, StatusTone, StripTree, TaskCenter, TreeStatus, tre
 use std::time::Instant;
 use zeron_proto::mission::{INTRO_DISMISS, INTRO_NEXT, INTRO_PAGES, INTRO_TRY};
 
+mod release;
+
 const PAGE_IN: motion::MotionSpec = motion::MotionSpec::new(250, motion::EASE_OUT);
 const PAGE_SHIFT: f32 = 8.0;
 pub(super) const VISUAL_HEIGHT: f32 = 172.0;
@@ -1241,16 +1243,28 @@ pub(super) fn loop_clock(shown: Instant, cx: &App) -> Option<f32> {
         .then(|| motion::since(shown).as_secs_f32() / motion::speed_scale().max(f32::EPSILON))
 }
 
+const SINCE_VISUALS: [(&str, f32, f32); 4] = [
+    (TASKS_HOME, 6.6, 1.9),
+    (MISSION_TABS, 6.0, 1.5),
+    (SIDEBAR_MISSION, 6.4, 4.5),
+    (SUPERVISOR_CONVERSATION, 6.0, 4.5),
+];
+
+fn timing(id: &str) -> Option<(f32, f32)> {
+    SINCE_VISUALS
+        .iter()
+        .chain(release::VISUALS.iter())
+        .find(|(candidate, ..)| *candidate == id)
+        .map(|&(_, period, rest)| (period, rest))
+}
+
 pub(super) fn is_since_visual(id: &str) -> bool {
-    SINCE_PAGES.iter().any(|page| page.id == id)
+    timing(id).is_some()
 }
 
 pub(super) fn since_visual(id: &str, theme: &Theme, clock: Option<f32>) -> AnyElement {
-    let (period, rest) = match id {
-        TASKS_HOME => (6.6, 1.9),
-        MISSION_TABS => (6.0, 1.5),
-        SIDEBAR_MISSION => (6.4, 4.5),
-        _ => (6.0, 4.5),
+    let Some((period, rest)) = timing(id) else {
+        return div().into_any_element();
     };
     let reduced = clock.is_none();
     let t = clock.map_or(rest, |clock| clock % period);
@@ -1258,7 +1272,8 @@ pub(super) fn since_visual(id: &str, theme: &Theme, clock: Option<f32>) -> AnyEl
         TASKS_HOME => tasks_visual(theme, t, reduced),
         MISSION_TABS => tabs_visual(theme, t, reduced),
         SIDEBAR_MISSION => sidebar_visual(theme, t, reduced),
-        _ => supervisor_conversation_visual(theme, t),
+        SUPERVISOR_CONVERSATION => supervisor_conversation_visual(theme, t),
+        _ => release::visual(id, theme, t, reduced),
     };
     div()
         .size_full()

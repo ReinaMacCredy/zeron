@@ -345,6 +345,9 @@ impl Shell {
                         | ComposerEvent::PlanFirst
                         | ComposerEvent::AnnotationsChanged(_)
                         | ComposerEvent::AnnotationHovered(_) => {}
+                        ComposerEvent::OpenTask(task_id) => {
+                            this.defer_open_task(task_id.clone(), cx)
+                        }
                         ComposerEvent::UnsentChanged => cx.notify(),
                         ComposerEvent::ThreadMentionDropped => this.accept_command_palette_drop(),
                         ComposerEvent::OpenUsage => this.open_usage(cx),
