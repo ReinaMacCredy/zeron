@@ -45,7 +45,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -64,10 +63,19 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import sh.zeron.android.core.AppModel
 import sh.zeron.android.core.TerminalTab
+import sh.zeron.android.design.GeistMono
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
+import sh.zeron.android.ui.session.ShellOutputSheet
+import sh.zeron.android.ui.session.StopButton
+import sh.zeron.android.ui.session.rememberRoster
+import sh.zeron.android.ui.session.sessionHandle
+import sh.zeron.android.ui.session.stopRun
+import uniffi.zeron_core.AgentRunRow
+import uniffi.zeron_core.AgentRunState
 import uniffi.zeron_core.CoreException
 import uniffi.zeron_core.SessionRow
+import uniffi.zeron_core.ShellRow
 import uniffi.zeron_core.SubagentRow
 import uniffi.zeron_core.SubagentState
 import uniffi.zeron_core.TerminalPhase
@@ -80,7 +88,7 @@ enum class CompanionSection(val title: String) { Agents("Agents"), SideChats("Si
 class Companions(val agents: List<SubagentRow>, val sideChats: List<SessionRow>, val terminals: List<TerminalTab>) {
     val runningAgents: Int get() = agents.count { it.state == SubagentState.RUNNING }
     val liveTerminals: Int get() = terminals.count { it.isLive }
-    val isEmpty: Boolean get() = agents.isEmpty() && sideChats.isEmpty() && terminals.isEmpty()
+    val isEmpty: Boolean get() = sideChats.isEmpty() && terminals.isEmpty()
 }
 
 /**
@@ -109,11 +117,7 @@ fun rememberCompanions(model: AppModel, chatId: String, includeSideChats: Boolea
     return value
 }
 
-/**
- * Chips above the composer for what's working alongside the session — "2
- * working" while subagents run, side chats, live terminals — each a tap from
- * its section of the companions sheet. Nothing shows when there's nothing.
- */
+/** Side chats and terminals above the composer; subagents and shells are the agents pill's. */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun CompanionStrip(c: Companions, onTap: (CompanionSection) -> Unit, modifier: Modifier = Modifier) {
@@ -123,15 +127,6 @@ fun CompanionStrip(c: Companions, onTap: (CompanionSection) -> Unit, modifier: M
         onTap(s)
     }
     Row(modifier.animateContentSize(MaterialTheme.motionScheme.defaultSpatialSpec()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        AnimatedVisibility(c.agents.isNotEmpty(), enter = fadeIn() + expandHorizontally(), exit = fadeOut() + shrinkHorizontally()) {
-            val running = c.runningAgents
-            CompanionChip(
-                icon = if (running > 0) null else ZIcons.Bot,
-                text = if (running > 0) "$running working" else "${c.agents.size}",
-                label = if (running > 0) "$running subagents working" else "${c.agents.size} subagents",
-                spinning = running > 0,
-            ) { tap(CompanionSection.Agents) }
-        }
         AnimatedVisibility(c.sideChats.isNotEmpty(), enter = fadeIn() + expandHorizontally(), exit = fadeOut() + shrinkHorizontally()) {
             CompanionChip(ZIcons.SideChats, "${c.sideChats.size}", "${c.sideChats.size} side chats") { tap(CompanionSection.SideChats) }
         }
@@ -223,13 +218,15 @@ fun CompanionsContent(
     val scope = rememberCoroutineScope()
     val view = LocalView.current
     var forking by remember { mutableStateOf(false) }
-    // Running agents' elapsed time ticks on screen only.
-    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(1000)
-            now = System.currentTimeMillis()
-        }
+    val handle = remember(chatId) { sessionHandle(model, chatId) }
+    val roster = rememberRoster(model, chatId, handle, ticking = true)
+    val runs = roster.value?.agents.orEmpty()
+    val shells = roster.value?.shells.orEmpty()
+    var shell by remember { mutableStateOf<ShellRow?>(null) }
+    fun openRun(run: AgentRunRow) {
+        if (run.delegated) return dismissThen { onOpenSideChat(run.taskId) }
+        val sub = model.sessionSubagents(chatId).firstOrNull { it.id == run.taskId && it.docId != null } ?: return
+        dismissThen { onOpenSubagent(sub) }
     }
     fun newSideChat() {
         val id = model.createSideChat(chatId) ?: return model.toast("Couldn't start a side chat")
@@ -251,16 +248,12 @@ fun CompanionsContent(
         }
     }
 
-    val agents = remember(c.agents) {
-        // Live first, then newest.
-        c.agents.withIndex().sortedWith(compareByDescending<IndexedValue<SubagentRow>> { it.value.state == SubagentState.RUNNING }.thenByDescending { it.index }).map { it.value }
-    }
     val list = rememberLazyListState()
     LaunchedEffect(initialSection) {
         val section = initialSection ?: return@LaunchedEffect
-        // Items: title, [agents header + rows], side chats header + rows (or empty text + 2 actions), terminals…
+        // Items: title, [agents header + rows], [shells header + rows], side chats header + rows (or empty text + 2 actions), terminals…
         val first = if (showTitle) 1 else 0
-        val sides = first + if (agents.isNotEmpty()) agents.size + 1 else 0
+        val sides = first + (if (runs.isNotEmpty()) runs.size + 1 else 0) + if (shells.isNotEmpty()) shells.size + 1 else 0
         val index = when (section) {
             CompanionSection.Agents -> first
             CompanionSection.SideChats -> sides
@@ -283,10 +276,34 @@ fun CompanionsContent(
                     )
                 }
             }
-            if (agents.isNotEmpty()) {
+            if (runs.isNotEmpty()) {
                 header(CompanionSection.Agents)
-                itemsIndexed(agents, key = { _, a -> "agent/${a.id}" }) { i, a ->
-                    AgentRow(a, i, agents.size, now, Modifier.animateItem()) { onOpen -> if (onOpen) dismissThen { onOpenSubagent(a) } }
+                itemsIndexed(runs, key = { _, a -> "agent/${a.taskId}" }) { i, run ->
+                    RunRow(
+                        run.state,
+                        run.title,
+                        listOfNotNull(run.line, run.review).joinToString(" · "),
+                        i,
+                        runs.size,
+                        Modifier.animateItem(),
+                        depth = run.depth.toInt(),
+                        stop = if (run.canStop) ({ handle?.let { stopRun(model, it, scope, run.taskId, run.delegated, roster::reload) } }) else null,
+                    ) { openRun(run) }
+                }
+            }
+            if (shells.isNotEmpty()) {
+                header("shells", roster.value?.shellsSection ?: "")
+                itemsIndexed(shells, key = { _, s -> "shell/${s.taskId}" }) { i, s ->
+                    RunRow(
+                        AgentRunState.WORKING,
+                        s.label,
+                        s.line,
+                        i,
+                        shells.size,
+                        Modifier.animateItem(),
+                        mono = true,
+                        stop = if (s.canStop) ({ handle?.let { stopRun(model, it, scope, s.taskId, false, roster::reload) } }) else null,
+                    ) { shell = s }
                 }
             }
             header(CompanionSection.SideChats) {
@@ -329,6 +346,10 @@ fun CompanionsContent(
             }
         }
     }
+    val h = handle
+    shell?.let { s ->
+        if (h != null) ShellOutputSheet(h, s, onStop = { stopRun(model, h, scope, s.taskId, false, roster::reload) }) { shell = null }
+    }
 }
 
 fun forkError(e: Exception): String = when (e) {
@@ -338,13 +359,16 @@ fun forkError(e: Exception): String = when (e) {
 }
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
-private fun LazyListScope.header(section: CompanionSection, action: (@Composable () -> Unit)? = null) {
-    item("h-${section.name}") {
+private fun LazyListScope.header(section: CompanionSection, action: (@Composable () -> Unit)? = null) = header("h-${section.name}", section.title, action)
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+private fun LazyListScope.header(key: String, title: String, action: (@Composable () -> Unit)? = null) {
+    item(key) {
         Row(
             Modifier.fillMaxWidth().animateItem().padding(start = 12.dp, top = 20.dp, bottom = 8.dp).heightIn(min = 36.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(section.title, style = MaterialTheme.typography.titleSmallEmphasized, color = MaterialTheme.colorScheme.primary, modifier = Modifier.weight(1f))
+            Text(title, style = MaterialTheme.typography.titleSmallEmphasized, color = MaterialTheme.colorScheme.primary, modifier = Modifier.weight(1f))
             action?.invoke()
         }
     }
@@ -369,47 +393,42 @@ private fun Tile(container: Color, content: @Composable () -> Unit) {
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun AgentRow(a: SubagentRow, index: Int, count: Int, now: Long, modifier: Modifier, onClick: (Boolean) -> Unit) {
-    val detail = SubagentFormat.detail(a)
+private fun RunRow(
+    state: AgentRunState,
+    title: String,
+    line: String,
+    index: Int,
+    count: Int,
+    modifier: Modifier,
+    depth: Int = 0,
+    mono: Boolean = false,
+    stop: (() -> Unit)?,
+    onClick: () -> Unit,
+) {
     val scheme = MaterialTheme.colorScheme
     SegmentedListItem(
-        onClick = { onClick(a.docId != null) },
-        enabled = a.docId != null,
+        onClick = onClick,
         shapes = segmentedShapes(index, count),
-        colors = ListItemDefaults.segmentedColors(containerColor = cardColor(), disabledContainerColor = cardColor()),
-        modifier = modifier.padding(bottom = ListItemDefaults.SegmentedGap).semantics {
-            contentDescription = "${a.title}, " + when (a.state) {
-                SubagentState.RUNNING -> "working"
-                SubagentState.FAILED -> "failed"
-                SubagentState.DONE -> "done"
-            }
-        },
+        colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+        modifier = modifier.padding(start = 16.dp * depth, bottom = ListItemDefaults.SegmentedGap),
         leadingContent = {
-            when (a.state) {
-                SubagentState.RUNNING -> Tile(scheme.primaryContainer) { LoadingIndicator(Modifier.size(30.dp)) }
-                SubagentState.DONE -> Tile(successColor().copy(alpha = 0.14f)) { ZIcon(ZIcons.Check, null, Modifier.size(20.dp), tint = successColor()) }
-                SubagentState.FAILED -> Tile(scheme.errorContainer) { ZIcon(ZIcons.Close, null, Modifier.size(20.dp), tint = scheme.onErrorContainer) }
+            when (state) {
+                AgentRunState.WORKING -> Tile(scheme.primaryContainer) { LoadingIndicator(Modifier.size(30.dp)) }
+                AgentRunState.COMPLETED -> Tile(successColor().copy(alpha = 0.14f)) { ZIcon(ZIcons.Check, null, Modifier.size(20.dp), tint = successColor()) }
+                AgentRunState.FAILED -> Tile(scheme.errorContainer) { ZIcon(ZIcons.Close, null, Modifier.size(20.dp), tint = scheme.onErrorContainer) }
+                AgentRunState.STOPPED -> Tile(chipContainer()) { ZIcon(ZIcons.Stop, null, Modifier.size(18.dp), tint = scheme.onSurfaceVariant) }
             }
         },
-        supportingContent = {
-            Text(
-                when (a.state) {
-                    SubagentState.RUNNING -> a.tail ?: detail.ifEmpty { "Working" }
-                    SubagentState.DONE -> detail.ifEmpty { "Finished" }
-                    SubagentState.FAILED -> if (detail.isEmpty()) "Didn't finish" else "Failed · $detail"
-                },
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        },
-        trailingContent = if (a.state == SubagentState.RUNNING) {
-            { Text(SubagentFormat.elapsedSince(a.startedAtMs, now), style = MaterialTheme.typography.labelLarge, color = scheme.primary) }
-        } else if (a.docId != null) {
-            { ZIcon(ZIcons.ChevronRight, null, Modifier.size(18.dp), tint = scheme.outline) }
-        } else {
-            null
-        },
-    ) { Text(a.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+        supportingContent = { Text(line, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        trailingContent = stop?.let { { StopButton("Stop $title", it) } },
+    ) {
+        Text(
+            title,
+            style = if (mono) MaterialTheme.typography.titleMedium.copy(fontFamily = GeistMono) else MaterialTheme.typography.titleMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
