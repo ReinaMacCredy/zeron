@@ -151,7 +151,7 @@ fn event_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, warning: bool, text: 
     } else {
         ("cursorarrow", ColorRole::TextSecondary)
     };
-    chip_row(ctx, entry_id, part_id, icon, color, text)
+    chip_row(ctx, entry_id, part_id, icon, color, text, WhiteSpace::Normal)
 }
 
 pub(crate) fn notice_row(

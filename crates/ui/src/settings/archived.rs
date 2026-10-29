@@ -97,6 +97,18 @@ impl ArchivedPage {
         }
     }
 
+    /// Whether a dialog [`Self::dismiss_on_escape`] would close is open.
+    pub(crate) fn has_escape_surface(&self) -> bool {
+        self.delete_all_confirm.is_some()
+    }
+
+    /// The Delete all dialog, open without archived chats to count.
+    #[cfg(test)]
+    pub(crate) fn open_delete_all_confirm(&mut self, cx: &mut Context<Self>) {
+        self.delete_all_confirm = Some(Vec::new());
+        cx.notify();
+    }
+
     /// Escape that reached Settings unclaimed closes the Delete all dialog
     /// first, so it never closes Settings under the dialog (this page
     /// outlives Settings, and the dialog would reopen with it).

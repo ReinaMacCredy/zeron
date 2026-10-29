@@ -25,6 +25,7 @@ members = [
     "crates/syntax",
     "crates/markdown",
     "crates/mobile",
+    "crates/mobile-bindgen",
     "crates/client",
     "crates/mcp",
     "crates/text",
@@ -36,7 +37,7 @@ members = [
 exclude = ["vendor/cua-driver"]
 
 [workspace.package]
-version = "0.2.122"
+version = "0.2.129"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -105,14 +106,17 @@ loro-protocol = "0.3"
 # translucent compositing, plus blur-aware scene batching (#10).
 # Per-pixel rounded clipping (`Window::with_rounded_clip`, 361ff20).
 # Drags need the button held and 4px of travel (0dc69aa).
-gpui = { git = "https://github.com/zeronsh/zui", rev = "0dc69aa254841738b1e84ac743fa0aa435ad71b1" }
-gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "0dc69aa254841738b1e84ac743fa0aa435ad71b1", features = [
+# Atlas tiles updated in place from pixels or imported dma-bufs, display-rate
+# frame callbacks in inactive windows, and Wayland frames that no longer stop
+# after a forced draw (b564a34, zeronsh/zui#18).
+gpui = { git = "https://github.com/zeronsh/zui", rev = "b564a34413bb7ef1da04121c4a287758f94993d9" }
+gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "b564a34413bb7ef1da04121c4a287758f94993d9", features = [
     "wayland",
     "x11",
     "font-kit",
 ] }
-gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "0dc69aa254841738b1e84ac743fa0aa435ad71b1" }
-gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "6ffe5e575bd0db31d69764773a823cdeb8913d8e" }
+gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "b564a34413bb7ef1da04121c4a287758f94993d9" }
+gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "59f89243cea79dd70eb7a619b3930c374ef6958a" }
 
 # diffs
 similar = "2"

@@ -59,7 +59,7 @@ icon_assets![
     (FAST_TIER_BOLD, "fast-tier-bold"),
     // Solar Icons (Linear), CC BY 4.0 — 480 Design.
     (MONITOR, "monitor"),
-    (CURSOR, "cursor"),
+    (COMPUTER_CURSOR, "computer-cursor"),
     // Central Icons "screen-capture" (Synara's AppSnap glyph): a viewfinder
     // frame around a lens.
     (SCREEN_CAPTURE, "screen-capture"),
@@ -67,6 +67,9 @@ icon_assets![
     (MOON, "moon"),
     // Browser globe, drawn in the same linear weight as the toolbar family.
     (GLOBE, "globe"),
+    (CURSOR_SQUARE, "cursor-square"),
+    // The pointer alone: an annotation chip's glyph inside its well.
+    (CURSOR, "cursor"),
     (LAPTOP, "laptop"),
     (PEN_NEW_SQUARE, "pen-new-square"),
     (SORT, "sort"),

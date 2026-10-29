@@ -6568,6 +6568,8 @@ impl DocHost {
                         profile_id: None,
                         instance_id: None,
                         disabled_tools: request.disabled_tools.clone(),
+                        access: request.permission_mode.access(),
+                        plan: request.plan,
                     };
                     if let Err(err) = ws.set_chat_config(chat_id, &config) {
                         tracing::warn!(chat = %chat_id, error = %err, "run-config backfill failed");
@@ -6597,7 +6599,8 @@ impl DocHost {
                 // issued_at, clamped against clock skew) — not whenever this
                 // host got around to draining a queued command. Idempotent by
                 // id, so the dispatch path's own execution-time write dedupes
-                // to a no-op.
+                // to a no-op. A provider switch's seam lands with it, above.
+                sessions.note_provider_switch(chat_id, harness, handle);
                 if let Err(err) = handle.write_user_message(
                     message_id,
                     &request.prompt,
@@ -6715,6 +6718,15 @@ impl DocHost {
                     return Ok((
                         SessionCommandStatus::Rejected,
                         Some("the turn that asked for Computer consent has ended".into()),
+                    ));
+                }
+                // Closed without an answer: there is nothing to deliver, and
+                // a resumed turn would only say so. Record it and stop.
+                if answers.is_empty() {
+                    handle.doc.resolve_input(request_id, Some(answers), now_ms())?;
+                    return Ok((
+                        SessionCommandStatus::Applied,
+                        Some("closed unanswered".into()),
                     ));
                 }
                 // The run died under the question (engine restart, crash).
@@ -7199,6 +7211,10 @@ impl DocHost {
             }
         };
         let config = chat.config;
+        let permission_mode = config
+            .as_ref()
+            .map(|c| c.permission_mode)
+            .unwrap_or_default();
         Some(zeron_proto::RunRequest {
             mcp: None,
             prompt: prompt.to_string(),
@@ -7215,10 +7231,9 @@ impl DocHost {
                 .map(|c| c.sandbox)
                 .unwrap_or(zeron_proto::SandboxLevel::WorkspaceWrite),
             auto_approve: false,
-            permission_mode: config
-                .as_ref()
-                .map(|c| c.permission_mode)
-                .unwrap_or_default(),
+            permission_mode,
+            access: permission_mode.access(),
+            plan: config.as_ref().is_some_and(|c| c.plan),
             attachments: Vec::new(),
             resume: None,
             worktree: None,

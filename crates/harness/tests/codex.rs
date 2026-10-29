@@ -14,8 +14,8 @@ use zeron_harness::{
     CancellationToken, CodexHarness, Harness, HarnessError, RunControls, SteerMessage,
 };
 use zeron_proto::{
-    AgentEvent, Compaction, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel,
-    TodoItem, TodoStatus, ToolCall, UserInputAnswer, UserInputQuestion,
+    AccessMode, AgentEvent, Compaction, DoneStatus, HarnessId, ReasoningLevel, RunRequest,
+    SandboxLevel, TodoItem, TodoStatus, ToolCall, UserInputAnswer, UserInputQuestion,
 };
 
 fn fixture_path() -> PathBuf {
@@ -106,6 +106,8 @@ fn request(prompt: &str) -> RunRequest {
         sandbox: SandboxLevel::WorkspaceWrite,
         permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         branch: None,
@@ -670,6 +672,7 @@ async fn approvals_round_trip_as_input_requests() {
     let mut req = request("scenario:approve");
     req.permission_mode = zeron_proto::PermissionMode::Ask;
     req.auto_approve = false;
+    req.access = AccessMode::Supervised;
     let events = run_to_end(&harness(), req, controls).await;
 
     let asked = asked.lock().unwrap();
@@ -705,9 +708,144 @@ async fn approval_no_answer_becomes_decline() {
     let mut req = request("scenario:decline");
     req.permission_mode = zeron_proto::PermissionMode::Ask;
     req.auto_approve = false;
+    req.access = AccessMode::Supervised;
     let events = run_to_end(&harness(), req, controls).await;
 
     // The fake only completes the turn after seeing the decline decision.
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+}
+
+/// Controls whose `request_input` answers `answer_label` and records what
+/// it was asked.
+fn recording_controls(
+    answer_label: &'static str,
+) -> (
+    RunControls,
+    Arc<Mutex<Vec<UserInputQuestion>>>,
+    mpsc::Sender<SteerMessage>,
+) {
+    let (mut controls, steer, _token) = controls(answer_label);
+    let asked: Arc<Mutex<Vec<UserInputQuestion>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen = asked.clone();
+    controls.request_input = Box::new(move |questions| {
+        seen.lock().unwrap().extend(questions.iter().cloned());
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(
+            questions
+                .iter()
+                .map(|q| UserInputAnswer {
+                    question_id: q.id.clone(),
+                    labels: vec![answer_label.into()],
+                })
+                .collect(),
+        );
+        rx
+    });
+    (controls, asked, steer)
+}
+
+#[tokio::test]
+async fn auto_mode_hands_escalations_to_codex_review_and_asks_the_rest() {
+    let (controls, asked, _steer) = recording_controls("No");
+    let mut req = request("scenario:auto-mode");
+    req.permission_mode = zeron_proto::PermissionMode::Auto;
+    req.auto_approve = false;
+    req.access = AccessMode::AutoAcceptEdits;
+    let events = run_to_end(&harness(), req, controls).await;
+
+    // The fake checks the on-request / workspace-write / auto_review wire
+    // and completes only after every approval that reached Zeron is declined.
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    let asked = asked.lock().unwrap();
+    let headers: Vec<&str> = asked.iter().map(|q| q.header.as_str()).collect();
+    assert_eq!(
+        headers,
+        [
+            "Approve file change",
+            "Approve command",
+            "Approve permissions"
+        ]
+    );
+    assert_eq!(
+        asked[1].question,
+        "Codex wants to run `git push`. Allow it?"
+    );
+}
+
+#[tokio::test]
+async fn plan_mode_rides_each_turn_and_leaving_it_is_explicit() {
+    let (controls, asked, steer) = recording_controls("Yes");
+    let mut req = request("scenario:plan");
+    req.plan = true;
+    let mut stream = harness().run(req, controls).await.expect("run starts");
+    // Leaving plan applies in place, from the next turn; a plain follow-up
+    // keeps naming the default mode.
+    let build = request("");
+    let mut steers = vec![
+        SteerMessage {
+            config: Some(Box::new(build)),
+            ..SteerMessage::text("build it")
+        },
+        SteerMessage::text("plain"),
+    ]
+    .into_iter();
+    let mut events = Vec::new();
+    let mut completed = 0;
+    while completed < 3 {
+        let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("event in time")
+            .expect("stream open")
+            .expect("stream event");
+        if let AgentEvent::Done { status, error, .. } = &event {
+            assert_eq!(*status, DoneStatus::Completed, "{error:?}");
+            completed += 1;
+            if let Some(next) = steers.next() {
+                steer.send(next).await.unwrap();
+            }
+        }
+        events.push(event);
+    }
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        text,
+        "Here is the plan.\n\n# Plan\n\n1. Read\n2. Change\n\nbuild itplain"
+    );
+    assert!(asked.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_resumed_thread_left_in_plan_mode_is_taken_out_of_it() {
+    let (controls, _steer, _token) = controls("Yes");
+    let mut req = request("scenario:leave-plan");
+    req.resume = Some("resume-in-plan".into());
+    req.model = None;
+    req.reasoning = None;
+    let events = run_to_end(&harness(), req, controls).await;
     assert!(
         matches!(
             events.last(),
@@ -2021,6 +2159,54 @@ async fn image_generation_fake_lifecycle_reaches_done_without_inline_payload() {
     }
 }
 
+/// `view_image` used to leave no trace: the model saw the image, the
+/// transcript showed nothing between its messages (#962). It reads as a
+/// file read, so the chip opens and previews the image.
+#[tokio::test]
+async fn view_image_reads_as_a_file_read() {
+    let (controls, _steer, _token) = controls("Yes");
+    let events = run_to_end(&harness(), request("scenario:view-image"), controls).await;
+    let read = ToolCall::ReadFile {
+        path: "/Users/me/Documents/Codex/mockup.png".into(),
+    };
+    let tools: Vec<AgentEvent> = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                AgentEvent::ToolCall { .. } | AgentEvent::ToolResult { .. }
+            )
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        tools,
+        vec![
+            AgentEvent::ToolCall {
+                id: "exec-view-1".into(),
+                call: read.clone(),
+            },
+            AgentEvent::ToolCall {
+                id: "exec-view-1".into(),
+                call: read,
+            },
+            AgentEvent::ToolResult {
+                id: "exec-view-1".into(),
+                is_error: false,
+                output: None,
+                diff: None,
+            },
+        ]
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        }
+    )));
+}
+
 /// Opt-in provider smoke; the engine integration test verifies the subsequent
 /// import lands under profile uploads. See docs/generated-images-validation.md.
 #[tokio::test]
@@ -2456,6 +2642,68 @@ async fn idle_voice_runtime_has_no_initial_turn_and_preserves_mcp() {
     .unwrap();
     token.cancel();
     drop(stream);
+}
+
+/// A run whose Zeron server is side-chats-only starts its thread without
+/// Codex's agent tools, as a title run does; any other run keeps them.
+#[tokio::test]
+async fn a_side_chats_only_thread_starts_without_agent_tools() {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-codex-voice.py");
+    let driver = CodexHarness::new()
+        .with_executable(fixture)
+        .with_graces(Duration::from_millis(10), Duration::from_millis(100));
+    for side_chats_only in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut req = request("delegate this");
+        req.cwd = dir.path().display().to_string();
+        let (mut controls, _steer, token) = controls("Yes");
+        controls.tool_server = Some(zeron_harness::ToolServer {
+            command: "zeron".into(),
+            args: vec!["mcp".into()],
+            env: side_chats_only
+                .then(|| {
+                    (
+                        zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV.to_owned(),
+                        "1".to_owned(),
+                    )
+                })
+                .into_iter()
+                .collect(),
+            guidance: None,
+        });
+        let mut stream = driver.run(req, controls).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = stream.next().await {
+                if matches!(event.unwrap(), AgentEvent::Done { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        token.cancel();
+        drop(stream);
+        let wire = std::fs::read_to_string(dir.path().join("voice-wire.jsonl")).unwrap();
+        let start = wire
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|frame| frame["method"] == "thread/start")
+            .expect("a thread starts");
+        let config = &start["params"]["config"];
+        assert_eq!(config["mcp_servers.zeron.command"], "zeron", "{config}");
+        for key in [
+            "features.multi_agent",
+            "features.multi_agent_v2",
+            "agents.enabled",
+        ] {
+            assert_eq!(
+                config.get(key) == Some(&serde_json::Value::Bool(false)),
+                side_chats_only,
+                "{key}: {config}"
+            );
+        }
+    }
 }
 
 #[cfg(unix)]

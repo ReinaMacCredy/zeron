@@ -132,6 +132,8 @@ fn request(prompt: &str) -> RunRequest {
         sandbox: SandboxLevel::WorkspaceWrite,
         permission_mode: PermissionMode::Full,
         auto_approve: false,
+        access: PermissionMode::Full.access(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         mcp: None,

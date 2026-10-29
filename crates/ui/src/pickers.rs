@@ -33,8 +33,8 @@ use zeron_proto::model_options::{
     self, AUTO_COMPACT, CONTEXT_WINDOW, compact_applies, compact_tokens,
 };
 use zeron_proto::{
-    ChatConfig, FolderListing, HarnessId, Model, ModelCatalog,
-    PermissionMode, ProviderInstance, ReasoningLevel, RepoRef, SandboxLevel, Space,
+    AccessMode, ChatConfig, FolderListing, HarnessId, Model, ModelCatalog, PermissionMode,
+    ProviderInstance, ReasoningLevel, RepoRef, SandboxLevel, Space,
 };
 use zeron_rpc::methods;
 
@@ -201,6 +201,7 @@ pub struct DraftConfig {
     pub profile_id: Option<String>,
     pub disabled_tools: Vec<String>,
     pub model_options: Option<serde_json::Map<String, serde_json::Value>>,
+    pub plan: bool,
 }
 
 /// Where a new session runs (t3code's env-mode: `local | worktree`). "Current
@@ -251,6 +252,7 @@ pub struct ResolvedRunConfig {
     pub instructions: String,
     pub profile_id: Option<String>,
     pub disabled_tools: Vec<String>,
+    pub plan: bool,
 }
 
 impl ResolvedRunConfig {
@@ -271,8 +273,32 @@ impl ResolvedRunConfig {
             profile_id: self.profile_id.clone(),
             instance_id: self.instance_id.clone(),
             disabled_tools: self.disabled_tools.clone(),
+            access: self.permission_mode.access(),
+            plan: self.plan,
         }
     }
+}
+
+/// The mode a run gets when `wanted` is not among those the harness
+/// `offered`: the most trusting offered mode that still asks at least as
+/// much. A harness with nothing that asks as much runs in its least
+/// trusting mode — for an agent that cannot ask at all, full access, which
+/// the chip then shows. Nothing offered (an engine predating modes) runs as
+/// before, with full access.
+pub fn resolve_access(wanted: AccessMode, offered: &[AccessMode]) -> AccessMode {
+    if offered.is_empty() {
+        return AccessMode::FullAccess;
+    }
+    if offered.contains(&wanted) {
+        return wanted;
+    }
+    let rank = |mode: AccessMode| AccessMode::ALL.iter().position(|m| *m == mode);
+    offered
+        .iter()
+        .copied()
+        .filter(|mode| rank(*mode) <= rank(wanted))
+        .max_by_key(|mode| rank(*mode))
+        .unwrap_or(offered[0])
 }
 
 // ---------------------------------------------------------------------------
@@ -445,7 +471,8 @@ fn windows_browser_path(path: &str) -> Option<WindowsBrowserPath<'_>> {
     })
 }
 
-fn is_windows_path(path: &str) -> bool {
+/// Drive- or UNC-rooted: separators are backslashes.
+pub fn is_windows_path(path: &str) -> bool {
     windows_browser_path(path).is_some()
 }
 
@@ -649,6 +676,136 @@ pub fn typed_path_target(query: &str, home: Option<&str>) -> Option<String> {
         });
     }
     None
+}
+
+/// A path as typed or pasted into the new-project path field: surrounding
+/// whitespace and one pair of matching quotes dropped, and shell escapes
+/// (`My\ Folder`, from a folder dragged into a terminal) undone — except on
+/// a `windows` device, whose backslashes are separators.
+pub fn clean_typed_path(text: &str, windows: bool) -> String {
+    let text = text.trim();
+    let text = ['"', '\'']
+        .iter()
+        .find_map(|quote| text.strip_prefix(*quote)?.strip_suffix(*quote))
+        .unwrap_or(text);
+    unescape_typed_path(text, windows)
+}
+
+/// Shell escapes undone (`My\ Folder` → `My Folder`, `\\` → `\`), except
+/// on a `windows` device, whose backslashes are separators.
+pub fn unescape_typed_path(text: &str, windows: bool) -> String {
+    if windows || is_windows_path(text) {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => out.push(chars.next().unwrap_or('\\')),
+            ch => out.push(ch),
+        }
+    }
+    out
+}
+
+/// A path or folder name as the path field writes it: on POSIX a literal
+/// `\` is doubled, so [`unescape_typed_path`] gives it back.
+pub fn escape_typed_path(text: &str, windows: bool) -> String {
+    if windows || is_windows_path(text) {
+        text.to_owned()
+    } else {
+        text.replace('\\', r"\\")
+    }
+}
+
+/// `~` or `~/…`: the device's home, or a path under it.
+pub fn is_home_relative(text: &str) -> bool {
+    text == "~" || text.starts_with("~/") || text.starts_with(r"~\")
+}
+
+/// Lexically resolve `.`, `..` and repeated separators in an absolute
+/// browser path. The device lists whatever spelling it is sent, so a typed
+/// `~/code/../notes` would otherwise open (and add) a project with `..` in
+/// its path. `..` stops at the root; extended (`\\?\`) paths are verbatim by
+/// definition and stay as they are.
+pub fn normalize_browser_path(path: &str) -> String {
+    fn segments<'a>(rest: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+        let mut kept = Vec::new();
+        for segment in rest {
+            match segment {
+                "" | "." => {}
+                ".." => {
+                    kept.pop();
+                }
+                segment => kept.push(segment),
+            }
+        }
+        kept
+    }
+    if let Some(windows) = windows_browser_path(path) {
+        if windows.extended {
+            return path.to_owned();
+        }
+        let rest = segments(windows.rest.split(|ch| windows.is_separator(ch)));
+        return format!("{}{}", windows.root_path(), rest.join("\\"));
+    }
+    format!("/{}", segments(path.split('/')).join("/"))
+}
+
+/// Where a path typed in the new-project path field points, absolute and
+/// normalized: `~` and `~/x` under the device's `home`, absolute and
+/// drive-rooted paths as typed, anything else relative to `base` (the open
+/// folder) — `../site`, `src`. On a `windows` device (or one whose paths
+/// say so) `/` is `\`, `\code` is on the open folder's drive and `D:code`
+/// at that drive's root. `None` when that takes a `home` or `base` not
+/// known yet.
+pub fn resolve_typed_path(
+    text: &str,
+    base: Option<&str>,
+    home: Option<&str>,
+    windows: bool,
+) -> Option<String> {
+    let windows = windows || base.or(home).is_some_and(is_windows_path);
+    let mut text = clean_typed_path(text, windows);
+    if windows {
+        // `//nas/share` is a share, `/code` a drive's root.
+        text = text.replace('/', r"\");
+    }
+    if text.is_empty() {
+        return None;
+    }
+    let drive_relative = |text: &str| {
+        let bytes = text.as_bytes();
+        bytes.len() > 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+    };
+    let target = match typed_path_target(&text, home) {
+        Some(target) => target,
+        None if is_home_relative(&text) => return None,
+        None if windows && text.starts_with('\\') => {
+            let root = windows_browser_path(base?)?.root_path();
+            child_path(&root, text.trim_start_matches('\\'))
+        }
+        None if windows && drive_relative(&text) => format!(r"{}\{}", &text[..2], &text[2..]),
+        None => child_path(base?, &text),
+    };
+    Some(normalize_browser_path(&target))
+}
+
+/// A typed path split at its last separator: the folder part as typed
+/// (separator included, empty for a bare name) and the name being typed
+/// after it. `\` separates only on a `windows` device or in a
+/// Windows-shaped path.
+pub fn split_typed_leaf(text: &str, windows: bool) -> (&str, &str) {
+    let windows = windows || is_windows_path(text);
+    let at = if windows {
+        text.rfind(['/', '\\'])
+    } else {
+        text.rfind('/')
+    };
+    match at {
+        Some(at) => (&text[..=at], &text[at + 1..]),
+        None => ("", text),
+    }
 }
 
 /// Breadcrumb segments for a path: `(label, full path)`, root first.
@@ -1050,6 +1207,9 @@ pub struct Pickers {
     /// Space the branch draft/cache belong to (see the state observer).
     space_owner: Option<String>,
     device_owner: Option<String>,
+    /// The checkout kind each project's canvas was left with, put back when
+    /// the canvas returns to that project (see the state observer).
+    checkout_by_space: HashMap<String, CheckoutKind>,
     /// The device whose harness/model catalogs are loaded (see
     /// [`Self::catalog_device`]).
     catalog_owner: Option<String>,
@@ -1294,6 +1454,7 @@ impl Pickers {
             | ComposerInputEvent::PastedText { .. }
             | ComposerInputEvent::PastedLongText(_)
             | ComposerInputEvent::OpenAttachment(_)
+            | ComposerInputEvent::AnnotationHovered(_)
             | ComposerInputEvent::CursorMoved
             | ComposerInputEvent::ViewportChanged
             | ComposerInputEvent::MentionNavigate(_)
@@ -1328,11 +1489,22 @@ impl Pickers {
                 }
             }
             // A space switch invalidates the branch draft + cache — the folder
-            // (and possibly the device) changed under them.
+            // (and possibly the device) changed under them. The checkout kind
+            // is the project's own: it is filed away on the way out and put
+            // back on return, so a visit elsewhere can't quietly turn "New
+            // worktree" into a run in the main checkout.
             let space = state.read(cx).selected_space.clone();
             let device = state.read(cx).effective_device_id();
             let device_changed = device != this.device_owner;
             if space != this.space_owner || device_changed {
+                if let Some(left) = this.space_owner.take() {
+                    // Cloud is a device-menu pick that re-targets the agent
+                    // catalogs (`switch_cloud`): never put back silently.
+                    match this.config.checkout {
+                        CheckoutKind::Cloud => this.checkout_by_space.remove(&left),
+                        kind => this.checkout_by_space.insert(left, kind),
+                    };
+                }
                 this.space_owner = space;
                 this.device_owner = device;
                 this.setting_menu = None;
@@ -1340,15 +1512,18 @@ impl Pickers {
                 this.held_ref = this.selected_ref().cloned().or(this.held_ref.take());
                 this.refs_task = None;
                 this.config.branch = None;
-                // A Cloud project runs nowhere else.
-                this.config.checkout = if state
-                    .read(cx)
-                    .selected_space_row()
-                    .is_some_and(|space| zeron_proto::is_cloud_device(&space.device_id, ""))
-                {
-                    CheckoutKind::Cloud
-                } else {
-                    CheckoutKind::default()
+                this.config.checkout = match state.read(cx).selected_space_row() {
+                    // A Cloud project runs nowhere else.
+                    Some(space) if zeron_proto::is_cloud_device(&space.device_id, "") => {
+                        CheckoutKind::Cloud
+                    }
+                    // Only a git project can make a worktree.
+                    Some(space) if space.git_detected => this
+                        .checkout_by_space
+                        .get(&space.id)
+                        .copied()
+                        .unwrap_or_default(),
+                    _ => CheckoutKind::default(),
                 };
                 // ...and Cloud runs Codex and Claude Code only: a provider it
                 // can't run would boot (and bill) a machine for a failing run.
@@ -1472,6 +1647,7 @@ impl Pickers {
             state,
             space_owner,
             device_owner,
+            checkout_by_space: HashMap::new(),
             catalog_owner,
             target_generation: 0,
             menu_geometry: HashMap::new(),
@@ -1835,6 +2011,8 @@ impl Pickers {
                 installed: true,
                 can_install: false,
                 enabled: Some(true),
+                access_modes: Vec::new(),
+                supports_plan: false,
             },
             None => return None,
         };
@@ -2270,6 +2448,7 @@ impl Pickers {
                 instructions: self.effective_instructions(cx),
                 profile_id: self.effective_profile_id(cx),
                 disabled_tools: self.effective_disabled_tools(cx),
+                plan: self.effective_plan(cx),
             };
         }
         ResolvedRunConfig {
@@ -2286,6 +2465,7 @@ impl Pickers {
             instructions: self.effective_instructions(cx),
             profile_id: self.effective_profile_id(cx),
             disabled_tools: self.effective_disabled_tools(cx),
+            plan: self.effective_plan(cx),
         }
     }
 
@@ -2377,6 +2557,29 @@ impl Pickers {
 
     pub(crate) fn set_chip_permission(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
         self.pick_permission(mode, cx);
+    }
+
+    fn plan_offered(&self, cx: &App) -> bool {
+        self.effective_descriptor(cx).is_some_and(|d| d.supports_plan)
+    }
+
+    /// The chat's plan switch, else the draft's; off on a harness without one.
+    fn effective_plan(&self, cx: &App) -> bool {
+        let wanted = match self.chat_row(cx) {
+            Some(chat) => chat.config.as_ref().is_some_and(|c| c.plan),
+            None => self.config.plan,
+        };
+        wanted && (self.effective_descriptor(cx).is_none() || self.plan_offered(cx))
+    }
+
+    fn toggle_plan(&mut self, cx: &mut Context<Self>) {
+        let plan = !self.effective_plan(cx);
+        if self.chat_id(cx).is_some() {
+            self.update_chat_config(cx, None, move |config| config.plan = plan);
+        } else {
+            self.config.plan = plan;
+        }
+        cx.notify();
     }
 
     // ---- open/close ----
@@ -5158,10 +5361,15 @@ impl Pickers {
             }
         }
         // ⌘1…⌘9 jump-picks the Nth visible model row (t3 modelPickerKeys;
-        // the chips on the rows advertise these).
+        // the chips on the rows advertise these). Read the digit through the
+        // layout: AZERTY types ⌘1 as ⌘&.
         if self.open_kind() == Some(PickerKind::HarnessModel)
             && event.keystroke.modifiers.platform
-            && let Ok(n) = event.keystroke.key.parse::<usize>()
+            && let Some(n) = crate::settings::canonical_key(
+                &event.keystroke.key,
+                &crate::settings::key_equivalents(cx),
+            )
+            .and_then(|key| key.parse::<usize>().ok())
             && (1..=9).contains(&n)
         {
             self.activate_model_index(n - 1, cx);
@@ -5198,7 +5406,9 @@ impl Pickers {
                     }
                     Some(PickerKind::Space) => self.filtered_project_rows(cx).len() + 1,
                     Some(PickerKind::Device) => self.filtered_device_rows(cx).len(),
-                    Some(PickerKind::Permission) => PermissionMode::ALL.len(),
+                    Some(PickerKind::Permission) => {
+                        PermissionMode::ALL.len() + usize::from(self.plan_offered(cx))
+                    }
                     None => 0,
                 };
                 let current = (self.active != NO_ACTIVE_ROW).then_some(self.active);
@@ -5226,8 +5436,10 @@ impl Pickers {
                         .map_or(CheckoutKind::Local, |(kind, _, _)| *kind);
                     self.pick_checkout(kind, cx);
                 } else if self.open_kind() == Some(PickerKind::Permission) {
-                    if let Some(mode) = PermissionMode::ALL.get(self.active) {
-                        self.pick_permission(*mode, cx);
+                    match PermissionMode::ALL.get(self.active) {
+                        Some(mode) => self.pick_permission(*mode, cx),
+                        None if self.plan_offered(cx) => self.toggle_plan(cx),
+                        None => {}
                     }
                 } else {
                     self.on_search_submit(cx);
@@ -6492,7 +6704,10 @@ impl Pickers {
                     .size(px(12.0))
                     .text_color(tone),
             )
-            .child(SharedString::from(mode.label()));
+            .child(SharedString::from(mode.label()))
+            .when(self.effective_plan(cx), |el| {
+                el.child(div().text_color(theme.accent).child("Plan"))
+            });
         attach_overlay_end(
             chip,
             &mut overlay,
@@ -6506,6 +6721,7 @@ impl Pickers {
     fn render_permission_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
         let current = self.effective_permission_mode(cx);
+        let plan = self.plan_offered(cx).then(|| self.effective_plan(cx));
         let active = self.active;
         div()
             .flex()
@@ -6567,6 +6783,24 @@ impl Pickers {
                     )
                 })
             }))
+            .when_some(plan, |menu, on| {
+                let ix = PermissionMode::ALL.len();
+                menu.child(popover::menu_separator()).child(
+                    popover::menu_row_nav(&theme, false, ix == active, "permission-row-plan")
+                        .id("permission-row-plan")
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_plan(cx)))
+                        .child(access_row_text(
+                            "Plan mode",
+                            "Explore and propose a plan before changing anything.",
+                            &theme,
+                        ))
+                        .child(crate::settings::widgets::toggle_switch(
+                            &theme,
+                            on,
+                            "permission-plan-switch",
+                        )),
+                )
+            })
             .into_any_element()
     }
 
@@ -6738,6 +6972,9 @@ impl Pickers {
         strip = strip.child(
             div()
                 .id("model-tab-favorites")
+                .role(gpui::Role::Tab)
+                .aria_label("Starred")
+                .aria_selected(favorites_view)
                 .relative()
                 .flex_none()
                 .w(px(32.0))
@@ -6750,6 +6987,7 @@ impl Pickers {
                 .when(!favorites_view, |el| {
                     el.hover(|s| s.bg(crate::theme::ink(0.06)))
                 })
+                .tooltip(|_, cx| cx.new(|_| compact::PickerHint("Starred".into())).into())
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.setting_menu = None;
                     this.model_rail = ModelRail::Favorites;
@@ -6835,6 +7073,7 @@ impl Pickers {
                 && viewed == Some(harness)
                 && viewed_instance.is_none();
             let (icon_path, tint) = harness_brand_icon(harness);
+            let name: SharedString = descriptor.name.clone().into();
             if is_viewed {
                 selected_tab = Some((format!("harness:{ix}"), tab_count));
             }
@@ -6843,6 +7082,9 @@ impl Pickers {
                 strip.child(
                     div()
                         .id(("harness-tab", ix))
+                        .role(gpui::Role::Tab)
+                        .aria_label(name.clone())
+                        .aria_selected(is_viewed)
                         .relative()
                         .flex_none()
                         .w(px(32.0))
@@ -6853,6 +7095,7 @@ impl Pickers {
                         .justify_center()
                         .cursor_pointer()
                         .when(!is_viewed, |el| el.hover(|s| s.bg(crate::theme::ink(0.06))))
+                        .tooltip(move |_, cx| cx.new(|_| compact::PickerHint(name.clone())).into())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.setting_menu = None;
                             this.model_rail = ModelRail::Harness;
@@ -7284,7 +7527,8 @@ impl Pickers {
             }))
             .child(body);
         if ix < 9 {
-            el = el.child(popover::kbd_hint(&theme, &format!("⌘{}", ix + 1)));
+            let key = crate::settings::bound_key(&(ix + 1).to_string());
+            el = el.child(popover::kbd_hint(&theme, &format!("⌘{key}")));
         }
         // A model configured in place opens its settings card on hover.
         // The title picker has no settings, so no card either.
@@ -7363,6 +7607,14 @@ impl Pickers {
                 ));
             }
         }
+        // The compact picker's wording: the name tells a screen reader's
+        // list of stars apart.
+        let star_hint: SharedString = if is_fav {
+            format!("Remove {} from favorites", row.model.label)
+        } else {
+            format!("Add {} to favorites", row.model.label)
+        }
+        .into();
         el = el.child(
             div()
                 .id(("model-star", ix))
@@ -7376,6 +7628,14 @@ impl Pickers {
                 .cursor_pointer()
                 .hover(|s| s.bg(crate::theme::ink(0.08)))
                 .when(!starrable, |el| el.invisible())
+                .role(gpui::Role::Button)
+                .aria_label(star_hint.clone())
+                .aria_toggled(if is_fav {
+                    gpui::Toggled::True
+                } else {
+                    gpui::Toggled::False
+                })
+                .tooltip(move |_, cx| cx.new(|_| compact::PickerHint(star_hint.clone())).into())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     if starrable {
@@ -10047,6 +10307,22 @@ impl Pickers {
     }
 }
 
+/// A row's name over what it does, in the permission menu.
+fn access_row_text(label: &'static str, description: &'static str, theme: &Theme) -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .child(div().truncate().child(SharedString::from(label)))
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.text_muted)
+                .child(SharedString::from(description)),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10096,6 +10372,22 @@ mod tests {
         assert!(switch_warning(Some(HarnessId::Mock), "Mock B").contains("Mock B"));
         assert!(zeron_proto::model_switch::switch_hint(None).contains("re-read"));
     }
+
+    #[test]
+    fn an_unoffered_access_mode_never_falls_back_to_more_access() {
+        use AccessMode::*;
+        assert_eq!(resolve_access(AutoAcceptEdits, &ALL_MODES), AutoAcceptEdits);
+        // Muse: supervised or full access.
+        let muse = [Supervised, FullAccess];
+        assert_eq!(resolve_access(AutoAcceptEdits, &muse), Supervised);
+        assert_eq!(resolve_access(FullAccess, &muse), FullAccess);
+        // Only full access offered: nothing safer to fall back to.
+        assert_eq!(resolve_access(Supervised, &[FullAccess]), FullAccess);
+        // An engine predating modes runs everything as before.
+        assert_eq!(resolve_access(Supervised, &[]), FullAccess);
+    }
+
+    const ALL_MODES: [AccessMode; 3] = AccessMode::ALL;
 
     struct ModelShortcutHost {
         focus_sub: Option<gpui::Subscription>,
@@ -11401,6 +11693,131 @@ mod tests {
             pickers.held_ref = None; // as the refs load does on landing
             assert_eq!(pickers.ref_label(), SharedString::from("trunk"));
             assert_eq!(pickers.checkout_label(), "Current checkout");
+        });
+    }
+
+    #[gpui::test]
+    fn project_round_trip_puts_the_canvas_checkout_back(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("local".into());
+            state.apply_spaces(vec![git_space("a", "local"), git_space("b", "local")]);
+            state.selected_space = Some("a".into());
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.pick_checkout(CheckoutKind::NewWorktree, cx);
+            pickers.config.branch = Some("main".into());
+        });
+        state.update(cx, |state, cx| state.select_space(Some("b".into()), cx));
+        cx.run_until_parked();
+        // The pick was a's: b starts in its own folder.
+        pickers.read_with(cx, |pickers, _| {
+            assert_eq!(pickers.config.checkout, CheckoutKind::Local);
+        });
+        state.update(cx, |state, cx| state.select_space(Some("a".into()), cx));
+        cx.run_until_parked();
+        pickers.read_with(cx, |pickers, _| {
+            assert_eq!(pickers.config.checkout, CheckoutKind::NewWorktree);
+            assert_eq!(pickers.checkout_label(), "New worktree");
+            // a's refs reload on the way back; the ref pick starts over.
+            assert_eq!(pickers.config.branch, None);
+        });
+    }
+
+    #[gpui::test]
+    fn canvas_reopens_with_its_checkout_after_another_projects_chat(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("local".into());
+            state.apply_spaces(vec![git_space("a", "local"), git_space("b", "local")]);
+            state.apply_chats(vec![
+                serde_json::from_value(serde_json::json!({
+                    "id":"in-b", "deviceId":"local", "spaceId":"b", "archived":false,
+                    "createdAt":"2026-09-01T00:00:00Z",
+                }))
+                .unwrap(),
+            ]);
+            state.selected_space = Some("a".into());
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.pick_checkout(CheckoutKind::NewWorktree, cx);
+        });
+        state.update(cx, |state, cx| state.select_chat(Some("in-b".into()), cx));
+        cx.run_until_parked();
+        // New session: the canvas target comes back, and its checkout with it.
+        state.update(cx, |state, cx| state.select_chat(None, cx));
+        cx.run_until_parked();
+        pickers.read_with(cx, |pickers, cx| {
+            assert_eq!(pickers.state.read(cx).selected_space.as_deref(), Some("a"));
+            assert_eq!(pickers.config.checkout, CheckoutKind::NewWorktree);
+        });
+    }
+
+    #[gpui::test]
+    fn a_cloud_pick_is_not_put_back_on_return(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("local".into());
+            state.apply_spaces(vec![git_space("a", "local"), git_space("b", "local")]);
+            state.selected_space = Some("a".into());
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        let round_trip = |cx: &mut gpui::TestAppContext| {
+            state.update(cx, |state, cx| state.select_space(Some("b".into()), cx));
+            cx.run_until_parked();
+            state.update(cx, |state, cx| state.select_space(Some("a".into()), cx));
+            cx.run_until_parked();
+        };
+        pickers.update(cx, |pickers, cx| {
+            pickers.pick_checkout(CheckoutKind::NewWorktree, cx);
+        });
+        round_trip(cx);
+        // Cloud then replaces that pick (where `switch_cloud` lands).
+        pickers.update(cx, |pickers, _| {
+            pickers.config.checkout = CheckoutKind::Cloud
+        });
+        round_trip(cx);
+        // Neither the Cloud pick nor the older "New worktree" comes back.
+        pickers.read_with(cx, |pickers, _| {
+            assert_eq!(pickers.config.checkout, CheckoutKind::Local);
+        });
+    }
+
+    #[gpui::test]
+    fn a_project_that_lost_git_never_gets_a_worktree_back(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("local".into());
+            state.apply_spaces(vec![git_space("a", "local"), git_space("b", "local")]);
+            state.selected_space = Some("a".into());
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.pick_checkout(CheckoutKind::NewWorktree, cx);
+        });
+        state.update(cx, |state, cx| state.select_space(Some("b".into()), cx));
+        cx.run_until_parked();
+        state.update(cx, |state, _| {
+            state.apply_spaces(vec![
+                Space {
+                    git_detected: false,
+                    ..git_space("a", "local")
+                },
+                git_space("b", "local"),
+            ]);
+        });
+        state.update(cx, |state, cx| state.select_space(Some("a".into()), cx));
+        cx.run_until_parked();
+        // No checkout chip shows without git: a kept "New worktree" would ask
+        // for a worktree the user can neither see nor change.
+        pickers.read_with(cx, |pickers, _| {
+            assert_eq!(pickers.config.checkout, CheckoutKind::Local);
         });
     }
 
@@ -12733,6 +13150,8 @@ mod tests {
             profile_id: None,
             instance_id: None,
             disabled_tools: Vec::new(),
+            access: zeron_proto::PermissionMode::Full.access(),
+            plan: false,
         });
         assert_eq!(
             chat.harness_marks(),
@@ -12750,6 +13169,8 @@ mod tests {
             reasoning_levels: Vec::new(),
             steering_mode: zeron_proto::SteeringMode::StepBoundary,
             supports_steering: false,
+            access_modes: Vec::new(),
+            supports_plan: false,
         }
     }
     #[gpui::test]
@@ -13618,6 +14039,8 @@ mod tests {
                         profile_id: None,
                         instance_id: None,
                         disabled_tools: Vec::new(),
+                        access: zeron_proto::PermissionMode::default().access(),
+                        plan: false,
                     }),
                     last_message_preview: None,
                     last_message_at: None,
@@ -13779,6 +14202,8 @@ mod tests {
                         profile_id: None,
                         instance_id: None,
                         disabled_tools: Vec::new(),
+                        access: zeron_proto::PermissionMode::default().access(),
+                        plan: false,
                     }),
                     last_message_preview: None,
                     last_message_at: None,
@@ -15373,6 +15798,102 @@ mod tests {
     }
 
     #[test]
+    fn pasted_paths_lose_quotes_and_shell_escapes() {
+        let clean = |text| clean_typed_path(text, false);
+        assert_eq!(clean("  /Users/ana/code \n"), "/Users/ana/code");
+        assert_eq!(clean("'/Users/ana/My Code'"), "/Users/ana/My Code");
+        assert_eq!(clean("\"~/My Code\""), "~/My Code");
+        // A folder dragged into a terminal.
+        assert_eq!(
+            clean(r"/Users/ana/My\ Code\ \(old\)"),
+            "/Users/ana/My Code (old)"
+        );
+        // Mismatched quotes are part of the name.
+        assert_eq!(clean("'/tmp/x\""), "'/tmp/x\"");
+        // Windows backslashes are separators, drive-rooted or relative.
+        assert_eq!(clean(r"D:\Random\zeron"), r"D:\Random\zeron");
+        assert_eq!(clean_typed_path(r"'..\site'", true), r"..\site");
+        assert_eq!(clean_typed_path(r"~\code", true), r"~\code");
+    }
+
+    #[test]
+    fn typed_paths_resolve_dots_home_and_the_open_folder() {
+        let (base, home) = (Some("/home/wing/code"), Some("/home/wing"));
+        let resolve = |text| resolve_typed_path(text, base, home, false);
+        assert_eq!(resolve("/srv//data/"), Some("/srv/data".into()));
+        assert_eq!(resolve("~/code/../notes"), Some("/home/wing/notes".into()));
+        assert_eq!(resolve("~"), Some("/home/wing".into()));
+        // Relative to the open folder, like a shell's cd.
+        assert_eq!(
+            resolve("zeron/src"),
+            Some("/home/wing/code/zeron/src".into())
+        );
+        assert_eq!(resolve("../site"), Some("/home/wing/site".into()));
+        assert_eq!(resolve("./"), Some("/home/wing/code".into()));
+        // `..` stops at the root.
+        assert_eq!(resolve("/../../etc"), Some("/etc".into()));
+        assert_eq!(resolve("/"), Some("/".into()));
+        assert_eq!(resolve("  "), None);
+        // `~` needs the device's home, a relative path an open folder.
+        assert_eq!(resolve_typed_path("~/code", base, None, false), None);
+        assert_eq!(resolve_typed_path("code", None, home, false), None);
+        assert_eq!(
+            resolve_typed_path("/srv/data", None, None, false),
+            Some("/srv/data".into())
+        );
+        // A backslash in a POSIX name, as the field writes it, survives.
+        let written = escape_typed_path(r"/home/wing/a\b/", false);
+        assert_eq!(written, r"/home/wing/a\\b/");
+        assert_eq!(resolve(written.as_str()), Some(r"/home/wing/a\b".into()));
+    }
+
+    #[test]
+    fn typed_windows_paths_resolve_on_any_client() {
+        let (base, home) = (Some(r"C:\Users\Ana\code"), Some(r"C:\Users\Ana"));
+        let resolve = |text| resolve_typed_path(text, base, home, false);
+        // Rooted on the open folder's drive, or at a named drive's root.
+        assert_eq!(resolve(r"\Projects"), Some(r"C:\Projects".into()));
+        assert_eq!(resolve("/Projects"), Some(r"C:\Projects".into()));
+        assert_eq!(resolve("D:work"), Some(r"D:\work".into()));
+        // `/` reads as `\`, so a forward-slash share stays a share.
+        assert_eq!(
+            resolve("//nas/projects/app"),
+            Some(r"\\nas\projects\app".into())
+        );
+        assert_eq!(escape_typed_path(r"C:\a", false), r"C:\a");
+        // A Windows device before anything listed: rooted paths wait for it.
+        assert_eq!(resolve_typed_path("/code", None, None, true), None);
+        assert_eq!(resolve(r"D:\Random\..\zeron\"), Some(r"D:\zeron".into()));
+        assert_eq!(
+            resolve("D:/Random/./zeron"),
+            Some(r"D:\Random\zeron".into())
+        );
+        assert_eq!(resolve(r"~\notes"), Some(r"C:\Users\Ana\notes".into()));
+        assert_eq!(resolve(r"..\site"), Some(r"C:\Users\Ana\site".into()));
+        assert_eq!(resolve(r"C:\.."), Some(r"C:\".into()));
+        assert_eq!(
+            resolve(r"\\server\share\team\..\repo"),
+            Some(r"\\server\share\repo".into())
+        );
+        // Verbatim paths are taken as they are.
+        assert_eq!(normalize_browser_path(r"\\?\D:\a\..\b"), r"\\?\D:\a\..\b");
+    }
+
+    #[test]
+    fn typed_paths_split_at_the_name_being_typed() {
+        let split = |text| split_typed_leaf(text, false);
+        assert_eq!(split("/home/wing/co"), ("/home/wing/", "co"));
+        assert_eq!(split("~/"), ("~/", ""));
+        assert_eq!(split("code"), ("", "code"));
+        assert_eq!(split(r"D:\Random\ze"), (r"D:\Random\", "ze"));
+        assert_eq!(split("D:/Random/ze"), ("D:/Random/", "ze"));
+        // A backslash is part of a POSIX name, a separator on Windows.
+        assert_eq!(split(r"/tmp/a\b"), ("/tmp/", r"a\b"));
+        assert_eq!(split_typed_leaf(r"code\ze", true), (r"code\", "ze"));
+        assert_eq!(split_typed_leaf(r"~\co", true), (r"~\", "co"));
+    }
+
+    #[test]
     fn browser_navigation_reducer() {
         let listing = FolderListing {
             path: "/home/w".into(),
@@ -15503,6 +16024,8 @@ mod tests {
             installed: true,
             can_install: false,
             enabled: None,
+            access_modes: Vec::new(),
+            supports_plan: false,
         };
         let mixed = vec![
             descriptor(HarnessId::Mock, "Mock"),
@@ -15530,6 +16053,8 @@ mod tests {
             installed: true,
             can_install: false,
             enabled,
+            access_modes: Vec::new(),
+            supports_plan: false,
         };
         let catalog = |claude: Option<bool>, codex: Option<bool>, grok: Option<bool>| {
             vec![
@@ -15583,6 +16108,8 @@ mod tests {
                 installed,
                 can_install: false,
                 enabled,
+                access_modes: Vec::new(),
+                supports_plan: false,
             };
         // Enabled-but-missing-CLI agents stay out of the rail; an installed
         // enabled one rides along. A live engine no longer stamps that

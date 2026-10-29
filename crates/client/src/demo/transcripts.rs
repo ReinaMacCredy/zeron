@@ -1543,6 +1543,55 @@ fn seams(host: &str, now: i64) -> Vec<SessionMessageEntry> {
     ]
 }
 
+/// The Codex side chat that messages `chat-side` (see [`side`]): its
+/// `send_message` call reads as the message it sent.
+fn easing(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    let send = ToolCall::Mcp {
+        server: "zeron".into(),
+        tool: "send_message".into(),
+        input: Some(serde_json::json!({
+            "chat": "chat-side",
+            "text": "Keeping the power curve for the veil. Which EMA window should the fade track so the cadence stays steady?",
+            "wait": true,
+        })),
+    };
+    vec![
+        user("m1", now - 360_000, "Would a spring read calmer than the power curve for the veil?"),
+        assistant(
+            "m2",
+            host,
+            now - 340_000,
+            vec![
+                text("t0", "A critically damped spring settles in ~2.4τ, but it overshoots nothing and can't be retimed mid-fade — the `1 − (1−p)^1.6` curve keeps the cadence-tracking duration. Keep the curve; use the spring only for the follow scroll."),
+                text("t1", "The fade still needs its EMA window, so I'll ask the timing chat."),
+                tool("k1", send, false, None),
+                text("t2", "Track α = 0.2: it settles within five appends and ignores a single slow chunk."),
+            ],
+        ),
+    ]
+}
+
+/// A side chat another chat messaged through Zeron's `send_message`: its
+/// header names the Codex side chat that sent it.
+fn side(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    let sent = zeron_proto::agent_messages::agent_message(
+        "Spring vs. power curve for the veil (chat-sid)",
+        "chat-side-easing",
+        "Keeping the power curve for the veil. Which EMA window should the fade track so the cadence stays steady?",
+    );
+    vec![
+        user("m1", now - 300_000, "What EMA window does the veil use?"),
+        assistant("m2", host, now - 280_000, vec![text("t0", "α = 0.2 over inter-append gaps, seeded from the first two chunks.")]),
+        user("m3", now - 120_000, &sent),
+        assistant(
+            "m4",
+            host,
+            now - 100_000,
+            vec![text("t0", "Track α = 0.2: it settles within five appends and ignores a single slow chunk. I've replied to your chat with the numbers.")],
+        ),
+    ]
+}
+
 /// Fixture transcript for a demo chat (`None` = starts empty).
 pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<SessionMessageEntry> {
     let now = last_activity;
@@ -1596,18 +1645,8 @@ pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<Sess
             "Draft the launch post outline.",
             "## Outline\n\n1. Why a phone viewport\n2. The CRDT under the hood\n3. What's next",
         ),
-        "chat-side" => short(
-            host,
-            now,
-            "What EMA window does the veil use?",
-            "α = 0.2 over inter-append gaps, seeded from the first two chunks.",
-        ),
-        "chat-side-easing" => short(
-            host,
-            now,
-            "Would a spring read calmer than the power curve for the veil?",
-            "A critically damped spring settles in ~2.4τ, but it overshoots nothing and can't be retimed mid-fade — the `1 − (1−p)^1.6` curve keeps the cadence-tracking duration. Keep the curve; use the spring only for the follow scroll.",
-        ),
+        "chat-side" => side(host, now),
+        "chat-side-easing" => easing(host, now),
         "chat-oklch" => short(
             host,
             now,

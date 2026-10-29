@@ -70,6 +70,8 @@ pub fn profile_config(profile: &crate::AgentProfile) -> crate::ChatConfig {
         profile_id: Some(profile.id.clone()),
         instance_id: None,
         disabled_tools: profile.disabled_tools.clone(),
+        access: Default::default(),
+        plan: false,
     }
 }
 

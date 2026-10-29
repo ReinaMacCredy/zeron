@@ -182,6 +182,8 @@ fn run_payload(prompt: &str, message_id: &str, cwd: &str) -> SessionCommandPaylo
             sandbox: SandboxLevel::WorkspaceWrite,
             permission_mode: zeron_proto::PermissionMode::Full,
             auto_approve: true,
+            access: zeron_proto::PermissionMode::Full.access(),
+            plan: false,
             attachments: Vec::new(),
             resume: None,
             worktree: None,

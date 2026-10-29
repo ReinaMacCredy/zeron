@@ -589,6 +589,8 @@ impl DocHost {
             profile_id: None,
             instance_id: None,
             disabled_tools: Vec::new(),
+            access: PermissionMode::Ask.access(),
+            plan: false,
         }
     }
 

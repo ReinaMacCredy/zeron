@@ -441,6 +441,19 @@ impl PullRequestsPage {
         -self.board_list.scroll_px_offset_for_scrollbar().y
     }
 
+    /// Show `items` as a loaded board, without an engine.
+    #[cfg(test)]
+    pub(crate) fn show_test_items(
+        &mut self,
+        items: Vec<ChangeRequestListItem>,
+        cx: &mut Context<Self>,
+    ) {
+        self.items = items;
+        self.view_items = None;
+        self.load_state = PullRequestsLoadState::Ready;
+        cx.notify();
+    }
+
     /// The board's rows for the current list, view, stars and collapsed
     /// groups. Rebuilt only when one of those changes; the list state is
     /// spliced so the row at the top of the viewport stays put.
@@ -2576,6 +2589,7 @@ impl Render for PullRequestsPage {
                                                 .id("pull-requests-clear-search")
                                                 .role(gpui::Role::Button)
                                                 .aria_label("Clear search")
+                                                .tooltip(widgets::text_tooltip("Clear search"))
                                                 .tab_index(0)
                                                 .size(px(24.0))
                                                 .flex()

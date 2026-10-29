@@ -106,6 +106,7 @@ mod panel_interaction_tests;
 mod pr_chat;
 pub(crate) mod project_icon;
 mod sidebar_peek;
+mod settings_search;
 mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
@@ -123,6 +124,7 @@ use side_chats::SideChatTab;
 mod tabs;
 mod terminal_tabs;
 mod update_glyph;
+use tabs::NewSessionTarget;
 mod voice_stage;
 use voice_stage::VOICE_STAGE_ORB_SCALE;
 
@@ -131,17 +133,24 @@ pub(crate) use tabs::TabDragPayload;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
 
-/// `connected` already includes the engine's degradation grace. A brief
-/// focus-triggered dial needs no sidebar status; queued changes or a sustained
-/// outage still deserve one.
-fn chat_sync_pill_caption(chat: &zeron_proto::ChatConnectivity) -> Option<&'static str> {
-    use zeron_proto::ChatSyncState as S;
-    let sustained_or_queued = !chat.connected || chat.pending_pushes > 0;
-    match chat.sync_state {
-        S::Waiting if sustained_or_queued => Some("Sync queued — changes are saved"),
-        S::Connecting if sustained_or_queued => Some("Syncing…"),
-        S::Offline if !chat.connected => Some("Offline — changes are saved"),
-        _ => None,
+/// The sidebar line speaks for the whole connection, and whether its glyph
+/// is the amber dot (else the reconnect spinner). One chat's sync reads in
+/// its own composer and transcript, so the two never tell different
+/// stories. A failed local save is the exception, whichever chat it hit:
+/// it outranks the network.
+fn connection_pill_caption(conn: &zeron_proto::Connectivity) -> Option<(&'static str, bool)> {
+    use zeron_proto::{ChatSyncState, ConnectivityState as S};
+    if conn
+        .chats
+        .iter()
+        .any(|chat| chat.sync_state == ChatSyncState::StorageError)
+    {
+        return Some(("Changes could not be saved", true));
+    }
+    match conn.state {
+        S::Disabled | S::Connected => None,
+        S::Offline => Some(("Offline — sends are saved", true)),
+        S::Reconnecting => Some(("Reconnecting…", false)),
     }
 }
 
@@ -503,6 +512,8 @@ pub fn cluster_clearance(
 /// (Re-)apply the whole app keymap: clears every binding, restores the composer
 /// map, then binds the customizable shortcuts from `keymap` (feature-inventory
 /// §1.4). Invalid persisted combos fall back to that shortcut's default.
+/// Everything is written in US keys and bound where the active keyboard layout
+/// types them (see [`localize_key_bindings`]); re-run on a layout switch.
 pub fn apply_keymap(
     cx: &mut App,
     keymap: &KeymapConfig,
@@ -518,7 +529,8 @@ pub fn apply_keymap(
             platform_combo(fallback)
         }
     }
-    crate::appshots::set_shortcut(&keymap.capture_appshot);
+    let equivalents = crate::settings::key_equivalents(cx);
+    crate::appshots::set_shortcut(&keymap.capture_appshot, &equivalents);
     cx.clear_key_bindings();
     // `clear_key_bindings` also removes the contextual editing actions that
     // gpui-base installed at startup. Reinitialize the component layer before
@@ -651,6 +663,72 @@ pub fn apply_keymap(
             ),
         ]
     }));
+    localize_key_bindings(cx, &equivalents);
+    crate::settings::set_bound_key_equivalents(equivalents);
+}
+
+/// Move every binding to the key the active layout types for it. Combos are
+/// written in US keys, like the macOS menus they mirror; Apple relocates
+/// those per layout (AZERTY ⌘1 is ⌘&, ⌘/ is ⌘:, ⌘[ is ⌘^) and gpui ships
+/// the same table, but `KeyBinding::new` never applies it — to Zeron's
+/// bindings or gpui-base's editor map. Order is kept: gpui breaks ties
+/// between equally deep matches by binding order.
+fn localize_key_bindings(cx: &mut App, equivalents: &crate::settings::KeyEquivalents) {
+    if equivalents.is_empty() {
+        return;
+    }
+    let bindings: Vec<KeyBinding> = cx
+        .key_bindings()
+        .borrow()
+        .bindings()
+        .map(|binding| localize_binding(binding, equivalents))
+        .collect();
+    cx.clear_key_bindings();
+    cx.bind_keys(bindings);
+}
+
+fn localize_binding(
+    binding: &KeyBinding,
+    equivalents: &crate::settings::KeyEquivalents,
+) -> KeyBinding {
+    let mut moved = false;
+    let source = binding
+        .keystrokes()
+        .iter()
+        .map(|keystroke| {
+            let keystroke = keystroke.inner();
+            let key = crate::settings::localize_key(&keystroke.key, equivalents);
+            moved |= key != keystroke.key.as_str();
+            Keystroke {
+                key: key.into_owned(),
+                ..keystroke.clone()
+            }
+            .unparse()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !moved {
+        return binding.clone();
+    }
+    match KeyBinding::load(
+        &source,
+        binding.action().boxed_clone(),
+        binding.predicate(),
+        false,
+        binding.action_input(),
+        &gpui::DummyKeyboardMapper,
+    ) {
+        Ok(mut localized) => {
+            if let Some(meta) = binding.meta() {
+                localized.set_meta(meta);
+            }
+            localized
+        }
+        Err(error) => {
+            tracing::warn!(%error, %source, "unbindable localized shortcut; keeping US key");
+            binding.clone()
+        }
+    }
 }
 
 /// The settings sections (feature-inventory §1.5 routes).
@@ -837,164 +915,32 @@ impl SettingsSection {
         }
     }
 
-    /// Words the settings search matches on the section itself, for pages
-    /// whose content is a list rather than titled rows.
-    fn keywords(self) -> &'static [&'static str] {
+    /// The section's glyph, in the nav and on its settings-search hits.
+    fn icon(self) -> &'static str {
         match self {
-            SettingsSection::Devices => &["device", "remote"],
-            SettingsSection::Harnesses => &[
-                "agent", "harness", "account", "usage", "claude", "codex", "cursor", "opencode",
-            ],
-            SettingsSection::Agents => &["account", "login", "usage", "provider"],
-            SettingsSection::Tools => &["mcp", "zeron tools", "delegate", "thread tools"],
-            SettingsSection::AgentProfiles => &["profile", "preset", "delegate", "model"],
-            SettingsSection::Routing => &["model", "route", "quota", "sub-agent"],
-            SettingsSection::CodeReview => &["review", "reviewer", "findings", "model"],
-            SettingsSection::Shortcuts => &["keyboard", "keybinding"],
-            SettingsSection::Appshots => &["screenshot", "capture"],
-            SettingsSection::Computer => &["computer use", "desktop", "cursor", "permission"],
-            SettingsSection::DeviceHub => &["simulator", "emulator", "ios", "android"],
-            SettingsSection::SourceControl => &["git", "commit", "pull request"],
-            SettingsSection::Home => &["widget", "dashboard", "new thread", "customize"],
-            SettingsSection::Archived => &["archive", "old sessions"],
-            _ => &[],
+            SettingsSection::Devices => icons::MONITOR,
+            SettingsSection::Cloud => icons::CLOUD,
+            SettingsSection::Billing => icons::WALLET,
+            SettingsSection::Harnesses => icons::WIDGET,
+            SettingsSection::Tools => icons::LUCIDE_HAMMER,
+            SettingsSection::AgentProfiles => icons::BOT,
+            SettingsSection::Routing => icons::FORK,
+            SettingsSection::CodeReview => icons::CHECKLIST,
+            SettingsSection::Agents => icons::KEY_MINIMALISTIC,
+            SettingsSection::Appearance => icons::TUNING,
+            SettingsSection::Files => icons::FOLDER,
+            SettingsSection::Notifications => icons::BELL,
+            SettingsSection::Voice => icons::MICROPHONE,
+            SettingsSection::Shortcuts => icons::KEYBOARD,
+            SettingsSection::General => icons::SETTINGS,
+            SettingsSection::Appshots => icons::SCREEN_CAPTURE,
+            SettingsSection::Computer => icons::COMPUTER_CURSOR,
+            SettingsSection::DeviceHub => icons::SMARTPHONE,
+            SettingsSection::SourceControl => icons::GIT_BRANCH,
+            SettingsSection::Home => icons::HOME,
+            SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         }
     }
-
-    /// The page's titled rows: the title is what a search result shows
-    /// under the section, the keywords are what else finds it.
-    fn rows(self) -> &'static [SettingsSearchRow] {
-        match self {
-            SettingsSection::General => &[
-                ("Send messages with", &["enter", "submit"]),
-                ("Follow-up behavior", &["queue", "steer", "interrupt"]),
-                ("Compact mode", &["transcript"]),
-                ("Stop active agent with Escape", &["escape", "cancel"]),
-                ("Session switcher shows", &["switcher", "recency"]),
-                ("Session switcher shows at most", &["switcher"]),
-                ("Thread naming", &["title", "automatic"]),
-                ("Delegation depth", &["delegate", "subagent", "nest"]),
-                (
-                    "Delegated tasks per chat",
-                    &["delegate", "subagent", "limit"],
-                ),
-            ],
-            SettingsSection::Harnesses => &[("Add account", &["sign in", "api key", "login"])],
-            SettingsSection::Appearance => &[
-                ("Light theme", &["theme"]),
-                ("Dark theme", &["theme"]),
-                ("Interface font", &["font size"]),
-                ("Terminal font", &["font size"]),
-                ("Code font", &["font size"]),
-                ("Accent color", &["color"]),
-                ("Glass", &["blur", "opacity", "scrim", "frosted"]),
-                ("New thread composer background", &["image"]),
-                ("Chat background", &["image", "placement"]),
-                (
-                    "Background effect",
-                    &["dither", "ascii", "halftone", "scanlines"],
-                ),
-            ],
-            SettingsSection::Files => &[
-                ("Autosave", &["save"]),
-                ("Autosave delay", &["save"]),
-                ("Word wrap", &["editor"]),
-                ("Show all files", &["hidden", "ignored"]),
-            ],
-            SettingsSection::Notifications => &[
-                ("Session sounds", &["sound", "chime"]),
-                ("Task completed", &["sound", "done"]),
-                ("Input required", &["sound", "question"]),
-                ("Errors and disconnections", &["sound"]),
-                ("Desktop notifications", &["banner"]),
-                ("Only when in the background", &["focus"]),
-            ],
-            SettingsSection::Shortcuts => &[
-                ("Save file", &[]),
-                ("Reload browser page", &[]),
-                ("Toggle left sidebar", &[]),
-                ("Toggle right sidebar", &[]),
-                ("Toggle terminal", &[]),
-                ("New session", &[]),
-                ("Next session", &["switcher"]),
-                ("Previous session", &["switcher"]),
-                ("Archive session", &[]),
-            ],
-            SettingsSection::Appshots => &[("Hotkey", &["capture appshot", "shortcut", "keyboard"])],
-            SettingsSection::Computer => &[
-                ("Computer control", &["computer use", "desktop"]),
-                ("Cursor colors", &["cursor", "color"]),
-                ("Preview", &["compact", "large"]),
-                ("Placement", &["rail", "floating"]),
-                ("Developer access", &["javascript", "browser"]),
-                ("Always-allowed apps", &["consent", "allow"]),
-                ("Click sounds", &[]),
-                ("Getting started", &[]),
-                ("Recent Computer actions", &["history", "audit"]),
-                ("Advanced", &["permission", "driver"]),
-            ],
-            SettingsSection::DeviceHub => &[
-                ("Device hub", &["simulator", "emulator", "version"]),
-                ("Platform support", &["xcode", "android sdk"]),
-                ("Agent device access", &["agent"]),
-                ("Device hosts", &["ssh", "remote"]),
-                ("Auto-show floating preview", &["float"]),
-            ],
-            SettingsSection::SourceControl => &[
-                ("Instruction", &["commit message", "prompt", "conventional"]),
-                ("Default model", &["commit message", "haiku"]),
-                ("Chat history", &["pr chat", "keep per pr", "fresh"]),
-                ("New chat when idle", &["pr chat", "idle", "expiry"]),
-                ("While an agent is running", &["git", "agent", "busy"]),
-            ],
-            SettingsSection::Home => &[
-                ("Working now", &["running", "agents"]),
-                ("Pull requests", &["review"]),
-                ("Git activity", &["commits"]),
-                ("This Mac", &["cpu", "memory", "disk"]),
-                ("Running services", &["ports", "server"]),
-                ("Recent areas", &["worktree", "project"]),
-                ("CI failures", &["checks"]),
-                ("Show ports", &["by zeron", "all ports"]),
-            ],
-            _ => &[],
-        }
-    }
-
-    /// Row titles the query finds on this page, in page order. Empty for an
-    /// empty query: nothing is expanded until the user types.
-    pub fn matching_rows(self, query: &str) -> Vec<&'static str> {
-        let query = query.trim().to_lowercase();
-        if query.is_empty() {
-            return Vec::new();
-        }
-        self.rows()
-            .iter()
-            .filter(|(title, keywords)| search_row_matches(title, keywords, &query))
-            .map(|(title, _)| *title)
-            .collect()
-    }
-
-    /// Case-insensitive substring match over the label, keywords, and rows;
-    /// an empty query matches every section.
-    pub fn matches(self, query: &str) -> bool {
-        let query = query.trim().to_lowercase();
-        query.is_empty()
-            || self.label().to_lowercase().contains(&query)
-            || self.keywords().iter().any(|word| word.contains(&query))
-            || self
-                .rows()
-                .iter()
-                .any(|(title, keywords)| search_row_matches(title, keywords, &query))
-    }
-}
-
-/// A titled settings row and the extra words that find it.
-type SettingsSearchRow = (&'static str, &'static [&'static str]);
-
-/// `query` is already trimmed and lowercased.
-fn search_row_matches(title: &str, keywords: &[&str], query: &str) -> bool {
-    title.to_lowercase().contains(query) || keywords.iter().any(|word| word.contains(query))
 }
 
 /// Persisted as [`crate::settings::UiSettings::settings_section`].
@@ -2641,7 +2587,6 @@ pub struct Shell {
     btw_titles: std::collections::HashMap<String, (SharedString, SharedString, std::time::Instant)>,
     side_chats: std::collections::HashMap<u64, SideChatTab>,
     side_chat_seq: u64,
-    side_chat_creating: bool,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
@@ -2703,6 +2648,8 @@ pub struct Shell {
     settings_focus_pending: bool,
     settings_restore_pending: bool,
     settings_return_route: Route,
+    /// The field atop the Settings sidebar, made on its first render.
+    settings_search: Option<settings_search::SettingsSearch>,
     /// Route history behind the titlebar back/forward buttons (§ nav history).
     nav: NavHistory,
     nav_focus: Option<NavEntry>,
@@ -2766,9 +2713,6 @@ pub struct Shell {
     rail_usage_hover: app_rail::RingHover,
     continuing: std::collections::HashSet<String>,
     harnesses_page: Option<Entity<HarnessesPage>>,
-    /// Filters the settings nav; cleared when settings close.
-    settings_search: Entity<ComposerInput>,
-    _settings_search_sub: Subscription,
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
     files_settings_sub: Option<Subscription>,
@@ -3100,13 +3044,6 @@ impl Shell {
             .collect();
         state.update(cx, |s, cx| s.set_hidden_chats(hidden, cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
-        let settings_search =
-            cx.new(|cx| ComposerInput::with_context("Search settings…", "PaletteSearch", cx));
-        let settings_search_sub = cx.subscribe(&settings_search, |_: &mut Shell, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Edited) {
-                cx.notify();
-            }
-        });
         let docs_search =
             cx.new(|cx| ComposerInput::with_context("Search docs…", "PaletteSearch", cx));
         let docs_search_sub = cx.subscribe(&docs_search, |_: &mut Shell, _, event, cx| {
@@ -3158,6 +3095,26 @@ impl Shell {
                 ComposerEvent::WorkspaceCommand(command) => {
                     this.pending_workspace_command = Some(*command);
                     cx.notify();
+                }
+                ComposerEvent::AnnotationsChanged(numbers) => {
+                    let key = this.panel_key(cx);
+                    for surface in this.right_tabs.get(&key).into_iter().flatten() {
+                        if let RightSurface::Browser(id) = surface
+                            && let Some(browser) = this.browsers.get(id)
+                        {
+                            browser.read(cx).keep_markers(numbers);
+                        }
+                    }
+                }
+                ComposerEvent::AnnotationHovered(number) => {
+                    let key = this.panel_key(cx);
+                    for surface in this.right_tabs.get(&key).into_iter().flatten() {
+                        if let RightSurface::Browser(id) = surface
+                            && let Some(browser) = this.browsers.get(id)
+                        {
+                            browser.read(cx).focus_marker(*number);
+                        }
+                    }
                 }
                 ComposerEvent::NewThreadTransitionStarted => {
                     // Route observation drives the dock once selection commits.
@@ -3432,7 +3389,6 @@ impl Shell {
             btw_titles: std::collections::HashMap::new(),
             side_chats: std::collections::HashMap::new(),
             side_chat_seq: 0,
-            side_chat_creating: false,
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
             browser_seq: 0,
@@ -3470,6 +3426,7 @@ impl Shell {
             settings_focus_pending: matches!(route, Route::Settings(_)),
             settings_restore_pending: false,
             settings_return_route: Route::Chat,
+            settings_search: None,
             nav,
             nav_focus: None,
             swipe: swipe_nav::SwipeNav::default(),
@@ -3526,8 +3483,6 @@ impl Shell {
             rail_usage_hover: app_rail::RingHover::default(),
             continuing: Default::default(),
             harnesses_page: None,
-            settings_search,
-            _settings_search_sub: settings_search_sub,
             shortcuts_sub: None,
             notifications_sub: None,
             files_settings_sub: None,
@@ -3805,7 +3760,6 @@ impl Shell {
         self.resolve_intros(cx);
         if state.read(cx).engine().is_none() {
             self.side_chats.clear();
-            self.side_chat_creating = false;
         }
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
             self.show_notice(crate::toast::ToastKind::Info, notice, cx);
@@ -4934,6 +4888,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> crate::markdown::render::LinkOutcome {
         use crate::markdown::render::{LinkAction, LinkOutcome};
+        use crate::settings::PullRequestDestination;
         let Some(source) = activation.source_session.clone() else {
             return LinkOutcome::Rejected;
         };
@@ -4962,9 +4917,22 @@ impl Shell {
                 LinkOutcome::Rejected
             };
         }
+        let settings = crate::settings::current(cx);
+        let pull_request = activation
+            .target
+            .navigation
+            .as_deref()
+            .ok()
+            .and_then(crate::pull_request_detail::pull_request_link);
         let mut resolved = activation.clone();
         if resolved.action == LinkAction::Primary {
-            resolved.action = if crate::settings::current(cx).open_web_links_in_zeron {
+            // "Open links in Zeron" decides whether a click stays in Zeron;
+            // a pull request leaves too when Settings sends pull requests to
+            // the default browser.
+            resolved.action = if settings.open_web_links_in_zeron
+                && !(pull_request.is_some()
+                    && settings.pull_request_destination == PullRequestDestination::External)
+            {
                 LinkAction::Internal
             } else {
                 LinkAction::External
@@ -4976,6 +4944,22 @@ impl Shell {
             self.add_browser_surface(activation.target.navigation.clone().ok(), window, cx);
         }
         outcome
+    }
+
+    /// A pull request sent to a Browser tab: beside the session in focus,
+    /// else (off a session) the default browser.
+    fn browse_chat_pull_request(
+        &mut self,
+        url: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(self.route, Route::Chat) || self.active_chat.is_empty() {
+            cx.open_url(&url);
+            return;
+        }
+        self.set_surfaces_open(true, cx);
+        self.add_browser_surface(Some(url), window, cx);
     }
 
     fn sync_browser_profile(&mut self, cx: &mut Context<Self>) {
@@ -5066,7 +5050,7 @@ impl Shell {
                 crate::browser::BrowserEvent::Close => {
                     this.close_right_surface(RightSurface::Browser(id), window, cx)
                 }
-                crate::browser::BrowserEvent::Annotation(capture) => {
+                crate::browser::BrowserEvent::AnnotationCapture(capture) => {
                     let capture = capture.clone();
                     let (composer, stage_key) = this.capture_composer(&owner, cx);
                     composer.update(cx, |composer, cx| {
@@ -5074,6 +5058,26 @@ impl Shell {
                     });
                     if this.panel_key(cx) == owner {
                         window.focus(&composer.focus_handle(cx), cx);
+                    }
+                }
+                crate::browser::BrowserEvent::Annotation {
+                    annotation,
+                    marker,
+                    last,
+                } => {
+                    // Only the session that owns this tab receives its picks.
+                    if this.panel_key(cx) == owner {
+                        let annotation = annotation.clone();
+                        let last = *last;
+                        if last && let Some(browser) = this.browsers.get(&id) {
+                            browser.read(cx).release_keyboard();
+                        }
+                        let number = this.composer.update(cx, |composer, cx| {
+                            composer.add_browser_annotation(annotation, last, window, cx)
+                        });
+                        if let (Some(number), Some(browser)) = (number, this.browsers.get(&id)) {
+                            browser.read(cx).label_marker(*marker, number);
+                        }
                     }
                 }
             }
@@ -5125,6 +5129,17 @@ impl Shell {
     /// panels, user request).
     fn add_diff_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let changes = cx.new(|cx| Changes::new(self.state.clone(), cx));
+        self.register_diff_surface(changes, window, cx);
+    }
+
+    /// A Diff tab opened on *Branch changes* (the session card's totals),
+    /// opening the pane when it is closed.
+    fn add_branch_diff_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_chat.is_empty() {
+            return;
+        }
+        self.set_surfaces_open(true, cx);
+        let changes = cx.new(|cx| Changes::for_branch(self.state.clone(), cx));
         self.register_diff_surface(changes, window, cx);
     }
 
@@ -7361,7 +7376,9 @@ impl Shell {
             | ComposerEvent::OpenChanges
             | ComposerEvent::StartMission(_)
             | ComposerEvent::OpenTaskCenter(_)
-            | ComposerEvent::PlanFirst => {}
+            | ComposerEvent::PlanFirst
+            | ComposerEvent::AnnotationsChanged(_)
+            | ComposerEvent::AnnotationHovered(_) => {}
             ComposerEvent::OpenUsage => self.open_usage(cx),
             ComposerEvent::OpenSubagent {
                 chat_id,
@@ -8037,6 +8054,15 @@ impl Shell {
         if self.route == Route::Supervisor && route != Route::Supervisor {
             self.leave_supervisor(cx);
         }
+        // A settings-search landing belongs to the page it was asked on, and
+        // a query to the visit: however Settings is left, the next visit
+        // starts from the sections.
+        if route != self.route {
+            settings::search::clear_reveal();
+        }
+        if matches!(self.route, Route::Settings(_)) && !matches!(route, Route::Settings(_)) {
+            self.reset_settings_search(cx);
+        }
         let was_pull_requests = matches!(self.route, Route::PullRequests);
         let will_show_pull_requests = matches!(route, Route::PullRequests);
         if was_pull_requests && !will_show_pull_requests {
@@ -8531,6 +8557,36 @@ impl Shell {
         }
     }
 
+    /// Whether a dialog or menu that Escape would close is open over Settings:
+    /// [`Self::dismiss_settings_escape_surface`] without the dismissing.
+    fn settings_escape_surface_open(&self, cx: &App) -> bool {
+        if self.sync_flow.has_visible_overlay() || self.user_menu.is_open() {
+            return true;
+        }
+        let Route::Settings(section) = self.route else {
+            return false;
+        };
+        match section.canonical() {
+            SettingsSection::Devices => self
+                .devices_page
+                .as_ref()
+                .is_some_and(|page| page.read(cx).has_escape_surface()),
+            SettingsSection::Harnesses => self
+                .harnesses_page
+                .as_ref()
+                .is_some_and(|page| page.read(cx).has_escape_surface(cx)),
+            SettingsSection::Appearance => self
+                .appearance_page
+                .as_ref()
+                .is_some_and(|page| page.read(cx).has_escape_surface()),
+            SettingsSection::Archived => self
+                .archived_page
+                .as_ref()
+                .is_some_and(|page| page.read(cx).has_escape_surface()),
+            _ => false,
+        }
+    }
+
     /// Escape bubbling out of the settings page. Focused controls — open
     /// dropdowns, the shortcut recorder, a dialog's own input — consume it
     /// before it gets here. What remains open without holding focus closes
@@ -8867,8 +8923,6 @@ impl Shell {
     }
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
-        self.settings_search
-            .update(cx, |input, cx| input.set_text("", cx));
         self.settings_focus_pending = false;
         self.settings_restore_pending = true;
         let route = self.settings_return_route;
@@ -8942,8 +8996,6 @@ impl Shell {
         self.suspend_file_images(cx);
         match entry {
             NavEntry::Chat(chat_id) => {
-                self.settings_search
-                    .update(cx, |input, cx| input.set_text("", cx));
                 self.set_route(Route::Chat, cx);
                 self.focus_composer(cx);
                 let target = (!chat_id.is_empty()).then_some(chat_id);
@@ -8952,8 +9004,6 @@ impl Shell {
                 }
             }
             NavEntry::Draft(draft_id) => {
-                self.settings_search
-                    .update(cx, |input, cx| input.set_text("", cx));
                 self.set_route(Route::Chat, cx);
                 self.focus_composer(cx);
                 self.state.update(cx, |s, cx| {
@@ -9306,13 +9356,17 @@ impl Shell {
                     ));
                     self.shortcuts_page = Some(page);
                 }
+                let keep_focus = self.settings_search_focused(window, cx);
                 match &self.shortcuts_page {
                     Some(page) => {
                         page.update(cx, |page, _| {
                             page.show_section(
                                 section == SettingsSection::Appshots,
                                 section == SettingsSection::General,
-                            )
+                            );
+                            if keep_focus {
+                                page.keep_focus();
+                            }
                         });
                         page.clone().into_any_element()
                     }
@@ -11653,6 +11707,7 @@ impl Shell {
                     match button {
                         gpui::WindowButton::Minimize => linux_caption_button(
                             "window-minimize",
+                            "Minimize",
                             icons::WINDOW_MINIMIZE,
                             false,
                             theme,
@@ -11660,18 +11715,24 @@ impl Shell {
                         )
                         .into_any_element(),
                         gpui::WindowButton::Maximize => {
-                            let (id, icon_path) = if is_maximized {
-                                ("window-restore", icons::WINDOW_RESTORE)
+                            let (id, label, icon_path) = if is_maximized {
+                                ("window-restore", "Restore", icons::WINDOW_RESTORE)
                             } else {
-                                ("window-maximize", icons::WINDOW_MAXIMIZE)
+                                ("window-maximize", "Maximize", icons::WINDOW_MAXIMIZE)
                             };
-                            linux_caption_button(id, icon_path, false, theme, |_, window, _| {
-                                window.zoom_window()
-                            })
+                            linux_caption_button(
+                                id,
+                                label,
+                                icon_path,
+                                false,
+                                theme,
+                                |_, window, _| window.zoom_window(),
+                            )
                             .into_any_element()
                         }
                         gpui::WindowButton::Close => linux_caption_button(
                             "window-close",
+                            "Close",
                             icons::CLOSE,
                             true,
                             theme,
@@ -11905,7 +11966,12 @@ impl Shell {
         let sidebar_width = self.settings.sidebar_width;
         // Dropdowns contain themselves to the page pane beside this column.
         settings::widgets::set_sidebar_width(self.content_left() + sidebar_width, cx);
-        let nav = self.render_settings_nav(section, &theme, window, cx);
+        let search_field = self.render_settings_search_field(&theme, window, cx);
+        let nav = if self.settings_searching(cx) {
+            self.render_settings_search_results(&theme, cx)
+        } else {
+            self.render_settings_nav(section, &theme, window, cx)
+        };
         let outlet = self.settings_outlet(section, window, cx);
         div()
             .id("settings-page")
@@ -11919,9 +11985,19 @@ impl Shell {
             .flex_row()
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 let key = &event.keystroke.key;
+                let modifiers = event.keystroke.modifiers;
                 if key == "escape" {
                     if !this.dismiss_settings_escape_surface(cx) {
                         this.close_settings(cx);
+                    }
+                    cx.stop_propagation();
+                } else if key == "f"
+                    && modifiers.secondary()
+                    && modifiers.number_of_modifiers() == 1
+                {
+                    // A dialog over the page keeps the keyboard.
+                    if !this.settings_escape_surface_open(cx) {
+                        this.focus_settings_search(window, cx);
                     }
                     cx.stop_propagation();
                 } else if key == "tab" {
@@ -11969,6 +12045,13 @@ impl Shell {
                             .child("Back"),
                         ),
                     )
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(Theme::SPACE_SM))
+                            .pt(px(Theme::SPACE_SM))
+                            .child(search_field),
+                    )
                     .child(div().flex_1().min_h_0().child(nav)),
             )
             .child(
@@ -12003,30 +12086,6 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let cloud_offered = self.state.read(cx).cloud_offered();
-        let section_icon = |item: SettingsSection| match item {
-            SettingsSection::Devices => icons::MONITOR,
-            SettingsSection::Cloud => icons::CLOUD,
-            SettingsSection::Billing => icons::WALLET,
-            SettingsSection::Harnesses => icons::WIDGET,
-            SettingsSection::Tools => icons::LUCIDE_HAMMER,
-            SettingsSection::AgentProfiles => icons::BOT,
-            SettingsSection::Routing => icons::FORK,
-            SettingsSection::CodeReview => icons::CHECKLIST,
-            SettingsSection::Agents => icons::KEY_MINIMALISTIC,
-            SettingsSection::Appearance => icons::TUNING,
-            SettingsSection::Files => icons::FOLDER,
-            SettingsSection::Notifications => icons::BELL,
-            SettingsSection::Voice => icons::MICROPHONE,
-            SettingsSection::Shortcuts => icons::KEYBOARD,
-            SettingsSection::General => icons::SETTINGS,
-            SettingsSection::Appshots => icons::SCREEN_CAPTURE,
-            SettingsSection::Computer => icons::CURSOR,
-            SettingsSection::DeviceHub => icons::SMARTPHONE,
-            SettingsSection::SourceControl => icons::GIT_BRANCH,
-            SettingsSection::Home => icons::HOME,
-            SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
-        };
-        let query = self.settings_search.read(cx).text().to_string();
         settings::widgets::scroll_faded(
             "settings-nav-scroll",
             div()
@@ -12047,18 +12106,10 @@ impl Shell {
                         .flex()
                         .flex_col()
                         .gap(px(2.0))
-                        .child(
-                            popover::search_input_frame(
-                                theme,
-                                self.settings_search.clone().into_any_element(),
-                            )
-                            .mb(px(6.0)),
-                        )
                         .children(
                             SettingsSection::ALL
                                 .into_iter()
                                 .filter(|item| item.shown_in_nav(cloud_offered))
-                                .filter(|item| item.matches(&query))
                                 .map(|item| {
                                     let index = SettingsSection::ALL
                                         .iter()
@@ -12078,7 +12129,7 @@ impl Shell {
                                         motion::mix(theme.text_muted, theme.text, selection_t),
                                         theme.text,
                                     );
-                                    let section_tab = settings::widgets::section_tab(
+                                    settings::widgets::section_tab(
                                         theme,
                                         selected,
                                         selection_t,
@@ -12096,11 +12147,9 @@ impl Shell {
                                     .tab_stop(selected)
                                     .on_key_down(cx.listener(
                                         move |this, event: &gpui::KeyDownEvent, window, cx| {
-                                            let query =
-                                                this.settings_search.read(cx).text().to_string();
                                             let items: Vec<_> = SettingsSection::ALL
                                                 .into_iter()
-                                                .filter(|s| s.shown_in_nav(cloud_offered) && s.matches(&query))
+                                                .filter(|s| s.shown_in_nav(cloud_offered))
                                                 .collect();
                                             let current =
                                                 items.iter().position(|s| *s == item).unwrap_or(0);
@@ -12128,38 +12177,8 @@ impl Shell {
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.open_settings(item, cx)
                                     }))
-                                    .child(
-                                        icon(section_icon(item))
-                                            .size(px(16.0))
-                                            .text_color(tab_text),
-                                    )
-                                    .child(SharedString::from(item.label()));
-                                    // While searching, the rows the query found sit
-                                    // under their section, indented past its icon.
-                                    let hits = item.matching_rows(&query);
-                                    div().flex().flex_col().child(section_tab).children(
-                                        hits.into_iter().map(|title| {
-                                            div()
-                                                .id(SharedString::from(format!(
-                                                    "settings-nav-{}-{title}",
-                                                    item.label()
-                                                )))
-                                                .role(gpui::Role::Button)
-                                                .aria_label(SharedString::from(title))
-                                                .rounded(px(8.0))
-                                                .pl(px(Theme::SPACE_SM + 24.0))
-                                                .pr(px(Theme::SPACE_SM))
-                                                .py(px(4.0))
-                                                .text_size(crate::typography::ui_rems(13.0))
-                                                .text_color(theme.text)
-                                                .cursor_pointer()
-                                                .hover(|s| s.bg(theme.glass_hover()))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.open_settings(item, cx)
-                                                }))
-                                                .child(SharedString::from(title))
-                                        }),
-                                    )
+                                    .child(icon(item.icon()).size(px(16.0)).text_color(tab_text))
+                                    .child(SharedString::from(item.label()))
                                 }),
                         ),
                 ),
@@ -14208,64 +14227,29 @@ impl Shell {
     /// Chat-mode sidebar (spaces overhaul): window-control strip, the Spaces
     /// section (folder + device rows, add-space), the global Active sessions
     /// list, the notice strip, and the UserMenu (§1.6).
-    /// Global connection health, with selected-chat queue and storage status.
-    /// Persistence failures take precedence even when the network is offline.
-    /// No surface,
+    /// Global connection health and any chat's storage failure (see
+    /// [`connection_pill_caption`]). No surface,
     /// no border (v0.2.12 feedback): a bare spinner + faint caption while
     /// reconnecting; an amber dot only when the OS says offline. The
     /// transport error belongs in logs, not the sidebar.
     fn render_connection_pill(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        use zeron_proto::ConnectivityState as S;
-        let conn = self.state.read(cx).connectivity.clone();
-        let selected = self.state.read(cx).selected_chat.as_deref();
-        let chat = conn
-            .chats
-            .iter()
-            .find(|c| Some(c.chat_id.as_str()) == selected);
-        let chat_state = chat.map(|c| c.sync_state);
-        let (label, glyph): (SharedString, AnyElement) = match conn.state {
-            _ if chat_state == Some(zeron_proto::ChatSyncState::StorageError) => (
-                "Changes could not be saved".into(),
-                div()
-                    .size(px(5.0))
-                    .rounded_full()
-                    .bg(theme.warning)
-                    .into_any_element(),
-            ),
-            S::Disabled => return None,
-            S::Connected => {
-                let caption = chat_sync_pill_caption(chat?)?;
-                (
-                    caption.into(),
-                    loaders::mini_mono_spinner(
-                        "chat-sync-spinner",
-                        2.0,
-                        theme.text_muted,
-                        self.sidebar_pane.entity_id(),
-                        cx,
-                    )
-                    .into_any_element(),
-                )
-            }
-            S::Offline => (
-                "Offline — sends are saved".into(),
-                div()
-                    .size(px(5.0))
-                    .rounded_full()
-                    .bg(theme.warning)
-                    .into_any_element(),
-            ),
-            S::Reconnecting => (
-                "Reconnecting…".into(),
-                loaders::mini_mono_spinner(
-                    "connection-spinner",
-                    2.0,
-                    theme.text_muted,
-                    self.sidebar_pane.entity_id(),
-                    cx,
-                )
-                .into_any_element(),
-            ),
+        let (caption, warning) = connection_pill_caption(&self.state.read(cx).connectivity)?;
+        let label: SharedString = caption.into();
+        let glyph = if warning {
+            div()
+                .size(px(5.0))
+                .rounded_full()
+                .bg(theme.warning)
+                .into_any_element()
+        } else {
+            loaders::mini_mono_spinner(
+                "connection-spinner",
+                2.0,
+                theme.text_muted,
+                self.sidebar_pane.entity_id(),
+                cx,
+            )
+            .into_any_element()
         };
         Some(
             crate::motion::fade_in(
@@ -15142,8 +15126,6 @@ impl Shell {
         }
         let from_settings = matches!(self.route, Route::Settings(_));
         if from_settings {
-            self.settings_search
-                .update(cx, |input, cx| input.set_text("", cx));
             self.settings_focus_pending = false;
             self.settings_restore_pending = true;
         }
@@ -15208,12 +15190,12 @@ impl Shell {
                 .tooltip(crate::settings::widgets::text_tooltip(entry.label))
                 .into_any_element();
         }
-        let tooltip: SharedString = match (active, cfg!(target_os = "macos")) {
-            (false, true) => "Settings · ⌘,".into(),
-            (false, false) => "Settings · Ctrl+,".into(),
-            (true, true) => "Close settings · ⌘,".into(),
-            (true, false) => "Close settings · Ctrl+,".into(),
-        };
+        let tooltip: SharedString = format!(
+            "{} · {}",
+            if active { "Close settings" } else { "Settings" },
+            crate::settings::badge_combo("mod-,")
+        )
+        .into();
         button
             .aria_label(if active { "Close settings" } else { "Settings" })
             .aria_toggled(if active {
@@ -16001,6 +15983,10 @@ impl Shell {
         // The folded-breadcrumbs menu floats over the palette; it closes first.
         if self.add_space.is_some() && self.project_crumb_menu.is_open() {
             self.close_project_crumb_menu(cx);
+            return true;
+        }
+        // A typed path gives the crumbs back before the palette closes.
+        if self.add_space_cancel_path_edit(cx) {
             return true;
         }
         if self.add_space.is_some() {
@@ -18563,9 +18549,11 @@ impl Shell {
                     MouseButton::Right,
                     cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                         let chat_id = match surface {
+                            // A pending fork has no chat to act on yet.
                             RightSurface::SideChat(id) => this
                                 .side_chats
                                 .get(&id)
+                                .filter(|tab| tab.fork.is_none())
                                 .and_then(|tab| tab.state.read(cx).selected_chat.clone())
                                 .unwrap_or_default(),
                             _ => String::new(),
@@ -19427,6 +19415,7 @@ fn windows_caption_button(
 /// of the drag strip's event surface (see [`window_control_button`]).
 fn linux_caption_button(
     id: &'static str,
+    label: &'static str,
     icon_path: &'static str,
     close: bool,
     theme: &Theme,
@@ -19451,6 +19440,9 @@ fn linux_caption_button(
         .rounded(px(6.0))
         .cursor_pointer()
         .hover(move |style| style.bg(hover_bg))
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .tooltip(crate::settings::widgets::text_tooltip(label))
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .on_click(move |event, window, cx| {
@@ -19969,6 +19961,14 @@ impl Render for Shell {
                 }),
             )
             .on_action(cx.listener(
+                |this,
+                 action: &crate::pull_request_detail::OpenPullRequestInBrowser,
+                 window,
+                 cx| {
+                    this.browse_chat_pull_request(action.0.clone(), window, cx);
+                },
+            ))
+            .on_action(cx.listener(
                 |this, _: &crate::pull_request_detail::ClosePullRequest, _, cx| {
                     this.close_pull_request(cx)
                 },
@@ -19995,7 +19995,10 @@ impl Render for Shell {
                         this.open_add_space_on_device(&action.device, cx);
                         return;
                     }
-                    this.open_new_session(Some(action.project_id.clone()), cx);
+                    this.open_new_session(
+                        Some(NewSessionTarget::Project(action.project_id.clone())),
+                        cx,
+                    );
                     // Stage after the composer has swapped to the new
                     // session's draft, which runs on the state observation
                     // `open_new_session` just queued. A draft already waiting
@@ -20986,7 +20989,8 @@ impl Render for Shell {
             );
         let root = root.children(crate::browser::inline_frame_end());
         self.render_time = None;
-        root
+        // Wheel notches anywhere in the window glide (Appearance → Motion).
+        crate::smooth_scroll::smooth_scroll(root)
     }
 }
 
@@ -21081,114 +21085,50 @@ mod tests {
     }
 
     #[test]
-    fn settings_search_matches_labels_and_row_keywords() {
-        assert!(SettingsSection::ALL.iter().all(|s| s.matches("")));
-        assert!(SettingsSection::General.matches("Follow"));
-        assert!(SettingsSection::General.matches("steer"));
-        assert!(!SettingsSection::Shortcuts.matches("steer"));
-        assert!(SettingsSection::Appearance.matches("FONT SIZE"));
-        assert!(SettingsSection::Archived.matches("archived"));
-        assert!(!SettingsSection::Files.matches("steer"));
-        assert!(SettingsSection::ALL.iter().all(|s| !s.matches("zzz")));
-    }
+    fn connection_pill_is_global_only() {
+        use zeron_proto::{ChatConnectivity, ChatSyncState as S, Connectivity, ConnectivityState};
 
-    #[test]
-    fn settings_search_lists_the_rows_it_found_under_the_section() {
-        assert!(SettingsSection::Appearance.matching_rows("").is_empty());
-        assert_eq!(
-            SettingsSection::Appearance.matching_rows("them"),
-            vec!["Light theme", "Dark theme"]
-        );
-        assert_eq!(
-            SettingsSection::General.matching_rows("steer"),
-            vec!["Follow-up behavior"]
-        );
-        assert_eq!(
-            SettingsSection::Computer.matching_rows("rail"),
-            vec!["Placement"]
-        );
-        assert_eq!(
-            SettingsSection::Computer.matching_rows("javascript"),
-            vec!["Developer access"]
-        );
-        assert_eq!(
-            SettingsSection::Computer.matching_rows("consent"),
-            vec!["Always-allowed apps"]
-        );
-        // A label-only hit expands nothing; the section row stands alone.
-        assert!(
-            SettingsSection::Archived
-                .matching_rows("archived")
-                .is_empty()
-        );
-        assert!(SettingsSection::SourceControl.matches("commit"));
-        assert_eq!(
-            SettingsSection::SourceControl.matching_rows("commit"),
-            vec!["Instruction", "Default model"]
-        );
-        assert_eq!(
-            SettingsSection::SourceControl.matching_rows("pr chat"),
-            vec!["Chat history", "New chat when idle"]
-        );
-        assert!(
-            SettingsSection::SourceControl
-                .matching_rows("floating")
-                .is_empty()
-        );
-        assert_eq!(
-            SettingsSection::Appshots.matching_rows("capture appshot"),
-            vec!["Hotkey"]
-        );
-        assert!(
-            SettingsSection::Shortcuts
-                .matching_rows("appshot")
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn sidebar_sync_status_waits_for_grace_or_queued_changes() {
-        use zeron_proto::{ChatConnectivity, ChatSyncState as S};
-
-        let mut chat = ChatConnectivity {
-            chat_id: "remote".into(),
-            sync_state: S::Local,
+        let chat = |chat_id: &str, sync_state| ChatConnectivity {
+            chat_id: chat_id.into(),
+            sync_state,
             connected: false,
             delivery_live: false,
-            pending_pushes: 0,
+            pending_pushes: 3,
         };
-        assert_eq!(chat_sync_pill_caption(&chat), None);
-
-        for state in [S::Waiting, S::Connecting, S::Offline] {
-            chat.sync_state = state;
-            chat.connected = true;
-            assert_eq!(chat_sync_pill_caption(&chat), None, "transient {state:?}");
+        // A slow open or a sustained per-chat stall reads in that chat's own
+        // composer and transcript; the sidebar line stays quiet.
+        let mut conn = Connectivity {
+            state: ConnectivityState::Connected,
+            chats: [S::Waiting, S::Connecting, S::Offline, S::Unknown, S::Local]
+                .into_iter()
+                .enumerate()
+                .map(|(i, state)| chat(&format!("chat-{i}"), state))
+                .collect(),
+            ..Connectivity::default()
+        };
+        assert_eq!(connection_pill_caption(&conn), None);
+        conn.state = ConnectivityState::Disabled;
+        assert_eq!(connection_pill_caption(&conn), None);
+        conn.state = ConnectivityState::Reconnecting;
+        assert_eq!(
+            connection_pill_caption(&conn),
+            Some(("Reconnecting…", false))
+        );
+        conn.state = ConnectivityState::Offline;
+        assert_eq!(
+            connection_pill_caption(&conn),
+            Some(("Offline — sends are saved", true))
+        );
+        // A failed local save outranks the network, whichever chat it hit
+        // (not only the selected one).
+        conn.chats.push(chat("background", S::StorageError));
+        for state in [ConnectivityState::Offline, ConnectivityState::Connected] {
+            conn.state = state;
+            assert_eq!(
+                connection_pill_caption(&conn),
+                Some(("Changes could not be saved", true))
+            );
         }
-
-        chat.sync_state = S::Waiting;
-        chat.connected = false;
-        assert_eq!(
-            chat_sync_pill_caption(&chat),
-            Some("Sync queued — changes are saved")
-        );
-        chat.sync_state = S::Connecting;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
-        chat.sync_state = S::Offline;
-        assert_eq!(
-            chat_sync_pill_caption(&chat),
-            Some("Offline — changes are saved")
-        );
-
-        // Real pending pushes remain visible even with a live room.
-        chat.connected = true;
-        chat.pending_pushes = 1;
-        chat.sync_state = S::Waiting;
-        assert_eq!(
-            chat_sync_pill_caption(&chat),
-            Some("Sync queued — changes are saved")
-        );
-        chat.sync_state = S::Connecting;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
     }
 
     #[test]
@@ -23264,12 +23204,14 @@ mod exit_regressions {
                     settings.reduce_motion = crate::motion::ReduceMotion::On;
                     settings.pause_animations_in_background = true;
                 });
+                settings::set_smooth_scrolling(false, cx);
                 // Any shell-owned change (sidebar width, panels) republishes
                 // the working copy; it must not revert the motion choices.
                 shell.schedule_save(cx);
                 let saved = settings::current(cx);
                 assert_eq!(saved.reduce_motion, crate::motion::ReduceMotion::On);
                 assert!(saved.pause_animations_in_background);
+                assert!(!saved.smooth_scrolling);
             })
             .unwrap();
     }
@@ -24144,15 +24086,79 @@ mod exit_regressions {
                     state.apply_spaces(vec![space("one"), space("two")]);
                 });
                 shell.settings.space_filter = None;
-                shell.open_new_session(Some("two".into()), cx);
+                shell.open_new_session(Some(NewSessionTarget::Project("two".into())), cx);
                 let state = shell.state.read(cx);
                 assert!(state.selected_chat.is_none());
                 assert_eq!(state.selected_space.as_deref(), Some("two"));
 
                 // The explicit project wins over a standing filter.
                 shell.settings.space_filter = Some("one".into());
-                shell.open_new_session(Some("two".into()), cx);
+                shell.open_new_session(Some(NewSessionTarget::Project("two".into())), cx);
                 assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("two"));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn new_session_without_a_project_homes_the_canvas_on_that_device(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, cx| {
+                    state.apply_spaces(vec![zeron_proto::Space {
+                        id: "repo".into(),
+                        device_id: "local".into(),
+                        path: "/repo".into(),
+                        name: None,
+                        git_detected: false,
+                        git_checked_at: None,
+                        checkout_id: None,
+                        repository_id: None,
+                        github_repo: None,
+                        created_at: Utc::now(),
+                    }]);
+                    state.select_space(Some("repo".into()), cx);
+                });
+                // The opt-out wins over a standing filter, which the shell
+                // then drops so the first send stays visible.
+                shell.settings.space_filter = Some("repo".into());
+                shell.open_new_session(Some(NewSessionTarget::NoProject("remote".into())), cx);
+                let state = shell.state.read(cx);
+                assert!(state.selected_chat.is_none());
+                assert!(state.no_project);
+                assert!(state.selected_space.is_none());
+                assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
+                shell.on_state_changed(&shell.state.clone(), cx);
+                assert!(shell.settings.space_filter.is_none());
             })
             .unwrap();
     }
@@ -24310,6 +24316,101 @@ mod exit_regressions {
             .unwrap();
         cx.run_until_parked();
         assert!(weak.upgrade().is_none());
+    }
+
+    /// "In-app browser" opens pull requests in a Browser tab beside the
+    /// conversation, from a link or a badge, and in the default browser off a
+    /// session. "Default browser" keeps a clicked link out of Zeron while the
+    /// explicit "Open in Zeron" still opens a Browser tab.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[gpui::test]
+    fn pull_requests_open_in_browser_tabs_when_settings_ask(cx: &mut TestAppContext) {
+        use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
+        let dir = tempfile::tempdir().unwrap();
+        let mut initial = settings::UiSettings::default();
+        initial.pull_request_destination = settings::PullRequestDestination::Browser;
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(initial, dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                shell.active_chat = "first-session".into();
+                shell.state.update(cx, |state, _| {
+                    state.selected_chat = Some("first-session".into())
+                });
+                let mut link = LinkActivation {
+                    target: LinkTarget::new("#1", "https://github.com/a/b/pull/1/files"),
+                    action: LinkAction::Primary,
+                    source_session: Some("first-session".into()),
+                };
+                let shown = |shell: &Shell, cx: &App| {
+                    let RightSurface::Browser(id) = shell.resolved_right_active(cx) else {
+                        panic!("a Browser tab is active");
+                    };
+                    shell.browsers[&id].read(cx).page.url.clone()
+                };
+                assert_eq!(
+                    shell.activate_session_link(&link, window, cx),
+                    LinkOutcome::Internal
+                );
+                assert!(shell.right_pane_open(cx));
+                assert_eq!(
+                    shown(shell, cx).as_deref(),
+                    Some("https://github.com/a/b/pull/1/files")
+                );
+                // A badge: the same Browser tab, beside the conversation.
+                shell.browse_chat_pull_request("https://github.com/c/d/pull/2".into(), window, cx);
+                assert_eq!(
+                    shown(shell, cx).as_deref(),
+                    Some("https://github.com/c/d/pull/2")
+                );
+                assert_eq!(shell.browsers.len(), 2);
+                // "Default browser": a click leaves Zeron, links stay in
+                // Zeron otherwise, and "Open in Zeron" opens a Browser tab.
+                settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                    settings.pull_request_destination = settings::PullRequestDestination::External;
+                });
+                assert!(settings::current(cx).open_web_links_in_zeron);
+                assert_eq!(
+                    shell.activate_session_link(&link, window, cx),
+                    LinkOutcome::External("https://github.com/a/b/pull/1/files".into())
+                );
+                assert_eq!(shell.browsers.len(), 2);
+                link.action = LinkAction::Internal;
+                assert_eq!(
+                    shell.activate_session_link(&link, window, cx),
+                    LinkOutcome::Internal
+                );
+                assert_eq!(shell.browsers.len(), 3);
+                // Off a session, a badge falls back to the default browser.
+                shell.enter_pull_requests_route(cx);
+                shell.browse_chat_pull_request("https://github.com/e/f/pull/3".into(), window, cx);
+                assert_eq!(shell.browsers.len(), 3);
+            })
+            .unwrap();
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("https://github.com/e/f/pull/3")
+        );
     }
 
     /// Encoded destinations open the decoded path, and an absolute
@@ -25747,6 +25848,22 @@ impl Shell {
     pub fn fixture_transcript(&self) -> Entity<crate::transcript::Transcript> {
         self.transcript.clone()
     }
+    /// A session row's click in the sidebar.
+    pub fn fixture_open_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        self.open_chat(chat_id.to_owned(), cx);
+    }
+    /// A side chat's row under its parent.
+    pub fn fixture_open_side_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        self.open_child_chat_tab(chat_id, cx);
+    }
+    /// The session card's "Fork chat".
+    pub fn fixture_fork_chat(&mut self, cx: &mut Context<Self>) {
+        self.create_side_chat(cx);
+    }
+    pub fn fixture_open_browser(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_surfaces_open(true, cx);
+        self.add_browser_surface(Some(url), window, cx);
+    }
 }
 
 #[cfg(test)]
@@ -26118,6 +26235,112 @@ mod settings_modal_regressions {
             (Route::Chat, Some("newer".into()))
         );
         assert_eq!(press(&keymap.new_session), (Route::Chat, None));
+    }
+
+    /// An AZERTY Mac types ⌘& on the key AppKit reads as ⌘1, and ⌘⇧& — which
+    /// gpui reports as a literal ⌘1 — is no shortcut there. Bound in US keys
+    /// only, Jump to session 1 answered the second and not the first.
+    #[gpui::test]
+    fn azerty_jumps_from_the_key_appkit_reads_as_cmd_1(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        let window = cx.add_window(|_, cx| {
+            let mut shell = test_shell(dir.path(), cx);
+            shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(WorkspaceScope::Local);
+                state.local_device_id = Some("local".into());
+                state.chats = ["older", "newer"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, id)| {
+                        serde_json::from_value(serde_json::json!({
+                            "id": id, "title": id, "deviceId": "local", "archived": false,
+                            "createdAt": Utc::now() - chrono::Duration::minutes(10 - ix as i64),
+                        }))
+                        .unwrap()
+                    })
+                    .collect();
+                state.selected_chat = Some("older".into());
+            });
+            shell
+        });
+        // `Shell::new` bound the keymap against the test platform, which has
+        // no layout table; localize it as an AZERTY Mac's `apply_keymap` does.
+        cx.run_until_parked();
+        cx.update(|cx| localize_key_bindings(cx, &settings::azerty_key_equivalents()));
+        let mut press = |combo: &str| {
+            cx.simulate_keystrokes(window.into(), &platform_combo(combo));
+            window
+                .read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone())
+                .unwrap()
+        };
+        assert_eq!(press("mod-1"), Some("older".into()));
+        assert_eq!(press("mod-&"), Some("newer".into()));
+    }
+
+    /// Localizing moves exactly the bindings whose key the layout relocates —
+    /// Zeron's and gpui-base's alike — and keeps the rest, in order.
+    #[gpui::test]
+    fn azerty_keymap_moves_only_relocated_keys(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        let keymap = KeymapConfig::default();
+        cx.update(|cx| {
+            apply_keymap(
+                cx,
+                &keymap,
+                ComposerSendBehavior::default(),
+                Default::default(),
+            )
+        });
+        let azerty = settings::azerty_key_equivalents();
+        let sources = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                cx.key_bindings()
+                    .borrow()
+                    .bindings()
+                    .map(|binding| {
+                        let keys = binding
+                            .keystrokes()
+                            .iter()
+                            .map(|keystroke| keystroke.inner().unparse())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        (binding.action().name(), keys)
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let before = sources(cx);
+        cx.update(|cx| localize_key_bindings(cx, &azerty));
+        let after = sources(cx);
+        assert_eq!(before.len(), after.len());
+        for ((action, us), (localized_action, localized)) in before.iter().zip(&after) {
+            assert_eq!(action, localized_action, "binding order must hold");
+            let expected = us
+                .split(' ')
+                .map(|keystroke| settings::localize_combo(keystroke, &azerty))
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(localized, &expected, "{action}");
+        }
+        let bound = |action: &str| {
+            after
+                .iter()
+                .filter(|(name, _)| *name == action)
+                .map(|(_, keys)| keys.as_str())
+                .collect::<Vec<_>>()
+        };
+        let primary = platform_combo("mod");
+        // Every jump slot shares the action name: slot 1 now sits on &, and
+        // none stays on the literal 1 that AZERTY types only with Shift.
+        let jumps = bound(JumpSession(0).name());
+        assert!(jumps.contains(&format!("{primary}-&").as_str()));
+        assert!(!jumps.contains(&format!("{primary}-1").as_str()));
+        assert!(bound(OpenModelPicker.name()).contains(&format!("{primary}-:").as_str()));
+        assert!(bound(crate::browser::Back.name()).contains(&format!("{primary}-^").as_str()));
+        assert!(bound(ToggleSidebar.name()).contains(&format!("{primary}-b").as_str()));
     }
 
     #[gpui::test]

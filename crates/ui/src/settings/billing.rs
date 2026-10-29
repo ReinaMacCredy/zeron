@@ -16,6 +16,7 @@ use zeron_proto::{BillingLink, BillingPlan, BillingStatus};
 use zeron_rpc::methods;
 
 use crate::popover::{self, Loadable};
+use crate::settings::search::{SearchAnchor, SettingId};
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -491,7 +492,12 @@ impl BillingPage {
                 "Never expire · used once plan credits run out".to_string(),
                 crate::cloud::group_number(extra.floor()),
             ));
-        widgets::section(theme, "Credits", block).into_any_element()
+        widgets::section(
+            theme,
+            "Credits",
+            block.search_anchor(SettingId::Credits).block(),
+        )
+        .into_any_element()
     }
 
     /// The three plans side by side, the current one marked; on a plan,
@@ -625,7 +631,8 @@ impl BillingPage {
                 ),
             );
         }
-        widgets::section(theme, "Plan", block).into_any_element()
+        widgets::section(theme, "Plan", block.search_anchor(SettingId::Plan).block())
+            .into_any_element()
     }
 
     /// One-off packs: how many in one pill (− count +), then Buy.
@@ -645,6 +652,11 @@ impl BillingPage {
                     delta: i32,
                     cx: &mut Context<Self>| {
             let accent = theme.accent;
+            let label = if delta < 0 {
+                "Fewer packs"
+            } else {
+                "More packs"
+            };
             div()
                 .id(id)
                 .flex_none()
@@ -655,11 +667,8 @@ impl BillingPage {
                 .rounded(px(8.0))
                 .tab_index(0)
                 .role(gpui::Role::Button)
-                .aria_label(if delta < 0 {
-                    "Fewer packs"
-                } else {
-                    "More packs"
-                })
+                .aria_label(label)
+                .tooltip(widgets::text_tooltip(label))
                 .focus_visible(move |s| s.border_2().border_color(accent))
                 .when(!enabled, |el| el.opacity(0.35))
                 .when(enabled, |el| {
@@ -742,7 +751,12 @@ impl BillingPage {
                         ),
                 ),
         );
-        widgets::section(theme, "Extra credits", block).into_any_element()
+        widgets::section(
+            theme,
+            "Extra credits",
+            block.search_anchor(SettingId::ExtraCredits).block(),
+        )
+        .into_any_element()
     }
 
     /// Shown while a Stripe page is open: what we're waiting on, and a way
@@ -918,6 +932,7 @@ impl Render for BillingPage {
                 )
                 .fade_overflow_y(&self.scroll.scroll),
             )
+            .child(widgets::page_reveal(&self.scroll.scroll))
             .children(scrollbar)
     }
 }

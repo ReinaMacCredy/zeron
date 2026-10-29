@@ -13462,7 +13462,7 @@ public struct DemoOptions: Equatable, Hashable {
          */transcriptScale: TranscriptScale, streamSpeed: StreamSpeed, 
         /**
          * Repeat the scripted reply 12× (long streaming stress).
-         */longReply: Bool, computerStill: Bool, flakyPages: Bool) {
+         */longReply: Bool, computerStill: Bool = false, flakyPages: Bool = false) {
         self.fixture = fixture
         self.transcriptScale = transcriptScale
         self.streamSpeed = streamSpeed

@@ -26,6 +26,7 @@ use zeron_rpc::methods;
 
 use crate::cloud::{self, CloudAction, ProviderLink};
 use crate::popover::{self, Loadable};
+use crate::settings::search::{SearchAnchor, SettingId};
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -1004,7 +1005,14 @@ impl CloudPage {
         if self.github_only {
             return Some(block.into_any_element());
         }
-        Some(widgets::section(theme, "GitHub", block).into_any_element())
+        Some(
+            widgets::section(
+                theme,
+                "GitHub",
+                block.search_anchor(SettingId::CloudGitHub).block(),
+            )
+            .into_any_element(),
+        )
     }
 
     /// The repositories Cloud sessions can open — the GitHub App's reach —
@@ -1042,6 +1050,7 @@ impl CloudPage {
             .tab_index(0)
             .role(gpui::Role::Button)
             .aria_label("Check repositories again")
+            .tooltip(widgets::text_tooltip("Check repositories again"))
             .cursor_pointer()
             .hover(|style| style.bg(crate::theme::ink(0.05)))
             .when(!refreshing, |el| {
@@ -1148,6 +1157,7 @@ impl CloudPage {
             .tab_index(0)
             .role(gpui::Role::Button)
             .aria_label(format!("Copy GitHub code {}", flow.user_code))
+            .tooltip(widgets::text_tooltip("Copy code"))
             .on_click(cx.listener(|this, _, _, cx| this.copy_github_code(cx)))
             .child(
                 div()
@@ -1308,7 +1318,12 @@ impl CloudPage {
                     ),
             );
         Some(
-            widgets::section(theme, "Usage", block).into_any_element(),
+            widgets::section(
+                theme,
+                "Usage",
+                block.search_anchor(SettingId::CloudUsage).block(),
+            )
+            .into_any_element(),
         )
     }
 }
@@ -1377,6 +1392,7 @@ impl Render for CloudPage {
                 )
                 .fade_overflow_y(&self.scroll.scroll),
             )
+            .child(widgets::page_reveal(&self.scroll.scroll))
             .children(scrollbar)
             .into_any_element()
     }

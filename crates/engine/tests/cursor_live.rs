@@ -83,6 +83,8 @@ fn start(core: &EngineCore, cwd: &std::path::Path, prompt: String) {
                     sandbox: SandboxLevel::DangerFullAccess,
                     permission_mode: zeron_proto::PermissionMode::Full,
                     auto_approve: true,
+                    access: Default::default(),
+                    plan: false,
                     attachments: vec![],
                     worktree: None,
                     branch: None,

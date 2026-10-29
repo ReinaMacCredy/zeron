@@ -566,52 +566,64 @@ impl ShortcutsPage {
 
         let capture_card = widgets::section_card(&theme)
             .mt(px(6.0))
-            .child(row(
-                &theme,
-                true,
-                "Enable Appshots",
-                &format!("Run the capture listener in the background while {app} is open."),
-                Some(self.enable_status()),
-                enable_reset,
-                capture.into_any_element(),
-                None,
-            ))
-            .child(row(
-                &theme,
-                false,
-                "Hotkey",
-                &hotkey_description,
-                None,
-                hotkey_reset,
-                hotkey_control,
-                None,
-            ))
-            .child(row(
-                &theme,
-                false,
-                "Destination",
-                destination_description,
-                None,
-                destination_reset,
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .justify_end()
-                    .gap(px(6.0))
-                    .children(destinations)
-                    .into_any_element(),
-                None,
-            ))
-            .child(row(
-                &theme,
-                false,
-                "Capture sound",
-                "Play a short shutter cue when a window is captured.",
-                None,
-                sound_reset,
-                sound_control.into_any_element(),
-                None,
-            ));
+            .child(
+                row(
+                    &theme,
+                    true,
+                    "Enable Appshots",
+                    &format!("Run the capture listener in the background while {app} is open."),
+                    Some(self.enable_status()),
+                    enable_reset,
+                    capture.into_any_element(),
+                    None,
+                )
+                .search_anchor(SettingId::CaptureAppshots),
+            )
+            .child(
+                row(
+                    &theme,
+                    false,
+                    "Hotkey",
+                    &hotkey_description,
+                    None,
+                    hotkey_reset,
+                    hotkey_control,
+                    None,
+                )
+                .search_anchor(ShortcutId::CaptureAppshot),
+            )
+            .child(
+                row(
+                    &theme,
+                    false,
+                    "Destination",
+                    destination_description,
+                    None,
+                    destination_reset,
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .justify_end()
+                        .gap(px(6.0))
+                        .children(destinations)
+                        .into_any_element(),
+                    None,
+                )
+                .search_anchor(SettingId::AppshotDestination),
+            )
+            .child(
+                row(
+                    &theme,
+                    false,
+                    "Capture sound",
+                    "Play a short shutter cue when a window is captured.",
+                    None,
+                    sound_reset,
+                    sound_control.into_any_element(),
+                    None,
+                )
+                .search_anchor(SettingId::AppshotSound),
+            );
 
         let mut permissions_card = widgets::section_card(&theme).mt(px(6.0));
         let panes: &[(PermissionPane, &str)] = if capabilities.platform == AppshotPlatform::MacOs {
@@ -619,7 +631,7 @@ impl ShortcutsPage {
         } else {
             &APPSHOT_PANES[1..]
         };
-        for element in permission_guide::permission_rows(
+        for (element, (pane, _)) in permission_guide::permission_rows(
             self,
             "appshot",
             panes,
@@ -627,8 +639,21 @@ impl ShortcutsPage {
             &theme,
             window,
             cx,
-        ) {
-            permissions_card = permissions_card.child(element);
+        )
+        .into_iter()
+        .zip(panes)
+        {
+            permissions_card = permissions_card.child(match pane {
+                PermissionPane::ScreenRecording => element
+                    .search_anchor(SettingId::WindowCapture)
+                    .into_any_element(),
+                PermissionPane::Accessibility => element
+                    .search_anchor(SettingId::ApplicationText)
+                    .into_any_element(),
+                PermissionPane::InputMonitoring => element
+                    .search_anchor(SettingId::InputMonitoring)
+                    .into_any_element(),
+            });
         }
         let rechecking = self.permissions.recheck.is_some();
         let mut recheck = outline_button(&theme)
@@ -652,16 +677,19 @@ impl ShortcutsPage {
         } else {
             recheck = recheck.child("Recheck permissions");
         }
-        permissions_card = permissions_card.child(row(
-            &theme,
-            false,
-            "Permission status",
-            "Grant each permission with the steps above. If you take longer than 10 minutes, press Grant again.",
-            self.permissions.notice.clone(),
-            None,
-            recheck.into_any_element(),
-            None,
-        ));
+        permissions_card = permissions_card.child(
+            row(
+                &theme,
+                false,
+                "Permission status",
+                "Grant each permission with the steps above. If you take longer than 10 minutes, press Grant again.",
+                self.permissions.notice.clone(),
+                None,
+                recheck.into_any_element(),
+                None,
+            )
+            .search_anchor(SettingId::AppshotPermissions),
+        );
 
         let customized = non_default
             || self.appshots_enabled
@@ -775,6 +803,7 @@ impl ShortcutsPage {
                             ),
                     )).fade_overflow_y(&self.scroll.scroll),
             )
+            .child(widgets::page_reveal(&self.scroll.scroll))
             .children(scrollbar)
             .into_any_element()
     }

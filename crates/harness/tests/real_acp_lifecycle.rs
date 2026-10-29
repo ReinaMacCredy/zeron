@@ -34,6 +34,7 @@ async fn live_run(cancel: bool) {
         model_options: serde_json::Map::new(), cwd: cwd.path().display().to_string(),
         sandbox: SandboxLevel::WorkspaceWrite, auto_approve: true,
         permission_mode: zeron_proto::PermissionMode::Full,
+        access: Default::default(), plan: false,
         attachments: Vec::new(), worktree: None, branch: None, resume: None,
         forked_at: None,
         computer_control: false,

@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};
 use std::sync::{Arc, Mutex};
-use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SteeringMode,
+    SteeringMode, ToolCall,
 };
 use zeron_rpc::methods;
 
@@ -201,6 +201,8 @@ async fn fork_is_frozen_durable_idempotent_and_has_an_independent_provider_sessi
                 cwd: "/tmp".into(),
                 sandbox: SandboxLevel::WorkspaceWrite,
                 auto_approve: true,
+                access: Default::default(),
+                plan: false,
                 resume: None,
                 attachments: vec![],
                 worktree: None,
@@ -428,6 +430,138 @@ async fn forking_a_side_chat_can_land_as_a_sibling_under_the_main_chat() {
     assert_eq!(nested.created_by_chat_id.as_deref(), Some("side"));
 }
 
+/// A subagent still running in the source keeps running, and reporting,
+/// there only: its copied chip settles `failed` with its ref intact, and a
+/// copied question settles answered. The source keeps both as they are.
+#[tokio::test]
+async fn a_fork_settles_the_running_subagent_chips_it_copies() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(
+        dir.path(),
+        Arc::new(HarnessRegistry::new()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    core.workspace
+        .create_chat("main", None, Some(&core.device_id), None, None)
+        .unwrap();
+    let chip = |id: &str, status| MessagePart::Tool {
+        id: id.into(),
+        call: ToolCall::Unknown {
+            name: "Agent: scout".into(),
+            input: None,
+        },
+        is_error: false,
+        resolved: true,
+        output: None,
+        diff: None,
+        output_ref: None,
+        output_bytes: None,
+        diff_ref: None,
+        diff_stats: None,
+        subagent_ref: Some(format!("main--sub--{id}")),
+        subagent_status: Some(status),
+        subagent_tail: None,
+        delegate_route: None,
+        html_render: None,
+    };
+    core.doc_host
+        .open("main")
+        .unwrap()
+        .doc()
+        .push_message(&SessionMessageEntry {
+            parts: vec![
+                chip("running", SubagentStatus::Running),
+                chip("done", SubagentStatus::Done),
+                MessagePart::Input {
+                    id: "a1-input".into(),
+                    request_id: "q-1".into(),
+                    questions: vec![zeron_proto::UserInputQuestion {
+                        approval: false,
+                        id: "q1".into(),
+                        header: "Pick".into(),
+                        question: "Which one?".into(),
+                        options: vec!["a".into(), "b".into()],
+                        prefill: None,
+                        multiline: false,
+                        multi_select: false,
+                        kind: None,
+                    }],
+                    resolved: false,
+                    answers: None,
+                    asked_at_ms: None,
+                    answered_at_ms: None,
+                },
+            ],
+            ..message("a1", MessageRole::Assistant, "", MessageStatus::Complete)
+        })
+        .unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            methods::FORK_SIDE_CHAT,
+            serde_json::json!({ "chatId": "side", "sourceChatId": "main" }),
+        )
+        .await
+        .unwrap();
+    // Each chip's (subagentRef, subagentStatus), then each question's
+    // (`resolved`, `answers`).
+    let settled = |chat: &str| {
+        let parts: Vec<_> = core
+            .doc_host
+            .open(chat)
+            .unwrap()
+            .doc()
+            .read_entries()
+            .unwrap()
+            .into_iter()
+            .flat_map(|e| e.parts)
+            .collect();
+        let chips: Vec<_> = parts
+            .iter()
+            .filter_map(|p| match p {
+                MessagePart::Tool {
+                    subagent_ref,
+                    subagent_status,
+                    ..
+                } => Some((subagent_ref.clone(), *subagent_status)),
+                _ => None,
+            })
+            .collect();
+        let questions: Vec<_> = parts
+            .iter()
+            .filter_map(|p| match p {
+                MessagePart::Input {
+                    resolved, answers, ..
+                } => Some((*resolved, answers.clone())),
+                _ => None,
+            })
+            .collect();
+        (chips, questions)
+    };
+    let chips = |first| {
+        vec![
+            (Some("main--sub--running".to_owned()), Some(first)),
+            (
+                Some("main--sub--done".to_owned()),
+                Some(SubagentStatus::Done),
+            ),
+        ]
+    };
+    // The fork's copy of the open question reads closed unanswered; the
+    // source's stays open.
+    assert_eq!(
+        settled("side"),
+        (chips(SubagentStatus::Failed), vec![(true, Some(vec![]))])
+    );
+    assert_eq!(
+        settled("main"),
+        (chips(SubagentStatus::Running), vec![(false, None)])
+    );
+    core.shutdown().await;
+}
+
 /// One turn through the engine; returns the request the provider received.
 async fn side_turn(
     core: &EngineCore,
@@ -457,6 +591,8 @@ async fn side_turn(
                 cwd: "/tmp".into(),
                 sandbox: SandboxLevel::WorkspaceWrite,
                 auto_approve: true,
+                access: Default::default(),
+                plan: false,
                 resume,
                 attachments: vec![],
                 worktree: None,
@@ -671,6 +807,8 @@ async fn warm_side_chat_sends_owed_fork_history_once() {
         cwd: "/tmp".into(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         resume: None,
         attachments: vec![],
         worktree: None,
@@ -862,6 +1000,8 @@ async fn orphaned_history_steer_still_owes_the_history() {
         cwd: "/tmp".into(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         resume: None,
         attachments: vec![],
         worktree: None,
@@ -924,6 +1064,129 @@ async fn orphaned_history_steer_still_owes_the_history() {
     assert_eq!(
         doc.doc().fork_history_session().as_deref(),
         Some("drop-session")
+    );
+    core.shutdown().await;
+}
+
+/// Native subagents off is the routing native policy Off, which reaches
+/// every chat: delegation nests (delegate_task), so a side chat and a chat
+/// whose row is only claimed also launch without the provider's subagent
+/// tools and are told to delegate through Zeron.
+#[tokio::test]
+async fn native_subagents_off_reaches_side_chats_and_claimed_chats_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Arc::new(HarnessRegistry::new());
+    registry.register(Arc::new(
+        zeron_harness::ClaudeHarness::new().with_executable(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../harness/tests/fixtures/fake-claude.sh"),
+        ),
+    ));
+    let core =
+        EngineCore::assemble(dir.path(), registry.clone(), HarnessId::ClaudeCode, None).unwrap();
+    // A served IPC port: runs carry Zeron's own MCP server.
+    core.sessions.set_tool_server_port(27699);
+    registry
+        .set_native_subagents(HarnessId::ClaudeCode, false)
+        .unwrap();
+    // Per chat: the init frame's tools, then the fake CLI's reply naming
+    // its Zeron server's mode.
+    let mut launched = Vec::new();
+    // `None`: no createChat yet, the run claims the row.
+    for (chat, parent) in [
+        ("main", Some(None)),
+        ("side", Some(Some("main"))),
+        ("claimed", None),
+    ] {
+        match parent {
+            Some(parent) => core
+                .workspace
+                .create_chat_from(
+                    chat,
+                    None,
+                    Some(&core.device_id),
+                    None,
+                    Some("/tmp".into()),
+                    parent,
+                )
+                .unwrap(),
+            None => core.workspace.claim_chat(chat, Some("/tmp")).unwrap(),
+        }
+        // Titled up front: no title run.
+        core.workspace.rename_chat(chat, chat).unwrap();
+        core.sessions
+            .dispatch(
+                chat,
+                HarnessId::ClaudeCode,
+                RunRequest {
+                    mcp: None,
+                    prompt: "scenario:native-subagents".into(),
+                    harness: Some(HarnessId::ClaudeCode),
+                    model: None,
+                    reasoning: None,
+                    model_options: Default::default(),
+                    cwd: "/tmp".into(),
+                    sandbox: SandboxLevel::WorkspaceWrite,
+                    permission_mode: zeron_proto::PermissionMode::Full,
+                    auto_approve: true,
+                    access: zeron_proto::PermissionMode::Full.access(),
+                    plan: false,
+                    resume: None,
+                    attachments: vec![],
+                    worktree: None,
+                    branch: None,
+                    forked_at: None,
+                    computer_control: false,
+                    disabled_tools: Vec::new(),
+                    env: Default::default(),
+                },
+                Some(format!("{chat}-u1")),
+            )
+            .await
+            .unwrap();
+        let doc = core.doc_host.open(chat).unwrap();
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let reply = doc
+                    .doc()
+                    .read_entries()
+                    .unwrap()
+                    .into_iter()
+                    .filter(|e| {
+                        e.role == MessageRole::Assistant
+                            && e.status == Some(MessageStatus::Complete)
+                    })
+                    .flat_map(|e| e.parts)
+                    .find_map(|p| match p {
+                        MessagePart::Text { text, .. } => Some(text),
+                        _ => None,
+                    });
+                if let Some(reply) = reply {
+                    break reply;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the turn completes");
+        let (journal, _) = core.sessions.subscribe(chat, 0).unwrap();
+        let tools = journal
+            .into_iter()
+            .find_map(|e| match e.event {
+                AgentEvent::SessionStarted { tools, .. } => Some(tools),
+                _ => None,
+            })
+            .expect("the session starts");
+        launched.push((tools, reply));
+    }
+    let tools = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        launched,
+        [
+            (tools(&["Bash"]), "side chats only".to_string()),
+            (tools(&["Bash"]), "side chats only".to_string()),
+            (tools(&["Bash"]), "side chats only".to_string()),
+        ]
     );
     core.shutdown().await;
 }

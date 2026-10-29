@@ -454,25 +454,27 @@ impl Shell {
         options.media = Some(MediaUi {
             diagram: None,
             image: Some(Rc::new(
-                |image, id, theme| match crate::whats_new::picture(&image.source) {
-                    Some(picture) => div()
-                        .id(id)
-                        .w_full()
-                        .aspect_ratio(picture.aspect)
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(theme.border)
-                        .child(
-                            img(picture.image.clone())
-                                .size_full()
-                                .rounded(px(7.0))
-                                .object_fit(ObjectFit::Cover),
-                        )
-                        .into_any_element(),
-                    None => div()
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(image.alt.clone()))
-                        .into_any_element(),
+                |image, id, theme| {
+                    Some(match crate::whats_new::picture(&image.source) {
+                        Some(picture) => div()
+                            .id(id)
+                            .w_full()
+                            .aspect_ratio(picture.aspect)
+                            .rounded(px(8.0))
+                            .border_1()
+                            .border_color(theme.border)
+                            .child(
+                                img(picture.image.clone())
+                                    .size_full()
+                                    .rounded(px(7.0))
+                                    .object_fit(ObjectFit::Cover),
+                            )
+                            .into_any_element(),
+                        None => div()
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(image.alt.clone()))
+                            .into_any_element(),
+                    })
                 },
             )),
         });

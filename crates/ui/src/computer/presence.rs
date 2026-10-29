@@ -245,7 +245,7 @@ pub fn chat_glyph(
             .flex_none()
             .size(px(size))
             .child(
-                crate::icons::icon(crate::icons::CURSOR)
+                crate::icons::icon(crate::icons::COMPUTER_CURSOR)
                     .size(px(size))
                     .text_color(color.opacity(opacity)),
             )

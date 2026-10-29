@@ -462,17 +462,21 @@ impl DemoHost {
                     let _ =
                         core.write(|doc| doc.resolve_input(&request_id, Some(&answers), now_ms()));
                     missions::input_answered(&client, chat_id, &request_id);
-                    let steps = if consent {
-                        transcripts::consent_answered(zeron_proto::computer::cards::consent_outcome(
-                            true,
-                            Some(&answers),
-                        ))
+                    if answers.is_empty() {
+                        self.set_status(&client, chat_id, SessionStatus::Idle, None);
                     } else {
-                        let labels: Vec<String> =
-                            answers.into_iter().flat_map(|a| a.labels).collect();
-                        transcripts::answered(&labels)
-                    };
-                    self.spawn_turn(chat_id.to_owned(), None, steps, None);
+                        let steps = if consent {
+                            transcripts::consent_answered(zeron_proto::computer::cards::consent_outcome(
+                                true,
+                                Some(&answers),
+                            ))
+                        } else {
+                            let labels: Vec<String> =
+                                answers.into_iter().flat_map(|a| a.labels).collect();
+                            transcripts::answered(&labels)
+                        };
+                        self.spawn_turn(chat_id.to_owned(), None, steps, None);
+                    }
                 }
             }
         }

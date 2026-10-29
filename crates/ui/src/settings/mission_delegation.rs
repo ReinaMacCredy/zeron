@@ -3,6 +3,7 @@ use zeron_engine::registry::DelegationSettings;
 use zeron_rpc::methods;
 
 use crate::popover::Loadable;
+use crate::settings::search::{SearchAnchor, SettingId};
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -156,7 +157,8 @@ impl DelegationCard {
 impl Render for DelegationCard {
     fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
-        let card = widgets::section_card(&theme).child(Self::mission_row(&theme, cx));
+        let card = widgets::section_card(&theme)
+            .child(Self::mission_row(&theme, cx).search_anchor(SettingId::ChatMission));
         let Some(settings) = self.settings.ready().copied() else {
             let note = match &self.settings {
                 Loadable::Error(error) => error.clone(),

@@ -1466,6 +1466,8 @@ fn phone_stops_resumes_and_starts_supervisors() {
                 profile_id: None,
                 instance_id: None,
                 disabled_tools: Vec::new(),
+                access: Default::default(),
+                plan: false,
             }),
         ))
         .unwrap();
@@ -1714,6 +1716,8 @@ fn a_new_chat_draft_takes_and_drops_a_profile() {
         profile_id: None,
         instance_id: None,
         disabled_tools: Vec::new(),
+        access: Default::default(),
+        plan: false,
     };
     let rows = rt
         .block_on(client.draft_profile_rows(&device, draft.clone()))

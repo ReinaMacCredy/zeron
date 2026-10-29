@@ -44,6 +44,15 @@
 //!   (`form.created`, reply `POST /api/session/{id}/form/{formID}/reply`
 //!   with `{answer:{q0:..}}`; verified live against 2.0.24), folded into
 //!   the same question flow.
+//! - permission requests (`permission.asked`; `permission` + `patterns` on
+//!   1.x, `action` + `resources` on 2.x) are answered `once` under the Full
+//!   permission mode. Auto and Ask add `ask` rules to the server's inline
+//!   config ([`access_config`]), since opencode's defaults allow everything,
+//!   and put each request they do not cover to the person: yes is `once`,
+//!   anything else `reject` (verified live, 1.19.4).
+//! - plan mode is opencode's read-only `plan` agent: 1.x names it on each
+//!   prompt (`agent`; a prompt without one runs the default agent, verified
+//!   live, 1.19.4), 2.x sets it on the session (`/api/session/{id}/agent`).
 //!
 //! Failure surfacing (the #169 class): a dying provider is VISIBLE here —
 //! `session.status{type:"retry", attempt, message}` streams per attempt.
@@ -72,9 +81,9 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AgentEvent, Compaction, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice,
-    ReasoningLevel, RunRequest, SlashCommand, SlashCommandKind, SteeringMode, TodoItem, TodoStatus,
-    ToolCall, UserInputAnswer, UserInputQuestion,
+    AccessMode, AgentEvent, Compaction, DoneStatus, HarnessId, Model, ModelOption,
+    ModelOptionChoice, ReasoningLevel, RunRequest, SlashCommand, SlashCommandKind, SteeringMode,
+    TodoItem, TodoStatus, ToolCall, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::process::{Child, Command, Stdio};
@@ -444,22 +453,34 @@ impl OpencodeHarness {
         cwd: Option<&str>,
         mcp: Option<&zeron_proto::McpServer>,
     ) -> Result<Server, HarnessError> {
-        self.server_with_env(cwd, mcp, &Default::default()).await
+        self.server_with_env(cwd, mcp, &Default::default(), AccessMode::FullAccess)
+            .await
     }
 
     /// [`Self::server`] for a run: the host-resolved run environment
-    /// ([`RunRequest::env`]) rides the spawned `opencode serve`.
+    /// ([`RunRequest::env`]) rides the spawned `opencode serve`, with the
+    /// permission rules of its access mode.
     async fn server_with_env(
         &self,
         cwd: Option<&str>,
         mcp: Option<&zeron_proto::McpServer>,
         run_env: &std::collections::BTreeMap<String, String>,
+        access: AccessMode,
     ) -> Result<Server, HarnessError> {
         if let Some(base) = &self.base_url {
             return Ok(Server::attached(base.clone()));
         }
         let exe = self.resolve_executable()?;
-        Server::spawn_with_env(&exe, &self.launch, cwd, self.startup_timeout, mcp, run_env).await
+        Server::spawn_with_env(
+            &exe,
+            &self.launch,
+            cwd,
+            self.startup_timeout,
+            mcp,
+            run_env,
+            access,
+        )
+        .await
     }
 
     /// One short-lived server answers both discovery calls. Also primes the
@@ -558,12 +579,24 @@ impl Harness for OpencodeHarness {
     /// The model and effort ride each prompt (1.x) or are set on the
     /// session (2.x), so a change applies from the next prompt without a new
     /// server. Clearing one back to the default cannot be expressed that way.
-    /// The permission mode is fixed when the run starts.
+    /// Plan mode is opencode's `plan` agent, named on the prompt (1.x) or
+    /// set on the session (2.x), so it too changes in place. The permission
+    /// mode does not: its permission rules are read when the server starts.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
             && live.permission_mode == next.permission_mode
             && (next.model.is_some() || live.model.is_none())
             && (next.reasoning.is_some() || live.reasoning.is_none())
+    }
+    /// Full access approves every permission request, as every run did
+    /// before modes; the others add `ask` rules to the server's config so
+    /// opencode raises what they ask about (its defaults allow everything),
+    /// and put each of those to the person.
+    fn access_modes(&self) -> &[AccessMode] {
+        &AccessMode::ALL
+    }
+    fn supports_plan(&self) -> bool {
+        true
     }
     fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.model == next.model
@@ -762,7 +795,12 @@ impl OpencodeHarness {
         request.prompt = zeron_proto::invocation::harness_prompt(&request.prompt, self.id());
         let cwd = (!request.cwd.is_empty()).then(|| request.cwd.clone());
         let server = self
-            .server_with_env(cwd.as_deref(), request.mcp.as_ref(), &request.env)
+            .server_with_env(
+                cwd.as_deref(),
+                request.mcp.as_ref(),
+                &request.env,
+                access(&request),
+            )
             .await?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
@@ -799,6 +837,8 @@ struct Server {
     /// Wire generation, resolved once via the health endpoints.
     protocol: tokio::sync::OnceCell<Protocol>,
     version: tokio::sync::OnceCell<ServerVersion>,
+    /// Keeps preview discovery off our own server's port while it lives.
+    _port: Option<crate::agent_ports::Reservation>,
 }
 
 /// The attached server's wire generation: the 1.x "v1" global namespace
@@ -902,6 +942,7 @@ impl Server {
             stderr_tail: crate::StderrTail::default(),
             protocol: tokio::sync::OnceCell::new(),
             version: tokio::sync::OnceCell::new(),
+            _port: None,
         }
     }
 
@@ -928,13 +969,23 @@ impl Server {
         startup: Duration,
         mcp: Option<&zeron_proto::McpServer>,
     ) -> Result<Self, HarnessError> {
-        Self::spawn_with_env(exe, launch, cwd, startup, mcp, &Default::default()).await
+        Self::spawn_with_env(
+            exe,
+            launch,
+            cwd,
+            startup,
+            mcp,
+            &Default::default(),
+            AccessMode::FullAccess,
+        )
+        .await
     }
 
     /// Spawn `opencode serve` on a free loopback port with a per-run Basic
     /// password, and wait for a generation-bearing health answer (which
     /// also resolves [`Protocol`]). `run_env` is the host-resolved run
-    /// environment ([`RunRequest::env`]).
+    /// environment ([`RunRequest::env`]); `access` adds its permission
+    /// rules ([`access_config`]).
     ///
     /// Every opencode process shares one SQLite database; a server booting
     /// while another migrates or checkpoints it can exit with "database is
@@ -950,13 +1001,25 @@ impl Server {
         startup: Duration,
         mcp: Option<&zeron_proto::McpServer>,
         run_env: &std::collections::BTreeMap<String, String>,
+        access: AccessMode,
     ) -> Result<Self, HarnessError> {
-        // Known up front (cached per binary): it picks the MCP config shape
-        // and which health endpoints to probe first.
+        // Known up front (cached per binary): it picks the MCP and
+        // permission config shapes and which health endpoints to probe first.
         let version = opencode_version(exe, launch).await;
         let mut attempt = 0;
         loop {
-            match Self::spawn_once(exe, launch, cwd, startup, mcp, run_env, version.as_ref()).await {
+            match Self::spawn_once(
+                exe,
+                launch,
+                cwd,
+                startup,
+                mcp,
+                run_env,
+                access,
+                version.as_ref(),
+            )
+            .await
+            {
                 Err(SpawnFailure::Retryable(error)) if attempt < SPAWN_RETRIES => {
                     attempt += 1;
                     tracing::warn!(
@@ -982,6 +1045,7 @@ impl Server {
         startup: Duration,
         mcp: Option<&zeron_proto::McpServer>,
         run_env: &std::collections::BTreeMap<String, String>,
+        access: AccessMode,
         version: Option<&semver::Version>,
     ) -> Result<Self, SpawnFailure> {
         let fatal = SpawnFailure::Fatal;
@@ -1008,22 +1072,39 @@ impl Server {
         crate::compose_child_path(&mut cmd, exe);
         launch.apply(&mut cmd, None);
         crate::apply_run_env(&mut cmd, run_env);
-        if let Some(mcp) = mcp {
+        let restricted = !access.is_full_access();
+        if mcp.is_some() || restricted {
             // The config shape differs by generation. If even the cold probe
-            // can't tell, run without the Zeron MCP server rather than fail.
+            // can't tell, run without the Zeron MCP server rather than fail,
+            // but never without the rules a restricted mode relies on: the
+            // run would do unasked what the person chose to approve.
             match preferred {
                 Some(protocol) => {
                     // Set after the run env, merging into its inline config
                     // (the user's layer for this run) rather than replacing it.
-                    let inherited = run_env
+                    let mut inline = run_env
                         .get("OPENCODE_CONFIG_CONTENT")
                         .or_else(|| launch.env.get("OPENCODE_CONFIG_CONTENT"))
                         .cloned()
                         .or_else(|| std::env::var("OPENCODE_CONFIG_CONTENT").ok());
-                    cmd.env(
-                        "OPENCODE_CONFIG_CONTENT",
-                        mcp_config(inherited.as_deref(), mcp, protocol).map_err(fatal)?,
-                    );
+                    if let Some(mcp) = mcp {
+                        inline = Some(mcp_config(inline.as_deref(), mcp, protocol).map_err(fatal)?);
+                    }
+                    if restricted {
+                        inline = Some(
+                            access_config(inline.as_deref(), access, protocol).map_err(fatal)?,
+                        );
+                    }
+                    if let Some(inline) = inline {
+                        cmd.env("OPENCODE_CONFIG_CONTENT", inline);
+                    }
+                }
+                None if restricted => {
+                    return Err(fatal(HarnessError::Protocol(format!(
+                        "Could not tell which opencode version is installed, so {} cannot \
+                         be applied; choose Full access or check the opencode install",
+                        access.label()
+                    ))));
                 }
                 None => tracing::warn!(
                     binary_path = %exe.display(),
@@ -1113,6 +1194,7 @@ impl Server {
             stderr_tail,
             protocol: tokio::sync::OnceCell::new(),
             version: tokio::sync::OnceCell::new(),
+            _port: Some(crate::agent_ports::reserve(port)),
         };
 
         // Readiness: the server binds a few seconds into the process's life
@@ -1444,6 +1526,7 @@ impl Server {
             stderr_tail: crate::StderrTail::default(),
             protocol: self.protocol.clone(),
             version: self.version.clone(),
+            _port: None,
         }
     }
 
@@ -2145,11 +2228,14 @@ async fn run_session(session: Session) {
     let directory = (!request.cwd.is_empty()).then(|| request.cwd.clone());
     let dir = directory.as_deref();
 
-    let agent = request
-        .model_options
-        .get("agent")
-        .and_then(Value::as_str)
-        .filter(|a| !a.is_empty());
+    // Plan mode as of the live prompt: 1.x names the plan agent on each
+    // prompt, 2.x holds it on the session (and keeps it there across runs).
+    let mut plan = request.plan;
+    let agent = if plan {
+        Some(PLAN_AGENT)
+    } else {
+        chosen_agent(&request)
+    };
 
     // ---- session create/resume -------------------------------------------
     let setup = async {
@@ -2163,6 +2249,12 @@ async fn run_session(session: Session) {
                             .and_then(Value::as_str)
                             .unwrap_or(resume)
                             .to_owned();
+                        // A session a plan-mode run left on the plan agent
+                        // goes back to the default one.
+                        let agent = agent.or_else(|| {
+                            (info.get("agent").and_then(Value::as_str) == Some(PLAN_AGENT))
+                                .then_some(DEFAULT_AGENT)
+                        });
                         if server.protocol().await == Protocol::V2
                             && let Some(agent) = agent
                         {
@@ -2344,6 +2436,7 @@ async fn run_session(session: Session) {
         TurnSpec {
             model: model.as_ref(),
             variant: variant.as_deref(),
+            plan,
             attachments: &request.attachments,
             one_shot,
         },
@@ -2474,7 +2567,7 @@ async fn run_session(session: Session) {
                 }
                 let steer = texts.join("\n\n");
                 let adopted = match config {
-                    Some(next) => adopt_config(&server, &session_id, dir, &next)
+                    Some(next) => adopt_config(&server, &session_id, dir, &next, &mut plan)
                         .await
                         .map(|selection| (model, variant) = selection),
                     None => Ok(()),
@@ -2494,6 +2587,7 @@ async fn run_session(session: Session) {
                         TurnSpec {
                             model: model.as_ref(),
                             variant: variant.as_deref(),
+                            plan,
                             attachments: &attachments,
                             one_shot: None,
                         },
@@ -2884,9 +2978,11 @@ async fn run_session(session: Session) {
                                 next_assistant_message_id: Some(next),
                             }).await;
                             let adopted = match &steer.config {
-                                Some(next) => adopt_config(&server, &session_id, dir, next)
-                                    .await
-                                    .map(|selection| (model, variant) = selection),
+                                Some(next) => {
+                                    adopt_config(&server, &session_id, dir, next, &mut plan)
+                                        .await
+                                        .map(|selection| (model, variant) = selection)
+                                }
                                 None => Ok(()),
                             };
                             delivery = tokio_util::sync::CancellationToken::new();
@@ -2904,6 +3000,7 @@ async fn run_session(session: Session) {
                                     TurnSpec {
                                         model: model.as_ref(),
                                         variant: variant.as_deref(),
+                                        plan,
                                         attachments: &steer.attachments,
                                         one_shot: None,
                                     },
@@ -3278,25 +3375,54 @@ fn model_selection(
     (model, variant)
 }
 
-/// Adopt `next`'s model and effort for the prompts that follow: 1.x carries
-/// them on each prompt, 2.x sets them on the session first. The catalog is
-/// fetched again here rather than held for the session's life.
+/// Adopt `next`'s model, effort and plan mode for the prompts that follow:
+/// 1.x carries them on each prompt, 2.x sets them on the session first —
+/// leaving plan mode for the agent `next` chose, else the default one. The
+/// catalog is fetched again here rather than held for the session's life.
 async fn adopt_config(
     server: &Server,
     session_id: &str,
     dir: Option<&str>,
     next: &RunRequest,
+    plan: &mut bool,
 ) -> Result<(Option<(String, String)>, Option<String>), HarnessError> {
     let providers = server.provider_catalog(dir).await.unwrap_or_default();
     let (model, variant) = model_selection(&providers, next);
-    if server.protocol().await == Protocol::V2
-        && let Some((provider, model_id)) = &model
-    {
+    let v2 = server.protocol().await == Protocol::V2;
+    if v2 && let Some((provider, model_id)) = &model {
         server
             .set_model(session_id, provider, model_id, variant.as_deref(), dir)
             .await?;
     }
+    if v2 && next.plan != *plan {
+        let agent = if next.plan {
+            PLAN_AGENT
+        } else {
+            chosen_agent(next).unwrap_or(DEFAULT_AGENT)
+        };
+        server
+            .post_json(
+                &format!("/api/session/{session_id}/agent"),
+                dir,
+                &json!({ "agent": agent }),
+            )
+            .await?;
+    }
+    *plan = next.plan;
     Ok((model, variant))
+}
+
+/// opencode's read-only planning agent, and the agent it hands back to.
+const PLAN_AGENT: &str = "plan";
+const DEFAULT_AGENT: &str = "build";
+
+/// The agent picked in the model's Agent option (2.x), if any.
+fn chosen_agent(request: &RunRequest) -> Option<&str> {
+    request
+        .model_options
+        .get("agent")
+        .and_then(Value::as_str)
+        .filter(|a| !a.is_empty())
 }
 
 fn pick_variant(
@@ -3432,6 +3558,9 @@ fn mime_for(path: &str) -> &'static str {
 struct TurnSpec<'a> {
     model: Option<&'a (String, String)>,
     variant: Option<&'a str>,
+    /// Plan mode: 1.x names the plan agent on the prompt or command (2.x
+    /// set it on the session).
+    plan: bool,
     attachments: &'a [String],
     one_shot: Option<&'a str>,
 }
@@ -3483,10 +3612,13 @@ async fn post_prompt(
     let TurnSpec {
         model,
         variant,
+        plan,
         attachments,
         one_shot,
     } = spec;
     let protocol = server.protocol().await;
+    // A prompt or command naming no agent runs the default one.
+    let agent = (plan && protocol == Protocol::V1).then_some(PLAN_AGENT);
     if let Some((name, arguments)) =
         native_command_request(prompt, commands, native_command_selected)?
     {
@@ -3497,7 +3629,7 @@ async fn post_prompt(
             ));
         }
         // 1.x names the args `arguments`; 2.x `text`.
-        let (path, cmd_body) = match protocol {
+        let (path, mut cmd_body) = match protocol {
             Protocol::V1 => (
                 format!("/session/{session_id}/command"),
                 json!({ "command": name, "arguments": arguments }),
@@ -3507,6 +3639,10 @@ async fn post_prompt(
                 command_body_v2(server.version.get(), name, &arguments, attachments),
             ),
         };
+        // A command's own configured agent still wins over this one.
+        if let Some(agent) = agent {
+            cmd_body["agent"] = json!(agent);
+        }
         let server = server.handle();
         let dir_owned = dir.map(str::to_owned);
         let path_owned = path.clone();
@@ -3538,7 +3674,7 @@ async fn post_prompt(
         return Ok(false);
     }
     let message_id = prompt_message_id();
-    let (path, body) = match protocol {
+    let (path, mut body) = match protocol {
         Protocol::V1 => {
             let mut body = prompt_body(
                 prompt,
@@ -3565,6 +3701,9 @@ async fn post_prompt(
             },
         ),
     };
+    if let Some(agent) = agent {
+        body["agent"] = json!(agent);
+    }
     let server = server.handle();
     let session_id = session_id.to_owned();
     let updates = updates.clone();
@@ -4201,7 +4340,6 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             let server = server.handle();
             let dir_owned = dir.map(str::to_owned);
             let updates_tx = updates_tx.clone();
-            let permission_input = Arc::clone(request_input);
             let kind = permission_kind(props);
             // Full never asks; Auto lets workspace edits/reads through and
             // asks for the rest (commands, network, outside the workspace);
@@ -4210,20 +4348,6 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                 zeron_proto::PermissionMode::Full => true,
                 zeron_proto::PermissionMode::Auto => kind.is_some_and(auto_allows),
                 zeron_proto::PermissionMode::Ask => false,
-            };
-            let question = UserInputQuestion {
-                approval: true,
-                id: format!("permission:{id}"),
-                header: match kind {
-                    Some(kind) => format!("Allow {kind}?"),
-                    None => "Permission".into(),
-                },
-                question: format!("Allow this OpenCode request once? {}", props),
-                options: vec!["No".into(), "Yes".into()],
-                multi_select: false,
-                kind: None,
-                prefill: None,
-                multiline: false,
             };
             let reply_key = if protocol == Protocol::V2
                 && server
@@ -4236,22 +4360,23 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             } else {
                 "reply"
             };
+            // Never "always": that would write a durable permission rule.
+            let ask = (!auto_allowed).then(|| {
+                let question = permission_question(props, dir);
+                (question.clone(), (request_input)(vec![question]))
+            });
             tokio::spawn(async move {
-                let allowed = auto_allowed
-                    || (permission_input)(vec![question.clone()])
-                        .await
-                        .unwrap_or_default()
-                        .iter()
-                        .any(|answer| {
-                            answer.question_id == question.id
-                                && answer
-                                    .labels
-                                    .iter()
-                                    .any(|label| label.eq_ignore_ascii_case("yes"))
-                        });
-                // V2 "always" writes durable project-wide permission rules.
-                // Approval of this request must not grant future runs access.
-                let reply = if allowed { "once" } else { "reject" };
+                let reply = match ask {
+                    None => "once",
+                    Some((question, answers)) => {
+                        let answers = answers.await.unwrap_or_default();
+                        if crate::approval::approved(&question, &answers) {
+                            "once"
+                        } else {
+                            "reject"
+                        }
+                    }
+                };
                 let mut routes = vec![(reply_path, json!({ reply_key: reply }))];
                 if let Some(fallback_path) = fallback_path {
                     routes.push((fallback_path, json!({ "response": reply })));
@@ -4262,7 +4387,11 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                         signal: TurnSignal::ReplyFailed(format!(
                             "Could not {} an opencode permission request, so the \
                              agent cannot continue: {error}",
-                            if allowed { "approve" } else { "decline" }
+                            if reply == "once" {
+                                "approve"
+                            } else {
+                                "decline"
+                            }
                         )),
                     });
                 }
@@ -4310,7 +4439,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                         format!("/api/session/{session}/form/{request_id}/reply"),
                         form_answer_body(&pairs, &answers),
                     )),
-                    Ok(answers) => {
+                    Ok(answers) if !answers.is_empty() => {
                         let ordered: Vec<Vec<String>> = pairs
                             .iter()
                             .map(|(_, q)| {
@@ -4332,7 +4461,9 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     // left to cancel; only the 1.x route gets an explicit
                     // reject.
                     Err(_) if is_form => None,
-                    Err(_) => {
+                    // No answers (the questions were closed unanswered), or
+                    // the run went away: the 1.x route's own decline.
+                    Ok(_) | Err(_) => {
                         if let Err(e) = server
                             .post_json(
                                 &format!("/question/{request_id}/reject"),
@@ -4786,6 +4917,57 @@ fn part_delta_events(
             text: delta.to_owned(),
         }
     }]
+}
+
+/// The approval question for a `permission.asked` request: the command for
+/// `bash` (`metadata.command`), the file for an edit (`metadata.filepath`,
+/// shown relative to the run's directory), else the permission and its
+/// patterns (`resources` on 2.x).
+fn permission_question(props: &Value, dir: Option<&str>) -> UserInputQuestion {
+    const AGENT: &str = "OpenCode";
+    let permission = props
+        .get("permission")
+        .or_else(|| props.get("action"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let patterns: Vec<&str> = props
+        .get("patterns")
+        .or_else(|| props.get("resources"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let metadata = |key: &str| {
+        props
+            .pointer(&format!("/metadata/{key}"))
+            .and_then(Value::as_str)
+    };
+    match permission {
+        "bash" => crate::approval::command(
+            AGENT,
+            &metadata("command").map_or_else(|| patterns.join(" && "), str::to_owned),
+        ),
+        edit if is_edit_permission(edit) => match metadata("filepath") {
+            Some(path) => {
+                let relative = dir
+                    .and_then(|dir| std::path::Path::new(path).strip_prefix(dir).ok())
+                    .and_then(|relative| relative.to_str())
+                    .filter(|relative| !relative.is_empty());
+                crate::approval::edit(AGENT, &[relative.unwrap_or(path)])
+            }
+            None => crate::approval::edit(AGENT, &patterns),
+        },
+        "external_directory" => crate::approval::question(
+            "Approve access",
+            format!(
+                "{AGENT} wants to access {} outside the project. Allow it?",
+                metadata("parentDir").map_or_else(|| patterns.join(", "), str::to_owned)
+            ),
+        ),
+        "" => crate::approval::tool(AGENT, "a tool", Some(&patterns.join(", "))),
+        other => crate::approval::tool(AGENT, other, Some(&patterns.join(", "))),
+    }
 }
 
 /// `question.asked` → the input panel's questions, each paired with the key a
@@ -5824,6 +6006,22 @@ async fn opencode_version(
     Some(version)
 }
 
+/// The inherited inline config (none is an empty one), to add ours to.
+fn inline_config(inherited: Option<&str>) -> Result<Value, HarnessError> {
+    let config: Value = match inherited.filter(|s| !s.trim().is_empty()) {
+        Some(raw) => deser_hjson::from_str(raw).map_err(|_| {
+            HarnessError::Protocol("OPENCODE_CONFIG_CONTENT must be a valid config object".into())
+        })?,
+        None => json!({}),
+    };
+    if !config.is_object() {
+        return Err(HarnessError::Protocol(
+            "OPENCODE_CONFIG_CONTENT must be an object".into(),
+        ));
+    }
+    Ok(config)
+}
+
 /// Inline config is the final user config layer. Preserve inherited overrides
 /// and other MCP servers; never write chat identity into a shared config file.
 fn mcp_config(
@@ -5831,15 +6029,8 @@ fn mcp_config(
     mcp: &zeron_proto::McpServer,
     protocol: Protocol,
 ) -> Result<String, HarnessError> {
-    let mut config: Value = match inherited.filter(|s| !s.trim().is_empty()) {
-        Some(raw) => deser_hjson::from_str(raw).map_err(|_| {
-            HarnessError::Protocol("OPENCODE_CONFIG_CONTENT must be a valid config object".into())
-        })?,
-        None => json!({}),
-    };
-    let object = config.as_object_mut().ok_or_else(|| {
-        HarnessError::Protocol("OPENCODE_CONFIG_CONTENT must be an object".into())
-    })?;
+    let mut config = inline_config(inherited)?;
+    let object = config.as_object_mut().expect("inline config is an object");
     let servers = object.entry("mcp").or_insert_with(|| json!({}));
     let servers = if protocol == Protocol::V2 {
         servers
@@ -5865,6 +6056,165 @@ fn mcp_config(
     }
     servers.insert(mcp.name.clone(), server);
     Ok(config.to_string())
+}
+
+/// The permission rules `request`'s server starts with.
+fn access(request: &RunRequest) -> AccessMode {
+    request.permission_mode.access()
+}
+
+/// opencode's permission for changing files: 1.x folds its write and patch
+/// tools into `edit` (verified live, 1.19.4); older names are kept.
+fn is_edit_permission(permission: &str) -> bool {
+    matches!(
+        permission,
+        "edit" | "write" | "patch" | "multiedit" | "apply_patch"
+    )
+}
+
+/// What a restricted mode has opencode ask before, besides file changes in
+/// supervised: commands and the network. Reaching outside the project
+/// (`external_directory`) and a repeated identical call (`doom_loop`) are
+/// opencode's own asks already.
+const ASKED_PERMISSIONS: [&str; 3] = ["bash", "webfetch", "websearch"];
+
+/// What a restricted mode still lets through unasked on 1.x, where every
+/// other tool — MCP tools, custom tools — is asked (`"*": "ask"`, verified
+/// live on 1.19.4): looking around, the agent's own todo list and
+/// questions, and subagents, whose tools answer to the same rules.
+const UNASKED_PERMISSIONS: [&str; 10] = [
+    "read", "glob", "grep", "list", "lsp", "todoread", "todowrite", "question", "task", "skill",
+];
+
+/// Where the `plan` agent writes its plan: `.opencode/plans/` in a
+/// repository, opencode's data directory otherwise (a path relative to the
+/// worktree); `*` spans directories.
+const PLAN_FILES: &str = "*opencode/plans/*.md";
+
+/// The `ask` rules a restricted `access` mode adds to the inline config.
+/// opencode allows every tool by default and raises a request only for an
+/// `ask` rule; rules match last-first and this layer is read last, so ours
+/// win over the user's — a `deny` set in this same layer is kept. The
+/// general `edit: ask` of supervised would also relax the `plan` agent's own
+/// edit denial (verified live, 1.19.4), so the plan agent gets it back,
+/// asking before its plan file instead of allowing it.
+fn access_config(
+    inherited: Option<&str>,
+    access: AccessMode,
+    protocol: Protocol,
+) -> Result<String, HarnessError> {
+    let mut config = inline_config(inherited)?;
+    let supervised = access == AccessMode::Supervised;
+    let mut asked: Vec<&str> = ASKED_PERMISSIONS.to_vec();
+    if supervised {
+        asked.push("edit");
+    }
+    let object = config.as_object_mut().expect("inline config is an object");
+    match protocol {
+        Protocol::V1 => {
+            let rules = permission_object(object, "permission", "OPENCODE_CONFIG_CONTENT")?;
+            // The catch-all leads so every named rule after it wins.
+            let inherited = std::mem::take(rules);
+            let deny = json!("deny");
+            let all = match inherited.get("*") {
+                Some(rule) if *rule == deny => deny.clone(),
+                _ => json!("ask"),
+            };
+            rules.insert("*".into(), all);
+            rules.extend(inherited.into_iter().filter(|(name, _)| name != "*"));
+            let mut set = |permission: &str, rule: &str| {
+                if rules.get(permission) != Some(&deny) {
+                    rules.insert(permission.into(), json!(rule));
+                }
+            };
+            for permission in UNASKED_PERMISSIONS {
+                set(permission, "allow");
+            }
+            if !supervised {
+                set("edit", "allow");
+            }
+            for permission in asked {
+                set(permission, "ask");
+            }
+            if supervised {
+                let plan = object
+                    .entry("agent")
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .and_then(|agents| {
+                        agents
+                            .entry("plan")
+                            .or_insert_with(|| json!({}))
+                            .as_object_mut()
+                    })
+                    .ok_or_else(|| {
+                        HarnessError::Protocol(
+                            "OPENCODE_CONFIG_CONTENT.agent.plan must be an object".into(),
+                        )
+                    })?;
+                let rules =
+                    permission_object(plan, "permission", "OPENCODE_CONFIG_CONTENT.agent.plan")?;
+                rules.insert("edit".into(), json!({"*": "deny", PLAN_FILES: "ask"}));
+            }
+        }
+        // 2.x: ordered `{action, resource, effect}` rules, every config
+        // layer's appended in turn, then each agent's own.
+        Protocol::V2 => {
+            let rule = |action: &str, resource: &str, effect: &str| -> Value {
+                json!({"action": action, "resource": resource, "effect": effect})
+            };
+            permission_list(object, "OPENCODE_CONFIG_CONTENT")?
+                .extend(asked.into_iter().map(|action| rule(action, "*", "ask")));
+            if supervised {
+                let plan = object
+                    .entry("agents")
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .and_then(|agents| {
+                        agents
+                            .entry("plan")
+                            .or_insert_with(|| json!({}))
+                            .as_object_mut()
+                    })
+                    .ok_or_else(|| {
+                        HarnessError::Protocol(
+                            "OPENCODE_CONFIG_CONTENT.agents.plan must be an object".into(),
+                        )
+                    })?;
+                permission_list(plan, "OPENCODE_CONFIG_CONTENT.agents.plan")?
+                    .extend([rule("edit", "*", "deny"), rule("edit", PLAN_FILES, "ask")]);
+            }
+        }
+    }
+    Ok(config.to_string())
+}
+
+/// `owner[key]` as a 1.x permission object; the one-word form (`"allow"`)
+/// is the same as `{"*": "allow"}`.
+fn permission_object<'a>(
+    owner: &'a mut serde_json::Map<String, Value>,
+    key: &str,
+    path: &str,
+) -> Result<&'a mut serde_json::Map<String, Value>, HarnessError> {
+    let rules = owner.entry(key).or_insert_with(|| json!({}));
+    if let Some(action) = rules.as_str() {
+        *rules = json!({ "*": action });
+    }
+    rules
+        .as_object_mut()
+        .ok_or_else(|| HarnessError::Protocol(format!("{path}.{key} must be an object")))
+}
+
+/// `owner.permissions` as a 2.x rule list.
+fn permission_list<'a>(
+    owner: &'a mut serde_json::Map<String, Value>,
+    path: &str,
+) -> Result<&'a mut Vec<Value>, HarnessError> {
+    owner
+        .entry("permissions")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .ok_or_else(|| HarnessError::Protocol(format!("{path}.permissions must be a list")))
 }
 
 #[cfg(test)]
@@ -6017,6 +6367,77 @@ http.createServer((req, res) => {
         let probe = server.get_json("/config-probe", None).await.unwrap();
         server.shutdown(Duration::from_millis(100)).await;
         assert_eq!(probe["config"], Value::Null);
+        // A restricted mode cannot run without its rules: it would do
+        // unasked what the person chose to approve.
+        let error = Server::spawn_with_env(
+            &exe,
+            &Default::default(),
+            fixture.path().to_str(),
+            Duration::from_secs(5),
+            Some(&mcp),
+            &Default::default(),
+            AccessMode::Supervised,
+        )
+        .await
+        .err()
+        .expect("supervised must not start without its permission rules");
+        assert!(error.to_string().contains("Supervised"), "{error}");
+    }
+
+    /// A restricted mode's rules reach the server with no MCP server to
+    /// inject, merged into the run environment's inline config.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restricted_access_injects_permission_rules() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = tempfile::tempdir().unwrap();
+        let exe = fixture.path().join("opencode");
+        let script = r#"#!/usr/bin/env node
+const http = require('node:http');
+if (process.argv.includes('--version')) { console.log('1.19.4'); process.exit(0); }
+const config = process.env.OPENCODE_CONFIG_CONTENT ?? null;
+const port = Number(process.argv[process.argv.indexOf('--port') + 1]);
+http.createServer((req, res) => {
+  res.setHeader('content-type', 'application/json');
+  if (req.url === '/config-probe') { res.end(JSON.stringify({config})); return; }
+  if (req.url === '/global/health') { res.end(JSON.stringify({version: '1.19.4'})); return; }
+  res.statusCode = 404; res.end('{}');
+}).listen(port, '127.0.0.1');
+"#;
+        std::fs::write(&exe, script).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let run_env = [(
+            "OPENCODE_CONFIG_CONTENT".to_owned(),
+            r#"{"model": "keep"}"#.to_owned(),
+        )]
+        .into();
+        for access in AccessMode::ALL {
+            let mut server = Server::spawn_with_env(
+                &exe,
+                &Default::default(),
+                fixture.path().to_str(),
+                Duration::from_secs(5),
+                None,
+                &run_env,
+                access,
+            )
+            .await
+            .unwrap();
+            let probe = server.get_json("/config-probe", None).await.unwrap();
+            server.shutdown(Duration::from_millis(100)).await;
+            let config: Value = serde_json::from_str(probe["config"].as_str().unwrap()).unwrap();
+            assert_eq!(config["model"], "keep");
+            let edit = &config["permission"]["edit"];
+            let bash = &config["permission"]["bash"];
+            match access {
+                // Full access passes the run's config through untouched.
+                AccessMode::FullAccess => assert_eq!(config, json!({"model": "keep"})),
+                AccessMode::AutoAcceptEdits => {
+                    assert_eq!((edit, bash), (&json!("allow"), &json!("ask")))
+                }
+                AccessMode::Supervised => assert_eq!((edit, bash), (&json!("ask"), &json!("ask"))),
+            }
+        }
     }
 
     /// A freshly installed binary's first `--version` outlasts the shared

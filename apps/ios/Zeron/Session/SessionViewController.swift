@@ -111,6 +111,17 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             guard let self else { return }
             self.presentCompanion(SubagentViewController(app: self.app, parentId: self.chatId, docId: doc, title: title, running: running))
         }
+        list.onOpenChat = { [weak self] id in
+            guard let self, id != self.chatId else { return }
+            // On the phone the sender's chat pushes over this one, so Back
+            // returns here; beside the iPad sidebar it takes the detail.
+            if self.mainShell != nil, let nav = self.navigationController {
+                guard let session = SessionViewController(app: self.app, chatId: id) else { return }
+                nav.pushViewController(session, animated: true)
+            } else {
+                self.router?.openSession(id)
+            }
+        }
         list.htmlLoader = { [weak self] device, path in await self?.source.htmlPage(deviceId: device, path: path) }
         list.textFetcher = { [weak self] ref in await self?.source.attachmentText(ref) }
         // Hidden while following (the runway glide and tail spring travel).
@@ -1573,11 +1584,19 @@ extension UIViewController {
         return rest
     }
 
-    /// Beside the sidebar the composer rests on the safe area, level with
-    /// the sidebar's bottom toolbar; on its own (tab shell, sheet) 8pt up.
+    /// Beside the sidebar the composer rests centered on the sidebar's
+    /// bottom toolbar, as measured: where the system puts that toolbar
+    /// differs by device and OS (on the unfolded Duo its buttons sit ~10pt
+    /// below the safe area, on iPad on it), so a fixed gap left the two out
+    /// of line. Negative sinks the composer into the safe area, as the
+    /// toolbar is. On its own (tab shell, sheet, sidebar hidden) 8pt up.
     var composerRestGap: CGFloat {
-        guard mainShell == nil, let split = splitViewController, !split.isCollapsed else { return 8 }
-        return 0
+        guard mainShell == nil, let split = splitViewController as? SplitRootController,
+              let window = view.window, let middle = split.sidebarToolbarMidY(in: window)
+        else { return 8 }
+        let y = view.convert(CGPoint(x: 0, y: middle), from: window).y
+        let safeBottom = view.bounds.maxY - view.safeAreaInsets.bottom
+        return (safeBottom - y - ComposerBar.restHeight / 2).rounded()
     }
 }
 

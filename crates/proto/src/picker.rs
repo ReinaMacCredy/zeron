@@ -252,6 +252,8 @@ mod tests {
             profile_id: None,
             instance_id: None,
             disabled_tools: Vec::new(),
+            access: Default::default(),
+            plan: false,
         }
     }
 

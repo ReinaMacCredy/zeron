@@ -976,6 +976,8 @@ pub(crate) fn seed(
                     profile_id: None,
                     instance_id: demo.instance.map(str::to_owned),
                     disabled_tools: Vec::new(),
+                    access: Default::default(),
+                    plan: false,
                 },
             )),
             last_message_preview: Some(demo.preview.into()),

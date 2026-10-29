@@ -89,7 +89,7 @@ pub fn native_tools_off(settings: &RoutingSettings, harness: HarnessId) -> bool 
     settings.native == NativePolicy::Off && harness == HarnessId::ClaudeCode
 }
 
-pub const NATIVE_TOOLS: [&str; 2] = ["Agent", "Task"];
+pub const NATIVE_TOOLS: [&str; 3] = ["Agent", "Task", "Workflow"];
 
 #[cfg(test)]
 mod tests {

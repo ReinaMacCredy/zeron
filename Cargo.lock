@@ -3925,7 +3925,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.5.2"
-source = "git+https://github.com/zeronsh/gpui-component?rev=6ffe5e575bd0db31d69764773a823cdeb8913d8e#6ffe5e575bd0db31d69764773a823cdeb8913d8e"
+source = "git+https://github.com/zeronsh/gpui-component?rev=59f89243cea79dd70eb7a619b3930c374ef6958a#59f89243cea79dd70eb7a619b3930c374ef6958a"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -11146,6 +11146,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-luau"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "871abeb427d719788bb38094facd7ff082908ef2b93c1d3d6a5f6025330120f4"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-make"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13386,7 +13396,7 @@ dependencies = [
 
 [[package]]
 name = "zatex"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "tiny-skia",
  "ttf-parser",
@@ -13637,7 +13647,7 @@ dependencies = [
 
 [[package]]
 name = "zeron"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "anyhow",
  "chrono",
@@ -13663,7 +13673,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-audio"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "base64 0.22.1",
  "cpal 0.18.2",
@@ -13675,7 +13685,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-client"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13706,7 +13716,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-doc"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "chrono",
  "loro",
@@ -13720,7 +13730,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-docs"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "serde",
  "toml 0.8.23",
@@ -13730,7 +13740,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-engine"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -13785,7 +13795,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-harness"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13818,14 +13828,14 @@ dependencies = [
 
 [[package]]
 name = "zeron-markdown"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "pulldown-cmark",
 ]
 
 [[package]]
 name = "zeron-mcp"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -13846,7 +13856,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-mobile"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13876,8 +13886,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-mobile-bindgen"
+version = "0.2.129"
+dependencies = [
+ "uniffi",
+]
+
+[[package]]
 name = "zeron-notify"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "objc",
  "tracing",
@@ -13885,11 +13902,11 @@ dependencies = [
 
 [[package]]
 name = "zeron-orb"
-version = "0.2.122"
+version = "0.2.129"
 
 [[package]]
 name = "zeron-preview"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13917,7 +13934,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-proto"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "chrono",
  "pulldown-cmark",
@@ -13929,7 +13946,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-rpc"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13950,7 +13967,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-sync"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "block2 0.6.2",
  "chrono",
@@ -13973,7 +13990,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-syntax"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "thiserror 2.0.20",
  "tree-sitter",
@@ -13991,6 +14008,7 @@ dependencies = [
  "tree-sitter-json",
  "tree-sitter-kotlin-ng",
  "tree-sitter-lua",
+ "tree-sitter-luau",
  "tree-sitter-make",
  "tree-sitter-md",
  "tree-sitter-nix",
@@ -14007,14 +14025,14 @@ dependencies = [
 
 [[package]]
 name = "zeron-term"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "alacritty_terminal",
 ]
 
 [[package]]
 name = "zeron-term-link"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -14031,7 +14049,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-text"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
@@ -14048,7 +14066,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-theme"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "anyhow",
  "clap",
@@ -14063,7 +14081,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-ui"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -14095,6 +14113,7 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-core-media",
  "objc2-core-video",
  "objc2-foundation 0.3.2",
@@ -14154,7 +14173,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-update"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "anyhow",
  "futures",
@@ -14170,11 +14189,11 @@ dependencies = [
 
 [[package]]
 name = "zeron-veil"
-version = "0.2.122"
+version = "0.2.129"
 
 [[package]]
 name = "zeron-visual"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "base64 0.22.1",
  "gltf",
@@ -14186,7 +14205,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-visual-gpu"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "image",
  "pollster 0.4.0",
@@ -14197,7 +14216,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-voice"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "anyhow",
  "cpal 0.17.3",
@@ -14214,7 +14233,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-voice-media"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "async-trait",
  "semver",
@@ -14229,7 +14248,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-voice-session"
-version = "0.2.122"
+version = "0.2.129"
 dependencies = [
  "async-trait",
  "futures",

@@ -55,6 +55,27 @@ case "$first" in
   emit '{"type":"result","subtype":"success","result":"Fix Login Flow","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-title"}'
   ;;
 
+*scenario:native-subagents*)
+  # A bare `--disallowedTools` rule takes the tools out of the init frame's
+  # list, as 2.1.310 does (it lists the `Agent` tool as `Task`). The reply
+  # says whether the inline Zeron server is side-chats-only.
+  server='native subagents'
+  disallowed=''
+  prev=''
+  for arg in "$@"; do
+    case "$arg" in --disallowedTools=*) disallowed=${arg#--disallowedTools=} ;; esac
+    [ "$prev" = "--disallowedTools" ] && disallowed=$arg
+    prev=$arg
+    case "$arg" in *'"ZERON_SIDE_CHATS_ONLY":"1"'*) server='side chats only' ;; esac
+  done
+  tools='"Bash"'
+  case ",$disallowed," in *,Agent,*) ;; *) tools="$tools,\"Task\"" ;; esac
+  case ",$disallowed," in *,Workflow,*) ;; *) tools="$tools,\"Workflow\"" ;; esac
+  emit "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fable-5\",\"tools\":[$tools],\"cwd\":\"/tmp\",\"session_id\":\"sess-native\"}"
+  emit "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"$server\"}}}"
+  emit '{"type":"result","subtype":"success","result":"ok","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-native"}'
+  ;;
+
 
 *scenario:computer-on*|*scenario:computer-off*)
   # Computer guidance rides --append-system-prompt only on a computer run.
@@ -191,6 +212,21 @@ case "$first" in
   emit '{"type":"result","subtype":"success","result":"steered","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-steer"}'
   ;;
 
+*scenario:closed-question*)
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-ask"}'
+  # Questions closed unanswered come back as a deny, never an empty allow.
+  emit '{"type":"control_request","request_id":"cr-1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"header":"Choice","question":"Pick one","options":["A","B"],"multiSelect":false}]}}}'
+  read -r resp1 || exit 1
+  case "$resp1" in
+  *'"request_id":"cr-1"'*'"behavior":"deny"'*'dismissed'*)
+    emit '{"type":"result","subtype":"success","result":"declined","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-ask"}'
+    ;;
+  *)
+    emit '{"type":"result","subtype":"error_during_execution","errors":["closed questions were not denied"],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-ask"}'
+    ;;
+  esac
+  ;;
+
 *scenario:steer*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-steer"}'
   emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"first"}}}'
@@ -254,6 +290,36 @@ case "$first" in
   emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"second answer"}}}'
   emit '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","result":"second answer","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-q"}'
   emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$sid\",\"state\":\"completed\"}"
+  ;;
+
+*scenario:typed-fork-steer-boundary*)
+  # `/probe` typed as the prompt, and a message sent while its fork runs, in
+  # the order of a live 2.1.310 run: the message is queued at once, and
+  # started only after the fork's replay and result. The fork's chip is an
+  # open tool, so the message comes `next` (exits otherwise).
+  fid=$(uuid_of "$first")
+  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$fid\",\"state\":\"queued\"}"
+  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$fid\",\"state\":\"started\"}"
+  emit '{"type":"system","subtype":"task_started","task_id":"t1","description":"/probe","subagent_type":"general-purpose","task_type":"local_agent","skip_transcript":true,"ambient":true,"prompt":"Probe.","is_backgrounded":false,"spawn_depth":1}'
+  read -r steer || exit 1
+  case "$steer" in *'"priority":"next"'*) ;; *) exit 9 ;; esac
+  sid=$(uuid_of "$steer")
+  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$sid\",\"state\":\"queued\"}"
+  emit '{"type":"system","subtype":"task_notification","task_id":"t1","status":"completed","summary":"/probe","skip_transcript":true,"ambient":true}'
+  emit '{"type":"system","subtype":"init","model":"claude-sonnet-5-5","tools":[],"cwd":"/tmp","session_id":"sess-tfb"}'
+  emit '{"type":"user","parent_tool_use_id":"forked-command-probe","message":{"role":"user","content":[{"type":"text","text":"Probe."}]}}'
+  emit '{"type":"assistant","parent_tool_use_id":"forked-command-probe","message":{"content":[{"type":"text","text":"probed"}]}}'
+  emit '{"type":"assistant","parent_tool_use_id":null,"local_command_source":"<local-command-stdout>probed</local-command-stdout>","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"probed"}]}}'
+  emit "{\"type\":\"user\",\"parent_tool_use_id\":null,\"uuid\":\"$fid\",\"isReplay\":true,\"message\":{\"role\":\"user\",\"content\":\"/probe\"}}"
+  emit '{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":"probed","errors":[],"usage":{"input_tokens":0,"output_tokens":0},"session_id":"sess-tfb"}'
+  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$fid\",\"state\":\"completed\"}"
+  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$sid\",\"state\":\"started\"}"
+  emit '{"type":"system","subtype":"init","model":"claude-sonnet-5-5","tools":[],"cwd":"/tmp","session_id":"sess-tfb"}'
+  emit "$steer"
+  emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"second answer"}}}'
+  emit '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"second answer","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-tfb"}'
+  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$sid\",\"state\":\"completed\"}"
+  cat >/dev/null
   ;;
 
 *scenario:stop-held*)
@@ -320,6 +386,98 @@ case "$first" in
   cat >/dev/null
   ;;
 
+*scenario:stop-typed-fork*)
+  # `/probe` typed as the prompt forks with no tool call (shapes from 2.1.310).
+  # The stop is answered and no result follows, so the driver ends the turn
+  # itself (2.1.310 sends the stopped fork's result about 1 s after). The
+  # next message says which priority it was written with.
+  emit '{"type":"system","subtype":"task_started","task_id":"t1","description":"/probe","subagent_type":"general-purpose","task_type":"local_agent","skip_transcript":true,"ambient":true,"prompt":"Probe.","is_backgrounded":false,"spawn_depth":1}'
+  read -r stop || exit 1
+  case "$stop" in *'"subtype":"interrupt"'*) ;; *) exit 8 ;; esac
+  rid=$(printf '%s\n' "$stop" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+  emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":{\"still_queued\":[]}}}"
+  while read -r next; do
+    case "$next" in *'"type":"user"'*) break ;; esac
+  done
+  case "$next" in
+    *'"priority":"now"'*) priority=now ;;
+    *'"priority":"next"'*) priority=next ;;
+    *) priority=none ;;
+  esac
+  emit "{\"type\":\"stream_event\",\"parent_tool_use_id\":null,\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"priority:$priority\"}}}"
+  cat >/dev/null
+  ;;
+
+*scenario:typed-fork-replay*)
+  # The typed `/fanout` capture (claude/live-2.1.310-typed-forked-command.jsonl)
+  # in two parts, for crates/engine/tests/claude_subagents.rs: the fork's start
+  # and its agents' starts, then a hold while the fork "runs" (until the test
+  # drops `release` in the cwd, 20 s at most), then everything the CLI holds
+  # back until the fork is over.
+  frames="$(dirname "$0")/claude/live-2.1.310-typed-forked-command.jsonl"
+  head -n 3 "$frames"
+  i=0
+  while [ ! -e release ] && [ "$i" -lt 400 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  tail -n +4 "$frames"
+  cat >/dev/null
+  ;;
+
+*scenario:typed-fork-parked-steer*)
+  # A turn ends and the session parks with its process live. `/probe` then
+  # comes in as a message to that process: queued, started, and only then
+  # the fork's task start (the order of a typed prompt in 2.1.310). The fork
+  # holds until the test drops `release` in the cwd (20 s at most), then its
+  # notification, replay and result follow.
+  fid=$(uuid_of "$first")
+  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$fid\",\"state\":\"started\"}"
+  emit '{"type":"system","subtype":"init","model":"claude-sonnet-5-5","tools":[],"cwd":"/tmp","session_id":"sess-tps"}'
+  emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"first answer"}}}'
+  emit '{"type":"result","subtype":"success","is_error":false,"result":"first answer","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-tps"}'
+  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$fid\",\"state\":\"completed\"}"
+  read -r steer || exit 1
+  sid=$(uuid_of "$steer")
+  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$sid\",\"state\":\"queued\"}"
+  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$sid\",\"state\":\"started\"}"
+  emit '{"type":"system","subtype":"task_started","task_id":"t2","description":"/probe","subagent_type":"general-purpose","task_type":"local_agent","skip_transcript":true,"ambient":true,"prompt":"Probe.","is_backgrounded":false,"spawn_depth":1}'
+  i=0
+  while [ ! -e release ] && [ "$i" -lt 400 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  emit '{"type":"system","subtype":"task_notification","task_id":"t2","status":"completed","summary":"/probe","skip_transcript":true,"ambient":true}'
+  emit '{"type":"system","subtype":"init","model":"claude-sonnet-5-5","tools":[],"cwd":"/tmp","session_id":"sess-tps"}'
+  emit '{"type":"user","parent_tool_use_id":"forked-command-probe","message":{"role":"user","content":[{"type":"text","text":"Probe."}]}}'
+  emit '{"type":"assistant","parent_tool_use_id":"forked-command-probe","message":{"content":[{"type":"text","text":"probed"}]}}'
+  emit '{"type":"assistant","parent_tool_use_id":null,"local_command_source":"<local-command-stdout>probed</local-command-stdout>","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"probed"}]}}'
+  emit "{\"type\":\"user\",\"parent_tool_use_id\":null,\"uuid\":\"$sid\",\"isReplay\":true,\"message\":{\"role\":\"user\",\"content\":\"/probe\"}}"
+  emit '{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":"probed","errors":[],"usage":{"input_tokens":0,"output_tokens":0},"session_id":"sess-tps"}'
+  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$sid\",\"state\":\"completed\"}"
+  cat >/dev/null
+  ;;
+
+*scenario:typed-fork-on-disk*)
+  # The typed `/f-slow-steps` capture (claude/live-2.1.310-typed-fork-slow-steps*.jsonl),
+  # for crates/engine/tests/claude_subagents.rs: the fork's start, its
+  # transcript written under $CLAUDE_CONFIG_DIR while stdout holds the fork
+  # back (until the test drops `release` in the cwd), then the rest.
+  frames="$(dirname "$0")/claude/live-2.1.310-typed-fork-slow-steps.jsonl"
+  session="$CLAUDE_CONFIG_DIR/projects/-p/133a2e35-c338-4601-8108-99dcb7d09af2"
+  mkdir -p "$session/subagents"
+  head -n 1 "$frames"
+  cp "$(dirname "$0")/claude/live-2.1.310-typed-fork-slow-steps-transcript.jsonl" \
+    "$session/subagents/agent-ae74593bb0c051579.jsonl"
+  i=0
+  while [ ! -e release ] && [ "$i" -lt 400 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  tail -n +2 "$frames"
+  cat >/dev/null
+  ;;
+
 *scenario:lifecycle-queued-cancelled*)
   # A queued message cancelled before any turn takes it up: the result held
   # for it was the turn's real end, released at once — no quiet timer.
@@ -361,6 +519,78 @@ case "$first" in
   case "$again" in *'same again'*) ;; *) exit 16 ;; esac
   emit "$again"
   emit '{"type":"result","subtype":"success","result":"same","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-rc"}'
+  ;;
+
+*scenario:approvals*)
+  # One tool call of each kind through the permission channel; the result
+  # says the launch's permission flags and how each call was answered.
+  mode=none
+  skip=none
+  prev=
+  for arg in "$@"; do
+    [ "$prev" = "--permission-mode" ] && mode=$arg
+    case "$arg" in *skip-permissions) skip=$arg ;; esac
+    prev=$arg
+  done
+  emit "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fable-5\",\"tools\":[],\"cwd\":\"/tmp\",\"session_id\":\"sess-ap\",\"permissionMode\":\"$mode\"}"
+  answer() {
+    read -r resp || exit 1
+    case "$resp" in
+    *"\"request_id\":\"$1\""*'"behavior":"allow"'*'"mode":"'*)
+      printf 'allow:%s' "$(printf '%s\n' "$resp" | sed 's/.*"mode":"\([^"]*\)".*/\1/')"
+      ;;
+    *"\"request_id\":\"$1\""*'"behavior":"allow"'*) printf allow ;;
+    *"\"request_id\":\"$1\""*'"behavior":"deny"'*) printf deny ;;
+    *) exit 1 ;;
+    esac
+  }
+  emit '{"type":"control_request","request_id":"cr-bash","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"rm -rf build"}}}'
+  bash=$(answer cr-bash) || exit 1
+  emit '{"type":"control_request","request_id":"cr-edit","request":{"subtype":"can_use_tool","tool_name":"Edit","input":{"file_path":"/tmp/a.rs","old_string":"a","new_string":"b"}}}'
+  edit=$(answer cr-edit) || exit 1
+  emit '{"type":"control_request","request_id":"cr-plan","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"Do it."}}}'
+  plan=$(answer cr-plan) || exit 1
+  emit "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"$mode $skip bash=$bash edit=$edit plan=$plan\",\"errors\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"session_id\":\"sess-ap\"}"
+  ;;
+
+*scenario:mode-switch*)
+  # Plan mode on a live process, as 2.1.311 does it: approving ExitPlanMode
+  # leaves plan mode (a `status` frame says so), the next turn is put back
+  # in it, and leaving plan switches back with `set_permission_mode`.
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-ms","permissionMode":"plan"}'
+  emit '{"type":"control_request","request_id":"cr-plan","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"Do it."}}}'
+  read -r resp || exit 1
+  case "$resp" in *'"behavior":"allow"'*'"mode":"default"'*) ;; *) exit 21 ;; esac
+  emit '{"type":"system","subtype":"status","status":null,"permissionMode":"default","session_id":"sess-ms"}'
+  emit '{"type":"result","subtype":"success","result":"implemented","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-ms"}'
+  # Still a plan-mode chat: back to plan mode before the prompt.
+  read -r switch || exit 1
+  case "$switch" in *'"subtype":"set_permission_mode"'*) ;; *) exit 22 ;; esac
+  case "$switch" in *'"mode":"plan"'*) ;; *) exit 22 ;; esac
+  id=$(printf '%s\n' "$switch" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+  emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$id\",\"response\":{\"mode\":\"plan\"}}}"
+  emit '{"type":"system","subtype":"status","status":null,"permissionMode":"plan","session_id":"sess-ms"}'
+  read -r prompt || exit 1
+  case "$prompt" in *'plan again'*) ;; *) exit 23 ;; esac
+  emit "$prompt"
+  emit '{"type":"result","subtype":"success","result":"planned again","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-ms"}'
+  # Plan mode off: one switch back to the permission mode's, then the prompt.
+  read -r switch || exit 1
+  case "$switch" in *'"subtype":"set_permission_mode"'*) ;; *) exit 24 ;; esac
+  case "$switch" in *'"mode":"default"'*) ;; *) exit 24 ;; esac
+  id=$(printf '%s\n' "$switch" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+  emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$id\",\"response\":{\"mode\":\"default\"}}}"
+  emit '{"type":"system","subtype":"status","status":null,"permissionMode":"default","session_id":"sess-ms"}'
+  read -r prompt || exit 1
+  case "$prompt" in *'build it'*) ;; *) exit 25 ;; esac
+  emit "$prompt"
+  # The permission mode answers the next tool call: a command is asked (and
+  # the test says no).
+  emit '{"type":"control_request","request_id":"cr-bash","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}'
+  read -r resp || exit 1
+  case "$resp" in *'"request_id":"cr-bash"'*'"behavior":"deny"'*) ;; *) exit 26 ;; esac
+  emit '{"type":"result","subtype":"success","result":"building","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-ms"}'
+  read -r _ || exit 0
   ;;
 
 *scenario:resume-killed-tasks*)

@@ -122,6 +122,8 @@ async fn steering_never_aborts_a_running_tool() {
                 profile_id: None,
                 instance_id: None,
                 disabled_tools: Vec::new(),
+                access: zeron_proto::PermissionMode::default().access(),
+                plan: false,
             },
         )
         .unwrap();
@@ -158,6 +160,8 @@ async fn steering_never_aborts_a_running_tool() {
                     cwd: cwd.clone(),
                     sandbox: SandboxLevel::DangerFullAccess,
                     auto_approve: true,
+                    access: Default::default(),
+                    plan: false,
                     attachments: vec![],
                     worktree: None,
                     resume: None,

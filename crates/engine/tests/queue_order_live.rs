@@ -109,6 +109,8 @@ impl Rig {
                     profile_id: None,
                     instance_id: None,
                     disabled_tools: Vec::new(),
+                    access: zeron_proto::PermissionMode::default().access(),
+                    plan: false,
                 },
             )
             .unwrap();
@@ -133,6 +135,8 @@ impl Rig {
             cwd: self.dir.path().to_str().unwrap().into(),
             sandbox: SandboxLevel::DangerFullAccess,
             auto_approve: true,
+            access: Default::default(),
+            plan: false,
             attachments: vec![],
             worktree: None,
             resume: None,

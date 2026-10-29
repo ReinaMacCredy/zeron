@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use zeron_doc::parts::MessagePart;
 use zeron_doc::parts::MessageStatus;
+use zeron_client::workspace::WorkspaceSnapshot;
 use zeron_doc::schema::{MessageRole, SessionMessageEntry};
 use zeron_markdown::parser::{IncrementalParser, TopBlock};
 use zeron_proto::computer::cards::{computer_notice, consent_question, is_control_denied};
@@ -68,7 +69,13 @@ pub struct TranscriptInput {
     pub harness: Option<HarnessId>,
     pub chat_id: Option<String>,
     pub chats: Arc<Chats>,
+    /// The chats this workspace lists, for an agent message's sender: its
+    /// live title and provider, and whether it opens.
+    pub workspace: Option<Arc<zeron_client::workspace::WorkspaceSnapshot>>,
 }
+
+/// The link an agent message's sender caption opens: that chat.
+pub const OPEN_CHAT_SCHEME: &str = "zeron-chat";
 
 pub(crate) fn row_key(id: &str) -> u64 {
     // FNV-1a: stable across launches so platform caches may persist keys.
@@ -86,6 +93,9 @@ pub(crate) fn next_version() -> u64 {
 }
 
 pub(crate) struct UserBubble {
+    /// `Message from [mark] Chat` over the bubble, for a message another
+    /// chat sent through Zeron's `send_message`.
+    pub sender: Option<PText>,
     pub text: PText,
     pub md: Vec<PBlock>,
     pub images: Vec<String>,
@@ -126,6 +136,9 @@ pub(crate) enum Content {
     Tools(ToolGroup),
     Chip(Chip),
     Notice(Notice),
+    /// One muted line on the agent's side: `Message to [mark] Chat` for a
+    /// message this chat's agent sent. Faded while sending.
+    Caption { text: PText, pending: bool },
     Image { reference: String },
     Working {
         since_ms: Option<i64>,
@@ -186,6 +199,8 @@ pub(crate) mod geom {
     pub const THUMB: f32 = 76.0;
     pub const FILE_PILL: f32 = 32.0;
     pub const BADGE: f32 = 26.0;
+    /// Between a caption over a user bubble (an agent sender) and the bubble.
+    pub const CAPTION_GAP: f32 = 6.0;
     pub const CHIP_LINE: f32 = 32.0;
     /// Error cards: inner padding, and their action button.
     pub const NOTICE_PAD: f32 = 12.0;
@@ -343,7 +358,7 @@ impl RowBuilder {
                 .filter(|(text, _)| *text == p.text)
                 .map(|(_, row)| row.clone());
             let core = cached.unwrap_or_else(|| {
-                let row = Arc::new(self.user_row(ctx, &p.id, &p.text, true));
+                let row = Arc::new(self.user_row(ctx, &p.id, &p.text, true, None));
                 self.pending.insert(p.id.clone(), (p.text.clone(), row.clone()));
                 row
             });
@@ -407,6 +422,7 @@ impl RowBuilder {
     /// their way to the entry's questions, and the chats it names.
     fn entry_sig(&self, entry: &SessionMessageEntry, first: bool, prev: Option<MessageRole>, input: &TranscriptInput) -> u64 {
         let gaps = (first as u64) | ((prev.map_or(0, |r| r as u64 + 1)) << 1);
+        let gaps = gaps ^ agent_message_sig(entry, input.workspace.as_deref()).rotate_left(11);
         let sig = entry
             .parts
             .iter()
@@ -481,7 +497,7 @@ impl RowBuilder {
             if let Some(from) = entry.from_chat_id.as_deref() {
                 if Some(from) == own {
                     rows.push(Placed { core: Arc::new(seams::auto_continue(ctx, &entry.id)), gap });
-                    rows.push(Placed { core: Arc::new(self.user_row(ctx, &entry.id, &text, false)), gap: Gap::First });
+                    rows.push(Placed { core: Arc::new(self.user_row(ctx, &entry.id, &text, false, input.workspace.as_deref())), gap: Gap::First });
                     return rows;
                 }
                 let delegate = own.is_some() && chats.get(from).and_then(|c| c.delegated_by.as_deref()) == own;
@@ -507,7 +523,7 @@ impl RowBuilder {
                 rows.push(Placed { core: Arc::new(core), gap });
                 return rows;
             }
-            rows.push(Placed { core: Arc::new(self.user_row(ctx, &entry.id, &text, false)), gap });
+            rows.push(Placed { core: Arc::new(self.user_row(ctx, &entry.id, &text, false, input.workspace.as_deref())), gap });
             return rows;
         }
         if entry.role == MessageRole::System {
@@ -608,6 +624,19 @@ impl RowBuilder {
                     tools.push(part);
                     flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
                 }
+                MessagePart::Tool { id, call, is_error, resolved, .. }
+                    if let Some(sent) = zeron_proto::agent_messages::outgoing_messages(call) =>
+                {
+                    // A message to another chat reads as one line naming the
+                    // recipient, not a tool: it leaves the group, one line
+                    // per recipient.
+                    flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
+                    for (mi, message) in sent.iter().enumerate() {
+                        let gap = gap_for(&rows, false);
+                        let row = self.outgoing_row(ctx, &entry.id, &format!("{id}.m{mi}"), message, !*resolved, *is_error, input.workspace.as_deref());
+                        rows.push(Placed { core: Arc::new(row), gap });
+                    }
+                }
                 MessagePart::Tool { id, call, html_render, .. } => {
                     let genus = Genus::of(call);
                     let genus_flip = tools.iter().any(|p| match p {
@@ -699,12 +728,17 @@ impl RowBuilder {
                                 }
                                 continue;
                             }
-                            let text = if *resolved {
-                                "Answered a question".to_owned()
-                            } else {
-                                questions.first().map_or("Awaiting your answer…".to_owned(), |q| q.question.clone())
+                            use zeron_proto::view::InputOutcome;
+                            let (text, white_space) = match zeron_proto::view::input_outcome(questions, *resolved, answers.as_deref()) {
+                                InputOutcome::Pending => (questions.first().map_or("Awaiting your answer…".to_owned(), |q| q.question.clone()), WhiteSpace::Normal),
+                                // Resolved before answers were recorded.
+                                InputOutcome::Unrecorded => ("Answered a question".to_owned(), WhiteSpace::Normal),
+                                InputOutcome::Closed(line) => (line.to_string(), WhiteSpace::Normal),
+                                // `Recherche → Deep dive`, one line per question: each
+                                // line is already single-line, so the breaks are the joins.
+                                InputOutcome::Answered(lines) => (lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"), WhiteSpace::PreLine),
                             };
-                            rows.push(Placed { core: Arc::new(chip_row(ctx, &entry.id, id, "questionmark.bubble", ColorRole::Accent, &text)), gap });
+                            rows.push(Placed { core: Arc::new(chip_row(ctx, &entry.id, id, "questionmark.bubble", ColorRole::Accent, &text, white_space)), gap });
                         }
                         MessagePart::Error { id, message } => {
                             let gap = gap_for(&rows, false);
@@ -713,7 +747,7 @@ impl RowBuilder {
                         MessagePart::Fork { id, source_title, .. } => {
                             let gap = gap_for(&rows, false);
                             let text = format!("Forked from {source_title}");
-                            rows.push(Placed { core: Arc::new(chip_row(ctx, &entry.id, id, "arrow.triangle.branch", ColorRole::TextTertiary, &text)), gap });
+                            rows.push(Placed { core: Arc::new(chip_row(ctx, &entry.id, id, "arrow.triangle.branch", ColorRole::TextTertiary, &text, WhiteSpace::Normal)), gap });
                         }
                         MessagePart::Switch { id, from, to, from_harness, to_harness } => {
                             let gap = gap_for(&rows, false);
@@ -858,8 +892,40 @@ impl RowBuilder {
         }
     }
 
-    fn user_row(&mut self, ctx: &mut Ctx, id: &str, content: &str, pending: bool) -> RowCore {
+    /// A message this chat's agent sent another (`send_message`): one line
+    /// naming the recipient. Faded while sending; a failed send says so.
+    #[allow(clippy::too_many_arguments)]
+    fn outgoing_row(
+        &mut self,
+        ctx: &mut Ctx,
+        entry_id: &str,
+        part_id: &str,
+        message: &zeron_proto::agent_messages::OutgoingMessage,
+        pending: bool,
+        failed: bool,
+        workspace: Option<&WorkspaceSnapshot>,
+    ) -> RowCore {
+        let (title, harness, id) = recipient_chat(&message.chat, workspace);
+        let lead = if failed { "Couldn't message" } else { "Message to" };
+        RowCore {
+            key: row_key(&format!("{entry_id}#{part_id}")),
+            version: next_version(),
+            // Agent content, not a prompt: user rows anchor the turn scroll.
+            kind: RowKind::Markdown,
+            entry_id: Arc::from(entry_id),
+            content: Content::Caption { text: chat_caption(ctx, lead, &title, harness.as_deref(), id.as_deref()), pending },
+            copy_text: format!("{lead} {title}"),
+        }
+    }
+
+    fn user_row(&mut self, ctx: &mut Ctx, id: &str, content: &str, pending: bool, workspace: Option<&WorkspaceSnapshot>) -> RowCore {
         let key = row_key(&format!("{id}#u"));
+        // An agent's message: its sender rides over the bubble, and only the
+        // body under the routing header goes in it.
+        let (sender, content) = match zeron_proto::agent_messages::agent_message_sender(content) {
+            Some((sender, body)) => (Some(sender_caption(ctx, &sender, workspace)), body),
+            None => (None, content),
+        };
         // Shared parser: strips the image trailer *and* hidden Appshot context.
         let mut parsed = zeron_client::attachments::parse_user_message(content);
         let (rest, badges) = zeron_proto::badges::split(&parsed.text);
@@ -934,6 +1000,7 @@ impl RowBuilder {
             kind: RowKind::User,
             entry_id: Arc::from(id),
             content: Content::User(UserBubble {
+                sender,
                 text,
                 md,
                 images,
@@ -1109,6 +1176,32 @@ fn prepare_user_text(ctx: &mut Ctx, body: &str, style: super::style::Resolved, l
     }
 }
 
+/// An agent message's sender, or the chats it messaged, as the workspace lists them (a rename, a provider).
+fn agent_message_sig(entry: &SessionMessageEntry, workspace: Option<&WorkspaceSnapshot>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    if entry.role != MessageRole::User {
+        // Messages this agent sent: each recipient as the workspace lists it.
+        let mut h = None::<std::collections::hash_map::DefaultHasher>;
+        for part in &entry.parts {
+            let MessagePart::Tool { call, .. } = part else { continue };
+            for message in zeron_proto::agent_messages::outgoing_messages(call).into_iter().flatten() {
+                let h = h.get_or_insert_with(std::collections::hash_map::DefaultHasher::new);
+                recipient_chat(&message.chat, workspace).hash(h);
+            }
+        }
+        return h.map_or(0, |h| h.finish());
+    }
+    let Some(MessagePart::Text { text, .. }) = entry.parts.iter().find(|p| matches!(p, MessagePart::Text { .. })) else {
+        return 0;
+    };
+    let Some((sender, _)) = zeron_proto::agent_messages::agent_message_sender(text) else {
+        return 0;
+    };
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    sender_chat(&sender, workspace).hash(&mut h);
+    h.finish()
+}
+
 fn is_agent_call(call: &zeron_proto::ToolCall) -> bool {
     call.is_subagent_spawn() || call.is_delegate_task()
 }
@@ -1150,7 +1243,7 @@ impl Genus {
     }
 }
 
-pub(crate) fn chip_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, icon: &'static str, color: ColorRole, text: &str) -> RowCore {
+pub(crate) fn chip_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, icon: &'static str, color: ColorRole, text: &str, white_space: WhiteSpace) -> RowCore {
     let (size, lh) = TYPE.small;
     let style = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
     let lh = ctx.typo.px(lh);
@@ -1162,7 +1255,7 @@ pub(crate) fn chip_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, icon: &'sta
         content: Content::Chip(Chip {
             icon,
             color,
-            text: prepare_plain(ctx, text, style, lh, if color == ColorRole::Danger { ColorRole::Danger } else { ColorRole::TextSecondary }, WhiteSpace::Normal),
+            text: prepare_plain(ctx, text, style, lh, if color == ColorRole::Danger { ColorRole::Danger } else { ColorRole::TextSecondary }, white_space),
         }),
         copy_text: text.to_owned(),
     }
@@ -1183,6 +1276,88 @@ fn error_notice_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, message: &str)
             action,
         }),
         copy_text: message.to_owned(),
+    }
+}
+
+/// An agent message's sender as this workspace lists it: its live title
+/// (the header's for an untitled or unlisted chat), its provider, and
+/// whether it is listed (and so opens).
+fn sender_chat(sender: &zeron_proto::agent_messages::AgentSender, workspace: Option<&WorkspaceSnapshot>) -> (String, Option<String>, bool) {
+    let row = workspace.and_then(|ws| ws.session(&sender.chat_id));
+    let title = row
+        .filter(|row| row.has_title)
+        .map(|row| row.title.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| sender.title.clone());
+    (title, row.and_then(|row| row.harness.clone()).filter(|h| !h.is_empty()), row.is_some())
+}
+
+/// The chat a message this agent sent went to, as this workspace lists it:
+/// its title (the call's own key when unlisted), its provider, and its id
+/// when listed (and so it opens).
+fn recipient_chat(key: &str, workspace: Option<&WorkspaceSnapshot>) -> (String, Option<String>, Option<String>) {
+    let row = workspace.and_then(|ws| {
+        let chats: Vec<(&str, Option<&str>)> = ws
+            .sessions
+            .values()
+            .map(|row| (row.id.as_str(), row.has_title.then_some(row.title.as_str())))
+            .collect();
+        ws.session(zeron_proto::agent_messages::resolve_chat_key(key, &chats)?)
+    });
+    let Some(row) = row else {
+        return (key.split_whitespace().collect::<Vec<_>>().join(" "), None, None);
+    };
+    let title = Some(row.title.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|title| row.has_title && !title.is_empty())
+        .unwrap_or_else(|| row.id.chars().take(8).collect());
+    (title, row.harness.clone().filter(|h| !h.is_empty()), Some(row.id.clone()))
+}
+
+/// `Message from [mark] Chat`, the desktop's caption over an agent-sent
+/// bubble: the sending chat's provider mark (a chat glyph when unknown) and
+/// title, which opens that chat when the workspace lists it.
+fn sender_caption(ctx: &mut Ctx, sender: &zeron_proto::agent_messages::AgentSender, workspace: Option<&WorkspaceSnapshot>) -> PText {
+    let (title, harness, known) = sender_chat(sender, workspace);
+    chat_caption(ctx, "Message from", &title, harness.as_deref(), known.then_some(sender.chat_id.as_str()))
+}
+
+/// `{lead} [mark] Chat`: a muted one-line caption over a message between
+/// chats, the chat's provider mark (a chat glyph when unknown) beside its
+/// title, which opens chat `open`.
+fn chat_caption(ctx: &mut Ctx, lead: &str, title: &str, harness: Option<&str>, open: Option<&str>) -> PText {
+    let (size, lh) = TYPE.small;
+    let regular = ctx.typo.style(Family::Sans, Weight::Regular, false, size);
+    let medium = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
+    let lh = ctx.typo.px(lh);
+    let mark = ctx.typo.px(14.0);
+    // The mark rides a zero-width word joiner's padding, with a space on
+    // either side, so it sits as far from the title as from the lead.
+    let text = format!("{lead} \u{2060} {title}");
+    let split = lead.len() + 1;
+    let spans = vec![
+        zeron_text::Span { range: 0..split, style: regular.id, pad_start: 0.0, pad_end: 0.0, atomic: false, inline_box: None },
+        zeron_text::Span { range: split..text.len(), style: medium.id, pad_start: mark + 4.0, pad_end: 0.0, atomic: false, inline_box: None },
+    ];
+    let icon = harness.map_or_else(|| "bubble.left".to_owned(), |h| format!("brand:{h}"));
+    // One link (one tap target, one accessibility element): the chat.
+    let paint = |link| super::markdown::SpanPaint { color: ColorRole::TextSecondary, decoration: super::display::Decoration::None, link, chip: false };
+    let p = zeron_text::prepare(
+        &ctx.typo.book,
+        ctx.cache,
+        &text,
+        &spans,
+        &zeron_text::PrepareOptions { white_space: WhiteSpace::Pre, ..Default::default() },
+    );
+    PText {
+        p,
+        lh,
+        base: super::style::baseline(lh, regular),
+        paints: vec![paint(None), paint(open.map(|_| 0))],
+        links: open.map(|id| format!("{OPEN_CHAT_SCHEME}://open?id={id}")).into_iter().collect(),
+        chip: (0.0, 0.0),
+        badges: Vec::new(),
+        marks: vec![(1, icon)],
+        math: Vec::new(),
     }
 }
 
@@ -1277,6 +1452,20 @@ pub(crate) fn place_row(
             }
             let th = place_text(&c.text, x + px.v(24.0), top + px.v(4.0), cw - px.v(24.0), out);
             h.max(th + px.v(8.0))
+        }
+        Content::Caption { text, pending } => {
+            // Left-aligned like the agent's text; a long title fades.
+            if let Some(out) = out.as_deref_mut() {
+                let w = text.p.max_content_width().ceil().min(cw);
+                let first = out.runs.len();
+                place_text_lines(text, x, top, w, 1, px, out);
+                if *pending {
+                    for r in &mut out.runs[first..] {
+                        r.color = ColorRole::TextTertiary;
+                    }
+                }
+            }
+            text.lh
         }
         Content::Notice(n) => {
             // Card: padding, the warning glyph beside the text, and the
@@ -1431,8 +1620,17 @@ fn place_user(u: &UserBubble, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
     let badges_h = (badge_rows.len() as f32 * (badge_h + gap) - gap).max(0.0);
     let above = attach_h + if attach_h > 0.0 && badges_h > 0.0 { gap } else { 0.0 } + badges_h;
     let thumbs_h = if above > 0.0 { above + if bubble_h > 0.0 { px.v(8.0) } else { 0.0 } } else { 0.0 };
-    let h = thumbs_h + bubble_h;
+    let caption_h = u.sender.as_ref().map_or(0.0, |c| c.lh + px.v(CAPTION_GAP));
+    let h = caption_h + thumbs_h + bubble_h;
     let Some(out) = out else { return h };
+    // The sender caption, right-aligned over everything and never wider than
+    // the bubble under it; a long title fades.
+    if let Some(caption) = &u.sender {
+        let under = if bubble_h > 0.0 { bubble_w } else { max_w };
+        let cw_caption = caption.p.max_content_width().ceil().min(under);
+        place_text_lines(caption, x + cw - cw_caption, y, cw_caption, 1, px, out);
+    }
+    let y = y + caption_h;
     // Thumbnails right-aligned above the bubble.
     let mut tx = x + cw - side;
     for img in u.images.iter().rev() {
@@ -1545,7 +1743,8 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
     match content {
         Content::Block(b) => block(b),
         Content::User(u) => {
-            u.text.p.heap_bytes()
+            u.sender.as_ref().map_or(0, |c| c.p.heap_bytes())
+                + u.text.p.heap_bytes()
                 + u.md.iter().map(block).sum::<usize>()
                 + u.more.p.heap_bytes()
                 + u.files.iter().map(|(_, n, _)| n.p.heap_bytes()).sum::<usize>()
@@ -1553,6 +1752,7 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
         }
         Content::Tools(t) => super::tools::heap_bytes(t),
         Content::Chip(c) => c.text.p.heap_bytes(),
+        Content::Caption { text, .. } => text.p.heap_bytes(),
         Content::Notice(n) => n.text.p.heap_bytes(),
         Content::Image { reference } => reference.len(),
         Content::Working { .. } | Content::Visual(_) => 0,

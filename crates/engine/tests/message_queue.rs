@@ -1873,6 +1873,8 @@ async fn queued_turn_uses_current_config_at_turn_end_and_send_now() {
             profile_id: None,
             instance_id: None,
             disabled_tools: Vec::new(),
+            access: zeron_proto::PermissionMode::Full.access(),
+            plan: false,
         };
         core.workspace.set_chat_config(CHAT, &config).unwrap();
         core.doc_host

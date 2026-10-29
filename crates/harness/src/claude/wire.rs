@@ -101,6 +101,14 @@ pub(crate) struct SystemFrame {
     /// absent on subagent-owned background shell tasks.
     #[serde(default)]
     pub subagent_type: Option<String>,
+    /// `task_started`: the task's one-line name, `/<skill>` for a forked
+    /// skill (live-verified 2.1.310).
+    #[serde(default)]
+    pub description: Option<String>,
+    /// `task_started`: the subagent's opening prompt, a forked skill's body.
+    /// A `Value`: a shape we don't expect must not cost the frame.
+    #[serde(default)]
+    pub prompt: Option<Value>,
     #[serde(default)]
     pub spawn_depth: Option<u32>,
     /// `compact_boundary`: the CLI's own measurement of the compaction it
@@ -125,6 +133,10 @@ pub(crate) struct SystemFrame {
     pub error: Option<Value>,
     #[serde(default)]
     pub usage: Option<Value>,
+    /// `init` and `status`: the permission mode the CLI is in now. A `status`
+    /// follows every change, ours or its own (leaving plan mode).
+    #[serde(default, rename = "permissionMode")]
+    pub permission_mode: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -224,6 +236,9 @@ pub(crate) struct ContentBlock {
     pub kind: String,
     #[serde(default)]
     pub text: String,
+    /// A `thinking` block's (summarized) text.
+    #[serde(default)]
+    pub thinking: String,
     #[serde(default)]
     pub id: String,
     #[serde(default)]
@@ -358,6 +373,12 @@ pub(crate) struct ControlRequestBody {
     pub subtype: String,
     #[serde(default)]
     pub tool_name: String,
+    /// `can_use_tool`: the tool's name as shown to people (an MCP tool's
+    /// own), and what the model says the call is for.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     #[serde(default)]
     pub input: Value,
 }
@@ -643,6 +664,18 @@ pub(crate) fn apply_flag_settings_line(request_id: &str, settings: Value) -> Str
     .to_string()
 }
 
+/// Switch the live process's permission mode. `bypassPermissions` only
+/// works on a process launched with one of the skip-permissions flags
+/// (verified live against 2.1.311).
+pub(crate) fn set_permission_mode_line(request_id: &str, mode: &str) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": { "subtype": "set_permission_mode", "mode": mode },
+    })
+    .to_string()
+}
+
 /// Stop the in-flight turn only. `cancel_queued` drops steers the CLI has
 /// queued but not yet consumed: a stopped turn never continues into them.
 pub(crate) fn stop_turn_request_line(request_id: &str) -> String {
@@ -686,7 +719,17 @@ pub(crate) fn allow_response(updated_input: Value) -> Value {
     json!({ "behavior": "allow", "updatedInput": updated_input })
 }
 
-/// `can_use_tool` deny payload; the message reaches the model as the tool result.
+/// `can_use_tool` allow for `ExitPlanMode` that leaves plan mode for `mode`.
+/// Without it the CLI drops to `default` (verified live against 2.1.311).
+pub(crate) fn exit_plan_response(updated_input: Value, mode: &str) -> Value {
+    json!({
+        "behavior": "allow",
+        "updatedInput": updated_input,
+        "updatedPermissions": [{ "type": "setMode", "mode": mode, "destination": "session" }],
+    })
+}
+
+/// `can_use_tool` deny payload: the model reads `message` as the result.
 pub(crate) fn deny_response(message: &str) -> Value {
     json!({ "behavior": "deny", "message": message })
 }

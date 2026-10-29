@@ -162,6 +162,8 @@ async fn transcript_survives_open_racing_create_chat() {
                         sandbox: SandboxLevel::WorkspaceWrite,
                         permission_mode: zeron_proto::PermissionMode::Full,
                         auto_approve: true,
+                        access: Default::default(),
+                        plan: false,
                         attachments: Vec::new(),
                         worktree: None,
                         branch: None,

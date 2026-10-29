@@ -117,11 +117,7 @@ impl SessionFixture {
         &self,
         prompt: &str,
         resume: bool,
-    ) -> (
-        tokio::process::Child,
-        tokio::process::ChildStdin,
-        tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
-    ) {
+    ) -> (tokio::process::Child, tokio::process::ChildStdin, Frames) {
         self.start_with_mcp(prompt, resume, serde_json::Value::Null)
             .await
     }
@@ -130,23 +126,15 @@ impl SessionFixture {
         prompt: &str,
         resume: bool,
         mcp: serde_json::Value,
-    ) -> (
-        tokio::process::Child,
-        tokio::process::ChildStdin,
-        tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
-    ) {
+    ) -> (tokio::process::Child, tokio::process::ChildStdin, Frames) {
         self.spawn(serde_json::json!({"op":"run","prompt":prompt,"cwd":self.dir.path(),"resume":resume.then_some("agent-fixture"),"mcp":mcp}))
             .await
     }
     async fn spawn(
         &self,
         frame: serde_json::Value,
-    ) -> (
-        tokio::process::Child,
-        tokio::process::ChildStdin,
-        tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
-    ) {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    ) -> (tokio::process::Child, tokio::process::ChildStdin, Frames) {
+        use tokio::io::AsyncWriteExt;
         let mut child = tokio::process::Command::new("node")
             .arg(self.dir.path().join("shim.mjs"))
             .env("ZERON_CURSOR_STATE_DIR", self.dir.path().join("state"))
@@ -157,7 +145,7 @@ impl SessionFixture {
             .spawn()
             .unwrap();
         let mut stdin = child.stdin.take().unwrap();
-        let lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        let lines = Frames::new(child.stdout.take().unwrap());
         stdin
             .write_all(format!("{frame}\n").as_bytes())
             .await
@@ -165,10 +153,29 @@ impl SessionFixture {
         (child, stdin, lines)
     }
 }
-async fn frame(
-    lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
-) -> serde_json::Value {
-    let line = tokio::time::timeout(std::time::Duration::from_secs(5), lines.next_line())
+/// A shim's stdout, one JSON frame per line.
+struct Frames {
+    lines: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    started: bool,
+}
+impl Frames {
+    fn new(stdout: tokio::process::ChildStdout) -> Self {
+        use tokio::io::AsyncBufReadExt;
+        Self {
+            lines: tokio::io::BufReader::new(stdout).lines(),
+            started: false,
+        }
+    }
+    async fn next_line(&mut self) -> std::io::Result<Option<String>> {
+        self.lines.next_line().await
+    }
+}
+/// The next frame, within 5 s. A shim's first frame also waits for `node`
+/// to start, which alone has taken over 5 s on Windows CI runners.
+async fn frame(lines: &mut Frames) -> serde_json::Value {
+    let bound = if lines.started { 5 } else { 30 };
+    lines.started = true;
+    let line = tokio::time::timeout(std::time::Duration::from_secs(bound), lines.next_line())
         .await
         .expect("bounded frame")
         .unwrap()
@@ -281,7 +288,6 @@ async fn recovery_refuses_to_modify_a_store_with_a_live_owner() {
 
 #[tokio::test]
 async fn engine_death_does_not_leave_an_orphan_owning_the_conversation() {
-    use tokio::io::AsyncBufReadExt;
     let fixture = SessionFixture::new();
     let parent = fixture.dir.path().join("parent.mjs");
     std::fs::write(
@@ -305,7 +311,7 @@ async fn engine_death_does_not_leave_an_orphan_owning_the_conversation() {
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    let mut lines = tokio::io::BufReader::new(engine.stdout.take().unwrap()).lines();
+    let mut lines = Frames::new(engine.stdout.take().unwrap());
     assert_eq!(frame(&mut lines).await["ev"], "ready");
     assert_eq!(frame(&mut lines).await["ev"], "text");
     engine.kill().await.unwrap();
@@ -817,12 +823,8 @@ impl SessionFixture {
         &self,
         prompt: &str,
         extra: serde_json::Value,
-    ) -> (
-        tokio::process::Child,
-        tokio::process::ChildStdin,
-        tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
-    ) {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    ) -> (tokio::process::Child, tokio::process::ChildStdin, Frames) {
+        use tokio::io::AsyncWriteExt;
         let mut child = tokio::process::Command::new("node")
             .arg(self.dir.path().join("shim.mjs"))
             .env("ZERON_CURSOR_STATE_DIR", self.dir.path().join("state"))
@@ -833,7 +835,7 @@ impl SessionFixture {
             .spawn()
             .unwrap();
         let mut stdin = child.stdin.take().unwrap();
-        let lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        let lines = Frames::new(child.stdout.take().unwrap());
         let mut frame = serde_json::json!({"op":"run","prompt":prompt,"cwd":self.dir.path()});
         for (key, value) in extra.as_object().unwrap() {
             frame[key] = value.clone();
@@ -859,9 +861,7 @@ impl SessionFixture {
 }
 
 /// Frames up to and including the turn's terminal one.
-async fn turn_frames(
-    lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
-) -> Vec<serde_json::Value> {
+async fn turn_frames(lines: &mut Frames) -> Vec<serde_json::Value> {
     let mut frames = Vec::new();
     loop {
         let next = frame(lines).await;

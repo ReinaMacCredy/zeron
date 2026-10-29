@@ -69,6 +69,8 @@ async fn probe_once(harness: Box<dyn Harness>) -> ProbeOutcome {
         sandbox: SandboxLevel::WorkspaceWrite,
         permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         branch: None,

@@ -38,6 +38,8 @@ fn request(cwd: &Path) -> RunRequest {
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
         permission_mode: Default::default(),
+        access: Default::default(),
+        plan: false,
         resume: None,
         attachments: Vec::new(),
         worktree: None,

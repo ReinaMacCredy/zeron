@@ -56,6 +56,8 @@ async fn main() {
             zeron_proto::PermissionMode::Full
         },
         auto_approve: !answer_yes,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         resume: None,
         worktree: None,

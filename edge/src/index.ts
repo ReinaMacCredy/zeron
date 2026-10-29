@@ -45,6 +45,7 @@
  *   GET  /admin/cloud/usage             — ADMIN_TOKEN (operator export)
  *   POST /admin/cloud/credits           — ADMIN_TOKEN (grant a user credits)
  *   POST /admin/cloud/machine           — ADMIN_TOKEN (a user's machine size)
+ *   POST /admin/cloud/limits            — ADMIN_TOKEN (a user's awake/chat caps)
  *   POST /stripe/webhook | GET /billing/done — pre-bearer billing (Stripe-signed / static page)
  */
 import { authenticate } from "./auth";
@@ -54,6 +55,7 @@ import { handleAuthRoute } from "./auth-routes";
 import type { Env } from "./env";
 import { SessionRoom } from "./session-room";
 import { previewRoute } from "./preview-route";
+import { releaseRoute } from "./releases";
 import { PreviewRoom } from "./preview-room";
 import { DeviceRoom } from "./device-room";
 import { RegistryRoom } from "./registry-room";
@@ -118,29 +120,8 @@ export default {
         }
       });
     }
-    if (
-      parts[0] === "releases" &&
-      parts.length >= 2 &&
-      (request.method === "GET" || request.method === "HEAD")
-    ) {
-      const key = decodeURIComponent(url.pathname.slice("/releases/".length));
-      if (key.length === 0 || key.includes("..")) return json({ error: "bad request" }, 400);
-      const object = await env.RELEASES.get(key);
-      if (!object) return json({ error: "not_found" }, 404);
-      // latest.txt / manifest.json flip on release; artifacts are immutable by name.
-      const mutable = key.endsWith(".txt") || key.endsWith(".json");
-      const headers = new Headers({
-        "content-type": key.endsWith(".txt")
-          ? "text/plain; charset=utf-8"
-          : key.endsWith(".json")
-            ? "application/json"
-            : "application/octet-stream",
-        "content-length": String(object.size),
-        "cache-control": mutable ? "public, max-age=60" : "public, max-age=86400, immutable",
-        etag: object.httpEtag
-      });
-      return new Response(request.method === "HEAD" ? null : object.body, { headers });
-    }
+    const release = await releaseRoute(request, env, url);
+    if (release) return release;
 
     // ── WorkOS auth routes (pre-bearer: exchange/refresh/callback have no
     //    access token yet; the org routes verify the bearer themselves) ─────

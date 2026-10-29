@@ -236,9 +236,11 @@ pub(crate) async fn listening_services(
     roots: Vec<ProjectRoot>,
     all_ports: bool,
 ) -> Vec<ListeningService> {
-    let listeners = tokio::task::spawn_blocking(discovery::listeners)
-        .await
-        .unwrap_or_default();
+    let listeners = tokio::task::spawn_blocking(|| {
+        discovery::listeners(&mut discovery::Origins::default()).unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
     services(listeners, &roots, all_ports)
 }
 
@@ -533,6 +535,8 @@ mod tests {
             started_at: 0,
             address: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port),
             zeron_owned: false,
+            origin: None,
+            chat_id: None,
         }
     }
 

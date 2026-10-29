@@ -472,8 +472,13 @@ impl MessagePart {
                         .as_ref()
                         .map_or(0, |s| serde_json::to_vec(s).map_or(0, |v| v.len()))
             }
-            MessagePart::Input { questions, .. } => {
+            MessagePart::Input {
+                questions, answers, ..
+            } => {
                 serde_json::to_vec(questions).map_or(0, |v| v.len())
+                    + answers
+                        .as_ref()
+                        .map_or(0, |a| serde_json::to_vec(a).map_or(0, |v| v.len()))
             }
             MessagePart::Image {
                 id,
@@ -522,7 +527,8 @@ pub fn stamp_input_times(parts: &mut [MessagePart], now_ms: i64) {
 ///   (a tool call in between breaks the text block).
 /// - `ToolCall` appends, or refreshes in place when the id already exists (SDK retry idempotence).
 /// - `ToolResult` marks the matching tool part resolved / errored in place.
-/// - `InputRequested` appends an input part; `InputResolved` marks it resolved.
+/// - `InputRequested` appends an input part; `InputResolved` marks it resolved and records the
+///   answers it carries.
 /// - `Error` and `Done{error}` become visible error parts.
 pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
     match event {
@@ -1139,6 +1145,73 @@ mod tests {
             &parts[2],
             MessagePart::Reasoning { id, text } if id == "r2" && text == "more"
         ));
+    }
+
+    #[test]
+    fn input_resolution_records_what_the_run_received() {
+        let asked = |id: &str| AgentEvent::InputRequested {
+            request_id: id.into(),
+            questions: vec![],
+        };
+        let picked = vec![UserInputAnswer {
+            question_id: "q".into(),
+            labels: vec!["B".into()],
+        }];
+        let mut parts = Vec::new();
+        for id in ["answered", "closed", "legacy"] {
+            fold_event_into_parts(&mut parts, &asked(id));
+        }
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Input { answers: None, .. }
+        ));
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::InputResolved {
+                request_id: "answered".into(),
+                answers: Some(picked.clone()),
+            },
+        );
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::InputResolved {
+                request_id: "closed".into(),
+                answers: Some(vec![]),
+            },
+        );
+        // An event from before answers were recorded resolves the part but
+        // records nothing.
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::InputResolved {
+                request_id: "legacy".into(),
+                answers: None,
+            },
+        );
+        let recorded: Vec<_> = parts
+            .iter()
+            .map(|p| match p {
+                MessagePart::Input {
+                    resolved, answers, ..
+                } => (*resolved, answers.clone()),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            recorded,
+            vec![(true, Some(picked)), (true, Some(vec![])), (true, None)]
+        );
+        // The splitter counts answers toward the entry's byte budget.
+        let bare = MessagePart::Input {
+            id: "i".into(),
+            request_id: "i".into(),
+            questions: vec![],
+            resolved: true,
+            answers: None,
+            asked_at_ms: None,
+            answered_at_ms: None,
+        };
+        assert!(parts[0].byte_len() > bare.byte_len());
     }
 
     #[test]

@@ -77,7 +77,9 @@ final class RowView: UIView {
     private func rebuildLinkElements(_ d: RowDisplay) {
         linkElements = d.links.map { l in
             let e = UIAccessibilityElement(accessibilityContainer: self)
-            e.accessibilityLabel = URL(string: l.url)?.host() ?? l.url
+            let url = URL(string: l.url)
+            // A caption over a message between chats opens the other chat.
+            e.accessibilityLabel = url?.scheme == "zeron-chat" ? "Open chat" : url?.host() ?? l.url
             e.accessibilityValue = l.url
             e.accessibilityTraits = .link
             e.accessibilityIdentifier = "transcript-link"

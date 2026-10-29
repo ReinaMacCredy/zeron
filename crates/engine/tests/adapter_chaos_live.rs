@@ -125,6 +125,8 @@ impl Suite {
             sandbox: SandboxLevel::DangerFullAccess,
             permission_mode: zeron_proto::PermissionMode::Full,
             auto_approve: true,
+            access: Default::default(),
+            plan: false,
             attachments: vec![],
             worktree: None,
             branch: None,
@@ -204,6 +206,8 @@ impl Suite {
                     profile_id: None,
                     instance_id: None,
                     disabled_tools: Vec::new(),
+                    access: zeron_proto::PermissionMode::Full.access(),
+                    plan: false,
                 },
             )
             .unwrap();
@@ -1203,6 +1207,8 @@ fn restart_request(name: &str, cwd: &str, prompt: &str) -> RunRequest {
         sandbox: SandboxLevel::DangerFullAccess,
         permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: vec![],
         worktree: None,
         branch: None,
@@ -1304,6 +1310,8 @@ async fn restart_durability() {
                 profile_id: None,
                 instance_id: None,
                 disabled_tools: Vec::new(),
+                access: zeron_proto::PermissionMode::Full.access(),
+                plan: false,
             },
         )
         .unwrap();

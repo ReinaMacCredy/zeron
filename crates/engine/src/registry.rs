@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use zeron_harness::{Harness, HarnessError, LaunchOverrides, mock::MockHarness};
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ModelCatalog, ProviderInstance, ReasoningLevel,
-    SteeringMode,
+    AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ModelCatalog, ProviderInstance,
+    ReasoningLevel, SteeringMode,
 };
 
 /// What `ListHarnesses` reports per harness.
@@ -41,6 +41,14 @@ pub struct HarnessDescriptor {
     /// "unknown": consumers fall back to detection (see [`descriptor_enabled`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// The access modes this harness honors, least to most trusting. Empty
+    /// — a catalog from an engine predating modes — offers no choice: those
+    /// engines run every chat with full access.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub access_modes: Vec<AccessMode>,
+    /// Whether this harness honors plan mode.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supports_plan: bool,
 }
 
 impl HarnessDescriptor {
@@ -84,6 +92,8 @@ fn describe(harness: &dyn Harness) -> HarnessDescriptor {
         installed: harness.installed(),
         can_install: false,
         enabled: None,
+        access_modes: harness.access_modes().to_vec(),
+        supports_plan: harness.supports_plan(),
     }
 }
 
@@ -242,6 +252,16 @@ impl Default for CompactionSettings {
             missions: true,
         }
     }
+}
+
+/// Per-device native subagent preferences (Settings → Providers).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NativeSubagentSettings {
+    /// Registered harnesses whose native subagents can be turned off.
+    pub switchable: Vec<HarnessId>,
+    /// The ones turned off: their runs delegate through side chats only.
+    pub off: Vec<HarnessId>,
 }
 
 type Factory = Box<dyn Fn() -> Result<Arc<dyn Harness>, HarnessError> + Send + Sync>;
@@ -1000,6 +1020,49 @@ impl HarnessRegistry {
         }
     }
 
+    /// Whether runs of `id` keep the provider's own subagent tools: off only
+    /// under the routing native policy Off, for a driver that can launch
+    /// without them.
+    pub fn native_subagents(&self, id: HarnessId) -> bool {
+        !(zeron_harness::switches_native_subagents(id)
+            && self.prefs().routing.native == crate::routing::NativePolicy::Off)
+    }
+
+    pub fn native_subagent_settings(&self) -> NativeSubagentSettings {
+        let switchable: Vec<HarnessId> = self
+            .order()
+            .iter()
+            .copied()
+            .filter(|id| zeron_harness::switches_native_subagents(*id))
+            .collect();
+        let off = switchable
+            .iter()
+            .copied()
+            .filter(|id| !self.native_subagents(*id))
+            .collect();
+        NativeSubagentSettings { switchable, off }
+    }
+
+    /// The upstream per-harness switch, kept as a view of the routing native
+    /// policy so there is one setting: off sets the policy to Off, on puts
+    /// back the default.
+    pub fn set_native_subagents(&self, id: HarnessId, on: bool) -> Result<(), String> {
+        if !zeron_harness::switches_native_subagents(id) {
+            return Err(format!("{id:?} has no native subagents to turn off"));
+        }
+        {
+            let mut prefs = self.prefs();
+            let off = prefs.routing.native == crate::routing::NativePolicy::Off;
+            prefs.routing.native = match (on, off) {
+                (true, true) => crate::routing::NativePolicy::default(),
+                (false, false) => crate::routing::NativePolicy::Off,
+                _ => return Ok(()),
+            };
+        }
+        self.persist_prefs();
+        Ok(())
+    }
+
     pub fn register(&self, harness: Arc<dyn Harness>) {
         let id = harness.id();
         if self.slots().insert(id, Slot::Ready(harness)).is_none() {
@@ -1238,6 +1301,8 @@ fn full_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            access_modes: AccessMode::ALL.to_vec(),
+            supports_plan: true,
         },
         Box::new(|| zeron_harness::ClaudeHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::ClaudeHarness::new()) as Arc<dyn Harness>)),
@@ -1266,6 +1331,8 @@ fn full_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            access_modes: AccessMode::ALL.to_vec(),
+            supports_plan: true,
         },
         Box::new(|| zeron_harness::CodexHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::CodexHarness::new()) as Arc<dyn Harness>)),
@@ -1283,6 +1350,8 @@ fn full_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            access_modes: vec![AccessMode::FullAccess],
+            supports_plan: false,
         },
         Box::new(|| zeron_harness::CursorHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::CursorHarness::new()) as Arc<dyn Harness>)),
@@ -1301,6 +1370,8 @@ fn full_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            access_modes: vec![AccessMode::FullAccess],
+            supports_plan: false,
         },
         Box::new(|| zeron_harness::AcpHarness::devin().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::devin()) as Arc<dyn Harness>)),
@@ -1323,6 +1394,8 @@ fn full_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            access_modes: vec![AccessMode::FullAccess],
+            supports_plan: false,
         },
         Box::new(|| zeron_harness::AcpHarness::grok().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::grok()) as Arc<dyn Harness>)),
@@ -1341,6 +1414,8 @@ fn full_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            access_modes: vec![AccessMode::FullAccess],
+            supports_plan: false,
         },
         Box::new(|| zeron_harness::AcpHarness::hermes().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::hermes()) as Arc<dyn Harness>)),
@@ -1356,6 +1431,8 @@ fn full_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            access_modes: vec![AccessMode::FullAccess],
+            supports_plan: false,
         },
         Box::new(|| zeron_harness::PiHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::PiHarness::new()) as Arc<dyn Harness>)),
@@ -1381,6 +1458,8 @@ fn full_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            access_modes: AccessMode::ALL.to_vec(),
+            supports_plan: true,
         },
         Box::new(|| zeron_harness::OpencodeHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::OpencodeHarness::new()) as Arc<dyn Harness>)),
@@ -1399,6 +1478,8 @@ fn full_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            access_modes: AccessMode::ALL.to_vec(),
+            supports_plan: false,
         },
         Box::new(|| zeron_harness::AcpHarness::antigravity().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::antigravity()) as Arc<dyn Harness>)),
@@ -1415,6 +1496,8 @@ fn full_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
+            access_modes: vec![AccessMode::Supervised, AccessMode::FullAccess],
+            supports_plan: false,
         },
         Box::new(|| zeron_harness::MuseHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::MuseHarness::new()) as Arc<dyn Harness>)),
@@ -1483,6 +1566,8 @@ mod tests {
             installed: true,
             can_install: false,
             enabled: Some(true),
+            access_modes: Vec::new(),
+            supports_plan: false,
         };
         assert!(descriptor.steers_mid_turn());
 
@@ -1510,6 +1595,8 @@ mod tests {
                 installed: true,
                 can_install: false,
                 enabled: None,
+                access_modes: Vec::new(),
+                supports_plan: false,
             },
             Box::new(|| false),
             Box::new(move || {
@@ -1529,6 +1616,23 @@ mod tests {
         );
         assert!(registry.resolve(HarnessId::Mock).is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// The composer offers what the catalog lists before any harness has
+    /// resolved, so each lazy descriptor must offer the modes its harness
+    /// honors once it does.
+    #[test]
+    fn lazy_descriptors_offer_the_modes_their_harness_honors() {
+        let registry = full_registry();
+        for described in registry.descriptors() {
+            let harness = registry.resolve(described.id).unwrap();
+            assert_eq!(
+                (described.access_modes.as_slice(), described.supports_plan),
+                (harness.access_modes(), harness.supports_plan()),
+                "{:?}",
+                described.id
+            );
+        }
     }
 
     #[test]
@@ -1658,6 +1762,8 @@ mod tests {
                 installed: true,
                 can_install: false,
                 enabled: None,
+                access_modes: Vec::new(),
+                supports_plan: false,
             },
             Box::new(move || installed),
             Box::new(|| Err(HarnessError::NotInstalled("test slot".into()))),
@@ -1771,6 +1877,8 @@ mod tests {
                 installed: true,
                 can_install: false,
                 enabled: None,
+                access_modes: Vec::new(),
+                supports_plan: false,
             },
             Box::new(move || probe.load(Ordering::SeqCst)),
             Box::new(|| Err(HarnessError::NotInstalled("test slot".into()))),
@@ -2003,6 +2111,64 @@ mod tests {
         assert_eq!(before.supports_steering, after.supports_steering);
         assert_eq!(before.steering_mode, after.steering_mode);
         assert_eq!(before.reasoning_levels, after.reasoning_levels);
+    }
+
+    #[test]
+    fn native_subagents_switch_off_per_harness_and_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        test_slot(&registry, HarnessId::ClaudeCode, true);
+        test_slot(&registry, HarnessId::Codex, true);
+        test_slot(&registry, HarnessId::Opencode, true);
+        assert!(registry.native_subagents(HarnessId::ClaudeCode));
+        assert_eq!(
+            registry.native_subagent_settings().switchable,
+            vec![HarnessId::ClaudeCode]
+        );
+        // A Codex thread keeps the mode it ran with: no switch to undo.
+        assert!(
+            registry
+                .set_native_subagents(HarnessId::Codex, false)
+                .is_err()
+        );
+
+        registry
+            .set_native_subagents(HarnessId::ClaudeCode, false)
+            .unwrap();
+        registry
+            .set_native_subagents(HarnessId::ClaudeCode, false)
+            .unwrap();
+        assert!(
+            registry
+                .set_native_subagents(HarnessId::Opencode, false)
+                .is_err()
+        );
+        assert!(!registry.native_subagents(HarnessId::ClaudeCode));
+        assert!(registry.native_subagents(HarnessId::Codex));
+
+        // One setting: the switch is the routing native policy.
+        assert_eq!(
+            registry.routing_settings().native,
+            crate::routing::NativePolicy::Off
+        );
+        assert!(registry.native_subagents(HarnessId::Opencode));
+
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        test_slot(&reloaded, HarnessId::ClaudeCode, true);
+        assert_eq!(
+            reloaded.native_subagent_settings().off,
+            vec![HarnessId::ClaudeCode]
+        );
+        reloaded
+            .set_native_subagents(HarnessId::ClaudeCode, true)
+            .unwrap();
+        assert!(reloaded.native_subagents(HarnessId::ClaudeCode));
+        assert_eq!(
+            reloaded.routing_settings().native,
+            crate::routing::NativePolicy::default()
+        );
     }
 }
 

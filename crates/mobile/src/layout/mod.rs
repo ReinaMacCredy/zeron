@@ -649,6 +649,7 @@ impl TranscriptView {
                 serde_json::from_value(serde_json::Value::String(wire)).ok()
             });
             let entries = snap.transcript_messages();
+            let workspace = client.as_ref().map(|client| client.client().workspace());
             let chats: seams::Chats = client
                 .map(|client| {
                     std::iter::once(chat_id.clone())
@@ -679,6 +680,7 @@ impl TranscriptView {
                 harness,
                 chat_id: Some(chat_id.clone()),
                 chats: Arc::new(chats),
+                workspace,
             };
             let _ = tx.lock().unwrap().send(Msg::Input(input));
         });
@@ -813,6 +815,7 @@ pub(crate) fn debug_input(entries: Vec<DebugEntry>, working: bool) -> Transcript
         harness: None,
         chat_id: None,
         chats: Default::default(),
+        workspace: None,
     }
 }
 

@@ -155,6 +155,8 @@ fn run_request(prompt: &str) -> RunRequest {
         sandbox: SandboxLevel::WorkspaceWrite,
         permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         branch: None,
@@ -615,6 +617,8 @@ async fn chat_config_selects_the_run_harness() {
                 profile_id: None,
                 instance_id: None,
                 disabled_tools: Vec::new(),
+                access: zeron_proto::PermissionMode::Full.access(),
+                plan: false,
             }),
             None,
         )

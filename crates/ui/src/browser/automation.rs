@@ -101,7 +101,7 @@ impl BrowserSurface {
     pub(crate) fn take_over(&mut self, cx: &mut Context<Self>) {
         self.disable_diagnostics();
         self.control.revoke();
-        self.annotation.took_over();
+        self.annotate_state.took_over();
         cx.notify();
     }
     pub(crate) fn resume_control(&mut self, cx: &mut Context<Self>) {

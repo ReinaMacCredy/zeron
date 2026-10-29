@@ -16,7 +16,8 @@ pub const DESCRIPTION: &str = "\
 Show an interactive visual (chart, table, dashboard, diagram, simulation, 3D view) inline in this \
 chat, above your final text reply; call it before writing that reply. Use it when a visual says more \
 than prose. The reader already sees it, so the reply should not announce, locate, or restate it: add \
-only what the visual doesn't say.\n\
+only what the visual doesn't say. To show an image file as it is (a screenshot, a photo), use \
+show_image instead.\n\
 \n\
 A visual is a Luau script (Lua 5.1 plus `+=`, `continue`, and `if` expressions). Zeron runs it in a \
 sandbox (no I/O or network; math.random is seeded, so data is the same on every render) and renders \
@@ -159,6 +160,63 @@ pub fn tool() -> Value {
         },
         "annotations": { "title": "Show visual", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false }
     })
+}
+
+pub const IMAGE_TOOL: &str = "show_image";
+
+const IMAGE_DESCRIPTION: &str = "\
+Show an image file (a screenshot, a rendered chart or diagram, a photo) inline in this chat, above \
+your final text reply; call it before writing that reply, once per image, in the order they should \
+appear. PNG, JPEG, WebP, or GIF, at most 10 MB and 4096 pixels on a side. Zeron copies the file \
+into the chat, so it stays visible after the file changes or is deleted. The reader \
+already sees the image, so the reply should not announce or describe it: add only what the image \
+doesn't show.";
+
+pub fn image_tool() -> Value {
+    json!({
+        "name": IMAGE_TOOL,
+        "description": IMAGE_DESCRIPTION,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The image file on this machine, absolute or relative to your working directory."
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        },
+        "annotations": { "title": "Show image", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false }
+    })
+}
+
+/// `show_image`'s file (a path relative to the agent's working directory),
+/// base64-encoded, bounded however the file changes (or lies about its size).
+pub async fn read_image(path: &str) -> Result<String, String> {
+    use base64::Engine as _;
+    use zeron_proto::IMAGE_MAX_BYTES;
+    let too_large = || format!("{path} is over {} MB", IMAGE_MAX_BYTES / (1024 * 1024));
+    let unreadable = |e: std::io::Error| format!("can't read {path}: {e}");
+    let metadata = tokio::fs::metadata(path).await.map_err(unreadable)?;
+    if !metadata.is_file() {
+        return Err(format!("{path} is not a file"));
+    }
+    if metadata.len() > IMAGE_MAX_BYTES as u64 {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    tokio::fs::File::open(path)
+        .await
+        .map_err(unreadable)?
+        .take(IMAGE_MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(unreadable)?;
+    if bytes.len() > IMAGE_MAX_BYTES {
+        return Err(too_large());
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
 /// Read the asset files (paths relative to the agent's working directory),

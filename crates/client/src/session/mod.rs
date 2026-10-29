@@ -1463,6 +1463,8 @@ impl SessionHandle {
                     cwd: chat.cwd.clone().unwrap_or_else(|| "~".into()),
                     sandbox: config.map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox),
                     auto_approve: false,
+                    access: config.map(|c| c.permission_mode.access()).unwrap_or_default(),
+                    plan: config.is_some_and(|c| c.plan),
                     resume: None,
                     attachments: refs.clone(),
                     worktree: request.worktree.clone(),
