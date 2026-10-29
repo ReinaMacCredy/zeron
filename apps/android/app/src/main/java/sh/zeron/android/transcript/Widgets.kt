@@ -138,7 +138,8 @@ private fun Widget(state: TranscriptState, model: RowModel, w: Widget, palette: 
         }
         is WidgetKind.Action -> ActionButton(kind.label, palette) { actions.act(kind.action) }
         is WidgetKind.CardButton -> Tap(kind.action::class.simpleName ?: "Card action") { actions.card(kind.action) }
-        is WidgetKind.HtmlRender, is WidgetKind.HtmlExpand -> Unit
+        is WidgetKind.HtmlRender -> HtmlPageWidget(state, kind, actions)
+        is WidgetKind.HtmlExpand -> HtmlExpandButton(kind, actions, palette)
     }
 }
 
