@@ -89,6 +89,8 @@ import uniffi.zeron_core.SessionHandle
 
 private data class TextSheet(val title: String, val text: String, val mono: Boolean)
 
+private data class ConfigRequest(val tab: uniffi.zeron_core.ConfigTab = uniffi.zeron_core.ConfigTab.CONFIG, val query: String = "")
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun SessionScreen(
@@ -123,6 +125,8 @@ fun SessionScreen(
         return
     }
     val transcript = remember(chatId) { TranscriptState() }
+    val extras = remember(chatId) { sh.zeron.android.core.SessionExtras(model, core, handle, chatId) }
+    DisposableEffect(chatId) { onDispose { extras.close() } }
     val density = LocalDensity.current.density
     DisposableEffect(chatId) {
         transcript.engine.attach(core, chatId)
@@ -161,7 +165,7 @@ fun SessionScreen(
     val scope = rememberCoroutineScope()
     var sheet by remember { mutableStateOf<TextSheet?>(null) }
     var viewing by remember { mutableStateOf<ImageBitmap?>(null) }
-    var claudeConfig by remember(chatId) { mutableStateOf(false) }
+    var claudeConfig by remember(chatId) { mutableStateOf<ConfigRequest?>(null) }
     val quotes = remember(chatId) { kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 4) }
     val actions = remember(chatId) {
         suspend fun load(ref: String): ImageBitmap? {
@@ -190,7 +194,11 @@ fun SessionScreen(
             openSubagent = { doc, title, running -> onOpenSubagent(chatId, doc, title, running) },
             // An error card's "Log in": that agent's sign-in, started at once.
             act = { action -> if (action == "sign-in") signInTarget(model, chatId)?.let { onOpenAccounts(it, true) } },
-            card = { action -> if (action is uniffi.zeron_core.CardAction.OpenClaudeConfig) claudeConfig = true },
+            loadHtml = { device, path ->
+                val key = (device.ifEmpty { extras.hostDevice }) + "\n" + path
+                htmlPages.get(key) ?: runCatching { core.readAttachment(device.ifEmpty { extras.hostDevice }, path).toString(Charsets.UTF_8) }.getOrNull()?.also { htmlPages.put(key, it) }
+            },
+            card = { action -> if (action is uniffi.zeron_core.CardAction.OpenClaudeConfig) claudeConfig = ConfigRequest() },
         )
     }
     // The composer's draft outlives the panel that replaces it while the agent asks.
@@ -395,7 +403,7 @@ fun SessionScreen(
                             if (cloudOutOfCredits) nudges++
                             !cloudOutOfCredits
                         },
-                        onOpenClaudeConfig = { claudeConfig = true },
+                        onOpenClaudeConfig = { claudeConfig = ConfigRequest() },
                         onNeedsYou = onNeedsYou,
                         onOpenChat = onOpenChat,
                         onOpenRoute = onOpenRoute,
@@ -408,7 +416,8 @@ fun SessionScreen(
 
     viewing?.let { ImageViewer(it) { viewing = null } }
 
-    if (claudeConfig) sh.zeron.android.ui.session.ClaudeConfigSheet(model, chatId) { claudeConfig = false }
+    claudeConfig?.let { c -> sh.zeron.android.ui.session.ClaudeConfigSheet(model, chatId, extras, c.tab, c.query) { claudeConfig = null } }
+    sh.zeron.android.ui.session.SwitchPromptDialog(extras)
 
     if (showCompanions) {
         CompanionsSheet(
@@ -467,6 +476,8 @@ fun SessionScreen(
         }
     }
 }
+
+private val htmlPages = android.util.LruCache<String, String>(16)
 
 /** How far above the chips and composer the transcript starts to fade. */
 private val FADE = 44.dp

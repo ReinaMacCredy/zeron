@@ -77,6 +77,7 @@ class TranscriptActions(
     /** An in-transcript button (`sign-in` on an error card). */
     val act: (String) -> Unit = {},
     val card: (uniffi.zeron_core.CardAction) -> Unit = {},
+    val loadHtml: suspend (deviceId: String, path: String) -> String? = { _, _ -> null },
 )
 
 private const val OVERSCAN = 700f
