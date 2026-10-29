@@ -196,6 +196,75 @@ async fn a_started_task_opens_a_linked_chat_whose_first_turn_is_the_task() {
 }
 
 #[tokio::test]
+async fn gathered_tasks_share_one_new_thread_and_one_listing_message() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Recording(prompts.clone())));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    core.workspace
+        .create_space("space-1", "dev-a", "/tmp", None, false)
+        .unwrap();
+    let rpc = core.rpc_service();
+    let mutate = |params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move { rpc.handle(methods::MUTATE, params).await }
+    };
+    for (id, title) in [("g1", "Fix login"), ("g2", "Add tests"), ("g3", "Ship it")] {
+        mutate(json!({ "op": "createTask", "taskId": id, "title": title, "spaceId": "space-1" }))
+            .await
+            .unwrap();
+    }
+
+    mutate(json!({
+        "op": "startTasks", "taskIds": ["g1", "g2"], "chatId": "gather",
+        "config": {
+            "harness": "mock", "model": "rec-model", "reasoning": "low",
+            "sandbox": "workspace-write", "permissionMode": "auto",
+        },
+    }))
+    .await
+    .unwrap();
+    wait_for(|| !prompts.lock().unwrap().is_empty(), "the gathered turn").await;
+    assert_eq!(
+        prompts.lock().unwrap()[0],
+        "Work through these 2 tasks in this thread, in order. Mark each one done with the \
+         `tasks` tool when it is finished.\n\n1. [Fix login](zeron-task:g1)\n2. [Add tests](zeron-task:g2)"
+    );
+    for id in ["g1", "g2"] {
+        assert_eq!(
+            core.workspace.task(id).unwrap().chat_id.as_deref(),
+            Some("gather")
+        );
+    }
+    let chat = core.workspace.chat("gather").unwrap().unwrap();
+    assert_eq!(chat.title.as_deref(), Some("Fix login +1"));
+    assert_eq!(chat.space_id.as_deref(), Some("space-1"));
+
+    mutate(json!({ "op": "addTasksToThread", "taskIds": ["g3"], "chatId": "gather" }))
+        .await
+        .unwrap();
+    wait_for(|| prompts.lock().unwrap().len() == 2, "the added task").await;
+    assert_eq!(
+        prompts.lock().unwrap()[1],
+        "Also take this task in this thread. Mark it done with the `tasks` tool when it is \
+         finished.\n\n1. [Ship it](zeron-task:g3)"
+    );
+    assert_eq!(
+        core.workspace.task("g3").unwrap().chat_id.as_deref(),
+        Some("gather")
+    );
+    assert!(
+        mutate(json!({ "op": "startTasks", "taskIds": [], "chatId": "none" }))
+            .await
+            .is_err()
+    );
+    assert!(core.workspace.chat("none").unwrap().is_none());
+}
+
+#[tokio::test]
 async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
