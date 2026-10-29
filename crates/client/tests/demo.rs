@@ -1141,10 +1141,12 @@ fn the_roster_lists_subagents_and_shells_and_stops_them() {
         [
             ("Check the sheet layout", RunState::Completed),
             ("Audit the composer pickers", RunState::Working),
+            ("Measure the picker hit areas", RunState::Working),
             ("Trace the draft restore path", RunState::Working),
             ("Reproduce the composer jump when the key…", RunState::Failed),
         ]
     );
+    assert_eq!(roster.agents[2].parent.as_deref(), Some("spawn-pickers"));
     assert_eq!(roster.harness, Some(zeron_proto::HarnessId::ClaudeCode));
     let compact = session.compact_section(0).unwrap();
     assert_eq!(compact.heading, "Idle compaction");

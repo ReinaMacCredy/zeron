@@ -5,11 +5,11 @@ use gpui::{
     AnyElement, App, ClickEvent, Context, Div, Entity, Hsla, MouseButton, MouseDownEvent,
     SharedString, Stateful, Window, div, point, prelude::*, px,
 };
-use zeron_doc::background::{agent_runs, agent_tree, latest_prompt};
+use zeron_doc::background::{agent_runs, agent_tree, latest_prompt, rows_missing, walked_docs};
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::background::{
     AgentRun, RunState, aggregate, agents_label, delegate_runs, elapsed_label, latest_line,
-    roster_heading, shell_tasks, shells_label,
+    roster_heading, run_depths, shell_tasks, shells_label,
 };
 use zeron_proto::{BackgroundTask, HarnessId, ReasoningLevel};
 use zeron_rpc::methods;
@@ -214,6 +214,7 @@ pub(crate) struct BackgroundUi {
     outputs: HashMap<String, ShellOutput>,
     tokens: HashMap<String, AgentTokens>,
     walks: HashMap<String, AgentWalk>,
+    widen: Option<bool>,
     detail: Option<TrayDetail>,
 }
 
@@ -224,6 +225,7 @@ struct ShellOutput {
 
 struct AgentWalk {
     entries: Vec<SessionMessageEntry>,
+    loaded: bool,
     _watch: Option<gpui::Task<()>>,
 }
 
@@ -343,7 +345,7 @@ impl Composer {
         })?;
         let chat_reasoning =
             chat_reasoning.or_else(|| self.pickers.read(cx).resolved(cx).reasoning);
-        let (agents, shells) = {
+        let (agents, shells, walk, counted) = {
             let state = self.state.read(cx);
             let transcript = self.bound_transcript(state);
             let turn_start = latest_prompt(transcript);
@@ -363,7 +365,14 @@ impl Composer {
                 turn_start.map_or(0, |ix| transcript[ix].created_at),
                 pending_review,
             ));
-            (agents, shell_tasks(state.session_for(&chat_id)))
+            let walk = walked_docs(transcript, &agents, self.background.widen == Some(true));
+            let counted = state.running_subagents_for(&chat_id, chrono::Utc::now());
+            (
+                agents,
+                shell_tasks(state.session_for(&chat_id)),
+                walk,
+                counted,
+            )
         };
         if self.background.chat.as_deref() != Some(chat_id.as_str()) {
             self.background = BackgroundUi {
@@ -372,7 +381,20 @@ impl Composer {
                 ..Default::default()
             };
         }
-        self.sync_agent_walks(&agents, cx);
+        self.sync_agent_walks(walk, cx);
+        if self.background.walks.values().all(|walk| walk.loaded) {
+            let short = rows_missing(&agents, counted);
+            match self.background.widen {
+                None => {
+                    self.background.widen = Some(short);
+                    if short {
+                        cx.notify();
+                    }
+                }
+                Some(true) if !short => self.background.widen = Some(false),
+                _ => {}
+            }
+        }
         if let Some((pending_chat, panel, asked)) = self.background.pending.take()
             && asked.elapsed() < PANEL_WAIT
         {
@@ -630,14 +652,9 @@ impl Composer {
         let dismiss = motion.live.then(|| {
             cx.listener(|this: &mut Self, _: &MouseDownEvent, _, cx| this.close_roster(cx))
         });
-        let mut depths: HashMap<&str, usize> = HashMap::new();
+        let depths = run_depths(agents);
         let rows = agents.iter().enumerate().map(|(ix, run)| {
-            let depth = run
-                .parent
-                .as_deref()
-                .and_then(|parent| depths.get(parent))
-                .map_or(0, |depth| depth + 1);
-            depths.insert(run.part_id.as_str(), depth);
+            let depth = depths[ix];
             let open = {
                 let part_id = run.part_id.clone();
                 let doc_id = run.doc_id.clone();
@@ -992,22 +1009,16 @@ impl Composer {
         }))
     }
 
-    fn sync_agent_walks(&mut self, agents: &[AgentRun], cx: &mut Context<Self>) {
-        let docs: Vec<&str> = agents
-            .iter()
-            .filter(|run| !run.delegated)
-            .map(|run| run.doc_id.as_str())
-            .collect();
-        self.background
-            .walks
-            .retain(|id, _| docs.contains(&id.as_str()));
+    fn sync_agent_walks(&mut self, docs: Vec<String>, cx: &mut Context<Self>) {
+        self.background.walks.retain(|id, _| docs.contains(id));
         for id in docs {
-            if !self.background.walks.contains_key(id) {
-                let watch = self.watch_doc_entries(id.to_owned(), true, cx);
+            if !self.background.walks.contains_key(&id) {
+                let watch = self.watch_doc_entries(id.clone(), true, cx);
                 self.background.walks.insert(
-                    id.to_owned(),
+                    id,
                     AgentWalk {
                         entries: Vec::new(),
+                        loaded: false,
                         _watch: watch,
                     },
                 );
@@ -1131,18 +1142,20 @@ impl Composer {
                         continue;
                     };
                     let applied = this.update(cx, |this, cx| {
-                        let entries = if walk {
-                            &mut this.background.walks.get_mut(&doc_id)?.entries
+                        let (entries, quiet) = if walk {
+                            let agent = this.background.walks.get_mut(&doc_id)?;
+                            let loaded = std::mem::replace(&mut agent.loaded, true);
+                            (&mut agent.entries, loaded)
                         } else {
-                            &mut this
+                            let feed = this
                                 .background
                                 .detail
                                 .as_mut()
                                 .and_then(|detail| detail.feed.as_mut())
-                                .filter(|feed| feed.doc_id == doc_id)?
-                                .entries
+                                .filter(|feed| feed.doc_id == doc_id)?;
+                            (&mut feed.entries, false)
                         };
-                        let spawns = walk.then(|| agent_runs(&*entries, 0));
+                        let spawns = quiet.then(|| agent_runs(&*entries, 0));
                         let synced =
                             zeron_doc::apply_transcript_frame(entries, update.frame).is_ok();
                         if spawns.is_none_or(|spawns| spawns != agent_runs(&*entries, 0)) {

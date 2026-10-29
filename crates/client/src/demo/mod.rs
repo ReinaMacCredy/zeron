@@ -257,6 +257,10 @@ impl DemoHost {
         composer::background_session(chat_id)
     }
 
+    pub(crate) fn subagent_transcript(&self, doc_id: &str) -> Vec<zeron_doc::SessionMessageEntry> {
+        composer::subagent_transcript(doc_id)
+    }
+
     pub(crate) fn shell_output(&self, task_id: &str) -> Vec<String> {
         composer::shell_output(task_id)
     }

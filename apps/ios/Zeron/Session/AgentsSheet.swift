@@ -90,6 +90,7 @@ final class AgentsSheetViewController: UITableViewController {
             content.text = run.title
             content.secondaryText = [run.line, run.review].compactMap { $0 }.joined(separator: "\n")
             content.image = UIImage(systemName: run.delegated ? "arrow.triangle.branch" : "person.2")
+            content.directionalLayoutMargins.leading += 16 * CGFloat(run.depth)
             cell.accessibilityIdentifier = "agents-row-\(indexPath.row)"
             if run.canStop {
                 cell.accessoryView = BackgroundRuns.stopButton(id: "agents-stop-\(indexPath.row)") { [weak self] in

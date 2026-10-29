@@ -140,6 +140,21 @@ fn working_count(runs: &[AgentRun]) -> usize {
         .count()
 }
 
+pub fn run_depths(runs: &[AgentRun]) -> Vec<u32> {
+    let mut depths = std::collections::HashMap::<&str, u32>::new();
+    runs.iter()
+        .map(|run| {
+            let depth = run
+                .parent
+                .as_deref()
+                .and_then(|parent| depths.get(parent))
+                .map_or(0, |depth| depth + 1);
+            depths.insert(run.part_id.as_str(), depth);
+            depth
+        })
+        .collect()
+}
+
 pub fn agents_label(runs: &[AgentRun]) -> (Option<String>, String) {
     let working = working_count(runs);
     match runs {

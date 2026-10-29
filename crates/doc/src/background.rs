@@ -35,6 +35,35 @@ pub fn agent_tree<'a, 'd>(
         .collect()
 }
 
+/// `widen` adds every spawn, for a roster bound after a settled run's spawn kept working.
+pub fn walked_docs<'a>(
+    transcript: impl IntoIterator<Item = &'a SessionMessageEntry>,
+    runs: &[AgentRun],
+    widen: bool,
+) -> Vec<String> {
+    let mut docs: Vec<String> = runs
+        .iter()
+        .filter(|run| !run.delegated)
+        .map(|run| run.doc_id.clone())
+        .collect();
+    if widen {
+        for (_, run) in spawn_runs(transcript) {
+            if !docs.contains(&run.doc_id) {
+                docs.push(run.doc_id);
+            }
+        }
+    }
+    docs
+}
+
+pub fn rows_missing(runs: &[AgentRun], counted: u32) -> bool {
+    let working = runs
+        .iter()
+        .filter(|run| !run.delegated && run.state == RunState::Working)
+        .count();
+    counted as usize > working
+}
+
 fn nested_runs<'d>(
     parent: &AgentRun,
     doc: &dyn Fn(&str) -> Option<&'d [SessionMessageEntry]>,
@@ -254,6 +283,16 @@ mod tests {
         assert_eq!(rows, [("outer", None), ("inner", Some("outer"))]);
         assert_eq!(runs[1].state, RunState::Working);
         assert!(agent_tree(&transcript, 2, &|_| None).is_empty());
+        assert_eq!(
+            walked_docs(&transcript, &runs, false),
+            ["c1--sub--outer", "c1--sub--inner"]
+        );
+        assert_eq!(
+            walked_docs(&transcript, &runs, true),
+            ["c1--sub--outer", "c1--sub--inner", "c1--sub--quiet"]
+        );
+        assert!(!rows_missing(&runs, 1));
+        assert!(rows_missing(&runs, 2));
     }
 
     #[test]
