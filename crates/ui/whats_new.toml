@@ -2,6 +2,89 @@
 # must be listed in crates/docs/src/images.rs IMAGES. Order does not matter.
 
 [[entry]]
+version = "0.2.129"
+date = "Oct 29"
+hero = "claude-config-panel.jpg"
+hero_visual = "claude-config"
+
+[[entry.features]]
+id = "claude-config"
+title = "Claude Code settings inside the chat"
+description = "Type /config in a Claude Code chat and its settings open over the chat, with Status, Config, Usage and Stats tabs. Search or filter the list and change a setting in place. Closing leaves a row with what changed and Reopen. On iPhone it opens as a sheet."
+image = "ios-claude-config.jpg"
+visual = "claude-config"
+
+[[entry.features]]
+id = "claude-command-cards"
+title = "Claude Code commands answer with cards"
+description = "/context, /usage, /model and /mcp in a Claude Code chat answer with a card, even while the agent is replying, without starting a turn. Commands that only run in Claude Code's terminal say so, and the / list tags them Terminal at the bottom. The same cards show on iPhone."
+details = "/context shows what fills the context, with Compact now. A card shows a running row until its answer replaces it, and offers Retry if it fails. /hooks opens settings.json and /export saves the chat as Markdown."
+image = "claude-context-card.jpg"
+visual = "claude-command-cards"
+
+[[entry.features]]
+id = "compaction-card"
+title = "One card for each compaction"
+description = "When a chat compacts, one card follows it: a small model checks whether to compact, then its verdict and reason, the progress, and the tokens before and after. Open the card to read the summary the agent wrote and what it carried over word for word."
+visual = "compaction-card"
+
+[[entry.features]]
+id = "working-now-tree"
+title = "What each chat is still running"
+description = "The Working now card on Home lists each chat's subagents, delegated chats and shells under it, and keeps a chat whose turn is done while they still run. Click a subagent or shell line to open the chat with its agents or shells showing."
+image = "home-widgets-grid.jpg"
+visual = "working-now-tree"
+
+[[entry.features]]
+id = "phone-slash-popup"
+title = "The / and $ lists on iPhone"
+description = "Type / or $ in the iPhone composer for the same command and skill lists as the Mac, for every agent, with Zeron's own commands in the list too."
+image = "ios-slash-popup.jpg"
+visual = "phone-slash-popup"
+
+[[entry.features]]
+id = "phone-subagents-pill"
+title = "Subagents above the iPhone composer"
+description = "When a chat runs subagents or shells, a pill above the iPhone composer counts them. Tap it for a roster card where you stop a run or open its output."
+image = "ios-agents-pill.jpg"
+visual = "phone-subagents-pill"
+
+[[entry.features]]
+id = "phone-chat-background"
+title = "Chat backgrounds on iPhone, synced with your Mac"
+description = "Settings > Wallpaper on iPhone has the Mac's chat background controls: Placement, Opacity, Blur and Scrim. Turn on Sync with Mac and the phone follows that Mac's artwork and settings."
+image = "ios-chat-background.jpg"
+visual = "phone-chat-background"
+
+[[entry.improvements]]
+text = "The update button in the rail moves: an arrow drops into the tray while the update downloads, then the button checks and turns into restart."
+visual = "rail-update"
+
+[[entry.improvements]]
+text = "Project Actions an agent adds or changes show at once in the sidecar, the toolbar menu and Cmd+K, without reopening the chat."
+
+[[entry.improvements]]
+text = "The chat wallpaper shows through the titlebar and the active folder tab, and the tab opens into the card with no line."
+
+[[entry.improvements]]
+text = "The Help menu no longer has a Mission Control intro row."
+
+[[entry.improvements]]
+text = "HTML pages open on iPhone: the card and the sheet show that a page is loading, and offer Retry when it fails. Pages with images load faster."
+
+[[entry.improvements]]
+text = "On iPhone, the minimized tab bar keeps the voice button inside its capsule, and the status sits centered when the title is hidden."
+
+[[entry.improvements]]
+text = "On iPhone, the photo grid reopens with the photos you attached picked; deselect one to take it out of the composer."
+
+[[entry.improvements]]
+text = "On iPhone, Settings keeps its large title as you scroll, under a soft blurred edge."
+
+[[entry.improvements]]
+text = "Closing a device in the Device panel no longer crashes Zeron."
+
+[[entry]]
 version = "0.2.120"
 date = "Oct 24"
 hero = "providers-muse.jpg"

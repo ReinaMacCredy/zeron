@@ -9,7 +9,7 @@ Tap a session on the iPhone to open its transcript. It shows the same rows as th
 - Your own messages render their Markdown and math, so a list or a table you sent reads as one.
 - Lines across the transcript mark events such as **Context compacted**, **Model changed**, **Host restarted** and **Resumed**. A hand-off or a switch to another provider shows a "Continued from" line; tap it to read what was handed over.
 - A classifier row names its model, how long it took and its verdict; tap it for its card. While the agent waits on compaction or the classifier, the working row says so, even on an idle chat.
-- Pages an agent renders with `html_render` show inline in the transcript; their links open outside the app.
+- Pages an agent renders with `html_render` show inline in the transcript; their links open outside the app. A page reads **Loading page** until it arrives; if it cannot load, it reads **Couldn't load this page.** with **Retry**.
 - A skill's name shows in violet; tap it to read its SKILL.md.
 - Messages carrying a pull request's context, or review comments, show a pill such as **PR context**; tap it to read what was attached.
 - When you scroll up, **Jump to latest** takes you back to the bottom.

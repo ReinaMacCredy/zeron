@@ -1,5 +1,29 @@
 pub const IMAGES: &[(&str, &[u8])] = &[
     (
+        "claude-config-panel.jpg",
+        include_bytes!("../../ui/assets/whats_new/claude-config-panel.jpg"),
+    ),
+    (
+        "claude-context-card.jpg",
+        include_bytes!("../../ui/assets/whats_new/claude-context-card.jpg"),
+    ),
+    (
+        "ios-claude-config.jpg",
+        include_bytes!("../../ui/assets/whats_new/ios-claude-config.jpg"),
+    ),
+    (
+        "ios-slash-popup.jpg",
+        include_bytes!("../../ui/assets/whats_new/ios-slash-popup.jpg"),
+    ),
+    (
+        "ios-agents-pill.jpg",
+        include_bytes!("../../ui/assets/whats_new/ios-agents-pill.jpg"),
+    ),
+    (
+        "ios-chat-background.jpg",
+        include_bytes!("../../ui/assets/whats_new/ios-chat-background.jpg"),
+    ),
+    (
         "providers-muse.jpg",
         include_bytes!("../../ui/assets/whats_new/providers-muse.jpg"),
     ),
@@ -174,10 +198,6 @@ pub const IMAGES: &[(&str, &[u8])] = &[
     (
         "compaction-popover.jpg",
         include_bytes!("../../ui/assets/whats_new/compaction-popover.jpg"),
-    ),
-    (
-        "compaction-classifier.jpg",
-        include_bytes!("../../ui/assets/whats_new/compaction-classifier.jpg"),
     ),
     (
         "agent-questions-panel.jpg",

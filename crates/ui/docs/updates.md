@@ -5,8 +5,8 @@ Zeron updates itself and the agent CLIs it runs, and tells you what changed in e
 Zeron checks for a new version shortly after launch and then every hour. When one is out, a round download button appears in the app rail, just above **Settings**. Hover it to read its status:
 
 - **Update available**: click to download in the background.
-- **Downloading**: keep working while it downloads.
-- **Update ready — restart to apply**: click to restart into the new version.
+- **Downloading**: keep working while it downloads. An arrow drops into a tray under a turning arc.
+- **Update ready — restart to apply**: click to restart into the new version. The button pops, shows a check, and turns into a restart arrow with a pulsing halo.
 - **Update failed**: click to try again.
 - **Restarting…**: Zeron is quitting to start the new version.
 
@@ -40,7 +40,7 @@ This follows **Auto-resume after usage limits** in [Settings > Providers](zeron:
 
 ## What's new
 
-After an update, a card at the bottom of the sidebar names the release's headline feature. Click **See what's new** to open the **What's new?** dialog with that release's highlights, or click the **×** to dismiss the card. In the dialog, **View changelog** shows the **Changelog**: every release, newest first, each one expandable. **Got it** closes the dialog.
+After an update, a card at the bottom of the sidebar names the release's headline feature, and counts the release's smaller changes, such as "+ 9 improvements and fixes". Click **See what's new** to open the **What's new?** dialog with that release's highlights, or click the **×** to dismiss the card. Each new feature has its own section, most with a moving picture; the smaller changes follow as one list under **Improvements and fixes**. In the dialog, **View changelog** shows the **Changelog**: every release, newest first, each one expandable. **Got it** closes the dialog.
 
 ![The What's new card](updates-whats-new-card.jpg)
 
