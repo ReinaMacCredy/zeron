@@ -155,7 +155,7 @@ final class CoreSessionSource: SessionSource {
         // Working state is shown at the transcript tail (layout engine), not here.
         if let input = c.openInput {
             next.questions = (input.requestId, input.questions.map {
-                SessionChrome.Question(id: $0.id, header: $0.header, text: $0.question, options: $0.options, multiSelect: $0.multiSelect, prefill: $0.prefill, multiline: $0.multiline)
+                SessionChrome.Question(id: $0.id, header: $0.header, text: $0.question, options: $0.options, multiSelect: $0.multiSelect, prefill: $0.prefill, multiline: $0.multiline, secret: $0.secret)
             })
         }
         next.queue = c.queue.map { q in

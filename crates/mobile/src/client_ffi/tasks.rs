@@ -494,6 +494,7 @@ impl From<&zc::NeedsYouEntry> for NeedsYouEntry {
                             multi_select: q.multi_select,
                             prefill: q.prefill.clone(),
                             multiline: q.multiline,
+                            secret: q.is_secret(),
                         })
                         .collect(),
                 },

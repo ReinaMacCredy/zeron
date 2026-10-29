@@ -66,6 +66,7 @@ use serde_json::{Value, json};
 
 use zeron_proto::{GithubRepo, HarnessId, RunRequest, VaultProvider};
 
+use crate::agent_accounts::private_dir;
 use crate::http_error::describe_http_error;
 use crate::runner::{EdgeErrorBody, RunnerIdentity, write_private_atomic};
 
@@ -1459,17 +1460,6 @@ async fn configure_git_identity(home: &Path, identity: &GitIdentity) {
             return;
         }
     }
-}
-
-/// `dir` created and made owner-only (0700 on Unix).
-fn private_dir(dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -65,6 +65,7 @@ pub mod routing;
 pub mod rpc;
 pub mod run_journal;
 pub mod runner;
+pub mod secret_requests;
 pub mod sessions;
 pub mod source_control;
 pub mod spaces;
@@ -209,6 +210,7 @@ pub struct EngineCore {
     pub computer: Arc<computer::runtime::ComputerRuntime>,
     pub device_hub: Arc<device_hub::DeviceHub>,
     html_preview: Arc<html_render::PreviewHost>,
+    pub secret_requests: secret_requests::SecretRequests,
     pub harness_updates: harness_updates::HarnessUpdateCoordinator,
     pub resume_schedule: resume_schedule::ResumeSchedule,
     pub device_id: String,
@@ -502,6 +504,7 @@ impl EngineCore {
             computer,
             device_hub,
             html_preview: Arc::default(),
+            secret_requests: secret_requests::SecretRequests::new(data_dir),
             harness_updates,
             resume_schedule,
             device_id,
@@ -653,6 +656,7 @@ impl EngineCore {
         .with_computer(self.computer.clone())
         .with_device_hub(self.device_hub.clone())
         .with_html_preview(self.html_preview.clone())
+        .with_secret_requests(self.secret_requests.clone())
         .with_remote_terminals(self.remote_terminals.clone())
         .with_harness_updates(self.harness_updates.clone())
         .with_resume_schedule(self.resume_schedule.clone())
@@ -833,7 +837,9 @@ struct RelayRpc {
 fn relay_refused(method: &str) -> bool {
     matches!(
         method,
-        methods::WATCH_COMPUTER_HOST_REQUESTS
+        methods::REQUEST_SECRET
+            | methods::ANSWER_SECRET
+            | methods::WATCH_COMPUTER_HOST_REQUESTS
             | methods::RESPOND_COMPUTER_HOST_REQUEST
             | methods::PUBLISH_HTML_RENDER
             | methods::HTML_PREVIEW

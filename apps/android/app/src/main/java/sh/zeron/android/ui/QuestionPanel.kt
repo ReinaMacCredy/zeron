@@ -59,6 +59,7 @@ import uniffi.zeron_core.UserInputQuestion
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun QuestionPanel(input: InputRequest, onSubmit: (List<UserInputAnswer>) -> Unit) {
+    input.questions.firstOrNull { it.secret }?.let { return SecretOnMac(it) }
     val items = input.questions
     var page by remember(input.requestId) { mutableIntStateOf(0) }
     val picks = remember(input.requestId) { mutableStateMapOf<String, Set<String>>() }
@@ -187,6 +188,29 @@ fun QuestionPanel(input: InputRequest, onSubmit: (List<UserInputAnswer>) -> Unit
                 size = 36.dp,
                 container = MaterialTheme.colorScheme.surfaceContainerHighest,
             )
+        }
+    }
+}
+
+// A typed answer would cross the relay in the chat document, so a secret is entered on the Mac.
+@Composable
+private fun SecretOnMac(q: UserInputQuestion) {
+    Surface(
+        shape = RoundedCornerShape(28.dp),
+        color = composerContainer(),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(bottom = 8.dp).testTag("question-secret"),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Text(q.header, style = MaterialTheme.typography.titleMediumEmphasized)
+            Spacer(Modifier.height(6.dp))
+            Text(q.question, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ZIcon(ZIcons.Key, null, Modifier.size(16.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Enter it on your Mac. It stays out of chat.", style = MaterialTheme.typography.labelLarge)
+            }
         }
     }
 }

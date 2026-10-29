@@ -6723,6 +6723,12 @@ impl DocHost {
                         Some("no pending input request".into()),
                     ));
                 };
+                if questions.iter().any(UserInputQuestion::is_secret) {
+                    return Ok((
+                        SessionCommandStatus::Rejected,
+                        Some("a secret is entered in its own card on the Mac".into()),
+                    ));
+                }
                 // Consent binds only the turn that asked; a new turn must ask again.
                 if questions.iter().any(UserInputQuestion::is_computer) {
                     if let Err(err) = handle.doc.resolve_input(request_id, None, now_ms()) {

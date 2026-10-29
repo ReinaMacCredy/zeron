@@ -1867,3 +1867,257 @@ async fn ask_user_parks_a_multi_select_card_and_returns_every_picked_label() {
     rig.finish_turn().await;
     rig.core.shutdown().await;
 }
+
+const FAKE_SECRET: &str = "tskey-fake-7Qm2xP9vLr4Kd8Wz";
+
+#[derive(Clone, Default)]
+struct LogSink(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn files_holding(root: &std::path::Path, skip: &std::path::Path, needle: &[u8]) -> Vec<String> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.starts_with(skip) {
+            continue;
+        }
+        if path.is_dir() {
+            found.extend(files_holding(&path, skip, needle));
+        } else if std::fs::read(&path)
+            .is_ok_and(|bytes| bytes.windows(needle.len()).any(|w| w == needle))
+        {
+            found.push(path.display().to_string());
+        }
+    }
+    found
+}
+
+impl Rig {
+    fn open_secret(&self) -> Option<String> {
+        self.entries(CHAT)
+            .iter()
+            .flat_map(|e| e.parts.clone())
+            .find_map(|part| match part {
+                MessagePart::Input {
+                    request_id,
+                    questions,
+                    resolved: false,
+                    ..
+                } if questions.iter().any(UserInputQuestion::is_secret) => Some(request_id),
+                _ => None,
+            })
+    }
+
+    fn secret_statuses(&self) -> Vec<zeron_proto::view::SecretStatus> {
+        self.entries(CHAT)
+            .iter()
+            .flat_map(|e| e.parts.clone())
+            .filter_map(|part| match part {
+                MessagePart::Input {
+                    questions,
+                    resolved,
+                    answers,
+                    ..
+                } if questions.iter().any(UserInputQuestion::is_secret) => Some(
+                    zeron_proto::view::secret_status(resolved, answers.as_deref()),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn secret_files(&self) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(self.core.secret_requests.dir())
+            .map(|dir| dir.flatten().map(|entry| entry.path()).collect())
+            .unwrap_or_default()
+    }
+}
+
+#[tokio::test]
+async fn request_secret_saves_a_private_file_and_the_value_stays_out_of_the_chat() {
+    use std::os::unix::fs::PermissionsExt;
+    use zeron_proto::view::SecretStatus;
+    let logs = LogSink::default();
+    let _ = tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer({
+                let logs = logs.clone();
+                move || logs.clone()
+            })
+            .finish(),
+    );
+    let rig = rig();
+    rig.run("c1", "plain", AccessMode::Supervised, None);
+    let secret = rig.saw(1).await.secret.expect("the run carries a secret");
+    let client = zeron_rpc::memory_client(rig.core.rpc_service());
+    let tools = zeron_mcp::ThreadTools::new(zeron_rpc::memory_client(rig.core.rpc_service()), CHAT)
+        .with_run_secret(Some(secret));
+    let asked = tokio::spawn(async move {
+        tools
+            .call(
+                "request_secret",
+                &json!({
+                    "label": "Tailscale auth key",
+                    "reason": "Joins the test VMs to your tailnet.",
+                    "placeholder": "tskey-auth-...",
+                }),
+            )
+            .await
+    });
+    wait_for(|| rig.open_secret().is_some(), "the secret card").await;
+    let request_id = rig.open_secret().unwrap();
+    wait_for(
+        || rig.core.sessions.session_status(CHAT).unwrap().status == SessionStatus::AwaitingInput,
+        "the chat to await the person",
+    )
+    .await;
+
+    rig.command(
+        "phone",
+        SessionCommandPayload::RespondInput {
+            request_id: request_id.clone(),
+            answers: vec![UserInputAnswer {
+                question_id: "secret".into(),
+                labels: vec!["typed on a phone".into()],
+            }],
+        },
+        None,
+    );
+    assert_eq!(rig.applied("phone").await.0, SessionCommandStatus::Rejected);
+    assert!(
+        rig.open_secret().is_some(),
+        "a doc answer never settles a secret"
+    );
+
+    let answered = client
+        .call(
+            methods::ANSWER_SECRET,
+            json!({ "chatId": CHAT, "requestId": request_id, "secret": FAKE_SECRET }),
+        )
+        .await;
+    assert!(answered.is_ok(), "{answered:?}");
+    let result = asked.await.unwrap().unwrap();
+    assert_eq!(result["status"], "saved");
+    let file = std::path::PathBuf::from(result["file"].as_str().unwrap());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), FAKE_SECRET);
+    assert_eq!(file.parent(), Some(rig.core.secret_requests.dir()));
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&file), 0o600);
+    assert_eq!(mode(rig.core.secret_requests.dir()), 0o700);
+    wait_for(
+        || rig.secret_statuses() == [SecretStatus::Saved],
+        "the card to read saved",
+    )
+    .await;
+
+    rig.finish_turn().await;
+    let needle = FAKE_SECRET.as_bytes();
+    let entries = serde_json::to_vec(&rig.entries(CHAT)).unwrap();
+    assert!(
+        !entries.windows(needle.len()).any(|w| w == needle),
+        "transcript"
+    );
+    let synced = rig
+        .core
+        .doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .export_snapshot()
+        .unwrap();
+    assert!(
+        !synced.windows(needle.len()).any(|w| w == needle),
+        "sync snapshot"
+    );
+    let stored = files_holding(rig._dir.path(), rig.core.secret_requests.dir(), needle);
+    assert!(
+        stored.is_empty(),
+        "stored outside the secret file: {stored:?}"
+    );
+    let logged = logs.0.lock().unwrap().clone();
+    assert!(!logged.is_empty(), "the log capture saw the engine");
+    assert!(!logged.windows(needle.len()).any(|w| w == needle), "logs");
+
+    let later = std::time::SystemTime::now() + zeron_engine::secret_requests::TTL;
+    assert_eq!(rig.core.secret_requests.sweep(later), 1);
+    assert!(!file.exists(), "the TTL sweep deletes the file");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn declined_timed_out_and_cancelled_secrets_leave_no_file() {
+    use zeron_proto::view::SecretStatus;
+    let rig = rig();
+    rig.run("c1", "plain", AccessMode::Supervised, None);
+    let secret = rig.saw(1).await.secret.expect("the run carries a secret");
+    let client = Arc::new(zeron_rpc::memory_client(rig.core.rpc_service()));
+    let ask = |timeout_ms: Option<u64>| {
+        let client = client.clone();
+        let secret = secret.clone();
+        tokio::spawn(async move {
+            client
+                .call(
+                    methods::REQUEST_SECRET,
+                    json!({
+                        "chatId": CHAT,
+                        "runSecret": secret,
+                        "label": "API key",
+                        "reason": "For the deploy.",
+                        "timeoutMs": timeout_ms,
+                    }),
+                )
+                .await
+        })
+    };
+
+    let declined = ask(None);
+    wait_for(|| rig.open_secret().is_some(), "the first card").await;
+    let request_id = rig.open_secret().unwrap();
+    client
+        .call(
+            methods::ANSWER_SECRET,
+            json!({ "chatId": CHAT, "requestId": request_id }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(declined.await.unwrap().unwrap()["status"], "declined");
+    assert!(
+        client
+            .call(
+                methods::ANSWER_SECRET,
+                json!({ "chatId": CHAT, "requestId": request_id, "secret": FAKE_SECRET }),
+            )
+            .await
+            .is_err(),
+        "an answered card takes no second answer"
+    );
+
+    let timed_out = ask(Some(1));
+    assert_eq!(timed_out.await.unwrap().unwrap()["status"], "timed_out");
+    wait_for(
+        || rig.secret_statuses() == [SecretStatus::Declined, SecretStatus::TimedOut],
+        "the first two cards to settle",
+    )
+    .await;
+
+    let cancelled = ask(None);
+    wait_for(|| rig.open_secret().is_some(), "the last card").await;
+    rig.finish_turn().await;
+    assert_eq!(cancelled.await.unwrap().unwrap()["status"], "cancelled");
+    assert!(rig.secret_files().is_empty(), "{:?}", rig.secret_files());
+    rig.core.shutdown().await;
+}

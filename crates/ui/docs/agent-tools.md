@@ -26,6 +26,7 @@ Each tool has its own switch in Settings > Tools, under its group. The names are
 | | `set_thread` (switches `set_thread_title`, `set_thread_archived`, `set_thread_settled`) | Rename, archive, or settle chats. |
 | | `interrupt_thread`, `respond_to_input` | Stop another chat's turn, and answer the question it is waiting on. |
 | **Questions, terminal, actions and tasks** | `ask_user` | Ask you one to four questions and wait for the answers. See [When an agent asks](zeron://docs/agent-questions). |
+| | `request_secret` | Ask you for a secret in a private card. The agent gets a private file to read in its commands, never the value. See [When an agent asks](zeron://docs/agent-questions). |
 | | `terminal` | Use this chat's terminals. See [Terminal](zeron://docs/terminal). |
 | | `project_actions` | Manage the project's saved Actions. See [Projects and worktrees](zeron://docs/projects). |
 | | `tasks` | Write, update, and assign tasks, and plan a mission's steps. See [Tasks](zeron://docs/tasks). |

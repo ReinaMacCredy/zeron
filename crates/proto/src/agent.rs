@@ -1326,6 +1326,10 @@ pub enum UserInputKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         app: Option<crate::computer::ComputerConsentApp>,
     },
+    Secret {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placeholder: Option<String>,
+    },
 }
 
 impl UserInputQuestion {
@@ -1334,7 +1338,14 @@ impl UserInputQuestion {
     }
 
     pub fn is_computer(&self) -> bool {
-        self.kind.is_some()
+        matches!(
+            self.kind,
+            Some(UserInputKind::Consent { .. } | UserInputKind::Foreground { .. })
+        )
+    }
+
+    pub fn is_secret(&self) -> bool {
+        matches!(self.kind, Some(UserInputKind::Secret { .. }))
     }
 }
 

@@ -223,6 +223,7 @@ pub struct UserInputQuestion {
     pub multi_select: bool,
     pub prefill: Option<String>,
     pub multiline: bool,
+    pub secret: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -261,6 +262,7 @@ impl From<&zc::InputRequest> for InputRequest {
                     multi_select: q.multi_select,
                     prefill: q.prefill.clone(),
                     multiline: q.multiline,
+                    secret: q.is_secret(),
                 })
                 .collect(),
         }

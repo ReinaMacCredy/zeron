@@ -1024,6 +1024,9 @@ impl Wizard {
 
     /// Explicit submit / auto-advance landing.
     pub fn advance(&mut self) -> WizardStep {
+        if self.current().is_some_and(UserInputQuestion::is_secret) {
+            return WizardStep::Stay;
+        }
         if self.page + 1 < self.questions.len() {
             self.page += 1;
             WizardStep::Stay
@@ -6278,7 +6281,7 @@ impl Render for ComposerInput {
             .role(self.accessibility_role)
             .aria_label(self.placeholder.clone())
             .aria_placeholder(self.placeholder.clone())
-            .when(!self.content.is_empty(), |this| {
+            .when(!self.content.is_empty() && !self.masked, |this| {
                 this.aria_value(self.content.clone())
             })
             .on_a11y_action(gpui::AccessibleAction::SetValue, move |data, _, cx| {
@@ -11646,7 +11649,8 @@ impl Composer {
             (
                 (self.chat_override.is_none() || self.full_chat)
                     .then(|| pending_input_request(self.bound_transcript(s)))
-                    .flatten(),
+                    .flatten()
+                    .filter(|(_, questions)| !questions.iter().any(UserInputQuestion::is_secret)),
                 editing_id
                     .as_ref()
                     .is_none_or(|id| s.queue.iter().any(|item| item.id == *id)),
@@ -22009,6 +22013,15 @@ mod tests {
         assert_eq!(w.answers()[0].labels, vec!["  first\nsecond\n"]);
         w.set_typed(String::new());
         assert_eq!(w.answers()[0].labels, vec![""]);
+    }
+
+    #[test]
+    fn a_secret_question_never_completes_as_a_typed_answer() {
+        let mut q = question("secret", &[], false);
+        q.kind = Some(zeron_proto::UserInputKind::Secret { placeholder: None });
+        let mut w = Wizard::new("req".into(), vec![q]);
+        w.set_typed("tskey-typed-in-the-tray".into());
+        assert_eq!(w.advance(), WizardStep::Stay);
     }
 
     #[test]

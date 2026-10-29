@@ -946,6 +946,48 @@ impl std::fmt::Display for AnswerLine {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretStatus {
+    Pending,
+    Saved,
+    Declined,
+    TimedOut,
+    Cancelled,
+}
+
+impl SecretStatus {
+    pub const SAVED: &str = "saved";
+    pub const DECLINED: &str = "declined";
+    pub const TIMED_OUT: &str = "timed_out";
+    pub const CANCELLED: &str = "cancelled";
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SecretStatus::Pending => "Asking for a secret",
+            SecretStatus::Saved => "Secret saved",
+            SecretStatus::Declined => "Declined",
+            SecretStatus::TimedOut => "Timed out",
+            SecretStatus::Cancelled => "Cancelled",
+        }
+    }
+}
+
+pub fn secret_status(resolved: bool, answers: Option<&[crate::UserInputAnswer]>) -> SecretStatus {
+    if !resolved {
+        return SecretStatus::Pending;
+    }
+    let word = answers
+        .and_then(|answers| answers.first())
+        .and_then(|answer| answer.labels.first())
+        .map(String::as_str);
+    match word {
+        Some(SecretStatus::SAVED) => SecretStatus::Saved,
+        Some(SecretStatus::DECLINED) => SecretStatus::Declined,
+        Some(SecretStatus::TIMED_OUT) => SecretStatus::TimedOut,
+        _ => SecretStatus::Cancelled,
+    }
+}
+
 /// [`InputOutcome`] from an input part's fields. `answers` is `None` on parts
 /// written before answers were recorded, `Some([])` when the questions closed
 /// unanswered.

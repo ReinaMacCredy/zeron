@@ -22,6 +22,13 @@ image = "ios-claude-config.jpg"
 visual = "claude-config"
 
 [[entry.features]]
+id = "request-secret"
+title = "Agents ask for secrets in a private card"
+description = "An agent that needs an API key or a token asks for it in a card in the chat. Paste it in the masked field and click Save securely: it goes to a private file on this Mac that the agent's commands can read for 24 hours, and the chat records only that it was saved. Decline tells the agent no."
+details = "The agent never sees the value, and it stays out of the chat, your other devices and the logs. On iPhone the request shows with Enter it on your Mac."
+image = "agent-secret-card.jpg"
+
+[[entry.features]]
 id = "settings-updates"
 title = "Settings grouped, with an Updates page"
 description = "Settings opens as a panel over the app. Its pages sit in groups (Agents, Code, Connections), the header names the page and holds its actions, and a new Chat page holds the composer and transcript options. Settings > Updates shows this Mac's version and Automatic updates, each agent CLI with its update policy and Update all, and every device's version. Update everything in its header updates Zeron and this Mac's agents in one go."

@@ -35,6 +35,7 @@ use std::time::{Duration, Instant};
 mod claude_cards;
 mod compaction_card;
 mod html_card;
+mod secret_card;
 pub(crate) use claude_cards::ClaudeCardAction;
 
 use gpui::{
@@ -1319,6 +1320,13 @@ pub enum RowKind {
         question_id: SharedString,
         app: Option<SharedString>,
     },
+    SecretRequest {
+        request_id: SharedString,
+        label: SharedString,
+        reason: SharedString,
+        placeholder: Option<SharedString>,
+        status: zeron_proto::view::SecretStatus,
+    },
     ComputerNotice {
         notice: ComputerNotice,
         text: SharedString,
@@ -2418,6 +2426,50 @@ pub fn rows_for_entry(
                                 path: path.clone(),
                                 title: title.clone(),
                             },
+                        });
+                    }
+                    MessagePart::Input {
+                        id: part_id,
+                        request_id,
+                        questions,
+                        resolved,
+                        answers,
+                        ..
+                    } if questions.iter().any(zeron_proto::UserInputQuestion::is_secret) => {
+                        let question = questions
+                            .iter()
+                            .find(|question| question.is_secret())
+                            .expect("guarded");
+                        let placeholder = match &question.kind {
+                            Some(zeron_proto::UserInputKind::Secret { placeholder }) => {
+                                placeholder.clone().map(SharedString::from)
+                            }
+                            _ => None,
+                        };
+                        let status = match zeron_proto::view::secret_status(
+                            *resolved,
+                            answers.as_deref(),
+                        ) {
+                            zeron_proto::view::SecretStatus::Pending if !streaming => {
+                                zeron_proto::view::SecretStatus::Cancelled
+                            }
+                            status => status,
+                        };
+                        rows.push(Row {
+                            id: format!("{}#{}", entry.id, part_id).into(),
+                            version: fnv1a(format!("secret\0{request_id}\0{status:?}").as_bytes()),
+                            turn_start: false,
+                            kind: RowKind::SecretRequest {
+                                request_id: request_id.clone().into(),
+                                label: question.header.clone().into(),
+                                reason: question.question.clone().into(),
+                                placeholder,
+                                status,
+                            },
+                            entry_id: entry_id.clone(),
+                            timestamp: None,
+                            copy_text: None,
+                            compact_fold: None,
                         });
                     }
                     MessagePart::Input {
@@ -4504,6 +4556,7 @@ pub struct Transcript {
     consent_sent: HashMap<SharedString, ConsentOutcome>,
     consent_failures: HashMap<SharedString, SharedString>,
     foreground_sent: HashSet<SharedString>,
+    secrets: secret_card::SecretCards,
     html_files: HashMap<std::path::PathBuf, HtmlFileState>,
     html_pages: html_card::HtmlPages,
     plan_previews: HashMap<SharedString, PlanPreview>,
@@ -5462,6 +5515,7 @@ impl Transcript {
             consent_sent: HashMap::new(),
             consent_failures: HashMap::new(),
             foreground_sent: HashSet::new(),
+            secrets: Default::default(),
             html_files: HashMap::new(),
             html_pages: html_card::HtmlPages::new(cx),
             plan_previews: HashMap::new(),
@@ -11285,6 +11339,22 @@ impl Transcript {
                 question_id.clone(),
                 app.as_deref(),
                 &theme,
+                cx,
+            ),
+            RowKind::SecretRequest {
+                request_id,
+                label,
+                reason,
+                placeholder,
+                status,
+            } => self.render_secret_request(
+                request_id.clone(),
+                label.clone(),
+                reason.clone(),
+                placeholder.clone(),
+                *status,
+                &theme,
+                window,
                 cx,
             ),
             RowKind::ComputerNotice { notice, text, hint } => self.render_computer_notice(
