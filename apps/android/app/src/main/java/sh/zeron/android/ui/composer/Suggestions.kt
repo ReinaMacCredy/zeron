@@ -59,10 +59,6 @@ private sealed interface Shown {
     data class Mentions(val threads: List<ThreadMention>, val files: List<FileMatch>) : Shown
 }
 
-/**
- * The list above the composer (iOS `MentionSuggestions`): `/` commands and
- * `$` skills from the host's catalog, or `@` threads then files.
- */
 @Composable
 fun ComposerSuggestions(
     draft: ComposerModel,

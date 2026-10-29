@@ -34,26 +34,18 @@ class StagedImage(val id: String, val name: String, val bytes: ByteArray, val th
     val outgoing get() = OutgoingAttachment(name, "image/jpeg", bytes)
 }
 
-/** A long paste staged as `Pasted text N.txt` instead of filling the prompt. */
 class PastedText(val id: String, val name: String, val text: String) {
     val outgoing get() = OutgoingAttachment(name, "text/plain", text.toByteArray())
 }
 
-/** The `/` or `$` invocation, or `@` mention, being typed at the cursor. */
 data class ActiveQuery(val start: Int, val end: Int, val query: String)
 
-/**
- * What's being composed: the prompt (with its cursor, for `@` mentions and
- * `/` `$` invocations), staged images and pasted texts, quoted replies, and
- * the tokens it shows for links it sends.
- */
 @Stable
 class ComposerModel(initial: String = "") {
     var value by mutableStateOf(TextFieldValue(initial, TextRange(initial.length)))
     val images = mutableStateListOf<StagedImage>()
     val pasted = mutableStateListOf<PastedText>()
     val quotes = mutableStateListOf<String>()
-    /** `@name` (or `/command`) shown in the composer → the link it sends. */
     private val tokens = LinkedHashMap<String, String>()
 
     val text: String get() = value.text
@@ -73,7 +65,6 @@ class ComposerModel(initial: String = "") {
         tokens.clear()
     }
 
-    /** A paste long enough to read as a file becomes a tile; false lets the edit through. */
     fun stagesPaste(next: TextFieldValue): Boolean {
         val old = value.text
         val added = next.text.length - old.length
@@ -86,10 +77,9 @@ class ComposerModel(initial: String = "") {
         return true
     }
 
-    /** The `@query` being typed at the cursor. */
     fun activeQuery(): Pair<Int, String>? = query('@')?.let { it.start to it.query }
 
-    /** The `/command` or `$skill` being typed: a second `/` makes it a path, and `$5` or `$HOME` is not a skill. */
+    // A second `/` makes it a path, and `$5` or `$HOME` is not a skill.
     fun activeInvocation(): Pair<ActiveQuery, Boolean>? {
         query('$')?.takeIf { q -> !q.query.contains('/') && q.query.firstOrNull()?.let { it.isDigit() || it.isUpperCase() } != true }?.let { return it to true }
         query('/')?.takeIf { !it.query.contains('/') }?.let { return it to false }
@@ -142,19 +132,16 @@ class ComposerModel(initial: String = "") {
         replace(q, entry.insert + " ")
     }
 
-    /** The draft with the typed invocation removed (a picked workspace command runs instead). */
     fun dropQuery(q: ActiveQuery) = replace(q, "")
 
     fun withoutQuery(q: ActiveQuery): String = value.text.removeRange(q.start, q.end)
 
-    /** Start an `@` mention at the end of the draft (the `/files` command). */
     fun beginFileMention() {
         val t = value.text
         val gap = if (t.isEmpty() || t.endsWith(" ") || t.endsWith("\n")) "" else " "
         setText("$t$gap@")
     }
 
-    /** The text to send: live tokens become their links, quotes go in front. */
     fun encoded(): String {
         var out = value.text
         for ((token, link) in tokens.entries.sortedByDescending { it.key.length }) {

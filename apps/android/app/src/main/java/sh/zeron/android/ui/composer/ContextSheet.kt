@@ -36,7 +36,6 @@ import uniffi.zeron_core.ContextCard
 import uniffi.zeron_core.SessionHandle
 import uniffi.zeron_core.StatsRow
 
-/** Context and stats (iOS `ContextSheetViewController`): the context window, compaction, cost and session statistics, ticking each second. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ContextSheet(

@@ -234,7 +234,6 @@ fun ComposerSurface(
     }
 }
 
-/** Quotes, pasted texts and photos above the prompt, each removable. */
 @Composable
 private fun StagedThumbnails(model: ComposerModel) {
     Row(

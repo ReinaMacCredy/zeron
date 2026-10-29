@@ -483,7 +483,6 @@ fun Composer(
     }
 }
 
-/** Start mission on the composer: the chip, plan.md or steps only, and review the plan first. */
 @Stable
 class MissionDraft {
     var on by mutableStateOf(false)
@@ -495,7 +494,6 @@ class MissionDraft {
     fun error(images: Int): String? = missionStagedError(images.toUInt(), null)
 }
 
-/** A mission's task: first line the title, the rest its notes (iOS `MissionStart.draft`). */
 fun missionDraft(text: String, spaceId: String?, images: List<String>): uniffi.zeron_core.TaskDraft {
     val trimmed = text.trim()
     val title = trimmed.substringBefore('\n')
@@ -568,10 +566,6 @@ private fun DeliveryChip(current: Delivery, canSteer: Boolean, onChange: (Delive
     }
 }
 
-/**
- * Writes to the chat's config, confirming a model, provider or profile
- * switch when the core asks (iOS `confirmSwitch`); the switch note lands in the transcript.
- */
 @Stable
 class ConfigSwitches(private val client: CoreClient, private val chatId: String) {
     private var pending by mutableStateOf<Pair<ModelSwitchPrompt, suspend () -> Unit>?>(null)
@@ -674,7 +668,6 @@ fun accessIcon(mode: AccessMode): Int = when (mode) {
     AccessMode.FULL_ACCESS -> R.drawable.zi_danger_triangle
 }
 
-/** The Access chip and menu: the modes this agent offers (iOS "Access"). */
 @Composable
 fun AccessChip(current: AccessMode, offered: List<AccessMode>?, onPick: (AccessMode) -> Unit) {
     var open by remember { mutableStateOf(false) }
@@ -791,7 +784,6 @@ fun StatusBanner(text: String, action: Pair<String, () -> Unit>?) {
     }
 }
 
-/** Messages queued behind the live turn (shared across devices): sender, thumbnail, and the row's own send arrow. */
 @Composable
 fun QueuePanel(queue: List<QueueItem>, handle: SessionHandle, editingId: String?, onEdit: (String) -> Unit, image: suspend (String) -> ByteArray? = { null }) {
     val scope = rememberCoroutineScope()
@@ -874,12 +866,6 @@ private fun gate(item: QueueItem): String? = when (val g = item.gate) {
     null -> if (item.actionPending) "Updating" else null
 }
 
-/**
- * The session's model picker (iOS `CoreSessionSource.modelMenu`): agent
- * profiles over it, the chat's provider first, then — between turns, on a
- * host that can switch — the others and the host's provider instances,
- * each switch confirmed when the core asks.
- */
 @Composable
 private fun SessionModelPicker(client: CoreClient, c: ComposerState, row: SessionRow?, open: Boolean, switches: ConfigSwitches, onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
@@ -889,7 +875,6 @@ private fun SessionModelPicker(client: CoreClient, c: ComposerState, row: Sessio
     val hostSwitches = c.host.capabilities.providerSwitch
     val canSwitch = hostSwitches && !c.live.turnRunning && !sendPending
     val cloud = row?.isCloud == true
-    // The host's providers and instances, read ahead so the picker opens with its tabs.
     var hostHarnesses by remember { mutableStateOf<List<uniffi.zeron_core.HarnessInfo>>(emptyList()) }
     var instances by remember { mutableStateOf<List<ProviderInstanceRow>>(emptyList()) }
     LaunchedEffect(c.host.deviceId, canSwitch, cloud) {
@@ -971,7 +956,6 @@ private fun SessionModelPicker(client: CoreClient, c: ComposerState, row: Sessio
 private const val INSTANCE = "instance:"
 private const val RETRY = "retry:"
 
-/** Agent profiles over the model list: apply one, revert or save an edited one, or run with none. */
 @Composable
 private fun ProfilesRow(switches: ConfigSwitches) {
     val scope = rememberCoroutineScope()
