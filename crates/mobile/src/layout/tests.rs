@@ -185,17 +185,19 @@ fn messages_the_agent_sent_show_as_one_line_naming_the_recipient() {
         })],
         ..Default::default()
     };
+    // A settled turn folds under its work header (fork); open it.
+    w.builder.expanded.insert(rows::row_key("a#work"));
     let frame = w.pass();
     // The ordinary tool keeps its group; each message is its own row.
-    assert_eq!(frame.row_count(), 4);
-    assert_eq!(frame.placement(1).unwrap().kind, RowKind::Markdown);
-    let d = frame.display(1).unwrap();
+    assert_eq!(frame.row_count(), 5);
+    assert_eq!(frame.placement(2).unwrap().kind, RowKind::Markdown);
+    let d = frame.display(2).unwrap();
     // Just the recipient: no bubble, no message text.
     assert_eq!(d.text, "Message to \u{2060} Windows lane");
     assert!(d.boxes.iter().all(|b| b.color != display::ColorRole::UserBubble));
     // Left-aligned at the column's edge.
     assert!(d.runs.first().unwrap().x < 40.0);
-    assert!(frame.display(3).unwrap().text.ends_with(" b"));
+    assert!(frame.display(4).unwrap().text.ends_with(" b"));
 }
 
 fn transcript_one(text: &str) -> TranscriptInput {
