@@ -37,15 +37,15 @@ The **Keyboard shortcuts** page groups rows under **Appearance**, **Files**, **B
 
 Shortcuts must be unique. If the combination already belongs to another shortcut, Zeron keeps the old binding and says which shortcut owns it. Cmd+Enter is reserved for the composer. **Capture Appshot** has one extra rule: it needs Control, Option or Command with a letter, number, function key or navigation key. A changed row shows **Reset** to go back to its default. **Restore defaults** at the top resets every shortcut.
 
-> **Restore defaults** also resets **Hold to dictate**, **Capture Appshot**, and the keyboard options in Settings > General: **Send messages with**, **Follow-up behavior**, **Thinking level shortcut**, **Stop agent with Escape**, and the session switcher settings.
+> **Restore defaults** also resets **Hold to dictate**, **Capture Appshot**, and the keyboard options in Settings > Chat and Settings > General: **Send messages with**, **Follow-up behavior**, **Stop active agent with Escape**, **Thinking level shortcut**, and the session switcher settings.
 
 ## Related keyboard settings
 
-These live in [Settings > General](zeron://settings/general):
+These live in [Settings > Chat](zeron://settings/chat) and [Settings > General](zeron://settings/general):
 
-- **Send messages with**: Enter or Cmd+Enter.
+- **Send messages with** (Chat): Enter or Cmd+Enter.
 - **Thinking level shortcut** (macOS only): press Cmd+- or Cmd+= to lower or raise the thinking level, or switch the modifier to **⌃ Control**. On other systems the keys are Ctrl+- and Ctrl+=.
-- **Stop agent with Escape**: press Escape to stop the running agent when no dialog or menu is open. Off by default.
+- **Stop active agent with Escape** (Chat): press Escape to stop the running agent when no dialog or menu is open. Off by default.
 - **Ctrl+Tab cycles tabs**: move straight to the next tab instead of opening the session switcher.
 
 ## Keys in other places

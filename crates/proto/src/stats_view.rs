@@ -187,6 +187,12 @@ impl CompactSection {
                 "Agent compaction",
                 Some("The agent asked to compact. It runs as soon as the turn ends."),
             ),
+            Some(CompactPlan::Copy { .. }) => (
+                "Background compaction",
+                Some(
+                    "A copy of this chat is compacting. It swaps in at the next pause; turns after it come back as text.",
+                ),
+            ),
             _ => ("Idle compaction", Some("Sending a message first cancels it.")),
         };
         let mut rows = Vec::new();
@@ -196,6 +202,12 @@ impl CompactSection {
         match plan {
             Some(CompactPlan::Idle { at }) => rows.push(("Compacts at", clock(at))),
             Some(CompactPlan::Agent) => rows.push(("Compacts", "when this turn ends".into())),
+            Some(CompactPlan::Copy { since, ready }) => {
+                rows.push(("Copy started", clock(since)));
+                if ready {
+                    rows.push(("Swaps in", "at the next pause".into()));
+                }
+            }
             None => {}
         }
         Some(Self {

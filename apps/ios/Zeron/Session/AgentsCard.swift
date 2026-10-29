@@ -196,7 +196,7 @@ final class AgentsCard: UIView {
         var views = rows.arrangedSubviews.makeIterator()
         for (i, run) in roster.agents.enumerated() {
             guard let row = views.next() as? RosterRow else { return }
-            row.configure(state: run.state, title: run.title, line: [run.line, run.review].compactMap { $0 }.joined(separator: " · "))
+            row.configure(state: run.state, title: run.title, line: [run.line, run.review].compactMap { $0 }.joined(separator: " · "), depth: run.depth)
             row.setStop(run.canStop ? stopAction(run.taskId, delegated: run.delegated) : nil, id: "agents-card-stop-\(i)")
             row.onTap = { [weak self] in self?.tap(run) }
         }
@@ -285,6 +285,7 @@ private final class RosterRow: UIControl {
     private let line = UILabel()
     private let stack: UIStackView
     private var stopButton: UIButton?
+    private var leading: NSLayoutConstraint!
 
     init(id: String, mono: Bool) {
         stack = UIStackView(arrangedSubviews: [glyph, title, line])
@@ -306,10 +307,11 @@ private final class RosterRow: UIControl {
         stack.alignment = .center
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
+        leading = stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14)
         NSLayoutConstraint.activate([
             heightAnchor.constraint(greaterThanOrEqualToConstant: 40),
             glyph.widthAnchor.constraint(equalToConstant: 14),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            leading,
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             stack.topAnchor.constraint(equalTo: topAnchor, constant: 4),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
@@ -319,7 +321,8 @@ private final class RosterRow: UIControl {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(state: AgentRunState, title text: String, line detail: String) {
+    func configure(state: AgentRunState, title text: String, line detail: String, depth: UInt32 = 0) {
+        leading.constant = 14 + 16 * CGFloat(depth)
         glyph.state = state
         if title.text != text { title.text = text }
         if line.text != detail { line.text = detail }

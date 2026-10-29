@@ -238,6 +238,7 @@ pub struct CompactionSettings {
     pub classifier: TitleSettings,
     pub jev: Option<JevSource>,
     pub missions: bool,
+    pub compact_ahead: bool,
 }
 
 impl Default for CompactionSettings {
@@ -250,6 +251,7 @@ impl Default for CompactionSettings {
             classifier: TitleSettings::default(),
             jev: None,
             missions: true,
+            compact_ahead: false,
         }
     }
 }

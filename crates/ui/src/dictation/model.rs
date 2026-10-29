@@ -630,16 +630,27 @@ impl Render for VoiceCard {
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll.scroll)
                         .child(
-                            widgets::page_column()
-                                .child(widgets::page_header(&theme, "Voice", None))
-                                .child(conversation_card)
+                            widgets::settings_page()
                                 .child(
+                                    widgets::section(
+                                        &theme,
+                                        "Voice conversation",
+                                        conversation_card.mt_0(),
+                                    )
+                                    .mt_0(),
+                                )
+                                .child(widgets::section(
+                                    &theme,
+                                    "Dictation",
                                     widgets::section_card(&theme)
+                                        .mt_0()
                                         .child(dictation_row)
                                         .children(microphone_row)
                                         .child(shortcut_row),
-                                )
-                                .children(model_card),
+                                ))
+                                .children(model_card.map(|card| {
+                                    widgets::section(&theme, "Speech model", card.mt_0())
+                                })),
                         ),
                 )
                 .fade_overflow_y(&self.scroll.scroll),

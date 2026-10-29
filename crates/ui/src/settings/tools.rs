@@ -633,7 +633,7 @@ impl popover::ScrollRailHost for ToolsPage {
 impl Render for ToolsPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
-        let mut column = widgets::page_column();
+        let mut column = widgets::settings_page();
         match self.settings.ready().cloned() {
             Some(settings) => {
                 let disabled = self.disabled(&settings, cx);
@@ -663,8 +663,7 @@ impl Render for ToolsPage {
                     "OFF"
                 };
                 column = column
-                    .child(widgets::page_header(&theme, "Tools", None))
-                    .child(widgets::page_subtitle(&theme, SUBTITLE))
+                    .child(widgets::page_note(&theme, SUBTITLE))
                     .when_some(self.error.clone(), |el, error| {
                         el.child(
                             div()
@@ -673,7 +672,7 @@ impl Render for ToolsPage {
                         )
                     })
                     .child(self.hero(&theme, wires, live, total, cx));
-                let mut groups = widgets::section_card(&theme).mt(px(6.0));
+                let mut groups = widgets::section_card(&theme).mt_0();
                 for (index, info) in TOOL_GROUPS.iter().enumerate() {
                     groups = groups.child(self.group_card(
                         &theme,
@@ -684,35 +683,35 @@ impl Render for ToolsPage {
                         cx,
                     ));
                 }
-                column = column.child(groups).child(
-                    div()
-                        .mt(px(12.0))
-                        .px(px(4.0))
-                        .flex()
-                        .flex_wrap()
-                        .justify_between()
-                        .gap(px(8.0))
-                        .text_size(crate::typography::ui_rems(widgets::ROW_DESCRIPTION_SIZE))
-                        .text_color(theme.text_muted)
-                        .child(
-                            div()
-                                .font_family(theme.font_mono.clone())
-                                .text_size(crate::typography::ui_rems(10.5))
-                                .child(SharedString::from(format!(
-                                    "{groups_on} GROUPS · {live} / {total} TOOLS · {status}"
-                                ))),
-                        )
-                        .child("Applies to every chat on this engine."),
-                );
+                column = column
+                    .child(widgets::section(&theme, "Tool groups", groups))
+                    .child(
+                        div()
+                            .mt(px(12.0))
+                            .px(px(4.0))
+                            .flex()
+                            .flex_wrap()
+                            .justify_between()
+                            .gap(px(8.0))
+                            .text_size(crate::typography::ui_rems(widgets::ROW_DESCRIPTION_SIZE))
+                            .text_color(theme.text_muted)
+                            .child(
+                                div()
+                                    .font_family(theme.font_mono.clone())
+                                    .text_size(crate::typography::ui_rems(10.5))
+                                    .child(SharedString::from(format!(
+                                        "{groups_on} GROUPS · {live} / {total} TOOLS · {status}"
+                                    ))),
+                            )
+                            .child("Applies to every chat on this engine."),
+                    );
             }
             None => {
                 let note = match &self.settings {
                     Loadable::Error(error) => error.clone(),
                     _ => "Loading…".to_string(),
                 };
-                column = column
-                    .child(widgets::page_header(&theme, "Tools", None))
-                    .child(widgets::page_subtitle(&theme, note));
+                column = column.child(widgets::page_note(&theme, note));
             }
         }
         let scrollbar = popover::rail(self, "tools-page-scrollbar", &theme, cx);

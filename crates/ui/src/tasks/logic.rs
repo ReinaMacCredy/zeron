@@ -3,27 +3,46 @@ use zeron_proto::{Task, pin_order_key_between};
 
 pub(crate) use zeron_proto::mission::{COLUMNS, drop_completes};
 
-pub(crate) fn reorder_key(
+/// New order keys that put `moving` (in that order) right before `before`, or
+/// at the end; empty when they already sit there.
+pub(crate) fn reorder_keys(
     open: &[&Task],
-    moving: &str,
+    moving: &[String],
     before: Option<&str>,
     nonce: &str,
-) -> Option<String> {
-    if before == Some(moving) {
-        return None;
+) -> Vec<(String, String)> {
+    if before.is_some_and(|id| moving.iter().any(|m| m == id)) {
+        return Vec::new();
     }
-    let rest: Vec<&Task> = open.iter().copied().filter(|t| t.id != moving).collect();
-    let at = match before {
-        Some(id) => rest.iter().position(|t| t.id == id)?,
-        None => rest.len(),
+    let rest: Vec<&Task> = open
+        .iter()
+        .copied()
+        .filter(|t| !moving.contains(&t.id))
+        .collect();
+    let Some(at) = (match before {
+        Some(id) => rest.iter().position(|t| t.id == id),
+        None => Some(rest.len()),
+    }) else {
+        return Vec::new();
     };
-    let current = open.iter().position(|t| t.id == moving)?;
-    if current == at {
-        return None;
+    let mut current: Vec<&str> = rest.iter().map(|t| t.id.as_str()).collect();
+    current.splice(at..at, moving.iter().map(String::as_str));
+    let now: Vec<&str> = open.iter().map(|t| t.id.as_str()).collect();
+    if current == now {
+        return Vec::new();
     }
-    let lower = at.checked_sub(1).map(|i| rest[i].order_key.as_str());
     let upper = rest.get(at).map(|t| t.order_key.as_str());
-    pin_order_key_between(lower, upper, nonce).ok()
+    let mut lower = at.checked_sub(1).map(|i| rest[i].order_key.clone());
+    let mut keys = Vec::new();
+    for (ix, id) in moving.iter().enumerate() {
+        let Ok(key) = pin_order_key_between(lower.as_deref(), upper, &format!("{nonce}{ix}"))
+        else {
+            return Vec::new();
+        };
+        lower = Some(key.clone());
+        keys.push((id.clone(), key));
+    }
+    keys
 }
 
 pub(crate) fn quick_add_title(text: &str) -> Option<String> {
@@ -131,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn reorder_key_lands_strictly_between_the_new_neighbours() {
+    fn reorder_keys_land_strictly_between_the_new_neighbours() {
         let keys: Vec<String> = ["a", "b", "c"]
             .iter()
             .enumerate()
@@ -147,18 +166,32 @@ mod tests {
         let open: Vec<&Task> = tasks.iter().collect();
         let nonce = "6f0c1e2a-0000-4000-8000-000000000000";
 
-        let to_top = reorder_key(&open, "c", Some("a"), nonce).unwrap();
-        assert!(valid_pin_order_key(&to_top) && to_top < sorted[0]);
+        let key = |moving: &[&str], before: Option<&str>| {
+            let moving: Vec<String> = moving.iter().map(|id| id.to_string()).collect();
+            reorder_keys(&open, &moving, before, nonce)
+        };
 
-        let middle = reorder_key(&open, "a", Some("c"), nonce).unwrap();
-        assert!(sorted[1] < middle && middle < sorted[2]);
+        let to_top = key(&["c"], Some("a"));
+        assert!(valid_pin_order_key(&to_top[0].1) && to_top[0].1 < sorted[0]);
 
-        let to_end = reorder_key(&open, "a", None, nonce).unwrap();
-        assert!(to_end > sorted[2]);
+        let middle = key(&["a"], Some("c"));
+        assert!(sorted[1] < middle[0].1 && middle[0].1 < sorted[2]);
 
-        assert_eq!(reorder_key(&open, "b", Some("b"), nonce), None);
-        assert_eq!(reorder_key(&open, "a", Some("b"), nonce), None);
-        assert_eq!(reorder_key(&open, "c", None, nonce), None);
+        let to_end = key(&["a"], None);
+        assert!(to_end[0].1 > sorted[2]);
+
+        assert!(key(&["b"], Some("b")).is_empty());
+        assert!(key(&["a"], Some("b")).is_empty());
+        assert!(key(&["c"], None).is_empty());
+
+        let pair = key(&["a", "c"], None);
+        assert_eq!(pair.len(), 2);
+        assert!(
+            sorted[1] < pair[0].1 && pair[0].1 < pair[1].1,
+            "a then c after b"
+        );
+        assert!(key(&["b", "c"], None).is_empty());
+        assert_eq!(key(&["c", "a"], Some("b")).len(), 2);
     }
 
     #[test]

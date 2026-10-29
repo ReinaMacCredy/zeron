@@ -5,21 +5,31 @@ use gpui::{linear_color_stop, linear_gradient, relative};
 const CLAUDE_CONFIG: &str = "claude-config";
 const COMMAND_CARDS: &str = "claude-command-cards";
 const COMPACTION_CARD: &str = "compaction-card";
+const COMPACT_AHEAD: &str = "compact-ahead";
 const WORKING_TREE: &str = "working-now-tree";
 const PHONE_SLASH: &str = "phone-slash-popup";
 const PHONE_SUBAGENTS: &str = "phone-subagents-pill";
 const PHONE_BACKGROUND: &str = "phone-chat-background";
 const RAIL_UPDATE: &str = "rail-update";
+const TASK_MENTIONS: &str = "task-mentions";
+const GATHER_TASKS: &str = "gather-tasks";
+const TASK_DRAG: &str = "task-drag";
+const SETTINGS_UPDATES: &str = "settings-updates";
 
-pub(super) const VISUALS: [(&str, f32, f32); 8] = [
+pub(super) const VISUALS: [(&str, f32, f32); 13] = [
     (CLAUDE_CONFIG, 7.0, 3.4),
     (COMMAND_CARDS, 6.6, 4.5),
     (COMPACTION_CARD, 7.6, 5.4),
+    (COMPACT_AHEAD, 8.0, 2.2),
     (WORKING_TREE, 6.6, 2.0),
     (PHONE_SLASH, 7.0, 2.6),
     (PHONE_SUBAGENTS, 6.6, 2.6),
     (PHONE_BACKGROUND, 7.0, 4.4),
     (RAIL_UPDATE, 6.4, 5.2),
+    (TASK_MENTIONS, 6.6, 5.2),
+    (GATHER_TASKS, 7.2, 5.0),
+    (TASK_DRAG, 6.8, 4.6),
+    (SETTINGS_UPDATES, 6.8, 5.6),
 ];
 
 pub(super) fn visual(id: &str, theme: &Theme, t: f32, reduced: bool) -> AnyElement {
@@ -27,11 +37,16 @@ pub(super) fn visual(id: &str, theme: &Theme, t: f32, reduced: bool) -> AnyEleme
         CLAUDE_CONFIG => config_visual(theme, t),
         COMMAND_CARDS => command_cards_visual(theme, t, reduced),
         COMPACTION_CARD => compaction_visual(theme, t, reduced),
+        COMPACT_AHEAD => compact_ahead_visual(theme, t, reduced),
         WORKING_TREE => working_tree_visual(theme, t, reduced),
         PHONE_SLASH => phone_slash_visual(theme, t),
         PHONE_SUBAGENTS => phone_subagents_visual(theme, t, reduced),
         PHONE_BACKGROUND => phone_background_visual(theme, t),
         RAIL_UPDATE => rail_update_visual(theme, t, reduced),
+        TASK_MENTIONS => task_mentions_visual(theme, t),
+        GATHER_TASKS => gather_tasks_visual(theme, t, reduced),
+        TASK_DRAG => task_drag_visual(theme, t),
+        SETTINGS_UPDATES => settings_updates_visual(theme, t),
         _ => div().into_any_element(),
     }
 }
@@ -563,6 +578,181 @@ fn compaction_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
                 t if t < COMPACT_AT => "A small model checks first",
                 t if t < DONE_AT => "Its verdict and reason, then the compaction",
                 _ => "Open it for the summary and what was kept",
+            },
+        ))
+        .into_any_element()
+}
+
+fn compact_ahead_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
+    const QUEUE_AT: f32 = 1.0;
+    const DONE_AT: f32 = 3.0;
+    const CODEX_AT: f32 = 4.2;
+    const SWAP_AT: f32 = 6.4;
+    let meta = |copy: String| text(11.5, theme.text_faint, copy);
+    let strong =
+        |copy: &'static str| text(12.5, theme.text, copy).font_weight(gpui::FontWeight::SEMIBOLD);
+    let reply = |copy: &'static str| text(12.0, theme.text, copy);
+    let bubble = |copy: &'static str| {
+        div().flex().justify_end().child(
+            div()
+                .px(px(10.0))
+                .py(px(5.0))
+                .rounded(px(10.0))
+                .bg(crate::theme::ink(0.06))
+                .child(text(12.0, theme.text, copy)),
+        )
+    };
+    let frame = |head: gpui::Div, bar: Option<f32>| {
+        div()
+            .p(px(9.0))
+            .px(px(10.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_card.opacity(0.85))
+            .child(head)
+            .children(bar.map(|fill| {
+                div()
+                    .ml(px(21.0))
+                    .h(px(2.0))
+                    .rounded_full()
+                    .bg(crate::theme::ink(0.06))
+                    .child(
+                        div()
+                            .h_full()
+                            .w(relative(fill))
+                            .rounded_full()
+                            .bg(theme.accent),
+                    )
+            }))
+    };
+    let head = || div().flex().flex_wrap().items_center().gap(px(7.0));
+    let claude = t < CODEX_AT;
+    let mut chat = div().flex().flex_col().gap(px(10.0));
+    if claude {
+        chat = chat.child(reply("Done: the receipt matches the order page."));
+        let card = if t < DONE_AT {
+            let secs = (t * 10.0).floor() as u32 + 1;
+            frame(
+                head()
+                    .child(running(theme, reduced))
+                    .child(strong("Compacting"))
+                    .child(pill("Carry over", theme.accent))
+                    .child(meta(format!("\u{b7} 212.0k \u{b7} {secs}s, usually ~40s"))),
+                Some(0.92 * ramp(t, 0.0, 2800.0, motion::EASE_OUT)),
+            )
+        } else {
+            let post = 212.0 - 143.0 * ramp(t, DONE_AT, 600.0, motion::EASE_OUT);
+            frame(
+                head()
+                    .child(glyph(icons::LUCIDE_CHECK, 14.0, theme.success))
+                    .child(strong("Compacted"))
+                    .child(pill("Carry over", theme.accent))
+                    .child(meta(format!(
+                        "\u{b7} 212.0k \u{2192} {post:.1}k \u{b7} 40s"
+                    ))),
+                None,
+            )
+        };
+        chat = chat.child(card);
+        if t >= DONE_AT + 0.4 {
+            chat = chat.child(rise(bubble("Add a refund button."), t, DONE_AT + 0.4));
+        }
+    } else {
+        chat = chat
+            .child(bubble("Add a refund button."))
+            .child(reply("Refund button added."));
+        if t >= SWAP_AT {
+            let post = 212.0 - 143.0 * ramp(t, SWAP_AT, 600.0, motion::EASE_OUT);
+            chat = chat.child(rise(
+                frame(
+                    head()
+                        .child(glyph(icons::LUCIDE_CHECK, 14.0, theme.success))
+                        .child(strong("Compacted in the background"))
+                        .child(pill("Swapped in", theme.warning))
+                        .child(meta(format!(
+                            "\u{b7} 212k \u{2192} {post:.0}k \u{b7} 1 turn as text"
+                        ))),
+                    None,
+                ),
+                t,
+                SWAP_AT,
+            ));
+        }
+    }
+    let queued = (claude && (QUEUE_AT..DONE_AT + 0.4).contains(&t)).then(|| {
+        let left = (DONE_AT - t).max(0.0) * 10.0;
+        rise(
+            div()
+                .h(px(30.0))
+                .px(px(10.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(theme.border)
+                .child(text(12.0, theme.text, "Add a refund button."))
+                .child(div().flex_1())
+                .child(meta(format!(
+                    "Sends after compaction \u{b7} 0:{:02}",
+                    left.ceil() as u32
+                ))),
+            t,
+            QUEUE_AT,
+        )
+    });
+    let chip = (!claude && t < SWAP_AT).then(|| {
+        let ready = t >= SWAP_AT - 0.6;
+        div()
+            .flex_none()
+            .h(px(20.0))
+            .px(px(7.0))
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .rounded(px(6.0))
+            .bg(theme.warning.opacity(0.12))
+            .child(glyph(
+                if ready {
+                    icons::LUCIDE_CHECK
+                } else {
+                    icons::LUCIDE_CIRCLE_DASHED
+                },
+                12.0,
+                theme.warning,
+            ))
+            .child(text(
+                11.0,
+                theme.warning,
+                if ready {
+                    "Copy ready \u{b7} swaps now".to_string()
+                } else {
+                    format!(
+                        "Compacting a copy \u{b7} 0:{:02}",
+                        ((t - CODEX_AT) * 10.0) as u32
+                    )
+                },
+            ))
+    });
+    div()
+        .w(px(380.0))
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .child(chat)
+        .children(queued)
+        .children(chip.map(|chip| div().flex().child(chip)))
+        .child(text(
+            11.0,
+            theme.text_faint,
+            if claude {
+                "Claude compacts in place as the turn ends; a message waits for it"
+            } else {
+                "Codex compacts a copy while it works, then swaps it in"
             },
         ))
         .into_any_element()
@@ -1266,5 +1456,728 @@ fn rail_update_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
                 .text_color(theme.text_muted)
                 .child(caption),
         )
+        .into_any_element()
+}
+
+fn todo_circle(theme: &Theme, size: f32) -> gpui::Svg {
+    glyph(icons::LUCIDE_CIRCLE_DASHED, size, theme.text_faint)
+}
+
+fn task_token(theme: &Theme, title: &'static str, shown: f32) -> gpui::Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .opacity(shown)
+        .child(todo_circle(theme, 11.0))
+        .child(text(12.0, theme.accent, title).font_weight(gpui::FontWeight::MEDIUM))
+}
+
+fn task_mentions_visual(theme: &Theme, t: f32) -> AnyElement {
+    const FIRST_PICK: f32 = 1.9;
+    const SCOPED_AT: f32 = 2.5;
+    const SECOND_PICK: f32 = 4.3;
+    let scoped = (SCOPED_AT..SECOND_PICK).contains(&t);
+    let query = if t < FIRST_PICK {
+        typed("@", t, 0.3, 0.1)
+    } else if scoped {
+        typed("@task ", t, SCOPED_AT, 0.07)
+    } else {
+        ""
+    };
+    let open = match (query.is_empty(), scoped) {
+        (true, _) => 0.0,
+        (false, true) => ramp(t, SCOPED_AT + 0.45, 200.0, motion::EASE_OUT),
+        (false, false) => ramp(t, 0.4, 200.0, motion::EASE_OUT),
+    };
+    let active = usize::from(t >= if scoped { 3.6 } else { 1.2 });
+    let heading = |label: &str| {
+        div().h(px(15.0)).px(px(6.0)).flex().items_end().child(
+            text(9.5, theme.text_muted, crate::popover::tracked_upper(label))
+                .font_weight(gpui::FontWeight::MEDIUM),
+        )
+    };
+    let row = |lead: gpui::Svg, title: &'static str, meta: &'static str, on: bool| {
+        div()
+            .h(px(20.0))
+            .px(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .rounded(px(5.0))
+            .when(on, |el| el.bg(theme.wash(0.08)))
+            .child(lead)
+            .child(text(11.5, theme.text, title))
+            .child(div().flex_1())
+            .child(text(10.5, theme.text_faint, meta))
+    };
+    let rows: Vec<gpui::Div> = if scoped {
+        vec![
+            heading("Tasks"),
+            row(
+                todo_circle(theme, 11.0),
+                "Ship the shop checkout",
+                "added",
+                active == 0,
+            ),
+            row(
+                todo_circle(theme, 11.0),
+                "Fix flaky upload test",
+                "shop",
+                active == 1,
+            ),
+            row(
+                todo_circle(theme, 11.0),
+                "Write the release notes",
+                "docs",
+                false,
+            ),
+            div()
+                .h(px(20.0))
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .px(px(5.0))
+                        .rounded(px(4.0))
+                        .bg(theme.accent.opacity(0.16))
+                        .child(mono(theme, 10.0, theme.accent, "@task")),
+                )
+                .child(text(10.5, theme.text_muted, "Tasks only")),
+        ]
+    } else {
+        vec![
+            heading("Threads"),
+            row(
+                glyph(icons::CLAUDE_MARK, 11.0, crate::icons::claude_brand()),
+                "Plan the shop launch",
+                "1h",
+                active == 0,
+            ),
+            heading("Tasks"),
+            row(
+                todo_circle(theme, 11.0),
+                "Ship the shop checkout",
+                "shop",
+                active == 1,
+            ),
+            row(
+                todo_circle(theme, 11.0),
+                "Fix flaky upload test",
+                "shop",
+                false,
+            ),
+            heading("Files"),
+            row(
+                glyph(icons::FILE_CODE, 11.0, theme.text_muted),
+                "cart.ts",
+                "src/checkout",
+                false,
+            ),
+        ]
+    };
+    let above = if open > 0.0 {
+        div()
+            .w(px(270.0))
+            .ml(px(8.0))
+            .p(px(3.0))
+            .flex()
+            .flex_col()
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
+            .relative()
+            .top(px((1.0 - open) * 6.0))
+            .opacity(open)
+            .children(rows)
+    } else {
+        div().px(px(4.0)).child(text(
+            11.0,
+            theme.text_faint,
+            match t {
+                t if t < FIRST_PICK => "Type @ for threads, tasks and files",
+                t if t < SECOND_PICK => "Type @task and a space for tasks only",
+                _ => "The agent gets a link it reads with the tasks tool",
+            },
+        ))
+    };
+    let composer = div()
+        .w_full()
+        .h(px(30.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(theme.border_strong)
+        .when(t >= FIRST_PICK, |el| {
+            el.child(task_token(
+                theme,
+                "Ship the shop checkout",
+                ramp(t, FIRST_PICK, 150.0, motion::EASE_OUT),
+            ))
+        })
+        .when(t >= SECOND_PICK, |el| {
+            el.child(task_token(
+                theme,
+                "Fix flaky upload test",
+                ramp(t, SECOND_PICK, 150.0, motion::EASE_OUT),
+            ))
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(1.0))
+                .child(text(12.0, theme.text, query))
+                .child(caret(theme, t)),
+        );
+    div()
+        .w(px(400.0))
+        .h(px(166.0))
+        .flex()
+        .flex_col()
+        .justify_end()
+        .gap(px(5.0))
+        .child(above)
+        .child(composer)
+        .into_any_element()
+}
+
+fn gather_tasks_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
+    const TITLES: [(&str, &str); 4] = [
+        ("Ship the shop checkout", "shop"),
+        ("Fix flaky upload test", "shop"),
+        ("Redesign onboarding", "app"),
+        ("Write the release notes", "docs"),
+    ];
+    const PICKED: [usize; 3] = [0, 1, 3];
+    const CHECK_AT: [f32; 3] = [0.7, 1.15, 1.6];
+    const START_AT: f32 = 2.4;
+    const THREAD_AT: f32 = 2.9;
+    const TICK_AT: [f32; 2] = [4.2, 5.6];
+    if t < THREAD_AT {
+        let gutter = ramp(t, 0.3, 100.0, motion::EASE_OUT);
+        let count = CHECK_AT.iter().filter(|at| t >= **at).count();
+        let row = |ix: usize| {
+            let on = PICKED
+                .iter()
+                .position(|picked| *picked == ix)
+                .map_or(0.0, |n| ramp(t, CHECK_AT[n], 100.0, motion::EASE_OUT));
+            let check = if on > 0.0 {
+                div()
+                    .flex_none()
+                    .size(px(12.0))
+                    .rounded(px(4.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(theme.accent.opacity(on))
+                    .child(glyph(icons::LUCIDE_CHECK, 9.0, theme.on_accent.opacity(on)))
+                    .into_any_element()
+            } else {
+                task_box(theme)
+            };
+            let (title, project) = TITLES[ix];
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(div().flex_none().opacity(gutter).child(check))
+                .child(
+                    div()
+                        .flex_1()
+                        .h(px(24.0))
+                        .px(px(8.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .rounded(px(7.0))
+                        .bg(theme.accent.opacity(0.14 * on))
+                        .child(todo_circle(theme, 12.0))
+                        .child(text(12.0, theme.text, title))
+                        .child(text(11.0, theme.text_faint, project)),
+                )
+        };
+        let shown = ramp(t, CHECK_AT[0], 180.0, motion::EASE_OUT);
+        let pressed = (START_AT..START_AT + 0.15).contains(&t);
+        let bar = div()
+            .h(px(30.0))
+            .pl(px(10.0))
+            .pr(px(10.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .rounded(px(9.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.surface_raised)
+            .relative()
+            .top(px((1.0 - shown) * 10.0))
+            .opacity(shown)
+            .child(
+                text(11.5, theme.text, format!("{count} selected"))
+                    .font_weight(gpui::FontWeight::MEDIUM),
+            )
+            .child(
+                div()
+                    .h(px(22.0))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .rounded(px(6.0))
+                    .bg(theme.text.opacity(if pressed { 0.75 } else { 1.0 }))
+                    .child(glyph(icons::LUCIDE_SQUARE_PEN, 11.0, theme.surface))
+                    .child(text(11.5, theme.surface, "Start in one thread")),
+            )
+            .child(text(11.5, theme.text, "Add to thread\u{2026}"))
+            .child(text(11.5, theme.text_faint, "Clear"));
+        return div()
+            .w(px(380.0))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .opacity(1.0 - ramp(t, THREAD_AT - 0.2, 150.0, motion::EASE_IN))
+            .children((0..TITLES.len()).map(row))
+            .child(div().mt(px(10.0)).flex().justify_center().child(bar))
+            .into_any_element();
+    }
+    let enter = ramp(t, THREAD_AT, 240.0, motion::EASE_OUT);
+    let done = TICK_AT.iter().filter(|at| t >= **at).count();
+    let progress = TICK_AT
+        .iter()
+        .map(|at| ramp(t, *at, 240.0, motion::EASE_OUT))
+        .sum::<f32>()
+        / PICKED.len() as f32;
+    let (_, _, working) = chat_status_tone(zeron_proto::ChatIndicator::Working, theme);
+    let (_, _, ok) = chat_status_tone(zeron_proto::ChatIndicator::Completed, theme);
+    let row = |n: usize| {
+        let finished = TICK_AT.get(n).is_some_and(|at| t >= *at);
+        div()
+            .h(px(17.0))
+            .flex()
+            .items_center()
+            .gap(px(7.0))
+            .child(if finished {
+                tree_glyph(TreeStatus::Done, 12.0, ok, true)
+            } else {
+                running(theme, reduced)
+            })
+            .child(text(11.0, theme.text_faint, format!("{}", n + 1)).w(px(8.0)))
+            .child(
+                text(12.0, theme.accent, TITLES[PICKED[n]].0).font_weight(gpui::FontWeight::MEDIUM),
+            )
+            .child(div().flex_1())
+            .child(text(
+                11.0,
+                if finished { ok } else { working },
+                if finished { "Done" } else { "Working" },
+            ))
+    };
+    let pinned = card(theme)
+        .px(px(9.0))
+        .py(px(6.0))
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(glyph(icons::CHECKLIST, 13.0, theme.text_muted))
+                .child(
+                    text(12.0, theme.text, "3 tasks in this thread")
+                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                )
+                .child(text(
+                    11.5,
+                    theme.text_faint,
+                    format!("{done} of {} done", PICKED.len()),
+                ))
+                .child(div().flex_1())
+                .child(glyph(icons::LUCIDE_CHEVRON_DOWN, 11.0, theme.text_faint)),
+        )
+        .child(
+            div()
+                .h(px(3.0))
+                .w_full()
+                .rounded_full()
+                .bg(crate::theme::ink(0.06))
+                .child(
+                    div()
+                        .h_full()
+                        .w(relative(progress))
+                        .rounded_full()
+                        .bg(theme.success),
+                ),
+        )
+        .children((0..PICKED.len()).map(row));
+    let message = div().flex().justify_end().child(
+        div()
+            .px(px(10.0))
+            .py(px(2.0))
+            .rounded(px(10.0))
+            .bg(crate::theme::ink(0.06))
+            .child(text(
+                11.5,
+                theme.text,
+                "Work through these 3 tasks in this thread, in order.",
+            )),
+    );
+    let composer = div()
+        .h(px(20.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(theme.border_strong)
+        .child(text(11.5, theme.text_faint, "Do anything\u{2026}"));
+    div()
+        .w(px(390.0))
+        .flex()
+        .flex_col()
+        .gap(px(5.0))
+        .relative()
+        .top(px((1.0 - enter) * 6.0))
+        .opacity(enter)
+        .child(pinned)
+        .child(message)
+        .child(composer)
+        .into_any_element()
+}
+
+fn task_drag_visual(theme: &Theme, t: f32) -> AnyElement {
+    const SLOT: f32 = 24.0;
+    const OVERSHOOT: f32 = 4.0;
+    const GROUP_AT: f32 = 3.0;
+    const TITLES: [&str; 4] = [
+        "Ship the shop checkout",
+        "Fix flaky upload test",
+        "Write the release notes",
+        "Audit the image cache",
+    ];
+    let ease = |start: f32, ms: f32| ramp(t, start, ms, motion::EASE_OUT);
+    let hover = ease(0.3, 100.0) * (1.0 - ease(2.6, 100.0));
+    let lift_one = ease(0.9, 160.0) * (1.0 - ease(2.0, 220.0));
+    let follow_one = ramp(t, 1.1, 700.0, motion::EASE_IN_OUT);
+    let shift_one = ease(1.45, 200.0);
+    let settle_one = ease(2.0, 220.0);
+    let picked = [ease(3.0, 100.0), ease(3.35, 100.0)].map(|on| on * (1.0 - ease(5.8, 150.0)));
+    let grip_two = ease(3.7, 100.0) * (1.0 - ease(5.5, 100.0));
+    let lift_two = ease(3.9, 160.0) * (1.0 - ease(5.0, 220.0));
+    let tuck = ease(3.9, 200.0) * (1.0 - ease(5.0, 220.0));
+    let follow_two = ramp(t, 4.2, 600.0, motion::EASE_IN_OUT);
+    let shift_two = ease(4.45, 200.0);
+    let settle_two = ease(5.0, 220.0);
+    let top_zero = (SLOT + OVERSHOOT) * follow_two - OVERSHOOT * settle_two;
+    let tops = [
+        top_zero,
+        SLOT + (SLOT + OVERSHOOT) * follow_one - OVERSHOOT * settle_one - 2.0 * SLOT * shift_two,
+        if t < GROUP_AT {
+            2.0 * SLOT - SLOT * shift_one
+        } else {
+            top_zero + SLOT - (SLOT - OVERSHOOT) * tuck
+        },
+        3.0 * SLOT,
+    ];
+    let lifts = [lift_two, lift_one, 0.0, 0.0];
+    let grips = [grip_two, hover, 0.0, 0.0];
+    let selected = [picked[0], 0.0, picked[1], 0.0];
+    let row = |ix: usize| {
+        let lift = lifts[ix];
+        let rest = if selected[ix] > 0.0 {
+            theme.accent.opacity(0.14 * selected[ix])
+        } else {
+            theme.wash(0.06 * grips[ix])
+        };
+        let shown = if ix == 2 { 1.0 - tuck } else { 1.0 };
+        div()
+            .absolute()
+            .top(px(tops[ix]))
+            .left(px(-2.0 * lift))
+            .w(px(270.0 + 4.0 * lift))
+            .h(px(22.0))
+            .px(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .rounded(px(7.0))
+            .border_1()
+            .border_color(theme.border_strong.opacity(lift))
+            .bg(motion::mix(
+                rest,
+                gpui::Hsla {
+                    a: 1.0,
+                    ..theme.surface_raised
+                },
+                lift,
+            ))
+            .when(lift > 0.0, |el| {
+                el.shadow(vec![gpui::BoxShadow {
+                    color: gpui::black().opacity(0.25 * lift),
+                    offset: gpui::point(px(0.0), px(4.0 * lift)),
+                    blur_radius: px(12.0),
+                    spread_radius: px(0.0),
+                    inset: false,
+                }])
+            })
+            .child(glyph(
+                icons::DRAG_HANDLE,
+                11.0,
+                theme.text_faint.opacity(grips[ix]),
+            ))
+            .child(todo_circle(theme, 12.0).opacity(shown))
+            .child(text(12.0, theme.text, TITLES[ix]).opacity(shown))
+            .child(div().flex_1())
+            .when(ix == 0 && tuck > 0.0, |el| {
+                el.child(
+                    div()
+                        .h(px(16.0))
+                        .min_w(px(16.0))
+                        .px(px(5.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(theme.accent)
+                        .opacity(tuck)
+                        .child(text(10.0, theme.on_accent, "2")),
+                )
+            })
+    };
+    let order = if t < GROUP_AT {
+        [0, 2, 3, 1]
+    } else {
+        [3, 1, 2, 0]
+    };
+    let caption = match t {
+        t if t < GROUP_AT => "Drag by the grip: the others slide apart",
+        t if t < 3.9 => "Cmd-click to select several",
+        _ => "Selected tasks move together",
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(18.0))
+        .child(
+            div()
+                .relative()
+                .flex_none()
+                .w(px(270.0))
+                .h(px(3.0 * SLOT + 22.0))
+                .children(order.map(row)),
+        )
+        .child(
+            div()
+                .w(px(110.0))
+                .text_size(crate::typography::ui_rems(11.5))
+                .text_color(theme.text_faint)
+                .child(caption),
+        )
+        .into_any_element()
+}
+
+fn settings_updates_visual(theme: &Theme, t: f32) -> AnyElement {
+    const CHECK_AT: f32 = 0.9;
+    const FOUND_AT: f32 = 1.7;
+    const DOWNLOAD_AT: f32 = 2.6;
+    const READY_AT: f32 = 4.2;
+    let (description, button, accent) = if t < CHECK_AT {
+        (
+            "Current version of the application.",
+            "Check for Updates",
+            false,
+        )
+    } else if t < FOUND_AT {
+        ("Checking for updates\u{2026}", "Checking\u{2026}", false)
+    } else if t < DOWNLOAD_AT {
+        ("Update 0.2.129 available.", "Download", false)
+    } else if t < READY_AT {
+        (
+            "Downloading update 0.2.129\u{2026}",
+            "Downloading\u{2026}",
+            false,
+        )
+    } else {
+        (
+            "Update 0.2.129 downloaded. Restart Zeron to install it.",
+            "Restart to update",
+            true,
+        )
+    };
+    let enter = ramp(t, 0.0, 220.0, motion::EASE_OUT);
+    let nav_item = |icon_path: &'static str, label: &'static str, on: bool| {
+        div()
+            .h(px(20.0))
+            .px(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .rounded(px(5.0))
+            .when(on, |el| el.bg(theme.wash(0.08)))
+            .child(glyph(
+                icon_path,
+                11.0,
+                if on { theme.text } else { theme.text_muted },
+            ))
+            .child(text(
+                10.5,
+                if on { theme.text } else { theme.text_muted },
+                label,
+            ))
+    };
+    let heading = |label: &'static str| {
+        div()
+            .mt(px(6.0))
+            .px(px(6.0))
+            .child(text(9.5, theme.text_faint, label))
+    };
+    let nav = div()
+        .w(px(104.0))
+        .flex_none()
+        .p(px(5.0))
+        .flex()
+        .flex_col()
+        .gap(px(1.0))
+        .border_r_1()
+        .border_color(theme.border)
+        .child(nav_item(icons::SETTINGS, "General", false))
+        .child(nav_item(icons::CHAT_ROUND_LINE, "Chat", false))
+        .child(heading("Agents"))
+        .child(nav_item(icons::WIDGET, "Providers", false))
+        .child(nav_item(icons::FORK, "Routing", false))
+        .child(heading("Connections"))
+        .child(nav_item(icons::MONITOR, "Devices", false))
+        .child(div().h(px(6.0)))
+        .child(nav_item(icons::REFRESH, "Updates", true));
+    let header = div()
+        .h(px(26.0))
+        .px(px(8.0))
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .border_b_1()
+        .border_color(theme.border)
+        .child(text(10.5, theme.text_muted, "Settings"))
+        .child(glyph(icons::ALT_ARROW_RIGHT, 9.0, theme.text_faint))
+        .child(text(10.5, theme.text, "Updates").font_weight(gpui::FontWeight::MEDIUM))
+        .child(div().flex_1())
+        .child(
+            div()
+                .h(px(18.0))
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .rounded(px(5.0))
+                .bg(theme.text)
+                .child(glyph(icons::RESTART, 9.0, theme.on_solid))
+                .child(text(9.5, theme.on_solid, "Update everything")),
+        );
+    let control = div()
+        .h(px(18.0))
+        .px(px(7.0))
+        .flex()
+        .items_center()
+        .rounded(px(5.0))
+        .when(accent, |el| el.bg(theme.accent))
+        .when(!accent, |el| el.bg(theme.wash(0.08)))
+        .child(text(
+            10.0,
+            if accent { theme.on_accent } else { theme.text },
+            button,
+        ));
+    let version = div()
+        .px(px(8.0))
+        .py(px(6.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(
+                            text(10.5, theme.text, "Version").font_weight(gpui::FontWeight::MEDIUM),
+                        )
+                        .child(mono(theme, 9.0, theme.text_muted, "0.2.122")),
+                )
+                .child(text(9.5, theme.text_muted, description)),
+        )
+        .child(control);
+    let agent = |name: &'static str, line: &'static str, harness: zeron_proto::HarnessId| {
+        let (mark, tint) = crate::pickers::harness_brand_icon(harness);
+        div()
+            .px(px(8.0))
+            .py(px(5.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .border_t_1()
+            .border_color(theme.border.opacity(0.6))
+            .child(glyph(mark, 10.0, tint.unwrap_or(theme.text_muted)))
+            .child(
+                div()
+                    .flex_1()
+                    .child(text(10.0, theme.text, name))
+                    .child(text(9.0, theme.text_muted, line)),
+            )
+            .child(text(9.5, theme.text_muted, "Notify \u{25BE}"))
+    };
+    let page = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .child(header)
+        .child(
+            div()
+                .p(px(8.0))
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .relative()
+                .top(px((1.0 - enter) * 4.0))
+                .opacity(enter)
+                .child(text(11.0, theme.text, "This Mac").font_weight(gpui::FontWeight::SEMIBOLD))
+                .child(card(theme).child(version))
+                .child(text(11.0, theme.text, "Agent CLIs").font_weight(gpui::FontWeight::SEMIBOLD))
+                .child(
+                    card(theme)
+                        .child(agent(
+                            "Claude Code",
+                            "2.1.4 \u{2192} 2.1.6 available",
+                            zeron_proto::HarnessId::ClaudeCode,
+                        ))
+                        .child(agent(
+                            "Codex",
+                            "0.52.0 \u{b7} up to date",
+                            zeron_proto::HarnessId::Codex,
+                        )),
+                ),
+        );
+    card(theme)
+        .w_full()
+        .max_w(px(410.0))
+        .mx(px(10.0))
+        .h(px(170.0))
+        .overflow_hidden()
+        .flex()
+        .flex_row()
+        .child(nav)
+        .child(page)
         .into_any_element()
 }

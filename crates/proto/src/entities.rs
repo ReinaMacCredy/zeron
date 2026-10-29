@@ -1253,8 +1253,14 @@ pub struct Classifying {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum CompactPlan {
-    Idle { at: i64 },
+    Idle {
+        at: i64,
+    },
     Agent,
+    Copy {
+        since: i64,
+        ready: bool,
+    },
 }
 
 impl Session {

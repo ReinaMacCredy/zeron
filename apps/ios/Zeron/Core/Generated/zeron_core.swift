@@ -10125,10 +10125,11 @@ public struct AgentRunRow: Equatable, Hashable {
     public var canStop: Bool
     public var delegated: Bool
     public var review: String?
+    public var depth: UInt32
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(taskId: String, title: String, line: String, state: AgentRunState, canStop: Bool, delegated: Bool, review: String?) {
+    public init(taskId: String, title: String, line: String, state: AgentRunState, canStop: Bool, delegated: Bool, review: String?, depth: UInt32) {
         self.taskId = taskId
         self.title = title
         self.line = line
@@ -10136,6 +10137,7 @@ public struct AgentRunRow: Equatable, Hashable {
         self.canStop = canStop
         self.delegated = delegated
         self.review = review
+        self.depth = depth
     }
 
     
@@ -10160,7 +10162,8 @@ public struct FfiConverterTypeAgentRunRow: FfiConverterRustBuffer {
                 state: FfiConverterTypeAgentRunState.read(from: &buf), 
                 canStop: FfiConverterBool.read(from: &buf), 
                 delegated: FfiConverterBool.read(from: &buf), 
-                review: FfiConverterOptionString.read(from: &buf)
+                review: FfiConverterOptionString.read(from: &buf), 
+                depth: FfiConverterUInt32.read(from: &buf)
         )
     }
 
@@ -10172,6 +10175,7 @@ public struct FfiConverterTypeAgentRunRow: FfiConverterRustBuffer {
         FfiConverterBool.write(value.canStop, into: &buf)
         FfiConverterBool.write(value.delegated, into: &buf)
         FfiConverterOptionString.write(value.review, into: &buf)
+        FfiConverterUInt32.write(value.depth, into: &buf)
     }
 }
 

@@ -169,9 +169,8 @@ impl Render for HomeSettingsPage {
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll.scroll)
                         .child(
-                            widgets::page_column()
-                                .child(widgets::page_header(&theme, "Home", None))
-                                .child(widgets::section(&theme, "Widgets", widgets_card))
+                            widgets::settings_page()
+                                .child(widgets::section(&theme, "Widgets", widgets_card).mt_0())
                                 .child(widgets::section(&theme, "Running services", services_card)),
                         ),
                 )

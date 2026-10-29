@@ -36,7 +36,7 @@ section = "basics"
 title = "Start a new chat"
 icon = "lucide-square-pen"
 blurb = "Pick Chat or Work, a project and checkout, then send your first message."
-actions = ["settings/general"]
+actions = ["settings/chat"]
 
 [[article]]
 id = "composer"
@@ -44,7 +44,7 @@ section = "basics"
 title = "The composer"
 icon = "chat-round-line"
 blurb = "Send, attach files, queue or steer follow-ups, stop, and use predictions."
-actions = ["settings/general"]
+actions = ["settings/chat", "settings/general"]
 
 [[article]]
 id = "conversation"
@@ -59,7 +59,7 @@ id = "commands-and-mentions"
 section = "basics"
 title = "Commands and mentions"
 icon = "command"
-blurb = "Use / commands, $ skills, and @ mentions of files and threads."
+blurb = "Use / commands, $ skills, and @ mentions of files, threads, and tasks."
 actions = ["settings/providers"]
 
 [[article]]
@@ -116,7 +116,7 @@ section = "basics"
 title = "Updates and what's new"
 icon = "lucide-gift"
 blurb = "App and agent updates, auto-resume after limits, the changelog."
-actions = ["changelog", "settings/providers"]
+actions = ["changelog", "settings/updates"]
 
 [[article]]
 id = "providers"

@@ -31,7 +31,7 @@ final class AgentsPillFlowTests: XCTestCase {
         let app = launch()
         let pill = app.buttons["agents-pill"]
         XCTAssertTrue(pill.waitForExistence(timeout: 15))
-        XCTAssertEqual(pill.label, "2 of 4 working · 1 shell")
+        XCTAssertEqual(pill.label, "3 of 5 working · 1 shell")
         snapshot(app, "1-pill-keyboard-down")
 
         let input = app.textViews["composer-input"]
@@ -49,11 +49,14 @@ final class AgentsPillFlowTests: XCTestCase {
         pill.tap()
         let heading = app.staticTexts["agents-card-heading"]
         XCTAssertTrue(heading.waitForExistence(timeout: 5))
-        XCTAssertEqual(heading.label, "2 of 4 working")
+        XCTAssertEqual(heading.label, "3 of 5 working")
         XCTAssertEqual(pill.value as? String, "Open")
         XCTAssertEqual(input.frame, composer)
-        XCTAssertEqual(app.staticTexts["agents-card-row-3-title"].label, "Reproduce the composer jump when the key…")
-        XCTAssertTrue(app.staticTexts["agents-card-row-3-line"].label.hasPrefix("Failed"))
+        XCTAssertEqual(app.staticTexts["agents-card-row-4-title"].label, "Reproduce the composer jump when the key…")
+        XCTAssertTrue(app.staticTexts["agents-card-row-4-line"].label.hasPrefix("Failed"))
+        let nested = app.staticTexts["agents-card-row-2-title"]
+        XCTAssertEqual(nested.label, "Measure the picker hit areas")
+        XCTAssertGreaterThan(nested.frame.minX, app.staticTexts["agents-card-row-1-title"].frame.minX)
         XCTAssertTrue(app.buttons["agents-card-stop-1"].exists)
         XCTAssertFalse(app.buttons["agents-card-stop-0"].exists)
         XCTAssertTrue(app.staticTexts["agents-card-shell-0-title"].exists)
@@ -83,13 +86,13 @@ final class AgentsPillFlowTests: XCTestCase {
         XCTAssertTrue(app.textViews["shell-output"].waitForNonExistence(timeout: 5))
         XCTAssertTrue(heading.exists)
         XCTAssertTrue(app.staticTexts["agents-card-shell-0-title"].waitForNonExistence(timeout: 5))
-        XCTAssertEqual(pill.label, "2 of 4 working")
+        XCTAssertEqual(pill.label, "3 of 5 working")
 
         app.buttons["agents-card-stop-1"].tap()
-        let settled = NSPredicate(format: "label == %@", "1 of 4 working")
+        let settled = NSPredicate(format: "label == %@", "2 of 5 working")
         expectation(for: settled, evaluatedWith: heading)
         waitForExpectations(timeout: 5)
-        XCTAssertEqual(pill.label, "1 of 4 working")
+        XCTAssertEqual(pill.label, "2 of 5 working")
         snapshot(app, "6-after-stop")
     }
 }

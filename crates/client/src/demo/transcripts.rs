@@ -1484,8 +1484,8 @@ fn seams(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                     "v0",
                     ToolCall::Mcp {
                         server: "zeron".into(),
-                        tool: "device_open".into(),
-                        input: None,
+                        tool: "device".into(),
+                        input: Some(serde_json::json!({ "action": "open" })),
                     },
                     false,
                     None,
@@ -1494,8 +1494,8 @@ fn seams(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                     "v1",
                     ToolCall::Mcp {
                         server: "zeron".into(),
-                        tool: "device_screenshot".into(),
-                        input: None,
+                        tool: "device".into(),
+                        input: Some(serde_json::json!({ "action": "screenshot" })),
                     },
                     false,
                     Some(

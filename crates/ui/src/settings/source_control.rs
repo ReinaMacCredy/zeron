@@ -402,9 +402,10 @@ impl Render for SourceControlPage {
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll.scroll)
                         .child(
-                            widgets::page_column()
-                                .child(widgets::page_header(&theme, "Source Control", None))
-                                .child(widgets::section(&theme, "Commit message", commit_card))
+                            widgets::settings_page()
+                                .child(
+                                    widgets::section(&theme, "Commit message", commit_card).mt_0(),
+                                )
                                 .child(widgets::section(
                                     &theme,
                                     "Pull Requests · AI chat",

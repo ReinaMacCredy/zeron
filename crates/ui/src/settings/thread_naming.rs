@@ -145,6 +145,7 @@ impl Render for ThreadNamingCard {
             "A small model keeps titles fast and cheap."
         };
         widgets::section_card(&theme)
+            .mt_0()
             .child(
                 widgets::card_row(&theme, true)
                     .child(

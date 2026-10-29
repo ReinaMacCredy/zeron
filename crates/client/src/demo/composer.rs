@@ -364,6 +364,24 @@ fn subagent_turn(now: i64) -> Vec<zeron_doc::SessionMessageEntry> {
     ]
 }
 
+pub(super) fn subagent_transcript(doc_id: &str) -> Vec<zeron_doc::SessionMessageEntry> {
+    if doc_id != "chat-home--sub--spawn-pickers" {
+        return Vec::new();
+    }
+    vec![entry(
+        "m-pickers-nested",
+        MessageRole::Assistant,
+        super::fixtures::MAC,
+        chrono::Utc::now().timestamp_millis() - 40_000,
+        vec![spawn(
+            "spawn-picker-hits",
+            "Measure the picker hit areas",
+            "haiku",
+            SubagentStatus::Running,
+        )],
+    )]
+}
+
 pub(super) fn background_session(chat_id: &str) -> Option<Session> {
     if chat_id == "chat-blog" {
         return Some(Session {
@@ -400,7 +418,7 @@ pub(super) fn background_session(chat_id: &str) -> Option<Session> {
         }],
         started_at: None,
         updated_at: Utc::now(),
-        running_subagents: 2,
+        running_subagents: 3,
         compact_plan: Some(CompactPlan::Idle {
             at: (Utc::now() + Duration::minutes(38)).timestamp_millis(),
         }),

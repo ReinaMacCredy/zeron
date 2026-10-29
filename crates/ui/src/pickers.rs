@@ -71,6 +71,50 @@ const FOOTER_CHIP_RADIUS: f32 = 6.0;
 
 /// Both sides of the composer handoff share one leading-aligned workspace
 /// cluster. Available width belongs after the pair, never between its labels.
+fn copy_chip_label(
+    plan: zeron_proto::CompactPlan,
+    now_ms: i64,
+    working: bool,
+) -> Option<(SharedString, bool)> {
+    let zeron_proto::CompactPlan::Copy { since, ready } = plan else {
+        return None;
+    };
+    let label = match (ready, working) {
+        (false, _) => {
+            let secs = ((now_ms - since) / 1000).max(0);
+            format!("Compacting a copy · {}:{:02}", secs / 60, secs % 60)
+        }
+        (true, true) => "Copy ready · swaps when the turn ends".into(),
+        (true, false) => "Copy ready · waits for background work".into(),
+    };
+    Some((label.into(), ready))
+}
+
+fn copy_chip(label: SharedString, ready: bool, theme: &Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .ml(px(6.0))
+        .px(px(7.0))
+        .h(px(20.0))
+        .rounded(px(6.0))
+        .bg(theme.warning.opacity(0.12))
+        .text_size(crate::typography::ui_rems(11.5))
+        .text_color(theme.warning)
+        .child(
+            crate::icons::icon(if ready {
+                crate::icons::LUCIDE_CHECK
+            } else {
+                crate::icons::LUCIDE_CIRCLE_DASHED
+            })
+            .size(px(12.0))
+            .text_color(theme.warning),
+        )
+        .child(label)
+}
+
 fn workspace_footer_row() -> gpui::Div {
     div()
         .w_full()
@@ -1083,6 +1127,7 @@ const EFFORT_THUMB_SIZE: f32 = 28.0;
 const EFFORT_MARK_SIZE: f32 = 4.0;
 /// Card height beyond a plain trait row (header + track + insets − 32).
 const EFFORT_CARD_EXTRA_HEIGHT: f32 = 30.0;
+const PERMISSIONS_SECTION_HEIGHT: f32 = 80.0;
 
 /// A manual-drive tween (the shell `WidthTween` pattern) for the effort
 /// card: the thumb's glide between stops and the pressed disc's scale.
@@ -1247,6 +1292,7 @@ pub struct Pickers {
     /// fraction of the rail), the pressed disc's scale, whether a drag is
     /// live, and the track's last painted bounds (pointer → stop math).
     effort_snap: Option<EffortTween>,
+    permission_preview: Option<PermissionMode>,
     effort_press: Option<EffortTween>,
     effort_dragging: bool,
     effort_track: Option<gpui::Bounds<gpui::Pixels>>,
@@ -1455,6 +1501,7 @@ impl Pickers {
             | ComposerInputEvent::PastedLongText(_)
             | ComposerInputEvent::OpenAttachment(_)
             | ComposerInputEvent::AnnotationHovered(_)
+            | ComposerInputEvent::OpenTask(_)
             | ComposerInputEvent::CursorMoved
             | ComposerInputEvent::ViewportChanged
             | ComposerInputEvent::MentionNavigate(_)
@@ -1693,6 +1740,7 @@ impl Pickers {
             model_tabs_scroll: gpui::ScrollHandle::new(),
             revealed_model_tab: None,
             effort_snap: None,
+            permission_preview: None,
             effort_press: None,
             effort_dragging: false,
             effort_track: None,
@@ -2513,14 +2561,134 @@ impl Pickers {
         self.config.permission_mode
     }
 
+    pub fn names_permission(&self, cx: &App) -> bool {
+        self.effective_permission_mode(cx) != PermissionMode::default() || self.effective_plan(cx)
+    }
+
     fn pick_permission(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
+        self.set_permission(mode, cx);
+        self.animate_close(cx);
+    }
+
+    fn set_permission(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
         if self.chat_id(cx).is_some() {
             self.update_chat_config(cx, None, |config| config.permission_mode = mode);
         } else {
             self.config.permission_mode = mode;
         }
-        self.animate_close(cx);
         cx.notify();
+    }
+
+    fn render_permissions_section(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).for_popup();
+        let current = self.effective_permission_mode(cx);
+        let shown = self.permission_preview.unwrap_or(current);
+        let segments = PermissionMode::ALL.into_iter().map(|mode| {
+            let selected = mode == current;
+            div()
+                .id(SharedString::from(format!(
+                    "permission-segment-{}",
+                    mode.short_label()
+                )))
+                .debug_selector(move || format!("permission-segment-{}", mode.short_label()))
+                .role(gpui::Role::RadioButton)
+                .aria_label(SharedString::from(mode.label()))
+                .aria_selected(selected)
+                .h(px(24.0))
+                .w(px(32.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .when(selected, |el| el.bg(crate::theme::card_selected_bg()))
+                .when(!selected, |el| el.hover(|s| s.bg(crate::theme::ink(0.05))))
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    let next = hovered
+                        .then_some(mode)
+                        .or(this.permission_preview.filter(|preview| *preview != mode));
+                    if this.permission_preview != next {
+                        this.permission_preview = next;
+                        cx.notify();
+                    }
+                }))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_permission(mode, cx);
+                    cx.stop_propagation();
+                }))
+                .child(
+                    crate::icons::icon(permission_icon(mode))
+                        .size(px(14.0))
+                        .text_color(if selected {
+                            theme.text
+                        } else {
+                            theme.text_muted
+                        }),
+                )
+        });
+        div()
+            .id("model-permissions")
+            .flex_none()
+            .h(px(PERMISSIONS_SECTION_HEIGHT))
+            .px(px(8.0))
+            .pt(px(6.0))
+            .pb(px(8.0))
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text_muted)
+                            .child("Permissions"),
+                    )
+                    .child(
+                        div()
+                            .id("permission-segments")
+                            .role(gpui::Role::RadioGroup)
+                            .aria_label("Permissions")
+                            .flex()
+                            .gap(px(2.0))
+                            .p(px(2.0))
+                            .rounded(px(8.0))
+                            .bg(crate::theme::ink(0.04))
+                            .children(segments),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .h(px(18.0))
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .text_color(theme.text)
+                    .child(SharedString::from(shown.label()))
+                    .when(shown == PermissionMode::default(), |el| {
+                        el.child(
+                            div()
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .text_color(theme.text_muted)
+                                .child("default"),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .mt(px(-4.0))
+                    .h(px(16.0))
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(shown.description())),
+            )
+            .into_any_element()
     }
 
     pub(crate) fn chip_choices(&self, cx: &App) -> zeron_proto::claude_panel::ChipChoices {
@@ -2695,6 +2863,7 @@ impl Pickers {
         }
         if kind == PickerKind::HarnessModel {
             self.profiles_only = false;
+            self.permission_preview = None;
             let groups = self.setting_groups(cx);
             self.open_model_height = model_menu_height(groups.len(), tray_card_extra(&groups));
             self.compact_model_list = false;
@@ -5934,39 +6103,99 @@ impl Pickers {
             )
     }
 
-    /// New-session destination controls: the project, then the device it
-    /// runs on, as a chip-only cluster floating above the composer's trailing
-    /// edge.
-    pub fn render_new_thread_target_selectors(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub fn render_new_thread_project(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let closing = (self.open.closing_since(), self.menu_geometry().below);
-        let mut overlay: Option<(PickerKind, AnyElement)> = match self.mounted_kind() {
-            Some(PickerKind::Space) => {
-                let content = self.render_space_popover(cx);
-                Some((
-                    PickerKind::Space,
-                    self.popover_frame(PickerKind::Space, 280.0, content, cx),
-                ))
-            }
-            Some(PickerKind::Device) => {
-                let content = self.render_device_popover(cx);
-                Some((
-                    PickerKind::Device,
-                    self.popover_frame(PickerKind::Device, 224.0, content, cx),
-                ))
-            }
-            _ => None,
-        };
-        let on_cloud = self.runs_on_cloud(cx);
-        let (device_label, project_label, offline, device_glyph) = {
+        let mut overlay = (self.mounted_kind() == Some(PickerKind::Space)).then(|| {
+            let content = self.render_space_popover(cx);
+            (
+                PickerKind::Space,
+                self.popover_frame(PickerKind::Space, 280.0, content, cx),
+            )
+        });
+        let label: SharedString = self
+            .state
+            .read(cx)
+            .selected_space_row()
+            .map(|space| space.display_name().to_string())
+            .unwrap_or_else(|| "No project".to_string())
+            .into();
+        let open = self.open_kind() == Some(PickerKind::Space);
+        let id: SharedString = format!("picker-project-{}", cx.entity_id()).into();
+        let trigger = div()
+            .relative()
+            .child(self.measure_trigger(PickerKind::Space, cx))
+            .id(id.clone())
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!(
+                "{}: {label}",
+                PickerKind::Space.a11y_name()
+            )))
+            .aria_expanded(open)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(4.0))
+            .rounded(px(8.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .bg(if open {
+                theme.element_hover
+            } else {
+                motion::hover_blend(&id, gpui::transparent_black(), theme.element_hover)
+            })
+            .on_hover(motion::hover_listener(id.clone()))
+            .cursor_pointer()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, _| {
+                    this.open
+                        .note_trigger_press_matching(|open| *open == PickerKind::Space)
+                }),
+            )
+            .on_click(cx.listener(|this, _, window, cx| this.toggle(PickerKind::Space, window, cx)))
+            .child(div().min_w_0().max_w(px(360.0)).truncate().child(label))
+            .child(
+                crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                    .size(px(18.0))
+                    .flex_none()
+                    .text_color(theme.text_muted.opacity(0.7)),
+            );
+        attach_overlay(
+            trigger,
+            &mut overlay,
+            PickerKind::Space,
+            "project-popover",
+            closing,
+        )
+        .into_any_element()
+    }
+
+    pub fn render_new_thread_device_chip(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let closing = (self.open.closing_since(), self.menu_geometry().below);
+        let mut overlay = (self.mounted_kind() == Some(PickerKind::Device)).then(|| {
+            let content = self.render_device_popover(cx);
+            (
+                PickerKind::Device,
+                self.popover_frame(PickerKind::Device, 224.0, content, cx),
+            )
+        });
+        let (label, offline, glyph) = if self.runs_on_cloud(cx) {
+            (
+                SharedString::from(crate::cloud::CLOUD_LABEL),
+                false,
+                crate::icons::CLOUD,
+            )
+        } else {
             let state = self.state.read(cx);
             let device_id = state.effective_device_id();
-            let device_glyph = device_id
+            let glyph = device_id
                 .as_deref()
                 .and_then(|id| state.devices.iter().find(|d| d.id == id))
                 .filter(|device| crate::cloud::is_cloud(device))
                 .map_or(crate::icons::MONITOR, |_| crate::icons::CLOUD);
-            let device_label: SharedString = device_id
+            let label: SharedString = device_id
                 .as_deref()
                 .and_then(|id| state.device_name(id))
                 .map(str::to_string)
@@ -5975,61 +6204,26 @@ impl Pickers {
             let offline = device_id
                 .as_deref()
                 .is_some_and(|id| state.device_presence(id, chrono::Utc::now()).warns());
-            let project_label: SharedString = state
-                .selected_space_row()
-                .map(|s| s.display_name().to_string())
-                .unwrap_or_else(|| "No project".to_string())
-                .into();
-            if on_cloud {
-                (
-                    SharedString::from(crate::cloud::CLOUD_LABEL),
-                    project_label,
-                    false,
-                    crate::icons::CLOUD,
-                )
-            } else {
-                (device_label, project_label, offline, device_glyph)
-            }
+            (label, offline, glyph)
         };
-        let device_chip = self
+        let chip = self
             .footer_chip(
                 PickerKind::Device,
                 "picker-device",
-                device_glyph,
-                device_label,
+                glyph,
+                label,
                 &theme,
                 cx,
             )
             .when(offline, |el| el.text_color(theme.warning.opacity(0.8)));
-        let project_chip = self.footer_chip(
-            PickerKind::Space,
-            "picker-project",
-            crate::icons::FOLDER,
-            project_label,
-            &theme,
-            cx,
-        );
-        div()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.0))
-            .child(attach_overlay_end(
-                project_chip,
-                &mut overlay,
-                PickerKind::Space,
-                "project-popover",
-                closing,
-            ))
-            .child(attach_overlay_end(
-                device_chip,
-                &mut overlay,
-                PickerKind::Device,
-                "device-popover",
-                closing,
-            ))
-            .into_any_element()
+        attach_overlay(
+            chip,
+            &mut overlay,
+            PickerKind::Device,
+            "device-popover",
+            closing,
+        )
+        .into_any_element()
     }
 
     /// New-session Git controls. Checkout mode and branch form the original
@@ -6204,6 +6398,17 @@ impl Pickers {
                 .turn_in_flight(&chat.id, chrono::Utc::now());
             self.stats_chip
                 .update(cx, |chip, cx| chip.set(stats, working, cx));
+            let copy = self
+                .state
+                .read(cx)
+                .session_for(&chat.id)
+                .and_then(|session| session.compact_plan)
+                .and_then(|plan| {
+                    copy_chip_label(plan, chrono::Utc::now().timestamp_millis(), working)
+                });
+            if copy.as_ref().is_some_and(|(_, ready)| !ready) {
+                crate::motion::pulse_lease(cx.entity_id(), cx);
+            }
             return Some(
                 row()
                     .pr_0()
@@ -6211,6 +6416,9 @@ impl Pickers {
                     .child(left)
                     .child(right)
                     .child(self.stats_chip.clone())
+                    .when_some(copy, |el, (label, ready)| {
+                        el.child(copy_chip(label, ready, &theme))
+                    })
                     .child(div().flex_1().min_w_0())
                     .when_some(change_request, |el, summary| {
                         el.child(div().flex_none().child(
@@ -6360,6 +6568,23 @@ impl Pickers {
     /// [`Self::popover_frame`] without the p-1 inset — the harness/model
     /// picker's rail + list panes bleed to the card edge (zeron
     /// harness-model-picker.tsx `className="w-80 p-0"`).
+    fn permissions_reserved(&self, cx: &App) -> f32 {
+        if !self.compact_model_picker(cx)
+            && self.title.is_none()
+            && self.model_rail != ModelRail::Profiles
+        {
+            PERMISSIONS_SECTION_HEIGHT
+        } else {
+            0.0
+        }
+    }
+
+    fn model_frame_height(&self, cx: &App) -> f32 {
+        self.menu_geometry()
+            .height
+            .min(self.open_model_height + self.permissions_reserved(cx))
+    }
+
     fn popover_frame_flush(
         &self,
         width: f32,
@@ -6367,7 +6592,7 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
-        let height = self.menu_geometry().height.min(self.open_model_height);
+        let height = self.model_frame_height(cx);
         let fits_content = self.model_rail == ModelRail::Profiles && self.profile_edit.is_none();
         popover::popover_card_flush(&theme)
             .id("picker-popover")
@@ -6662,11 +6887,7 @@ impl Pickers {
             _ => None,
         };
         let open = self.open_kind() == Some(PickerKind::Permission);
-        let tone = if mode == PermissionMode::Full {
-            theme.warning
-        } else {
-            theme.text_muted
-        };
+        let tone = theme.text_muted;
         let chip = div()
             .id("picker-permission")
             .debug_selector(|| "picker-permission".into())
@@ -6857,7 +7078,9 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let compact = self.compact_model_picker(cx);
-        let height = self.menu_geometry().height.min(self.open_model_height);
+        let reserved = self.permissions_reserved(cx);
+        let permissions = reserved > 0.0;
+        let height = (self.model_frame_height(cx) - reserved).max(0.0);
         let groups = self.setting_groups(cx);
         let (list_height, tray_height) =
             model_menu_budgets(height, groups.len(), tray_card_extra(&groups));
@@ -7337,6 +7560,13 @@ impl Pickers {
                 .into_any_element()
         });
 
+        let permissions_section = permissions.then(|| {
+            div()
+                .border_t_1()
+                .border_color(crate::theme::hairline(0.08))
+                .px(px(popover::CARD_INSET))
+                .child(self.render_permissions_section(cx))
+        });
         div()
             .flex()
             .flex_col()
@@ -7345,6 +7575,7 @@ impl Pickers {
             .children(refresh_error)
             .child(list_host)
             .children(tray)
+            .children(permissions_section)
             .into_any_element()
     }
 
@@ -10330,6 +10561,29 @@ mod tests {
     use zeron_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
 
     #[test]
+    fn the_copy_chip_counts_then_says_what_the_swap_waits_for() {
+        use zeron_proto::CompactPlan;
+        let copy = |ready| CompactPlan::Copy {
+            since: 10_000,
+            ready,
+        };
+        let label = |plan, working| copy_chip_label(plan, 33_400, working).map(|(l, _)| l);
+        assert_eq!(
+            label(copy(false), true).as_deref(),
+            Some("Compacting a copy · 0:23")
+        );
+        assert_eq!(
+            label(copy(true), true).as_deref(),
+            Some("Copy ready · swaps when the turn ends")
+        );
+        assert_eq!(
+            label(copy(true), false).as_deref(),
+            Some("Copy ready · waits for background work")
+        );
+        assert_eq!(label(CompactPlan::Agent, false), None);
+    }
+
+    #[test]
     fn a_model_pick_warns_only_on_a_chat_with_history_and_a_real_change() {
         assert!(needs_switch_warning(true, Some("fable"), "opus"));
         assert!(needs_switch_warning(true, None, "opus"));
@@ -11210,7 +11464,7 @@ mod tests {
                     .unwrap();
                 assert!(
                     (f32::from(bounds.get().size.height)
-                        - available.min(model_menu_height(2, 0.0)))
+                        - available.min(model_menu_height(2, 0.0) + PERMISSIONS_SECTION_HEIGHT))
                     .abs()
                         < 0.1,
                     "settings={settings}, available={available}, bounds={:?}",
@@ -12759,7 +13013,13 @@ mod tests {
             let parent = measured.get();
             let trigger = gpui::point(
                 parent.center().x,
-                parent.bottom() - px(popover::CARD_INSET + 30.0 + popover::MENU_GAP + 15.0),
+                parent.bottom()
+                    - px(PERMISSIONS_SECTION_HEIGHT
+                        + 1.0
+                        + popover::CARD_INSET
+                        + 30.0
+                        + popover::MENU_GAP
+                        + 15.0),
             );
             let click = |window: &mut Window, cx: &mut App, position| {
                 window.dispatch_event(

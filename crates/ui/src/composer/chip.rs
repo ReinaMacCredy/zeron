@@ -64,11 +64,15 @@ pub enum ChipKind {
     Chat,
     /// An element picked in the browser.
     Annotation,
+    Task,
 }
 
 impl ChipKind {
     pub(crate) fn in_accent_flow(self) -> bool {
-        matches!(self, Self::Thread | Self::Skill | Self::Command)
+        matches!(
+            self,
+            Self::Thread | Self::Task | Self::Skill | Self::Command
+        )
     }
 }
 
@@ -213,6 +217,7 @@ pub(crate) fn chip_icon(
         ChipKind::Thread => ChipIcon::Glyph(crate::icons::CHAT_ROUND_LINE),
         ChipKind::Chat => ChipIcon::Glyph(crate::icons::CHAT_ROUND_LINE),
         ChipKind::Annotation => ChipIcon::Glyph(crate::icons::CURSOR),
+        ChipKind::Task => ChipIcon::Glyph(crate::icons::LUCIDE_CIRCLE_DASHED),
         ChipKind::File => ChipIcon::FileTheme(asset_path(FileIconIdentity::file(path), appearance)),
         ChipKind::Directory => ChipIcon::FileTheme(asset_path(
             FileIconIdentity::directory(path.trim_end_matches('/'), false),

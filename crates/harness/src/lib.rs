@@ -455,6 +455,11 @@ pub trait Harness: Send + Sync {
         ))
     }
 
+    /// [`Harness::compact`] with a `branch.keep` compacts a fork cut there; its `Done` names the fork.
+    fn compacts_a_copy(&self) -> bool {
+        false
+    }
+
     /// Whether the driver can start a run on a copy of a resumed session cut
     /// at a [`zeron_proto::SessionBranch`] (fork and rewind). Drivers that
     /// return true emit [`AgentEvent::Anchor`] for prompts and replies.

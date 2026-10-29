@@ -60,7 +60,7 @@ What each level exposes:
 - `ui_driver_drive` carries a destructive hint, so a Codex chat at Ask or Auto asks the person
   before every call ("Approve UI drive"). A Codex chat at Full gets the tool pre-approved in its
   thread config (`mcp_servers.zeron.tools.ui_driver_drive.approval_mode = "approve"`), so it
-  drives without asking. `device_close` is pre-approved in every mode.
+  drives without asking. The `device` tool is pre-approved in every mode.
 
 ## Reaching a target
 

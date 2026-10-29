@@ -1026,11 +1026,11 @@ fn auto_update_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// `ZERON_AUTO_UPDATE=1|true|yes` — the desktop app downloads in the
-/// background and installs on quit. Unset, it only offers the update: the
-/// download and the install each wait for a click.
-pub fn desktop_auto_update_enabled() -> bool {
-    auto_update_enabled()
+/// `ZERON_AUTO_UPDATE` when it is set: on (`1|true|yes`) the desktop app
+/// downloads in the background and installs on quit, anything else keeps it
+/// off. `None` when unset, so the app's own setting decides.
+pub fn desktop_auto_update_override() -> Option<bool> {
+    std::env::var_os("ZERON_AUTO_UPDATE").map(|_| auto_update_enabled())
 }
 
 /// "Nothing would be interrupted by a restart right now" — wired by the engine

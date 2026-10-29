@@ -33,6 +33,7 @@ pub struct AgentRun {
     pub started_ms: i64,
     pub delegated: bool,
     pub harness: Option<HarnessId>,
+    pub parent: Option<String>,
 }
 
 impl AgentRun {
@@ -102,6 +103,7 @@ pub fn delegate_runs(
                 started_ms,
                 delegated: true,
                 harness: chat.config.as_ref().map(|c| c.harness),
+                parent: None,
             })
         })
         .collect()
@@ -136,6 +138,21 @@ fn working_count(runs: &[AgentRun]) -> usize {
     runs.iter()
         .filter(|run| run.state == RunState::Working)
         .count()
+}
+
+pub fn run_depths(runs: &[AgentRun]) -> Vec<u32> {
+    let mut depths = std::collections::HashMap::<&str, u32>::new();
+    runs.iter()
+        .map(|run| {
+            let depth = run
+                .parent
+                .as_deref()
+                .and_then(|parent| depths.get(parent))
+                .map_or(0, |depth| depth + 1);
+            depths.insert(run.part_id.as_str(), depth);
+            depth
+        })
+        .collect()
 }
 
 pub fn agents_label(runs: &[AgentRun]) -> (Option<String>, String) {
@@ -292,6 +309,7 @@ mod tests {
             started_ms: 0,
             delegated: false,
             harness: None,
+            parent: None,
         }
     }
 
