@@ -9,31 +9,74 @@ pub fn agent_runs<'a>(
     transcript: impl IntoIterator<Item = &'a SessionMessageEntry>,
     turn_start: usize,
 ) -> Vec<AgentRun> {
-    transcript
+    spawn_runs(transcript)
+        .filter(|(ix, run)| *ix >= turn_start || run.state == RunState::Working)
+        .map(|(_, run)| run)
+        .collect()
+}
+
+/// An earlier turn's settled run stays listed while one of its spawns still works.
+pub fn agent_tree<'a, 'd>(
+    transcript: impl IntoIterator<Item = &'a SessionMessageEntry>,
+    turn_start: usize,
+    doc: &dyn Fn(&str) -> Option<&'d [SessionMessageEntry]>,
+) -> Vec<AgentRun> {
+    spawn_runs(transcript)
+        .flat_map(|(ix, run)| {
+            let nested = nested_runs(&run, doc);
+            let listed = ix >= turn_start
+                || run.state == RunState::Working
+                || nested.iter().any(|n| n.state == RunState::Working);
+            listed
+                .then(|| std::iter::once(run).chain(nested))
+                .into_iter()
+                .flatten()
+        })
+        .collect()
+}
+
+fn nested_runs<'d>(
+    parent: &AgentRun,
+    doc: &dyn Fn(&str) -> Option<&'d [SessionMessageEntry]>,
+) -> Vec<AgentRun> {
+    doc(&parent.doc_id)
         .into_iter()
-        .enumerate()
-        .flat_map(|(ix, entry)| {
-            entry.parts.iter().filter_map(move |part| {
-                let MessagePart::Tool {
-                    id,
-                    call,
-                    subagent_ref: Some(doc_id),
-                    subagent_status: Some(status),
-                    ..
-                } = part
-                else {
-                    return None;
-                };
-                if !call.is_subagent_spawn() {
-                    return None;
-                }
-                let state = match status {
-                    SubagentStatus::Running => RunState::Working,
-                    SubagentStatus::Done => RunState::Completed,
-                    SubagentStatus::Failed => RunState::Failed,
-                    SubagentStatus::Stopped => RunState::Stopped,
-                };
-                (ix >= turn_start || state == RunState::Working).then(|| AgentRun {
+        .flat_map(spawn_runs)
+        .flat_map(|(_, mut run)| {
+            run.parent = Some(parent.part_id.clone());
+            let nested = nested_runs(&run, doc);
+            std::iter::once(run).chain(nested)
+        })
+        .collect()
+}
+
+fn spawn_runs<'a>(
+    transcript: impl IntoIterator<Item = &'a SessionMessageEntry>,
+) -> impl Iterator<Item = (usize, AgentRun)> {
+    transcript.into_iter().enumerate().flat_map(|(ix, entry)| {
+        entry.parts.iter().filter_map(move |part| {
+            let MessagePart::Tool {
+                id,
+                call,
+                subagent_ref: Some(doc_id),
+                subagent_status: Some(status),
+                ..
+            } = part
+            else {
+                return None;
+            };
+            if !call.is_subagent_spawn() {
+                return None;
+            }
+            let state = match status {
+                SubagentStatus::Running => RunState::Working,
+                SubagentStatus::Done => RunState::Completed,
+                SubagentStatus::Failed => RunState::Failed,
+                SubagentStatus::Stopped => RunState::Stopped,
+            };
+            Some((
+                ix,
+                AgentRun {
                     part_id: id.clone(),
                     doc_id: doc_id.clone(),
                     title: call.subagent_title(),
@@ -43,10 +86,11 @@ pub fn agent_runs<'a>(
                     started_ms: entry.created_at,
                     delegated: false,
                     harness: None,
-                })
-            })
+                    parent: None,
+                },
+            ))
         })
-        .collect()
+    })
 }
 
 pub fn latest_prompt<'a, I>(transcript: I) -> Option<usize>
@@ -173,6 +217,43 @@ mod tests {
         assert_eq!(runs[1].model.as_deref(), Some("opus"));
         assert_eq!(runs[1].doc_id, "c1--sub--new-live");
         assert_eq!(runs[2].state, RunState::Failed);
+    }
+
+    #[test]
+    fn nested_spawns_list_under_their_run_and_keep_a_settled_one_listed() {
+        let transcript = vec![
+            entry("u1", MessageRole::User, 1, vec![]),
+            entry(
+                "a1",
+                MessageRole::Assistant,
+                2,
+                vec![
+                    spawn("outer", "Agent: outer", Some(SubagentStatus::Done)),
+                    spawn("quiet", "Agent: quiet", Some(SubagentStatus::Done)),
+                ],
+            ),
+            entry("u2", MessageRole::User, 3, vec![]),
+        ];
+        let outer = vec![entry(
+            "s1",
+            MessageRole::Assistant,
+            2,
+            vec![spawn(
+                "inner",
+                "Agent: inner",
+                Some(SubagentStatus::Running),
+            )],
+        )];
+        let runs = agent_tree(&transcript, 2, &|id| {
+            (id == "c1--sub--outer").then_some(outer.as_slice())
+        });
+        let rows: Vec<(&str, Option<&str>)> = runs
+            .iter()
+            .map(|run| (run.part_id.as_str(), run.parent.as_deref()))
+            .collect();
+        assert_eq!(rows, [("outer", None), ("inner", Some("outer"))]);
+        assert_eq!(runs[1].state, RunState::Working);
+        assert!(agent_tree(&transcript, 2, &|_| None).is_empty());
     }
 
     #[test]

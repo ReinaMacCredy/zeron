@@ -33,6 +33,7 @@ pub struct AgentRun {
     pub started_ms: i64,
     pub delegated: bool,
     pub harness: Option<HarnessId>,
+    pub parent: Option<String>,
 }
 
 impl AgentRun {
@@ -102,6 +103,7 @@ pub fn delegate_runs(
                 started_ms,
                 delegated: true,
                 harness: chat.config.as_ref().map(|c| c.harness),
+                parent: None,
             })
         })
         .collect()
@@ -292,6 +294,7 @@ mod tests {
             started_ms: 0,
             delegated: false,
             harness: None,
+            parent: None,
         }
     }
 

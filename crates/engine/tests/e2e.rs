@@ -4388,38 +4388,61 @@ async fn session_row_counts_running_subagents_until_the_run_ends() {
             },
         }
     }
-    fn chatter(parent: &str) -> AgentEvent {
+    fn sub(parent: &str, event: AgentEvent) -> AgentEvent {
         AgentEvent::Subagent {
             parent_tool_use_id: parent.into(),
-            event: Box::new(AgentEvent::TextDelta {
-                text: "working".into(),
-            }),
+            event: Box::new(event),
         }
     }
+    fn chatter(parent: &str) -> AgentEvent {
+        sub(
+            parent,
+            AgentEvent::TextDelta {
+                text: "working".into(),
+            },
+        )
+    }
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let dir = tempfile::tempdir().unwrap();
     let core = assemble(
         dir.path(),
-        Arc::new(ScriptedHarness {
-            script: vec![
-                spawn("sub-1"),
-                spawn("sub-2"),
-                chatter("sub-1"),
-                chatter("sub-2"),
-                AgentEvent::Subagent {
-                    parent_tool_use_id: "sub-1".into(),
-                    event: Box::new(done(DoneStatus::Completed)),
-                },
-            ],
-            step_delay: Duration::from_millis(400),
-            hang_until_interrupt: true,
-        }),
+        Arc::new(ControlledHarness(std::sync::Mutex::new(Some(rx)))),
     );
-    let running = || {
-        core.sessions
-            .session_status(CHAT)
-            .map(|s| s.running_subagents)
-    };
     let handle = core.doc_host.open(CHAT).unwrap();
+    let counts = || {
+        let running = core
+            .sessions
+            .session_status(CHAT)
+            .map(|s| s.running_subagents);
+        let entries = handle.doc().read_entries().unwrap();
+        let mut docs = std::collections::HashMap::<String, Vec<SessionMessageEntry>>::new();
+        loop {
+            let turn_start = zeron_doc::background::latest_prompt(&entries).unwrap_or(0);
+            let runs = zeron_doc::background::agent_tree(&entries, turn_start, &|id| {
+                docs.get(id).map(Vec::as_slice)
+            });
+            let unread: Vec<String> = runs
+                .iter()
+                .map(|run| run.doc_id.clone())
+                .filter(|id| !docs.contains_key(id))
+                .collect();
+            if unread.is_empty() {
+                let working = runs
+                    .iter()
+                    .filter(|run| run.state == zeron_proto::background::RunState::Working)
+                    .count();
+                return (running, working);
+            }
+            for id in unread {
+                let read = core
+                    .doc_host
+                    .open(&id)
+                    .ok()
+                    .and_then(|sub| sub.doc().read_entries().ok());
+                docs.insert(id, read.unwrap_or_default());
+            }
+        }
+    };
     queue_as_viewer(
         handle.doc(),
         "subagents-run",
@@ -4429,24 +4452,70 @@ async fn session_row_counts_running_subagents_until_the_run_ends() {
         },
     );
 
-    wait_for(|| running() == Some(2), "both subagents counted").await;
-    wait_for(|| running() == Some(1), "one subagent settled").await;
+    for event in [
+        spawn("sub-1"),
+        spawn("sub-2"),
+        spawn("sub-3"),
+        chatter("sub-1"),
+        chatter("sub-2"),
+        sub(
+            "sub-3",
+            AgentEvent::ContextUsage {
+                tokens: Some(1),
+                window: None,
+            },
+        ),
+    ] {
+        tx.send(event).unwrap();
+    }
+    wait_for(
+        || counts() == (Some(2), 2),
+        "a usage report alone is no subagent",
+    )
+    .await;
+
+    tx.send(sub("sub-1", spawn("nested-1"))).unwrap();
+    tx.send(chatter("nested-1")).unwrap();
+    wait_for(|| counts() == (Some(3), 3), "a nested subagent counts").await;
+
+    tx.send(sub("sub-1", done(DoneStatus::Completed))).unwrap();
+    wait_for(
+        || counts() == (Some(2), 2),
+        "the nested subagent outlives its parent",
+    )
+    .await;
+
+    tx.send(done(DoneStatus::Completed)).unwrap();
+    tx.send(sub("nested-1", done(DoneStatus::Completed)))
+        .unwrap();
+    tx.send(sub("sub-2", done(DoneStatus::Completed))).unwrap();
+    wait_for(|| counts() == (Some(0), 0), "a parked turn's settles").await;
+
+    tx.send(sub(
+        "sub-1",
+        AgentEvent::UserMessage {
+            text: "one more thing".into(),
+        },
+    ))
+    .unwrap();
+    tx.send(chatter("sub-1")).unwrap();
+    wait_for(
+        || counts() == (Some(1), 1),
+        "a resumed subagent counts again",
+    )
+    .await;
 
     queue_as_viewer(
         handle.doc(),
         "subagents-interrupt",
         SessionCommandPayload::Interrupt { teardown: false },
     );
+    drop(tx);
     wait_for(
-        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
-        "run to end",
+        || counts() == (Some(0), 0),
+        "an ended run leaves no subagents counted",
     )
     .await;
-    assert_eq!(
-        running(),
-        Some(0),
-        "an ended run leaves no subagents counted"
-    );
 }
 
 /// `show_visual` end to end below the MCP server: the RPC checks the script,

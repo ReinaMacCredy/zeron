@@ -5,7 +5,7 @@ use gpui::{
     AnyElement, App, ClickEvent, Context, Div, Entity, Hsla, MouseButton, MouseDownEvent,
     SharedString, Stateful, Window, div, point, prelude::*, px,
 };
-use zeron_doc::background::{agent_runs, latest_prompt};
+use zeron_doc::background::{agent_runs, agent_tree, latest_prompt};
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::background::{
     AgentRun, RunState, aggregate, agents_label, delegate_runs, elapsed_label, latest_line,
@@ -213,11 +213,17 @@ pub(crate) struct BackgroundUi {
     tick: Option<gpui::Task<()>>,
     outputs: HashMap<String, ShellOutput>,
     tokens: HashMap<String, AgentTokens>,
+    walks: HashMap<String, AgentWalk>,
     detail: Option<TrayDetail>,
 }
 
 struct ShellOutput {
     lines: Vec<String>,
+    _watch: Option<gpui::Task<()>>,
+}
+
+struct AgentWalk {
+    entries: Vec<SessionMessageEntry>,
     _watch: Option<gpui::Task<()>>,
 }
 
@@ -341,7 +347,10 @@ impl Composer {
             let state = self.state.read(cx);
             let transcript = self.bound_transcript(state);
             let turn_start = latest_prompt(transcript);
-            let mut agents = agent_runs(transcript, turn_start.unwrap_or(0));
+            let walks = &self.background.walks;
+            let mut agents = agent_tree(transcript, turn_start.unwrap_or(0), &|id| {
+                walks.get(id).map(|walk| walk.entries.as_slice())
+            });
             let pending_review = state
                 .reviews
                 .get(&chat_id)
@@ -363,6 +372,7 @@ impl Composer {
                 ..Default::default()
             };
         }
+        self.sync_agent_walks(&agents, cx);
         if let Some((pending_chat, panel, asked)) = self.background.pending.take()
             && asked.elapsed() < PANEL_WAIT
         {
@@ -620,7 +630,14 @@ impl Composer {
         let dismiss = motion.live.then(|| {
             cx.listener(|this: &mut Self, _: &MouseDownEvent, _, cx| this.close_roster(cx))
         });
+        let mut depths: HashMap<&str, usize> = HashMap::new();
         let rows = agents.iter().enumerate().map(|(ix, run)| {
+            let depth = run
+                .parent
+                .as_deref()
+                .and_then(|parent| depths.get(parent))
+                .map_or(0, |depth| depth + 1);
+            depths.insert(run.part_id.as_str(), depth);
             let open = {
                 let part_id = run.part_id.clone();
                 let doc_id = run.doc_id.clone();
@@ -652,6 +669,7 @@ impl Composer {
                 .items_center()
                 .gap(px(8.0))
                 .px(px(12.0))
+                .pl(px(12.0 + 16.0 * depth as f32))
                 .py(px(7.0))
                 .cursor_pointer()
                 .text_size(crate::typography::ui_rems(13.0))
@@ -663,7 +681,14 @@ impl Composer {
                     1.0,
                     theme,
                 ))
-                .child(div().flex_1().min_w_0().truncate().child(run.title.clone()))
+                .child(
+                    div()
+                        .debug_selector(move || format!("background-roster-title-{ix}"))
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(run.title.clone()),
+                )
                 .when_some(tag, |el, tag| el.child(model_tag(tag, run_harness, theme)))
                 .when_some(level, |el, level| {
                     el.child(
@@ -967,6 +992,29 @@ impl Composer {
         }))
     }
 
+    fn sync_agent_walks(&mut self, agents: &[AgentRun], cx: &mut Context<Self>) {
+        let docs: Vec<&str> = agents
+            .iter()
+            .filter(|run| !run.delegated)
+            .map(|run| run.doc_id.as_str())
+            .collect();
+        self.background
+            .walks
+            .retain(|id, _| docs.contains(&id.as_str()));
+        for id in docs {
+            if !self.background.walks.contains_key(id) {
+                let watch = self.watch_doc_entries(id.to_owned(), true, cx);
+                self.background.walks.insert(
+                    id.to_owned(),
+                    AgentWalk {
+                        entries: Vec::new(),
+                        _watch: watch,
+                    },
+                );
+            }
+        }
+    }
+
     fn agent_tokens(&self, doc_id: &str) -> Option<u64> {
         self.background.tokens.get(doc_id)?.count
     }
@@ -1035,7 +1083,7 @@ impl Composer {
     }
 
     fn open_agent_detail(&mut self, part_id: String, doc_id: String, cx: &mut Context<Self>) {
-        let watch = self.watch_subagent_feed(doc_id.clone(), cx);
+        let watch = self.watch_doc_entries(doc_id.clone(), false, cx);
         self.background.detail = Some(TrayDetail {
             target: DetailTarget::Agent(part_id),
             scroll: gpui::ScrollHandle::new(),
@@ -1049,9 +1097,10 @@ impl Composer {
         cx.notify();
     }
 
-    fn watch_subagent_feed(
+    fn watch_doc_entries(
         &self,
         doc_id: String,
+        walk: bool,
         cx: &mut Context<Self>,
     ) -> Option<gpui::Task<()>> {
         let engine = self.state.read(cx).engine().cloned()?;
@@ -1082,16 +1131,23 @@ impl Composer {
                         continue;
                     };
                     let applied = this.update(cx, |this, cx| {
-                        let feed = this
-                            .background
-                            .detail
-                            .as_mut()
-                            .and_then(|detail| detail.feed.as_mut())
-                            .filter(|feed| feed.doc_id == doc_id)?;
+                        let entries = if walk {
+                            &mut this.background.walks.get_mut(&doc_id)?.entries
+                        } else {
+                            &mut this
+                                .background
+                                .detail
+                                .as_mut()
+                                .and_then(|detail| detail.feed.as_mut())
+                                .filter(|feed| feed.doc_id == doc_id)?
+                                .entries
+                        };
+                        let spawns = walk.then(|| agent_runs(&*entries, 0));
                         let synced =
-                            zeron_doc::apply_transcript_frame(&mut feed.entries, update.frame)
-                                .is_ok();
-                        cx.notify();
+                            zeron_doc::apply_transcript_frame(entries, update.frame).is_ok();
+                        if spawns.is_none_or(|spawns| spawns != agent_runs(&*entries, 0)) {
+                            cx.notify();
+                        }
                         Some(synced)
                     });
                     match applied {
@@ -1992,6 +2048,37 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("background-roster-tokens-0").is_some());
+        assert!(cx.debug_bounds("background-roster-row-1").is_none());
+        composer.update(cx, |composer, cx| {
+            composer
+                .background
+                .walks
+                .get_mut("c1--sub--p1")
+                .expect("each listed run's transcript is walked")
+                .entries = vec![entry(
+                "s0",
+                MessageRole::Assistant,
+                3,
+                vec![spawn(
+                    "n1",
+                    "Agent: nested probe",
+                    Some(SubagentStatus::Running),
+                )],
+            )];
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let parent = cx
+            .debug_bounds("background-roster-title-0")
+            .expect("parent row painted");
+        let nested = cx
+            .debug_bounds("background-roster-title-1")
+            .expect("a nested subagent gets its own row");
+        assert!(nested.top() > parent.top());
+        assert!(nested.left() > parent.left(), "nested rows indent");
+        composer.read_with(cx, |composer, _| {
+            assert!(composer.background.walks.contains_key("c1--sub--n1"));
+        });
 
         let row = cx
             .debug_bounds("background-roster-row-0")
