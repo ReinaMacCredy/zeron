@@ -577,12 +577,15 @@ class ConfigSwitches(private val client: CoreClient, private val chatId: String)
     private var pending by mutableStateOf<Pair<ModelSwitchPrompt, suspend () -> Unit>?>(null)
     private var failure by mutableStateOf<String?>(null)
     var profiles by mutableStateOf<List<ProfileRow>>(emptyList())
+    var version by mutableStateOf(0)
+        private set
 
     fun current(harness: String): ChatConfig =
         client.sessionConfig(chatId) ?: ChatConfig(harness, null, null, emptyMap(), SandboxLevel.WORKSPACE_WRITE)
 
     fun set(harness: String, change: (ChatConfig) -> ChatConfig) {
         runCatching { client.setSessionConfig(chatId, change(current(harness))) }.onFailure { failure = it.message }
+        version++
     }
 
     fun confirm(prompt: ModelSwitchPrompt?, harness: String, change: (ChatConfig) -> ChatConfig) {
@@ -640,7 +643,10 @@ class ConfigSwitches(private val client: CoreClient, private val chatId: String)
                 confirmButton = {
                     TextButton(onClick = {
                         pending = null
-                        scope.launch { runCatching { run() }.onFailure { failure = it.message } }
+                        scope.launch {
+                            runCatching { run() }.onFailure { failure = it.message }
+                            version++
+                        }
                     }) { Text(prompt.confirm) }
                 },
                 dismissButton = { TextButton(onClick = { pending = null }) { Text(prompt.cancel) } },
@@ -696,7 +702,7 @@ private fun SessionChips(client: CoreClient, handle: SessionHandle, c: ComposerS
     LaunchedEffect(c.host.deviceId, harness) {
         models = runCatching { client.listModels(c.host.deviceId, harness) }.getOrNull()?.takeIf { it.isNotEmpty() } ?: fallbackModels(harness)
     }
-    val config = remember(c.revision, row?.revision) { client.sessionConfig(c.chatId) }
+    val config = remember(c.revision, row?.revision, switches.version) { client.sessionConfig(c.chatId) }
     LaunchedEffect(config?.profileId, row?.revision) {
         if (config?.profileId != null || switches.profiles.isNotEmpty()) switches.loadProfiles()
     }
