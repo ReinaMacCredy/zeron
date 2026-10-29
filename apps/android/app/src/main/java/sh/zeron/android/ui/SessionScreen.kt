@@ -109,6 +109,8 @@ fun SessionScreen(
     onOpenBilling: () -> Unit = {},
     /** Companions open beside the session (the large-screen inspector) instead of over it. */
     onShowCompanions: ((CompanionSection?) -> Unit)? = null,
+    onNeedsYou: () -> Unit = {},
+    onOpenRoute: (String) -> Unit = {},
 ) {
     val client by model.client.collectAsState()
     val core = client ?: return
@@ -159,6 +161,8 @@ fun SessionScreen(
     val scope = rememberCoroutineScope()
     var sheet by remember { mutableStateOf<TextSheet?>(null) }
     var viewing by remember { mutableStateOf<ImageBitmap?>(null) }
+    var claudeConfig by remember(chatId) { mutableStateOf(false) }
+    val quotes = remember(chatId) { kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 4) }
     val actions = remember(chatId) {
         suspend fun load(ref: String): ImageBitmap? {
             val device = handle.composer().host.deviceId
@@ -186,6 +190,7 @@ fun SessionScreen(
             openSubagent = { doc, title, running -> onOpenSubagent(chatId, doc, title, running) },
             // An error card's "Log in": that agent's sign-in, started at once.
             act = { action -> if (action == "sign-in") signInTarget(model, chatId)?.let { onOpenAccounts(it, true) } },
+            card = { action -> if (action is uniffi.zeron_core.CardAction.OpenClaudeConfig) claudeConfig = true },
         )
     }
     // The composer's draft outlives the panel that replaces it while the agent asks.
@@ -326,6 +331,7 @@ fun SessionScreen(
             val density = LocalDensity.current
             var stack by remember { mutableStateOf(0.dp) }
             LaunchedEffect(stack) { transcript.bottomInset = stack.value + 12f }
+            sh.zeron.android.design.ChatBackground(model, chatId, Modifier.matchParentSize())
             Transcript(transcript, actions, Modifier.fillMaxSize())
             val page = MaterialTheme.colorScheme.background
             Box(
@@ -362,6 +368,16 @@ fun SessionScreen(
                 androidx.compose.animation.AnimatedVisibility(cloudOutOfCredits) {
                     CloudCreditsNotice(nudges, onAddCredits = onOpenBilling)
                 }
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    sh.zeron.android.ui.session.AgentsPill(
+                        model,
+                        chatId,
+                        onOpenChat = onOpenChat,
+                        onOpenSubagent = { doc, title, running -> onOpenSubagent(chatId, doc, title, running) },
+                        onOpenTerminal = { terminal -> onOpenTerminal(chatId, terminal) },
+                    )
+                    NeedsYouPill(model, chatId, onClick = onNeedsYou)
+                }
                 Row(Modifier.fillMaxWidth().padding(end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.weight(1f)) { Banner(composer, connectivity?.state, onRetry = { runCatching { handle.retryDelivery() } }, cloud = if (isCloud) model.cloud else null, chatId = chatId, deviceId = row?.deviceId) }
                     CompanionStrip(companions, onTap = { section -> onShowCompanions?.invoke(section) ?: run { companionsSheet = section; showCompanions = true } }, modifier = if (companions.isEmpty) Modifier else Modifier.padding(vertical = 6.dp))
@@ -371,17 +387,28 @@ fun SessionScreen(
                 if (input != null) {
                     QuestionPanel(input) { answers -> runCatching { handle.respondInput(input.requestId, answers) } }
                 } else {
-                    Composer(model, core, handle, composer, row, transcript, draft, openModelPicker = openPicker, beforeSend = {
-                        // Out of credits, a Cloud send can't wake its machine: say so instead of a send that never lands.
-                        if (cloudOutOfCredits) nudges++
-                        !cloudOutOfCredits
-                    })
+                    Composer(
+                        model, core, handle, composer, row, transcript, draft,
+                        openModelPicker = openPicker,
+                        beforeSend = {
+                            // Out of credits, a Cloud send can't wake its machine: say so instead of a send that never lands.
+                            if (cloudOutOfCredits) nudges++
+                            !cloudOutOfCredits
+                        },
+                        onOpenClaudeConfig = { claudeConfig = true },
+                        onNeedsYou = onNeedsYou,
+                        onOpenChat = onOpenChat,
+                        onOpenRoute = onOpenRoute,
+                        quotes = quotes,
+                    )
                 }
             }
         }
     }
 
     viewing?.let { ImageViewer(it) { viewing = null } }
+
+    if (claudeConfig) sh.zeron.android.ui.session.ClaudeConfigSheet(model, chatId) { claudeConfig = false }
 
     if (showCompanions) {
         CompanionsSheet(

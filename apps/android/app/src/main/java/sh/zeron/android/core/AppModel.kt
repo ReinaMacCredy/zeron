@@ -83,6 +83,8 @@ data class LaunchOptions(
     val remoteVoice: Boolean = false,
     /** `--ez voice-selftest true`: log a host-less WebRTC offer (debuggable builds). */
     val voiceSelfTest: Boolean = false,
+    val still: Boolean = false,
+    val flakyPages: Boolean = false,
 )
 
 /**
@@ -155,6 +157,14 @@ class AppModel(private val app: Application) {
     fun setGroupCollapsed(id: String, collapsed: Boolean) {
         _collapsed.value = if (collapsed) _collapsed.value + id else _collapsed.value - id
         settings.edit().putStringSet("collapsedGroups", _collapsed.value).apply()
+    }
+
+    private val _steerByDefault = MutableStateFlow(settings.getBoolean("composer.steer", false))
+    val steerByDefault: StateFlow<Boolean> = _steerByDefault.asStateFlow()
+
+    fun setSteerByDefault(on: Boolean) {
+        _steerByDefault.value = on
+        settings.edit().putBoolean("composer.steer", on).apply()
     }
 
     /** Unsent composer text per chat (and the new-session page), kept across launches. */
@@ -257,6 +267,8 @@ class AppModel(private val app: Application) {
         },
         streamSpeed = if (launch.fast) StreamSpeed.FAST else StreamSpeed.REALISTIC,
         longReply = launch.longReply,
+        computerStill = launch.still,
+        flakyPages = launch.flakyPages,
     )
 
     private val coreDir get() = File(app.filesDir, "core")
@@ -404,7 +416,10 @@ class AppModel(private val app: Application) {
         _connectivity.value = null
         if (!wasDemo) {
             credentials.clear()
-            if (forget) coreDir.deleteRecursively()
+            if (forget) {
+                coreDir.deleteRecursively()
+                drafts.clear()
+            }
         }
         // Nothing of the account stays in memory (or seeds the next one's new session).
         lastDraft = NewSessionDraft()

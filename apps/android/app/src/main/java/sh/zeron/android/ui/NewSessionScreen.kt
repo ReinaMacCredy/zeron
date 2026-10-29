@@ -78,6 +78,7 @@ fun NewSessionScreen(
     onOpenBilling: () -> Unit = {},
     /** Focus the prompt at once (a large screen's page at launch waits: the keyboard would cover the column). */
     focusOnAppear: Boolean = true,
+    onOpenRoute: (String) -> Unit = {},
 ) {
     val workspace by model.workspace.collectAsState()
     val client by model.client.collectAsState()

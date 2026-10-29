@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
@@ -24,6 +25,7 @@ import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.PlainTooltip
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
@@ -105,6 +107,16 @@ object Routes {
     const val WELCOME = "welcome?step={step}"
     const val TERMINAL = "terminal/{chat}?id={id}"
     const val SUBAGENT = "subagent/{parent}/{doc}?title={title}&running={running}"
+    const val TASKS = "tasks"
+    const val MISSION = "mission/{id}"
+    const val SUPERVISOR = "supervisor"
+    const val PRS = "prs"
+    const val PR = "pr?url={url}&device={device}"
+    const val GIT = "git?history={history}"
+    const val HOST_PAGE = "host-page/{page}?host={host}"
+    const val WHATS_NEW = "whatsnew"
+    const val DOCS = "docs"
+    const val DOC = "doc/{id}"
     fun chat(id: String) = "chat/$id"
     fun providers(target: String?) = "providers" + (target?.let { "?target=${Uri.encode(it)}" } ?: "")
     fun accounts(target: String, signIn: Boolean) = "accounts/${Uri.encode(target)}?signin=$signIn"
@@ -112,7 +124,22 @@ object Routes {
     fun terminal(chat: String, id: String?) = "terminal/${Uri.encode(chat)}" + (id?.let { "?id=${Uri.encode(it)}" } ?: "")
     fun subagent(parent: String, doc: String, title: String, running: Boolean) =
         "subagent/${Uri.encode(parent)}/${Uri.encode(doc)}?title=${Uri.encode(title)}&running=$running"
+    fun mission(id: String) = "mission/${Uri.encode(id)}"
+    fun pr(url: String, device: String?) = "pr?url=${Uri.encode(url)}" + (device?.let { "&device=${Uri.encode(it)}" } ?: "")
+    fun git(history: Boolean) = "git?history=$history"
+    fun hostPage(page: String, host: String?) = "host-page/${Uri.encode(page)}" + (host?.let { "?host=${Uri.encode(it)}" } ?: "")
+    fun doc(id: String) = "doc/${Uri.encode(id)}"
+
+    fun settingsPage(route: String): String? = when {
+        route == "whatsnew" -> WHATS_NEW
+        route == "docs" -> DOCS
+        route.startsWith("doc:") -> doc(route.removePrefix("doc:"))
+        route.startsWith("page:") -> route.removePrefix("page:").split('@', limit = 2).let { hostPage(it[0].ifEmpty { "mac" }, it.getOrNull(1)) }
+        else -> null
+    }
 }
+
+enum class HomeTab { Sessions, Tasks, Settings }
 
 @Composable
 private fun MainNav(model: AppModel) {
@@ -142,15 +169,16 @@ private fun MainNav(model: AppModel) {
             }
         }
     }
-    LaunchedEffect(Unit) {
-        val route = model.launch.route ?: return@LaunchedEffect
-        val parts = route.split(':')
+    var homeTab by rememberSaveable { mutableStateOf(HomeTab.Sessions) }
+    var taskPending by rememberSaveable { mutableStateOf<String?>(null) }
+    var needsYou by remember { mutableStateOf(false) }
+    var needsYouExcluding by remember { mutableStateOf<String?>(null) }
+    // A debug `companion` extra opens over the launch route's chat, once.
+    var companionPending by rememberSaveable { mutableStateOf(model.launch.companion) }
+    var companionChat by rememberSaveable { mutableStateOf(model.launch.route?.removePrefix("chat:")?.substringBefore('/')) }
+
+    fun openCloudRoute(route: String, parts: List<String>) {
         when (parts[0]) {
-            "new" -> if (wide) shell.newSession() else nav.navigate(Routes.NEW)
-            "search" -> if (wide) shell.searching = true else nav.navigate(Routes.SEARCH)
-            "settings", "more" -> if (wide) shell.settings = Routes.SETTINGS else nav.navigate(Routes.SETTINGS)
-            "archived" -> nav.navigate(Routes.ARCHIVED)
-            "chat" -> open(route.removePrefix("chat:"))
             "welcome" -> nav.navigate(Routes.welcome(parts.getOrNull(1)))
             // Cloud pages straight away (screenshots, tests): `cloud` · `cloud:billing` ·
             // `cloud:repos` · `billing` · `providers[:cloud|:<device id>]` · `accounts:<target>`.
@@ -167,6 +195,66 @@ private fun MainNav(model: AppModel) {
             }
         }
     }
+
+    fun openTasks(path: String) {
+        if (wide) {
+            nav.navigate(Routes.TASKS) { launchSingleTop = true }
+        } else {
+            nav.popBackStack(Routes.HOME, inclusive = false)
+            homeTab = HomeTab.Tasks
+        }
+        when {
+            path == "supervisor" -> nav.navigate(Routes.SUPERVISOR)
+            path.startsWith("mission:") -> nav.navigate(Routes.mission(path.removePrefix("mission:")))
+            path.startsWith("task:") -> taskPending = path.removePrefix("task:")
+        }
+    }
+
+    fun openRoute(route: String) {
+        val parts = route.split(':')
+        val settingsPage = Routes.settingsPage(route)
+        when {
+            route == "new" -> if (wide) shell.newSession() else nav.navigate(Routes.NEW)
+            route == "search" -> if (wide) shell.searching = true else nav.navigate(Routes.SEARCH)
+            route == "settings" || route == "more" -> if (wide) shell.settings = Routes.SETTINGS else homeTab = HomeTab.Settings
+            route == "archived" -> nav.navigate(Routes.ARCHIVED)
+            route == "needs-you" -> {
+                needsYouExcluding = null
+                needsYou = true
+            }
+            route.startsWith("chat:") -> {
+                val path = route.removePrefix("chat:")
+                val id = path.substringBefore('/')
+                when (val panel = path.substringAfter('/', "").ifEmpty { null }) {
+                    null -> Unit
+                    "needs-you" -> {
+                        needsYouExcluding = id
+                        needsYou = true
+                    }
+                    else -> {
+                        companionChat = id
+                        companionPending = panel
+                    }
+                }
+                open(id)
+            }
+            route == "tasks" || route.startsWith("tasks:") -> openTasks(route.removePrefix("tasks").removePrefix(":"))
+            route == "prs" -> nav.navigate(Routes.PRS)
+            route == "git" || route == "git-history" -> nav.navigate(Routes.git(history = route == "git-history"))
+            route.startsWith("pr:") -> nav.navigate(Routes.pr(route.removePrefix("pr:"), null))
+            settingsPage != null -> if (wide) {
+                shell.settings = settingsPage
+            } else {
+                homeTab = HomeTab.Settings
+                nav.navigate(settingsPage)
+            }
+            else -> openCloudRoute(route, parts)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        model.launch.route?.let(::openRoute)
+    }
     // First run after signing in: the welcome pages (once per account).
     val client by model.client.collectAsState()
     LaunchedEffect(client) {
@@ -178,13 +266,9 @@ private fun MainNav(model: AppModel) {
             if (nav.currentDestination?.route != Routes.VOICE) nav.navigate(Routes.VOICE) { launchSingleTop = true }
         }
     }
-    // A debug `companion` extra opens over the launch route's chat, once.
-    var companionPending by rememberSaveable { mutableStateOf(model.launch.companion) }
-
     /** A session page with its companions wired to the nav stack (phone) or the inspector (large screens). */
     @Composable
     fun Session(id: String, onBack: () -> Unit, beside: Boolean = false) {
-        val launchChat = model.launch.route?.removePrefix("chat:")
         SessionScreen(
             model,
             id,
@@ -199,10 +283,15 @@ private fun MainNav(model: AppModel) {
             onOpenSubagent = { parent, doc, title, running ->
                 if (beside) shell.push(id, InspectorPage.Subagent(parent, doc, title, running)) else nav.navigate(Routes.subagent(parent, doc, title, running))
             },
-            openCompanion = companionPending?.takeIf { id == launchChat }?.also { companionPending = null },
+            openCompanion = companionPending?.takeIf { id == companionChat }?.also { companionPending = null },
             onOpenAccounts = { target, signIn -> nav.navigate(Routes.accounts(target.encode(), signIn)) },
             onOpenBilling = { if (wide) shell.settings = Routes.BILLING else nav.navigate(Routes.BILLING) },
             onShowCompanions = if (beside) ({ section -> shell.toggleCompanions(id, section) }) else null,
+            onNeedsYou = {
+                needsYouExcluding = id
+                needsYou = true
+            },
+            onOpenRoute = ::openRoute,
         )
     }
 
@@ -231,12 +320,34 @@ private fun MainNav(model: AppModel) {
                 Home(
                     model,
                     open,
-                    onSettings = { nav.navigate(Routes.SETTINGS) },
+                    onSettings = { homeTab = HomeTab.Settings },
                     onSearch = { nav.navigate(Routes.SEARCH) },
                     onNew = { nav.navigate(Routes.NEW) },
                     onArchived = { nav.navigate(Routes.ARCHIVED) },
                     onVoice = { nav.navigate(Routes.VOICE) { launchSingleTop = true } },
                     onVoiceSettings = { nav.navigate(Routes.VOICE_SETTINGS) },
+                    onOpenRoute = ::openRoute,
+                    tab = homeTab,
+                    onTab = { homeTab = it },
+                    tasks = {
+                        sh.zeron.android.ui.tasks.TasksScreen(
+                            model,
+                            onOpenChat = open,
+                            onOpenRoute = ::openRoute,
+                            openTask = taskPending?.also { taskPending = null },
+                        )
+                    },
+                    settings = {
+                        SettingsScreen(
+                            model,
+                            onArchived = { nav.navigate(Routes.ARCHIVED) },
+                            onOpenVoiceSettings = { nav.navigate(Routes.VOICE_SETTINGS) },
+                            onOpenProviders = { nav.navigate(Routes.providers(null)) },
+                            onOpenCloud = { nav.navigate(Routes.CLOUD) },
+                            onOpenBilling = { nav.navigate(Routes.BILLING) },
+                            onOpenRoute = ::openRoute,
+                        )
+                    },
                 )
             } else {
                 TabletShell(
@@ -262,6 +373,7 @@ private fun MainNav(model: AppModel) {
                                 onArchived = { shell.settings = Routes.ARCHIVED },
                                 onVoice = { nav.navigate(Routes.VOICE) { launchSingleTop = true } },
                                 onVoiceSettings = { nav.navigate(Routes.VOICE_SETTINGS) },
+                                onOpenRoute = ::openRoute,
                             )
                         }
                     },
@@ -273,6 +385,7 @@ private fun MainNav(model: AppModel) {
                             onCreated = { id -> shell.select(id) },
                             onOpenBilling = { shell.settings = Routes.BILLING },
                             focusOnAppear = shell.draftToken > 0,
+                            onOpenRoute = ::openRoute,
                         )
                     },
                     page = { chat, page -> InspectorPageContent(model, shell, chat, page) },
@@ -282,7 +395,39 @@ private fun MainNav(model: AppModel) {
         settingsGraph(nav, model, openChat = { id ->
             nav.popBackStack(Routes.HOME, inclusive = false)
             open(id)
-        })
+        }, openRoute = ::openRoute)
+        composable(Routes.TASKS) {
+            sh.zeron.android.ui.tasks.TasksScreen(
+                model,
+                onOpenChat = { id ->
+                    nav.popBackStack(Routes.HOME, inclusive = false)
+                    open(id)
+                },
+                onOpenRoute = ::openRoute,
+                openTask = taskPending?.also { taskPending = null },
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable(Routes.MISSION, arguments = listOf(navArgument("id") { type = NavType.StringType })) { entry ->
+            val id = entry.arguments?.getString("id") ?: return@composable
+            sh.zeron.android.ui.tasks.MissionScreen(model, id, onBack = { nav.popBackStack() }, onOpenChat = open, onOpenRoute = ::openRoute)
+        }
+        composable(Routes.SUPERVISOR) {
+            sh.zeron.android.ui.tasks.SupervisorScreen(model, onBack = { nav.popBackStack() }, onOpenChat = open)
+        }
+        composable(Routes.PRS) {
+            sh.zeron.android.ui.git.PullRequestsScreen(model, onBack = { nav.popBackStack() }, onOpenRoute = ::openRoute)
+        }
+        composable(
+            Routes.PR,
+            arguments = listOf(navArgument("url") { type = NavType.StringType }, navArgument("device") { type = NavType.StringType; nullable = true }),
+        ) { entry ->
+            val url = entry.arguments?.getString("url") ?: return@composable
+            sh.zeron.android.ui.git.PullRequestScreen(model, url, entry.arguments?.getString("device"), onBack = { nav.popBackStack() }, onOpenChat = open, onOpenRoute = ::openRoute)
+        }
+        composable(Routes.GIT, arguments = listOf(navArgument("history") { type = NavType.BoolType; defaultValue = false })) { entry ->
+            sh.zeron.android.ui.git.GitScreen(model, entry.arguments?.getBoolean("history") == true, onBack = { nav.popBackStack() }, onOpenChat = open)
+        }
         composable(Routes.CHAT) { entry ->
             val id = entry.arguments?.getString("id") ?: return@composable
             Session(id, onBack = { nav.popBackStack() })
@@ -340,6 +485,7 @@ private fun MainNav(model: AppModel) {
                     open(id)
                 },
                 onOpenBilling = { nav.navigate(Routes.BILLING) },
+                onOpenRoute = ::openRoute,
             )
         }
         composable(Routes.SEARCH) {
@@ -362,9 +508,27 @@ private fun MainNav(model: AppModel) {
         SettingsDialog(model, start, onDismiss = { shell.settings = null }, openChat = { id ->
             shell.settings = null
             open(id)
+        }, openRoute = { route ->
+            shell.settings = null
+            openRoute(route)
         })
     }
-    Toasts(model, nav)
+    if (needsYou) {
+        NeedsYouSheet(
+            model,
+            excluding = needsYouExcluding,
+            onDismiss = { needsYou = false },
+            onOpenChat = { id ->
+                needsYou = false
+                open(id)
+            },
+            onOpenRoute = { route ->
+                needsYou = false
+                openRoute(route)
+            },
+        )
+    }
+    Toasts(model, nav, tabs = !wide)
     }
     }
 }
@@ -380,8 +544,12 @@ private fun androidx.navigation.NavGraphBuilder.settingsGraph(
     nav: NavHostController,
     model: AppModel,
     openChat: (String) -> Unit,
+    openRoute: (String) -> Unit,
     onClose: (() -> Unit)? = null,
 ) {
+    fun route(route: String) {
+        Routes.settingsPage(route)?.let { nav.navigate(it) } ?: openRoute(route)
+    }
     fun back() {
         if (!nav.popBackStack()) onClose?.invoke()
     }
@@ -395,8 +563,21 @@ private fun androidx.navigation.NavGraphBuilder.settingsGraph(
                 onOpenProviders = { nav.navigate(Routes.providers(null)) },
                 onOpenCloud = { nav.navigate(Routes.CLOUD) },
                 onOpenBilling = { nav.navigate(Routes.BILLING) },
+                onOpenRoute = ::route,
             )
         }
+    }
+    composable(Routes.HOST_PAGE, arguments = listOf(navArgument("page") { type = NavType.StringType }, navArgument("host") { type = NavType.StringType; nullable = true })) { entry ->
+        HostPageScreen(model, entry.arguments?.getString("page") ?: "mac", entry.arguments?.getString("host"), onBack = ::back, onOpenRoute = ::route)
+    }
+    composable(Routes.WHATS_NEW) {
+        sh.zeron.android.ui.help.WhatsNewScreen(model, onBack = ::back, onOpenRoute = ::route)
+    }
+    composable(Routes.DOCS) {
+        sh.zeron.android.ui.help.DocsScreen(model, onBack = ::back, onOpenRoute = ::route)
+    }
+    composable(Routes.DOC, arguments = listOf(navArgument("id") { type = NavType.StringType })) { entry ->
+        sh.zeron.android.ui.help.DocScreen(model, entry.arguments?.getString("id") ?: return@composable, onBack = ::back, onOpenRoute = ::route)
     }
     composable(Routes.ARCHIVED) {
         ArchivedScreen(model, onBack = ::back, onOpen = openChat)
@@ -439,7 +620,7 @@ private fun androidx.navigation.NavGraphBuilder.settingsGraph(
 
 /** Large screens: Settings over the shell as a dialog with its own stack of pages. */
 @Composable
-private fun SettingsDialog(model: AppModel, start: String, onDismiss: () -> Unit, openChat: (String) -> Unit) {
+private fun SettingsDialog(model: AppModel, start: String, onDismiss: () -> Unit, openChat: (String) -> Unit, openRoute: (String) -> Unit) {
     androidx.compose.ui.window.Dialog(
         onDismissRequest = onDismiss,
         properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
@@ -451,7 +632,7 @@ private fun SettingsDialog(model: AppModel, start: String, onDismiss: () -> Unit
             modifier = Modifier.fillMaxWidth(0.9f).widthIn(max = 720.dp).fillMaxHeight(0.92f),
         ) {
             NavHost(nav, startDestination = start) {
-                settingsGraph(nav, model, openChat = openChat, onClose = onDismiss)
+                settingsGraph(nav, model, openChat = openChat, openRoute = openRoute, onClose = onDismiss)
             }
         }
     }
@@ -459,7 +640,7 @@ private fun SettingsDialog(model: AppModel, start: String, onDismiss: () -> Unit
 
 /** App-wide snackbars ("Archived · Undo"), just above whatever bottom chrome the page has. */
 @Composable
-private fun androidx.compose.foundation.layout.BoxScope.Toasts(model: AppModel, nav: NavHostController) {
+private fun androidx.compose.foundation.layout.BoxScope.Toasts(model: AppModel, nav: NavHostController, tabs: Boolean) {
     val host = remember { SnackbarHostState() }
     LaunchedEffect(Unit) {
         model.toasts.collect { toast ->
@@ -473,7 +654,7 @@ private fun androidx.compose.foundation.layout.BoxScope.Toasts(model: AppModel, 
     }
     val entry by nav.currentBackStackEntryAsState()
     val inset = when (entry?.destination?.route) {
-        Routes.HOME -> 96.dp
+        Routes.HOME -> if (tabs) 176.dp else 96.dp
         Routes.CHAT, Routes.NEW -> 96.dp
         Routes.TERMINAL, Routes.SUBAGENT -> 72.dp
         Routes.WELCOME -> 120.dp
@@ -500,6 +681,60 @@ private fun Home(
     onArchived: () -> Unit,
     onVoice: () -> Unit,
     onVoiceSettings: () -> Unit,
+    onOpenRoute: (String) -> Unit,
+    tab: HomeTab = HomeTab.Sessions,
+    onTab: ((HomeTab) -> Unit)? = null,
+    tasks: @Composable () -> Unit = {},
+    settings: @Composable () -> Unit = {},
+) {
+    androidx.activity.compose.BackHandler(enabled = onTab != null && tab != HomeTab.Sessions) { onTab?.invoke(HomeTab.Sessions) }
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            when (tab) {
+                HomeTab.Sessions -> SessionsPage(model, open, selected, onSettings, onSearch, onNew, onArchived, onVoice, onVoiceSettings, onOpenRoute, tabs = onTab != null)
+                HomeTab.Tasks -> tasks()
+                HomeTab.Settings -> settings()
+            }
+        }
+        if (onTab != null) {
+            val badge = sh.zeron.android.ui.tasks.rememberTasksBadge(model)
+            androidx.compose.material3.NavigationBar {
+                for (t in HomeTab.entries) {
+                    NavigationBarItem(
+                        selected = t == tab,
+                        onClick = { onTab(t) },
+                        icon = {
+                            val icon = when (t) {
+                                HomeTab.Sessions -> ZIcons.TabSessions
+                                HomeTab.Tasks -> ZIcons.TabTasks
+                                HomeTab.Settings -> ZIcons.TabSettings
+                            }
+                            androidx.compose.material3.BadgedBox(badge = { if (t == HomeTab.Tasks && badge > 0) androidx.compose.material3.Badge { Text("$badge") } }) {
+                                ZIcon(icon, null, Modifier.size(24.dp))
+                            }
+                        },
+                        label = { Text(t.name) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun SessionsPage(
+    model: AppModel,
+    open: (String) -> Unit,
+    selected: String?,
+    onSettings: () -> Unit,
+    onSearch: () -> Unit,
+    onNew: () -> Unit,
+    onArchived: () -> Unit,
+    onVoice: () -> Unit,
+    onVoiceSettings: () -> Unit,
+    onOpenRoute: (String) -> Unit,
+    tabs: Boolean,
 ) {
     // The FAB shows its label at rest and tucks to its icon while the list scrolls down (Gmail's Compose).
     var fabExpanded by rememberSaveable { mutableStateOf(true) }
@@ -520,6 +755,7 @@ private fun Home(
                 selected = selected,
                 onSearch = onSearch,
                 onSettings = onSettings,
+                onOpenRoute = onOpenRoute,
                 searchActions = {
                     // Tap calls (or opens the live call); hold picks the host and style.
                     if (sh.zeron.android.voice.rememberVoiceVisible(model.voice)) {
@@ -541,9 +777,19 @@ private fun Home(
             expanded = fabExpanded,
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .navigationBarsPadding()
+                .then(if (tabs) Modifier else Modifier.navigationBarsPadding())
                 .padding(16.dp),
         )
+    }
+}
+
+@Composable
+fun StubPage(title: String, onBack: (() -> Unit)?) {
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
+        if (onBack != null) {
+            Row(Modifier.padding(start = 12.dp, top = 8.dp)) { TonalCircleButton(ZIcons.Back, "Back", onClick = onBack) }
+        }
+        ScreenHeader(title, "Not built yet")
     }
 }
 

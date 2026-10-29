@@ -110,6 +110,11 @@ fun Composer(
     beforeSend: () -> Boolean = { true },
     /** Open the model picker once (a debug launch extra, for screenshots). */
     openModelPicker: Boolean = false,
+    onOpenClaudeConfig: () -> Unit = {},
+    onNeedsYou: () -> Unit = {},
+    onOpenChat: (String) -> Unit = {},
+    onOpenRoute: (String) -> Unit = {},
+    quotes: kotlinx.coroutines.flow.Flow<String> = kotlinx.coroutines.flow.emptyFlow(),
 ) {
     val scope = rememberCoroutineScope()
     // The model picker lives here, not in the chips: those leave with the expanded card.

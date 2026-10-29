@@ -76,6 +76,7 @@ class TranscriptActions(
     val openSubagent: (docId: String, title: String, running: Boolean) -> Unit = { _, _, _ -> },
     /** An in-transcript button (`sign-in` on an error card). */
     val act: (String) -> Unit = {},
+    val card: (uniffi.zeron_core.CardAction) -> Unit = {},
 )
 
 private const val OVERSCAN = 700f

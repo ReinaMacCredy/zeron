@@ -14,6 +14,10 @@ class Drafts(context: Context) {
         edit.apply()
     }
 
+    fun clear() {
+        prefs.edit().clear().apply()
+    }
+
     companion object {
         const val NEW_SESSION = "new-session"
     }

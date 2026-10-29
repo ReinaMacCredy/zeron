@@ -181,6 +181,7 @@ fun SessionsScreen(
     onSettings: () -> Unit = {},
     /** Inside the search bar, before the avatar (voice, when a host can take a call). */
     searchActions: @Composable RowScope.() -> Unit = {},
+    onOpenRoute: (String) -> Unit = {},
 ) {
     val workspace by model.workspace.collectAsState()
     val connectivity by model.connectivity.collectAsState()

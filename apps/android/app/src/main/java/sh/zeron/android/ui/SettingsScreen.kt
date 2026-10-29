@@ -62,6 +62,7 @@ fun SettingsScreen(
     onOpenProviders: () -> Unit = {},
     onOpenCloud: () -> Unit = {},
     onOpenBilling: () -> Unit = {},
+    onOpenRoute: (String) -> Unit = {},
 ) {
     val appearance by model.appearance.collectAsState()
     val groupByProject by model.groupByProject.collectAsState()
