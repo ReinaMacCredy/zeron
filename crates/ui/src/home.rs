@@ -24,7 +24,7 @@ use crate::theme::Theme;
 const GRID_MAX_WIDTH: f32 = 880.0;
 const GRID_PADDING_X: f32 = 24.0;
 const COLUMN_GAP: f32 = 10.0;
-const CARD_RADIUS: f32 = 10.0;
+const CARD_RADIUS: f32 = 16.0;
 const ROW_HEIGHT: f32 = 28.0;
 const STATS_EVERY: Duration = Duration::from_secs(3);
 const SERVICES_EVERY: Duration = Duration::from_secs(5);
@@ -2459,7 +2459,7 @@ fn card(
         .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(theme.border)
-        .bg(theme.wash(0.03))
+        .bg(theme.card_fill())
         .px(px(12.0))
         .pt(px(10.0))
         .pb(px(10.0))

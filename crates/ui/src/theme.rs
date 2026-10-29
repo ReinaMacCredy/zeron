@@ -1144,6 +1144,20 @@ impl Theme {
             .opacity(self.contrast_checked_tint_alpha(self.surface, 0.40, window))
     }
 
+    pub fn card_fill(&self) -> Hsla {
+        match self.appearance {
+            Appearance::Dark => self.ink(0.045),
+            Appearance::Light => self.ink(0.0),
+        }
+    }
+
+    pub fn text_meta(&self) -> Hsla {
+        match self.appearance {
+            Appearance::Dark => mix(self.text_muted, self.text_faint, 0.67),
+            Appearance::Light => self.text_muted,
+        }
+    }
+
     pub fn branch_ink(&self) -> Hsla {
         gpui::rgb(if self.appearance.is_dark() {
             0xc4b4ff
@@ -1207,15 +1221,15 @@ impl Theme {
             bg: grey(6),       // main panel — sampled #060606
             surface: grey(13), // shell / sidebar — sampled #0d0d0d
             surface_raised: neutral(0.235),
-            surface_card: grey(0x0e),
-            surface_dialog: grey(0x10),
+            surface_card: grey(0x11),
+            surface_dialog: grey(0x13),
             surface_overlay: grey(0x16),
             element_hover: hsla(0.0, 0.0, 0.92, 0.11),
             element_active: hsla(0.0, 0.0, 0.92, 0.16),
             border: hsla(0.0, 0.0, 1.0, 0.08),
             border_strong: hsla(0.0, 0.0, 1.0, 0.14),
             text: neutral(0.922),       // ~neutral-200
-            text_muted: neutral(0.708), // ~neutral-400
+            text_muted: grey(0xa3),     // neutral-400
             text_faint: neutral(0.556), // ~neutral-500
             text_dim: grey(0x98),
             solid: neutral(0.922), // near-white plate
@@ -1852,14 +1866,13 @@ pub fn glass_secondary_bg() -> Hsla {
     }
 }
 
-/// The user message bubble's plate: the same translucent wash family as
-/// [`glass_selected_bg`], one step softer — at the selection weight the
-/// bubble read too strong for settled content (user report), and an opaque
-/// plate before that read as a solid slab over glass.
+/// The user message bubble's plate: level with [`glass_selected_bg`] in dark
+/// (T3's message surface), translucent because an opaque plate read as a
+/// solid slab over glass.
 pub fn user_bubble_bg() -> Hsla {
     match current_appearance() {
-        Appearance::Dark => wash(0.08),
-        Appearance::Light => wash(0.04),
+        Appearance::Dark => wash(0.11),
+        Appearance::Light => wash(0.09),
     }
 }
 

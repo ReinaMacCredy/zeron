@@ -652,9 +652,8 @@ pub fn render_block(
             .flex_col()
             .gap(px(4.0))
             .children(items.iter().enumerate().map(|(item_ix, item)| {
-                // Accent markers (the inline-code hue): ordered numbers as
-                // tinted text, unordered as a REAL 5px disc — the glyph "•"
-                // reads too small at 14px.
+                // Muted markers: ordered numbers as text, unordered as a REAL
+                // 5px disc — the glyph "•" reads too small at 14px.
                 let task = item
                     .first()
                     .and_then(|block| match block {
@@ -729,7 +728,7 @@ pub fn render_block(
                             .min_w(px(18.0))
                             .text_size(crate::typography::ui_rems(MD_TEXT_SIZE))
                             .line_height(crate::typography::ui_rems(MD_LINE_HEIGHT))
-                            .text_color(theme.accent)
+                            .text_color(theme.text_muted)
                             .child(SharedString::from(format!("{}.", start + item_ix as u64)))
                             .into_any_element(),
                         None => div()
@@ -745,7 +744,7 @@ pub fn render_block(
                                     .w(px(5.0))
                                     .h(px(5.0))
                                     .rounded_full()
-                                    .bg(theme.accent),
+                                    .bg(theme.text_muted),
                             )
                             .into_any_element(),
                     }
@@ -1198,16 +1197,15 @@ pub struct FlatText {
     pub math: Vec<super::math::MathSlot>,
 }
 
-/// Inline-code tint: a text-safe use of the selected accent identity.
 pub fn inline_code_text(theme: &Theme) -> Hsla {
-    theme.code_text
+    theme.text
 }
 pub fn inline_code_wash(theme: &Theme) -> Hsla {
-    theme.code_wash
+    theme.text.opacity(0.10)
 }
 /// Rounded-wash geometry: small radius on a slightly inset box (paint-only —
 /// x extends 2px past the glyphs, y insets 2px from the 22px line box).
-pub const INLINE_CODE_RADIUS: f32 = 4.5;
+pub const INLINE_CODE_RADIUS: f32 = 4.0;
 pub const INLINE_CODE_PAD_X: f32 = 2.0;
 pub const INLINE_CODE_INSET_Y: f32 = 2.0;
 
@@ -2585,8 +2583,8 @@ fn code_block_frame(
         .min_w_0()
         .flex()
         .flex_col()
-        .rounded(px(10.0))
-        .bg(crate::theme::ink(0.035))
+        .rounded(px(8.0))
+        .bg(theme.card_fill())
         .border_1()
         .border_color(theme.border)
         .overflow_hidden()
@@ -4082,7 +4080,7 @@ mod tests {
         );
         // Adjacent code runs merge into ONE wash box; separated ones don't.
         assert_eq!(flat.code_ranges, vec![4..9, 14..17]);
-        // Code text is the violet tint; the square run background is gone
+        // Code text is the body foreground; the square run background is gone
         // (the rounded wash is painted by the canvas underlay instead).
         assert_eq!(flat.runs[1].color, inline_code_text(&theme));
         assert_eq!(flat.runs[1].background_color, None);
