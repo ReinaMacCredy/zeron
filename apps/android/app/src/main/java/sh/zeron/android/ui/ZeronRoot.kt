@@ -217,7 +217,12 @@ private fun MainNav(model: AppModel) {
         when {
             route == "new" -> if (wide) shell.newSession() else nav.navigate(Routes.NEW)
             route == "search" -> if (wide) shell.searching = true else nav.navigate(Routes.SEARCH)
-            route == "settings" || route == "more" -> if (wide) shell.settings = Routes.SETTINGS else homeTab = HomeTab.Settings
+            route == "settings" || route == "more" -> if (wide) {
+                shell.settings = Routes.SETTINGS
+            } else {
+                nav.popBackStack(Routes.HOME, inclusive = false)
+                homeTab = HomeTab.Settings
+            }
             route == "archived" -> nav.navigate(Routes.ARCHIVED)
             route == "needs-you" -> {
                 needsYouExcluding = null
