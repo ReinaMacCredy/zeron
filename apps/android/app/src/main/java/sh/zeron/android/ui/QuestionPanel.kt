@@ -59,7 +59,6 @@ import uniffi.zeron_core.UserInputQuestion
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun QuestionPanel(input: InputRequest, onSubmit: (List<UserInputAnswer>) -> Unit) {
-    input.questions.firstOrNull { it.secret }?.let { return SecretOnMac(it) }
     val items = input.questions
     var page by remember(input.requestId) { mutableIntStateOf(0) }
     val picks = remember(input.requestId) { mutableStateMapOf<String, Set<String>>() }
@@ -78,7 +77,7 @@ fun QuestionPanel(input: InputRequest, onSubmit: (List<UserInputAnswer>) -> Unit
 
     fun advance() {
         val q = items.getOrNull(page) ?: return
-        if (submitted || !answered(q)) return
+        if (submitted || q.secret || !answered(q)) return
         if (page < items.size - 1) {
             page++
             return
@@ -129,13 +128,24 @@ fun QuestionPanel(input: InputRequest, onSubmit: (List<UserInputAnswer>) -> Unit
                     val header = q.header.ifEmpty { "Question" }
                     // Header and question wrap clear of the corner close (8dp in, 36dp wide).
                     Text(
-                        if (items.size > 1) "$header · ${index + 1} of ${items.size}" else header,
+                        when {
+                            q.secret -> q.header
+                            items.size > 1 -> "$header · ${index + 1} of ${items.size}"
+                            else -> header
+                        },
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(end = 32.dp),
                     )
                     Spacer(Modifier.height(6.dp))
-                    Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+                    // A typed answer would cross the relay in the chat document, so a secret is entered on the Mac.
+                    if (q.secret) {
+                        Text(
+                            "${q.question}\n\nEnter it on your Mac. It stays out of chat.",
+                            style = MaterialTheme.typography.titleMediumEmphasized,
+                            modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()).testTag("question-secret"),
+                        )
+                    } else Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
                         Text(q.question, style = MaterialTheme.typography.titleMediumEmphasized, modifier = Modifier.padding(end = 32.dp))
                         Spacer(Modifier.height(14.dp))
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -158,11 +168,12 @@ fun QuestionPanel(input: InputRequest, onSubmit: (List<UserInputAnswer>) -> Unit
                             modifier = Modifier.fillMaxWidth().testTag(if (q.multiline) "question-editor" else "question-other"),
                         )
                     }
+                    if (q.secret && index == 0) return@Column
                     Spacer(Modifier.height(10.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (index > 0) TextButton(onClick = { page-- }) { Text("Back") }
                         Spacer(Modifier.weight(1f))
-                        Button(
+                        if (!q.secret) Button(
                             onClick = ::advance,
                             enabled = answered(current) && !submitted,
                             shapes = ButtonDefaults.shapes(),
@@ -180,7 +191,7 @@ fun QuestionPanel(input: InputRequest, onSubmit: (List<UserInputAnswer>) -> Unit
             // The model picker's close, pinned 8dp in so it is concentric with the
             // card's corner: answers nothing, and the agent reads that the questions
             // went unanswered.
-            TonalCircleButton(
+            if (!current.secret) TonalCircleButton(
                 ZIcons.Close,
                 "Close without answering",
                 onClick = ::dismiss,
@@ -188,29 +199,6 @@ fun QuestionPanel(input: InputRequest, onSubmit: (List<UserInputAnswer>) -> Unit
                 size = 36.dp,
                 container = MaterialTheme.colorScheme.surfaceContainerHighest,
             )
-        }
-    }
-}
-
-// A typed answer would cross the relay in the chat document, so a secret is entered on the Mac.
-@Composable
-private fun SecretOnMac(q: UserInputQuestion) {
-    Surface(
-        shape = RoundedCornerShape(28.dp),
-        color = composerContainer(),
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(bottom = 8.dp).testTag("question-secret"),
-    ) {
-        Column(Modifier.padding(16.dp)) {
-            Text(q.header, style = MaterialTheme.typography.titleMediumEmphasized)
-            Spacer(Modifier.height(6.dp))
-            Text(q.question, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(12.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                ZIcon(ZIcons.Key, null, Modifier.size(16.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Enter it on your Mac. It stays out of chat.", style = MaterialTheme.typography.labelLarge)
-            }
         }
     }
 }
