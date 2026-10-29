@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -163,15 +164,15 @@ fun ComputerStillPreview(extras: SessionExtras, working: Boolean, onReceiving: (
     val big = still?.image
     if (enlarged && big != null) {
         Dialog(onDismissRequest = { enlarged = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-            Box(Modifier.fillMaxSize().clickable { enlarged = false }, contentAlignment = Alignment.Center) {
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.85f)).clickable { enlarged = false }, contentAlignment = Alignment.Center) {
                 Image(
                     big,
                     "Computer preview",
                     Modifier
-                        .fillMaxWidth()
                         .padding(16.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color.Black),
+                        .fillMaxWidth()
+                        .aspectRatio(big.width.toFloat() / big.height.coerceAtLeast(1))
+                        .clip(RoundedCornerShape(12.dp)),
                     contentScale = ContentScale.Fit,
                 )
             }
