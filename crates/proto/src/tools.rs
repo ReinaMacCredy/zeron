@@ -205,6 +205,10 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
                 "show_visual",
                 "Show a native interactive visual (chart, table, 3D view) inline in this thread.",
             ),
+            tool(
+                "show_image",
+                "Show an image file (screenshot, photo) inline in this thread.",
+            ),
         ],
     },
     ToolGroupInfo {
@@ -467,7 +471,8 @@ mod tests {
             rules(&[
                 "WebFetch",
                 "mcp__zeron__html_render",
-                "mcp__zeron__show_visual"
+                "mcp__zeron__show_visual",
+                "mcp__zeron__show_image"
             ])
         );
         assert_eq!(rules_on(&disabled, &zeron_unlocked(pages, &ceiling)), 0);

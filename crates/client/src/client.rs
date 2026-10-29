@@ -90,6 +90,13 @@ pub(crate) struct ClientInner {
     /// again would hold the new chat up.
     pub(crate) cloud_repos: Mutex<HashMap<String, crate::cloud::CloudRepoRef>>,
     tree_stats: Mutex<HashMap<String, zeron_proto::SessionStats>>,
+    /// Terminals on other devices: direct link or relay, switching
+    /// mid-session (the desktop engine runs the same hub).
+    pub(crate) remote_terminals: zeron_term_link::remote::RemoteTerminals,
+    /// Wakes terminal streams waiting to reconnect (foreground, network back).
+    pub(crate) terminals_wake: Arc<tokio::sync::Notify>,
+    /// When the app last went to the background.
+    backgrounded_at: Mutex<Option<std::time::Instant>>,
 }
 
 impl Drop for ClientInner {
@@ -507,7 +514,7 @@ impl ClientInner {
     pub(crate) async fn host_rpc(
         self: &Arc<Self>,
         device_id: &str,
-        method: &'static str,
+        method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value> {
         match self.backend() {
@@ -525,6 +532,24 @@ impl ClientInner {
         match self.backend() {
             Backend::Demo(demo) => demo.host_rpc(device_id, method, params).await,
             Backend::Live(live) => live.relay.first(device_id, method, params).await,
+        }
+    }
+
+    /// A host stream (terminal output, a subagent's transcript): the relay's
+    /// subscription live, the demo host's channel offline.
+    pub(crate) async fn host_subscribe(
+        self: &Arc<Self>,
+        device_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<crate::host_stream::HostStream> {
+        match self.backend() {
+            Backend::Demo(demo) => demo.host_subscribe(device_id, method, params).await,
+            Backend::Live(live) => live
+                .relay
+                .subscribe(device_id, method, params)
+                .await
+                .map(crate::host_stream::HostStream::Live),
         }
     }
 
@@ -664,6 +689,9 @@ impl Client {
             harness_catalogs: Mutex::new(HashMap::new()),
             cloud_repos: Mutex::new(HashMap::new()),
             tree_stats: Mutex::new(HashMap::new()),
+            remote_terminals: Default::default(),
+            terminals_wake: Arc::new(tokio::sync::Notify::new()),
+            backgrounded_at: Mutex::new(None),
             credentials: credentials.clone(),
             config,
         });
@@ -1781,6 +1809,78 @@ impl Client {
         Ok(id)
     }
 
+    /// A fresh side chat under `parent_id`: same host, folder, checkout and
+    /// agent settings as its parent, an empty conversation (the desktop's
+    /// "New side chat"; agent-spawned side chats have the same shape).
+    pub fn create_side_chat(&self, parent_id: &str) -> Result<String> {
+        let parent = self
+            .inner
+            .workspace
+            .chat(parent_id)
+            .ok_or_else(|| ClientError::NotFound(parent_id.to_owned()))?;
+        // One level deep: a side chat's own side chat hangs off the root.
+        let root = parent
+            .created_by_chat_id
+            .clone()
+            .unwrap_or_else(|| parent.id.clone());
+        let mut chat = parent;
+        chat.id = crate::new_id();
+        chat.created_by_chat_id = Some(root);
+        chat.title = None;
+        chat.archived = false;
+        chat.created_at = Utc::now();
+        chat.last_message_at = None;
+        chat.last_message_preview = None;
+        chat.last_seen_at = None;
+        chat.harness_session_id = None;
+        chat.harness_session_cwd = None;
+        chat.harness_session_harness = None;
+        chat.room_gen = Some(2);
+        let id = chat.id.clone();
+        self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;
+        Ok(id)
+    }
+
+    /// Fork `source_id` through its latest completed reply into a side chat
+    /// (`ForkSideChat`, answered by the source's host, which copies the
+    /// conversation). A side chat forks as a sibling, under the same parent.
+    pub async fn fork_side_chat(&self, source_id: &str) -> Result<String> {
+        let source = self
+            .inner
+            .workspace
+            .chat(source_id)
+            .ok_or_else(|| ClientError::NotFound(source_id.to_owned()))?;
+        let parent = source
+            .created_by_chat_id
+            .clone()
+            .unwrap_or_else(|| source.id.clone());
+        let chat_id = crate::new_id();
+        let reply = self
+            .inner
+            .host_rpc(
+                &source.device_id,
+                zeron_rpc::methods::FORK_SIDE_CHAT,
+                serde_json::json!({
+                    "chatId": chat_id,
+                    "sourceChatId": source.id,
+                    "parentChatId": parent,
+                }),
+            )
+            .await?;
+        // The host writes the fork's row; it reaches this device through
+        // registry sync on its own time. Hold the reply's copy now so the
+        // fork opens at once (the same row converges when sync lands).
+        match serde_json::from_value::<Chat>(reply) {
+            Ok(chat) => {
+                if self.inner.workspace.chat(&chat.id).is_none() {
+                    self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;
+                }
+                Ok(chat.id)
+            }
+            Err(_) => Ok(chat_id),
+        }
+    }
+
     fn chat_write(
         &self,
         chat_id: &str,
@@ -2610,6 +2710,30 @@ impl Client {
                 live.kick();
                 self.kick_rooms();
             }
+            if online {
+                self.network_path_changed();
+            }
+        }
+    }
+
+    /// The OS network path changed (another interface, a new address): the
+    /// direct connections' paths are gone, so they re-pair now and the
+    /// terminals on them carry on over the relay meanwhile.
+    pub fn network_path_changed(&self) {
+        if let Some(direct) = self.inner.live().and_then(|live| live.direct()) {
+            direct.network_changed();
+        }
+        self.inner.terminals_wake.notify_waiters();
+    }
+
+    /// Start pairing with the device hosting `chat_id`, so a terminal opened
+    /// on it next starts on the direct link (a terminal screen opening).
+    pub fn warm_direct(&self, chat_id: &str) {
+        if let (Some(direct), Ok(device)) = (
+            self.inner.live().and_then(|live| live.direct()),
+            self.chat_host(chat_id),
+        ) {
+            direct.warm(&device);
         }
     }
 
@@ -2618,6 +2742,14 @@ impl Client {
     /// restart PR watches.
     pub fn on_foreground(&self) {
         self.inner.foreground.store(true, Ordering::Release);
+        let away = lock(&self.inner.backgrounded_at)
+            .take()
+            .map(|at| at.elapsed())
+            .unwrap_or_default();
+        if let Some(direct) = self.inner.live().and_then(|live| live.direct()) {
+            direct.foreground(away);
+        }
+        self.inner.terminals_wake.notify_waiters();
         if let Some(live) = self.inner.live() {
             live.kick();
             live.probe_health();
@@ -2632,6 +2764,7 @@ impl Client {
     /// work and PR streams.
     pub fn on_background(&self) {
         self.inner.foreground.store(false, Ordering::Release);
+        *lock(&self.inner.backgrounded_at) = Some(std::time::Instant::now());
         if let Some(live) = self.inner.live() {
             live.relay.stop_watches();
             live.flush_registry(&self.inner);

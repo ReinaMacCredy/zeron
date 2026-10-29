@@ -100,8 +100,8 @@ protocol SessionSource: AnyObject {
     func answerConsent(requestId: String, questionId: String, answer: String)
     func computerStill() async -> (sequence: UInt64, image: UIImage)?
     func computerStop() async throws -> Bool
-    func terminals() async throws -> [TerminalTab]
-    func terminal(_ id: String, dark: Bool) async throws -> TerminalView
+    func terminals() async throws -> [AgentTerminalTab]
+    func terminal(_ id: String, dark: Bool) async throws -> AgentTerminalScreen
     func projectActions() async throws -> ProjectActions?
     func runProjectAction(_ id: String) async throws -> String
     func queueAction(_ id: String, _ action: QueueAction)
@@ -297,8 +297,8 @@ final class FixtureSessionSource: SessionSource {
     func answerConsent(requestId: String, questionId: String, answer: String) {}
     func computerStill() async -> (sequence: UInt64, image: UIImage)? { nil }
     func computerStop() async throws -> Bool { false }
-    func terminals() async throws -> [TerminalTab] { [] }
-    func terminal(_ id: String, dark: Bool) async throws -> TerminalView { throw CancellationError() }
+    func terminals() async throws -> [AgentTerminalTab] { [] }
+    func terminal(_ id: String, dark: Bool) async throws -> AgentTerminalScreen { throw CancellationError() }
     func projectActions() async throws -> ProjectActions? { nil }
     func runProjectAction(_ id: String) async throws -> String { throw CancellationError() }
 
@@ -356,5 +356,7 @@ final class FixtureSessionSource: SessionSource {
 }
 
 extension SessionSource {
+    /// Nothing was ever sent or queued here.
+    var isUnused: Bool { false }
     func signInTarget() -> AgentAccountsViewController.Target? { nil }
 }

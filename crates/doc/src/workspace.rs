@@ -998,6 +998,8 @@ mod tests {
                 profile_id: None,
                 instance_id: None,
                 disabled_tools: Vec::new(),
+                access: Default::default(),
+                plan: false,
             }),
             last_message_preview: None,
             last_message_at: None,
@@ -1085,6 +1087,8 @@ mod tests {
             profile_id: None,
             instance_id: None,
             disabled_tools: Vec::new(),
+            access: Default::default(),
+            plan: false,
         };
         assert!(ws.set_chat_config("chat-1", &config).unwrap());
         let row = ws.chat("chat-1").unwrap().expect("row exists");

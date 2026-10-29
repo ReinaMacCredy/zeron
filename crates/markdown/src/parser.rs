@@ -151,9 +151,11 @@ pub fn parse_full(source: &str) -> BlockTree {
     parse_at(source, 0)
 }
 
-/// A newline typed into a chat box means a new line, not a soft wrap.
-pub fn parse_full_line_breaks(source: &str) -> BlockTree {
-    parse_guarded(source, 0, options(), true)
+/// Parse a message a person typed: like [`parse_full`], but every newline
+/// inside a paragraph is a line break (GFM comments' `breaks`), so a prompt
+/// keeps the lines it was written in.
+pub fn parse_message(source: &str) -> BlockTree {
+    parse_breaking(source, 0, options(), true)
 }
 
 /// `__init__`, `# comment` lines and indented code are plain developer text, so they stay text.
@@ -162,7 +164,7 @@ pub fn user_markdown(text: &str) -> Option<BlockTree> {
         .strip_prefix("Message from ")
         .and_then(|rest| rest.split_once("\n\n"));
     let body = attribution.map_or(text, |(_, body)| body);
-    let mut tree = parse_full_line_breaks(body);
+    let mut tree = parse_message(body);
     let typed = |runs: &[InlineRun]| {
         runs.iter()
             .any(|run| run.style.code || run.style.math || run.style.link.is_some())
@@ -214,15 +216,15 @@ fn parse_at(source: &str, offset: usize) -> BlockTree {
 }
 
 fn parse_with(source: &str, offset: usize, options: Options) -> BlockTree {
-    parse_guarded(source, offset, options, false)
+    parse_breaking(source, offset, options, false)
 }
 
-fn parse_guarded(source: &str, offset: usize, options: Options, line_breaks: bool) -> BlockTree {
+fn parse_breaking(source: &str, offset: usize, options: Options, breaks: bool) -> BlockTree {
     // pulldown-cmark 0.12 can panic on some malformed input (a slice index
     // in its first pass); a message must never take the app down with it.
     // Such a source renders as its plain text.
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        parse_rewritten(source, offset, options, line_breaks)
+        parse_rewritten(source, offset, options, breaks)
     }))
     .unwrap_or_else(|_| BlockTree {
         blocks: vec![Arc::new(TopBlock {
@@ -261,7 +263,7 @@ impl Skip {
 /// text, placed the way the innermost kept container takes children.
 const MAX_NESTING: usize = 32;
 
-fn parse_rewritten(source: &str, offset: usize, options: Options, line_breaks: bool) -> BlockTree {
+fn parse_rewritten(source: &str, offset: usize, options: Options, breaks: bool) -> BlockTree {
     let mut skip = Skip::default();
     // Every rewrite is checked against the parse it produced: a dollar pair
     // or a `\(…\)` pair must come out as exactly one formula, a destination
@@ -318,12 +320,9 @@ fn parse_rewritten(source: &str, offset: usize, options: Options, line_breaks: b
         }
         let events: Vec<(Event, Range<usize>)> = Parser::new_ext(&text, options)
             .into_offset_iter()
-            .map(|(event, range)| {
-                let event = match event {
-                    Event::SoftBreak if line_breaks => Event::HardBreak,
-                    event => event,
-                };
-                (event, to_source(&maps, range))
+            .map(|(event, range)| match event {
+                Event::SoftBreak if breaks => (Event::HardBreak, to_source(&maps, range)),
+                event => (event, to_source(&maps, range)),
             })
             .collect();
         let failed = if skip.all {
@@ -3162,6 +3161,32 @@ mod math_tests {
 
     fn paragraph(runs: Vec<InlineRun>) -> Block {
         Block::Paragraph { runs }
+    }
+
+    #[test]
+    fn message_newlines_are_line_breaks() {
+        let blocks = |tree: BlockTree| -> Vec<Block> {
+            tree.blocks.iter().map(|top| top.block.clone()).collect()
+        };
+        assert_eq!(
+            blocks(parse_message("one\ntwo\n\nthree")),
+            [
+                paragraph(vec![plain("one\ntwo")]),
+                paragraph(vec![plain("three")]),
+            ]
+        );
+        assert_eq!(
+            blocks(parse_full("one\ntwo")),
+            [paragraph(vec![plain("one two")])]
+        );
+        // Fences keep their own newlines either way.
+        assert_eq!(
+            blocks(parse_message("```\na\nb\n```")),
+            [Block::CodeBlock {
+                language: None,
+                code: "a\nb".into(),
+            }]
+        );
     }
 
     #[test]

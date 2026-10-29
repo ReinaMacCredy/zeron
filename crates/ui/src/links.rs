@@ -139,6 +139,8 @@ mod tests {
                 profile_id: None,
                 instance_id: None,
                 disabled_tools: Vec::new(),
+                access: zeron_proto::PermissionMode::Full.access(),
+                plan: false,
             }),
             last_message_preview: None,
             last_message_at: None,

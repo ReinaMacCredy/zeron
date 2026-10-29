@@ -63,6 +63,8 @@ async fn check_persistence(
         sandbox: SandboxLevel::ReadOnly,
         permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: vec![],
         worktree: None,
         branch: None,

@@ -271,6 +271,8 @@ fn chat(id: &str, device_id: &str) -> Chat {
             profile_id: None,
             instance_id: None,
             disabled_tools: Vec::new(),
+            access: Default::default(),
+            plan: false,
         }),
         last_message_preview: None,
         last_message_at: None,

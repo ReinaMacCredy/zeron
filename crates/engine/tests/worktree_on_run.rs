@@ -119,6 +119,8 @@ fn run_payload(message_id: &str, repo_path: &str, space_id: Option<&str>) -> Ses
             sandbox: SandboxLevel::WorkspaceWrite,
             permission_mode: zeron_proto::PermissionMode::Full,
             auto_approve: true,
+            access: Default::default(),
+            plan: false,
             attachments: Vec::new(),
             resume: None,
             worktree: Some(WorktreeSpec {

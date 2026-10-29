@@ -1100,6 +1100,11 @@ impl AccountsPage {
         cx.notify();
     }
 
+    /// Whether a dialog [`Self::dismiss_on_escape`] would close is open.
+    pub(crate) fn has_escape_surface(&self) -> bool {
+        self.api_key.is_some() || self.login.is_some()
+    }
+
     /// Escape that reached Settings unclaimed cancels an open login first,
     /// so it never closes Settings under the dialog. Returns whether it did.
     pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {

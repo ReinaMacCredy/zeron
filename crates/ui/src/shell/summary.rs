@@ -724,7 +724,7 @@ impl Shell {
                 _ => theme.text_faint,
             };
             let chat_id = entry.chat_id.clone();
-            let mut row = SidecarEntry::new("computer", 0, icons::CURSOR, "Computer")
+            let mut row = SidecarEntry::new("computer", 0, icons::COMPUTER_CURSOR, "Computer")
                 .value(Some(SidecarValue::Dot(entry.app.map(Into::into), dot)))
                 .action(move |this, _, cx| this.toggle_computer_entry(&chat_id, cx));
             row.thumbnail = entry.thumbnail.then_some(entry.chat_id);
@@ -2486,11 +2486,8 @@ mod sidecar_regressions {
         let forks = called(cx, &calls, zeron_rpc::methods::FORK_SIDE_CHAT, 1);
         assert_eq!(forks[0]["sourceChatId"], "parent");
         assert_eq!(forks[0]["createdByChatId"], "parent");
-        crate::device_panel::tests::wait(cx, |cx| {
-            shell.read_with(cx, |shell, _| !shell.side_chat_creating)
-        });
 
-        click(cx, "sidecar-collapse");
+        // The fork's progress tab opens the right pane, which folds the sidecar to its rail.
         click(cx, "sidecar-rail-fork-chat-0");
         called(cx, &calls, zeron_rpc::methods::FORK_SIDE_CHAT, 2);
     }

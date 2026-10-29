@@ -89,6 +89,8 @@ fn request(prompt: &str, cwd: &str) -> RunRequest {
         cwd: cwd.into(),
         sandbox: SandboxLevel::ReadOnly,
         permission_mode: zeron_proto::PermissionMode::Full,
+        access: Default::default(),
+        plan: false,
         auto_approve: false,
         attachments: Vec::new(),
         resume: None,

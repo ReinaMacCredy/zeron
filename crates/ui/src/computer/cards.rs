@@ -267,7 +267,7 @@ pub fn approval_card(card: ApprovalCard, theme: &Theme) -> AnyElement {
             .items_center()
             .justify_center()
             .child(
-                crate::icons::icon(crate::icons::CURSOR)
+                crate::icons::icon(crate::icons::COMPUTER_CURSOR)
                     .size(px(16.0))
                     .text_color(theme.text_muted),
             )

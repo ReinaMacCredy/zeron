@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{HarnessId, PermissionMode, ReasoningLevel, SandboxLevel};
+use crate::{AccessMode, HarnessId, PermissionMode, ReasoningLevel, SandboxLevel};
 
 /// Admission limit for new pins. Concurrent offline additions may exceed it;
 /// existing pins remain visible, reorderable and removable without truncation.
@@ -188,6 +188,12 @@ pub struct ChatConfig {
     /// [`crate::tools::ZERON_TOOL_PREFIX`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disabled_tools: Vec<String>,
+    /// The chat's access mode; absent on chats created before modes, which
+    /// ran with full access.
+    #[serde(default, skip_serializing_if = "AccessMode::is_full_access")]
+    pub access: AccessMode,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plan: bool,
 }
 
 /// Immutable-at-run-start repository context owned by one conversation.
@@ -2517,6 +2523,11 @@ pub struct TerminalSession {
     pub cwd: String,
     /// Shell basename (`zsh`, `bash`, …) for the tab label.
     pub shell: String,
+    /// The host answers the terminal's queries itself (device attributes,
+    /// cursor position, …), so a viewer must not answer them too. Absent
+    /// from hosts that predate it, whose viewers answer as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub host_replies: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

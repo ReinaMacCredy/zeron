@@ -14,7 +14,8 @@
 //! - `thread/start` (or `thread/resume`, unarchiving an archived thread; only
 //!   a conversation that is gone falls back to a fresh thread, with a visible
 //!   notice) → `SessionStarted`; `turn/start` carries the prompt, model,
-//!   effort, `sandboxPolicy`, and approval policy.
+//!   effort, `sandboxPolicy`, approval policy and (plan mode) the
+//!   `collaborationMode`.
 //! - Notifications map to [`AgentEvent`]s: agentMessage/reasoning deltas (both
 //!   `delta`/`textDelta` spellings), item lifecycles → typed ToolCall/ToolResult,
 //!   `thread/tokenUsage/updated` → Usage, turn/completed|failed|aborted → Done.
@@ -31,6 +32,10 @@
 //!   Full a stray one is accepted outright. `item/permissions/requestApproval`
 //!   rides the same path. MCP elicitations (sent whatever the policy) are
 //!   asked when they are a flat form and declined otherwise.
+//! - Plan mode is Codex's `plan` collaboration mode. It sticks to the thread
+//!   (across a resume too), so once a thread has planned every turn names
+//!   its mode. The proposed plan arrives as its own `plan` item, rendered
+//!   as reply text.
 //! - Subagents are full child app-server threads. Parent spawn items establish
 //!   their stable ownership; content arriving before the spawn is buffered.
 //!   A registered child's notifications route through an EXPLICIT table
@@ -73,7 +78,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AgentEvent, AnchorRole, Compaction, DoneStatus, HarnessId, Model, ModelOption,
+    AccessMode, AgentEvent, AnchorRole, Compaction, DoneStatus, HarnessId, Model, ModelOption,
     ModelOptionChoice, ReasoningLevel, RunRequest, SlashCommand, SlashCommandKind, SteeringMode,
     UserInputAnswer, UserInputQuestion,
 };
@@ -124,6 +129,24 @@ fn plain_executable(path: PathBuf) -> PathBuf {
         }
     }
     path
+}
+
+/// `thread/start` / `thread/resume` config keys that, set to false, take the
+/// agent tools away (title runs, side-chats-only runs). The app-server merges
+/// that `config` into its `-c` overrides (openai/codex rust-v0.153.4,
+/// codex-rs/app-server/src/config_manager.rs `load_with_cli_overrides`), and
+/// "Setting `agents.enabled=false` disables agent tools"
+/// (docs/research/codex-subagents.md). An enabled `features.multi_agent_v2`
+/// takes precedence over `agents.enabled` (codex-rs/core/config.schema.json).
+const AGENT_TOOLS: [&str; 3] = [
+    "features.multi_agent",
+    "features.multi_agent_v2",
+    "agents.enabled",
+];
+
+/// [`AGENT_TOOLS`] as config overrides that switch them off.
+fn agent_tools_off() -> [(String, Value); 3] {
+    AGENT_TOOLS.map(|key| (key.to_owned(), Value::Bool(false)))
 }
 
 /// The Codex harness. Construct with [`CodexHarness::new`]; tests point it at a
@@ -415,6 +438,21 @@ fn service_tier(request: &RunRequest) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// `turn/start`'s `collaborationMode` (`plan` or `default`). Its settings
+/// take precedence over the turn's model and effort, so they repeat them;
+/// a null `developer_instructions` keeps the mode's built-in ones (0.164.0
+/// schema).
+fn collaboration_mode(plan: bool, model: &str, effort: Option<&str>) -> Value {
+    json!({
+        "mode": if plan { "plan" } else { "default" },
+        "settings": {
+            "model": model,
+            "reasoning_effort": effort,
+            "developer_instructions": null,
+        },
+    })
+}
+
 fn reasoning_level(value: &str) -> Option<ReasoningLevel> {
     Some(match value {
         "minimal" => ReasoningLevel::Minimal,
@@ -688,6 +726,15 @@ impl Harness for CodexHarness {
     fn stops_turn_in_place(&self) -> bool {
         true
     }
+    /// Supervised asks before what codex does not know to be safe, and
+    /// auto-accept edits before stepping outside the workspace sandbox.
+    fn access_modes(&self) -> &[AccessMode] {
+        &AccessMode::ALL
+    }
+    /// Codex's own `plan` collaboration mode.
+    fn supports_plan(&self) -> bool {
+        true
+    }
     /// What the app-server launch and its turns read: the sandbox and
     /// approvals follow the permission mode, and `serviceTier` is the only
     /// model option used.
@@ -696,6 +743,7 @@ impl Harness for CodexHarness {
             && live.model == next.model
             && to_effort(live.reasoning) == to_effort(next.reasoning)
             && service_tier(live) == service_tier(next)
+            && live.plan == next.plan
     }
     /// `turn/start` carries model, effort and service tier, and each sticks
     /// for later turns — so a change applies from the next turn without a
@@ -1359,6 +1407,9 @@ fn thread_params(
                 "approve".into(),
             );
         }
+        if server.side_chats_only() {
+            overrides.extend(agent_tools_off());
+        }
         if request.computer_control {
             // One computer surface per run: Codex's bundled plugins would compete with Zeron's.
             for plugin in COMPETING_BUNDLED_PLUGINS {
@@ -1491,6 +1542,15 @@ async fn start_turn(client: &RpcClient, params: Value) -> Result<String, Harness
     let (method, params) = native.unwrap_or(("turn/start", params));
     let started = client.request(method, params).await?;
     Ok(started["turn"]["id"].as_str().unwrap_or("").to_owned())
+}
+
+/// What `thread/start` / `thread/resume` reports the thread runs with: the
+/// model and effort a collaboration mode falls back to when the request
+/// names none, and whether a resumed thread is still in plan mode.
+struct ThreadMode {
+    model: String,
+    effort: Option<String>,
+    plan: bool,
 }
 
 /// The per-run event loop: one task multiplexing app-server messages, the
@@ -1753,9 +1813,21 @@ async fn run_session(session: Session) {
             .as_str()
             .filter(|model| !model.is_empty())
             .map(str::to_owned);
-        Ok::<_, HarnessError>((thread_id, children, voice_context, model, restore_notice))
+        let thread_mode = ThreadMode {
+            model: thread["model"].as_str().unwrap_or_default().to_owned(),
+            effort: thread["reasoningEffort"].as_str().map(str::to_owned),
+            plan: thread.pointer("/collaborationMode/mode") == Some(&json!("plan")),
+        };
+        Ok::<_, HarnessError>((
+            thread_id,
+            children,
+            voice_context,
+            model,
+            restore_notice,
+            thread_mode,
+        ))
     };
-    let (thread_id, mut children, voice_context, resolved_model, restore_notice) = tokio::select! {
+    let (thread_id, mut children, voice_context, resolved_model, restore_notice, thread_mode) = tokio::select! {
         res = setup => match res {
             Ok(thread_id) => thread_id,
             Err(e) => {
@@ -1788,11 +1860,16 @@ async fn run_session(session: Session) {
         }
     };
 
-    // Model, effort and service tier ride every `turn/start` (each sticks
-    // for later turns): a steer's in-place `config` takes effect from the
-    // next turn the runtime starts.
+    // Model, effort, service tier, access and plan ride every `turn/start`
+    // (each sticks for later turns): a steer's in-place `config` takes
+    // effect from the next turn the runtime starts.
     let mut live = request.clone();
-    let turn_params = |live: &RunRequest, text: &str| -> Value {
+    // Plan mode sticks to the thread, across a resume too (live, 0.164.0).
+    // Once this runtime has asked for it, or the resumed thread is in it,
+    // every turn names its mode so that leaving plan is explicit; a thread
+    // that never planned is sent none, as before modes.
+    let mut names_mode = thread_mode.plan;
+    let mut turn_params = |live: &RunRequest, text: &str| -> Value {
         let mut p = serde_json::Map::new();
         p.insert("threadId".into(), Value::String(thread_id.clone()));
         p.insert("input".into(), prompt_input(text));
@@ -1818,6 +1895,22 @@ async fn run_session(session: Session) {
         }
         if let Some(tier) = service_tier(live) {
             p.insert("serviceTier".into(), Value::String(tier));
+        }
+        names_mode |= live.plan;
+        if names_mode {
+            let model = live.model.as_deref().unwrap_or(&thread_mode.model);
+            let effort = to_effort(live.reasoning).or(thread_mode.effort.as_deref());
+            if model.is_empty() {
+                tracing::warn!(
+                    target: "zeron_harness::codex",
+                    "no model to name the collaboration mode with; leaving it unchanged"
+                );
+            } else {
+                p.insert(
+                    "collaborationMode".into(),
+                    collaboration_mode(live.plan, model, effort),
+                );
+            }
         }
         Value::Object(p)
     };
@@ -2070,12 +2163,21 @@ async fn run_session(session: Session) {
                         }
                         if phase == Phase::Completed {
                             let output = match item_type(item) {
-                                "exitedReviewMode" => item.get("review").and_then(Value::as_str),
-                                "contextCompaction" => Some("Context compacted."),
+                                "exitedReviewMode" => {
+                                    item.get("review").and_then(Value::as_str).map(str::to_owned)
+                                }
+                                "contextCompaction" => Some("Context compacted.".to_owned()),
+                                // Plan mode's proposed plan: Codex lifts it
+                                // out of the agent message into its own item
+                                // (the completed one is authoritative, its
+                                // `item/plan/delta`s may not add up to it).
+                                "plan" => item.get("text").and_then(Value::as_str)
+                                    .filter(|text| !text.trim().is_empty())
+                                    .map(|text| format!("{}\n\n", text.trim_end())),
                                 _ => None,
                             };
                             if let Some(text) = output
-                                && !send(&event_tx, AgentEvent::TextDelta { text: text.into() }).await
+                                && !send(&event_tx, AgentEvent::TextDelta { text }).await
                             { break 'main; }
                         }
                         if matches!(item_type(item), "agentMessage" | "agent_message") {
@@ -3128,11 +3230,10 @@ fn handle_server_request(
             if auto_approve {
                 client.respond(&id, json!({ "action": "accept" }));
             } else {
-                let question = yes_no(
-                    "Approve UI drive".to_owned(),
+                let question = crate::approval::question(
+                    "Approve UI drive",
                     "Codex wants to drive a Zeron Dev app's UI with `ui_driver_drive`, which can \
-                     click its buttons. Allow it?"
-                        .to_owned(),
+                     click its buttons. Allow it?",
                 );
                 let Some(permit) = slot() else { return };
                 ask_approval(
@@ -3262,9 +3363,7 @@ fn ask_approval(
         let answers = (request_input)(vec![question.clone()])
             .await
             .unwrap_or_default();
-        let accept = answers.iter().any(|a| {
-            a.question_id == question.id && a.labels.iter().any(|l| l.eq_ignore_ascii_case("yes"))
-        });
+        let accept = crate::approval::approved(&question, &answers);
         client.respond(&id, reply(accept));
     });
 }
@@ -3347,9 +3446,11 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
         .collect()
 }
 
-/// Synthesize the yes/no question an approval request surfaces to the user.
+/// Synthesize the yes/no question an approval request surfaces to the user
+/// (the shared [`crate::approval`] wording; permissions spell out what
+/// they grant).
 fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
-    let (header, question) = if method.contains("commandExecution") {
+    if method.contains("commandExecution") {
         let command = match params.get("command") {
             Some(Value::String(s)) => s.clone(),
             Some(Value::Array(parts)) => parts
@@ -3359,14 +3460,7 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
                 .join(" "),
             _ => String::new(),
         };
-        (
-            "Approve command".to_owned(),
-            if command.is_empty() {
-                "Codex wants to run a command. Allow it?".to_owned()
-            } else {
-                format!("Codex wants to run `{command}`. Allow it?")
-            },
-        )
+        crate::approval::command("Codex", &command)
     } else if method.contains("permissions") {
         let permissions = &params["permissions"];
         let mut asks = Vec::new();
@@ -3403,8 +3497,8 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
             .filter(|r| !r.is_empty())
             .map(|r| format!(" ({r})"))
             .unwrap_or_default();
-        (
-            "Approve permissions".to_owned(),
+        crate::approval::question(
+            "Approve permissions",
             format!("Codex wants {what}{why}. Allow it?"),
         )
     } else {
@@ -3416,29 +3510,7 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
             .iter()
             .filter_map(|c| c.get("path").and_then(Value::as_str))
             .collect();
-        (
-            "Approve file change".to_owned(),
-            if paths.is_empty() {
-                "Codex wants to modify files. Allow it?".to_owned()
-            } else {
-                format!("Codex wants to modify {}. Allow it?", paths.join(", "))
-            },
-        )
-    };
-    yes_no(header, question)
-}
-
-fn yes_no(header: String, question: String) -> UserInputQuestion {
-    UserInputQuestion {
-        approval: true,
-        id: new_message_id(),
-        header,
-        question,
-        options: vec!["Yes".into(), "No".into()],
-        prefill: None,
-        multiline: false,
-        multi_select: false,
-        kind: None,
+        crate::approval::edit("Codex", &paths)
     }
 }
 
@@ -3511,6 +3583,64 @@ mod tests {
         assert!(!legacy_model_page(&json!({"data":[]})));
     }
 
+    fn run_request(permission_mode: zeron_proto::PermissionMode, plan: bool) -> RunRequest {
+        RunRequest {
+            mcp: None,
+            prompt: String::new(),
+            harness: None,
+            model: Some("gpt-5.6-sol".into()),
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: "/repo".into(),
+            sandbox: permission_mode.sandbox(),
+            auto_approve: permission_mode.auto_approve(),
+            permission_mode,
+            access: permission_mode.access(),
+            plan,
+            attachments: Vec::new(),
+            worktree: None,
+            branch: None,
+            forked_at: None,
+            resume: None,
+            computer_control: false,
+            disabled_tools: Vec::new(),
+            env: Default::default(),
+        }
+    }
+
+    #[test]
+    fn plan_changes_apply_in_place_and_permission_changes_relaunch() {
+        use zeron_proto::PermissionMode;
+        let harness = CodexHarness::new();
+        let live = run_request(PermissionMode::Full, false);
+        let plan = run_request(PermissionMode::Full, true);
+        assert!(!harness.same_runtime(&live, &plan));
+        assert!(harness.reconfigures_in_place(&live, &plan));
+        for mode in [PermissionMode::Ask, PermissionMode::Auto] {
+            assert!(!harness.reconfigures_in_place(&live, &run_request(mode, false)));
+        }
+        let mut moved = run_request(PermissionMode::Full, false);
+        moved.cwd = "/elsewhere".into();
+        assert!(!harness.reconfigures_in_place(&live, &moved));
+        assert!(harness.supports_plan());
+    }
+
+    #[test]
+    fn collaboration_modes_repeat_the_turn_model_and_effort() {
+        assert_eq!(
+            collaboration_mode(true, "gpt-5.6-sol", Some("high")),
+            json!({"mode": "plan", "settings": {
+                "model": "gpt-5.6-sol", "reasoning_effort": "high", "developer_instructions": null,
+            }})
+        );
+        assert_eq!(
+            collaboration_mode(false, "gpt-5.6-sol", None),
+            json!({"mode": "default", "settings": {
+                "model": "gpt-5.6-sol", "reasoning_effort": null, "developer_instructions": null,
+            }})
+        );
+    }
+
     #[test]
     fn approval_questions_are_yes_no() {
         let q = approval_question(
@@ -3518,7 +3648,7 @@ mod tests {
             &json!({"itemId": "c1", "command": "rm -rf /tmp/x"}),
         );
         assert_eq!(q.header, "Approve command");
-        assert!(q.question.contains("rm -rf /tmp/x"));
+        assert_eq!(q.question, "Codex wants to run `rm -rf /tmp/x`. Allow it?");
         assert_eq!(q.options, vec!["Yes".to_string(), "No".to_string()]);
         assert!(!q.multi_select);
 
@@ -3647,6 +3777,8 @@ mod tests {
             cwd: "/w".into(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
             permission_mode: zeron_proto::PermissionMode::Ask,
+            access: zeron_proto::AccessMode::Supervised,
+            plan: false,
             auto_approve: false,
             resume: None,
             attachments: Vec::new(),

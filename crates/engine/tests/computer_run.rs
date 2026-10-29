@@ -274,6 +274,8 @@ fn request(prompt: &str, mode: PermissionMode) -> RunRequest {
         cwd: "/tmp".into(),
         sandbox: SandboxLevel::WorkspaceWrite,
         permission_mode: mode,
+        access: mode.access(),
+        plan: false,
         auto_approve: false,
         attachments: Vec::new(),
         worktree: None,

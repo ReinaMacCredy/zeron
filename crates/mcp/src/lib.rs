@@ -84,6 +84,7 @@ pub fn tool_list() -> Value {
     if let Some(list) = tools.as_array_mut() {
         for (after, tool) in [
             ("html_render", visual::tool()),
+            (visual::TOOL, visual::image_tool()),
             ("context_settings", compact_tool()),
             ("compact", docs::tool()),
             ("project_actions", ui_driver::tool(ui_driver::Tool::Observe)),
@@ -873,6 +874,7 @@ impl ThreadTools {
             "compact" => self.compact(args).await,
             "html_render" => self.html_render(args).await,
             visual::TOOL => self.show_visual(args).await,
+            visual::IMAGE_TOOL => self.show_image(args).await,
             "device_list" | "device_open" | "device_close" => self.device_tool(name, args).await,
             "list_projects" => self.list_projects().await,
             "list_harnesses" => self.list_harnesses().await,
@@ -1945,6 +1947,25 @@ impl ThreadTools {
         Ok(json!({
             "visual": shown,
             "message": "Shown to the reader above your reply. Don't mention or describe the visual; reply with only what it doesn't already say.",
+        }))
+    }
+
+    async fn show_image(&self, args: &Value) -> Result<Value, String> {
+        let path = args["path"].as_str().ok_or("path must be a string")?;
+        let data = visual::read_image(path).await?;
+        let name = std::path::Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "image".into());
+        let shown = self
+            .call_engine(
+                methods::PUBLISH_IMAGE,
+                json!({ "chatId": self.chat_id, "name": name, "data": data }),
+            )
+            .await?;
+        Ok(json!({
+            "image": shown,
+            "message": "Shown to the reader above your reply. Don't mention or describe the image; reply with only what it doesn't already show.",
         }))
     }
 
@@ -3566,7 +3587,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 37] = [
+    const THREAD_TOOLS: [&str; 38] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -3591,6 +3612,7 @@ mod tests {
         "html_preview",
         "html_render",
         "show_visual",
+        "show_image",
         "device_list",
         "device_open",
         "device_screenshot",
@@ -3943,6 +3965,15 @@ mod tests {
                         .push((method.to_string(), params.clone()));
                     Ok(RpcReply::Value(
                         json!({ "id": "v:1", "title": params["title"] }),
+                    ))
+                }
+                methods::PUBLISH_IMAGE => {
+                    self.calls
+                        .lock()
+                        .unwrap()
+                        .push((method.to_string(), params.clone()));
+                    Ok(RpcReply::Value(
+                        json!({ "id": "img:1", "name": params["name"] }),
                     ))
                 }
                 methods::HTML_PREVIEW => {
@@ -5469,6 +5500,50 @@ mod tests {
                 .unwrap_err()
                 .contains("plain file name")
         );
+    }
+
+    #[tokio::test]
+    async fn show_image_sends_the_file_into_the_callers_own_chat() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("before.png");
+        std::fs::write(&file, b"\x89PNG\r\n\x1a\nfixture").unwrap();
+        let rig = computer_rig(Some("live"));
+        let shown = rig
+            .tools
+            .call(
+                "show_image",
+                &json!({ "path": file.to_string_lossy(), "chatId": "other" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(shown["image"]["name"], "before.png");
+        let sent = logged(&rig.calls, methods::PUBLISH_IMAGE);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["chatId"], "a");
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(sent[0]["data"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(data, b"\x89PNG\r\n\x1a\nfixture");
+
+        let missing = rig
+            .tools
+            .call("show_image", &json!({ "path": "/nonexistent/shot.png" }))
+            .await
+            .unwrap_err();
+        assert!(missing.contains("can't read /nonexistent/shot.png"), "{missing}");
+        let huge = dir.path().join("huge.png");
+        std::fs::File::create(&huge)
+            .unwrap()
+            .set_len(zeron_proto::IMAGE_MAX_BYTES as u64 + 1)
+            .unwrap();
+        let error = rig
+            .tools
+            .call("show_image", &json!({ "path": huge.to_string_lossy() }))
+            .await
+            .unwrap_err();
+        assert!(error.contains("over 10 MB"), "{error}");
+        assert_eq!(logged(&rig.calls, methods::PUBLISH_IMAGE).len(), 1);
     }
 
     #[tokio::test]

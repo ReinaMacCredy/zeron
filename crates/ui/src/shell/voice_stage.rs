@@ -58,6 +58,8 @@ impl Shell {
                 profile_id: None,
                 instance_id: None,
                 disabled_tools: Vec::new(),
+                access: zeron_proto::PermissionMode::default().access(),
+                plan: false,
             });
         let saved = settings::current(cx);
         let device = saved.codex_voice_device.unwrap_or(device);
@@ -248,6 +250,9 @@ impl Shell {
                         cx.stop_propagation();
                         this.voice.update(cx, |voice, cx| voice.dismiss_reason(cx));
                     }))
+                    .role(gpui::Role::Button)
+                    .aria_label("Dismiss")
+                    .tooltip(stage_tooltip("Dismiss"))
                     .child(
                         icon(icons::CLOSE)
                             .size(px(14.0))

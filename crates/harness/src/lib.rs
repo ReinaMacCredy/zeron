@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, oneshot};
 pub use tokio_util::sync::CancellationToken;
 
 use zeron_proto::{
-    AgentEvent, Compaction, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
+    AccessMode, AgentEvent, Compaction, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
     SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
@@ -132,6 +132,12 @@ impl ToolServer {
             .map(|(name, value)| (name.clone(), serde_json::Value::String(value.clone())))
             .collect()
     }
+
+    pub fn side_chats_only(&self) -> bool {
+        self.env.iter().any(|(name, value)| {
+            name == zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV && value == "1"
+        })
+    }
 }
 
 impl SteerMessage {
@@ -233,6 +239,9 @@ pub struct RunControls {
     /// Standalone callers without an update coordinator can leave it unset.
     pub execution_lease: Option<std::sync::Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
     /// The run sends questions and awaits answers (blocks the agent, mirrors zeron).
+    /// No answers at all — an empty list, or a dropped sender — is a decline:
+    /// the person closed the questions, or the run stopped waiting. Drivers
+    /// answer it with their protocol's own decline where it has one.
     pub request_input: Box<
         dyn Fn(Vec<UserInputQuestion>) -> oneshot::Receiver<Vec<UserInputAnswer>> + Send + Sync,
     >,
@@ -336,6 +345,18 @@ pub trait Harness: Send + Sync {
             && live.reasoning == next.reasoning
             && same_model_options(&live.model_options, &next.model_options)
             && live.cwd == next.cwd
+            && live.access == next.access
+            && live.plan == next.plan
+    }
+    /// The [`AccessMode`]s this driver honors, least to most trusting. A
+    /// request for any other runs with full access (the composer offers
+    /// only these).
+    fn access_modes(&self) -> &[AccessMode] {
+        &[AccessMode::FullAccess]
+    }
+    /// Whether this driver honors [`RunRequest::plan`].
+    fn supports_plan(&self) -> bool {
+        false
     }
     /// Whether the tool server's guidance (system prompt and profile
     /// instructions) is fixed at launch, so a change needs a new runtime.
@@ -473,6 +494,7 @@ pub(crate) mod adapter_install;
 pub use adapter_install::{
     ensure_npm_tool, installed_npm_tool, installed_npm_versions, npm_tool_launch,
 };
+pub mod approval;
 pub mod archive_install;
 mod catalog;
 mod catalog_failure;
@@ -481,9 +503,11 @@ pub mod redact;
 pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 pub mod claude;
 pub mod codex;
+pub mod agent_ports;
 pub mod cursor;
 pub(crate) mod executable;
 pub mod install;
+pub(crate) mod jsonl_tail;
 pub(crate) mod jsonrpc;
 mod launch;
 pub use launch::LaunchOverrides;
@@ -961,6 +985,7 @@ pub(crate) fn one_shot_request(mut request: RunRequest) -> RunRequest {
     request.model_options.clear();
     request.auto_approve = false;
     request.permission_mode = zeron_proto::PermissionMode::Ask;
+    request.plan = false;
     request.computer_control = false;
     request
 }
@@ -1150,6 +1175,17 @@ mod child_path_tests {
         assert_eq!(plain[0], PathBuf::from("/opt/agents/bin"));
         assert!(!plain.contains(&shims));
     }
+}
+
+/// Drivers that launch without the provider's own subagent tools when the
+/// run's Zeron server is side-chats-only ([`zeron_proto::McpServer::side_chats_only`]),
+/// and get them back on the next launch without it. Not Codex: its driver
+/// starts such a thread, but a thread keeps the multi-agent mode it last ran
+/// with (openai/codex rust-v0.153.4, codex-rs/core/src/session/mod.rs
+/// `resolve_multi_agent_version`), so turning them back on would not reach
+/// a chat that ran while they were off.
+pub fn switches_native_subagents(id: HarnessId) -> bool {
+    matches!(id, HarnessId::ClaudeCode)
 }
 
 #[cfg(test)]

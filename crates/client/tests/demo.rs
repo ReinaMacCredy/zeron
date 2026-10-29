@@ -86,7 +86,10 @@ fn front_page_mirrors_the_desktop_sidebar() {
         ]
     );
     assert_eq!(ids(&ws.archived), ["chat-oklch", "chat-presence"]);
-    assert_eq!(ids(ws.children("chat-veil")), ["chat-side"]);
+    assert_eq!(
+        ids(ws.children("chat-veil")),
+        ["chat-side-easing", "chat-side"]
+    );
     assert!(ws.session("chat-btw").unwrap().sidechat_expired);
 
     let veil = ws.session("chat-veil").unwrap();
@@ -189,9 +192,9 @@ fn step_threads_and_opened_chats_nest_under_their_lead() {
         nested("chat-lead-shelf"),
         ["chat-shelf-3", "chat-shelf-4", "chat-shelf-2", "chat-shelf-1"]
     );
-    assert_eq!(nested("chat-veil"), ["chat-side"]);
+    assert_eq!(nested("chat-veil"), ["chat-side-easing", "chat-side"]);
     for lists in [&ws.front.recent, &ws.front.settled, &ws.front.pinned] {
-        assert!(!ids(lists).iter().any(|id| id.starts_with("chat-shelf-") || *id == "chat-side"));
+        assert!(!ids(lists).iter().any(|id| id.starts_with("chat-shelf-") || id.starts_with("chat-side")));
     }
 }
 
@@ -835,7 +838,9 @@ fn sends_to_an_offline_host_park_as_queued_not_working() {
 fn provider_switch_needs_a_host_that_switches() {
     let (client, _dir) = demo(fast());
     let switched = |chat: &str| {
-        let mut config = client.session_config(chat).expect("demo chats have a config");
+        let mut config = client
+            .session_config(chat)
+            .expect("demo chats have a config");
         use zeron_proto::HarnessId;
         config.harness = if config.harness == HarnessId::Codex {
             HarnessId::ClaudeCode
@@ -1461,6 +1466,8 @@ fn phone_stops_resumes_and_starts_supervisors() {
                 profile_id: None,
                 instance_id: None,
                 disabled_tools: Vec::new(),
+                access: Default::default(),
+                plan: false,
             }),
         ))
         .unwrap();
@@ -1709,6 +1716,8 @@ fn a_new_chat_draft_takes_and_drops_a_profile() {
         profile_id: None,
         instance_id: None,
         disabled_tools: Vec::new(),
+        access: Default::default(),
+        plan: false,
     };
     let rows = rt
         .block_on(client.draft_profile_rows(&device, draft.clone()))

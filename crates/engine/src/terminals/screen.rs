@@ -1,4 +1,4 @@
-//! The UI emulator stays the only responder to terminal queries (DSR, DA):
+//! Terminal queries (DSR, DA) are answered by `replies` or the viewer:
 //! this one drops `PtyWrite`, or every cursor report would arrive twice.
 
 use std::sync::{Arc, Mutex};

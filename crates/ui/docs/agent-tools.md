@@ -38,6 +38,7 @@ Each tool has its own switch in Settings > Tools, under its group. The names are
 | | `agent_profiles` | Create, change, or remove your agent profiles when you ask. See [Agent profiles](zeron://docs/agent-profiles). |
 | **Pages and visuals** | `html_render`, `html_preview` | Show a finished HTML page in the chat, and check a page before showing it: a screenshot, its elements as text, a crop, and clicks or typing step by step. See [Browser](zeron://docs/browser). |
 | | `show_visual` | Show a native, interactive chart, table, or 3D view in the chat. |
+| | `show_image` | Show an image file (a screenshot, a rendered chart, a photo) in the chat. The file is copied in, so it stays after the original changes. |
 | **Device hub** | `device_list`, `device_open`, `device_screenshot`, `device_close` | List simulators and emulators, open one in the Device panel, capture its screen, and close it. See [Device hub](zeron://docs/device-hub). |
 | **Computer** | `computer`, `computer_zeron_browser`, and the `computer_*` tools | See and drive the apps on your Mac (click, type, scroll, screenshots, windows, menus, clipboard) and the Zeron browser tabs (navigate, click, type, uploads, downloads, dialogs). See [Computer use](zeron://docs/computer-use). |
 

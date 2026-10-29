@@ -453,6 +453,8 @@ mod tests {
             profile_id: None,
             instance_id: None,
             disabled_tools: Vec::new(),
+            access: zeron_proto::PermissionMode::default().access(),
+            plan: false,
         };
         let window =
             |config: Option<&zeron_proto::ChatConfig>| with_chat_budget(reported, config).window;

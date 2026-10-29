@@ -64,6 +64,8 @@ async fn main() {
         sandbox: SandboxLevel::WorkspaceWrite,
         permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         resume: None,
         worktree: None,

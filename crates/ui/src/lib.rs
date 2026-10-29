@@ -85,11 +85,13 @@ pub mod quotes;
 pub mod rail;
 pub mod review;
 pub mod route_badge;
+pub(crate) mod reply_images;
 mod roll_text;
 pub mod running_pill;
 mod session_stats;
 pub mod settings;
 pub mod shell;
+pub mod smooth_scroll;
 pub mod sound;
 pub mod state;
 mod supervisor;
@@ -241,7 +243,12 @@ pub fn run_app(config: UiConfig) {
             let drafts = drafts.await;
             let installed_fonts = installed_fonts.await;
             cx.update(move |cx| {
-                let ui_settings = settings::UiSettings::load(&data_dir);
+                let mut ui_settings = settings::UiSettings::load(&data_dir);
+                // Older keymaps stored custom combos as the recording layout typed
+                // them; convert against the layout, which only the app can read.
+                ui_settings
+                    .keymap
+                    .adopt_layout_neutral(&settings::key_equivalents(cx));
                 settings::init(ui_settings.clone(), data_dir.clone(), cx);
                 draft_store::init_loaded(data_dir.clone(), drafts, cx);
                 let font_availability = typography::register_scanned_fonts(installed_fonts, cx);
@@ -385,6 +392,22 @@ pub fn run_app(config: UiConfig) {
                 // synchronously, so `set_menus` reads the final bindings for the ⌘-key
                 // equivalents (gpui snapshots the keymap at set time).
                 cx.set_menus(app_menus::app_menus());
+                // Switching keyboard layout moves the keys behind ⌘-shortcuts (AZERTY
+                // reaches ⌘1 as ⌘&): rebind against the new layout, then refresh the
+                // menu bar's snapshot of the keymap and redraw the hints that name
+                // those keys.
+                cx.on_keyboard_layout_change(|cx| {
+                    let settings = settings::current(cx);
+                    shell::apply_keymap(
+                        cx,
+                        &settings.keymap,
+                        settings.composer_send_behavior,
+                        settings.reasoning_shortcut_modifier,
+                    );
+                    cx.set_menus(app_menus::app_menus());
+                    cx.refresh_windows();
+                })
+                .detach();
                 cx.activate(true);
             });
         })

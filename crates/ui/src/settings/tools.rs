@@ -593,7 +593,7 @@ fn group_icon(group: ToolGroup) -> &'static str {
         ToolGroup::Delegation => icons::BOT,
         ToolGroup::Pages => icons::GLOBE,
         ToolGroup::Devices => icons::SMARTPHONE,
-        ToolGroup::Computer => icons::CURSOR,
+        ToolGroup::Computer => icons::COMPUTER_CURSOR,
     }
 }
 

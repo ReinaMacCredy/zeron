@@ -409,6 +409,8 @@ mod tests {
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
             permission_mode: zeron_proto::PermissionMode::Full,
             auto_approve: false,
+            access: Default::default(),
+            plan: false,
             attachments: Vec::new(),
             worktree: None,
             branch: None,

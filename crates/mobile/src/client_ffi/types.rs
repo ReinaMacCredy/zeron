@@ -155,7 +155,9 @@ pub struct DemoOptions {
     pub stream_speed: StreamSpeed,
     /// Repeat the scripted reply 12× (long streaming stress).
     pub long_reply: bool,
+    #[uniffi(default = false)]
     pub computer_still: bool,
+    #[uniffi(default = false)]
     pub flaky_pages: bool,
 }
 
@@ -965,6 +967,8 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
     type Error = CoreError;
 
     fn try_from(c: ChatConfig) -> CoreResult<Self> {
+        let permission_mode: zeron_proto::PermissionMode =
+            c.permission_mode.map(Into::into).unwrap_or_default();
         Ok(zc::ChatConfig {
             harness: from_wire(&c.harness, "harness")?,
             model: c.model,
@@ -983,11 +987,13 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
                 SandboxLevel::WorkspaceWrite => zeron_proto::SandboxLevel::WorkspaceWrite,
                 SandboxLevel::DangerFullAccess => zeron_proto::SandboxLevel::DangerFullAccess,
             },
-            permission_mode: c.permission_mode.map(Into::into).unwrap_or_default(),
+            permission_mode,
             instructions: c.instructions,
             profile_id: c.profile_id,
             instance_id: c.instance_id,
             disabled_tools: c.disabled_tools,
+            access: permission_mode.access(),
+            plan: false,
         })
     }
 }
@@ -999,7 +1005,9 @@ impl ChatConfig {
         if let Some(existing) = existing {
             if keep_mode {
                 config.permission_mode = existing.permission_mode;
+                config.access = existing.permission_mode.access();
             }
+            config.plan = existing.plan;
             config.instructions = existing.instructions;
             config.disabled_tools = existing.disabled_tools;
             if existing.harness != config.harness && config.instance_id == existing.instance_id {
@@ -1283,6 +1291,8 @@ mod tests {
             profile_id: Some("planner".into()),
             instance_id: None,
             disabled_tools: vec!["mcp__zeron__computer".into()],
+            access: Default::default(),
+            plan: false,
         };
         let mut edit = ChatConfig::from(&existing);
         edit.reasoning = Some("high".into());
@@ -1324,6 +1334,8 @@ mod tests {
             profile_id: None,
             instance_id: Some("acp_gemini".into()),
             disabled_tools: Vec::new(),
+            access: Default::default(),
+            plan: false,
         };
         let edit = ChatConfig::from(&existing);
         assert_eq!(edit.harness, "acp");

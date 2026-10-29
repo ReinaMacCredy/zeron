@@ -18,8 +18,10 @@
 //!   turn (`cancelled` → Interrupted, `refusal` → Errored, else Completed).
 //! - `session/update` notifications normalize per [`normalize::map_update`].
 //! - Permission requests auto-accept with the agent's preferred allow option
-//!   (zeron sessions run unattended); question-shaped requests block on the
-//!   engine's input bridge.
+//!   under the Full permission mode; under Ask/Auto the session mode follows
+//!   the permission mode and each permission is asked as a yes/no question
+//!   ([`permission`]). Question-shaped requests block on the engine's input
+//!   bridge.
 //! - Steering: agents advertising `_session/steering` get mid-turn injection;
 //!   others queue steers and deliver them as the next `session/prompt` at the
 //!   turn boundary. The session stays parked between turns while the
@@ -32,6 +34,7 @@
 mod antigravity_paths;
 mod devin_models;
 pub(crate) mod normalize;
+mod permission;
 mod subagent;
 mod subagent_devin;
 mod system_message;
@@ -49,7 +52,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AcpAuthMethod, AgentEvent, Compaction, DoneStatus, HarnessId, Model, ModelOption,
+    AccessMode, AcpAuthMethod, AgentEvent, Compaction, DoneStatus, HarnessId, Model, ModelOption,
     ModelOptionChoice, ReasoningLevel, RunRequest, SlashCommand, SlashCommandKind, SteeringMode,
     UserInputAnswer, UserInputQuestion,
 };
@@ -163,11 +166,16 @@ struct AcpAgentSpec {
     /// A prompt cancelled before it produced anything vanishes from the
     /// agent's history (Grok, verified live); preemption re-sends its text.
     drops_unstarted_cancelled_prompt: bool,
+    /// The access modes the agent lists as honored.
+    access_modes: &'static [AccessMode],
 }
 
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| value.to_string()).collect()
 }
+
+/// Only full access: the agent decides its own approvals.
+const FULL_ACCESS_ONLY: &[AccessMode] = &[AccessMode::FullAccess];
 
 fn identity_transform(_reasoning: Option<ReasoningLevel>, text: &str) -> String {
     text.to_owned()
@@ -297,6 +305,9 @@ fn grok_spec() -> AcpAgentSpec {
         skill_dirs: |_| Vec::new(),
         hidden_commands: Vec::new(),
         drops_unstarted_cancelled_prompt: true,
+        // Grok's Auto mode approves through its own classifier and asks only
+        // about what it would deny, so most actions never reach a permission.
+        access_modes: FULL_ACCESS_ONLY,
     }
 }
 
@@ -376,6 +387,9 @@ fn devin_spec() -> AcpAgentSpec {
         skill_dirs: |_| Vec::new(),
         hidden_commands: Vec::new(),
         drops_unstarted_cancelled_prompt: false,
+        // Only Devin's `bypass` mode value is known; which of its others
+        // asks before every command and edit is not.
+        access_modes: FULL_ACCESS_ONLY,
     }
 }
 
@@ -448,6 +462,9 @@ fn hermes_spec() -> AcpAgentSpec {
         skill_dirs: |_| Vec::new(),
         hidden_commands: Vec::new(),
         drops_unstarted_cancelled_prompt: false,
+        // Hermes advertises no session mode, and nothing shows it asking
+        // before every command and edit.
+        access_modes: FULL_ACCESS_ONLY,
     }
 }
 
@@ -1186,6 +1203,7 @@ fn antigravity_spec() -> AcpAgentSpec {
         skill_dirs: antigravity_skill_dirs_in,
         hidden_commands: Vec::new(),
         drops_unstarted_cancelled_prompt: false,
+        access_modes: &AccessMode::ALL,
     }
 }
 
@@ -1227,6 +1245,7 @@ fn generic_spec(display_name: String, executable: String, args: Vec<String>) -> 
         skill_dirs: |_| Vec::new(),
         hidden_commands: Vec::new(),
         drops_unstarted_cancelled_prompt: false,
+        access_modes: FULL_ACCESS_ONLY,
     }
 }
 
@@ -1405,6 +1424,12 @@ impl AcpHarness {
         }
     }
 
+    /// What a run's setup and control calls allow unasked, where no one can
+    /// be asked: the run's permission mode, for every agent.
+    fn access_for(request: &RunRequest) -> AccessMode {
+        request.permission_mode.access()
+    }
+
     /// Devin (`devin acp`) — Cognition's native ACP server.
     pub fn devin() -> Self {
         Self::with_spec(devin_spec())
@@ -1483,7 +1508,14 @@ impl AcpHarness {
             client
                 .request("initialize", initialize_params(self.spec.id))
                 .await?;
-            request_draining(&client, &mut incoming, "logout", json!({})).await
+            request_draining(
+                &client,
+                &mut incoming,
+                AccessMode::FullAccess,
+                "logout",
+                json!({}),
+            )
+            .await
         };
         let result = tokio::time::timeout(SIGN_OUT_TIMEOUT, flow).await;
         client.close_stdin_for_teardown();
@@ -1669,6 +1701,7 @@ impl AcpHarness {
             request_draining(
                 &client,
                 &mut incoming,
+                AccessMode::FullAccess,
                 "authenticate",
                 json!({ "methodId": method }),
             )
@@ -2361,7 +2394,7 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
 }
 
 /// A session config option surfaced as a Traits-dropdown section. Mode is
-/// zeron's own (forced to the no-prompts choice), model rides the model rows,
+/// zeron's own (set from the run's access mode), model rides the model rows,
 /// and thought_level is the Reasoning ladder — everything else the agent
 /// advertises (fast mode, collaboration mode, agent persona, …) passes
 /// through. `currentValue` doubles as the default: it is the state the
@@ -2508,6 +2541,11 @@ impl Harness for AcpHarness {
             }
             _ => Compaction::None,
         }
+    }
+    /// Per agent (see `AcpAgentSpec::access_modes`). None of them advertises
+    /// a plan session mode, so plan mode is not offered.
+    fn access_modes(&self) -> &[AccessMode] {
+        self.spec.access_modes
     }
 
     /// The agent's own CLI, not the adapter: `claude` counts as installed even
@@ -2748,6 +2786,7 @@ impl Harness for AcpHarness {
             incoming,
             event_tx,
             controls,
+            access: Self::access_for(&request),
             request,
             skills,
             harness: self.spec.id,
@@ -2811,6 +2850,8 @@ struct Session {
     request: RunRequest,
     /// Skill names the `$name` rewrite recognizes (the spec's `SKILL.md` dirs).
     skills: Vec<String>,
+    /// What the run's setup and control calls allow unasked (`access_for`).
+    access: AccessMode,
     harness: HarnessId,
     agent_name: String,
     prompt_complete_extension: bool,
@@ -2866,12 +2907,15 @@ impl DevinCatalog {
     }
 }
 
-/// How a session selects a run's model, effort and model options.
+/// How a session selects a run's model, effort, model options and session
+/// mode.
 #[derive(Clone, Copy)]
 struct ConfigRules {
     harness: HarnessId,
     effort_in_model_id: bool,
     effort_values: fn(Option<ReasoningLevel>, Option<&str>) -> Vec<&'static str>,
+    /// Fixed for the agent's life (see `reconfigures_in_place`).
+    access: AccessMode,
 }
 
 fn initialize_params(harness: HarnessId) -> Value {
@@ -3114,15 +3158,17 @@ fn validate_config_model_selection(
 }
 
 fn is_model_config_option(session_response: &Value, config_id: &str) -> bool {
+    config_option_category(session_response, config_id) == Some("model")
+}
+
+fn config_option_category<'a>(session_response: &'a Value, config_id: &str) -> Option<&'a str> {
     session_response
         .get("configOptions")
-        .and_then(Value::as_array)
-        .is_some_and(|options| {
-            options.iter().any(|option| {
-                option.get("id").and_then(Value::as_str) == Some(config_id)
-                    && option.get("category").and_then(Value::as_str) == Some("model")
-            })
-        })
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|option| option.get("id").and_then(Value::as_str) == Some(config_id))?
+        .get("category")
+        .and_then(Value::as_str)
 }
 
 /// The `session/set_config_option` calls a session response's `configOptions`
@@ -3131,6 +3177,8 @@ fn is_model_config_option(session_response: &Value, config_id: &str) -> bool {
 ///   option composes the `<model>[1m]` id first, the CLI's own convention),
 /// - the effort (category `thought_level`, first advertised value from the
 ///   spec's preference list),
+/// - the session mode (category `mode`) for the permission mode (see
+///   [`mode_preferences`]),
 /// - any remaining `model_options` matched by normalized id — selects take
 ///   the choice id, booleans take `on`/`true` truthiness (fastMode, thinking).
 ///
@@ -3383,7 +3431,9 @@ fn prompt_turn_with_context(
 fn mode_preferences(mode: zeron_proto::PermissionMode) -> &'static [&'static str] {
     match mode {
         zeron_proto::PermissionMode::Ask => &["default", "ask", "askPermissions", "read-only"],
-        zeron_proto::PermissionMode::Auto => &["acceptEdits", "accept_edits", "auto", "agent"],
+        zeron_proto::PermissionMode::Auto => {
+            &["acceptEdits", "accept_edits", "auto_edit", "auto", "agent"]
+        }
         zeron_proto::PermissionMode::Full => &[
             "bypassPermissions",
             "bypass_permissions",
@@ -3545,14 +3595,41 @@ impl PendingQuestions {
     }
 }
 
+/// [`handle_server_request`] where no one can be asked (setup, a control
+/// call). A run that is not in full access is allowed only what its mode
+/// covers; any other permission is refused, never allowed silently.
+fn handle_server_request_unattended(
+    client: &RpcClient,
+    id: Value,
+    method: &str,
+    params: &Value,
+    access: AccessMode,
+) -> Vec<AgentEvent> {
+    if method != "session/request_permission" || access.is_full_access() {
+        return handle_server_request(client, id, method, params);
+    }
+    let options = permission_options(params);
+    let allow = !is_user_question(&options) && permission::allowed_without_asking(access, params);
+    client.respond(&id, permission::outcome(&options, allow));
+    Vec::new()
+}
+
+fn permission_options(params: &Value) -> Vec<Value> {
+    params
+        .get("options")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
 /// The live-run request handler: under Full, tool permissions auto-accept
-/// like [`handle_server_request`]; under Ask/Auto they become a question
-/// too. Question-shaped requests (and, under Ask/Auto, tool permissions)
-/// block on the engine's input bridge (in a subtask so the message loop
-/// keeps flowing) and answer with the option whose name matches the chosen
-/// label. A tool permission never offers the agent's `allow_always` options
-/// (an approval must not persist a grant). A dropped resolver degrades to
-/// `cancelled` — never a silent allow.
+/// like [`handle_server_request`]; under Ask/Auto each becomes a yes/no
+/// question (see [`permission`]). Question-shaped requests block on the
+/// engine's input bridge, answered with the option whose name matches the
+/// chosen label. Either waits in a subtask so the message loop keeps
+/// flowing, and a dropped resolver degrades to a refusal or `cancelled` —
+/// never a silent allow.
+#[allow(clippy::too_many_arguments)]
 fn handle_server_request_live(
     client: &RpcClient,
     id: Value,
@@ -3563,6 +3640,7 @@ fn handle_server_request_live(
     request_input: &std::sync::Arc<RequestInputFn>,
     session_id: &str,
     questions: &mut PendingQuestions,
+    agent_name: &str,
 ) -> Vec<AgentEvent> {
     if params
         .get("sessionId")
@@ -3575,32 +3653,34 @@ fn handle_server_request_live(
     if method != "session/request_permission" {
         return handle_server_request(client, id, method, params);
     }
-    let mut options: Vec<Value> = params
-        .get("options")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let tool_permission = !is_user_question(&options);
-    // The engine's consent card is the only prompt a Zeron computer call gets.
-    if tool_permission
-        && allow_computer_calls
-        && is_zeron_computer_permission(params)
-        && let Some(option_id) = options
-            .iter()
-            .find(|o| o.get("kind").and_then(Value::as_str) == Some("allow_once"))
-            .and_then(|o| o.get("optionId").and_then(Value::as_str))
-    {
-        client.respond(
-            &id,
-            json!({ "outcome": { "outcome": "selected", "optionId": option_id } }),
-        );
+    let options = permission_options(params);
+    if !is_user_question(&options) {
+        // The engine's consent card is the only prompt a Zeron computer call gets.
+        if allow_computer_calls
+            && is_zeron_computer_permission(params)
+            && let Some(option_id) = options
+                .iter()
+                .find(|o| o.get("kind").and_then(Value::as_str) == Some("allow_once"))
+                .and_then(|o| o.get("optionId").and_then(Value::as_str))
+        {
+            client.respond(
+                &id,
+                json!({ "outcome": { "outcome": "selected", "optionId": option_id } }),
+            );
+            return Vec::new();
+        }
+        if permission_mode == zeron_proto::PermissionMode::Full {
+            return handle_server_request(client, id, method, params);
+        }
+        let question = permission::question(agent_name, params);
+        let request_input = std::sync::Arc::clone(request_input);
+        questions.spawn(client.clone(), id, async move {
+            let answers = (request_input)(vec![question.clone()])
+                .await
+                .unwrap_or_default();
+            permission::outcome(&options, crate::approval::approved(&question, &answers))
+        });
         return Vec::new();
-    }
-    if tool_permission && permission_mode == zeron_proto::PermissionMode::Full {
-        return handle_server_request(client, id, method, params);
-    }
-    if tool_permission {
-        options.retain(|o| o.get("kind").and_then(Value::as_str) != Some("allow_always"));
     }
     let names: Vec<String> = options
         .iter()
@@ -3612,7 +3692,7 @@ fn handle_server_request_live(
         })
         .collect();
     let question = UserInputQuestion {
-        approval: tool_permission,
+        approval: false,
         id: new_message_id(),
         header: "Agent question".into(),
         question: params
@@ -3809,6 +3889,7 @@ async fn open_session(
     init: &Value,
     harness: HarnessId,
     request: &RunRequest,
+    access: AccessMode,
     agent_name: &str,
     mcp_servers: &[Value],
     load_timeout: Duration,
@@ -3825,7 +3906,7 @@ async fn open_session(
         let restored = if method == "session/load" {
             tokio::time::timeout(
                 load_timeout,
-                request_draining(client, incoming, method, restore),
+                request_draining(client, incoming, access, method, restore),
             )
             .await
             .unwrap_or_else(|_| {
@@ -3835,7 +3916,7 @@ async fn open_session(
                 )))
             })
         } else {
-            request_draining(client, incoming, method, restore).await
+            request_draining(client, incoming, access, method, restore).await
         };
         match restored {
             Ok(response) => return Ok((resume.clone(), response)),
@@ -3859,7 +3940,7 @@ async fn open_session(
             }
         }
     }
-    let new = request_draining(client, incoming, "session/new", params).await?;
+    let new = request_draining(client, incoming, access, "session/new", params).await?;
     let session_id = new
         .get("sessionId")
         .and_then(Value::as_str)
@@ -3894,6 +3975,7 @@ fn run_auth_method(init: &Value) -> Result<Option<String>, String> {
 async fn authenticate_for_run(
     client: &RpcClient,
     incoming: &mut mpsc::Receiver<Incoming>,
+    access: AccessMode,
     init: &Value,
     agent_name: &str,
     required: &HarnessError,
@@ -3911,6 +3993,7 @@ async fn authenticate_for_run(
     request_draining(
         client,
         incoming,
+        access,
         "authenticate",
         json!({ "methodId": method }),
     )
@@ -4074,10 +4157,11 @@ fn effort_variant_id(
 /// Await a setup request while draining incoming messages, so a `session/load`
 /// whose replay outruns the incoming channel's capacity can't deadlock the
 /// reader. Replayed `session/update`s are dropped (the doc already holds the
-/// history); server requests are answered.
+/// history); server requests are answered unattended under `access`.
 async fn request_draining(
     client: &RpcClient,
     incoming: &mut mpsc::Receiver<Incoming>,
+    access: AccessMode,
     method: &'static str,
     params: Value,
 ) -> Result<Value, HarnessError> {
@@ -4094,7 +4178,7 @@ async fn request_draining(
             {
                 client.respond(&id, json!({"outcome": {"outcome": "cancelled"}}));
             } else {
-                handle_server_request(client, id, &method, &params);
+                handle_server_request_unattended(client, id, &method, &params, access);
             }
         }
         Incoming::Notification { method, params }
@@ -4186,12 +4270,13 @@ async fn drain_discovery_incoming(client: RpcClient, mut incoming: mpsc::Receive
 async fn control_request(
     client: &RpcClient,
     incoming: &mut mpsc::Receiver<Incoming>,
+    access: AccessMode,
     method: &'static str,
     params: Value,
 ) -> Result<Value, HarnessError> {
     tokio::time::timeout(
         CONTROL_REQUEST_TIMEOUT,
-        request_draining(client, incoming, method, params),
+        request_draining(client, incoming, access, method, params),
     )
     .await
     .unwrap_or_else(|_| {
@@ -4281,6 +4366,7 @@ async fn select_session_config(
             &mut session_response,
             &model,
             &selection.members,
+            rules.access,
         )
         .await?;
         request.model = Some(advertised);
@@ -4318,6 +4404,7 @@ async fn select_session_config(
         control_request(
             client,
             incoming,
+            rules.access,
             "session/set_model",
             json!({
                 "sessionId": session_id,
@@ -4369,6 +4456,7 @@ async fn select_session_config(
             match control_request(
                 client,
                 incoming,
+                rules.access,
                 "session/set_config_option",
                 Value::Object(params),
             )
@@ -4396,6 +4484,17 @@ async fn select_session_config(
                         return Err(HarnessError::Protocol(format!(
                             "agent rejected requested model {}: {e}",
                             requested_model.as_deref().unwrap_or_default()
+                        )));
+                    }
+                    // Left in a mode that approves on its own, a run that
+                    // asks would never see a permission: it must not start.
+                    if !rules.access.is_full_access()
+                        && config_option_category(&options_snapshot, &config_id) == Some("mode")
+                    {
+                        return Err(HarnessError::Protocol(format!(
+                            "agent rejected session mode {} for {}: {e}",
+                            payload["value"],
+                            rules.access.label()
                         )));
                     }
                     tracing::debug!(
@@ -4432,6 +4531,7 @@ async fn run_session(session: Session) {
         controls,
         mut request,
         skills,
+        access,
         harness,
         agent_name,
         prompt_complete_extension,
@@ -4470,6 +4570,7 @@ async fn run_session(session: Session) {
         harness,
         effort_in_model_id,
         effort_values,
+        access,
     };
 
     // ---- handshake + session (interruptible) ------------------------------
@@ -4514,6 +4615,7 @@ async fn run_session(session: Session) {
                 &init,
                 harness,
                 &request,
+                access,
                 &agent_name,
                 &mcp_servers,
                 session_load_timeout,
@@ -4526,7 +4628,8 @@ async fn run_session(session: Session) {
                 }
                 Err(e) if is_auth_required(&e) && !authenticated => {
                     authenticated = true;
-                    authenticate_for_run(&client, &mut incoming, &init, &agent_name, &e).await?;
+                    authenticate_for_run(&client, &mut incoming, access, &init, &agent_name, &e)
+                        .await?;
                 }
                 Err(e) if is_auth_required(&e) => {
                     return Err(HarnessError::Protocol(signed_out(&agent_name, &e)));
@@ -4981,6 +5084,7 @@ async fn run_session(session: Session) {
                                 allow_computer_calls,
                                 &request_input,
                                 &session_id, &mut questions,
+                                &agent_name,
                             ) {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -5202,6 +5306,7 @@ async fn run_session(session: Session) {
                         allow_computer_calls,
                         &request_input,
                         &session_id, &mut questions,
+                        &agent_name,
                     ) {
                         if !send(&event_tx, ev).await {
                             break 'main;
@@ -5314,6 +5419,7 @@ async fn run_session(session: Session) {
                                         allow_computer_calls,
                                         &request_input,
                                 &session_id, &mut questions,
+                                &agent_name,
                                     ) {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
@@ -7328,6 +7434,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn antigravity_mode_config_option_follows_the_permission_mode() {
+        // agy_acp_server's mode select.
+        let antigravity = |current: &str| {
+            json!({
+                "sessionId": "agy-1",
+                "configOptions": [{
+                    "id": "mode",
+                    "category": "mode",
+                    "type": "select",
+                    "currentValue": current,
+                    "options": [
+                        { "value": "default" },
+                        { "value": "auto_edit" },
+                        { "value": "yolo" },
+                    ],
+                }],
+            })
+        };
+        let no_opts = serde_json::Map::new();
+        let sets = |current, permission_mode| {
+            config_option_sets(&antigravity(current), None, &[], &no_opts, permission_mode)
+        };
+        let mode = |value: &str| vec![("mode".to_owned(), json!({ "value": value }))];
+        assert_eq!(sets("default", PermissionMode::Full), mode("yolo"));
+        assert_eq!(sets("yolo", PermissionMode::Ask), mode("default"));
+        assert_eq!(sets("auto_edit", PermissionMode::Ask), mode("default"));
+        assert_eq!(sets("default", PermissionMode::Ask), Vec::new());
+        assert_eq!(sets("yolo", PermissionMode::Auto), mode("auto_edit"));
+        assert_eq!(sets("auto_edit", PermissionMode::Auto), Vec::new());
+    }
+
     fn antigravity_signed_in_catalog() -> Value {
         json!({
             "configOptions": [{
@@ -7585,7 +7723,13 @@ async fn setup_retains_bounded_session_metadata_before_response() {
         RpcClient::new(child.stdin.take().unwrap(), child.stdout.take().unwrap());
     let result = tokio::time::timeout(
         Duration::from_secs(5),
-        request_draining(&client, &mut incoming, "session/new", json!({})),
+        request_draining(
+            &client,
+            &mut incoming,
+            AccessMode::FullAccess,
+            "session/new",
+            json!({}),
+        ),
     )
     .await
     .unwrap()

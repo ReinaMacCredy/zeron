@@ -8,7 +8,7 @@ final class ProjectActionsViewController: UITableViewController {
     private var actions: ProjectActions?
     private var loaded = false
     private var runs: [String: String] = [:]
-    private var tabs: [String: TerminalTab] = [:]
+    private var tabs: [String: AgentTerminalTab] = [:]
     private var starting: Set<String> = []
     private var poll: Task<Void, Never>?
 

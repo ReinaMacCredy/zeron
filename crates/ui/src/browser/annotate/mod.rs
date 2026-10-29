@@ -426,16 +426,16 @@ mod host {
             self.native.is_some() && self.page.url.is_some() && self.page.error.is_none()
         }
 
-        pub(crate) fn toggle_annotation(&mut self, cx: &mut Context<Self>) {
-            if self.annotation.active() {
+        pub(crate) fn toggle_annotate(&mut self, cx: &mut Context<Self>) {
+            if self.annotate_state.active() {
                 self.cancel_annotation(cx);
             } else {
-                self.start_annotation(cx);
+                self.start_annotate(cx);
             }
         }
 
-        pub(crate) fn start_annotation(&mut self, cx: &mut Context<Self>) {
-            if self.annotation.active() || !self.annotation_available() {
+        pub(crate) fn start_annotate(&mut self, cx: &mut Context<Self>) {
+            if self.annotate_state.active() || !self.annotation_available() {
                 return;
             }
             let Some(native) = &self.native else {
@@ -450,7 +450,7 @@ mod host {
             self.annotation_document = native.document();
             let was_paused = self.control.paused;
             self.take_over(cx);
-            self.annotation = AnnotationState::begin(was_paused);
+            self.annotate_state = AnnotationState::begin(was_paused);
             self.annotation_task = Some(cx.spawn(async move |this, cx| {
                 let picked = match picked.await {
                     Err(_) | Ok(Ok(serde_json::Value::Null)) => None,
@@ -465,7 +465,7 @@ mod host {
                     let _ = this.update(cx, |this, cx| {
                         this.end_annotation(cx);
                         if unreadable {
-                            cx.emit(BrowserEvent::Annotation(AnnotationCapture {
+                            cx.emit(BrowserEvent::AnnotationCapture(AnnotationCapture {
                                 appshot: None,
                                 draft: String::new(),
                             }));
@@ -482,7 +482,7 @@ mod host {
                     .collect();
                 let grab = grab_script(&ids);
                 let Ok(Some((snapshot, context))) = this.update(cx, |this, cx| {
-                    this.annotation.capturing();
+                    this.annotate_state.capturing();
                     cx.notify();
                     this.native.as_ref().map(|native| {
                         (
@@ -519,14 +519,14 @@ mod host {
                     }
                     let capture = this.annotation_capture(picked, png);
                     this.end_annotation(cx);
-                    cx.emit(BrowserEvent::Annotation(capture));
+                    cx.emit(BrowserEvent::AnnotationCapture(capture));
                 });
             }));
             cx.notify();
         }
 
         pub(crate) fn cancel_annotation(&mut self, cx: &mut Context<Self>) {
-            if !self.annotation.active() {
+            if !self.annotate_state.active() {
                 return;
             }
             if let Some(native) = &self.native {
@@ -537,7 +537,7 @@ mod host {
         }
 
         fn end_annotation(&mut self, cx: &mut Context<Self>) {
-            if self.annotation.end() && self.control.paused {
+            if self.annotate_state.end() && self.control.paused {
                 self.resume_control(cx);
             }
             cx.notify();
@@ -590,7 +590,7 @@ mod host {
                 }
                 tracing::info!("annotate-demo: idle");
                 wait(6000).await;
-                let _ = this.update(cx, |this, cx| this.start_annotation(cx));
+                let _ = this.update(cx, |this, cx| this.start_annotate(cx));
                 for (label, script) in DEMO_STEPS {
                     wait(1500).await;
                     let _ = this.update(cx, |this, _| {

@@ -113,6 +113,9 @@ if has "$line" '"method":"thread/resume"'; then
     read -r line || exit 1
     has "$line" '"method":"thread/resume"' || exit 1
     emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-unarchived\"}}}"
+  elif has "$line" '"threadId":"resume-in-plan"'; then
+    # A thread left in plan mode (live 0.164.0 resume shape).
+    emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\"},\"model\":\"gpt-resumed\",\"reasoningEffort\":\"medium\",\"collaborationMode\":{\"mode\":\"plan\",\"settings\":{\"model\":\"gpt-resumed\",\"reasoning_effort\":\"medium\",\"developer_instructions\":\"# Plan Mode\"}}}}"
   elif has "$line" '"threadId":"resume-broken"'; then
     # A failure a fresh thread would share: no thread/start may follow.
     emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32603,\"message\":\"failed to load configuration\"}}"
@@ -262,8 +265,17 @@ case "$turnline" in
   emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
   ;;
 
+*scenario:view-image*)
+  # `view_image` (live 0.164.0 shape): started and completed arrive together.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"item/started","params":{"item":{"type":"imageView","id":"exec-view-1","path":"/Users/me/Documents/Codex/mockup.png"},"threadId":"th-1","turnId":"t-1","startedAtMs":1792848136768},"emittedAtMs":1792848136769}'
+  emit '{"method":"item/completed","params":{"item":{"type":"imageView","id":"exec-view-1","path":"/Users/me/Documents/Codex/mockup.png"},"threadId":"th-1","turnId":"t-1","completedAtMs":1792848136769},"emittedAtMs":1792848136772}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"m1","delta":"The preview is above."}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+
 *scenario:title*)
-  for want in '"sandbox":"read-only"' '"ephemeral":true' '"baseInstructions":"You generate session titles.' '"features.shell_tool":false' '"mcp_servers.test.enabled":false' '"environments":[]' '"skills.include_instructions":false' '"features.plugins":false'; do
+  for want in '"sandbox":"read-only"' '"ephemeral":true' '"baseInstructions":"You generate session titles.' '"features.shell_tool":false' '"mcp_servers.test.enabled":false' '"environments":[]' '"skills.include_instructions":false' '"features.plugins":false' '"features.multi_agent":false' '"features.multi_agent_v2":false' '"agents.enabled":false'; do
     has "$thread_line" "$want" || { fail_turn "$tid" "title restriction missing"; exit 0; }
   done
   has "$turnline" '"sandboxPolicy":{"type":"readOnly"}' || { fail_turn "$tid" "title turn not read-only"; exit 0; }
@@ -325,6 +337,14 @@ case "$turnline" in
     '"serviceTier":"fast"'; do
     has "$thread_line" "$want" || { fail_turn "$tid" "thread param missing: $want"; exit 0; }
   done
+  # Full keeps its approvals with the person and names no plan mode.
+  for want in '"approvalsReviewer":"user"'; do
+    has "$thread_line" "$want" && has "$turnline" "$want" ||
+      { fail_turn "$tid" "full param missing: $want"; exit 0; }
+  done
+  if has "$thread_line" 'collaborationMode' || has "$turnline" 'collaborationMode'; then
+    fail_turn "$tid" "full sent collaborationMode"; exit 0
+  fi
   for want in '"optOutNotificationMethods":[' '"turn/diff/updated"' '"item/commandExecution/outputDelta"'; do
     has "$init_line" "$want" || { fail_turn "$tid" "initialize opt-out missing: $want"; exit 0; }
   done
@@ -531,12 +551,12 @@ case "$turnline" in
   ;;
 
 *scenario:approve*)
-  # An Ask run sends "untrusted"; its approvals must round-trip as input
-  # questions.
-  has "$thread_line" '"approvalPolicy":"untrusted"' ||
-    { fail_turn "$tid" "thread approvalPolicy should be untrusted"; exit 0; }
-  has "$turnline" '"approvalPolicy":"untrusted"' ||
-    { fail_turn "$tid" "turn approvalPolicy should be untrusted"; exit 0; }
+  # An Ask run sends "untrusted" and keeps its approvals with the person;
+  # they must round-trip as input questions.
+  for want in '"approvalPolicy":"untrusted"' '"approvalsReviewer":"user"'; do
+    has "$thread_line" "$want" || { fail_turn "$tid" "ask thread param missing: $want"; exit 0; }
+    has "$turnline" "$want" || { fail_turn "$tid" "ask turn param missing: $want"; exit 0; }
+  done
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
   emit '{"id":101,"method":"item/commandExecution/requestApproval","params":{"itemId":"c1","command":"rm -rf /tmp/x"}}'
@@ -568,6 +588,79 @@ case "$turnline" in
   done
   emit "{\"method\":\"item/agentMessage/delta\",\"params\":{\"itemId\":\"m1\",\"delta\":\"$outcome\"}}"
   emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
+  ;;
+
+*scenario:auto-mode*)
+  # Auto: the workspace is writable (network on), codex's own reviewer
+  # answers its escalations, and whatever still reaches Zeron is asked (the
+  # test answers No).
+  for want in '"approvalPolicy":"on-request"' '"sandbox":"workspace-write"' '"approvalsReviewer":"auto_review"'; do
+    has "$thread_line" "$want" || { fail_turn "$tid" "auto thread param missing: $want"; exit 0; }
+  done
+  for want in '"approvalPolicy":"on-request"' '"type":"workspaceWrite"' '"networkAccess":true' '"approvalsReviewer":"auto_review"'; do
+    has "$turnline" "$want" || { fail_turn "$tid" "auto turn param missing: $want"; exit 0; }
+  done
+  has "$turnline" 'collaborationMode' && { fail_turn "$tid" "collaborationMode without plan"; exit 0; }
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit '{"id":401,"method":"item/fileChange/requestApproval","params":{"itemId":"f1","changes":[{"path":"/outside/a.rs","kind":"update"}]}}'
+  read -r a1 || exit 1
+  { has "$a1" '"id":401' && has "$a1" '"decision":"decline"'; } ||
+    { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"file change not declined"}}}}'; exit 0; }
+  emit '{"id":402,"method":"item/commandExecution/requestApproval","params":{"itemId":"c1","command":"git push"}}'
+  read -r a2 || exit 1
+  { has "$a2" '"id":402' && has "$a2" '"decision":"decline"'; } ||
+    { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"command not declined"}}}}'; exit 0; }
+  emit '{"id":403,"method":"item/permissions/requestApproval","params":{"itemId":"p1","reason":"fetch","permissions":{"network":{"enabled":true}}}}'
+  read -r a3 || exit 1
+  { has "$a3" '"id":403' && has "$a3" '"permissions":{}'; } ||
+    { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"permissions not refused"}}}}'; exit 0; }
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
+  ;;
+
+*scenario:plan*)
+  # Plan mode rides turn/start as the `plan` collaboration mode, repeating
+  # the turn's model and effort; the proposed plan arrives as a `plan` item.
+  # Leaving plan is the next turn's explicit `default`, and a later plain
+  # turn still names it.
+  for want in '"collaborationMode":{' '"mode":"plan"' '"model":"gpt-5.6-sol"' '"reasoning_effort":"ultra"' \
+    '"developer_instructions":null' '"approvalPolicy":"never"'; do
+    has "$turnline" "$want" || { fail_turn "$tid" "plan turn param missing: $want"; exit 0; }
+  done
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"Here is the plan."}}'
+  emit '{"method":"item/completed","params":{"item":{"id":"m1","type":"agentMessage","text":"Here is the plan."}}}'
+  emit '{"method":"item/plan/delta","params":{"itemId":"p1","delta":"# Plan"}}'
+  emit '{"method":"item/completed","params":{"item":{"id":"p1","type":"plan","text":"# Plan\n\n1. Read\n2. Change\n"}}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  n=2
+  for want in 'build it|"mode":"default"|"approvalPolicy":"never"' \
+    'plain|"mode":"default"|"approvalPolicy":"never"'; do
+    read -r next || exit 1
+    text=${want%%|*}; rest=${want#*|}; mode=${rest%%|*}; policy=${rest#*|}
+    { has "$next" '"method":"turn/start"' && has "$next" "\"text\":\"$text\"" \
+      && has "$next" '"collaborationMode":{' && has "$next" "$mode" && has "$next" "$policy" \
+      && has "$next" '"sandboxPolicy":{"type":"dangerFullAccess"}' && ! has "$next" '"mode":"plan"'; } \
+      || { fail_turn "$(rid "$next")" "turn $n: wanted $text with $mode $policy"; exit 0; }
+    emit "{\"id\":$(rid "$next"),\"result\":{\"turn\":{\"id\":\"t-$n\"}}}"
+    emit "{\"method\":\"turn/started\",\"params\":{\"turn\":{\"id\":\"t-$n\"}}}"
+    emit "{\"method\":\"item/agentMessage/delta\",\"params\":{\"itemId\":\"m$n\",\"delta\":\"$text\"}}"
+    emit "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t-$n\",\"status\":\"completed\"}}}"
+    n=$((n + 1))
+  done
+  cat >/dev/null
+  ;;
+
+*scenario:leave-plan*)
+  # A resumed thread still in plan mode, on a run that is not: the turn
+  # names `default`, with the model and effort the thread reported.
+  for want in '"collaborationMode":{' '"mode":"default"' '"model":"gpt-resumed"' '"reasoning_effort":"medium"'; do
+    has "$turnline" "$want" || { fail_turn "$tid" "leave-plan turn param missing: $want"; exit 0; }
+  done
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
   ;;
 
 *scenario:decline*)

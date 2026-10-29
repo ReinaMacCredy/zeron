@@ -895,7 +895,7 @@ impl ComputerPage {
                     widgets::card_row(theme, ix == 0)
                         .debug_selector(move || format!("computer-history-row-{ix}"))
                         .child(
-                            crate::icons::icon(icons::CURSOR)
+                            crate::icons::icon(icons::COMPUTER_CURSOR)
                                 .size(px(16.0))
                                 .flex_none()
                                 .text_color(theme.text_muted),

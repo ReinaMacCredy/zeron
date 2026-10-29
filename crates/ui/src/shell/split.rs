@@ -384,7 +384,9 @@ impl Shell {
             | ComposerEvent::OpenChanges
             | ComposerEvent::StartMission(_)
             | ComposerEvent::OpenTaskCenter(_)
-            | ComposerEvent::PlanFirst => {}
+            | ComposerEvent::PlanFirst
+            | ComposerEvent::AnnotationsChanged(_)
+            | ComposerEvent::AnnotationHovered(_) => {}
             ComposerEvent::OpenSubagent {
                 chat_id,
                 doc_id,

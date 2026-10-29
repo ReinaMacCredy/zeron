@@ -323,6 +323,8 @@ fn run_payload(message_id: &str, cwd: &str) -> SessionCommandPayload {
             sandbox: SandboxLevel::WorkspaceWrite,
             permission_mode: zeron_proto::PermissionMode::Full,
             auto_approve: true,
+            access: zeron_proto::PermissionMode::Full.access(),
+            plan: false,
             attachments: Vec::new(),
             resume: None,
             worktree: None,

@@ -39,6 +39,7 @@ pub mod handoff;
 pub mod events;
 pub mod host_settings;
 pub mod invocations;
+mod host_stream;
 mod live;
 pub mod provider_login;
 pub mod providers;
@@ -50,6 +51,8 @@ pub mod runtime;
 pub mod session;
 pub mod sidechat;
 pub mod thread_mentions;
+pub mod subagents;
+pub mod terminal;
 pub mod workspace;
 
 pub use client::{Client, NewSession, PRELOAD_CAP, PushPrefs, SessionTarget, WARM_SESSION_CAP};
@@ -68,6 +71,8 @@ pub use session::{
     RoomState, SendOutcome, SendRequest, SessionHandle, SessionSnapshot, SkillFile, SnapshotDelta,
     SnapshotWatch,
 };
+pub use subagents::{SubagentInfo, SubagentSink, SubagentState, SubagentWatch};
+pub use terminal::{TerminalInfo, TerminalLink, TerminalReplies, TerminalSink, TerminalUpdate};
 pub use workspace::{
     ApprovalView, Brief, BriefMessage, ContextChat, DeviceView, EstimateLine, FrontGroup,
     FrontPage, HostRef, ItemSend, MissionFromChat, MissionOptions, MissionStrip, NeedsYouEntry,
@@ -77,6 +82,7 @@ pub use workspace::{
     TodayPullRequests, TodaySlot, TodayTask, TodayUsage, WakeEntry, WatchState, WorkspaceSnapshot,
     project_color_index, relative_time_label,
 };
+pub use zeron_term_link::remote::TerminalPath;
 
 /// Re-exported so consumers (the layout engine) name the exact doc types the
 /// transcript carries without a direct `zeron-doc` dependency.

@@ -341,6 +341,8 @@ fn queue_run_on(rig: &Rig, chat_id: &str, prompt: &str, cwd: &str, harness: Opti
                     sandbox: SandboxLevel::WorkspaceWrite,
                     permission_mode: zeron_proto::PermissionMode::Full,
                     auto_approve: true,
+                    access: zeron_proto::PermissionMode::Full.access(),
+                    plan: false,
                     attachments: Vec::new(),
                     worktree: None,
                     branch: None,

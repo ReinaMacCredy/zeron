@@ -160,6 +160,8 @@ fn request(prompt: &str) -> RunRequest {
         sandbox: SandboxLevel::WorkspaceWrite,
         permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         resume: None,
         attachments: vec![],
         worktree: None,

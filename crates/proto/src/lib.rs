@@ -6,6 +6,7 @@
 pub mod account_usage;
 pub mod agent;
 pub mod app_commands;
+pub mod agent_messages;
 pub mod attachment_mentions;
 pub mod badges;
 /// Stable capability error codes transported without provider stderr.
@@ -33,6 +34,7 @@ pub mod cloud;
 pub mod device_paths;
 pub mod device_tools;
 pub mod entities;
+pub mod annotation;
 pub mod file_mentions;
 pub mod git_graph;
 pub mod git_tab;

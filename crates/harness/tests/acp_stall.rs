@@ -61,6 +61,8 @@ async fn silent_agent_errors_via_the_prompt_stall_watchdog() {
         sandbox: SandboxLevel::DangerFullAccess,
         permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         branch: None,

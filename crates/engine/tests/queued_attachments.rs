@@ -130,6 +130,8 @@ fn run_payload(message_id: &str, pending_ref: &str) -> SessionCommandPayload {
             sandbox: SandboxLevel::WorkspaceWrite,
             permission_mode: zeron_proto::PermissionMode::Full,
             auto_approve: true,
+            access: Default::default(),
+            plan: false,
             attachments: vec![pending_ref.to_string()],
             worktree: None,
             branch: None,

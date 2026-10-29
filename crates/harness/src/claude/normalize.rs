@@ -6,7 +6,7 @@ use zeron_proto::{
     AgentEvent, AnchorRole, DoneStatus, HarnessId, TodoItem, TodoStatus, ToolCall, ToolDiff,
 };
 
-use super::wire::{ContentBlock, Frame, ResultFrame};
+use super::wire::{ContentBlock, Frame, MessageFrame, ResultFrame};
 
 /// Human-readable text for the CLI's assistant-level error codes. These arrive
 /// as a terse `error` field on an `assistant` frame — usually with NO text
@@ -325,6 +325,23 @@ fn background_launch(text: &str) -> Option<(String, String)> {
     (!id.is_empty() && named).then(|| (id.to_owned(), path.to_owned()))
 }
 
+/// A forked skill's chip once it runs: a spawn named after the skill
+/// (`Agent: /review`), like an Agent call is after its description.
+fn forked_skill_call(input: Value) -> ToolCall {
+    let name = match input
+        .get("skill")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        Some(skill) => format!("Agent: /{skill}"),
+        None => "Agent".into(),
+    };
+    ToolCall::Unknown {
+        name,
+        input: (!input.is_null()).then_some(input),
+    }
+}
+
 fn new_message_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -344,6 +361,73 @@ fn advisor_result(id: String, is_error: bool) -> AgentEvent {
         output: None,
         diff: None,
     }
+}
+
+/// A subagent's assistant message, attributed. The 2.1.x wire streams NO
+/// tagged partial deltas (live-verified): a subagent's text and thinking
+/// arrive only as full blocks on its tagged assistant frames — emit them, in
+/// block order with the tool calls, or subagent transcripts are
+/// tool-chips-only.
+fn subagent_message(parent: &str, f: &MessageFrame) -> Vec<AgentEvent> {
+    let mut out: Vec<AgentEvent> = f
+        .message
+        .blocks()
+        .filter_map(|b: ContentBlock| match b.kind.as_str() {
+            "text" if !b.text.is_empty() => Some(tag(
+                parent,
+                AgentEvent::TextDelta {
+                    text: format!("{}\n\n", b.text.trim_end()),
+                },
+            )),
+            "thinking" if !b.thinking.trim().is_empty() => Some(tag(
+                parent,
+                AgentEvent::ReasoningDelta {
+                    text: format!("{}\n\n", b.thinking.trim_end()),
+                },
+            )),
+            "tool_use" => Some(tag(
+                parent,
+                AgentEvent::ToolCall {
+                    id: b.id.clone(),
+                    call: decode_tool_use(&b.name, &b.input),
+                },
+            )),
+            _ => None,
+        })
+        .collect();
+    if let Some(code) = &f.error {
+        out.push(tag(
+            parent,
+            AgentEvent::Error {
+                message: assistant_error_text(code),
+            },
+        ));
+    }
+    out
+}
+
+/// A subagent's tool results, attributed like its calls.
+fn subagent_results(parent: &str, f: &MessageFrame) -> Vec<AgentEvent> {
+    f.message
+        .blocks()
+        .filter(|b: &ContentBlock| b.kind == "tool_result")
+        .map(|b| {
+            tag(
+                parent,
+                AgentEvent::ToolResult {
+                    id: b.tool_use_id.clone(),
+                    is_error: b.is_error.unwrap_or(false),
+                    output: None,
+                    diff: None,
+                },
+            )
+        })
+        .collect()
+}
+
+/// An id the CLI minted, safe in a path.
+fn path_safe(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 /// CLI-synthesized text that rides a user frame but is NOT conversation:
@@ -396,6 +480,31 @@ pub(crate) enum Transcript {
     Unknown,
 }
 
+/// A `/skill` typed as the prompt that runs in a fork (`context: fork`). No
+/// tool call announces it: its `task_started` has no tool id, and the CLI
+/// holds its transcript back, then replays it tagged `forked-command-<name>`
+/// after its `task_notification`, "together and in order after the forked
+/// skill finishes" (https://code.claude.com/docs/en/headless.md#follow-subagent-messages;
+/// live-verified 2.1.310).
+struct TypedFork {
+    /// Its chip, `forked-command-<name>-<task>`: the CLI reuses its own id
+    /// on every run of the command.
+    chip: String,
+    /// Its task id, which its notification carries.
+    task: String,
+    /// The prompt its tab opened with, until the replay echoes it.
+    echo: Option<String>,
+    /// What its notification said, kept for the turn's end.
+    status: Option<DoneStatus>,
+    /// Its session, whose history holds its transcript while it runs.
+    session: String,
+    /// Uuids of the records shown from that transcript.
+    seen: std::collections::HashSet<String>,
+    /// `None` until its replay begins, then whether the replay repeated a
+    /// record `seen`.
+    replayed: Option<bool>,
+}
+
 /// Per-run normalization state.
 ///
 /// `saw_init` dedupes `system:init` — the CLI re-emits it every time the model
@@ -423,6 +532,11 @@ pub(crate) struct Normalizer {
     task_outputs: std::collections::HashMap<String, String>,
     live_tasks: Vec<zeron_proto::BackgroundTask>,
     nested_agent_tasks: std::collections::HashSet<String>,
+    /// Parent-feed `Skill` calls, tool_use id → input, until their task
+    /// starts (a `context: fork` skill runs as a subagent under its Skill
+    /// call's id, and its `task_started` re-decodes the chip as a spawn) or
+    /// their result shows they ran inline.
+    skill_calls: std::collections::HashMap<String, Value>,
     /// tool_use ids of Agent/Task spawn calls, recorded from their own
     /// assistant frames (plus `task_started`'s agent-task pairing). Gates
     /// `task_notification`: background SHELL tasks settle through the same
@@ -449,6 +563,13 @@ pub(crate) struct Normalizer {
     pending_advisor: std::collections::HashMap<Option<String>, String>,
     /// The CLI names a loaded skill's directory in a later frame with no tool id.
     pending_skill: std::collections::HashMap<Option<String>, (String, Value)>,
+    /// The typed fork of the turn under way (a turn runs one at most). Its
+    /// replay feeds its chip only until the turn ends: a `forked-command-*`
+    /// id after that stays the CLI's own, which no chip carries.
+    typed_fork: Option<TypedFork>,
+    /// Typed forks' transcripts are read off disk (see `fork_tail`) until a
+    /// replay repeats none of the records read.
+    fork_transcripts: bool,
     /// Rotates at each assistant-frame close and at each steer; SessionStarted
     /// carries the first value so folds can attribute deltas from the start.
     assistant_message_id: String,
@@ -480,11 +601,14 @@ impl Normalizer {
             task_outputs: std::collections::HashMap::new(),
             live_tasks: Vec::new(),
             nested_agent_tasks: std::collections::HashSet::new(),
+            skill_calls: std::collections::HashMap::new(),
             agent_spawn_tools: std::collections::HashSet::new(),
             seeded_prompts: std::collections::HashMap::new(),
             computer_scripts: std::collections::HashSet::new(),
             pending_advisor: std::collections::HashMap::new(),
             pending_skill: std::collections::HashMap::new(),
+            typed_fork: None,
+            fork_transcripts: true,
             assistant_message_id: new_message_id(),
             session_id: None,
             rejected_windows: std::collections::BTreeMap::new(),
@@ -519,11 +643,19 @@ impl Normalizer {
             .map(|(task, _)| task.clone())
     }
 
+    /// The transcript a tagged frame feeds: the typed fork's chip, for any
+    /// `forked-command-*` id while it runs (the name after the prefix "can
+    /// differ from the one you typed"); the spawn a resumed agent maps back
+    /// to; else the id itself.
     fn spawn_of(&self, tool_use_id: &str) -> String {
-        self.spawn_aliases
-            .get(tool_use_id)
-            .cloned()
-            .unwrap_or_else(|| tool_use_id.to_owned())
+        match &self.typed_fork {
+            Some(fork) if tool_use_id.starts_with("forked-command-") => fork.chip.clone(),
+            _ => self
+                .spawn_aliases
+                .get(tool_use_id)
+                .cloned()
+                .unwrap_or_else(|| tool_use_id.to_owned()),
+        }
     }
 
     fn note_skill_call(&mut self, parent: Option<&str>, b: &ContentBlock) {
@@ -729,6 +861,113 @@ impl Normalizer {
         (prev, self.assistant_message_id.clone())
     }
 
+    /// The turn is ending: its typed fork settles with the status its
+    /// notification brought, else the turn's, once (a late notification
+    /// finds no spawn). No tool result ever answers the chip, so it is
+    /// resolved here too.
+    pub(crate) fn settle_typed_fork(&mut self, turn: DoneStatus) -> Vec<AgentEvent> {
+        let Some(fork) = self.typed_fork.take() else {
+            return Vec::new();
+        };
+        self.agent_tasks.remove(&fork.task);
+        self.agent_spawn_tools.remove(&fork.chip);
+        // Nothing promises the replay reuses the file's uuids: when it
+        // repeated none, every record showed twice, so this run's later
+        // forks wait for their replay.
+        if !fork.seen.is_empty() && fork.replayed == Some(false) {
+            tracing::warn!(
+                target: "zeron_harness::claude",
+                chip = %fork.chip,
+                "the typed fork's replay repeated no record read off disk; no longer reading forks' transcripts"
+            );
+            self.fork_transcripts = false;
+        }
+        let status = fork.status.unwrap_or(turn);
+        vec![
+            tag(
+                &fork.chip,
+                AgentEvent::Done {
+                    status,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                },
+            ),
+            AgentEvent::ToolResult {
+                id: fork.chip,
+                is_error: status == DoneStatus::Errored,
+                output: None,
+                diff: None,
+            },
+        ]
+    }
+
+    /// The typed fork whose transcript the driver reads off disk, as
+    /// `(chip, session, task)`, until its replay begins.
+    pub(crate) fn fork_to_follow(&self) -> Option<(&str, &str, &str)> {
+        self.typed_fork
+            .as_ref()
+            .filter(|fork| {
+                self.fork_transcripts
+                    && fork.replayed.is_none()
+                    && path_safe(&fork.session)
+                    && path_safe(&fork.task)
+            })
+            .map(|fork| {
+                (
+                    fork.chip.as_str(),
+                    fork.session.as_str(),
+                    fork.task.as_str(),
+                )
+            })
+    }
+
+    /// One record of the typed fork's transcript on disk: its messages and
+    /// tool results, as its replay shows them. Its prompt (the tab opened
+    /// with it) and the bookkeeping around them (attachments, API request
+    /// records) are not conversation. Once the replay has begun, it brings
+    /// the rest.
+    pub(crate) fn fork_record(&mut self, record: Value) -> Vec<AgentEvent> {
+        let Some(fork) = self
+            .typed_fork
+            .as_mut()
+            .filter(|fork| fork.replayed.is_none())
+        else {
+            return Vec::new();
+        };
+        let assistant = match record.get("type").and_then(Value::as_str) {
+            Some("assistant") => true,
+            Some("user") => false,
+            _ => return Vec::new(),
+        };
+        let Ok(f) = serde_json::from_value::<MessageFrame>(record) else {
+            return Vec::new();
+        };
+        let events = if assistant {
+            subagent_message(&fork.chip, &f)
+        } else {
+            subagent_results(&fork.chip, &f)
+        };
+        if !events.is_empty()
+            && let Some(uuid) = f.uuid
+        {
+            fork.seen.insert(uuid);
+        }
+        events
+    }
+
+    /// A frame of the typed fork's replay, which brings the rest of its
+    /// transcript. A record already read off disk shows nothing: the replay
+    /// repeats each one under its uuid (live-verified 2.1.310).
+    fn fork_repeat(&mut self, parent: &str, uuid: Option<&str>) -> bool {
+        let Some(fork) = self.typed_fork.as_mut().filter(|fork| fork.chip == parent) else {
+            return false;
+        };
+        let repeat = uuid.is_some_and(|uuid| fork.seen.contains(uuid));
+        fork.replayed = Some(fork.replayed == Some(true) || repeat);
+        repeat
+    }
+
     /// Normalize one stdout frame into 0+ unified events. `interrupted` folds
     /// a post-interrupt `result` into `Done { status: Interrupted }`.
     pub fn normalize(&mut self, frame: Frame, interrupted: bool) -> Vec<AgentEvent> {
@@ -789,6 +1028,13 @@ impl Normalizer {
                         // Non-terminal notification shapes: nothing to close.
                         _ => return out,
                     };
+                    // A typed fork's transcript is still to come: settled
+                    // now, its tab would drop the replay as stragglers.
+                    if let Some(fork) = self.typed_fork.as_mut().filter(|fork| fork.chip == *parent)
+                    {
+                        fork.status = Some(status);
+                        return out;
+                    }
                     out.push(tag(
                         parent,
                         AgentEvent::Done {
@@ -804,6 +1050,7 @@ impl Normalizer {
                 // owned shell tasks carry the same subtype without it):
                 // record agentId → spawn id for SendMessage steer re-keying.
                 if f.subtype == "task_started" {
+                    let mut out = Vec::new();
                     if f.subagent_type.is_some()
                         && let (Some(task), Some(tool)) = (
                             f.task_id.as_deref().filter(|t| !t.is_empty()),
@@ -819,6 +1066,64 @@ impl Normalizer {
                                 self.agent_spawn_tools.insert(tool.to_owned());
                             }
                         }
+                        // A `context: fork` skill runs as a subagent under its
+                        // Skill call's id, and this start precedes all of its
+                        // traffic (live-verified 2.1.310). Re-decoded as a spawn,
+                        // the chip gives that traffic a card and a tab to feed.
+                        out.extend(self.skill_calls.remove(tool).map(|input| {
+                            AgentEvent::ToolCall {
+                                id: tool.to_owned(),
+                                call: forked_skill_call(input),
+                            }
+                        }));
+                    }
+                    // A `/skill` typed as the prompt starts its fork with no tool
+                    // id, named after the command (see [`TypedFork`]). Its chip,
+                    // opened with the skill's prompt, gives the fork a row and a
+                    // tab while the CLI holds its transcript back.
+                    if f.subagent_type.is_some()
+                        && f.tool_use_id.as_deref().is_none_or(str::is_empty)
+                        && let Some(task) = f.task_id.as_deref().filter(|t| !t.is_empty())
+                        && let Some(name) = f
+                            .description
+                            .as_deref()
+                            .and_then(|d| d.split_whitespace().next())
+                            .and_then(|command| command.strip_prefix('/'))
+                            .filter(|name| !name.is_empty())
+                    {
+                        // A turn runs one at most. Should another start before
+                        // the first settled, the first ends here, not run on as
+                        // a chip nothing settles.
+                        out.extend(self.settle_typed_fork(DoneStatus::Interrupted));
+                        let chip = format!("forked-command-{name}-{task}");
+                        self.agent_tasks.insert(task.to_owned(), chip.clone());
+                        self.agent_spawn_tools.insert(chip.clone());
+                        let prompt = f
+                            .prompt
+                            .as_ref()
+                            .and_then(Value::as_str)
+                            .filter(|p| !p.trim().is_empty());
+                        out.push(AgentEvent::ToolCall {
+                            id: chip.clone(),
+                            call: forked_skill_call(serde_json::json!({ "skill": name })),
+                        });
+                        out.extend(prompt.map(|text| {
+                            tag(
+                                &chip,
+                                AgentEvent::UserMessage {
+                                    text: text.to_owned(),
+                                },
+                            )
+                        }));
+                        self.typed_fork = Some(TypedFork {
+                            chip,
+                            task: task.to_owned(),
+                            echo: prompt.map(str::to_owned),
+                            status: None,
+                            session: f.session_id.clone(),
+                            seen: std::collections::HashSet::new(),
+                            replayed: None,
+                        });
                     }
                     // The CLI lists a task before its task_started names the depth.
                     if let Some(task) = f.task_id.filter(|_| f.spawn_depth.is_some_and(|d| d > 1)) {
@@ -826,12 +1131,12 @@ impl Normalizer {
                         self.live_tasks.retain(|t| t.id != task);
                         self.nested_agent_tasks.insert(task);
                         if self.live_tasks.len() != listed {
-                            return vec![AgentEvent::BackgroundTasks {
+                            out.push(AgentEvent::BackgroundTasks {
                                 tasks: self.live_tasks.clone(),
-                            }];
+                            });
                         }
                     }
-                    return Vec::new();
+                    return out;
                 }
                 // The CLI retrying a failed API call waits between attempts
                 // with nothing on the wire: keep the turn visibly alive, and
@@ -979,57 +1284,39 @@ impl Normalizer {
             Frame::Assistant(f) => {
                 if let Some(parent) = f.parent_tool_use_id.as_deref().map(|p| self.spawn_of(p)) {
                     let parent = &parent;
-                    // Subagent content, attributed. The 2.1.x wire streams NO
-                    // tagged partial deltas (live-verified): a subagent's text
-                    // arrives only as full text blocks on its tagged
-                    // assistant frames — emit them, in block order with the
-                    // tool calls, or subagent transcripts are tool-chips-only.
-                    let mut out: Vec<AgentEvent> = f
-                        .message
-                        .blocks()
-                        .filter_map(|b: ContentBlock| match b.kind.as_str() {
-                            "text" if !b.text.is_empty() => Some(tag(
-                                parent,
-                                AgentEvent::TextDelta {
-                                    text: format!("{}\n\n", b.text.trim_end()),
-                                },
-                            )),
-                            "tool_use" => Some(tag(
-                                parent,
-                                AgentEvent::ToolCall {
-                                    id: b.id.clone(),
-                                    call: decode_tool_use(&b.name, &b.input),
-                                },
-                            )),
-                            _ => None,
-                        })
-                        .collect();
+                    if self.fork_repeat(parent, f.uuid.as_deref()) {
+                        return Vec::new();
+                    }
+                    let mut out = subagent_message(parent, &f);
                     for b in f.message.blocks() {
                         out.extend(self.advisor_events(Some(parent), &b));
                         self.note_skill_call(Some(parent), &b);
                     }
-                    if let Some(code) = &f.error {
-                        out.push(tag(
-                            parent,
-                            AgentEvent::Error {
-                                message: assistant_error_text(code),
-                            },
-                        ));
-                    }
                     return out;
                 }
                 // Record spawn tool ids up front: `task_notification` keys on
-                // them; a task may finish before a `task_started` arrives.
+                // them; a task may finish before a `task_started` arrives. A
+                // Skill call waits for its task start: only a forked skill
+                // gets one.
                 for b in f.message.blocks() {
                     self.note_skill_call(None, &b);
-                    if b.kind == "tool_use" && b.name == "mcp__zeron__computer" {
-                        self.computer_scripts.insert(b.id.clone());
+                    if b.kind != "tool_use" {
+                        continue;
                     }
-                    if b.kind == "tool_use" && matches!(b.name.as_str(), "Agent" | "Task") {
-                        self.agent_spawn_tools.insert(b.id.clone());
-                        if let Some(prompt) = spawn_prompt(&b) {
-                            self.seeded_prompts.insert(b.id.clone(), prompt.to_owned());
+                    match b.name.as_str() {
+                        "mcp__zeron__computer" => {
+                            self.computer_scripts.insert(b.id.clone());
                         }
+                        "Agent" | "Task" => {
+                            self.agent_spawn_tools.insert(b.id.clone());
+                            if let Some(prompt) = spawn_prompt(&b) {
+                                self.seeded_prompts.insert(b.id.clone(), prompt.to_owned());
+                            }
+                        }
+                        "Skill" => {
+                            self.skill_calls.insert(b.id.clone(), b.input.clone());
+                        }
+                        _ => {}
                     }
                 }
                 // Every main-channel assistant message is a cut point; the
@@ -1136,6 +1423,12 @@ impl Normalizer {
             }
 
             Frame::User(f) => {
+                let feed = f.parent_tool_use_id.as_deref().map(|p| self.spawn_of(p));
+                if let Some(parent) = feed.as_deref()
+                    && self.fork_repeat(parent, f.uuid.as_deref())
+                {
+                    return Vec::new();
+                }
                 // One structured result per frame: it names the frame's one
                 // tool_result block, so a multi-result frame gets none.
                 let results: Vec<ContentBlock> = f
@@ -1148,6 +1441,11 @@ impl Normalizer {
                     .flatten();
                 let mut learned_output = false;
                 if f.parent_tool_use_id.is_none() {
+                    // A skill whose result came back without a task start ran
+                    // inline: it never forks now.
+                    for b in &results {
+                        self.skill_calls.remove(&b.tool_use_id);
+                    }
                     for (task, path) in results
                         .iter()
                         .filter_map(|b| background_launch(&tool_result_text(&b.content)))
@@ -1162,7 +1460,6 @@ impl Normalizer {
                 let relisted = learned_output.then(|| AgentEvent::BackgroundTasks {
                     tasks: self.live_tasks.clone(),
                 });
-                let feed = f.parent_tool_use_id.as_deref().map(|p| self.spawn_of(p));
                 let skill_paths: Vec<AgentEvent> = f
                     .message
                     .blocks()
@@ -1192,8 +1489,8 @@ impl Normalizer {
                             output,
                             diff: diff.clone(),
                         });
-                if let Some(parent) = f.parent_tool_use_id.as_deref().map(|p| self.spawn_of(p)) {
-                    let parent = &parent;
+                if let Some(parent) = &feed {
+                    let loaded_inline = !skill_paths.is_empty();
                     // A subagent's tool results echo on the main channel too;
                     // they belong to its transcript, attributed like its calls.
                     let mut out: Vec<AgentEvent> = tool_results
@@ -1206,11 +1503,20 @@ impl Normalizer {
                     // Synthetic harness injections are not conversation, and
                     // must not read as a steer — see [`is_synthetic_user_text`].
                     // A foreground spawn's echo of the prompt already seeded
-                    // from its tool_use block is not a steer either.
+                    // from its tool_use block is not a steer either, nor is a
+                    // typed fork's replay of the prompt its tab opened with.
+                    let mut echo = self
+                        .typed_fork
+                        .as_mut()
+                        .filter(|fork| fork.chip == *parent)
+                        .map(|fork| &mut fork.echo);
                     for b in f.message.blocks() {
+                        // A forked skill's tab opens with its skill's text; an inline load's is bookkeeping.
+                        let forked_skill =
+                            !loaded_inline && b.text.trim_start().starts_with(SKILL_BASE_DIR);
                         if b.kind != "text"
                             || b.text.trim().is_empty()
-                            || is_synthetic_user_text(&b.text)
+                            || (is_synthetic_user_text(&b.text) && !forked_skill)
                         {
                             continue;
                         }
@@ -1220,6 +1526,13 @@ impl Normalizer {
                             .is_some_and(|p| *p == b.text)
                         {
                             self.seeded_prompts.remove(parent);
+                            continue;
+                        }
+                        if echo
+                            .as_mut()
+                            .and_then(|echo| echo.take_if(|p| p.trim() == b.text.trim()))
+                            .is_some()
+                        {
                             continue;
                         }
                         out.push(tag(parent, AgentEvent::UserMessage { text: b.text }));
@@ -1298,20 +1611,22 @@ impl Normalizer {
                 if f.unreadable {
                     tracing::warn!(target: "zeron_harness::claude", "unreadable result frame");
                     let failed = f.is_error && !interrupted;
+                    let status = if interrupted {
+                        DoneStatus::Interrupted
+                    } else if failed {
+                        DoneStatus::Errored
+                    } else {
+                        DoneStatus::Completed
+                    };
                     let mut out = self.settle_pending_advisors();
                     out.extend(held.map(|message| AgentEvent::Error { message }));
                     out.extend(
                         std::mem::take(&mut self.rate_limited).then(|| self.usage_limit_event()),
                     );
                     self.rejected_windows.clear();
+                    out.extend(self.settle_typed_fork(status));
                     out.push(AgentEvent::Done {
-                        status: if interrupted {
-                            DoneStatus::Interrupted
-                        } else if failed {
-                            DoneStatus::Errored
-                        } else {
-                            DoneStatus::Completed
-                        },
+                        status,
                         result: None,
                         error: (failed && !error_shown)
                             .then(|| "Claude's result for this turn could not be read.".to_owned()),
@@ -1459,7 +1774,11 @@ impl Normalizer {
                 }
                 out.extend(cache);
                 out.extend(cost);
-                out.extend([usage, done]);
+                out.push(usage);
+                if let AgentEvent::Done { status, .. } = &done {
+                    out.extend(self.settle_typed_fork(*status));
+                }
+                out.push(done);
                 out
             }
 
@@ -3045,6 +3364,525 @@ mod tests {
     }
 
     #[test]
+    fn a_forked_skill_becomes_a_spawn_when_its_task_starts() {
+        // Shapes from a live 2.1.310 capture. A `context: fork` skill runs as
+        // a subagent under its Skill call's id, and its `task_started` comes
+        // before any of that traffic. An inline skill starts no task and
+        // stays an ordinary tool.
+        let feed = |norm: &mut Normalizer, raw: &str| {
+            norm.normalize(
+                crate::claude::wire::parse_frame(raw).expect("parses"),
+                false,
+            )
+        };
+        let skill_call = |id: &str, skill: &str| {
+            format!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"{id}","name":"Skill","input":{{"skill":"{skill}"}}}}]}}}}"#
+            )
+        };
+        let task_started = |task: &str, tool: &str| {
+            format!(
+                r#"{{"type":"system","subtype":"task_started","task_id":"{task}","tool_use_id":"{tool}","subagent_type":"general-purpose","task_type":"local_agent","is_backgrounded":false}}"#
+            )
+        };
+        let skill_text = r#"{"type":"user","parent_tool_use_id":"toolu_skill","message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: /p/.claude/skills/fanout"}]}}"#;
+        let mut norm = Normalizer::new();
+        let events = feed(&mut norm, &skill_call("toolu_skill", "fanout"));
+        assert!(
+            matches!(&events[0], AgentEvent::ToolCall { id, call } if id == "toolu_skill" && !call.is_subagent_spawn()),
+            "{events:?}"
+        );
+        // Its task start turns the chip into a spawn, ahead of its traffic.
+        assert_eq!(
+            feed(&mut norm, &task_started("a1", "toolu_skill")),
+            [AgentEvent::ToolCall {
+                id: "toolu_skill".into(),
+                call: ToolCall::Unknown {
+                    name: "Agent: /fanout".into(),
+                    input: Some(json!({"skill": "fanout"})),
+                },
+            }]
+        );
+        let events = feed(&mut norm, skill_text);
+        assert!(
+            matches!(&events[..], [AgentEvent::Subagent { parent_tool_use_id, event }]
+                if parent_tool_use_id == "toolu_skill"
+                    && matches!(event.as_ref(), AgentEvent::UserMessage { .. })),
+            "its traffic passes as is: {events:?}"
+        );
+        let events = feed(
+            &mut norm,
+            r#"{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"toolu_skill","status":"completed"}"#,
+        );
+        assert!(
+            matches!(&events[..], [AgentEvent::Subagent { parent_tool_use_id, event }]
+                if parent_tool_use_id == "toolu_skill"
+                    && matches!(event.as_ref(), AgentEvent::Done { status: DoneStatus::Completed, .. })),
+            "it settles like any spawn: {events:?}"
+        );
+        // An agent the skill spawns starts a task and sends traffic too, but
+        // its call is on the skill's own feed: nothing here is re-decoded.
+        assert!(feed(&mut norm, &task_started("a2", "toolu_nested")).is_empty());
+        assert!(matches!(
+            &feed(
+                &mut norm,
+                r#"{"type":"assistant","parent_tool_use_id":"toolu_nested","message":{"content":[{"type":"text","text":"alpha"}]}}"#,
+            )[..],
+            [AgentEvent::Subagent { parent_tool_use_id, .. }] if parent_tool_use_id == "toolu_nested"
+        ));
+        // An inline skill's result comes back untagged, with no task start:
+        // it stays a tool, and nothing waits on it any more.
+        feed(&mut norm, &skill_call("toolu_inline", "lint"));
+        feed(
+            &mut norm,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_inline","content":"Launching skill: lint"}]}}"#,
+        );
+        assert!(norm.skill_calls.is_empty(), "{:?}", norm.skill_calls);
+        // So a late task start for it re-decodes nothing.
+        assert!(feed(&mut norm, &task_started("a3", "toolu_inline")).is_empty());
+    }
+
+    // `/fanout` typed as the prompt, in the shapes of a live 2.1.310 capture
+    // (`live-2.1.310-typed-forked-command.jsonl`): a task start with no tool
+    // id, its notification, then its held transcript, replayed under
+    // `forked-command-fanout`.
+    const TYPED_STARTED: &str = r#"{"type":"system","subtype":"task_started","task_id":"t1","description":"/fanout","subagent_type":"general-purpose","task_type":"local_agent","skip_transcript":true,"ambient":true,"prompt":"Fan out two agents.","is_backgrounded":false,"spawn_depth":1}"#;
+    const TYPED_NOTIFIED: &str = r#"{"type":"system","subtype":"task_notification","task_id":"t1","status":"completed","summary":"/fanout","skip_transcript":true,"ambient":true}"#;
+    const TYPED_ECHO: &str = r#"{"type":"user","parent_tool_use_id":"forked-command-fanout","message":{"role":"user","content":[{"type":"text","text":"Fan out two agents."}]}}"#;
+    const TYPED_CALL: &str = r#"{"type":"assistant","parent_tool_use_id":"forked-command-fanout","message":{"content":[{"type":"tool_use","id":"toolu_alpha","name":"Agent","input":{"description":"alpha","prompt":"Reply alpha."}}]}}"#;
+    const TYPED_RESULT: &str = r#"{"type":"user","parent_tool_use_id":"forked-command-fanout","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_alpha"}]}}"#;
+    const TURN_END: &str = r#"{"type":"result","subtype":"success","is_error":false,"result":"alpha bravo","session_id":"s1"}"#;
+    const TYPED_CHIP: &str = "forked-command-fanout-t1";
+
+    fn feed_one(norm: &mut Normalizer, raw: &str) -> Vec<AgentEvent> {
+        norm.normalize(
+            crate::claude::wire::parse_frame(raw).expect("parses"),
+            false,
+        )
+    }
+
+    /// How many of `events` feed `parent`'s transcript.
+    fn routed_to(events: &[AgentEvent], parent: &str) -> usize {
+        events
+            .iter()
+            .filter(|e| {
+                matches!(e, AgentEvent::Subagent { parent_tool_use_id, .. } if parent_tool_use_id == parent)
+            })
+            .count()
+    }
+
+    fn typed_settled(status: DoneStatus) -> [AgentEvent; 2] {
+        [
+            tag(
+                TYPED_CHIP,
+                AgentEvent::Done {
+                    status,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                },
+            ),
+            AgentEvent::ToolResult {
+                id: TYPED_CHIP.into(),
+                is_error: status == DoneStatus::Errored,
+                output: None,
+                diff: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn a_typed_fork_is_a_spawn_chip_from_its_task_start() {
+        let mut norm = Normalizer::new();
+        let started = feed_one(&mut norm, TYPED_STARTED);
+        assert_eq!(
+            started,
+            [
+                AgentEvent::ToolCall {
+                    id: TYPED_CHIP.into(),
+                    call: ToolCall::Unknown {
+                        name: "Agent: /fanout".into(),
+                        input: Some(json!({"skill": "fanout"})),
+                    },
+                },
+                tag(
+                    TYPED_CHIP,
+                    AgentEvent::UserMessage {
+                        text: "Fan out two agents.".into()
+                    }
+                ),
+            ]
+        );
+        assert!(
+            matches!(&started[0], AgentEvent::ToolCall { call, .. } if call.is_subagent_spawn())
+        );
+        // A description of several words is named by its first. (Typed with
+        // arguments, 2.1.310 still describes the bare command: see
+        // `a_typed_forks_replayed_prompt_is_dropped_once`.)
+        let mut norm = Normalizer::new();
+        let started = feed_one(
+            &mut norm,
+            &TYPED_STARTED.replace(r#""/fanout""#, r#""/code-review low""#),
+        );
+        assert!(
+            matches!(&started[0], AgentEvent::ToolCall { id, call: ToolCall::Unknown { name, .. } }
+                if id == "forked-command-code-review-t1" && name == "Agent: /code-review"),
+            "{started:?}"
+        );
+        // An agent task without a tool id that names no command is not one.
+        let mut norm = Normalizer::new();
+        assert!(
+            feed_one(
+                &mut norm,
+                &TYPED_STARTED.replace(r#""/fanout""#, r#""Explore the repo""#)
+            )
+            .is_empty()
+        );
+        assert!(norm.typed_fork.is_none());
+    }
+
+    #[test]
+    fn a_typed_forks_replay_feeds_its_chip_under_any_forked_command_id() {
+        let mut norm = Normalizer::new();
+        feed_one(&mut norm, TYPED_STARTED);
+        // Notified before its replay: settled here, its tab would drop the
+        // replay as stragglers.
+        assert!(feed_one(&mut norm, TYPED_NOTIFIED).is_empty());
+        for raw in [
+            TYPED_CALL.to_owned(),
+            // The name after the prefix "can differ from the one you typed".
+            TYPED_CALL.replace("forked-command-fanout", "forked-command-plugin-fanout"),
+            TYPED_RESULT.to_owned(),
+            r#"{"type":"stream_event","parent_tool_use_id":"forked-command-fanout","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"alpha"}}}"#.to_owned(),
+        ] {
+            let events = feed_one(&mut norm, &raw);
+            assert!(
+                !events.is_empty() && routed_to(&events, TYPED_CHIP) == events.len(),
+                "{raw}: {events:?}"
+            );
+        }
+        // An agent it starts keeps its own transcript.
+        let nested = feed_one(
+            &mut norm,
+            &TYPED_CALL.replace("forked-command-fanout", "toolu_alpha"),
+        );
+        assert_eq!(routed_to(&nested, "toolu_alpha"), 1, "{nested:?}");
+    }
+
+    #[test]
+    fn a_typed_forks_replayed_prompt_is_dropped_once() {
+        let mut norm = Normalizer::new();
+        feed_one(&mut norm, TYPED_STARTED);
+        // A tool result first leaves the echo to come.
+        assert_eq!(routed_to(&feed_one(&mut norm, TYPED_RESULT), TYPED_CHIP), 1);
+        assert!(
+            feed_one(&mut norm, TYPED_ECHO).is_empty(),
+            "the replay echoes the prompt the tab opened with"
+        );
+        // The same words again are the fork's own conversation.
+        assert_eq!(
+            feed_one(&mut norm, TYPED_ECHO),
+            [tag(
+                TYPED_CHIP,
+                AgentEvent::UserMessage {
+                    text: "Fan out two agents.".into()
+                }
+            )]
+        );
+        // `/fanout two words` (live 2.1.310): the start describes the bare
+        // command, and its prompt and the echo both end with the arguments.
+        let with_args = |raw: &str| {
+            raw.replace(
+                "Fan out two agents.",
+                r"Fan out two agents.\n\n\nARGUMENTS: two words",
+            )
+        };
+        let mut norm = Normalizer::new();
+        let started = feed_one(&mut norm, &with_args(TYPED_STARTED));
+        assert_eq!(
+            started.get(1),
+            Some(&tag(
+                TYPED_CHIP,
+                AgentEvent::UserMessage {
+                    text: "Fan out two agents.\n\n\nARGUMENTS: two words".into()
+                }
+            )),
+            "{started:?}"
+        );
+        assert!(feed_one(&mut norm, &with_args(TYPED_ECHO)).is_empty());
+    }
+
+    #[test]
+    fn a_typed_fork_settles_once_just_before_its_turns_done() {
+        let mut norm = Normalizer::new();
+        feed_one(&mut norm, TYPED_STARTED);
+        // Notified failed in a turn that completes: its own status wins.
+        assert!(feed_one(&mut norm, &TYPED_NOTIFIED.replace("completed", "failed")).is_empty());
+        feed_one(&mut norm, TYPED_CALL);
+        let end = feed_one(&mut norm, TURN_END);
+        let n = end.len();
+        assert!(n >= 3, "{end:?}");
+        assert_eq!(
+            end[n - 3..n - 1],
+            typed_settled(DoneStatus::Errored),
+            "{end:?}"
+        );
+        assert!(
+            matches!(
+                end[n - 1],
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    ..
+                }
+            ),
+            "{end:?}"
+        );
+        assert_eq!(routed_to(&end, TYPED_CHIP), 1, "{end:?}");
+        // A late notification, and the next turn's end, settle nothing again.
+        assert!(feed_one(&mut norm, TYPED_NOTIFIED).is_empty());
+        assert!(!feed_one(&mut norm, TURN_END).iter().any(|e| matches!(
+            e,
+            AgentEvent::Subagent { .. } | AgentEvent::ToolResult { .. }
+        )));
+    }
+
+    #[test]
+    fn each_typed_run_of_a_command_is_its_own_chip() {
+        let mut norm = Normalizer::new();
+        for raw in [TYPED_STARTED, TYPED_NOTIFIED, TYPED_CALL, TURN_END] {
+            feed_one(&mut norm, raw);
+        }
+        // The CLI replays every run of the command under the same id.
+        let again = feed_one(
+            &mut norm,
+            &TYPED_STARTED.replace(r#""task_id":"t1""#, r#""task_id":"t2""#),
+        );
+        assert!(
+            matches!(&again[0], AgentEvent::ToolCall { id, .. } if id == "forked-command-fanout-t2"),
+            "{again:?}"
+        );
+        let call = feed_one(&mut norm, TYPED_CALL);
+        assert_eq!(routed_to(&call, "forked-command-fanout-t2"), 1, "{call:?}");
+    }
+
+    #[test]
+    fn a_second_typed_fork_settles_the_first() {
+        let mut norm = Normalizer::new();
+        feed_one(&mut norm, TYPED_STARTED);
+        // No result between the two starts: the first must not run on.
+        let second = feed_one(
+            &mut norm,
+            &TYPED_STARTED.replace(r#""task_id":"t1""#, r#""task_id":"t2""#),
+        );
+        assert_eq!(
+            second[..2],
+            typed_settled(DoneStatus::Interrupted),
+            "{second:?}"
+        );
+        assert!(
+            matches!(&second[2], AgentEvent::ToolCall { id, .. } if id == "forked-command-fanout-t2"),
+            "{second:?}"
+        );
+        // The first's late notification finds no spawn.
+        assert!(feed_one(&mut norm, TYPED_NOTIFIED).is_empty());
+    }
+
+    #[test]
+    fn nothing_reaches_a_settled_typed_forks_chip() {
+        let mut norm = Normalizer::new();
+        for raw in [TYPED_STARTED, TYPED_NOTIFIED, TYPED_CALL, TURN_END] {
+            feed_one(&mut norm, raw);
+        }
+        // Late replay frames keep the CLI's own id, which no chip carries:
+        // they stay in the run journal. The echo routed to the chip would
+        // read as a steer, and reopen it.
+        for raw in [TYPED_ECHO, TYPED_CALL] {
+            let late = feed_one(&mut norm, raw);
+            assert!(
+                !late.is_empty() && routed_to(&late, "forked-command-fanout") == late.len(),
+                "{raw}: {late:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_interrupted_turn_settles_its_typed_fork_too() {
+        // Stopped before any notification: settled as the turn ended.
+        let mut norm = Normalizer::new();
+        feed_one(&mut norm, TYPED_STARTED);
+        let end = norm.normalize(crate::claude::wire::parse_frame(TURN_END).unwrap(), true);
+        let n = end.len();
+        assert_eq!(
+            end[n - 3..n - 1],
+            typed_settled(DoneStatus::Interrupted),
+            "{end:?}"
+        );
+        assert!(matches!(
+            end[n - 1],
+            AgentEvent::Done {
+                status: DoneStatus::Interrupted,
+                ..
+            }
+        ));
+        // A result line too torn to read still ends the turn, and its fork.
+        let mut norm = Normalizer::new();
+        feed_one(&mut norm, TYPED_STARTED);
+        let end = feed_one(
+            &mut norm,
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["#,
+        );
+        assert_eq!(end[..2], typed_settled(DoneStatus::Errored), "{end:?}");
+        assert!(matches!(
+            end[2..],
+            [AgentEvent::Done {
+                status: DoneStatus::Errored,
+                ..
+            }]
+        ));
+    }
+
+    // `/f-slow-steps` typed as the prompt (three 20 s steps, live 2.1.310):
+    // what stdout brought, and the fork's transcript as the CLI wrote it to
+    // disk meanwhile.
+    const SLOW: &str =
+        include_str!("../../tests/fixtures/claude/live-2.1.310-typed-fork-slow-steps.jsonl");
+    const SLOW_ON_DISK: &str = include_str!(
+        "../../tests/fixtures/claude/live-2.1.310-typed-fork-slow-steps-transcript.jsonl"
+    );
+    const SLOW_CHIP: &str = "forked-command-f-slow-steps-ae74593bb0c051579";
+    /// The slow fork's tab, past the prompt it opened with.
+    const SLOW_TAB: [&str; 9] = [
+        "thinking This is the f-slow-s",
+        "call qByz",
+        "result qByz",
+        "thinking Step 1 returned \"ste",
+        "call Y4gV",
+        "result Y4gV",
+        "call E8dg",
+        "result E8dg",
+        "text steps done",
+    ];
+
+    /// The slow fork started, and its transcript's records on disk.
+    fn slow_fork() -> (Normalizer, Vec<Value>) {
+        let mut norm = Normalizer::new();
+        feed_one(&mut norm, SLOW.lines().next().unwrap());
+        let records = SLOW_ON_DISK
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        (norm, records)
+    }
+
+    fn slow_replay() -> impl Iterator<Item = &'static str> {
+        SLOW.lines()
+            .filter(|line| line.contains(r#""parent_tool_use_id":"forked-command-"#))
+    }
+
+    /// What `events` add to the slow fork's tab.
+    fn slow_tab(events: &[AgentEvent]) -> Vec<String> {
+        events
+            .iter()
+            .map(|e| match e {
+                AgentEvent::Subagent {
+                    parent_tool_use_id,
+                    event,
+                } if parent_tool_use_id == SLOW_CHIP => match event.as_ref() {
+                    AgentEvent::ReasoningDelta { text } => format!("thinking {:.20}", text),
+                    AgentEvent::TextDelta { text } => format!("text {}", text.trim()),
+                    AgentEvent::ToolCall { id, .. } => format!("call {}", &id[id.len() - 4..]),
+                    AgentEvent::ToolResult { id, .. } => {
+                        format!("result {}", &id[id.len() - 4..])
+                    }
+                    other => format!("{other:?}"),
+                },
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_typed_forks_transcript_on_disk_shows_its_messages_and_results_only() {
+        let (mut norm, records) = slow_fork();
+        assert_eq!(
+            norm.fork_to_follow(),
+            Some((
+                SLOW_CHIP,
+                "133a2e35-c338-4601-8108-99dcb7d09af2",
+                "ae74593bb0c051579"
+            ))
+        );
+        // Its prompt (the tab opened with it), a date attachment and an API
+        // request record carrying message content show nothing.
+        let shown: Vec<AgentEvent> = records
+            .into_iter()
+            .flat_map(|r| norm.fork_record(r))
+            .collect();
+        assert_eq!(slow_tab(&shown), SLOW_TAB);
+        // Nor would user text: nothing steers a typed fork.
+        let text = json!({"type": "user", "uuid": "u9", "message": {"role": "user",
+            "content": [{"type": "text", "text": "Keep going."}]}});
+        assert!(norm.fork_record(text).is_empty());
+    }
+
+    #[test]
+    fn a_record_shows_once_whether_the_disk_or_the_replay_brings_it_first() {
+        // Read off disk first: the replay repeats it under its uuid.
+        let (mut norm, records) = slow_fork();
+        let mut shown: Vec<AgentEvent> = records
+            .into_iter()
+            .flat_map(|r| norm.fork_record(r))
+            .collect();
+        for frame in slow_replay() {
+            shown.extend(feed_one(&mut norm, frame));
+        }
+        assert_eq!(slow_tab(&shown), SLOW_TAB);
+        // The fork ends between two reads: what the replay brought first is
+        // not read again.
+        let (mut norm, records) = slow_fork();
+        let (before, after) = records.split_at(5);
+        let mut shown: Vec<AgentEvent> = before
+            .iter()
+            .flat_map(|r| norm.fork_record(r.clone()))
+            .collect();
+        for frame in slow_replay() {
+            shown.extend(feed_one(&mut norm, frame));
+        }
+        shown.extend(after.iter().flat_map(|r| norm.fork_record(r.clone())));
+        assert_eq!(slow_tab(&shown), SLOW_TAB);
+    }
+
+    #[test]
+    fn a_replay_that_repeats_nothing_read_off_disk_ends_the_reading() {
+        let next_fork = SLOW
+            .lines()
+            .next()
+            .unwrap()
+            .replace("ae74593bb0c051579", "a2");
+        let run = |uuids: &str| {
+            let (mut norm, records) = slow_fork();
+            records.into_iter().for_each(|r| {
+                norm.fork_record(r);
+            });
+            let replayed: Vec<AgentEvent> = slow_replay()
+                .flat_map(|f| feed_one(&mut norm, &f.replacen(r#""uuid":""#, uuids, 1)))
+                .collect();
+            feed_one(&mut norm, TURN_END);
+            feed_one(&mut norm, &next_fork);
+            (slow_tab(&replayed), norm.fork_to_follow().is_some())
+        };
+        // Repeated under the same uuids: nothing shows twice, and the next
+        // fork is read too.
+        assert_eq!(run(r#""uuid":""#), (Vec::<String>::new(), true));
+        // Under other uuids it all showed twice: the next fork fills from its
+        // replay alone.
+        assert_eq!(
+            run(r#""uuid":"x"#),
+            (SLOW_TAB.map(String::from).to_vec(), false)
+        );
+    }
+
+    #[test]
     fn shell_task_notification_never_settles_a_subagent() {
         // `Bash` with `run_in_background` settles through the SAME
         // `task_notification` subtype, carrying the Bash call's own id.
@@ -3069,24 +3907,38 @@ mod tests {
     }
 
     #[test]
-    fn subagent_assistant_text_blocks_emit_tagged_text() {
+    fn subagent_assistant_blocks_emit_tagged_reasoning_text_and_calls() {
         // No tagged partial deltas exist on the 2.1.x wire: a subagent's text
-        // arrives only as full blocks on its tagged assistant frames.
+        // and thinking arrive only as full blocks on its tagged assistant
+        // frames. Each ends on a blank line, so blocks that fold together
+        // stay apart; a signature-only thinking block carries nothing.
         let ev = normalize_one(
-            r#"{"type":"assistant","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"text","text":"working on it"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"thinking","thinking":"","signature":"sig"},{"type":"thinking","thinking":"Plan it. "},{"type":"thinking","thinking":"Then list."},{"type":"text","text":"working on it"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#,
         );
-        assert_eq!(ev.len(), 2);
+        let tagged = |event: AgentEvent| AgentEvent::Subagent {
+            parent_tool_use_id: "toolu_sub".into(),
+            event: Box::new(event),
+        };
         assert_eq!(
-            ev[0],
-            AgentEvent::Subagent {
-                parent_tool_use_id: "toolu_sub".into(),
-                event: Box::new(AgentEvent::TextDelta {
+            ev,
+            [
+                tagged(AgentEvent::ReasoningDelta {
+                    text: "Plan it.\n\n".into()
+                }),
+                tagged(AgentEvent::ReasoningDelta {
+                    text: "Then list.\n\n".into()
+                }),
+                tagged(AgentEvent::TextDelta {
                     text: "working on it\n\n".into()
                 }),
-            }
+                tagged(AgentEvent::ToolCall {
+                    id: "t1".into(),
+                    call: ToolCall::Exec {
+                        command: "ls".into()
+                    },
+                }),
+            ]
         );
-        assert!(matches!(&ev[1], AgentEvent::Subagent { event, .. }
-            if matches!(event.as_ref(), AgentEvent::ToolCall { .. })));
     }
 
     #[test]

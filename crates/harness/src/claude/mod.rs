@@ -11,11 +11,15 @@
 //!   live against 2.1.228: `can_use_tool` control requests arrive and
 //!   allow/deny responses are honored). The alternative channel — an MCP
 //!   permission tool — needs a server process and was rejected. The run's
-//!   [`zeron_proto::PermissionMode`] picks the CLI mode (Ask → `default`,
-//!   Auto → `acceptEdits`, Full → `bypassPermissions`) and whether a
-//!   `can_use_tool` auto-allows (Full) or becomes an Allow/Deny question;
-//!   `AskUserQuestion` always round-trips through
-//!   [`RunControls::request_input`].
+//!   [`zeron_proto::PermissionMode`] picks the CLI mode (Ask and Full →
+//!   `default`, Auto → `auto`) and whether a `can_use_tool` auto-allows
+//!   (Full) or becomes a yes/no question; `AskUserQuestion` always
+//!   round-trips through [`RunControls::request_input`].
+//! - PLAN MODE is the CLI's `--permission-mode plan` ([`permission_mode`]),
+//!   switched on the live process with `set_permission_mode`. Plan mode ends
+//!   when the person approves `ExitPlanMode`; the run then continues in its
+//!   permission mode, and the next turn returns to plan mode while the chat
+//!   is still in it.
 //! - DONE is the CLI's own `result` frame, eagerly: background work (a
 //!   spawned subagent) never holds the turn. The CLI natively runs a second
 //!   wake turn when a background task finishes — a fresh `init` (same
@@ -48,6 +52,7 @@
 
 pub mod catalog;
 mod discovery;
+mod fork_tail;
 mod local;
 mod normalize;
 pub mod refresh_lock;
@@ -65,16 +70,21 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AgentEvent, Compaction, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest,
+    AccessMode, AgentEvent, Compaction, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest,
     SlashCommand, SlashCommandKind, SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
+use crate::approval;
 use crate::process::owned::Child;
 use crate::process::{ChildStdin, Command, Stdio};
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal};
 use catalog::{apply_ultrathink, to_effort};
+use fork_tail::ForkTail;
 use normalize::{Normalizer, Transcript};
-use wire::{ControlRequestFrame, Frame, allow_response, control_error_line, control_response_line};
+use wire::{
+    ControlRequestFrame, Frame, allow_response, control_error_line, control_response_line,
+    deny_response,
+};
 
 /// Locate the device's installed Claude Code CLI: our own PATH, then the
 /// login-shell PATH snapshot (the user's shell init shapes PATH in ways a
@@ -245,6 +255,80 @@ fn option_is_on(options: &serde_json::Map<String, Value>, key: &str) -> bool {
     }
 }
 
+/// The CLI permission mode a run's [`zeron_proto::PermissionMode`] works
+/// in, and the one approving a plan returns to.
+fn access_permission_mode(request: &RunRequest) -> &'static str {
+    match request.permission_mode {
+        zeron_proto::PermissionMode::Ask | zeron_proto::PermissionMode::Full => "default",
+        zeron_proto::PermissionMode::Auto => "auto",
+    }
+}
+
+/// The `--permission-mode` a run launches (or is switched) with: plan mode
+/// over its permission mode.
+fn permission_mode(request: &RunRequest) -> &'static str {
+    if request.plan {
+        "plan"
+    } else {
+        access_permission_mode(request)
+    }
+}
+
+/// How much a CLI permission mode holds back on its own, least first.
+fn strictness(mode: &str) -> u8 {
+    match mode {
+        "bypassPermissions" => 0,
+        "acceptEdits" | "auto" => 1,
+        "default" => 2,
+        _ => 3, // plan
+    }
+}
+
+/// Claude's file-changing tools, asked about by the files they change.
+const EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+
+/// What a `can_use_tool` request has to ask the person before it is
+/// allowed; `None` allows it now. Full allows everything; under Ask and
+/// Auto the CLI's own mode already let through what it covers, so whatever
+/// reaches stdio is asked. `ExitPlanMode` (the plan is ready) asks whether
+/// to start implementing it.
+fn approval_question(
+    tool: &str,
+    display_name: Option<&str>,
+    description: Option<&str>,
+    input: &Value,
+    mode: zeron_proto::PermissionMode,
+) -> Option<UserInputQuestion> {
+    if mode == zeron_proto::PermissionMode::Full {
+        return None;
+    }
+    if tool == "ExitPlanMode" {
+        return Some(approval::question(
+            "Approve plan",
+            "Claude wants to start implementing its plan. Allow it?",
+        ));
+    }
+    let edit = EDIT_TOOLS.contains(&tool);
+    let field = |key: &str| input.get(key).and_then(Value::as_str);
+    Some(if tool == "Bash" {
+        approval::command("Claude", field("command").unwrap_or_default())
+    } else if edit {
+        let paths: Vec<&str> = field("file_path")
+            .or_else(|| field("notebook_path"))
+            .into_iter()
+            .collect();
+        approval::edit("Claude", &paths)
+    } else {
+        let name = display_name
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or(tool);
+        approval::tool("Claude", name, description)
+    })
+}
+
+/// What a refused approval tells the agent.
+const APPROVAL_DENIED: &str = "The user did not allow this.";
+
 /// The Claude Code harness. Construct with [`ClaudeHarness::new`]; tests point
 /// it at a fake CLI with [`ClaudeHarness::with_executable`].
 pub struct ClaudeHarness {
@@ -380,20 +464,15 @@ impl ClaudeHarness {
             args.extend(["--effort".into(), effort.into()]);
         }
         // The CLI decides what asks under each mode (default asks for
-        // everything but its own read-only safe list, acceptEdits also lets
-        // file edits through, `auto` lets its classifier clear what it deems
-        // safe and falls back to `default` on models without auto mode —
-        // verified live against 2.1.284); every `can_use_tool` that does
-        // reach stdio is a question for the user unless the mode is Full,
-        // where the handler auto-allows
-        // — Full keeps the `default` flag zeron always ran with, so the
-        // unattended path is byte-for-byte the old one (`bypassPermissions`
-        // would also be refused under a managed disableBypassPermissionsMode).
-        let cli_mode = match request.permission_mode {
-            zeron_proto::PermissionMode::Ask | zeron_proto::PermissionMode::Full => "default",
-            zeron_proto::PermissionMode::Auto => "auto",
-        };
-        args.extend(["--permission-mode".into(), cli_mode.into()]);
+        // everything but its own read-only safe list, `auto` lets its
+        // classifier clear what it deems safe and falls back to `default` on
+        // models without auto mode — verified live against 2.1.284); every
+        // `can_use_tool` that does reach stdio is a question for the user
+        // unless the mode is Full, where the handler auto-allows — Full keeps
+        // the `default` flag zeron always ran with, so the unattended path is
+        // byte-for-byte the old one (`bypassPermissions` would also be refused
+        // under a managed disableBypassPermissionsMode).
+        args.extend(["--permission-mode".into(), permission_mode(request).into()]);
         let mut settings = serde_json::Map::new();
         if option_is_on(&request.model_options, "fastMode") {
             settings.insert("fastMode".into(), Value::Bool(true));
@@ -725,11 +804,14 @@ impl Harness for ClaudeHarness {
         self.reconfigures_in_place(live, next)
             && Self::launch_args(live, None) == Self::launch_args(next, None)
     }
-    /// Model, context window, effort, fast mode, thinking and ultracode all
-    /// change on the live process (`set_model`, `apply_flag_settings`). Only
-    /// the directory, the permission mode, the computer grant, a fork or
-    /// branch cut, the 200K env switch, the auto-compact window and the
-    /// disallowed tools it launched with need a new one.
+    /// Model, context window, effort, fast mode, thinking, ultracode and
+    /// plan mode all change on the live process (`set_model`,
+    /// `apply_flag_settings`, `set_permission_mode`). The directory, the
+    /// permission mode, the computer grant, a fork or branch cut, the 200K
+    /// env switch, the auto-compact window and the disallowed tools it
+    /// launched with need a new one, and so does entering plan mode: the
+    /// prompt follows the switch on stdin, so a switch the CLI refused would
+    /// run it with less asked than chosen.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
             && live.auto_approve == next.auto_approve
@@ -740,6 +822,14 @@ impl Harness for ClaudeHarness {
             && disables_1m_context(live) == disables_1m_context(next)
             && auto_compact_window(live) == auto_compact_window(next)
             && live.disabled_tools == next.disabled_tools
+            && strictness(permission_mode(next)) <= strictness(permission_mode(live))
+    }
+    fn access_modes(&self) -> &[AccessMode] {
+        &AccessMode::ALL
+    }
+    /// The CLI's own plan mode; approving `ExitPlanMode` ends it.
+    fn supports_plan(&self) -> bool {
+        true
     }
     fn launch_reads_instructions(&self) -> bool {
         true
@@ -1019,6 +1109,8 @@ impl Launcher {
         // tools it started; and no inherited Claude Code session markers.
         crate::process::owned::configure(&mut cmd);
         crate::compose_child_path(&mut cmd, exe);
+        // The variable, not `--forward-subagent-text`: a CLI older than 2.1.211 exits on the flag.
+        cmd.env("CLAUDE_CODE_FORWARD_SUBAGENT_TEXT", "1");
         // The app can inherit these from the shell that launched it, and they override every chat's own pick.
         for var in [
             "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
@@ -1384,6 +1476,7 @@ async fn run_session(session: Session) {
 
     let mut pending_steers = std::collections::VecDeque::new();
     let mut reconfigures = 0u64;
+    let mut mode_switches = 0u64;
     let mut steering_open = true;
     let mut interrupted = false;
     let mut interrupt_sent = false;
@@ -1409,6 +1502,9 @@ async fn run_session(session: Session) {
     // is shown again only once the ask changes or has succeeded.
     let mut refused: std::collections::HashMap<&'static str, Value> =
         std::collections::HashMap::new();
+    // The permission mode the CLI last reported (`init`, `status`). It
+    // leaves plan mode on its own when the plan is approved.
+    let mut cli_mode: Option<String> = None;
     // A turn stop in flight (`TurnControl::stop_turn`): its request id, and
     // once the CLI has answered, how long a turn-ending `result` may still
     // take. The CLI answers a stop between turns without any result — the
@@ -1445,6 +1541,9 @@ async fn run_session(session: Session) {
     // [`crate::shutdown_agent`]).
     #[cfg_attr(not(unix), allow(unused_mut))]
     let mut torn_down: Vec<crate::process::Tracked> = Vec::new();
+    // The typed fork whose transcript is read off disk (see [`fork_tail`]).
+    let claude_root = config_root(&launched.env);
+    let mut tail: Option<ForkTail> = None;
 
     'main: loop {
         if std::mem::take(&mut relaunch) {
@@ -1487,6 +1586,14 @@ async fn run_session(session: Session) {
             }
         }
         let control_deadline = pending_controls.values().map(|(_, _, at)| *at).min();
+        match norm.fork_to_follow() {
+            Some(fork) if tail.as_ref().is_none_or(|t| t.chip != fork.0) => {
+                tail = Some(ForkTail::new(&claude_root, fork));
+            }
+            Some(_) => {}
+            None => tail = None,
+        }
+        let tail_at = tail.as_ref().and_then(ForkTail::next_read);
         tokio::select! {
             line = stdout_lines.next_line() => match line {
                 Ok(Some(line)) => {
@@ -1550,6 +1657,9 @@ async fn run_session(session: Session) {
                         continue;
                     }
                     if let Frame::System(system) = &frame {
+                        if let Some(mode) = &system.permission_mode {
+                            cli_mode = Some(mode.clone());
+                        }
                         match system.subtype.as_str() {
                             "background_tasks_changed" => {
                                 turn.set_background(system.tasks.as_ref().map_or(0, Vec::len));
@@ -1561,14 +1671,7 @@ async fn run_session(session: Session) {
                         }
                     }
                     if let Frame::ControlRequest(req) = frame {
-                        handle_control_request(
-                            req,
-                            title_only,
-                            config.permission_mode,
-                            config.computer_control,
-                            &request_input,
-                            &stdin.tx,
-                        );
+                        handle_control_request(req, title_only, &config, &request_input, &stdin.tx);
                         continue;
                     }
                     // Only the CLI confirms that a prompt joined its
@@ -1724,16 +1827,34 @@ async fn run_session(session: Session) {
                 None => stop_tasks = None,
             },
 
+            // The typed fork's records, as it writes them.
+            _ = tokio::time::sleep_until(tail_at.unwrap_or_else(tokio::time::Instant::now)),
+                if tail_at.is_some() => {
+                let records = tail.as_mut().map_or_else(Vec::new, ForkTail::read);
+                for ev in records.into_iter().flat_map(|record| norm.fork_record(record)) {
+                    if event_tx.send(Ok(ev)).await.is_err() {
+                        break 'main;
+                    }
+                }
+            },
+
             steer = steering.recv(), if steering_open && !interrupted => match steer {
                 Some(msg) => {
                     // A message of ours now owns whatever result comes next.
                     active_since_stop = true;
                     // A changed configuration applies before the prompt, on
                     // the same stdin the CLI reads in order.
+                    // A message starting a turn also puts back a plan mode
+                    // the CLI left when its last plan was approved.
+                    // Only plan: `auto` reads back as `default` on models without it.
+                    let mut switch_mode = !turn_open
+                        && config.plan
+                        && cli_mode.as_deref().is_some_and(|mode| mode != "plan");
                     if let Some(next) = msg.config {
                         reconfigures += 1;
                         let resend = std::mem::take(&mut config_unsure);
                         let deadline = tokio::time::Instant::now() + CONTROL_TIMEOUT;
+                        switch_mode |= resend || permission_mode(&next) != permission_mode(&config);
                         if resend || model_arg(&next) != model_arg(&config) {
                             let id = format!("zeron_model_{reconfigures}");
                             let model = model_arg(&next);
@@ -1749,6 +1870,15 @@ async fn run_session(session: Session) {
                             if !stdin.line(line) { break 'main; }
                         }
                         config = *next;
+                    }
+                    if switch_mode {
+                        mode_switches += 1;
+                        let id = format!("zeron_mode_{mode_switches}");
+                        let mode = permission_mode(&config);
+                        let deadline = tokio::time::Instant::now() + CONTROL_TIMEOUT;
+                        let line = wire::set_permission_mode_line(&id, mode);
+                        pending_controls.insert(id, ("permission mode", Value::from(mode), deadline));
+                        if !stdin.line(line) { break 'main; }
                     }
                     let id = uuid::Uuid::new_v4().to_string();
                     let images = load_image_blocks(&msg.attachments).await;
@@ -1822,6 +1952,13 @@ async fn run_session(session: Session) {
                         error: None,
                         session_id: norm.session_id.clone(),
                     });
+                    // No result came to settle a typed fork: it ends here,
+                    // with the turn, or its chip runs on in the parked run.
+                    for ev in norm.settle_typed_fork(DoneStatus::Interrupted) {
+                        if event_tx.send(Ok(ev)).await.is_err() {
+                            break 'main;
+                        }
+                    }
                     if event_tx.send(Ok(done)).await.is_err() {
                         break 'main;
                     }
@@ -2058,20 +2195,19 @@ type RequestInputFn = Box<
 /// Serve one `can_use_tool` control request. The CLI blocks until SOME
 /// response arrives, so every request must be answered. Under Full every
 /// tool is auto-approved (the unattended behavior); under Ask/Auto a tool
-/// request becomes an Allow/Deny question for the user. `AskUserQuestion`
-/// is intercepted in every mode — surface the questions through the
-/// engine's input bridge (which owns the `InputRequested`/`InputResolved`
-/// lifecycle), wait for the user's answers (in a subtask so the frame loop
-/// keeps flowing), and hand them back keyed by question text, as the tool
-/// expects.
+/// request becomes a yes/no question for the user (see
+/// [`approval_question`]), in a subtask so the frame loop keeps flowing, and
+/// only a yes allows it. `AskUserQuestion` is intercepted in every mode —
+/// surface the questions through the engine's input bridge (which owns the
+/// `InputRequested`/`InputResolved` lifecycle), wait for the user's answers,
+/// and hand them back keyed by question text, as the tool expects.
 ///
 /// Any other request is answered with an error: the CLI waits for a reply to
 /// every request it sends, and one left unanswered would stall the run.
 fn handle_control_request(
     req: ControlRequestFrame,
     title_only: bool,
-    permission_mode: zeron_proto::PermissionMode,
-    computer_control: bool,
+    config: &RunRequest,
     request_input: &Arc<RequestInputFn>,
     stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
 ) {
@@ -2098,31 +2234,45 @@ fn handle_control_request(
         return;
     }
     if req.request.tool_name != "AskUserQuestion" {
+        let body = req.request;
+        // Approving the plan leaves plan mode for the run's access mode,
+        // not the CLI's `default`.
+        let allow = {
+            let after_plan = access_permission_mode(config);
+            let exit_plan = body.tool_name == "ExitPlanMode";
+            move |input: Value| {
+                if exit_plan {
+                    wire::exit_plan_response(input, after_plan)
+                } else {
+                    allow_response(input)
+                }
+            }
+        };
         // The engine's consent card is the only prompt a Zeron computer call gets.
         let computer_call =
-            computer_control && crate::is_zeron_computer_tool(&req.request.tool_name);
-        if computer_call || permission_mode == zeron_proto::PermissionMode::Full {
-            let line = control_response_line(&req.request_id, allow_response(req.request.input));
+            config.computer_control && crate::is_zeron_computer_tool(&body.tool_name);
+        let question = approval_question(
+            &body.tool_name,
+            body.display_name.as_deref(),
+            body.description.as_deref(),
+            &body.input,
+            config.permission_mode,
+        )
+        .filter(|_| !computer_call);
+        let Some(question) = question else {
+            let line = control_response_line(&req.request_id, allow(body.input));
             let _ = stdin_tx.send(StdinMsg::Line(line));
             return;
-        }
-        let request_input = Arc::clone(request_input);
+        };
+        let answers = (request_input)(vec![question.clone()]);
         let stdin_tx = stdin_tx.clone();
         tokio::spawn(async move {
-            let question = permission_question(&req.request.tool_name, &req.request.input);
-            // A dropped sender (caller went away) degrades to a deny so the
-            // agent is unblocked — never silently allowed.
-            let answers = (request_input)(vec![question.clone()])
-                .await
-                .unwrap_or_default();
-            let allowed = answers.iter().any(|a| {
-                a.question_id == question.id
-                    && a.labels.iter().any(|l| l.eq_ignore_ascii_case("allow"))
-            });
-            let response = if allowed {
-                allow_response(req.request.input)
+            // A dropped sender or no answer is a refusal, like a no.
+            let answers = answers.await.unwrap_or_default();
+            let response = if approval::approved(&question, &answers) {
+                allow(body.input)
             } else {
-                wire::deny_response("The user denied this tool use.")
+                deny_response(APPROVAL_DENIED)
             };
             let line = control_response_line(&req.request_id, response);
             let _ = stdin_tx.send(StdinMsg::Line(line));
@@ -2142,38 +2292,23 @@ fn handle_control_request(
         // input part into the doc whose id no resolver knew — the QuestionPanel
         // answered that unanswerable twin and the run never resumed.
         //
-        // A dropped sender (caller went away) degrades to empty answers so the
-        // agent is unblocked rather than wedged.
+        // No answers — the person closed the questions, or a dropped sender
+        // (caller went away) — is a decline: deny the tool so the agent reads
+        // that it went unanswered, rather than an empty pick, and is
+        // unblocked rather than wedged.
         let answers = (request_input)(questions.clone()).await.unwrap_or_default();
-        let updated = updated_input_with_answers(&input, &questions, &answers);
-        let line = control_response_line(&request_id, allow_response(updated));
+        let response = if answers.is_empty() {
+            serde_json::json!({ "behavior": "deny", "message": QUESTIONS_DISMISSED })
+        } else {
+            allow_response(updated_input_with_answers(&input, &questions, &answers))
+        };
+        let line = control_response_line(&request_id, response);
         let _ = stdin_tx.send(StdinMsg::Line(line));
     });
 }
 
-/// The Allow/Deny question a tool permission becomes under Ask/Auto: the
-/// command for Bash, the path for file tools, the raw input otherwise.
-fn permission_question(tool_name: &str, input: &Value) -> UserInputQuestion {
-    let detail = input
-        .get("command")
-        .or_else(|| input.get("file_path"))
-        .or_else(|| input.get("path"))
-        .or_else(|| input.get("url"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| input.to_string());
-    UserInputQuestion {
-        approval: true,
-        id: uuid::Uuid::new_v4().to_string(),
-        header: format!("Allow {tool_name}?"),
-        question: format!("Claude wants to use {tool_name}: {detail}"),
-        options: vec!["Allow".into(), "Deny".into()],
-        multi_select: false,
-        kind: None,
-        prefill: None,
-        multiline: false,
-    }
-}
+/// What a declined `AskUserQuestion` tells the agent.
+const QUESTIONS_DISMISSED: &str = "The user dismissed the questions without answering.";
 
 /// Parse Claude's `AskUserQuestion` tool input into [`UserInputQuestion`]s
 /// (tolerant of `header`/`title`, `question`/`prompt`, string or object
@@ -2288,6 +2423,8 @@ mod tests {
             cwd: String::new(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
             permission_mode: zeron_proto::PermissionMode::Full,
+            access: Default::default(),
+            plan: false,
             auto_approve: false,
             resume: None,
             attachments: Vec::new(),
@@ -2359,6 +2496,8 @@ mod tests {
                 cwd: String::new(),
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
                 permission_mode: zeron_proto::PermissionMode::Full,
+                access: Default::default(),
+                plan: false,
                 auto_approve: false,
                 resume: None,
                 attachments: Vec::new(),
@@ -2418,6 +2557,8 @@ mod tests {
                 cwd: String::new(),
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
                 permission_mode: zeron_proto::PermissionMode::Full,
+                access: Default::default(),
+                plan: false,
                 auto_approve: false,
                 resume: None,
                 attachments: Vec::new(),
@@ -2486,6 +2627,8 @@ mod tests {
             cwd: String::new(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
             permission_mode: zeron_proto::PermissionMode::Full,
+            access: Default::default(),
+            plan: false,
             auto_approve: false,
             resume: None,
             attachments: Vec::new(),
@@ -2529,6 +2672,8 @@ mod tests {
                 cwd: String::new(),
                 sandbox: mode.sandbox(),
                 permission_mode: mode,
+                access: Default::default(),
+                plan: false,
                 auto_approve: false,
                 resume: None,
                 attachments: Vec::new(),
@@ -2585,18 +2730,14 @@ mod tests {
                 subtype: "can_use_tool".into(),
                 tool_name: tool.into(),
                 input: json!({ "window_id": 7 }),
+                ..Default::default()
             },
         };
         let answer = |tool: &str, mode: PermissionMode, computer_control: bool| {
             let (tx, mut rx) = mpsc::unbounded_channel();
-            handle_control_request(
-                frame(tool),
-                false,
-                mode,
-                computer_control,
-                &request_input,
-                &tx,
-            );
+            let mut config = access_tests::request(mode, false);
+            config.computer_control = computer_control;
+            handle_control_request(frame(tool), false, &config, &request_input, &tx);
             async move {
                 match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
                     Ok(Some(StdinMsg::Line(line))) => line,
@@ -2643,22 +2784,6 @@ mod tests {
         assert_eq!(asked.load(Ordering::SeqCst), 8);
     }
 
-    #[test]
-    fn permission_question_names_the_command_or_path() {
-        let q = permission_question(
-            "Bash",
-            &json!({"command": "rm -rf build", "description": "x"}),
-        );
-        assert_eq!(q.header, "Allow Bash?");
-        assert!(q.question.contains("rm -rf build"));
-        assert_eq!(q.options, vec!["Allow".to_string(), "Deny".to_string()]);
-        let q = permission_question("Edit", &json!({"file_path": "/a/b.rs", "old_string": "x"}));
-        assert!(q.question.contains("/a/b.rs"));
-        let q = permission_question("WebSearch", &json!({"query": "zeron"}));
-        assert!(q.question.contains("zeron"));
-        assert_eq!(wire::deny_response("no")["behavior"], "deny");
-    }
-
     #[cfg(unix)]
     #[test]
     fn a_branch_forks_the_resumed_session_at_the_kept_reply() {
@@ -2673,6 +2798,8 @@ mod tests {
             cwd: String::new(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
             permission_mode: zeron_proto::PermissionMode::Full,
+            access: Default::default(),
+            plan: false,
             auto_approve: false,
             resume: Some("sess-a".into()),
             attachments: Vec::new(),
@@ -2757,6 +2884,8 @@ mod tests {
             cwd: String::new(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
             permission_mode: zeron_proto::PermissionMode::Full,
+            access: Default::default(),
+            plan: false,
             auto_approve: false,
             resume: Some("sess-source".into()),
             attachments: Vec::new(),
@@ -2869,6 +2998,139 @@ mod tests {
         assert_eq!(updated["answers"]["Pick one"], json!("B"));
         // Original input is preserved alongside the answers.
         assert!(updated["questions"].is_array());
+    }
+
+    #[test]
+    fn runs_ask_the_cli_to_forward_subagent_text() {
+        let request = access_tests::request(zeron_proto::PermissionMode::Full, false);
+        let harness = ClaudeHarness::new();
+        let mut cmd = harness
+            .launcher(std::path::Path::new("claude"))
+            .command(&request);
+        let value = cmd
+            .as_std_mut()
+            .get_envs()
+            .find(|(key, _)| *key == "CLAUDE_CODE_FORWARD_SUBAGENT_TEXT")
+            .and_then(|(_, value)| value.map(|v| v.to_os_string()));
+        assert_eq!(value.as_deref(), Some(std::ffi::OsStr::new("1")));
+    }
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::*;
+    use serde_json::json;
+    use zeron_proto::PermissionMode;
+
+    pub(super) fn request(permission_mode: PermissionMode, plan: bool) -> RunRequest {
+        RunRequest {
+            mcp: None,
+            prompt: "hi".into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: "/work".into(),
+            sandbox: permission_mode.sandbox(),
+            auto_approve: permission_mode.auto_approve(),
+            permission_mode,
+            access: permission_mode.access(),
+            plan,
+            attachments: Vec::new(),
+            worktree: None,
+            branch: None,
+            resume: None,
+            forked_at: None,
+            computer_control: false,
+            disabled_tools: Vec::new(),
+            env: Default::default(),
+        }
+    }
+
+    #[test]
+    fn plan_mode_launches_over_the_permission_mode() {
+        let mode_of = |request: &RunRequest| {
+            let args = ClaudeHarness::launch_args(request, None);
+            args.iter()
+                .position(|a| a == "--permission-mode")
+                .map(|i| args[i + 1].clone())
+        };
+        for mode in PermissionMode::ALL {
+            assert_eq!(mode_of(&request(mode, true)).as_deref(), Some("plan"));
+        }
+        assert_eq!(
+            access_permission_mode(&request(PermissionMode::Auto, true)),
+            "auto"
+        );
+        assert_eq!(
+            access_permission_mode(&request(PermissionMode::Ask, true)),
+            "default"
+        );
+    }
+
+    #[test]
+    fn plan_changes_reconfigure_the_live_process() {
+        let harness = ClaudeHarness::new();
+        let ask = request(PermissionMode::Ask, false);
+        let planning = request(PermissionMode::Ask, true);
+        assert!(!harness.same_runtime(&planning, &ask));
+        assert!(harness.reconfigures_in_place(&planning, &ask));
+        // A stricter CLI mode relaunches: a refused switch must not leave
+        // the next prompt running with less asked.
+        assert!(!harness.reconfigures_in_place(&ask, &planning));
+        assert!(!harness.reconfigures_in_place(&ask, &request(PermissionMode::Full, false)));
+        assert!(harness.supports_plan());
+    }
+
+    #[test]
+    fn tool_calls_ask_unless_the_mode_is_full() {
+        let bash = json!({"command": "cargo test", "description": "Run tests"});
+        let edit = json!({"file_path": "/work/src/lib.rs", "old_string": "a"});
+        let notebook = json!({"notebook_path": "/work/a.ipynb"});
+        let ask = |tool: &str, input: &Value, mode: PermissionMode| {
+            approval_question(tool, None, None, input, mode).map(|q| q.question)
+        };
+        for tool in ["Bash", "Edit", "WebFetch", "ExitPlanMode", "mcp__x__y"] {
+            assert_eq!(ask(tool, &bash, PermissionMode::Full), None, "{tool}");
+        }
+        assert_eq!(
+            ask("Bash", &bash, PermissionMode::Auto).as_deref(),
+            Some("Claude wants to run `cargo test`. Allow it?")
+        );
+        assert_eq!(
+            ask("Write", &edit, PermissionMode::Ask).as_deref(),
+            Some("Claude wants to modify /work/src/lib.rs. Allow it?")
+        );
+        assert_eq!(
+            ask("NotebookEdit", &notebook, PermissionMode::Ask).as_deref(),
+            Some("Claude wants to modify /work/a.ipynb. Allow it?")
+        );
+        let mcp = approval_question(
+            "mcp__linear__search",
+            Some("search (linear)"),
+            Some("Find the bug"),
+            &json!({}),
+            PermissionMode::Ask,
+        )
+        .unwrap();
+        assert_eq!(mcp.header, "Approve tool");
+        assert_eq!(
+            mcp.question,
+            "Claude wants to use search (linear) (Find the bug). Allow it?"
+        );
+        let plan = approval_question(
+            "ExitPlanMode",
+            None,
+            None,
+            &json!({"plan": "p"}),
+            PermissionMode::Auto,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.question,
+            "Claude wants to start implementing its plan. Allow it?"
+        );
+        assert_eq!(plan.options, vec![approval::ALLOW, approval::DENY]);
     }
 }
 

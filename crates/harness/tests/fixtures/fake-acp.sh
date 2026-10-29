@@ -313,7 +313,7 @@ case "$promptline" in
 *scenario:computer*)
   # Guidance rides a host-context part ahead of the first prompt; a Zeron
   # computer permission in the recorded shape selects allow_once, anything
-  # else still reaches the input bridge (which answers "Yes", no such option).
+  # else is asked through the input bridge (the test answers No).
   ctx=0
   has "$promptline" '"prompt":[{"text":"<zeron_host_context>\n## Zeron computer use' && ctx=1
   outcome="ctx=$ctx"
@@ -323,7 +323,7 @@ case "$promptline" in
     read -r ans || exit 1
     has "$ans" "\"id\":$1" || exit 1
     if has "$ans" '"optionId":"once"'; then outcome="$outcome $1:once"
-    elif has "$ans" '"outcome":"cancelled"'; then outcome="$outcome $1:asked"
+    elif has "$ans" '"optionId":"no"'; then outcome="$outcome $1:refused"
     else outcome="$outcome $1:other"; fi
   done
   update "{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"$outcome\"}}"

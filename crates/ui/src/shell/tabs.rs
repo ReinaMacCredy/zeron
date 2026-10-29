@@ -593,6 +593,16 @@ fn panel_titlebar_widths(
     }
 }
 
+/// A target the opener names for the new-session canvas, over the sidebar
+/// filter and the canvas's own last pick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum NewSessionTarget {
+    /// This project (space id).
+    Project(String),
+    /// No project, on this device (id): a "No project" sidebar group.
+    NoProject(String),
+}
+
 impl Shell {
     /// The same binding navigates the focused pane. Keep the persisted action
     /// IDs so existing user keymaps and the native browser bridge still work.
@@ -845,9 +855,14 @@ impl Shell {
     /// open it just hides (detach, not close — the source chat's tabs and
     /// PTYs survive for the return trip).
     ///
-    /// `project` (the per-project `+` on a sidebar group header) homes the
-    /// canvas on that project and wins over the sidebar filter.
-    pub(super) fn open_new_session(&mut self, project: Option<String>, cx: &mut Context<Self>) {
+    /// `target` (the `+` on a sidebar group header) homes the canvas on that
+    /// project, or on no project on that device, and wins over the sidebar
+    /// filter.
+    pub(super) fn open_new_session(
+        &mut self,
+        target: Option<NewSessionTarget>,
+        cx: &mut Context<Self>,
+    ) {
         self.snapshot_current_chat(cx);
         self.command_palette = None;
         self.set_voice_stage_open(false, cx);
@@ -867,12 +882,12 @@ impl Shell {
                 panel.update(cx, |panel, cx| panel.set_open(false, cx));
             }
         }
-        let target = {
-            let state = self.state.read(cx);
-            project
-                .or_else(|| self.settings.space_filter.clone())
-                .filter(|id| state.space_row(id).is_some())
-        };
+        let project = match &target {
+            Some(NewSessionTarget::Project(project)) => Some(project.clone()),
+            Some(NewSessionTarget::NoProject(_)) => None,
+            None => self.settings.space_filter.clone(),
+        }
+        .filter(|id| self.state.read(cx).space_row(id).is_some());
         let defaults = crate::settings::composer::ComposerDefaults::load(&self.data_dir);
         self.state.update(cx, |s, cx| {
             // The draft comes first so the target picks below record onto
@@ -882,8 +897,12 @@ impl Shell {
             let restores = s.canvas_target.is_some();
             s.select_chat(None, cx);
             s.new_draft(cx);
-            if target.is_some() {
-                s.select_space(target, cx);
+            if let Some(NewSessionTarget::NoProject(device)) = target {
+                // The composer's "Don't work in a project" pick, on that device.
+                s.select_space(None, cx);
+                s.select_device(device, cx);
+            } else if project.is_some() {
+                s.select_space(project, cx);
             } else if !restores && defaults.no_project {
                 // No canvas target was set aside (e.g. after a runtime swap):
                 // fall back to the saved new-session opt-out.

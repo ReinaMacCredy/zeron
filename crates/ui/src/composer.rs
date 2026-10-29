@@ -725,6 +725,62 @@ fn should_publish_optimistic_echo(queue: bool) -> bool {
     !queue
 }
 
+/// The composer's one caption line about the chat's path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinkNotice {
+    text: SharedString,
+    glyph: NoticeGlyph,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoticeGlyph {
+    /// The connection is working on it.
+    Spinner,
+    Dot,
+    /// Hard offline: the only amber caption.
+    WarningDot,
+}
+
+/// What the caption says, if anything. Only `intent` — a draft, a send in
+/// flight or queued messages — earns a send clause: an empty composer never
+/// claims a message is waiting. While the transcript's loader speaks for
+/// the chat, only a send clause adds anything. This device's own connection
+/// outranks the host's presence, which goes dark with it.
+fn link_notice(
+    link: crate::state::ChatLink,
+    host: Option<&str>,
+    intent: bool,
+    loader_shown: bool,
+) -> Option<LinkNotice> {
+    use crate::state::LinkSync;
+    let notice = |text: SharedString, glyph| Some(LinkNotice { text, glyph });
+    match link.sync {
+        LinkSync::Offline if intent => notice(
+            "Offline — messages will send when you're back online.".into(),
+            NoticeGlyph::WarningDot,
+        ),
+        LinkSync::Stalled | LinkSync::Reconnecting if intent => notice(
+            "Reconnecting — messages will send once the connection recovers.".into(),
+            NoticeGlyph::Spinner,
+        ),
+        _ if link.host_unreachable && intent => notice(
+            format!(
+                "Can't reach {} — messages will send when it's reachable.",
+                host.unwrap_or("the host")
+            )
+            .into(),
+            NoticeGlyph::Dot,
+        ),
+        _ if loader_shown => None,
+        LinkSync::Offline => notice("Offline".into(), NoticeGlyph::WarningDot),
+        LinkSync::Stalled | LinkSync::Reconnecting => {
+            notice("Reconnecting…".into(), NoticeGlyph::Spinner)
+        }
+        LinkSync::Syncing { shown: true } => notice("Syncing…".into(), NoticeGlyph::Spinner),
+        LinkSync::Syncing { shown: false } | LinkSync::Live => None,
+    }
+}
+
 fn begin_interrupt(pending: &mut HashSet<String>, chat_id: &str) -> bool {
     pending.insert(chat_id.to_string())
 }
@@ -746,6 +802,13 @@ fn escape_dismisses_completion(key: &str, completion_open: bool) -> bool {
 
 fn wizard_escape_goes_back(key: &str, input_focused: bool, input_empty: bool) -> bool {
     key == "escape" && (!input_focused || input_empty)
+}
+
+/// Escape with no page to go back to and nothing given on this one closes
+/// the questions unanswered, like any panel. Anything picked or typed holds
+/// the panel open: a stray Escape must not throw an answer away.
+fn wizard_escape_dismisses(page: usize, page_has_pick: bool, input_empty: bool) -> bool {
+    page == 0 && !page_has_pick && input_empty
 }
 
 /// Find the unresolved input request the panel should serve, if any: an
@@ -1058,6 +1121,25 @@ const MENTION_SIDE_PAD: &str = "\u{00A0}";
 /// the `zeron` MCP server's `read_thread`, so the prompt carries the id
 /// verbatim and the label is only the title at insert time.
 use zeron_proto::chat_mentions::THREAD_MENTION_SCHEME;
+/// Code lines an annotation chip's hover card shows.
+const ANNOTATION_SNIPPET_LINES: usize = 4;
+/// Air between an annotation chip and its preview.
+const ANNOTATION_TOOLTIP_GAP: f32 = 6.0;
+
+/// The hover card's element row, above its code.
+const ANNOTATION_HEADER_HEIGHT: f32 = 28.0;
+
+fn annotation_tooltip_height(annotation: &zeron_proto::annotation::BrowserAnnotation) -> f32 {
+    let lines = annotation.snippet(ANNOTATION_SNIPPET_LINES).lines().count();
+    // Border, element row, hairline, then the code with its padding.
+    let code = if lines == 0 {
+        0.0
+    } else {
+        1.0 + lines as f32 * 16.0 + 14.0
+    };
+    2.0 + ANNOTATION_HEADER_HEIGHT + code
+}
+
 /// A private URI scheme keeps file mentions distinguishable from ordinary
 /// Markdown links pasted into the composer.
 use zeron_proto::file_mentions::{FILE_MENTION_SCHEME, local_file_link, local_path_is_safe};
@@ -1121,6 +1203,8 @@ struct FileMentionLink {
     kind: ChipKind,
     /// The draft number when this chip references a staged attachment.
     attachment: Option<u32>,
+    /// The element an annotation chip carries.
+    annotation: Option<std::sync::Arc<zeron_proto::annotation::BrowserAnnotation>>,
 }
 
 impl FileMentionLink {
@@ -1254,6 +1338,7 @@ fn file_mention_links(text: &str) -> Vec<FileMentionLink> {
                 ChipKind::File
             },
             attachment: None,
+            annotation: None,
         })
         .collect()
 }
@@ -1289,6 +1374,7 @@ fn thread_mention_links(text: &str) -> Vec<FileMentionLink> {
                     path: chat_id.to_string(),
                     kind: ChipKind::Thread,
                     attachment: None,
+                    annotation: None,
                 });
             }
         }
@@ -1316,6 +1402,8 @@ struct MentionTooltipTarget {
     /// Set for attachment chips. An image chip has no tooltip: a click opens
     /// the picture full size instead.
     attachment: Option<u32>,
+    /// Set for annotation chips: the hover shows the element's code.
+    annotation: Option<std::sync::Arc<zeron_proto::annotation::BrowserAnnotation>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1577,6 +1665,7 @@ impl TextProjection {
                         ChipKind::Skill
                     },
                     attachment: None,
+                    annotation: None,
                 }),
         );
         links.extend(
@@ -1588,6 +1677,7 @@ impl TextProjection {
                     path: link.chat_id,
                     kind: ChipKind::Chat,
                     attachment: None,
+                    annotation: None,
                 }),
         );
         links.extend(
@@ -1609,6 +1699,19 @@ impl TextProjection {
                         ChipKind::File
                     },
                     attachment: Some(mention.index),
+                    annotation: None,
+                }),
+        );
+        links.extend(
+            zeron_proto::annotation::annotation_links(raw)
+                .into_iter()
+                .map(|(range, annotation)| FileMentionLink {
+                    range,
+                    basename: annotation.label(),
+                    path: annotation.element.clone(),
+                    kind: ChipKind::Annotation,
+                    attachment: None,
+                    annotation: Some(std::sync::Arc::new(annotation)),
                 }),
         );
         links.sort_by_key(|link| link.range.start);
@@ -1836,6 +1939,7 @@ fn has_mention_scheme(raw: &str) -> bool {
         || raw.contains(zeron_proto::attachment_mentions::IMAGE_MENTION_SCHEME)
         || raw.contains(zeron_proto::attachment_mentions::ATTACHMENT_MENTION_SCHEME)
         || raw.contains(zeron_proto::chat_mentions::CHAT_MENTION_SCHEME)
+        || raw.contains(zeron_proto::annotation::ANNOTATION_SCHEME)
 }
 
 /// Project a sent message's raw Markdown for transcript display: mention links
@@ -2152,6 +2256,8 @@ pub enum ComposerInputEvent {
     PastedLongText(String),
     /// An image or pasted-text chip was clicked.
     OpenAttachment(u32),
+    /// The pointer moved onto (or off) an annotation chip.
+    AnnotationHovered(Option<u32>),
 }
 
 #[derive(Clone)]
@@ -2401,6 +2507,8 @@ pub struct ComposerInput {
     /// into another draft can tell it must not reuse their numbers.
     attachment_scope: String,
     mention_tooltip: MentionTooltipPhase,
+    /// The annotation chip under the pointer, as last reported.
+    hovered_annotation: Option<u32>,
     mention_tooltip_generation: u64,
     mention_tooltip_popup: Option<Bounds<Pixels>>,
     mention_tooltip_task: Option<Task<()>>,
@@ -2498,6 +2606,7 @@ impl ComposerInput {
             attachment_chips: None,
             attachment_scope: String::new(),
             mention_tooltip: MentionTooltipPhase::Hidden,
+            hovered_annotation: None,
             mention_tooltip_generation: 0,
             mention_tooltip_popup: None,
             mention_tooltip_task: None,
@@ -2872,6 +2981,59 @@ impl ComposerInput {
         true
     }
 
+    /// Insert a browser annotation chip at the selection, numbered after the
+    /// draft's existing annotations. One undo step, like a dropped mention.
+    pub(crate) fn insert_annotation(
+        &mut self,
+        mut annotation: zeron_proto::annotation::BrowserAnnotation,
+        cx: &mut Context<Self>,
+    ) -> Option<u32> {
+        if self.read_only || self.marked_range.is_some() {
+            return None;
+        }
+        annotation.index = zeron_proto::annotation::annotation_links(&self.content)
+            .iter()
+            .map(|(_, existing)| existing.index)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let index = annotation.index;
+        let range = self.selected_range.clone();
+        if range.start > range.end || !self.content.is_char_boundary(range.start) {
+            return None;
+        }
+        let lead = if range.start > 0
+            && self.content[..range.start]
+                .chars()
+                .next_back()
+                .is_some_and(|ch| !ch.is_whitespace())
+        {
+            " "
+        } else {
+            ""
+        };
+        let (trailing, advance) =
+            reference_suffix(self.content.get(range.end..).and_then(|s| s.chars().next()));
+        let inserted = format!("{lead}{}{trailing}", annotation.bounded().link());
+        self.invalidate_mention_tooltip();
+        self.record_edit(&range, &inserted);
+        self.edit_revision = self.edit_revision.wrapping_add(1);
+        self.content =
+            self.content[..range.start].to_owned() + &inserted + &self.content[range.end..];
+        let cursor = range.start + inserted.len() + advance;
+        self.selected_range = cursor..cursor;
+        self.selection_reversed = false;
+        self.caret_affinity = CaretAffinity::Downstream;
+        self.preferred_column = None;
+        self.refresh_projection();
+        self.follow_cursor = true;
+        self.reset_blink();
+        self.needs_measure = true;
+        cx.emit(ComposerInputEvent::Edited);
+        cx.notify();
+        Some(index)
+    }
+
     /// Replace a completed plain-text token (slash commands) as one
     /// non-coalescing undo step. Unlike [`Self::replace_mention`], the
     /// replacement is ordinary text — no link, no chip projection.
@@ -3044,8 +3206,11 @@ impl ComposerInput {
                     {
                         let path = input.mention_tooltip_text(target);
                         let activation = *generation;
-                        input.mention_tooltip_view =
-                            Some(cx.new(|_| MentionPathTooltip { path, activation }));
+                        input.mention_tooltip_view = Some(cx.new(|_| MentionPathTooltip {
+                            path,
+                            annotation: target.annotation.clone(),
+                            activation,
+                        }));
                     }
                     cx.notify();
                 }
@@ -3081,6 +3246,21 @@ impl ComposerInput {
     }
 
     fn on_mention_pointer_move(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        // The browser points at a hovered annotation chip's element at once,
+        // ahead of the delayed code card.
+        let annotation = (!self.is_selecting)
+            .then(|| {
+                self.mention_hits
+                    .iter()
+                    .find(|hit| hit.bounds.contains(&position))
+                    .and_then(|hit| hit.target.annotation.as_ref())
+                    .map(|annotation| annotation.index)
+            })
+            .flatten();
+        if annotation != self.hovered_annotation {
+            self.hovered_annotation = annotation;
+            cx.emit(ComposerInputEvent::AnnotationHovered(annotation));
+        }
         if self.is_selecting {
             self.invalidate_mention_tooltip();
             return;
@@ -3345,8 +3525,13 @@ impl ComposerInput {
             cx.propagate();
             return;
         }
-        // Mirror `apply_keymap`, which binds the default for an unparseable combo.
-        let parse = |combo: &str| Keystroke::parse(&crate::settings::platform_combo(combo)).ok();
+        // Mirror `apply_keymap`, which binds the default for an unparseable
+        // combo, on the key the active layout types for it.
+        let equivalents = crate::settings::key_equivalents(cx);
+        let parse = |combo: &str| {
+            let combo = crate::settings::platform_combo(combo);
+            Keystroke::parse(&crate::settings::localize_combo(&combo, &equivalents)).ok()
+        };
         let keystroke = parse(&crate::settings::current(cx).keymap.toggle_dictation)
             .or_else(|| parse(crate::settings::ShortcutId::ToggleDictation.default_combo()));
         let blur = cx.on_blur(&self.focus_handle, window, |input, _, cx| {
@@ -5372,14 +5557,105 @@ struct ComposerTextElement {
 
 struct MentionPathTooltip {
     path: SharedString,
+    /// Annotation chips preview their element instead of a path.
+    annotation: Option<std::sync::Arc<zeron_proto::annotation::BrowserAnnotation>>,
     /// Stable for one `Waiting → Visible` promotion; a later activation gets
     /// a new key and therefore exactly one fresh fade-in.
     activation: u64,
 }
 
+impl MentionPathTooltip {
+    /// At a glance: which element (with its size, like the page's label)
+    /// and the opening of its code.
+    fn annotation_card(
+        annotation: &zeron_proto::annotation::BrowserAnnotation,
+        activation: u64,
+        theme: &Theme,
+    ) -> gpui::AnyElement {
+        let snippet = annotation.snippet(ANNOTATION_SNIPPET_LINES);
+        let tag_len = annotation
+            .element
+            .find(['#', '.'])
+            .unwrap_or(annotation.element.len());
+        let (tag, rest) = annotation.element.split_at(tag_len);
+        let [_, _, width, height] = annotation.rect;
+        let header = div()
+            .h(px(ANNOTATION_HEADER_HEIGHT))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(10.0))
+            .text_size(px(12.0))
+            .child(
+                div()
+                    .flex()
+                    .min_w_0()
+                    .truncate()
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child(SharedString::from(tag.to_owned())),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(rest.to_owned())),
+                    ),
+            )
+            .when(width > 0 || height > 0, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .ml_auto()
+                        .pl(px(8.0))
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(format!("{width} × {height}"))),
+                )
+            });
+        let code = (!snippet.is_empty()).then(|| {
+            div()
+                .border_t_1()
+                .border_color(theme.border)
+                .px(px(10.0))
+                .py(px(7.0))
+                .font_family(theme.font_mono.clone())
+                .text_size(px(11.0))
+                .line_height(px(16.0))
+                .text_color(theme.text_muted)
+                .children(snippet.lines().map(|line| {
+                    div()
+                        .h(px(16.0))
+                        .truncate()
+                        .child(SharedString::from(line.to_owned()))
+                }))
+        });
+        motion::fade_quick(
+            ("annotation-chip-tooltip", activation),
+            div().child(crate::frost::frosted(
+                crate::popover::CARD_RADIUS,
+                crate::frost::MENU_BLUR,
+                crate::popover::popover_card(theme)
+                    .h(px(annotation_tooltip_height(annotation)))
+                    .w(px(360.0))
+                    .p_0()
+                    .gap_0()
+                    .child(header)
+                    .children(code),
+            )),
+        )
+        .into_any_element()
+    }
+}
+
 impl Render for MentionPathTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_popup();
+        if let Some(annotation) = &self.annotation {
+            return Self::annotation_card(annotation, self.activation, &theme);
+        }
         let card = crate::popover::popover_card(&theme)
             .max_w(px(480.0))
             .h(px(MENTION_TOOLTIP_HEIGHT))
@@ -5399,6 +5675,7 @@ impl Render for MentionPathTooltip {
                 card,
             )),
         )
+        .into_any_element()
     }
 }
 
@@ -5535,9 +5812,20 @@ impl gpui::Element for ComposerTextElement {
                     ))
                 },
                 attachment: mention.attachment,
+                annotation: mention.annotation.clone(),
             });
-            // The path tooltip stays flush so the pointer can move onto it.
-            let (tooltip_height, tooltip_gap) = (MENTION_TOOLTIP_HEIGHT, 1.0);
+            // The path tooltip stays flush so the pointer can move onto it; an
+            // annotation's code preview floats a little above its chip.
+            let (tooltip_height, tooltip_gap) =
+                mention
+                    .annotation
+                    .as_deref()
+                    .map_or((MENTION_TOOLTIP_HEIGHT, 1.0), |annotation| {
+                        (
+                            annotation_tooltip_height(annotation),
+                            ANNOTATION_TOOLTIP_GAP,
+                        )
+                    });
             let label = chip_pad_ranges(display)[0].end;
             for local_bounds in input.bounds_for_display_range(display.clone()) {
                 let row_top = origin.y + local_bounds.origin.y;
@@ -6064,6 +6352,10 @@ impl std::fmt::Debug for SidechatStaged {
 #[derive(Debug, Clone)]
 pub enum ComposerEvent {
     WorkspaceCommand(WorkspaceCommand),
+    /// The annotation numbers the draft holds changed.
+    AnnotationsChanged(Vec<u32>),
+    /// The pointer is on this annotation's chip (`None`: on none).
+    AnnotationHovered(Option<u32>),
     /// Arm the shared-element transition before the draft route is replaced
     /// by the newly-created session. Emitting this before `select_chat` keeps
     /// the first destination frame on the same timeline as the source frame.
@@ -6865,6 +7157,8 @@ pub struct Composer {
     /// Whether the modifier overlay should currently reveal the queue hint.
     /// The shell owns modifier tracking and clears this on window deactivation.
     queue_shortcut_revealed: bool,
+    /// Annotation numbers in the draft, as last reported to the shell.
+    annotation_marks: Vec<u32>,
     /// Interrupt/answer commands get their own slot: assigning `send_task`
     /// DROPPED an in-flight send future mid-upload — no banner, no cleanup,
     /// `sending` stuck true forever (2026-08-19 incident, "press Stop while
@@ -7341,9 +7635,11 @@ impl Composer {
         let input_events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Submitted => this.on_submit(cx),
             ComposerInputEvent::ModifiedSubmitted => this.on_modified_submit(cx),
-            ComposerInputEvent::Edited | ComposerInputEvent::CursorMoved => {
+            ComposerInputEvent::Edited => {
+                this.sync_annotation_marks(cx);
                 this.on_input_edited(cx)
             }
+            ComposerInputEvent::CursorMoved => this.on_input_edited(cx),
             ComposerInputEvent::ViewportChanged => cx.notify(),
             // The slash popup and the mention popup share the input's
             // completion key routing; they are mutually exclusive by token
@@ -7371,6 +7667,9 @@ impl Composer {
             }
             ComposerInputEvent::HistoryNavigate(delta) => this.navigate_history(*delta, cx),
             ComposerInputEvent::OpenAttachment(index) => this.open_attachment(*index, cx),
+            ComposerInputEvent::AnnotationHovered(number) => {
+                cx.emit(ComposerEvent::AnnotationHovered(*number))
+            }
             ComposerInputEvent::PastedImages(images) => {
                 let images = images.clone();
                 this.stage_in_background(
@@ -7502,6 +7801,7 @@ impl Composer {
             todo_panels: HashMap::new(),
             todo_scroll: gpui::ScrollHandle::new(),
             queue_shortcut_revealed: false,
+            annotation_marks: Vec::new(),
             expanded_mode: false,
             flip_epoch: 0,
             compact_capacity: 0.0,
@@ -8043,6 +8343,42 @@ impl Composer {
         }
     }
 
+    /// Composer honesty: how the chat's path stands — and, when there is
+    /// something to send, UP FRONT that a send will queue (a durable local
+    /// write delivered on reconnect) instead of letting the button imply
+    /// instant delivery. Opening a slow remote chat is syncing, not an outage.
+    fn current_link_notice(&self, cx: &App) -> Option<LinkNotice> {
+        // A new session on Cloud never waits on the project's device.
+        let runs_on_cloud = self.pickers.read(cx).runs_on_cloud(cx);
+        let draft = self.has_draft(cx);
+        let bound_chat = self.bound_chat_id(cx);
+        let reads_selection = self.reads_selection(cx);
+        let state = self.state.read(cx);
+        let now = crate::state::clock_now();
+        let (link, host) = match bound_chat.as_deref() {
+            Some(id) => (
+                state.chat_link_at(id, now),
+                state
+                    .chats
+                    .iter()
+                    .find(|chat| chat.id == id)
+                    .and_then(|chat| state.device_name(&chat.device_id)),
+            ),
+            // New-chat canvas: judge by the picked target device.
+            None => match state.effective_device_id().filter(|_| !runs_on_cloud) {
+                Some(id) => (state.device_link_at(&id, now), state.device_name(&id)),
+                None => (crate::state::ChatLink::LIVE, None),
+            },
+        };
+        let intent = draft
+            || (reads_selection && !state.queue.is_empty())
+            || bound_chat
+                .as_deref()
+                .is_some_and(|id| state.send_pending(id, now));
+        let loader_shown = reads_selection && state.transcript_loading(now).is_some();
+        link_notice(link, host, intent, loader_shown)
+    }
+
     /// Whether the draft holds anything a close would lose: text, staged
     /// attachments or appshots, or staged review comments.
     pub(crate) fn has_draft(&self, cx: &App) -> bool {
@@ -8211,6 +8547,44 @@ impl Composer {
     /// Add a file-tree or file-tab drop through the existing file-mention
     /// pipeline. This keeps the reference workspace-relative and therefore
     /// valid for local and remote sessions alike.
+    /// Add an element picked in the browser. `focus` hands the keyboard to
+    /// the composer (the pick finished) rather than leaving it with the page.
+    pub(crate) fn add_browser_annotation(
+        &mut self,
+        annotation: zeron_proto::annotation::BrowserAnnotation,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<u32> {
+        let number = self
+            .input
+            .update(cx, |input, cx| input.insert_annotation(annotation, cx));
+        if number.is_some() && focus {
+            let handle = self.input.read(cx).focus_handle.clone();
+            window.focus(&handle, cx);
+        }
+        cx.notify();
+        number
+    }
+
+    /// Tell the browser which annotation numbers the draft still holds, so
+    /// markers of removed or sent chips leave the page.
+    fn sync_annotation_marks(&mut self, cx: &mut Context<Self>) {
+        let text = self.input.read(cx).text();
+        let marks: Vec<u32> = if text.contains(zeron_proto::annotation::ANNOTATION_SCHEME) {
+            zeron_proto::annotation::annotation_links(text)
+                .into_iter()
+                .map(|(_, annotation)| annotation.index)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if marks != self.annotation_marks {
+            self.annotation_marks = marks.clone();
+            cx.emit(ComposerEvent::AnnotationsChanged(marks));
+        }
+    }
+
     pub(crate) fn add_workspace_path(
         &mut self,
         path: &str,
@@ -12008,6 +12382,7 @@ impl Composer {
         }
         // A queued message is not in the transcript yet — the queue panel is
         // its echo, and it gets a real bubble when the host sends it.
+        let creates_chat = is_new || create_side_chat.is_some();
         let cloud_boot = self.state.update(cx, |s, cx| {
             if background {
                 s.start_draft_in_background(&chat_id, cx);
@@ -12028,7 +12403,11 @@ impl Composer {
                 // Working overlay until the host executes the queued command —
                 // without it a remote send flashed Completed (and could ring
                 // the done-chime) in the queue→drain→sync gap.
-                s.begin_pending_send(&chat_id, &message_id, chrono::Utc::now());
+                if creates_chat {
+                    s.begin_first_send(&chat_id, &message_id, chrono::Utc::now());
+                } else {
+                    s.begin_pending_send(&chat_id, &message_id, chrono::Utc::now());
+                }
                 // A Cloud chat's machine may be starting or asleep: read
                 // where it stands (and follow it until it is up) — and
                 // whether credits allow it to, which can have changed since
@@ -12452,6 +12831,8 @@ impl Composer {
                         sandbox: SandboxLevel::WorkspaceWrite,
                         permission_mode: resolved.permission_mode,
                         auto_approve: false,
+                        access: resolved.permission_mode.access(),
+                        plan: resolved.plan,
                         resume: None,
                         attachments: attachment_paths,
                         worktree: run_worktree,
@@ -12777,6 +13158,13 @@ impl Composer {
         }
     }
 
+    /// Close the questions without answering: the same RespondInput as an
+    /// answer, with none — the run reads its own decline, the chip records
+    /// the questions closed, and the composer comes back.
+    fn wizard_dismiss(&mut self, cx: &mut Context<Self>) {
+        self.wizard_finish(Vec::new(), cx);
+    }
+
     /// Submit RespondInput and retire the panel.
     fn wizard_finish(&mut self, answers: Vec<UserInputAnswer>, cx: &mut Context<Self>) {
         let Some(wizard) = self.wizard.take() else {
@@ -12799,13 +13187,18 @@ impl Composer {
             return;
         };
         let request_id = wizard.request_id.clone();
+        let failed = if answers.is_empty() {
+            "Closing the question failed"
+        } else {
+            "Answer failed"
+        };
         let failure_chat = chat_id.clone();
         // `action_task`, NOT `send_task` — see `interrupt`.
         self.action_task = Some(cx.spawn(async move |this, cx| {
             let result = respond_input(&engine, &chat_id, &request_id, answers).await;
             if let Err(err) = result {
                 this.update(cx, |composer, cx| {
-                    composer.failure = Some(format!("Answer failed: {err}").into());
+                    composer.failure = Some(format!("{failed}: {err}").into());
                     composer.failure_key = Some(failure_chat);
                     // The answer never left this device — put the panel back.
                     composer.answered_requests.remove(&request_id);
@@ -12873,7 +13266,14 @@ impl Composer {
             match host {
                 WizardHost::Own => {
                     if wizard_escape_goes_back(key, input_focused, input_empty) {
-                        self.wizard_back(cx);
+                        let dismisses = self.wizard.as_ref().is_some_and(|wizard| {
+                            wizard_escape_dismisses(wizard.page, wizard.page_has_pick(), input_empty)
+                        });
+                        if dismisses {
+                            self.wizard_dismiss(cx);
+                        } else {
+                            self.wizard_back(cx);
+                        }
                     }
                 }
                 WizardHost::Ask => self.close_ask_tray(cx),
@@ -12888,7 +13288,8 @@ impl Composer {
     /// place of the composer: the same floating-pill chrome (`rounded-[26px]
     /// border-white/[0.08] bg-white/[0.03] shadow-xl`), uppercase header +
     /// "1/3" counter chip, option rows with number kbd chips, a free-text
-    /// override over a hairline, and Back / Next-Submit footer.
+    /// override over a hairline, and Back / Next-Submit footer — plus a corner
+    /// close that answers nothing (Escape on an untouched first page too).
     fn render_wizard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(wizard) = self.wizard.clone() else {
@@ -12947,6 +13348,9 @@ impl Composer {
         let typed_empty = input.read(cx).is_empty();
         let can_advance = wizard.page_has_pick() || !typed_empty || question.multiline;
         let hover_prefix = host.hover_prefix();
+        // The close's tooltip names Escape only while Escape would close.
+        let escape_closes = wizard_escape_dismisses(page, wizard.page_has_pick(), typed_empty);
+        let dismiss_hover_key: SharedString = format!("wizard-dismiss-{}", cx.entity_id()).into();
 
         let options = question.options.iter().enumerate().map(|(ix, label)| {
             // Selection reads on the row only while no typed override exists
@@ -13032,6 +13436,7 @@ impl Composer {
         });
 
         let body = div()
+            .relative()
             .px(px(16.0))
             .pt(px(16.0))
             .flex()
@@ -13043,6 +13448,8 @@ impl Composer {
                     .flex_row()
                     .items_center()
                     .gap(px(10.0))
+                    // Clear of the corner close, like the question.
+                    .when(host == WizardHost::Own, |el| el.pr(px(32.0)))
                     .child(
                         div()
                             .text_size(crate::typography::ui_rems(10.5))
@@ -13071,6 +13478,8 @@ impl Composer {
             .child(
                 div()
                     .mt(px(6.0))
+                    // Wraps clear of the corner close (12px in, 28px wide).
+                    .when(host == WizardHost::Own, |el| el.pr(px(32.0)))
                     .text_size(crate::typography::ui_rems(15.0))
                     .line_height(px(20.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
@@ -13111,7 +13520,55 @@ impl Composer {
                     .pb(px(4.0))
                     .px(px(4.0))
                     .child(input.clone()),
-            );
+            )
+            // Close without answering — the composer's own close (Cancel
+            // dictation) on the same pill: 28px round, 16px cross. Pinned to
+            // the corner so the header keeps its layout, 12px in so it is
+            // concentric with the 26px radius. No tab stop: the panel owns the
+            // keyboard, and Enter on a focused close would reach Next first.
+            .when(host == WizardHost::Own, |el| {
+                el.child(
+                    div()
+                        .id("wizard-dismiss")
+                        .role(gpui::Role::Button)
+                        .aria_label("Close without answering")
+                        .absolute()
+                        .top(px(12.0))
+                        .right(px(12.0))
+                        .size(px(28.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .bg(motion::hover_blend(
+                            &dismiss_hover_key,
+                            gpui::transparent_black(),
+                            crate::theme::ink(0.10),
+                        ))
+                        .on_hover(motion::hover_listener(dismiss_hover_key))
+                        .tooltip(crate::settings::widgets::text_tooltip(if escape_closes {
+                            "Close without answering · Esc"
+                        } else {
+                            "Close without answering"
+                        }))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.wizard_dismiss(cx);
+                        }))
+                        .on_a11y_action(gpui::AccessibleAction::Click, {
+                            let composer = cx.entity().downgrade();
+                            move |_, _, cx| {
+                                composer.update(cx, |this, cx| this.wizard_dismiss(cx)).ok();
+                            }
+                        })
+                        .child(
+                            crate::icons::icon(crate::icons::CLOSE)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        ),
+                )
+            });
         let footer = div()
             .flex()
             .flex_row()
@@ -14286,55 +14743,26 @@ impl Render for Composer {
         let expanded = self.expanded_mode || self.mission;
 
         let failure = self.visible_failure();
-        // Composer honesty: when the target's delivery path is degraded, say
-        // UP FRONT that a send will queue (a durable local write delivered on
-        // reconnect) instead of letting the button imply instant delivery.
-        let queue_notice: Option<(SharedString, bool)> = {
-            use zeron_proto::ConnectivityState as S;
-            let bound_chat = self.bound_chat_id(cx);
-            // A new session on Cloud never waits on the project's device.
-            let runs_on_cloud = self.pickers.read(cx).runs_on_cloud(cx);
-            let state = self.state.read(cx);
-            let degraded = match bound_chat.as_deref() {
-                Some(id) => state.chat_delivery_degraded(id),
-                None => {
-                    // New-chat canvas: judge by the picked target device.
-                    let remote_target = state
-                        .effective_device_id()
-                        .is_some_and(|id| state.local_device_id.as_deref() != Some(id.as_str()));
-                    remote_target
-                        && !runs_on_cloud
-                        && (matches!(state.connectivity.state, S::Offline | S::Reconnecting)
-                            || state
-                                .effective_device_id()
-                                .is_some_and(|id| !state.device_online(&id, chrono::Utc::now())))
-                }
-            };
-            let offline = state.connectivity.state == S::Offline;
-            // A sleeping Cloud device is woken by the send itself.
-            let cloud_asleep = !offline
-                && bound_chat
-                    .as_deref()
-                    .and_then(|id| state.chats.iter().find(|c| c.id == id))
-                    .map(|chat| chat.device_id.clone())
-                    .or_else(|| state.effective_device_id())
-                    .is_some_and(|id| {
-                        matches!(
-                            state.device_presence(&id, chrono::Utc::now()),
-                            crate::cloud::Presence::Asleep | crate::cloud::Presence::Waking
-                        )
-                    });
-            // A sleeping Cloud machine isn't a delivery problem — the send
-            // wakes it, and the session card shows it asleep.
-            (degraded && !cloud_asleep).then(|| {
-                let text: SharedString = if offline {
-                    "Offline — messages will send when you're back online.".into()
+        let queue_notice = self.current_link_notice(cx);
+        let queue_notice_glyph = queue_notice.as_ref().map(|notice| match notice.glyph {
+            NoticeGlyph::Spinner => crate::loaders::mini_mono_spinner(
+                "composer-link-spinner",
+                2.0,
+                theme.text_muted,
+                cx.entity_id(),
+                cx,
+            )
+            .into_any_element(),
+            NoticeGlyph::Dot | NoticeGlyph::WarningDot => div()
+                .size(px(5.0))
+                .rounded_full()
+                .bg(if notice.glyph == NoticeGlyph::WarningDot {
+                    theme.warning
                 } else {
-                    "Messages will send once the connection recovers.".into()
-                };
-                (text, offline)
-            })
-        };
+                    theme.text_faint
+                })
+                .into_any_element(),
+        });
         let effort_hint = self.computer_effort_hint(cx);
         let resume_compaction = self.resume_compaction(cx);
         let started_mission = self
@@ -14507,7 +14935,7 @@ impl Render for Composer {
                         .mx(px(4.0))
                         .child(crate::computer::cards::computer_card(
                             crate::computer::cards::CardTone::Info,
-                            crate::icons::CURSOR,
+                            crate::icons::COMPUTER_CURSOR,
                             "Desktop actions are faster at Medium effort".into(),
                             Vec::new(),
                             vec![
@@ -14538,32 +14966,30 @@ impl Render for Composer {
                         )),
                 )
             })
-            .when_some(queue_notice, |el, (notice, offline)| {
-                // Not a warning box (v0.2.12 feedback: the amber Notice read
-                // as an error and flashed on every blip — pre-grace). One
-                // quiet caption line, amber dot only for hard offline; it
-                // clears itself the moment the path heals.
-                let dot = if offline {
-                    theme.warning
-                } else {
-                    theme.text_faint
-                };
-                el.child(crate::motion::fade_in(
-                    "composer-queue-notice",
-                    div()
-                        .id("composer-queue-notice")
-                        .mx(px(8.0))
-                        .mt(px(6.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .text_size(px(11.0))
-                        .line_height(px(14.0))
-                        .text_color(theme.text_faint)
-                        .child(div().size(px(5.0)).rounded_full().bg(dot))
-                        .child(div().min_w_0().truncate().child(notice)),
-                ))
-            });
+            .when_some(
+                queue_notice.zip(queue_notice_glyph),
+                |el, (notice, glyph)| {
+                    // Not a warning box (v0.2.12 feedback: the amber Notice read
+                    // as an error and flashed on every blip — pre-grace). One
+                    // quiet caption line, amber dot only for hard offline; it
+                    // clears itself the moment the path heals.
+                    el.child(crate::motion::fade_in(
+                        "composer-queue-notice",
+                        div()
+                            .id("composer-queue-notice")
+                            .mx(px(8.0))
+                            .mt(px(6.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .text_size(px(11.0))
+                            .line_height(px(14.0))
+                            .text_color(theme.text_faint)
+                            .child(glyph)
+                            .child(div().min_w_0().truncate().child(notice.text)),
+                    ))
+                },
+            );
 
         // With Steer as the default, an agent that only takes input between
         // turns still queues; without this line the queue read as a dropped
@@ -16659,6 +17085,42 @@ mod tests {
         });
     }
 
+    /// The target the sidebar's "No project" `+` leaves: a project-less new
+    /// chat names its host outright, so it lands in that device's group.
+    #[gpui::test]
+    fn projectless_new_chat_is_created_on_the_picked_device(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel::<String>(64);
+        let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::RpcClient::new(out, inbound),
+            ));
+            state.local_device_id = Some("local".into());
+            state.select_space(None, cx);
+            state.select_device("remote".into(), cx);
+        });
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |composer, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("hello", cx));
+            composer.on_submit(cx);
+        });
+        cx.run_until_parked();
+        let create = std::iter::from_fn(|| requests.try_recv().ok())
+            .map(|frame| serde_json::from_str::<zeron_rpc::ClientFrame>(&frame).unwrap())
+            .find(|frame| frame.params["op"] == "createChat")
+            .expect("the send creates the chat");
+        assert_eq!(create.params["deviceId"], "remote");
+        assert!(create.params.get("spaceId").is_none());
+    }
+
     /// Out of credits, a send that would run on Cloud is held at the button:
     /// Cloud can't start or wake its machine. Other chats are untouched.
     #[gpui::test]
@@ -17779,6 +18241,62 @@ mod tests {
         });
     }
 
+    fn button_annotation() -> zeron_proto::annotation::BrowserAnnotation {
+        zeron_proto::annotation::BrowserAnnotation {
+            index: 1,
+            element: "button.cta".into(),
+            html: "<button class=\"cta\">Go</button>".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn annotation_tokens_project_to_annotate_chips_in_drafts_and_sent_messages() {
+        let raw = format!("Fix {} now", button_annotation().link());
+        let projection = TextProjection::new(&raw);
+        assert_eq!(projection.mentions.len(), 1);
+        let (link, display) = &projection.mentions[0];
+        assert!(link.annotation.is_some());
+        assert_eq!(link.kind, ChipKind::Annotation);
+        assert!(matches!(
+            chip_icon(link.kind, &link.path, crate::theme::Appearance::Dark),
+            ChipIcon::Glyph(crate::icons::CURSOR)
+        ));
+        assert!(projection.display[display.clone()].contains("Annotation\u{a0}1"));
+        let (text, spans) = sent_mention_display(&raw).unwrap();
+        assert!(text.starts_with("Fix ") && text.ends_with(" now"));
+        assert_eq!(spans[0].kind, ChipKind::Annotation);
+        assert!(!text.contains(zeron_proto::annotation::ANNOTATION_SCHEME));
+    }
+
+    #[gpui::test]
+    fn inserted_annotations_number_after_existing_ones_and_undo_as_one_step(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let input = cx.new(|cx| ComposerInput::new("Draft", cx));
+        input.update(cx, |input, cx| {
+            input.set_text("Tighten", cx);
+            input.selected_range = 7..7;
+            assert_eq!(input.insert_annotation(button_annotation(), cx), Some(1));
+            assert_eq!(input.insert_annotation(button_annotation(), cx), Some(2));
+            let indices: Vec<u32> = zeron_proto::annotation::annotation_links(input.text())
+                .into_iter()
+                .map(|(_, annotation)| annotation.index)
+                .collect();
+            assert_eq!(indices, [1, 2]);
+            assert!(input.text().starts_with("Tighten [Annotation 1]("));
+            assert_eq!(input.selected_range.start, input.text().len());
+            let previous = input.undo_stack.pop().unwrap();
+            input.restore(previous, cx);
+            assert_eq!(
+                zeron_proto::annotation::annotation_links(input.text()).len(),
+                1
+            );
+            input.read_only = true;
+            assert!(input.insert_annotation(button_annotation(), cx).is_none());
+        });
+    }
+
     #[gpui::test]
     fn completion_rejects_paths_that_cannot_round_trip_as_chips(cx: &mut gpui::TestAppContext) {
         let input = cx.new(|cx| ComposerInput::new("Draft", cx));
@@ -18083,6 +18601,7 @@ mod tests {
             range,
             path: path.into(),
             attachment: None,
+            annotation: None,
         }
     }
 
@@ -19062,6 +19581,8 @@ mod tests {
                             profile_id: None,
                             instance_id: None,
                             disabled_tools: Vec::new(),
+                            access: zeron_proto::PermissionMode::Full.access(),
+                            plan: false,
                         }),
                         last_message_preview: None,
                         last_message_at: None,
@@ -19217,6 +19738,8 @@ mod tests {
                                 profile_id: None,
                                 instance_id: None,
                                 disabled_tools: Vec::new(),
+                                access: zeron_proto::PermissionMode::Full.access(),
+                                plan: false,
                             });
                             chat.last_message_at =
                                 Some(chrono::Utc::now() - chrono::Duration::minutes(minutes));
@@ -19592,6 +20115,8 @@ mod tests {
                             profile_id: None,
                             instance_id: None,
                             disabled_tools: Vec::new(),
+                            access: zeron_proto::PermissionMode::Full.access(),
+                            plan: false,
                         })
                     };
                     let mut src = chat_row("src", None);
@@ -19777,6 +20302,7 @@ mod tests {
                 path: "foo/mod.rs".into(),
                 kind: ChipKind::File,
                 attachment: None,
+                annotation: None,
             },
             FileMentionLink {
                 range: 0..0,
@@ -19784,6 +20310,7 @@ mod tests {
                 path: "bar/oomod.rs".into(),
                 kind: ChipKind::File,
                 attachment: None,
+                annotation: None,
             },
         ];
         assert_eq!(
@@ -19852,6 +20379,7 @@ mod tests {
                 path: "2f9e1d58-aa".into(),
                 kind: ChipKind::Thread,
                 attachment: None,
+                annotation: None,
             }]
         );
         let projection = TextProjection::new(&raw);
@@ -20888,6 +21416,13 @@ mod tests {
         assert!(wizard_escape_goes_back("escape", true, true));
         assert!(!wizard_escape_goes_back("escape", true, false));
         assert!(!wizard_escape_goes_back("enter", false, true));
+
+        // With nowhere to go back to, Escape closes an untouched panel —
+        // never one holding a pick or typed text.
+        assert!(wizard_escape_dismisses(0, false, true));
+        assert!(!wizard_escape_dismisses(0, true, true));
+        assert!(!wizard_escape_dismisses(0, false, false));
+        assert!(!wizard_escape_dismisses(1, false, true));
     }
 
     #[test]
@@ -21236,6 +21771,53 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn closing_the_wizard_unanswered_retires_it_and_returns_the_draft(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| AppState::new());
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        state.update(cx, |s, _| s.selected_chat = Some("a".into()));
+        composer.update(cx, |c, cx| {
+            c.on_state_changed(cx);
+            c.input.update(cx, |i, cx| i.set_text("draft", cx));
+        });
+        state.update(cx, |s, _| {
+            s.transcript = vec![SessionMessageEntry {
+                id: "assistant".into(),
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Input {
+                    id: "input".into(),
+                    request_id: "r1".into(),
+                    questions: vec![question("q", &["a", "b"], false)],
+                    resolved: false,
+                    answers: None,
+                    asked_at_ms: None,
+                    answered_at_ms: None,
+                }],
+                created_at: 0,
+                device_id: "device".into(),
+                status: Some(zeron_doc::MessageStatus::Streaming),
+                continuation_of: None,
+                from_chat_id: None,
+                fork_import: false,
+                answers_request_id: None,
+                duration_ms: None,
+            }]
+        });
+        composer.update(cx, |c, cx| {
+            c.on_state_changed(cx);
+            assert!(c.wizard.is_some());
+            c.wizard_dismiss(cx);
+            assert!(c.wizard.is_none());
+            assert_eq!(c.input.read(cx).text(), "draft");
+            // The question still reads open until the close lands: the latch
+            // keeps the panel from coming straight back.
+            c.on_state_changed(cx);
+            assert!(c.wizard.is_none());
+        });
+    }
+
     #[test]
     fn pending_input_detection() {
         use zeron_doc::MessageStatus;
@@ -21356,6 +21938,198 @@ mod tests {
         assert!(input_request_resolved(&t, "r1"));
         assert!(!input_request_resolved(&t, "other"));
     }
+
+    #[test]
+    fn link_notice_needs_intent_for_the_send_clause() {
+        use crate::state::{ChatLink, LinkSync};
+        let link = |sync, host_unreachable| ChatLink {
+            sync,
+            host_unreachable,
+        };
+        let text = |link, intent, loader| {
+            link_notice(link, Some("omarchy"), intent, loader).map(|notice| notice.text.to_string())
+        };
+        let unreachable = "Can't reach omarchy — messages will send when it's reachable.";
+        let reconnecting = "Reconnecting — messages will send once the connection recovers.";
+        // (link, empty composer, something to send)
+        let cases = [
+            (link(LinkSync::Live, false), None, None),
+            (link(LinkSync::Syncing { shown: false }, false), None, None),
+            (
+                link(LinkSync::Syncing { shown: true }, false),
+                Some("Syncing…"),
+                Some("Syncing…"),
+            ),
+            (link(LinkSync::Live, true), None, Some(unreachable)),
+            (
+                link(LinkSync::Syncing { shown: true }, true),
+                Some("Syncing…"),
+                Some(unreachable),
+            ),
+            (
+                link(LinkSync::Stalled, false),
+                Some("Reconnecting…"),
+                Some(reconnecting),
+            ),
+            // This device's own connection outranks the host's presence,
+            // which goes dark with it.
+            (
+                link(LinkSync::Reconnecting, true),
+                Some("Reconnecting…"),
+                Some(reconnecting),
+            ),
+            (
+                link(LinkSync::Offline, true),
+                Some("Offline"),
+                Some("Offline — messages will send when you're back online."),
+            ),
+        ];
+        for (link, idle, intent) in cases {
+            assert_eq!(text(link, false, false).as_deref(), idle, "{link:?}");
+            assert_eq!(
+                text(link, true, false).as_deref(),
+                intent,
+                "{link:?} with intent"
+            );
+            // The transcript's loader speaks for the chat: only a send
+            // clause adds anything.
+            assert_eq!(text(link, false, true), None, "{link:?} under the loader");
+            let clause = intent.filter(|text| text.contains("will send"));
+            assert_eq!(
+                text(link, true, true).as_deref(),
+                clause,
+                "{link:?} with intent under the loader"
+            );
+        }
+        // Only hard offline is amber; the connection's own work spins.
+        let glyph = |link, intent| link_notice(link, None, intent, false).unwrap().glyph;
+        assert_eq!(
+            glyph(link(LinkSync::Offline, false), false),
+            NoticeGlyph::WarningDot
+        );
+        assert_eq!(
+            glyph(link(LinkSync::Stalled, false), true),
+            NoticeGlyph::Spinner
+        );
+        assert_eq!(
+            glyph(link(LinkSync::Syncing { shown: true }, false), false),
+            NoticeGlyph::Spinner
+        );
+        assert_eq!(glyph(link(LinkSync::Live, true), true), NoticeGlyph::Dot);
+        assert_eq!(
+            link_notice(link(LinkSync::Live, true), None, true, false)
+                .unwrap()
+                .text
+                .as_ref(),
+            "Can't reach the host — messages will send when it's reachable."
+        );
+    }
+
+    fn syncing_remote_chat(chat_id: &str, connected: bool) -> AppState {
+        let mut state = AppState::new();
+        state.local_device_id = Some("local".into());
+        state.chats = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": chat_id, "deviceId": "omarchy", "archived": false,
+                "createdAt": chrono::Utc::now(),
+            }))
+            .unwrap(),
+        ];
+        state.selected_chat = Some(chat_id.into());
+        state.apply_connectivity(zeron_proto::Connectivity {
+            state: zeron_proto::ConnectivityState::Connected,
+            chats: vec![zeron_proto::ChatConnectivity {
+                chat_id: chat_id.into(),
+                sync_state: zeron_proto::ChatSyncState::Connecting,
+                connected,
+                delivery_live: false,
+                pending_pushes: 0,
+            }],
+            ..Default::default()
+        });
+        state
+    }
+
+    /// The reported screenshot: an empty composer on a remote chat still
+    /// opening over a slow link said "Messages will send once the
+    /// connection recovers." Nothing had been sent; the chat was syncing.
+    #[gpui::test]
+    fn empty_composer_on_a_syncing_remote_chat_never_claims_an_outage(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let now = chrono::Utc::now();
+        let clock = crate::state::TestClock::start(now);
+        // The engine's room grace has already lapsed: `connected` is false.
+        let state = cx.new(|_| syncing_remote_chat("remote", false));
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        let notice = |cx: &mut gpui::TestAppContext| {
+            composer.read_with(cx, |composer, cx| {
+                composer
+                    .current_link_notice(cx)
+                    .map(|notice| notice.text.to_string())
+            })
+        };
+        assert_eq!(notice(cx), None, "a quick open never flashes a caption");
+        clock.set(now + chrono::TimeDelta::seconds(10));
+        assert_eq!(notice(cx).as_deref(), Some("Syncing…"));
+        // A draft earns no send clause: a syncing chat still delivers.
+        composer.update(cx, |composer, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("hello", cx))
+        });
+        assert_eq!(notice(cx).as_deref(), Some("Syncing…"));
+        // Past a whole first dial the room has stalled: now a send queues.
+        clock.set(now + chrono::TimeDelta::seconds(40));
+        assert_eq!(
+            notice(cx).as_deref(),
+            Some("Reconnecting — messages will send once the connection recovers.")
+        );
+        composer.update(cx, |composer, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("", cx))
+        });
+        assert_eq!(notice(cx).as_deref(), Some("Reconnecting…"));
+    }
+
+    /// A side chat tab has its own state: its composer reads its own chat's
+    /// link, never the conversation's beside it.
+    #[gpui::test]
+    fn side_chat_composer_reads_its_own_link(cx: &mut gpui::TestAppContext) {
+        let now = chrono::Utc::now();
+        let clock = crate::state::TestClock::start(now);
+        let parent = cx.new(|_| {
+            let mut state = syncing_remote_chat("main", true);
+            // The conversation itself is live.
+            state.apply_connectivity(zeron_proto::Connectivity {
+                state: zeron_proto::ConnectivityState::Connected,
+                ..Default::default()
+            });
+            state
+        });
+        let chat: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
+            "id": "side", "parentChatId": "main", "deviceId": "omarchy",
+            "archived": false, "createdAt": now,
+        }))
+        .unwrap();
+        let side = cx.new(|cx| AppState::side_chat_state(&parent, chat, false, cx));
+        side.update(cx, |state, _| {
+            state.apply_connectivity(syncing_remote_chat("side", false).connectivity)
+        });
+        let main_composer = cx.new(|cx| Composer::new(parent.clone(), cx));
+        let side_composer = cx.new(|cx| Composer::new(side.clone(), cx));
+        clock.set(now + chrono::TimeDelta::seconds(10));
+        let notice = |composer: &Entity<Composer>, cx: &mut gpui::TestAppContext| {
+            composer.read_with(cx, |composer, cx| {
+                composer
+                    .current_link_notice(cx)
+                    .map(|notice| notice.text.to_string())
+            })
+        };
+        assert_eq!(notice(&side_composer, cx).as_deref(), Some("Syncing…"));
+        assert_eq!(notice(&main_composer, cx), None);
+    }
 }
 
 #[cfg(test)]
@@ -21436,6 +22210,11 @@ mod appshot_rebase_tests {
 impl Composer {
     pub fn fixture_clear_appshots(&mut self, cx: &mut Context<Self>) {
         self.appshots.clear();
+        cx.notify();
+    }
+    /// A typed draft, as the input holds it.
+    pub fn fixture_draft(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.set_text(text, cx));
         cx.notify();
     }
     pub fn fixture_type(&mut self, text: &str, cx: &mut Context<Self>) {

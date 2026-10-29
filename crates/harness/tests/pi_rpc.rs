@@ -22,6 +22,8 @@ fn request(cwd: &std::path::Path, prompt: &str) -> RunRequest {
         sandbox: SandboxLevel::WorkspaceWrite,
         permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         resume: None,
         forked_at: None,
         attachments: vec![],

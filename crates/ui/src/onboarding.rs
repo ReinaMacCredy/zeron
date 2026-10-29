@@ -1400,6 +1400,8 @@ mod tests {
             installed,
             can_install: true,
             enabled: None,
+            access_modes: Vec::new(),
+            supports_plan: false,
         }
     }
 

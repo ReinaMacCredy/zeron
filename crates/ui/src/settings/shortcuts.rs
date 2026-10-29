@@ -13,11 +13,12 @@ use crate::popover::{self, ScrollRailHost};
 
 #[path = "appshots.rs"]
 mod appshots_page;
+use crate::settings::search::{SearchAnchor, SettingId};
 use crate::settings::widgets;
 use crate::settings::{
-    ComposerSendBehavior, FollowUpBehavior, KeymapConfig, PullRequestDestination,
-    ReasoningShortcutModifier, SavePolicy, ShortcutId, SwitcherWindow, combo_from_keystroke,
-    display_combo,
+    ComposerSendBehavior, FollowUpBehavior, KeyEquivalents, KeymapConfig, PullRequestDestination,
+    ReasoningShortcutModifier, SavePolicy, ShortcutId, SwitcherWindow, canonical_key,
+    combo_from_keystroke, display_combo, key_equivalents,
 };
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -38,11 +39,26 @@ pub enum RecordOutcome {
     Set(String),
 }
 
-pub fn record_key(key: &str, ctrl: bool, alt: bool, shift: bool, cmd: bool) -> RecordOutcome {
+/// `key` is what the layout reported; `equivalents` that layout's
+/// [`KeyEquivalents`]. The combo stores the US key behind it, the spelling
+/// defaults use (AZERTY ⌘& records as "mod-1"), so stored-combo conflict
+/// checks keep seeing one chord per key. A key no stored combo can reach is
+/// unusable.
+pub fn record_key(
+    key: &str,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    cmd: bool,
+    equivalents: &KeyEquivalents,
+) -> RecordOutcome {
     if key.eq_ignore_ascii_case("escape") {
         return RecordOutcome::Cancelled;
     }
-    match combo_from_keystroke(ctrl, alt, shift, cmd, key) {
+    let Some(key) = canonical_key(key, equivalents) else {
+        return RecordOutcome::Ignored;
+    };
+    match combo_from_keystroke(ctrl, alt, shift, cmd, &key) {
         Some(combo) => RecordOutcome::Set(combo),
         None => RecordOutcome::Ignored,
     }
@@ -103,7 +119,7 @@ pub struct ShortcutsPage {
     /// Settings → General's thread naming card (its own title-bound picker).
     thread_naming: Entity<crate::settings::thread_naming::ThreadNamingCard>,
     predictions: Entity<crate::settings::predictions::PredictionsCard>,
-    delegation: Entity<crate::settings::delegation::DelegationCard>,
+    delegation: Entity<crate::settings::mission_delegation::DelegationCard>,
     compaction: Entity<crate::settings::compaction::CompactionCard>,
     worktrees: Entity<super::worktrees::WorktreeSettingsCard>,
     _state: Entity<AppState>,
@@ -164,7 +180,7 @@ impl ShortcutsPage {
             },
             delegation: {
                 let state = state.clone();
-                cx.new(|cx| crate::settings::delegation::DelegationCard::new(state, cx))
+                cx.new(|cx| crate::settings::mission_delegation::DelegationCard::new(state, cx))
             },
             compaction: {
                 let state = state.clone();
@@ -193,6 +209,12 @@ impl ShortcutsPage {
                 self.appshot_capabilities = crate::appshots::capabilities();
             }
         }
+    }
+
+    /// Leave the keyboard where it is as Appshots opens: a settings-search
+    /// pick keeps it in the search field, for the next pick.
+    pub fn keep_focus(&mut self) {
+        self.appshots_focus_pending = false;
     }
 
     fn start_recording(&mut self, id: ShortcutId, window: &mut Window, cx: &mut Context<Self>) {
@@ -313,6 +335,7 @@ impl ShortcutsPage {
             mods.alt,
             mods.shift,
             mods.platform,
+            &key_equivalents(cx),
         ) {
             RecordOutcome::Cancelled => {
                 self.stop_recording();
@@ -530,6 +553,7 @@ impl ShortcutField {
             mods.alt,
             mods.shift,
             mods.platform,
+            &key_equivalents(cx),
         ) {
             RecordOutcome::Cancelled => self.stop_recording(),
             RecordOutcome::Ignored => {}
@@ -800,7 +824,7 @@ const GROUP_ORDER: [&str; 9] = [
 ];
 
 /// The section a shortcut's row renders under.
-fn group(id: ShortcutId) -> &'static str {
+pub(super) fn group(id: ShortcutId) -> &'static str {
     match id {
         ShortcutId::RandomWallpaper => "Appearance",
         ShortcutId::CaptureAppshot => "Appshots",
@@ -888,7 +912,8 @@ impl Render for ShortcutsPage {
                     .min_w(px(160.0))
                     .child(widgets::row_title(&theme, "Send messages with")),
             )
-            .child(send_behavior_control);
+            .child(send_behavior_control)
+            .search_anchor(SettingId::SendMessagesWith);
         let compact_mode_row = widgets::card_row(&theme, false)
             .child(
                 div()
@@ -921,7 +946,8 @@ impl Render for ShortcutsPage {
                         crate::settings::set_transcript_compact_mode(!compact_mode, cx);
                         cx.notify();
                     })),
-            );
+            )
+            .search_anchor(SettingId::CompactMode);
         let follow_up_row = widgets::card_row(&theme, false)
             .min_h(px(84.0))
             .child(
@@ -1235,7 +1261,8 @@ impl Render for ShortcutsPage {
                         cx.refresh_windows();
                         cx.notify();
                     })),
-            );
+            )
+            .search_anchor(SettingId::CompactModelPicker);
         let effort_slider = crate::settings::compact_effort_slider(cx);
         let effort_slider_row = widgets::card_row(&theme, false)
             .child(
@@ -1305,7 +1332,8 @@ impl Render for ShortcutsPage {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.set_escape_stops_active_agent(!escape_stops_active_agent, cx);
                 })),
-            );
+            )
+            .search_anchor(SettingId::EscapeStopsAgent);
         if self.general_page {
             let pull_request_destination = crate::settings::current(cx).pull_request_destination;
             let pull_request_destination_control = widgets::select(
@@ -1341,12 +1369,13 @@ impl Render for ShortcutsPage {
                             &theme,
                             vec![
                                 div()
-                                    .child("Applies to PR badges and the Pull requests board.")
+                                    .child(pull_request_destination.description())
                                     .into_any_element(),
                             ],
                         )),
                 )
-                .child(pull_request_destination_control);
+                .child(pull_request_destination_control)
+                .search_anchor(SettingId::PullRequestDestination);
             let scrollbar = self.render_scrollbar(&theme, cx);
             return div()
                 .id("general-settings-page-host")
@@ -1369,20 +1398,37 @@ impl Render for ShortcutsPage {
                                     .child(
                                         widgets::section_card(&theme)
                                             .child(send_behavior_row)
-                                            .child(follow_up_row)
+                                            .child(
+                                                follow_up_row
+                                                    .search_anchor(SettingId::FollowUpBehavior),
+                                            )
                                             .when(cfg!(target_os = "macos"), |card| {
-                                                card.child(reasoning_shortcut_row)
+                                                card.child(reasoning_shortcut_row.search_anchor(
+                                                    SettingId::ThinkingLevelShortcut,
+                                                ))
                                             })
                                             .child(compact_mode_row)
                                             .child(compact_model_picker_row)
-                                            .child(effort_slider_row)
+                                            .child(
+                                                effort_slider_row
+                                                    .search_anchor(SettingId::EffortSlider),
+                                            )
                                             .child(escape_behavior_row),
                                     )
                                     .child(
                                         widgets::section_card(&theme)
-                                            .child(switcher_row)
-                                            .child(switcher_limit_row)
-                                            .child(cycle_tabs_row),
+                                            .child(
+                                                switcher_row
+                                                    .search_anchor(SettingId::SessionSwitcher),
+                                            )
+                                            .child(
+                                                switcher_limit_row
+                                                    .search_anchor(SettingId::SessionSwitcherLimit),
+                                            )
+                                            .child(
+                                                cycle_tabs_row
+                                                    .search_anchor(SettingId::CtrlTabCyclesTabs),
+                                            ),
                                     )
                                     .child(widgets::section(
                                         &theme,
@@ -1400,6 +1446,7 @@ impl Render for ShortcutsPage {
                     )
                     .fade_overflow_y(&self.scroll.scroll),
                 )
+                .child(widgets::page_reveal(&self.scroll.scroll))
                 .children(scrollbar)
                 .into_any_element();
         }
@@ -1418,7 +1465,10 @@ impl Render for ShortcutsPage {
             let ids = ShortcutId::ALL.into_iter().filter(|&id| group(id) == name);
             for (gx, id) in ids.enumerate() {
                 let ix = ShortcutId::ALL.iter().position(|&a| a == id).unwrap_or(0);
-                card = card.child(self.render_row(id, ix, gx, recording, &theme, cx));
+                card = card.child(
+                    self.render_row(id, ix, gx, recording, &theme, cx)
+                        .search_anchor(id),
+                );
             }
             groups.push(widgets::section(&theme, name, card).into_any_element());
         }
@@ -1543,6 +1593,7 @@ impl Render for ShortcutsPage {
                             ,
                     )).fade_overflow_y(&self.scroll.scroll),
             )
+            .child(widgets::page_reveal(&self.scroll.scroll))
             .children(scrollbar)
             .into_any_element()
     }
@@ -1696,6 +1747,79 @@ mod tests {
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[gpui::test]
+    fn pull_request_destination_menu_saves_each_destination(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut page = ShortcutsPage::new(
+                state,
+                KeymapConfig::default(),
+                false,
+                ComposerSendBehavior::Enter,
+                FollowUpBehavior::default(),
+                ReasoningShortcutModifier::default(),
+                SwitcherWindow::default(),
+                0,
+                false,
+                false,
+                false,
+                AppshotDestination::Automatic,
+                cx,
+            );
+            page.show_section(false, true);
+            page
+        });
+        // The menu lists the pull request view, the in-app browser and the
+        // default browser, in that order.
+        for (option, destination) in [
+            (
+                "pull-request-destination-option-2",
+                PullRequestDestination::External,
+            ),
+            (
+                "pull-request-destination-option-0",
+                PullRequestDestination::Native,
+            ),
+            (
+                "pull-request-destination-option-1",
+                PullRequestDestination::Browser,
+            ),
+        ] {
+            cx.update(|window, cx| window.draw(cx).clear());
+            let trigger = cx.debug_bounds("pull-request-destination").unwrap();
+            cx.simulate_click(trigger.center(), gpui::Modifiers::default());
+            cx.update(|window, cx| window.draw(cx).clear());
+            let row = cx.debug_bounds(option).unwrap();
+            cx.simulate_click(row.center(), gpui::Modifiers::default());
+            page.update(cx, |page, cx| {
+                assert!(!page.pull_request_destination_select.is_open());
+                assert_eq!(
+                    crate::settings::current(cx).pull_request_destination,
+                    destination
+                );
+            });
+            // Let the menu's exit animation finish before opening it again.
+            std::thread::sleep(
+                crate::motion::MENU_OUT
+                    .total()
+                    .mul_f32(crate::motion::speed_scale()),
+            );
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs(1));
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            crate::settings::UiSettings::load(dir.path()).pull_request_destination,
+            PullRequestDestination::Browser
+        );
+    }
+
     #[gpui::test]
     fn appshots_setup_can_be_enabled_and_configured_by_keyboard(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
@@ -1921,35 +2045,74 @@ mod tests {
 
     #[test]
     fn recording_outcomes() {
+        let us = KeyEquivalents::default();
         assert_eq!(
-            record_key("escape", false, false, false, false),
+            record_key("escape", false, false, false, false, &us),
             RecordOutcome::Cancelled
         );
         assert_eq!(
-            record_key("Escape", true, false, false, false),
+            record_key("Escape", true, false, false, false, &us),
             RecordOutcome::Cancelled
         );
         assert_eq!(
-            record_key("s", false, false, false, true),
+            record_key("s", false, false, false, true, &us),
             RecordOutcome::Set("mod-s".into())
         );
         assert_eq!(
-            record_key("k", false, true, true, true),
+            record_key("k", false, true, true, true, &us),
             RecordOutcome::Set("mod-alt-shift-k".into())
         );
         // macOS-only: elsewhere ctrl IS the primary and records as "mod".
         #[cfg(target_os = "macos")]
         assert_eq!(
-            record_key("tab", true, false, true, false),
+            record_key("tab", true, false, true, false, &us),
             RecordOutcome::Set("ctrl-shift-tab".into())
         );
         // Bare modifiers stay recording.
         assert_eq!(
-            record_key("shift", false, false, true, false),
+            record_key("shift", false, false, true, false, &us),
             RecordOutcome::Ignored
         );
         assert_eq!(
-            record_key("ctrl", true, false, false, false),
+            record_key("ctrl", true, false, false, false, &us),
+            RecordOutcome::Ignored
+        );
+    }
+
+    #[test]
+    fn azerty_records_the_us_key_behind_each_chord() {
+        let azerty = crate::settings::azerty_key_equivalents();
+        // ⌘& is AZERTY's ⌘1: it records as the default's own spelling, so
+        // the conflict check sees Jump to session 1 holding it.
+        let RecordOutcome::Set(combo) = record_key("&", false, false, false, true, &azerty) else {
+            panic!("expected Set");
+        };
+        assert_eq!(combo, "mod-1");
+        assert_eq!(
+            conflict_owner(&KeymapConfig::default(), ShortcutId::NewSession, &combo),
+            Some(ShortcutId::JumpSession(0))
+        );
+        assert_eq!(
+            record_key(":", false, false, false, true, &azerty),
+            RecordOutcome::Set("mod-/".into())
+        );
+        // ⌘⇧è types 7, where AZERTY puts US ⌘&.
+        assert_eq!(
+            record_key("7", false, false, false, true, &azerty),
+            RecordOutcome::Set("mod-&".into())
+        );
+        // Letters and keys AZERTY keeps in place record as typed.
+        assert_eq!(
+            record_key("é", false, false, false, true, &azerty),
+            RecordOutcome::Set("mod-2".into())
+        );
+        assert_eq!(
+            record_key("b", false, false, false, true, &azerty),
+            RecordOutcome::Set("mod-b".into())
+        );
+        // No US key lands on AZERTY's @ key: nothing stored could reach it.
+        assert_eq!(
+            record_key("@", false, false, false, true, &azerty),
             RecordOutcome::Ignored
         );
     }
@@ -1982,7 +2145,9 @@ mod tests {
         // zeron parity: a combo bound elsewhere is refused at record time (the
         // helper names the owner) — conflicts never persist into the keymap.
         let keymap = KeymapConfig::default();
-        let RecordOutcome::Set(combo) = record_key("r", false, false, false, true) else {
+        let RecordOutcome::Set(combo) =
+            record_key("r", false, false, false, true, &KeyEquivalents::default())
+        else {
             panic!("expected Set");
         };
         assert_eq!(
