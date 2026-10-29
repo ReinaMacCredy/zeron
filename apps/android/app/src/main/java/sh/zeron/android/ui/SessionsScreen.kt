@@ -192,16 +192,18 @@ private fun liveCounts(ws: WorkspaceSnapshot): Pair<Int, Int> {
     return rows.count { it.indicator == ChatIndicator.WORKING } to rows.count { it.indicator == ChatIndicator.AWAITING_INPUT }
 }
 
-/** A row as the list draws it: one level in under its lead, or a lead with its children folded or open. */
 class ListEntry(val row: SessionRow, val depth: Int = 0, val children: Int = 0, val open: Boolean = false)
 
-private fun withChildren(rows: List<SessionRow>, nested: Map<String, List<SessionRow>>, closed: Set<String>): List<ListEntry> =
-    rows.flatMap { row ->
-        val children = nested[row.id].orEmpty()
+private fun withChildren(rows: List<SessionRow>, nested: Map<String, List<SessionRow>>, closed: Set<String>): List<ListEntry> {
+    val seen = HashSet<String>()
+    return rows.flatMap { row ->
+        if (!seen.add(row.id)) return@flatMap emptyList()
+        val children = nested[row.id].orEmpty().filter { seen.add(it.id) }
         if (children.isEmpty()) return@flatMap listOf(ListEntry(row))
         val open = row.id !in closed
         listOf(ListEntry(row, children = children.size, open = open)) + if (open) children.map { ListEntry(it, depth = 1) } else emptyList()
     }
+}
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -246,7 +248,7 @@ fun SessionsScreen(
         c.needsYou().filter { it.kind is NeedsYouKind.Input && seen.add(it.chatId) }.mapNotNull { model.row(it.chatId) }
     }
 
-    LaunchedEffect(client, organization, sort, activeFirst) { home.apply(client) }
+    LaunchedEffect(client) { home.apply(client) }
     LaunchedEffect(client) { home.refreshToday() }
 
     val subtitle = when {
@@ -504,7 +506,6 @@ fun SessionsScreen(
     }
 }
 
-/** Move Up (-1) / Move Down (+1) among the user's sections (the synced order). */
 private fun moveSection(model: AppModel, ids: List<String>, id: String, step: Int) {
     val at = ids.indexOf(id)
     val neighbour = ids.getOrNull(at + step) ?: return
@@ -513,7 +514,6 @@ private fun moveSection(model: AppModel, ids: List<String>, id: String, step: In
     }.onFailure { android.util.Log.w("Zeron", "move section failed: $it") }
 }
 
-/** The list's … menu: Organize and Sort (the desktop sidebar's), then New section, Collapse all, Archived. */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun OptionsMenu(
@@ -527,7 +527,6 @@ private fun OptionsMenu(
     onCollapseAll: () -> Unit,
     onArchived: () -> Unit,
 ) {
-    // Sort is inert under Inbox, as on the desktop.
     val sortable = organization != SidebarOrganization.INBOX
     val organize = listOf(
         Triple("By device", ZIcons.Laptop, SidebarOrganization.BY_DEVICE),
@@ -598,12 +597,9 @@ class RowActions(
     val newSection: (String?) -> Unit,
     /** The chat open beside the list (large screens). */
     val selected: String? = null,
-    /** Organized as Inbox: rows settle and unsettle. */
     val inbox: Boolean = false,
-    /** An ACP row's instance icon, once loaded. */
     val icon: (SessionRow) -> ImageBitmap? = { null },
     val onToggleChildren: (String) -> Unit = {},
-    /** How many step threads sit under a lead (the preview's count). */
     val steps: (String) -> Int = { 0 },
 )
 
@@ -682,7 +678,6 @@ private fun LazyListScope.group(
     tail()
 }
 
-/** The Needs-you section's pull request row: PRs waiting on a review or a merge. */
 @Composable
 private fun PullRequestAttention(pulls: TodayPullRequests, onOpen: () -> Unit) {
     Surface(
@@ -855,7 +850,6 @@ private fun setSettled(model: AppModel, id: String, settled: Boolean) {
 
 private fun marksOf(row: SessionRow): List<String> = row.harnessMarks.ifEmpty { listOf(row.harness ?: "claude-code") }
 
-/** Long-press: a preview of the session (the desktop row's hover card) above its actions. */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun SessionPreviewMenu(expanded: Boolean, onDismiss: () -> Unit, row: SessionRow, steps: Int, actions: List<MenuAction>) {
@@ -893,10 +887,6 @@ private fun SessionPreviewMenu(expanded: Boolean, onDismiss: () -> Unit, row: Se
     }
 }
 
-/**
- * The row's trailing status: an expired side chat, then background work (a ring, its label
- * in place of Working, or its count beside the time), else the live state.
- */
 @Composable
 private fun RowStatus(row: SessionRow) {
     val ring = row.backgroundRing
@@ -921,7 +911,7 @@ private fun RowStatus(row: SessionRow) {
     }
 }
 
-/** Every harness mark the session ran, on a tile toned by the session's project. */
+/** The harness mark on a tile toned by the session's project. */
 @Composable
 fun HarnessTile(row: SessionRow, icon: ImageBitmap? = null) {
     val tone = ProjectColors.color(row.colorIndex(), LocalDarkTheme.current)
@@ -980,7 +970,6 @@ fun PrBadge(number: ULong, state: PullRequestState) {
     }
 }
 
-/** The post-update card, floating over the list until opened or dismissed (the desktop's). */
 @Composable
 private fun WhatsNewFloatingCard(card: WhatsNewCard, onOpen: () -> Unit, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
     val entry = card.entry ?: return

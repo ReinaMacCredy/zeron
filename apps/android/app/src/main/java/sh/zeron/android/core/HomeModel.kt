@@ -16,10 +16,6 @@ import uniffi.zeron_core.WhatsNewCard
 import uniffi.zeron_core.svgIconPng
 import uniffi.zeron_core.whatsNewCard
 
-/**
- * The Sessions page's local state: Organize / Sort / Active first (handed to the core's
- * front page), folded leads, the settled shelf, the What's New card, and ACP instance icons.
- */
 class HomeModel private constructor(context: Context, private val model: AppModel) {
     private val prefs = context.getSharedPreferences("home", 0)
     private val scope = MainScope()
@@ -78,7 +74,6 @@ class HomeModel private constructor(context: Context, private val model: AppMode
         apply(model.client.value)
     }
 
-    /** Hand the view to the core; it rebuilds the front page and the workspace follows. */
     fun apply(client: CoreClient?) {
         client ?: return
         client.setSidebarView(_organization.value, _sort.value, _activeFirst.value)
@@ -108,7 +103,6 @@ class HomeModel private constructor(context: Context, private val model: AppMode
         model.client.value?.setTaskCompleted(id, done)
     }
 
-    /** The post-update card to show, recording a fresh install or an entry-less update as seen. */
     fun whatsNew(): WhatsNewCard? {
         val check = whatsNewCard(prefs.getString("whatsNewLastSeen", null))
         if (check.advance) prefs.edit().putString("whatsNewLastSeen", check.version).apply()
@@ -119,7 +113,6 @@ class HomeModel private constructor(context: Context, private val model: AppMode
         prefs.edit().putString("whatsNewLastSeen", version).apply()
     }
 
-    /** An ACP instance's registry icon; loads every instance of the device once, then recomposes. */
     fun icon(deviceId: String, instanceId: String?): ImageBitmap? {
         if (instanceId == null || deviceId.isEmpty()) return null
         _icons.value["$deviceId/$instanceId"]?.let { return it }

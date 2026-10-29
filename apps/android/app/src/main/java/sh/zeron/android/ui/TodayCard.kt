@@ -33,6 +33,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -102,7 +103,6 @@ private fun digest(page: TodayPage): AnnotatedString {
     }
 }
 
-/** The card on top of Sessions: greeting and summary, then open tasks, prompts so far and the tightest usage. */
 @Composable
 fun TodayCard(page: TodayPage, onOpen: () -> Unit, modifier: Modifier = Modifier) {
     Surface(
@@ -154,7 +154,6 @@ private fun androidx.compose.foundation.layout.RowScope.Tile(key: String, value:
     }
 }
 
-/** Today in full: today's tasks (check off, add one), the day's prompts by slot, and the tightest usage limit. */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun TodaySheet(page: TodayPage, home: HomeModel, onAllTasks: () -> Unit, onDismiss: () -> Unit) {
@@ -162,7 +161,7 @@ fun TodaySheet(page: TodayPage, home: HomeModel, onAllTasks: () -> Unit, onDismi
     val scope = rememberCoroutineScope()
     val pending = remember { mutableStateMapOf<String, Boolean>() }
     var draft by remember { mutableStateOf("") }
-    page.tasks.forEach { t -> if (pending[t.id] == t.done) pending.remove(t.id) }
+    LaunchedEffect(page) { page.tasks.forEach { t -> if (pending[t.id] == t.done) pending.remove(t.id) } }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
         Text("Today", style = MaterialTheme.typography.headlineSmallEmphasized, modifier = Modifier.padding(start = 24.dp, bottom = 8.dp))
         LazyColumn(contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 32.dp), modifier = Modifier.imePadding()) {

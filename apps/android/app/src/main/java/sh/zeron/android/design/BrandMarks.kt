@@ -25,7 +25,6 @@ enum class BrandMark(val width: Float, val height: Float, val evenOdd: Boolean, 
     companion object {
         fun forHarness(harness: String?): BrandMark = known(harness) ?: CLAUDE
 
-        /** The harness's mark, or null for one without a brand (an ACP agent draws the bot). */
         fun known(harness: String?): BrandMark? = when (harness) {
             null, "claude-code", "mock" -> CLAUDE
             "codex" -> OPENAI
@@ -56,7 +55,7 @@ private fun BrandMark.path(): androidx.compose.ui.graphics.Path = parsed.getOrPu
     }
 }
 
-/** A harness mark, aspect-fit and centered; Claude keeps its brand orange, an unbranded harness draws the bot. */
+/** A harness mark, aspect-fit and centered; Claude keeps its brand orange. */
 @androidx.compose.runtime.Composable
 fun HarnessMark(harness: String?, size: androidx.compose.ui.unit.Dp, modifier: androidx.compose.ui.Modifier = androidx.compose.ui.Modifier, tint: Color = androidx.compose.material3.LocalContentColor.current) {
     val mark = BrandMark.known(harness)
@@ -77,10 +76,6 @@ fun HarnessMark(harness: String?, size: androidx.compose.ui.unit.Dp, modifier: a
     }
 }
 
-/**
- * Every harness a session ran, overlapping left to right (iOS BrandMarks.stack): repeats of one
- * mark collapse, and the last one is the ACP instance's own registry icon when it has one.
- */
 @androidx.compose.runtime.Composable
 fun HarnessMarks(
     marks: List<String>,
