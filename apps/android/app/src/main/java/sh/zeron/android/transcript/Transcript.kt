@@ -78,6 +78,9 @@ class TranscriptActions(
     val act: (String) -> Unit = {},
     val card: (uniffi.zeron_core.CardAction) -> Unit = {},
     val loadHtml: suspend (deviceId: String, path: String) -> String? = { _, _ -> null },
+    val quote: ((String) -> Unit)? = null,
+    val branchBlocked: suspend (rewind: Boolean) -> String? = { null },
+    val branch: (uniffi.zeron_core.BranchOffer) -> Unit = {},
 )
 
 private const val OVERSCAN = 700f
@@ -304,15 +307,32 @@ private fun RowMenu(
     val density = LocalDensity.current
     val block = model.display.copyText
     val message = remember(frame, p.index) { frame.messageText(p.index) }
+    val offer = remember(frame, p.index) { frame.branch(p.index) }
+    val blocked by androidx.compose.runtime.produceState<String?>(null, offer) { offer?.let { value = actions.branchBlocked(it.rewind) } }
     Box(Modifier.offset(with(density) { at.x.toDp() }, with(density) { at.y.toDp() })) {
         val selectable = message ?: block
-        sh.zeron.android.ui.ActionMenu(
+        val quote = actions.quote
+        sh.zeron.android.ui.session.SessionMenu(
             true,
             dismiss,
-            listOfNotNull(
-                if (block.isNotEmpty()) sh.zeron.android.ui.MenuAction("Copy", ZIcons.Copy) { clipboard.setText(AnnotatedString(block)) } else null,
-                if (!message.isNullOrEmpty() && message != block) sh.zeron.android.ui.MenuAction("Copy message", ZIcons.Chat) { clipboard.setText(AnnotatedString(message)) } else null,
-                if (selectable.isNotEmpty()) sh.zeron.android.ui.MenuAction("Select text", ZIcons.Text) { actions.showText("Select text", selectable, false) } else null,
+            listOf(
+                listOfNotNull(
+                    if (block.isNotEmpty()) sh.zeron.android.ui.session.SessionMenuItem("Copy", ZIcons.Copy) { clipboard.setText(AnnotatedString(block)) } else null,
+                    if (!message.isNullOrEmpty() && message != block) sh.zeron.android.ui.session.SessionMenuItem("Copy message", ZIcons.Chat) { clipboard.setText(AnnotatedString(message)) } else null,
+                    if (selectable.isNotEmpty() && quote != null) sh.zeron.android.ui.session.SessionMenuItem("Quote in reply", ZIcons.Text) { quote(selectable) } else null,
+                    if (selectable.isNotEmpty()) sh.zeron.android.ui.session.SessionMenuItem("Select text", ZIcons.Text) { actions.showText("Select text", selectable, false) } else null,
+                ),
+                listOfNotNull(
+                    offer?.let { o ->
+                        sh.zeron.android.ui.session.SessionMenuItem(
+                            o.title,
+                            if (o.rewind) ZIcons.Restart else ZIcons.Fork,
+                            subtitle = blocked,
+                            enabled = blocked == null,
+                            destructive = o.rewind,
+                        ) { actions.branch(o) }
+                    },
+                ),
             ),
         )
     }

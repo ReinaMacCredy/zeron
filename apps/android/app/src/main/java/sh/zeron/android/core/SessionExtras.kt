@@ -21,6 +21,8 @@ class SessionExtras(val model: AppModel, val core: CoreClient, val handle: Sessi
 
     var pendingSwitch by mutableStateOf<PendingSwitch?>(null)
 
+    var compactNotice by mutableStateOf<String?>(null)
+
     val runsClaudeCode: Boolean get() = (model.row(chatId)?.harness ?: "claude-code") == "claude-code"
 
     val hostDevice: String get() = runCatching { handle.composer().host.deviceId }.getOrDefault("")
@@ -53,6 +55,17 @@ class SessionExtras(val model: AppModel, val core: CoreClient, val handle: Sessi
         }
         write.reasoning?.let { r -> setConfig { it.copy(reasoning = r) } }
         write.permission?.let { p -> setConfig { it.copy(access = p) } }
+    }
+
+    fun compact(focus: String? = null) {
+        compactNotice = null
+        scope.launch {
+            compactNotice = try {
+                handle.compact(focus)
+            } catch (e: Exception) {
+                "Compaction failed: ${failure(e, e.message ?: "$e")}"
+            }
+        }
     }
 
     fun launch(fallback: String, work: suspend () -> Unit) {
