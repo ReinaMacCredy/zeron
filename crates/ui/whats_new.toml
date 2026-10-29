@@ -88,7 +88,7 @@ text = "Closing a device in the Device panel no longer crashes Zeron."
 text = "A quieter look: neutral inline code, lighter icons, sidebar rows with branch and diff on one line, and shelves that always show their count."
 
 [[entry.improvements]]
-text = "New chat asks \"What should we build in\" your project, with the machine and permissions under the composer; a chat shows its permissions only when they are not Full access."
+text = "New chat asks \"What should we build in\" your project, with the machine and permissions under the composer; a chat shows its permissions only when they are not Full access, and the model picker has a Permissions row."
 
 [[entry]]
 version = "0.2.120"

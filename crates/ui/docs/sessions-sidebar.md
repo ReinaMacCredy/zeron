@@ -99,7 +99,7 @@ Sections and pins follow your account in a synced workspace, and stay on this de
 
 With **Organize** set to **Inbox**, the list splits into shelves: **Inbox** for open sessions, **Working** for running ones (when **Show > Working** is on), and **Settled** for sessions you are done with. Click a shelf's header to collapse it. A session with no activity for three days settles on its own; choose **Settle** from the hover button or right-click menu to do it now. Sessions that are working or waiting for you never settle. On a settled row, the hover button **Un-settle** takes the place of Archive and brings it back to **Inbox**.
 
-![Sidebar in Inbox mode with a custom section](sidebar-inbox-shelves.jpg)
+![Sidebar in Inbox mode with the Working and Settled shelves open](sidebar-inbox-shelves.jpg)
 
 **Settled** rows are slim one-liners: the shelf shows ten, then a "Show N more" row loads 25 at a time. The **Archived** group is hidden in this mode.
 
