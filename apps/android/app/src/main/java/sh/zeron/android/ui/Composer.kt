@@ -629,18 +629,23 @@ fun accessIcon(mode: AccessMode): Int = when (mode) {
 }
 
 @Composable
-fun AccessChip(current: AccessMode, offered: List<AccessMode>?, onPick: (AccessMode) -> Unit) {
+fun AccessChip(current: AccessMode, offered: List<AccessMode>?, plan: Boolean?, onPlan: (Boolean) -> Unit, onPick: (AccessMode) -> Unit) {
     var open by remember { mutableStateOf(false) }
     val info = accessModes(null).firstOrNull { it.mode == current } ?: return
     ContextChip(
-        info.label,
+        if (plan == true) "${info.label} · Plan" else info.label,
         leading = { ZIcon(accessIcon(current), null, Modifier.size(16.dp)) },
         onClick = { open = true },
         tint = if (current == AccessMode.FULL_ACCESS) warningTint() else MaterialTheme.colorScheme.onSurfaceVariant,
     ) {
-        ChoiceMenu(open, { open = false }, listOf(MenuSection("Access", accessModes(offered).map { m ->
-            MenuChoice(m.label, m.mode == current, m.description, leading = { ZIcon(accessIcon(m.mode), null, Modifier.size(20.dp)) }) { onPick(m.mode) }
-        })))
+        ChoiceMenu(open, { open = false }, listOfNotNull(
+            MenuSection("Access", accessModes(offered).map { m ->
+                MenuChoice(m.label, m.mode == current, m.description, leading = { ZIcon(accessIcon(m.mode), null, Modifier.size(20.dp)) }) { onPick(m.mode) }
+            }),
+            plan?.let { on ->
+                MenuSection(null, listOf(MenuChoice("Plan mode", on, "Explore and propose a plan before changing anything.") { onPlan(!on) }))
+            },
+        ))
     }
 }
 
@@ -685,7 +690,13 @@ private fun SessionChips(client: CoreClient, handle: SessionHandle, c: ComposerS
         }
     }
     val offered = c.host.capabilities.accessModes
-    AccessChip(resolveAccess(config?.access ?: AccessMode.FULL_ACCESS, offered), offered) { mode -> switches.set(harness) { it.copy(access = mode) } }
+    val plan = if (c.host.capabilities.supportsPlan == true) config?.plan ?: false else null
+    AccessChip(
+        resolveAccess(config?.access ?: AccessMode.FULL_ACCESS, offered),
+        offered,
+        plan,
+        onPlan = { on -> switches.set(harness) { it.copy(plan = on) } },
+    ) { mode -> switches.set(harness) { it.copy(access = mode) } }
     val pr = row?.pullRequest
     if (pr != null) {
         val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
