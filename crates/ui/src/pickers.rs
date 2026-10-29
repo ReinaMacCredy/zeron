@@ -926,6 +926,7 @@ const EFFORT_THUMB_SIZE: f32 = 28.0;
 const EFFORT_MARK_SIZE: f32 = 4.0;
 /// Card height beyond a plain trait row (header + track + insets − 32).
 const EFFORT_CARD_EXTRA_HEIGHT: f32 = 30.0;
+const PERMISSIONS_SECTION_HEIGHT: f32 = 80.0;
 
 /// A manual-drive tween (the shell `WidthTween` pattern) for the effort
 /// card: the thumb's glide between stops and the pressed disc's scale.
@@ -1087,6 +1088,7 @@ pub struct Pickers {
     /// fraction of the rail), the pressed disc's scale, whether a drag is
     /// live, and the track's last painted bounds (pointer → stop math).
     effort_snap: Option<EffortTween>,
+    permission_preview: Option<PermissionMode>,
     effort_press: Option<EffortTween>,
     effort_dragging: bool,
     effort_track: Option<gpui::Bounds<gpui::Pixels>>,
@@ -1517,6 +1519,7 @@ impl Pickers {
             model_tabs_scroll: gpui::ScrollHandle::new(),
             revealed_model_tab: None,
             effort_snap: None,
+            permission_preview: None,
             effort_press: None,
             effort_dragging: false,
             effort_track: None,
@@ -2338,13 +2341,129 @@ impl Pickers {
     }
 
     fn pick_permission(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
+        self.set_permission(mode, cx);
+        self.animate_close(cx);
+    }
+
+    fn set_permission(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
         if self.chat_id(cx).is_some() {
             self.update_chat_config(cx, None, |config| config.permission_mode = mode);
         } else {
             self.config.permission_mode = mode;
         }
-        self.animate_close(cx);
         cx.notify();
+    }
+
+    fn render_permissions_section(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).for_popup();
+        let current = self.effective_permission_mode(cx);
+        let shown = self.permission_preview.unwrap_or(current);
+        let segments = PermissionMode::ALL.into_iter().map(|mode| {
+            let selected = mode == current;
+            div()
+                .id(SharedString::from(format!(
+                    "permission-segment-{}",
+                    mode.short_label()
+                )))
+                .debug_selector(move || format!("permission-segment-{}", mode.short_label()))
+                .role(gpui::Role::RadioButton)
+                .aria_label(SharedString::from(mode.label()))
+                .aria_selected(selected)
+                .h(px(24.0))
+                .w(px(32.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .when(selected, |el| el.bg(crate::theme::card_selected_bg()))
+                .when(!selected, |el| el.hover(|s| s.bg(crate::theme::ink(0.05))))
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    let next = hovered
+                        .then_some(mode)
+                        .or(this.permission_preview.filter(|preview| *preview != mode));
+                    if this.permission_preview != next {
+                        this.permission_preview = next;
+                        cx.notify();
+                    }
+                }))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_permission(mode, cx);
+                    cx.stop_propagation();
+                }))
+                .child(
+                    crate::icons::icon(permission_icon(mode))
+                        .size(px(14.0))
+                        .text_color(if selected {
+                            theme.text
+                        } else {
+                            theme.text_muted
+                        }),
+                )
+        });
+        div()
+            .id("model-permissions")
+            .flex_none()
+            .h(px(PERMISSIONS_SECTION_HEIGHT))
+            .px(px(8.0))
+            .pt(px(6.0))
+            .pb(px(8.0))
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text_muted)
+                            .child("Permissions"),
+                    )
+                    .child(
+                        div()
+                            .id("permission-segments")
+                            .role(gpui::Role::RadioGroup)
+                            .aria_label("Permissions")
+                            .flex()
+                            .gap(px(2.0))
+                            .p(px(2.0))
+                            .rounded(px(8.0))
+                            .bg(crate::theme::ink(0.04))
+                            .children(segments),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .h(px(18.0))
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .text_color(theme.text)
+                    .child(SharedString::from(shown.label()))
+                    .when(shown == PermissionMode::default(), |el| {
+                        el.child(
+                            div()
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .text_color(theme.text_muted)
+                                .child("default"),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .mt(px(-4.0))
+                    .h(px(16.0))
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(shown.description())),
+            )
+            .into_any_element()
     }
 
     pub(crate) fn chip_choices(&self, cx: &App) -> zeron_proto::claude_panel::ChipChoices {
@@ -2496,6 +2615,7 @@ impl Pickers {
         }
         if kind == PickerKind::HarnessModel {
             self.profiles_only = false;
+            self.permission_preview = None;
             let groups = self.setting_groups(cx);
             self.open_model_height = model_menu_height(groups.len(), tray_card_extra(&groups));
             self.compact_model_list = false;
@@ -6177,6 +6297,23 @@ impl Pickers {
     /// [`Self::popover_frame`] without the p-1 inset — the harness/model
     /// picker's rail + list panes bleed to the card edge (zeron
     /// harness-model-picker.tsx `className="w-80 p-0"`).
+    fn permissions_reserved(&self, cx: &App) -> f32 {
+        if !self.compact_model_picker(cx)
+            && self.title.is_none()
+            && self.model_rail != ModelRail::Profiles
+        {
+            PERMISSIONS_SECTION_HEIGHT
+        } else {
+            0.0
+        }
+    }
+
+    fn model_frame_height(&self, cx: &App) -> f32 {
+        self.menu_geometry()
+            .height
+            .min(self.open_model_height + self.permissions_reserved(cx))
+    }
+
     fn popover_frame_flush(
         &self,
         width: f32,
@@ -6184,7 +6321,7 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
-        let height = self.menu_geometry().height.min(self.open_model_height);
+        let height = self.model_frame_height(cx);
         let fits_content = self.model_rail == ModelRail::Profiles && self.profile_edit.is_none();
         popover::popover_card_flush(&theme)
             .id("picker-popover")
@@ -6648,7 +6785,9 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let compact = self.compact_model_picker(cx);
-        let height = self.menu_geometry().height.min(self.open_model_height);
+        let reserved = self.permissions_reserved(cx);
+        let permissions = reserved > 0.0;
+        let height = (self.model_frame_height(cx) - reserved).max(0.0);
         let groups = self.setting_groups(cx);
         let (list_height, tray_height) =
             model_menu_budgets(height, groups.len(), tray_card_extra(&groups));
@@ -7119,6 +7258,13 @@ impl Pickers {
                 .into_any_element()
         });
 
+        let permissions_section = permissions.then(|| {
+            div()
+                .border_t_1()
+                .border_color(crate::theme::hairline(0.08))
+                .px(px(popover::CARD_INSET))
+                .child(self.render_permissions_section(cx))
+        });
         div()
             .flex()
             .flex_col()
@@ -7127,6 +7273,7 @@ impl Pickers {
             .children(refresh_error)
             .child(list_host)
             .children(tray)
+            .children(permissions_section)
             .into_any_element()
     }
 
@@ -10943,7 +11090,7 @@ mod tests {
                     .unwrap();
                 assert!(
                     (f32::from(bounds.get().size.height)
-                        - available.min(model_menu_height(2, 0.0)))
+                        - available.min(model_menu_height(2, 0.0) + PERMISSIONS_SECTION_HEIGHT))
                     .abs()
                         < 0.1,
                     "settings={settings}, available={available}, bounds={:?}",
@@ -12367,7 +12514,13 @@ mod tests {
             let parent = measured.get();
             let trigger = gpui::point(
                 parent.center().x,
-                parent.bottom() - px(popover::CARD_INSET + 30.0 + popover::MENU_GAP + 15.0),
+                parent.bottom()
+                    - px(PERMISSIONS_SECTION_HEIGHT
+                        + 1.0
+                        + popover::CARD_INSET
+                        + 30.0
+                        + popover::MENU_GAP
+                        + 15.0),
             );
             let click = |window: &mut Window, cx: &mut App, position| {
                 window.dispatch_event(
