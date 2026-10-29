@@ -1315,6 +1315,7 @@ pub struct EngineRpc {
     computer: Option<std::sync::Arc<ComputerRuntime>>,
     device_hub: Option<std::sync::Arc<crate::device_hub::DeviceHub>>,
     html_preview: std::sync::Arc<crate::html_render::PreviewHost>,
+    secret_requests: Option<crate::secret_requests::SecretRequests>,
     starting_tasks: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     plan_writes: std::sync::Arc<std::sync::Mutex<()>>,
     /// Cloud runner only: vault grants (ListGithubRepos, credentialed CloneRepo).
@@ -1384,12 +1385,19 @@ impl EngineRpc {
             computer: None,
             device_hub: None,
             html_preview: Default::default(),
+            secret_requests: None,
             starting_tasks: Default::default(),
             plan_writes: Default::default(),
             credentials: None,
             viewport_focus: Default::default(),
             engine_info,
         }
+    }
+
+    fn secret_requests(&self) -> Result<&crate::secret_requests::SecretRequests, RpcError> {
+        self.secret_requests
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("secret requests are not served here".into()))
     }
 
     fn delete_chat(&self, chat_id: &str) -> Result<(), RpcError> {
@@ -1514,6 +1522,14 @@ impl EngineRpc {
 
     pub fn with_device_hub(mut self, hub: std::sync::Arc<crate::device_hub::DeviceHub>) -> Self {
         self.device_hub = Some(hub);
+        self
+    }
+
+    pub(crate) fn with_secret_requests(
+        mut self,
+        requests: crate::secret_requests::SecretRequests,
+    ) -> Self {
+        self.secret_requests = Some(requests);
         self
     }
 
@@ -4777,6 +4793,22 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({ "answers": answers }))
+            }
+            methods::REQUEST_SECRET => {
+                let p = parse_params(params)?;
+                let requests = self.secret_requests()?;
+                let reply = requests
+                    .request(&self.sessions, p)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&reply)
+            }
+            methods::ANSWER_SECRET => {
+                let p = parse_params(params)?;
+                self.secret_requests()?
+                    .answer(&self.sessions, p)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;

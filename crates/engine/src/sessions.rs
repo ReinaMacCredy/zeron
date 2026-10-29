@@ -101,9 +101,53 @@ pub enum SteerOutcome {
 struct PendingInput {
     tx: oneshot::Sender<Vec<UserInputAnswer>>,
     person: bool,
+    secret: bool,
 }
 
 type PendingInputs = Arc<Mutex<HashMap<String, PendingInput>>>;
+
+pub(crate) struct SecretAnswer {
+    request_id: String,
+    input: Option<PendingInput>,
+    pending: PendingInputs,
+    events: mpsc::UnboundedSender<AgentEvent>,
+}
+
+impl SecretAnswer {
+    pub(crate) fn finish(mut self, status: &str) -> bool {
+        let input = self.input.take().expect("finished once");
+        let delivered = input
+            .tx
+            .send(vec![UserInputAnswer {
+                question_id: SECRET_QUESTION_ID.to_owned(),
+                labels: vec![status.to_owned()],
+            }])
+            .is_ok();
+        let status = if delivered {
+            status
+        } else {
+            zeron_proto::view::SecretStatus::CANCELLED
+        };
+        let _ = self.events.send(AgentEvent::InputResolved {
+            request_id: self.request_id.clone(),
+            answers: Some(vec![UserInputAnswer {
+                question_id: SECRET_QUESTION_ID.to_owned(),
+                labels: vec![status.to_owned()],
+            }]),
+        });
+        delivered
+    }
+}
+
+impl Drop for SecretAnswer {
+    fn drop(&mut self) {
+        if let Some(input) = self.input.take() {
+            lock(&self.pending).insert(self.request_id.clone(), input);
+        }
+    }
+}
+
+pub(crate) const SECRET_QUESTION_ID: &str = "secret";
 
 pub(crate) fn asks_person(questions: &[UserInputQuestion]) -> bool {
     !questions.iter().any(UserInputQuestion::is_computer)
@@ -590,6 +634,7 @@ impl RunSetup {
                         request_id.clone(),
                         PendingInput {
                             person: asks_person(&questions),
+                            secret: questions.iter().any(UserInputQuestion::is_secret),
                             tx: answer_tx,
                         },
                     );
@@ -4204,7 +4249,13 @@ impl SessionsEngine {
         let Some((pending, engine_tx)) = target else {
             return Ok(false);
         };
-        let Some(resolver) = lock(&pending).remove(request_id) else {
+        let Some(resolver) = ({
+            let mut pending = lock(&pending);
+            match pending.get(request_id) {
+                Some(resolver) if !resolver.secret => pending.remove(request_id),
+                _ => None,
+            }
+        }) else {
             return Ok(false);
         };
         let _ = resolver.tx.send(answers.clone());
@@ -4253,6 +4304,7 @@ impl SessionsEngine {
             request_id.to_owned(),
             PendingInput {
                 person: asks_person(&questions),
+                secret: questions.iter().any(UserInputQuestion::is_secret),
                 tx,
             },
         );
@@ -4298,6 +4350,63 @@ impl SessionsEngine {
             answers: None,
         });
         true
+    }
+
+    pub async fn ask_secret(
+        &self,
+        chat_id: &str,
+        run_secret: &str,
+        question: UserInputQuestion,
+        wait: std::time::Duration,
+    ) -> Result<(String, zeron_proto::view::SecretStatus), String> {
+        use zeron_proto::view::{SecretStatus, secret_status};
+        self.computer_run(chat_id, run_secret)
+            .ok_or_else(|| "This chat has no live run to ask in.".to_owned())?;
+        let question_id = question.id.clone();
+        let request_id = new_id();
+        let answers = self.raise_input(chat_id, &request_id, vec![question])?;
+        let status = match tokio::time::timeout(wait, answers).await {
+            Ok(Ok(answers)) => secret_status(true, Some(&answers)),
+            Ok(Err(_)) => SecretStatus::Cancelled,
+            Err(_) => {
+                let runs = lock(&self.inner.runs);
+                if let Some(run) = runs.get(chat_id)
+                    && lock(&run.pending_inputs).remove(&request_id).is_some()
+                {
+                    let _ = run.engine_tx.send(AgentEvent::InputResolved {
+                        request_id: request_id.clone(),
+                        answers: Some(vec![UserInputAnswer {
+                            question_id,
+                            labels: vec![SecretStatus::TIMED_OUT.to_owned()],
+                        }]),
+                    });
+                }
+                SecretStatus::TimedOut
+            }
+        };
+        Ok((request_id, status))
+    }
+
+    pub(crate) fn take_secret_input(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+    ) -> Result<SecretAnswer, String> {
+        let runs = lock(&self.inner.runs);
+        let run = runs
+            .get(chat_id)
+            .ok_or_else(|| "The agent that asked has stopped.".to_owned())?;
+        let mut pending = lock(&run.pending_inputs);
+        if !pending.get(request_id).is_some_and(|input| input.secret) {
+            return Err("This secret request is no longer waiting.".into());
+        }
+        let input = pending.remove(request_id).expect("checked above");
+        Ok(SecretAnswer {
+            request_id: request_id.to_owned(),
+            input: Some(input),
+            pending: run.pending_inputs.clone(),
+            events: run.engine_tx.clone(),
+        })
     }
 
     pub fn computer_run(&self, chat_id: &str, secret: &str) -> Option<ComputerRun> {

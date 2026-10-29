@@ -103,6 +103,10 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
                 "Ask the person watching this chat one to four questions and wait for answers.",
             ),
             tool(
+                "request_secret",
+                "Ask the person for a secret in a private card; the agent gets a private file, never the value.",
+            ),
+            tool(
                 "terminal",
                 "Use this chat's terminals in the terminal panel, live.",
             ),

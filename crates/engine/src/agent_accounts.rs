@@ -333,7 +333,7 @@ impl AgentAccountsConfig {
 /// Unix, an existing looser dir included. Sign-in homes hold whatever a CLI
 /// writes there (fresh tokens, in modes the CLI picks), so the directory is
 /// the boundary that keeps other local users out.
-fn private_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn private_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};

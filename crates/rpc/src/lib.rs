@@ -178,6 +178,14 @@ pub mod methods {
     /// [UserInputQuestion]}` → `{answers: [UserInputAnswer]}`; empty when the
     /// turn ended or nobody answered in time.
     pub const ASK_USER: &str = "AskUser";
+    /// Ask the person in `chatId`'s transcript for a secret in a private card
+    /// and wait, authenticated by the run secret. `{chatId, runSecret, label,
+    /// reason, placeholder?, timeoutMs?, clientRequestId?}` → `{status, file?}`.
+    pub const REQUEST_SECRET: &str = "RequestSecret";
+    /// The person's answer to a secret card: `{chatId, requestId, secret?}`,
+    /// no `secret` declining. Served only to connections on this device; the
+    /// value goes to an owner-only file and never into the chat.
+    pub const ANSWER_SECRET: &str = "AnswerSecret";
     /// Fork `sourceChatId` after the assistant entry `entryId` into the
     /// client-minted `chatId`, replying with the created `Chat` row.
     pub const FORK_CHAT: &str = "ForkChat";

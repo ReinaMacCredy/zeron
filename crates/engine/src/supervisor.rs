@@ -1412,7 +1412,7 @@ pub(crate) fn open_inputs(
                 questions,
                 resolved: false,
                 ..
-            } if asks_person(questions) => {
+            } if asks_person(questions) && !questions.iter().any(UserInputQuestion::is_secret) => {
                 Some((request_id.clone(), questions.clone(), entry.created_at))
             }
             _ => None,
