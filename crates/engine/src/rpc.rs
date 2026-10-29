@@ -2189,13 +2189,13 @@ impl EngineRpc {
                 .unwrap_or_default(),
         };
         let chat_harness = chat.config.as_ref().map(|config| config.harness);
-        let owner_permission = chat.config.as_ref().map(|config| config.permission_mode);
+        let owner_permission = chat.config.as_ref().map(|config| config.access);
         let choice = p.reviewer.clone().unwrap_or(settings.reviewer);
         let reviewer = crate::review::resolve_reviewer(&choice, chat_harness, &options);
         let profile = reviewer.profile.as_ref();
-        let permission_mode = profile
-            .and_then(|profile| profile.permission_mode)
-            .filter(|mode| owner_permission.is_some_and(|owner| mode.rank() <= owner.rank()));
+        let access = profile
+            .and_then(|profile| profile.access)
+            .filter(|mode| owner_permission.is_some_and(|owner| *mode <= owner));
         let task = crate::review::prompt(PromptInput {
             scope,
             base: base.as_deref(),
@@ -2219,7 +2219,7 @@ impl EngineRpc {
                     model: reviewer.model.clone(),
                     reasoning: reviewer.reasoning,
                     profile: crate::doc_host::ProfileParams {
-                        permission_mode,
+                        access,
                         model_options: profile
                             .filter(|profile| !profile.model_options.is_empty())
                             .map(|profile| profile.model_options.clone()),

@@ -1480,6 +1480,7 @@ impl DemoHost {
                 reasoning_levels: Vec::new(),
                 installed: true,
                 enabled: Some(true),
+                access_modes: None,
             });
         }
         let disabled = lock(&self.settings).disabled_harnesses.clone();

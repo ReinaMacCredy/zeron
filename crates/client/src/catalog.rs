@@ -27,6 +27,10 @@ pub struct HarnessInfo {
     /// Offered by the listing device (Settings → Providers). `None` ⇒ legacy.
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// The access modes the harness honors. `None` ⇒ not from a live
+    /// catalog, or an engine predating modes.
+    #[serde(default)]
+    pub access_modes: Option<Vec<zeron_proto::AccessMode>>,
 }
 
 fn default_true() -> bool {
@@ -43,6 +47,7 @@ impl HarnessInfo {
             reasoning_levels: Vec::new(),
             installed: true,
             enabled: None,
+            access_modes: None,
         }
     }
 

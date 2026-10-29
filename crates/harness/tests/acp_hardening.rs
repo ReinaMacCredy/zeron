@@ -49,7 +49,6 @@ fn request(mode: &str) -> RunRequest {
         env: [("FAKE_ACP_MODE".to_owned(), mode.to_owned())]
             .into_iter()
             .collect(),
-        permission_mode: Default::default(),
         branch: None,
         forked_at: None,
         computer_control: false,

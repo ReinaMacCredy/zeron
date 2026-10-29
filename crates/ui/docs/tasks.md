@@ -27,6 +27,21 @@ A new task belongs to the project you have selected for New chat. Tick the circl
 
 To reorder open tasks, point at a row and drag the grip that appears to its left. Clicking a row never drags it. The row lifts and follows the pointer, the others slide apart to show where it will land, and it moves one slot each time it passes the middle of the next row. Hold it near the top or bottom of the list to scroll. Release to drop it, or press Escape to send it back. Select several tasks first (see below) and dragging one of them moves them all, with their count on the row.
 
+## Quick capture
+
+File an idea without leaving what you are doing:
+
+- **From any app**: press both Option keys (⌥ + ⌥) on macOS. A bar opens over the app in front, without bringing Zeron forward. Type the idea and press Enter: the task lands at the top of **To do** and the app you were in keeps the keyboard. Shift+Enter starts the notes, **#** and a project name picks the project (the folder chip does too), **Today** sets the due date, and Cmd+V attaches an image. Cmd+Enter saves and opens the task's card in Zeron. Escape or a click outside closes the bar and keeps what you typed for next time.
+- **Inside Zeron**: click **+** under **Tasks** in the rail. Type and press Enter as many times as you like; the popover lists what you added. Escape, a click outside, or **+** again closes it.
+
+After a save from the bar, **Added to To do** shows with **Undo**, which deletes the task, and **Open**. Captured tasks start in the project you have selected for New chat and carry a **New** tag, and the Tasks icon in the rail counts them, until you next open Tasks.
+
+The chord is set in Settings > Appshots under **Quick capture to Tasks**: ⌘ + ⌘, ⌥ + ⌥, ⇧ + ⇧ or None. It needs the same Input Monitoring permission as the Appshot chord, and the two cannot share a chord. Linux and Windows have no quick-capture hotkey; use the **+** in the rail.
+
+![The quick capture bar with the project menu](quick-capture-bar.jpg)
+
+![The rail's quick capture over Tasks, with New tags](quick-capture.jpg)
+
 ## The task card
 
 Click a task that has no chat yet to open its card beside the list. A task with a chat opens its page instead (see **A task's page** below); right-click it and pick **Edit** for its card. Edits save on their own. You can set:

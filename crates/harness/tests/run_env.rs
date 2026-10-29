@@ -37,7 +37,6 @@ fn request(cwd: &Path) -> RunRequest {
         cwd: cwd.display().to_string(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
-        permission_mode: Default::default(),
         access: Default::default(),
         plan: false,
         resume: None,

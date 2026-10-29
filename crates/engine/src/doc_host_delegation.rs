@@ -1,9 +1,8 @@
 use chrono::Utc;
 use serde::Deserialize;
 use zeron_proto::{
-    Chat, ChatConfig, Delegation, DelegationDelivery, DelegationStatus, DelegationWake,
-    FindingOutcome, FindingOutcomeKind, PermissionMode, ReasoningLevel, Session, SessionStatus,
-    UserInputQuestion,
+    AccessMode, Chat, ChatConfig, Delegation, DelegationDelivery, DelegationStatus, DelegationWake,
+    FindingOutcome, FindingOutcomeKind, ReasoningLevel, Session, SessionStatus, UserInputQuestion,
 };
 
 use super::*;
@@ -47,8 +46,8 @@ pub struct DelegateTaskParams {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileParams {
-    #[serde(default)]
-    pub permission_mode: Option<PermissionMode>,
+    #[serde(default, alias = "permissionMode")]
+    pub access: Option<AccessMode>,
     #[serde(default)]
     pub model_options: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
@@ -462,16 +461,15 @@ impl DocHost {
                 .get_or_insert_with(|| self.default_chat_config())
                 .model_options = options.clone();
         }
-        if let Some(mode) = profile.permission_mode {
+        if let Some(mode) = profile.access {
             let config = config.get_or_insert_with(|| self.default_chat_config());
-            if mode.rank() > config.permission_mode.rank() {
+            if mode > config.access {
                 return Err(failure(
                     "permission_escalation_denied",
-                    "a new chat may only narrow this chat's permission mode",
+                    "a new chat may only narrow this chat's access mode",
                 ));
             }
-            config.permission_mode = mode;
-            config.sandbox = mode.sandbox();
+            config.access = mode;
         }
         Ok(config)
     }
@@ -584,12 +582,11 @@ impl DocHost {
             reasoning: None,
             model_options: Default::default(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-            permission_mode: PermissionMode::Ask,
             instructions: String::new(),
             profile_id: None,
             instance_id: None,
             disabled_tools: Vec::new(),
-            access: PermissionMode::Ask.access(),
+            access: AccessMode::Supervised,
             plan: false,
         }
     }

@@ -57,11 +57,44 @@ fn hotkey_description(combo: &str) -> String {
         None => "No hotkey. Choose a chord to capture from other apps.".to_string(),
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Chord {
+    Appshot,
+    QuickCapture,
+}
+
+impl Chord {
+    fn other(self) -> Self {
+        match self {
+            Chord::Appshot => Chord::QuickCapture,
+            Chord::QuickCapture => Chord::Appshot,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Chord::Appshot => "Appshot",
+            Chord::QuickCapture => "Quick capture",
+        }
+    }
+}
+
+fn quick_capture_description(combo: &str) -> String {
+    match ChordModifier::from_combo(combo) {
+        Some(chord) => format!(
+            "Press both {} keys in any app to file an idea into To do without leaving it.",
+            chord.glyph()
+        ),
+        None => "No hotkey. The + under Tasks on the rail still opens quick capture.".to_string(),
+    }
+}
+
 /// Page-local state: the hotkey dropdown, plus the permissions card's shared
 /// guide and the recheck that keeps it honest.
 #[derive(Default)]
 pub(super) struct PermissionsUi {
-    hotkey_menu: popover::Popup<()>,
+    hotkey_menu: popover::Popup<Chord>,
+    refused: Option<Chord>,
     hotkey_menu_dismissed_at: Option<Instant>,
     pub(super) guide: PermissionGuide,
     recheck: Option<gpui::Task<()>>,
@@ -81,6 +114,33 @@ impl PermissionGuideHost for ShortcutsPage {
 }
 
 impl ShortcutsPage {
+    fn chord_combo(&self, chord: Chord) -> &str {
+        match chord {
+            Chord::Appshot => self.keymap.get(ShortcutId::CaptureAppshot),
+            Chord::QuickCapture => &self.keymap.quick_capture,
+        }
+    }
+
+    fn any_chord(&self) -> bool {
+        uses_chord(self.chord_combo(Chord::Appshot))
+            || uses_chord(self.chord_combo(Chord::QuickCapture))
+    }
+
+    fn refusal(&self, chord: Chord) -> Option<SharedString> {
+        (self.permissions.refused == Some(chord))
+            .then(|| self.conflict_notice.clone())
+            .flatten()
+    }
+
+    fn quick_capture_status(&self) -> Option<SharedString> {
+        if let Some(refusal) = self.refusal(Chord::QuickCapture) {
+            return Some(refusal);
+        }
+        (uses_chord(&self.keymap.quick_capture)
+            && self.appshot_capabilities.input_monitoring == CapabilityState::PermissionRequired)
+            .then(|| "Allow Input Monitoring in macOS System Settings, then try again.".into())
+    }
+
     fn enable_status(&self) -> SharedString {
         let capabilities = self.appshot_capabilities;
         if capabilities.platform == AppshotPlatform::Unsupported {
@@ -120,7 +180,7 @@ impl ShortcutsPage {
         if enabled {
             // Synara requests the permissions from the toggle, then opens the
             // first missing pane's guide when a grant did not land.
-            let chord = uses_chord(self.keymap.get(ShortcutId::CaptureAppshot));
+            let chord = self.any_chord();
             let missing = |capabilities: AppshotCapabilities| {
                 if chord && capabilities.input_monitoring == CapabilityState::PermissionRequired {
                     Some(PermissionPane::InputMonitoring)
@@ -156,7 +216,7 @@ impl ShortcutsPage {
             this.update(cx, |this, cx| {
                 crate::appshots::refresh_registration();
                 this.appshot_capabilities = crate::appshots::capabilities();
-                let chord = uses_chord(this.keymap.get(ShortcutId::CaptureAppshot));
+                let chord = this.any_chord();
                 let missing = [
                     PermissionPane::InputMonitoring,
                     PermissionPane::ScreenRecording,
@@ -184,6 +244,7 @@ impl ShortcutsPage {
         let accent = theme.accent;
         let customized = self.keymap.get(ShortcutId::CaptureAppshot)
             != ShortcutId::CaptureAppshot.default_combo()
+            || self.keymap.quick_capture != crate::settings::default_quick_capture()
             || self.appshots_enabled
             || !self.appshot_sound_enabled
             || self.appshot_destination != AppshotDestination::default();
@@ -213,6 +274,7 @@ impl ShortcutsPage {
 
     pub(super) fn restore_appshot_defaults(&mut self, cx: &mut Context<Self>) {
         self.keymap.reset(ShortcutId::CaptureAppshot);
+        self.keymap.quick_capture = crate::settings::default_quick_capture().into();
         self.stop_recording();
         self.conflict_notice = None;
         self.commit(cx);
@@ -223,12 +285,27 @@ impl ShortcutsPage {
         cx.notify();
     }
 
-    fn set_hotkey(&mut self, choice: Option<ChordModifier>, cx: &mut Context<Self>) {
+    fn set_hotkey(&mut self, chord: Chord, choice: Option<ChordModifier>, cx: &mut Context<Self>) {
         self.close_hotkey_menu(cx);
-        self.keymap.set(
-            ShortcutId::CaptureAppshot,
-            hotkey_choice_combo(choice).into(),
-        );
+        let combo = hotkey_choice_combo(choice);
+        if crate::appshots::chords_conflict(combo, self.chord_combo(chord.other())) {
+            self.conflict_notice = Some(
+                format!(
+                    "{} is already the {} hotkey.",
+                    hotkey_choice_label(choice),
+                    chord.other().name()
+                )
+                .into(),
+            );
+            self.permissions.refused = Some(chord);
+            cx.notify();
+            return;
+        }
+        self.permissions.refused = None;
+        match chord {
+            Chord::Appshot => self.keymap.set(ShortcutId::CaptureAppshot, combo.into()),
+            Chord::QuickCapture => self.keymap.quick_capture = combo.into(),
+        }
         self.conflict_notice = None;
         self.commit(cx);
     }
@@ -249,7 +326,7 @@ impl ShortcutsPage {
         self.close_hotkey_menu(cx);
     }
 
-    fn toggle_hotkey_menu(&mut self, cx: &mut Context<Self>) {
+    fn toggle_hotkey_menu(&mut self, chord: Chord, cx: &mut Context<Self>) {
         let just_dismissed = self
             .permissions
             .hotkey_menu_dismissed_at
@@ -258,7 +335,7 @@ impl ShortcutsPage {
         if self.permissions.hotkey_menu.is_open() {
             self.close_hotkey_menu(cx);
         } else if !just_dismissed {
-            self.permissions.hotkey_menu.open(());
+            self.permissions.hotkey_menu.open(chord);
         }
         cx.notify();
     }
@@ -268,45 +345,46 @@ impl ShortcutsPage {
     pub(super) fn render_hotkey_dropdown(
         &self,
         slug: &'static str,
+        chord: Chord,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let accent = theme.accent;
-        let current = ChordModifier::from_combo(self.keymap.get(ShortcutId::CaptureAppshot));
+        let current = ChordModifier::from_combo(self.chord_combo(chord));
+        let slug = match chord {
+            Chord::Appshot => format!("{slug}-appshot"),
+            Chord::QuickCapture => format!("{slug}-quick-capture"),
+        };
         let rows: Vec<gpui::AnyElement> = HOTKEY_CHOICES
             .into_iter()
             .enumerate()
             .map(|(ix, choice)| {
                 let selected = choice == current;
-                popover::menu_row_nav(
-                    theme,
-                    selected,
-                    false,
-                    format!("{slug}-appshot-hotkey-option-{ix}"),
-                )
-                .id(SharedString::from(format!(
-                    "{slug}-appshot-hotkey-option-{ix}"
-                )))
-                .debug_selector(move || format!("{slug}-appshot-hotkey-option-{ix}"))
-                .role(gpui::Role::MenuItem)
-                .aria_label(hotkey_choice_label(choice))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.set_hotkey(choice, cx);
-                }))
-                .child(
-                    div()
-                        .flex_1()
-                        .child(SharedString::from(hotkey_choice_label(choice))),
-                )
-                .child(div().w(px(18.0)).flex_none().when(selected, |slot| {
-                    slot.child(
-                        crate::icons::icon(crate::icons::CHECK)
-                            .size(px(14.0))
-                            .text_color(theme.text),
+                popover::menu_row_nav(theme, selected, false, format!("{slug}-hotkey-option-{ix}"))
+                    .id(SharedString::from(format!("{slug}-hotkey-option-{ix}")))
+                    .debug_selector({
+                        let slug = slug.clone();
+                        move || format!("{slug}-hotkey-option-{ix}")
+                    })
+                    .role(gpui::Role::MenuItem)
+                    .aria_label(hotkey_choice_label(choice))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.set_hotkey(chord, choice, cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(SharedString::from(hotkey_choice_label(choice))),
                     )
-                }))
-                .into_any_element()
+                    .child(div().w(px(18.0)).flex_none().when(selected, |slot| {
+                        slot.child(
+                            crate::icons::icon(crate::icons::CHECK)
+                                .size(px(14.0))
+                                .text_color(theme.text),
+                        )
+                    }))
+                    .into_any_element()
             })
             .collect();
         let menu = popover::popover_card(theme)
@@ -317,13 +395,21 @@ impl ShortcutsPage {
             .gap(px(2.0))
             .children(rows)
             .into_any_element();
-        let open = self.permissions.hotkey_menu.is_open();
+        let mounted = self.permissions.hotkey_menu.get() == Some(&chord);
+        let open = mounted && self.permissions.hotkey_menu.is_open();
         let closing = self.permissions.hotkey_menu.closing_since();
         div()
-            .id(SharedString::from(format!("{slug}-appshot-hotkey")))
-            .debug_selector(move || format!("{slug}-appshot-hotkey"))
+            .id(SharedString::from(format!("{slug}-hotkey")))
+            .debug_selector({
+                let slug = slug.clone();
+                move || format!("{slug}-hotkey")
+            })
             .role(gpui::Role::Button)
-            .aria_label(format!("Appshot hotkey: {}", hotkey_choice_label(current)))
+            .aria_label(format!(
+                "{} hotkey: {}",
+                chord.name(),
+                hotkey_choice_label(current)
+            ))
             .tab_index(0)
             .focus_visible(move |style| style.border_2().border_color(accent))
             .relative()
@@ -344,7 +430,7 @@ impl ShortcutsPage {
             .gap(px(10.0))
             .cursor_pointer()
             .when(!open, |el| el.hover(|s| s.bg(crate::theme::ink(0.08))))
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_hotkey_menu(cx)))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_hotkey_menu(chord, cx)))
             .child(
                 div()
                     .flex_1()
@@ -359,9 +445,9 @@ impl ShortcutsPage {
                     .flex_none()
                     .text_color(theme.text_muted),
             )
-            .when_some(self.permissions.hotkey_menu.get(), |trigger, _| {
+            .when(mounted, |trigger| {
                 trigger.child(popover::anchored_menu_below_end(
-                    SharedString::from(format!("{slug}-appshot-hotkey-menu")),
+                    SharedString::from(format!("{slug}-hotkey-menu")),
                     menu,
                     closing,
                 ))
@@ -510,7 +596,7 @@ impl ShortcutsPage {
         // macOS picks a modifier chord from a menu; Linux records a key combo
         // with the shared shortcut recorder.
         let hotkey_control = if mac {
-            self.render_hotkey_dropdown("appshots", &theme, cx)
+            self.render_hotkey_dropdown("appshots", Chord::Appshot, &theme, cx)
         } else {
             self.render_binding_control(ShortcutId::CaptureAppshot, 0, self.recording, &theme, cx)
                 .into_any_element()
@@ -620,7 +706,7 @@ impl ShortcutsPage {
                     false,
                     "Hotkey",
                     &hotkey_description,
-                    None,
+                    self.refusal(Chord::Appshot),
                     hotkey_reset,
                     hotkey_control,
                     None,
@@ -659,6 +745,43 @@ impl ShortcutsPage {
                 )
                 .search_anchor(SettingId::AppshotSound),
             );
+
+        let quick_combo = self.keymap.quick_capture.clone();
+        let quick_reset = (quick_combo != crate::settings::default_quick_capture()).then(|| {
+            reset_glyph("quick-capture-hotkey-reset", "quick capture hotkey".into())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.keymap.quick_capture = crate::settings::default_quick_capture().into();
+                    this.conflict_notice = None;
+                    this.commit(cx);
+                }))
+                .into_any_element()
+        });
+        let quick_card = widgets::section_card(&theme).mt(px(6.0)).child(
+            row(
+                &theme,
+                true,
+                "Quick capture",
+                &if mac {
+                    quick_capture_description(&quick_combo)
+                } else {
+                    "The hotkey needs macOS. The + under Tasks on the rail opens quick capture."
+                        .to_string()
+                },
+                self.quick_capture_status(),
+                quick_reset.filter(|_| mac),
+                if mac {
+                    self.render_hotkey_dropdown("appshots", Chord::QuickCapture, &theme, cx)
+                } else {
+                    div()
+                        .text_size(crate::typography::ui_rems(13.0))
+                        .text_color(theme.text_muted)
+                        .child("None")
+                        .into_any_element()
+                },
+                None,
+            )
+            .search_anchor(SettingId::QuickCapture),
+        );
 
         let mut permissions_card = widgets::section_card(&theme).mt(px(6.0));
         let panes: &[(PermissionPane, &str)] = if capabilities.platform == AppshotPlatform::MacOs {
@@ -728,6 +851,8 @@ impl ShortcutsPage {
 
         let helper: SharedString = if self.recording.is_some() {
             "Press Escape to cancel.".into()
+        } else if self.permissions.refused.is_some() {
+            SharedString::default()
         } else {
             self.conflict_notice.clone().unwrap_or_default()
         };
@@ -772,6 +897,8 @@ impl ShortcutsPage {
                             .child(intro)
                             .child(section_label(&theme, "Capture"))
                             .child(capture_card)
+                            .child(section_label(&theme, "Quick capture to Tasks"))
+                            .child(quick_card)
                             .when(supported, |el| {
                                 let label = if mac { "macOS permissions" } else { "Permissions" };
                                 el.child(section_label(&theme, label))
@@ -809,6 +936,9 @@ mod tests {
         );
         assert!(hotkey_description(crate::appshots::NO_HOTKEY).starts_with("No hotkey"));
         assert_eq!(hotkey_choice_label(None), "None");
+        assert!(
+            quick_capture_description(ChordModifier::Option.combo()).starts_with("Press both ⌥")
+        );
         assert_eq!(
             hotkey_choice_combo(Some(ChordModifier::Option)),
             "option-option"

@@ -60,7 +60,7 @@ fn spawn_type(
 
 fn ask() -> Built {
     let built = settled(Scripted::default_fake());
-    *built.seams.mode.lock().unwrap() = Some(PermissionMode::Ask);
+    *built.seams.mode.lock().unwrap() = Some(AccessMode::Supervised);
     built
 }
 
@@ -145,7 +145,7 @@ async fn a_turn_that_ended_before_dispatch_approves_nothing_and_dispatches_nothi
         backend,
         seams,
     } = settled(Scripted::default_fake());
-    *seams.mode.lock().unwrap() = Some(PermissionMode::Full);
+    *seams.mode.lock().unwrap() = Some(AccessMode::FullAccess);
     let thread_id = "approval-pause-thread";
     seams.turn_inactive.store(true, Ordering::SeqCst);
     let error = type_if_authorized(

@@ -93,9 +93,8 @@ async fn real_pi_mock_lifecycle() {
             model_options: Default::default(),
             cwd: cwd.display().to_string(),
             sandbox: SandboxLevel::WorkspaceWrite,
-            permission_mode: zeron_proto::PermissionMode::Full,
             auto_approve: true,
-            access: Default::default(),
+            access: zeron_proto::AccessMode::FullAccess,
             plan: false,
             resume: session.clone(),
             attachments: vec![],
@@ -214,7 +213,6 @@ async fn real_pi_mock_lifecycle() {
         branch: None,
         forked_at: None,
         computer_control: false,
-        permission_mode: Default::default(),
         disabled_tools: Vec::new(),
         env: Default::default(),
     };
@@ -297,7 +295,6 @@ async fn real_pi_steering_bursts_share_the_next_model_call() {
         branch: None,
         forked_at: None,
         computer_control: false,
-        permission_mode: Default::default(),
         disabled_tools: Vec::new(),
         env: Default::default(),
     };

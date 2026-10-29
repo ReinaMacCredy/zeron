@@ -97,7 +97,6 @@ async fn a_run_is_torn_down_only_once_no_login_refresh_is_in_flight() {
             config.display().to_string(),
         )]
         .into(),
-        permission_mode: Default::default(),
         branch: None,
         forked_at: None,
         computer_control: false,

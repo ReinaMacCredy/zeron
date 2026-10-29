@@ -79,7 +79,7 @@ In an open chat, a row under the composer carries, from left to right:
 - **Mission Control**, which turns your message into a mission (see above).
 - For a git project, where the chat works: **Local checkout** or **Worktree**, then the branch (**No ref** when it is not known).
 - For a git project, the session stats chip (see [Usage and cost](zeron://docs/usage)) and a pull request badge when the branch has one.
-- The permission chip, when the chat is not at **Full access**, which sets how often the agent asks you. See [When an agent asks](zeron://docs/agent-questions).
+- The permission chip, when the chat is not at **Full access** or plan mode is on, which sets how often the agent asks you and turns plan mode on or off. See [When an agent asks](zeron://docs/agent-questions).
 - The context ring, which shows how full the context window is. See [Compaction and context](zeron://docs/compaction).
 - The terminal button, which opens the terminal drawer. See [Terminal](zeron://docs/terminal).
 

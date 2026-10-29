@@ -22,7 +22,7 @@ use zeron_proto::supervisor::{
     profile_config,
 };
 use zeron_proto::{
-    AgentProfile, Chat, ChatConfig, ChatIndicator, PermissionMode, PlanProgress, TaskStatus,
+    AccessMode, AgentProfile, Chat, ChatConfig, ChatIndicator, PlanProgress, TaskStatus,
     UserInputAnswer, UserInputQuestion,
 };
 use zeron_rpc::methods;
@@ -1695,7 +1695,7 @@ impl SupervisorPage {
             return Some(profile_config(profile));
         }
         let mut config = self.pickers.read(cx).resolved(cx).chat_config()?;
-        config.permission_mode = PermissionMode::Full;
+        config.access = AccessMode::FullAccess;
         Some(config)
     }
 
@@ -4643,7 +4643,7 @@ mod tests {
                 );
                 let config: ChatConfig = serde_json::from_value(configs[0].clone()).unwrap();
                 assert_eq!(config.harness, HarnessId::ClaudeCode);
-                assert_eq!(config.permission_mode, PermissionMode::Full);
+                assert_eq!(config.access, AccessMode::FullAccess);
                 let state = page.read_with(cx, |page, _| page.state.clone());
                 for chat_id in [Some("supervisor-1"), None] {
                     state.update(cx, |state, cx| {

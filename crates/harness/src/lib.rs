@@ -995,7 +995,7 @@ pub(crate) fn one_shot_request(mut request: RunRequest) -> RunRequest {
     request.mcp = None;
     request.model_options.clear();
     request.auto_approve = false;
-    request.permission_mode = zeron_proto::PermissionMode::Ask;
+    request.access = AccessMode::Supervised;
     request.plan = false;
     request.computer_control = false;
     request
@@ -1010,7 +1010,7 @@ pub(crate) fn prepend_instructions(instructions: &str, prompt: &str) -> String {
     }
 }
 
-// Pi and Cursor never read permission_mode; OpenCode and ACP agents ask only when their own config requests it.
+// Pi and Cursor never read the access mode; OpenCode and ACP agents ask only when their own config requests it.
 pub fn asks_before_running_tools(id: HarnessId) -> bool {
     matches!(
         id,

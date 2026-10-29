@@ -91,7 +91,7 @@ async fn a_late_accept_for_a_prompt_open_at_stop_settles_false() {
             gate.request(ApprovalRequest {
                 chat_id: thread_id.into(),
                 turn_id: None,
-                mode: PermissionMode::Ask,
+                mode: AccessMode::Supervised,
                 signal: CancellationToken::new(),
                 publish,
                 app: None,

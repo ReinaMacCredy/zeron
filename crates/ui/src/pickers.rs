@@ -33,8 +33,8 @@ use zeron_proto::model_options::{
     self, AUTO_COMPACT, CONTEXT_WINDOW, compact_applies, compact_tokens,
 };
 use zeron_proto::{
-    AccessMode, ChatConfig, FolderListing, HarnessId, Model, ModelCatalog, PermissionMode,
-    ProviderInstance, ReasoningLevel, RepoRef, SandboxLevel, Space,
+    AccessMode, ChatConfig, FolderListing, HarnessId, Model, ModelCatalog, ProviderInstance,
+    ReasoningLevel, RepoRef, SandboxLevel, Space,
 };
 use zeron_rpc::methods;
 
@@ -59,11 +59,19 @@ fn new_model_badge(theme: &Theme) -> AnyElement {
 /// pagination plumbing).
 const MAX_REF_ROWS: usize = 300;
 
-fn permission_icon(mode: PermissionMode) -> &'static str {
+fn permission_icon(mode: AccessMode) -> &'static str {
     match mode {
-        PermissionMode::Ask => crate::icons::CHECKLIST,
-        PermissionMode::Auto => crate::icons::BOT,
-        PermissionMode::Full => crate::icons::DANGER_TRIANGLE,
+        AccessMode::Supervised => crate::icons::CHECKLIST,
+        AccessMode::AutoAcceptEdits => crate::icons::BOT,
+        AccessMode::FullAccess => crate::icons::DANGER_TRIANGLE,
+    }
+}
+
+fn access_id(mode: AccessMode) -> &'static str {
+    match mode {
+        AccessMode::Supervised => "supervised",
+        AccessMode::AutoAcceptEdits => "auto-accept-edits",
+        AccessMode::FullAccess => "full-access",
     }
 }
 
@@ -238,9 +246,9 @@ pub struct DraftConfig {
     pub branch: Option<String>,
     /// Where the new session runs (the t3code env-mode).
     pub checkout: CheckoutKind,
-    /// How the new session's agent actions are approved (defaults to Full —
+    /// What the new session's agent may do unasked (defaults to full access,
     /// the unattended behavior every chat had before the chip existed).
-    pub permission_mode: PermissionMode,
+    pub access: AccessMode,
     pub instructions: String,
     pub profile_id: Option<String>,
     pub disabled_tools: Vec<String>,
@@ -292,7 +300,7 @@ pub struct ResolvedRunConfig {
     pub model: Option<String>,
     pub reasoning: Option<ReasoningLevel>,
     pub model_options: serde_json::Map<String, serde_json::Value>,
-    pub permission_mode: PermissionMode,
+    pub access: AccessMode,
     pub instructions: String,
     pub profile_id: Option<String>,
     pub disabled_tools: Vec<String>,
@@ -312,37 +320,25 @@ impl ResolvedRunConfig {
             reasoning: self.reasoning,
             model_options: self.model_options.clone(),
             sandbox: SandboxLevel::WorkspaceWrite,
-            permission_mode: self.permission_mode,
             instructions: self.instructions.clone(),
             profile_id: self.profile_id.clone(),
             instance_id: self.instance_id.clone(),
             disabled_tools: self.disabled_tools.clone(),
-            access: self.permission_mode.access(),
+            access: self.access,
             plan: self.plan,
         }
     }
 }
 
-/// The mode a run gets when `wanted` is not among those the harness
-/// `offered`: the most trusting offered mode that still asks at least as
-/// much. A harness with nothing that asks as much runs in its least
-/// trusting mode — for an agent that cannot ask at all, full access, which
-/// the chip then shows. Nothing offered (an engine predating modes) runs as
-/// before, with full access.
-pub fn resolve_access(wanted: AccessMode, offered: &[AccessMode]) -> AccessMode {
-    if offered.is_empty() {
-        return AccessMode::FullAccess;
+pub use zeron_proto::resolve_access;
+
+/// The access modes a harness honors; every mode while its catalog loads.
+pub(crate) fn offered_access_modes(descriptor: Option<&HarnessDescriptor>) -> Vec<AccessMode> {
+    match descriptor {
+        Some(d) if !d.access_modes.is_empty() => d.access_modes.clone(),
+        Some(_) => vec![AccessMode::FullAccess],
+        None => AccessMode::ALL.to_vec(),
     }
-    if offered.contains(&wanted) {
-        return wanted;
-    }
-    let rank = |mode: AccessMode| AccessMode::ALL.iter().position(|m| *m == mode);
-    offered
-        .iter()
-        .copied()
-        .filter(|mode| rank(*mode) <= rank(wanted))
-        .max_by_key(|mode| rank(*mode))
-        .unwrap_or(offered[0])
 }
 
 // ---------------------------------------------------------------------------
@@ -1004,8 +1000,8 @@ pub enum PickerKind {
     /// New-session canvas only: the device project-less sessions run on (a
     /// project pick implies its own host and overrides this).
     Device,
-    /// The approval-mode dropdown beside the context ring (Ask for approval
-    /// | Approve for me | Full access) — one setting for every harness.
+    /// The access-mode dropdown (Supervised | Auto-accept edits | Full
+    /// access, as the harness offers them) and the plan-mode switch.
     Permission,
 }
 
@@ -1292,7 +1288,7 @@ pub struct Pickers {
     /// fraction of the rail), the pressed disc's scale, whether a drag is
     /// live, and the track's last painted bounds (pointer → stop math).
     effort_snap: Option<EffortTween>,
-    permission_preview: Option<PermissionMode>,
+    permission_preview: Option<AccessMode>,
     effort_press: Option<EffortTween>,
     effort_dragging: bool,
     effort_track: Option<gpui::Bounds<gpui::Pixels>>,
@@ -2492,7 +2488,7 @@ impl Pickers {
                 model: self.effective_model_id(cx).map(str::to_string),
                 reasoning: self.explicit_reasoning(cx),
                 model_options: self.explicit_options(cx),
-                permission_mode: self.effective_permission_mode(cx),
+                access: self.effective_access(cx),
                 instructions: self.effective_instructions(cx),
                 profile_id: self.effective_profile_id(cx),
                 disabled_tools: self.effective_disabled_tools(cx),
@@ -2509,7 +2505,7 @@ impl Pickers {
                 .or_else(|| self.effective_model_id(cx).map(str::to_string)),
             reasoning: self.effective_reasoning(cx),
             model_options: self.explicit_options(cx),
-            permission_mode: self.effective_permission_mode(cx),
+            access: self.effective_access(cx),
             instructions: self.effective_instructions(cx),
             profile_id: self.effective_profile_id(cx),
             disabled_tools: self.effective_disabled_tools(cx),
@@ -2549,48 +2545,59 @@ impl Pickers {
         }
     }
 
-    /// The selected chat's recorded mode, else the draft's.
-    pub fn effective_permission_mode(&self, cx: &App) -> PermissionMode {
-        if self.chat_id(cx).is_some() {
-            return self
-                .chat_row(cx)
+    fn offered_access(&self, cx: &App) -> Vec<AccessMode> {
+        offered_access_modes(self.effective_descriptor(cx).as_ref())
+    }
+
+    /// The selected chat's recorded mode, else the draft's, narrowed to what
+    /// the harness honors (before its catalog loads, as picked: the host
+    /// narrows it the same way).
+    pub fn effective_access(&self, cx: &App) -> AccessMode {
+        let wanted = if self.chat_id(cx).is_some() {
+            self.chat_row(cx)
                 .and_then(|c| c.config.as_ref())
-                .map(|c| c.permission_mode)
-                .unwrap_or_default();
+                .map(|c| c.access)
+                .unwrap_or_default()
+        } else {
+            self.config.access
+        };
+        match self.effective_descriptor(cx) {
+            Some(d) => resolve_access(wanted, &d.access_modes),
+            None => wanted,
         }
-        self.config.permission_mode
     }
 
     pub fn names_permission(&self, cx: &App) -> bool {
-        self.effective_permission_mode(cx) != PermissionMode::default() || self.effective_plan(cx)
+        !self.effective_access(cx).is_full_access() || self.effective_plan(cx)
     }
 
-    fn pick_permission(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
+    fn pick_permission(&mut self, mode: AccessMode, cx: &mut Context<Self>) {
         self.set_permission(mode, cx);
         self.animate_close(cx);
     }
 
-    fn set_permission(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
+    fn set_permission(&mut self, mode: AccessMode, cx: &mut Context<Self>) {
         if self.chat_id(cx).is_some() {
-            self.update_chat_config(cx, None, |config| config.permission_mode = mode);
+            self.update_chat_config(cx, None, |config| config.access = mode);
         } else {
-            self.config.permission_mode = mode;
+            self.config.access = mode;
         }
         cx.notify();
     }
 
     fn render_permissions_section(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
-        let current = self.effective_permission_mode(cx);
+        let current = self.effective_access(cx);
         let shown = self.permission_preview.unwrap_or(current);
-        let segments = PermissionMode::ALL.into_iter().map(|mode| {
+        let plan = self.plan_offered(cx).then(|| self.effective_plan(cx));
+        let segments = self.offered_access(cx).into_iter().map(|mode| {
             let selected = mode == current;
             div()
                 .id(SharedString::from(format!(
                     "permission-segment-{}",
-                    mode.short_label()
+                    access_id(mode)
                 )))
-                .debug_selector(move || format!("permission-segment-{}", mode.short_label()))
+                .debug_selector(move || format!("permission-segment-{}", access_id(mode)))
                 .role(gpui::Role::RadioButton)
                 .aria_label(SharedString::from(mode.label()))
                 .aria_selected(selected)
@@ -2670,12 +2677,42 @@ impl Pickers {
                     .text_size(crate::typography::ui_rems(13.0))
                     .text_color(theme.text)
                     .child(SharedString::from(shown.label()))
-                    .when(shown == PermissionMode::default(), |el| {
+                    .when(shown.is_full_access(), |el| {
                         el.child(
                             div()
                                 .text_size(crate::typography::ui_rems(12.0))
                                 .text_color(theme.text_muted)
                                 .child("default"),
+                        )
+                    })
+                    .when_some(plan, |el, on| {
+                        el.child(div().flex_1()).child(
+                            div()
+                                .id("permission-plan")
+                                .debug_selector(|| "permission-plan".into())
+                                .role(gpui::Role::Switch)
+                                .aria_label("Plan mode")
+                                .aria_toggled(if on {
+                                    gpui::Toggled::True
+                                } else {
+                                    gpui::Toggled::False
+                                })
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .cursor_pointer()
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .text_color(theme.text_muted)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_plan(cx);
+                                    cx.stop_propagation();
+                                }))
+                                .child("Plan mode")
+                                .child(crate::settings::widgets::toggle_switch(
+                                    &theme,
+                                    on,
+                                    "permission-plan-switch",
+                                )),
                         )
                     }),
             )
@@ -2711,7 +2748,7 @@ impl Pickers {
                 .or_else(|| self.effective_model_id(cx).map(str::to_owned)),
             efforts: self.trait_ladder(cx),
             effort: self.effective_reasoning(cx),
-            permission: self.effective_permission_mode(cx),
+            permission: self.effective_access(cx),
         }
     }
 
@@ -2723,7 +2760,7 @@ impl Pickers {
         self.pick_reasoning(level, cx);
     }
 
-    pub(crate) fn set_chip_permission(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
+    pub(crate) fn set_chip_permission(&mut self, mode: AccessMode, cx: &mut Context<Self>) {
         self.pick_permission(mode, cx);
     }
 
@@ -2926,9 +2963,10 @@ impl Pickers {
             PickerKind::HarnessModel => self.selected_model_index(cx),
             PickerKind::Space => self.selected_project_index(cx),
             PickerKind::Device => self.selected_device_index(cx),
-            PickerKind::Permission => PermissionMode::ALL
+            PickerKind::Permission => self
+                .offered_access(cx)
                 .iter()
-                .position(|m| *m == self.effective_permission_mode(cx))
+                .position(|m| *m == self.effective_access(cx))
                 .unwrap_or(0),
         };
         if kind == PickerKind::HarnessModel {
@@ -5576,7 +5614,7 @@ impl Pickers {
                     Some(PickerKind::Space) => self.filtered_project_rows(cx).len() + 1,
                     Some(PickerKind::Device) => self.filtered_device_rows(cx).len(),
                     Some(PickerKind::Permission) => {
-                        PermissionMode::ALL.len() + usize::from(self.plan_offered(cx))
+                        self.offered_access(cx).len() + usize::from(self.plan_offered(cx))
                     }
                     None => 0,
                 };
@@ -5605,7 +5643,7 @@ impl Pickers {
                         .map_or(CheckoutKind::Local, |(kind, _, _)| *kind);
                     self.pick_checkout(kind, cx);
                 } else if self.open_kind() == Some(PickerKind::Permission) {
-                    match PermissionMode::ALL.get(self.active) {
+                    match self.offered_access(cx).get(self.active) {
                         Some(mode) => self.pick_permission(*mode, cx),
                         None if self.plan_offered(cx) => self.toggle_plan(cx),
                         None => {}
@@ -6874,7 +6912,7 @@ impl Pickers {
     /// tone so an unattended chat reads as such without opening anything.
     pub fn render_permission_chip(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let mode = self.effective_permission_mode(cx);
+        let mode = self.effective_access(cx);
         let closing = (self.open.closing_since(), self.menu_geometry().below);
         let mut overlay: Option<(PickerKind, AnyElement)> = match self.mounted_kind() {
             Some(PickerKind::Permission) => {
@@ -6941,17 +6979,33 @@ impl Pickers {
 
     fn render_permission_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
-        let current = self.effective_permission_mode(cx);
+        let current = self.effective_access(cx);
         let plan = self.plan_offered(cx).then(|| self.effective_plan(cx));
+        let modes = self.offered_access(cx);
+        let only = (modes.len() == 1)
+            .then(|| self.effective_descriptor(cx).map(|d| d.name.clone()))
+            .flatten()
+            .map(|name| {
+                div()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(format!(
+                        "{name} can't ask before acting, so it always runs with {}.",
+                        modes[0].label().to_lowercase()
+                    )))
+            });
+        let plan_ix = modes.len();
         let active = self.active;
         div()
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .child(popover::menu_heading(&theme, "Approve agent actions"))
-            .children(PermissionMode::ALL.into_iter().enumerate().map(|(ix, mode)| {
+            .child(popover::menu_heading(&theme, "Permissions"))
+            .children(modes.into_iter().enumerate().map(|(ix, mode)| {
                 let is_selected = current == mode;
-                let tone = if mode == PermissionMode::Full {
+                let tone = if mode == AccessMode::FullAccess {
                     theme.warning
                 } else {
                     theme.text_muted
@@ -6983,7 +7037,7 @@ impl Pickers {
                             div()
                                 .whitespace_nowrap()
                                 .truncate()
-                                .when(mode == PermissionMode::Full, |el| el.text_color(tone))
+                                .when(mode == AccessMode::FullAccess, |el| el.text_color(tone))
                                 .child(SharedString::from(mode.label())),
                         )
                         .child(
@@ -7004,10 +7058,10 @@ impl Pickers {
                     )
                 })
             }))
+            .when_some(only, |menu, note| menu.child(note))
             .when_some(plan, |menu, on| {
-                let ix = PermissionMode::ALL.len();
                 menu.child(popover::menu_separator()).child(
-                    popover::menu_row_nav(&theme, false, ix == active, "permission-row-plan")
+                    popover::menu_row_nav(&theme, false, plan_ix == active, "permission-row-plan")
                         .id("permission-row-plan")
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_plan(cx)))
                         .child(access_row_text(
@@ -10865,10 +10919,10 @@ mod tests {
                     })
                     .into(),
             }];
-            pickers.harnesses = Loadable::Ready(vec![
-                descriptor(HarnessId::ClaudeCode, "Claude Code"),
-                descriptor(HarnessId::Pi, "Pi"),
-            ]);
+            let mut pi = descriptor(HarnessId::Pi, "Pi");
+            pi.access_modes = AccessMode::ALL.to_vec();
+            pickers.harnesses =
+                Loadable::Ready(vec![descriptor(HarnessId::ClaudeCode, "Claude Code"), pi]);
             pickers
                 .models
                 .insert(HarnessId::Pi, Loadable::Ready(vec![model]));
@@ -10883,7 +10937,7 @@ mod tests {
             pickers.pick_model("pi-model".into(), cx);
             pickers.pick_reasoning(ReasoningLevel::Low, cx);
             pickers.pick_option("fastMode".into(), "on".into(), false, cx);
-            pickers.pick_permission(PermissionMode::Ask, cx);
+            pickers.pick_permission(AccessMode::Supervised, cx);
         });
         state.update(cx, |state, cx| {
             state.selected_chat = Some("other-chat".into());
@@ -10896,7 +10950,7 @@ mod tests {
             assert_eq!(config.model.as_deref(), Some("pi-model"));
             assert_eq!(config.reasoning, Some(ReasoningLevel::Low));
             assert_eq!(config.model_options["fastMode"], "on");
-            assert_eq!(config.permission_mode, PermissionMode::Ask);
+            assert_eq!(config.access, AccessMode::Supervised);
             assert_eq!(pickers.config_writes, 0);
             assert_eq!(pickers.defaults, ComposerDefaults::default());
         });
@@ -10904,7 +10958,7 @@ mod tests {
             for chat in &state.chats {
                 let config = chat.config.as_ref().unwrap();
                 assert_eq!(config.harness, HarnessId::Codex);
-                assert_eq!(config.permission_mode, PermissionMode::Full);
+                assert_eq!(config.access, AccessMode::FullAccess);
             }
         });
     }
@@ -13405,12 +13459,11 @@ mod tests {
             reasoning: None,
             model_options: Default::default(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-            permission_mode: zeron_proto::PermissionMode::Full,
             instructions: String::new(),
             profile_id: None,
             instance_id: None,
             disabled_tools: Vec::new(),
-            access: zeron_proto::PermissionMode::Full.access(),
+            access: zeron_proto::AccessMode::FullAccess,
             plan: false,
         });
         assert_eq!(
@@ -14294,12 +14347,11 @@ mod tests {
                         reasoning: None,
                         model_options: Default::default(),
                         sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-                        permission_mode: Default::default(),
                         instructions: String::new(),
                         profile_id: None,
                         instance_id: None,
                         disabled_tools: Vec::new(),
-                        access: zeron_proto::PermissionMode::default().access(),
+                        access: Default::default(),
                         plan: false,
                     }),
                     last_message_preview: None,
@@ -14457,12 +14509,11 @@ mod tests {
                         reasoning: None,
                         model_options: Default::default(),
                         sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-                        permission_mode: Default::default(),
                         instructions: String::new(),
                         profile_id: None,
                         instance_id: None,
                         disabled_tools: Vec::new(),
-                        access: zeron_proto::PermissionMode::default().access(),
+                        access: Default::default(),
                         plan: false,
                     }),
                     last_message_preview: None,
@@ -15357,7 +15408,7 @@ mod tests {
                     harness: HarnessId::Codex,
                     model: Some("gpt".into()),
                     reasoning: None,
-                    permission_mode: Some(PermissionMode::Ask),
+                    access: Some(AccessMode::Supervised),
                     model_options: Default::default(),
                     notes: String::new(),
                     instructions: String::new(),
@@ -15377,10 +15428,10 @@ mod tests {
                 let config = row(pickers, cx);
                 assert_eq!(config.harness, HarnessId::Codex);
                 assert_eq!(config.model.as_deref(), Some("gpt"));
-                assert_eq!(config.permission_mode, PermissionMode::Ask);
+                assert_eq!(config.access, AccessMode::Supervised);
 
                 profile.model = None;
-                profile.permission_mode = Some(PermissionMode::Full);
+                profile.access = Some(AccessMode::FullAccess);
                 pickers.apply_profile(&profile, cx);
                 assert!(
                     pickers.pending_model_switch.is_none(),
@@ -15388,7 +15439,7 @@ mod tests {
                 );
                 let config = row(pickers, cx);
                 assert_eq!(config.model.as_deref(), Some("gpt"));
-                assert_eq!(config.permission_mode, PermissionMode::Full);
+                assert_eq!(config.access, AccessMode::FullAccess);
             })
             .unwrap();
     }
@@ -15406,7 +15457,7 @@ mod tests {
                     harness: HarnessId::ClaudeCode,
                     model: Some("fable".into()),
                     reasoning: None,
-                    permission_mode: None,
+                    access: None,
                     model_options: Default::default(),
                     notes: String::new(),
                     instructions: String::new(),

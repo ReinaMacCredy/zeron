@@ -148,7 +148,6 @@ fn send(core: &EngineCore, id: &str, prompt: &str) {
                     worktree: None,
                     resume: None,
                     env: Default::default(),
-                    permission_mode: Default::default(),
                     branch: None,
                     forked_at: None,
                     computer_control: false,

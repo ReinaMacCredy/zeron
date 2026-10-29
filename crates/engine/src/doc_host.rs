@@ -6578,12 +6578,11 @@ impl DocHost {
                         reasoning: request.reasoning,
                         model_options: request.model_options.clone(),
                         sandbox: request.sandbox,
-                        permission_mode: request.permission_mode,
                         instructions: String::new(),
                         profile_id: None,
                         instance_id: None,
                         disabled_tools: request.disabled_tools.clone(),
-                        access: request.permission_mode.access(),
+                        access: request.access,
                         plan: request.plan,
                     };
                     if let Err(err) = ws.set_chat_config(chat_id, &config) {
@@ -7226,10 +7225,7 @@ impl DocHost {
             }
         };
         let config = chat.config;
-        let permission_mode = config
-            .as_ref()
-            .map(|c| c.permission_mode)
-            .unwrap_or_default();
+        let permission_mode = config.as_ref().map(|c| c.access).unwrap_or_default();
         Some(zeron_proto::RunRequest {
             mcp: None,
             prompt: prompt.to_string(),
@@ -7246,8 +7242,7 @@ impl DocHost {
                 .map(|c| c.sandbox)
                 .unwrap_or(zeron_proto::SandboxLevel::WorkspaceWrite),
             auto_approve: false,
-            permission_mode,
-            access: permission_mode.access(),
+            access: permission_mode,
             plan: config.as_ref().is_some_and(|c| c.plan),
             attachments: Vec::new(),
             resume: None,

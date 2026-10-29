@@ -883,9 +883,9 @@ pub struct ChatConfig {
     /// None runs the harness's default instance.
     #[uniffi(default = None)]
     pub instance_id: Option<String>,
-    /// None keeps the chat's current mode (Full for a new chat).
+    /// None keeps the chat's current mode (full access for a new chat).
     #[uniffi(default = None)]
-    pub permission_mode: Option<PermissionMode>,
+    pub access: Option<AccessMode>,
     /// A new chat's profile instructions; an existing chat keeps its own.
     #[uniffi(default = "")]
     pub instructions: String,
@@ -894,28 +894,28 @@ pub struct ChatConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
-pub enum PermissionMode {
-    Ask,
-    Auto,
-    Full,
+pub enum AccessMode {
+    Supervised,
+    AutoAcceptEdits,
+    FullAccess,
 }
 
-impl From<zeron_proto::PermissionMode> for PermissionMode {
-    fn from(mode: zeron_proto::PermissionMode) -> Self {
+impl From<zeron_proto::AccessMode> for AccessMode {
+    fn from(mode: zeron_proto::AccessMode) -> Self {
         match mode {
-            zeron_proto::PermissionMode::Ask => Self::Ask,
-            zeron_proto::PermissionMode::Auto => Self::Auto,
-            zeron_proto::PermissionMode::Full => Self::Full,
+            zeron_proto::AccessMode::Supervised => Self::Supervised,
+            zeron_proto::AccessMode::AutoAcceptEdits => Self::AutoAcceptEdits,
+            zeron_proto::AccessMode::FullAccess => Self::FullAccess,
         }
     }
 }
 
-impl From<PermissionMode> for zeron_proto::PermissionMode {
-    fn from(mode: PermissionMode) -> Self {
+impl From<AccessMode> for zeron_proto::AccessMode {
+    fn from(mode: AccessMode) -> Self {
         match mode {
-            PermissionMode::Ask => Self::Ask,
-            PermissionMode::Auto => Self::Auto,
-            PermissionMode::Full => Self::Full,
+            AccessMode::Supervised => Self::Supervised,
+            AccessMode::AutoAcceptEdits => Self::AutoAcceptEdits,
+            AccessMode::FullAccess => Self::FullAccess,
         }
     }
 }
@@ -956,7 +956,7 @@ impl From<&zc::ChatConfig> for ChatConfig {
             },
             profile_id: c.profile_id.clone(),
             instance_id: c.instance_id.clone(),
-            permission_mode: Some(c.permission_mode.into()),
+            access: Some(c.access.into()),
             instructions: c.instructions.clone(),
             disabled_tools: c.disabled_tools.clone(),
         }
@@ -967,8 +967,7 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
     type Error = CoreError;
 
     fn try_from(c: ChatConfig) -> CoreResult<Self> {
-        let permission_mode: zeron_proto::PermissionMode =
-            c.permission_mode.map(Into::into).unwrap_or_default();
+        let access: zeron_proto::AccessMode = c.access.map(Into::into).unwrap_or_default();
         Ok(zc::ChatConfig {
             harness: from_wire(&c.harness, "harness")?,
             model: c.model,
@@ -987,12 +986,11 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
                 SandboxLevel::WorkspaceWrite => zeron_proto::SandboxLevel::WorkspaceWrite,
                 SandboxLevel::DangerFullAccess => zeron_proto::SandboxLevel::DangerFullAccess,
             },
-            permission_mode,
             instructions: c.instructions,
             profile_id: c.profile_id,
             instance_id: c.instance_id,
             disabled_tools: c.disabled_tools,
-            access: permission_mode.access(),
+            access,
             plan: false,
         })
     }
@@ -1000,12 +998,11 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
 
 impl ChatConfig {
     pub(crate) fn over(self, existing: Option<zc::ChatConfig>) -> CoreResult<zc::ChatConfig> {
-        let keep_mode = self.permission_mode.is_none();
+        let keep_mode = self.access.is_none();
         let mut config: zc::ChatConfig = self.try_into()?;
         if let Some(existing) = existing {
             if keep_mode {
-                config.permission_mode = existing.permission_mode;
-                config.access = existing.permission_mode.access();
+                config.access = existing.access;
             }
             config.plan = existing.plan;
             config.instructions = existing.instructions;
@@ -1073,6 +1070,8 @@ pub struct HarnessInfo {
     pub offered: bool,
     /// Steers mid-turn (unknown until a live catalog).
     pub mid_turn_steering: Option<bool>,
+    /// The access modes it honors (unknown until a live catalog).
+    pub access_modes: Option<Vec<AccessMode>>,
 }
 
 impl From<zc::catalog::HarnessInfo> for HarnessInfo {
@@ -1080,6 +1079,9 @@ impl From<zc::catalog::HarnessInfo> for HarnessInfo {
         Self {
             offered: h.offered(),
             mid_turn_steering: h.mid_turn_steering(),
+            access_modes: h
+                .access_modes
+                .map(|modes| modes.into_iter().map(Into::into).collect()),
             id: h.id,
             label: h.label,
             supports_steering: h.supports_steering,
@@ -1286,39 +1288,37 @@ mod tests {
             reasoning: None,
             model_options: Default::default(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-            permission_mode: zeron_proto::PermissionMode::Ask,
             instructions: "Plan only.".into(),
             profile_id: Some("planner".into()),
             instance_id: None,
             disabled_tools: vec!["mcp__zeron__computer".into()],
-            access: Default::default(),
+            access: zeron_proto::AccessMode::Supervised,
             plan: false,
         };
         let mut edit = ChatConfig::from(&existing);
         edit.reasoning = Some("high".into());
         let written = edit.clone().over(Some(existing.clone())).unwrap();
         assert_eq!(written.reasoning, Some(zeron_proto::ReasoningLevel::High));
-        assert_eq!(written.permission_mode, zeron_proto::PermissionMode::Ask);
+        assert_eq!(written.access, zeron_proto::AccessMode::Supervised);
         assert_eq!(written.instructions, "Plan only.");
         assert_eq!(written.profile_id.as_deref(), Some("planner"));
         assert_eq!(written.disabled_tools, existing.disabled_tools);
 
         let legacy = ChatConfig {
             profile_id: None,
-            permission_mode: None,
             ..edit.clone()
         };
         let kept = legacy.over(Some(existing.clone())).unwrap();
-        assert_eq!(kept.permission_mode, zeron_proto::PermissionMode::Ask);
+        assert_eq!(kept.access, zeron_proto::AccessMode::Supervised);
 
         let changed = ChatConfig {
             profile_id: Some("reviewer".into()),
-            permission_mode: Some(PermissionMode::Full),
+            access: Some(AccessMode::FullAccess),
             ..edit
         };
         let changed = changed.over(Some(existing)).unwrap();
         assert_eq!(changed.profile_id.as_deref(), Some("reviewer"));
-        assert_eq!(changed.permission_mode, zeron_proto::PermissionMode::Full);
+        assert_eq!(changed.access, zeron_proto::AccessMode::FullAccess);
     }
 
     #[test]
@@ -1329,7 +1329,6 @@ mod tests {
             reasoning: None,
             model_options: Default::default(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-            permission_mode: Default::default(),
             instructions: String::new(),
             profile_id: None,
             instance_id: Some("acp_gemini".into()),

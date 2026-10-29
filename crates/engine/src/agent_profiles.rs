@@ -124,7 +124,7 @@ impl AgentProfilesStore {
                 harness: draft.harness,
                 model: draft.model,
                 reasoning: draft.reasoning,
-                permission_mode: draft.permission_mode,
+                access: draft.access,
                 model_options: draft.model_options,
                 notes: draft.notes,
                 instructions: draft.instructions,
@@ -248,7 +248,7 @@ fn normalize_draft(draft: AgentProfileDraft) -> Result<AgentProfileDraft, Engine
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_proto::{HarnessId, PermissionMode, ReasoningLevel};
+    use zeron_proto::{AccessMode, HarnessId, ReasoningLevel};
 
     fn draft(name: &str) -> AgentProfileDraft {
         AgentProfileDraft {
@@ -256,7 +256,7 @@ mod tests {
             harness: HarnessId::ClaudeCode,
             model: Some(" opus ".into()),
             reasoning: Some(ReasoningLevel::High),
-            permission_mode: Some(PermissionMode::Ask),
+            access: Some(AccessMode::Supervised),
             model_options: Default::default(),
             notes: " Review a diff. ".into(),
             instructions: " Review only. ".into(),

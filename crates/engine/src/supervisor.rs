@@ -12,7 +12,7 @@ use zeron_proto::supervisor::{
     SupervisorChoice, SupervisorEventKind, SupervisorEventSummary, SupervisorIntervention,
     SupervisorItem, SupervisorSettings, SupervisorSnapshot, SupervisorState, SupervisorWake,
 };
-use zeron_proto::{PermissionMode, StepTurn, StepTurnEnd, TaskStep, ToolCall, UserInputQuestion};
+use zeron_proto::{AccessMode, StepTurn, StepTurnEnd, TaskStep, ToolCall, UserInputQuestion};
 
 use crate::EngineError;
 use crate::project_actions::persist_json;
@@ -1288,7 +1288,7 @@ pub(crate) fn wake_text(
     entries: &[WakeEntry],
     dropped: &[SupervisorEventSummary],
     settings: SupervisorSettings,
-    permission: PermissionMode,
+    permission: AccessMode,
 ) -> String {
     let since = utc(header.since).with_timezone(&Local).format("%H:%M:%S");
     let count = match entries.len() {
@@ -1348,9 +1348,9 @@ pub(crate) fn wake_text(
     text
 }
 
-fn authority_footer(settings: SupervisorSettings, permission: PermissionMode) -> String {
+fn authority_footer(settings: SupervisorSettings, permission: AccessMode) -> String {
     let on = |allowed: bool| if allowed { "on" } else { "off" };
-    let approvals = if settings.message_threads && permission != PermissionMode::Full {
+    let approvals = if settings.message_threads && permission != AccessMode::FullAccess {
         " (tool approvals need this chat at Full access)"
     } else {
         ""
@@ -1655,7 +1655,7 @@ mod tests {
             &entries,
             &[],
             SupervisorSettings::default(),
-            PermissionMode::Full,
+            AccessMode::FullAccess,
         );
         let mut lines = text.lines();
         assert!(lines.next().unwrap().starts_with("Supervisor wake 1 of 12"));
@@ -1672,7 +1672,7 @@ mod tests {
     #[test]
     fn the_footer_names_only_the_authority_that_is_on() {
         let footer = |settings: SupervisorSettings| {
-            let text = authority_footer(settings, PermissionMode::Full);
+            let text = authority_footer(settings, AccessMode::FullAccess);
             text[text.find("- start a mission").unwrap()..].to_string()
         };
         let off = SupervisorSettings::default();

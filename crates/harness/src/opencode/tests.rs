@@ -30,7 +30,7 @@ fn turn_usage_sums_messages_and_bills_reasoning_as_output() {
 }
 
 #[test]
-fn auto_mode_allows_workspace_edits_and_asks_for_the_rest() {
+fn auto_accept_edits_allows_only_file_changes() {
     assert_eq!(
         permission_kind(&json!({"id":"p","type":"edit","sessionID":"s"})),
         Some("edit")
@@ -40,11 +40,10 @@ fn auto_mode_allows_workspace_edits_and_asks_for_the_rest() {
         Some("external_directory")
     );
     assert_eq!(permission_kind(&json!({"id":"p"})), None);
-    assert!(auto_allows("edit"));
-    assert!(auto_allows("read"));
-    assert!(!auto_allows("bash"));
-    assert!(!auto_allows("webfetch"));
-    assert!(!auto_allows("external_directory"));
+    assert!(is_edit_permission("edit"));
+    assert!(!is_edit_permission("read"));
+    assert!(!is_edit_permission("bash"));
+    assert!(!is_edit_permission("external_directory"));
 }
 
 #[derive(Clone, Copy)]

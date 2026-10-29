@@ -45,6 +45,15 @@ pub(crate) fn reorder_keys(
     keys
 }
 
+pub(crate) fn top_order_key(open: &[&Task], nonce: &str) -> Option<String> {
+    let first = open
+        .iter()
+        .map(|task| task.order_key.as_str())
+        .filter(|key| !key.is_empty())
+        .min();
+    pin_order_key_between(None, first, nonce).ok()
+}
+
 pub(crate) fn quick_add_title(text: &str) -> Option<String> {
     let title = text.trim();
     (!title.is_empty()).then(|| title.to_string())

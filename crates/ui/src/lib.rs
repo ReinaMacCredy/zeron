@@ -81,6 +81,7 @@ mod pull_request_skeleton;
 mod pull_request_test_support;
 pub mod pull_requests;
 pub mod queue;
+mod quick_capture;
 pub mod quotes;
 pub mod rail;
 pub mod review;
@@ -384,6 +385,7 @@ pub fn run_app(config: UiConfig) {
                 ui_driver::start(config.data_dir.clone(), config.ipc_port, cx);
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 start_appshot_service(config.boot().data_dir, cx);
+                start_quick_capture_service(cx);
                 // Native menu bar — macOS gets the standard app menu (About/Services/
                 // Hide/Quit ⌘Q), Edit clipboard verbs routed to the focused input, and
                 // a Window menu (⌘M/⌘W). Without this, `NSApp.mainMenu` stays nil: no
@@ -646,6 +648,28 @@ fn start_appshot_service(activation_dir: std::path::PathBuf, cx: &mut App) {
             // app or show a misleading self-capture error after success.
             while matches!(shortcuts.next().now_or_never(), Some(Some(()))) {}
             cx.update(|cx| deliver_appshot(capture, cx));
+        }
+    })
+    .detach();
+}
+
+fn start_quick_capture_service(cx: &mut App) {
+    let mut presses = appshots::start_quick_capture();
+    cx.spawn(async move |cx| {
+        while presses.next().await.is_some() {
+            cx.update(|cx| {
+                let shell = cx
+                    .windows()
+                    .into_iter()
+                    .find_map(|window| window.downcast::<shell::Shell>());
+                if let Some(shell) = shell {
+                    shell
+                        .update(cx, |shell, window, cx| {
+                            shell.toggle_quick_capture(window, cx)
+                        })
+                        .ok();
+                }
+            });
         }
     })
     .detach();

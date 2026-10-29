@@ -1,5 +1,5 @@
 use serde_json::Value;
-use zeron_proto::PermissionMode;
+use zeron_proto::AccessMode;
 
 pub use zeron_proto::computer::ZERON_COMPUTER_TOOL_NAMES;
 
@@ -69,14 +69,14 @@ pub fn computer_tool_name_from_provider_permission(
 pub struct ProviderToolAllowInput<'a> {
     pub computer_control_enabled: bool,
     pub active_turn: bool,
-    pub permission_mode: PermissionMode,
+    pub access: AccessMode,
     pub permission: ProviderToolPermission<'a>,
 }
 
 pub fn should_allow_zeron_computer_provider_tool(input: &ProviderToolAllowInput<'_>) -> bool {
     input.computer_control_enabled
         && input.active_turn
-        && input.permission_mode == PermissionMode::Ask
+        && input.access == AccessMode::Supervised
         && computer_tool_name_from_provider_permission(&input.permission).is_some()
 }
 
@@ -243,7 +243,7 @@ mod tests {
             &ProviderToolAllowInput {
                 computer_control_enabled: true,
                 active_turn: true,
-                permission_mode: PermissionMode::Ask,
+                access: AccessMode::Supervised,
                 permission: ProviderToolPermission {
                     title: Some(&prose),
                     ..ProviderToolPermission::default()
@@ -281,19 +281,19 @@ mod tests {
     #[test]
     fn requires_current_capability_active_turn_and_ask_mode() {
         let name = json!("mcp__zeron__computer_click");
-        let allowed = |enabled: bool, active: bool, mode: PermissionMode| {
+        let allowed = |enabled: bool, active: bool, mode: AccessMode| {
             should_allow_zeron_computer_provider_tool(&ProviderToolAllowInput {
                 computer_control_enabled: enabled,
                 active_turn: active,
-                permission_mode: mode,
+                access: mode,
                 permission: named(&name),
             })
         };
-        assert!(allowed(true, true, PermissionMode::Ask));
-        assert!(!allowed(false, true, PermissionMode::Ask));
-        assert!(!allowed(true, false, PermissionMode::Ask));
-        assert!(!allowed(true, true, PermissionMode::Auto));
-        assert!(!allowed(true, true, PermissionMode::Full));
+        assert!(allowed(true, true, AccessMode::Supervised));
+        assert!(!allowed(false, true, AccessMode::Supervised));
+        assert!(!allowed(true, false, AccessMode::Supervised));
+        assert!(!allowed(true, true, AccessMode::AutoAcceptEdits));
+        assert!(!allowed(true, true, AccessMode::FullAccess));
     }
 
     #[test]

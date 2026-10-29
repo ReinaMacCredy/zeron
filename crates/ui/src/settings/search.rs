@@ -85,6 +85,7 @@ pub enum SettingId {
     WindowCapture,
     ApplicationText,
     AppshotPermissions,
+    QuickCapture,
 }
 
 impl SettingId {
