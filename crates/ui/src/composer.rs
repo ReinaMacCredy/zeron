@@ -1143,6 +1143,7 @@ fn annotation_tooltip_height(annotation: &zeron_proto::annotation::BrowserAnnota
 /// A private URI scheme keeps file mentions distinguishable from ordinary
 /// Markdown links pasted into the composer.
 use zeron_proto::file_mentions::{FILE_MENTION_SCHEME, local_file_link, local_path_is_safe};
+use zeron_proto::task_mentions::{TASK_MENTION_SCHEME, task_mention_link, task_mention_links};
 const THREAD_ICON_SIZE: f32 = 14.0;
 
 /// The mark painted in a thread chip's icon slot: the thread's current
@@ -1226,6 +1227,10 @@ impl FileMentionLink {
 impl FileMentionLink {
     fn is_thread(&self) -> bool {
         self.kind == ChipKind::Thread
+    }
+
+    fn has_mark(&self) -> bool {
+        matches!(self.kind, ChipKind::Thread | ChipKind::Task)
     }
 
     fn is_invocation(&self) -> bool {
@@ -1404,6 +1409,7 @@ struct MentionTooltipTarget {
     attachment: Option<u32>,
     /// Set for annotation chips: the hover shows the element's code.
     annotation: Option<std::sync::Arc<zeron_proto::annotation::BrowserAnnotation>>,
+    task: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1649,6 +1655,17 @@ impl TextProjection {
         let mut links = file_mention_links(raw);
         links.extend(thread_mention_links(raw));
         links.extend(
+            task_mention_links(raw)
+                .into_iter()
+                .map(|link| FileMentionLink {
+                    range: link.range,
+                    basename: link.title,
+                    path: link.task_id,
+                    kind: ChipKind::Task,
+                    attachment: None,
+                }),
+        );
+        links.extend(
             zeron_proto::invocation::invocation_links(raw)
                 .into_iter()
                 .map(|(range, invocation)| FileMentionLink {
@@ -1739,7 +1756,7 @@ impl TextProjection {
                 };
                 let label = label.replace(' ', "\u{00A0}");
                 let pad = MENTION_SIDE_PAD;
-                let display = if link.is_thread() {
+                let display = if link.has_mark() {
                     format!("{pad}{CHIP_ICON_SLOT}{label}{pad}")
                 } else if link.is_invocation() {
                     format!("{pad}{}{label}{pad}", link.prefix())
@@ -1855,6 +1872,16 @@ impl TextProjection {
     }
 }
 
+const TASK_CHIP_GRAPHEMES: usize = 32;
+
+fn task_chip_label(title: &str) -> String {
+    let graphemes: Vec<_> = title.graphemes(true).collect();
+    if graphemes.len() <= TASK_CHIP_GRAPHEMES {
+        return title.to_string();
+    }
+    format!("{}…", graphemes[..TASK_CHIP_GRAPHEMES - 1].concat())
+}
+
 /// Basenames are compact in the common case. When the same basename appears
 /// more than once, use the shortest unique path suffix so chips remain
 /// distinguishable without always expanding to full paths.
@@ -1874,6 +1901,9 @@ fn mention_display_labels(links: &[FileMentionLink]) -> Vec<String> {
         .map(|link| {
             if link.is_thread() {
                 return link.basename.clone();
+            }
+            if link.kind == ChipKind::Task {
+                return task_chip_label(&link.basename);
             }
             labels
                 .entry((link.prefix(), &link.basename, &link.path))
@@ -1935,6 +1965,7 @@ pub struct SentMentionSpan {
 fn has_mention_scheme(raw: &str) -> bool {
     raw.contains(FILE_MENTION_SCHEME)
         || raw.contains(THREAD_MENTION_SCHEME)
+        || raw.contains(TASK_MENTION_SCHEME)
         || raw.contains(zeron_proto::invocation::INVOCATION_SCHEME)
         || raw.contains(zeron_proto::attachment_mentions::IMAGE_MENTION_SCHEME)
         || raw.contains(zeron_proto::attachment_mentions::ATTACHMENT_MENTION_SCHEME)
@@ -2258,6 +2289,7 @@ pub enum ComposerInputEvent {
     OpenAttachment(u32),
     /// The pointer moved onto (or off) an annotation chip.
     AnnotationHovered(Option<u32>),
+    OpenTask(String),
 }
 
 #[derive(Clone)]
@@ -2498,7 +2530,7 @@ pub struct ComposerInput {
     /// these instead of attempting to infer text geometry from the cursor.
     mention_hits: Vec<MentionHit>,
     /// The image chip a click started on, and where.
-    chip_press: Option<(u32, Point<Pixels>)>,
+    chip_press: Option<(MentionTooltipTarget, Point<Pixels>)>,
     /// The attachments the draft holds, by chip number, with each image's
     /// picture. `None` outside the composer, where every attachment link is
     /// shown as a chip.
@@ -3226,16 +3258,18 @@ impl ComposerInput {
     }
 
     fn is_clickable_chip(&self, target: &MentionTooltipTarget) -> bool {
-        self.chip_attachment(target)
-            .is_some_and(ChipAttachment::opens_on_click)
+        target.task
+            || self
+                .chip_attachment(target)
+                .is_some_and(ChipAttachment::opens_on_click)
     }
 
-    fn clickable_chip_at(&self, position: Point<Pixels>) -> Option<u32> {
+    fn clickable_chip_at(&self, position: Point<Pixels>) -> Option<&MentionTooltipTarget> {
         self.mention_hits
             .iter()
             .find(|hit| hit.bounds.contains(&position))
             .filter(|hit| self.is_clickable_chip(&hit.target))
-            .and_then(|hit| hit.target.attachment)
+            .map(|hit| &hit.target)
     }
 
     fn mention_tooltip_text(&self, target: &MentionTooltipTarget) -> SharedString {
@@ -3270,10 +3304,11 @@ impl ComposerInput {
             .iter()
             .find(|hit| hit.bounds.contains(&position))
             .filter(|hit| {
-                !matches!(
-                    self.chip_attachment(&hit.target),
-                    Some(ChipAttachment::Image(_))
-                )
+                !hit.target.task
+                    && !matches!(
+                        self.chip_attachment(&hit.target),
+                        Some(ChipAttachment::Image(_))
+                    )
             })
             .map(|hit| hit.target.clone());
         let in_popup = self
@@ -4608,9 +4643,9 @@ impl ComposerInput {
         window.focus(&self.focus_handle, cx);
         let intent = press_intent(event.click_count, event.modifiers.shift);
         self.chip_press = (intent == PressIntent::PlaceCaret)
-            .then(|| self.clickable_chip_at(event.position))
+            .then(|| self.clickable_chip_at(event.position).cloned())
             .flatten()
-            .map(|index| (index, event.position));
+            .map(|target| (target, event.position));
         self.is_selecting = true;
         self.drag_position = Some(event.position);
         self.drag_unit = None;
@@ -4691,13 +4726,17 @@ impl ComposerInput {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        // A click that starts and ends on an image or pasted-text chip opens
-        // it, as the thumbnails did; a drag across it only selects.
-        if let Some((index, down)) = self.chip_press.take()
-            && self.clickable_chip_at(event.position) == Some(index)
+        // A click that starts and ends on an image, pasted-text or task chip
+        // opens it, as the thumbnails did; a drag across it only selects.
+        if let Some((target, down)) = self.chip_press.take()
+            && self.clickable_chip_at(event.position) == Some(&target)
             && (event.position - down).magnitude() <= 4.0
         {
-            cx.emit(ComposerInputEvent::OpenAttachment(index));
+            if target.task {
+                cx.emit(ComposerInputEvent::OpenTask(target.path.to_string()));
+            } else if let Some(index) = target.attachment {
+                cx.emit(ComposerInputEvent::OpenAttachment(index));
+            }
         }
         self.is_selecting = false;
         self.drag_position = None;
@@ -5775,16 +5814,20 @@ impl gpui::Element for ComposerTextElement {
         let appearance = Theme::of(cx).appearance;
         let mut mention_hits = Vec::new();
         let mut mention_icons = Vec::new();
+        let (now, theme) = (chrono::Utc::now(), Theme::of(cx));
         for (mention, display) in &input.projection.mentions {
-            if mention.is_thread() {
-                let chat = input.thread_state.as_ref().and_then(|state| {
-                    state
-                        .read(cx)
-                        .chats
-                        .iter()
-                        .find(|chat| chat.id == mention.path)
-                });
-                let icon = thread_chip_icon(chat);
+            if mention.has_mark() {
+                let state = input.thread_state.as_ref().map(|state| state.read(cx));
+                let icon =
+                    match (mention.kind, state) {
+                        (ChipKind::Task, Some(state)) => {
+                            crate::tasks::mention_mark(state, &mention.path, theme, now)
+                        }
+                        (ChipKind::Task, None) => (crate::icons::LUCIDE_CIRCLE_DASHED, None),
+                        (_, state) => thread_chip_icon(state.and_then(|state| {
+                            state.chats.iter().find(|chat| chat.id == mention.path)
+                        })),
+                    };
                 if let Some(slot) = input
                     .bounds_for_display_range(thread_icon_slot(display))
                     .into_iter()
@@ -5813,6 +5856,7 @@ impl gpui::Element for ComposerTextElement {
                 },
                 attachment: mention.attachment,
                 annotation: mention.annotation.clone(),
+                task: mention.kind == ChipKind::Task,
             });
             // The path tooltip stays flush so the pointer can move onto it; an
             // annotation's code preview floats a little above its chip.
@@ -6413,6 +6457,7 @@ pub enum ComposerEvent {
     OpenChanges,
     StartMission(MissionStart),
     OpenTaskCenter(String),
+    OpenTask(String),
     PlanFirst,
     OpenUsage,
 }
@@ -6603,6 +6648,9 @@ pub(crate) fn mention_token(text: &str, cursor: usize) -> Option<MentionToken> {
     if cursor > text.len() || !text.is_char_boundary(cursor) {
         return None;
     }
+    if let Some(token) = task_scope_token(text, cursor) {
+        return Some(token);
+    }
     let token_start = text[..cursor]
         .char_indices()
         .rev()
@@ -6635,6 +6683,39 @@ pub(crate) fn mention_token(text: &str, cursor: usize) -> Option<MentionToken> {
     if closing.is_some_and(|ch| text[at + 1..cursor].contains(ch)) {
         return None;
     }
+    let end = completion_markdown_end(text, at, cursor, end)?;
+    Some(MentionToken {
+        range: at..end,
+        query: text[at + 1..cursor].to_string(),
+    })
+}
+
+const TASK_SCOPE: &str = "task ";
+
+/// A plain `@` query never holds a space, so this prefix alone marks the scope.
+fn task_scope_query(query: &str) -> Option<&str> {
+    query
+        .get(..TASK_SCOPE.len())
+        .filter(|head| head.eq_ignore_ascii_case(TASK_SCOPE))
+        .map(|_| &query[TASK_SCOPE.len()..])
+}
+
+fn task_scope_token(text: &str, cursor: usize) -> Option<MentionToken> {
+    let line_start = text[..cursor].rfind('\n').map_or(0, |at| at + 1);
+    let at = line_start + text[line_start..cursor].rfind('@')?;
+    task_scope_query(&text[at + 1..cursor])?;
+    let valid_boundary = at == 0
+        || text[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|ch| ch.is_whitespace() || matches!(ch, '(' | '[' | '{' | '>'));
+    if !valid_boundary {
+        return None;
+    }
+    let end = text[cursor..]
+        .char_indices()
+        .find_map(|(offset, ch)| ch.is_whitespace().then_some(cursor + offset))
+        .unwrap_or(text.len());
     let end = completion_markdown_end(text, at, cursor, end)?;
     Some(MentionToken {
         range: at..end,
@@ -6856,6 +6937,7 @@ struct FileMentionState {
     /// Sidebar threads matching the token, filtered locally (no RPC) and
     /// listed above the file results; `active` indexes threads then files.
     threads: Vec<ThreadMatch>,
+    tasks: Vec<TaskMatch>,
     results: Vec<FileSearchMatch>,
     active: Option<usize>,
     request: u64,
@@ -6868,6 +6950,31 @@ struct FileMentionState {
     /// Full token text, not just the cursor-relative query: moving within a
     /// dismissed token keeps it closed, while any edit re-enables completion.
     dismissed: Option<(Range<usize>, String)>,
+}
+
+fn task_scope_pill(theme: &Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        .px(px(6.0))
+        .py(px(1.0))
+        .rounded(px(5.0))
+        .bg(theme.accent.opacity(0.16))
+        .text_color(theme.accent)
+        .font_family(theme.font_mono.clone())
+        .text_size(crate::typography::ui_rems(11.5))
+        .child("@task")
+}
+
+/// Each section's heading takes a list slot of its own.
+fn mention_list_ix(active: usize, threads: usize, tasks: usize) -> usize {
+    let mut slot = active + usize::from(threads > 0);
+    if active >= threads && tasks > 0 {
+        slot += 1;
+    }
+    if active >= threads + tasks && threads + tasks > 0 {
+        slot += 1;
+    }
+    slot
 }
 
 fn mention_response_is_current(state: &FileMentionState, request: u64) -> bool {
@@ -6900,6 +7007,49 @@ pub(crate) fn thread_matches<'a>(
             title,
             marks: marks_of(chat),
             project: project_of(chat),
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskMatch {
+    task_id: String,
+    title: String,
+    space_id: Option<String>,
+}
+
+const TASK_MENTION_LIMIT: usize = 8;
+const TASK_MENTION_IDLE_LIMIT: usize = 5;
+
+fn task_matches<'a>(
+    tasks: &'a [zeron_proto::Task],
+    query: &str,
+    space_id: Option<&str>,
+    scoped: bool,
+) -> Vec<TaskMatch> {
+    let query = query.trim().to_lowercase();
+    let (open, done) = zeron_proto::mission::split_tasks(tasks);
+    let pick = |tasks: Vec<&'a zeron_proto::Task>| {
+        let mut tasks: Vec<_> = tasks
+            .into_iter()
+            .filter(|task| query.is_empty() || task.title.to_lowercase().contains(&query))
+            .collect();
+        tasks.sort_by_key(|task| task.space_id.as_deref() != space_id);
+        tasks
+    };
+    let mut matches = pick(open);
+    if query.is_empty() && !scoped {
+        matches.truncate(TASK_MENTION_IDLE_LIMIT);
+    } else {
+        matches.extend(pick(done));
+        matches.truncate(TASK_MENTION_LIMIT);
+    }
+    matches
+        .into_iter()
+        .map(|task| TaskMatch {
+            task_id: task.id.clone(),
+            title: zeron_proto::view::single_line(&task.title),
+            space_id: task.space_id.clone(),
         })
         .collect()
 }
@@ -7669,6 +7819,9 @@ impl Composer {
             ComposerInputEvent::OpenAttachment(index) => this.open_attachment(*index, cx),
             ComposerInputEvent::AnnotationHovered(number) => {
                 cx.emit(ComposerEvent::AnnotationHovered(*number))
+            }
+            ComposerInputEvent::OpenTask(task_id) => {
+                cx.emit(ComposerEvent::OpenTask(task_id.clone()))
             }
             ComposerInputEvent::PastedImages(images) => {
                 let images = images.clone();
@@ -9806,9 +9959,29 @@ impl Composer {
             // Fresh open: the row stack restarts at the top.
             crate::popover::reset_menu_scroll(&self.mention_scroll, &mut self.popup_bar);
         }
+        let task_query = token
+            .as_ref()
+            .and_then(|token| task_scope_query(&token.query));
+        let scoped = task_query.is_some();
         self.mention.error = None;
-        self.mention.loading = token.is_some();
+        self.mention.loading = token.is_some() && !scoped;
+        if scoped {
+            self.mention.results.clear();
+        }
+        self.mention.tasks = match &token {
+            Some(token) => {
+                let space = self.mention_space(cx);
+                task_matches(
+                    &self.state.read(cx).tasks,
+                    task_query.unwrap_or(&token.query),
+                    space.as_deref(),
+                    scoped,
+                )
+            }
+            None => Vec::new(),
+        };
         self.mention.threads = match &token {
+            Some(_) if scoped => Vec::new(),
             Some(token) => match self.mention_device(cx) {
                 Some((device, exclude)) => {
                     let space = self.mention_space(cx);
@@ -9843,7 +10016,7 @@ impl Composer {
             _ => (count > 0).then_some(0),
         };
         self.sync_mention_controls(cx);
-        let Some(token) = token else {
+        let Some(token) = token.filter(|_| !scoped) else {
             cx.notify();
             return;
         };
@@ -9928,17 +10101,12 @@ impl Composer {
         self.mention.active =
             crate::popover::menu_step(self.mention.active, self.mention_item_count(), delta);
         if let Some(active) = self.mention.active {
-            // Keep the keyboard cursor visible in the scrolled row stack; the
-            // section headings occupy list slots of their own.
-            let threads = self.mention.threads.len();
-            let list_ix = if threads == 0 {
-                active
-            } else if active < threads {
-                active + 1
-            } else {
-                active + 2
-            };
-            self.mention_scroll.scroll_to_item(list_ix);
+            // Keep the keyboard cursor visible in the scrolled row stack.
+            self.mention_scroll.scroll_to_item(mention_list_ix(
+                active,
+                self.mention.threads.len(),
+                self.mention.tasks.len(),
+            ));
         }
         self.sync_mention_controls(cx);
         cx.notify();
@@ -9961,12 +10129,18 @@ impl Composer {
     /// `@2` all find "Image 2", and `@note` finds "notes.md".
     fn mention_item_count(&self) -> usize {
         self.mention.threads.len()
+            + self.mention.tasks.len()
             + self.mention_attachment_matches().len()
             + self.mention.results.len()
     }
 
     fn mention_attachment_matches(&self) -> Vec<AttachmentRow> {
-        let Some(token) = self.mention.token.as_ref() else {
+        let Some(token) = self
+            .mention
+            .token
+            .as_ref()
+            .filter(|token| task_scope_query(&token.query).is_none())
+        else {
             return Vec::new();
         };
         let normalize = |text: &str| -> String {
@@ -9997,6 +10171,13 @@ impl Composer {
         rows
     }
 
+    fn mentioned_task_ids(&self, cx: &App) -> Vec<String> {
+        task_mention_links(self.input.read(cx).text())
+            .into_iter()
+            .map(|link| link.task_id)
+            .collect()
+    }
+
     fn accept_mention(&mut self, cx: &mut Context<Self>) {
         let Some(token) = self.mention.token.clone() else {
             return;
@@ -10004,20 +10185,24 @@ impl Composer {
         let Some(active) = self.mention.active else {
             return;
         };
-        let threads = self.mention.threads.len();
+        let named = self.mention.threads.len() + self.mention.tasks.len();
         let attachments = self.mention_attachment_matches();
         let link = if let Some(thread) = self.mention.threads.get(active) {
             thread_link(&thread.chat_id, &thread.title)
-        } else if let Some(row) = attachments.get(active - threads) {
+        } else if let Some(task) = self.mention.tasks.get(active - self.mention.threads.len()) {
+            if self.mentioned_task_ids(cx).contains(&task.task_id) {
+                return;
+            }
+            let Some(link) = task_mention_link(&task.task_id, &task.title) else {
+                return;
+            };
+            link
+        } else if let Some(row) = attachments.get(active - named) {
             zeron_proto::attachment_mentions::attachment_mention_link(
                 row.index,
                 row.image.is_none().then_some(row.label.as_str()),
             )
-        } else if let Some(result) = self
-            .mention
-            .results
-            .get(active - threads - attachments.len())
-        {
+        } else if let Some(result) = self.mention.results.get(active - named - attachments.len()) {
             local_file_link(&result.path, result.is_dir)
         } else {
             return;
@@ -10047,9 +10232,12 @@ impl Composer {
             )
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_mention(cx)));
         let thread_count = self.mention.threads.len();
+        let task_count = self.mention.tasks.len();
+        let named_count = thread_count + task_count;
+        let scoped = task_scope_query(&token.query).is_some();
         let attachment_rows = self.mention_attachment_matches();
         let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(
-            thread_count + attachment_rows.len() + self.mention.results.len() + 2,
+            named_count + attachment_rows.len() + self.mention.results.len() + 3,
         );
         if thread_count > 0 {
             rows.push(crate::popover::menu_heading(theme, "Threads").into_any_element());
@@ -10172,15 +10360,115 @@ impl Composer {
                     .into_any_element(),
             );
         }
-        // The file half keeps its own states under the thread rows: a
-        // skeleton while the search is out, the error, or the empty note
-        // (only when no thread matched either).
+        if task_count > 0 {
+            rows.push(crate::popover::menu_heading(theme, "Tasks").into_any_element());
+        }
+        let task_rows: Vec<(&'static str, Hsla, Option<SharedString>, SharedString)> = {
+            let now = chrono::Utc::now();
+            let state = self.state.read(cx);
+            self.mention
+                .tasks
+                .iter()
+                .map(|task| {
+                    let status = state
+                        .tasks
+                        .iter()
+                        .find(|row| row.id == task.task_id)
+                        .map_or(zeron_proto::TaskStatus::ToDo, |row| {
+                            crate::tasks::rollup(state, row, now).status
+                        });
+                    let (_, icon, color) = crate::tasks::column_tone(status, theme);
+                    let label = (status != zeron_proto::TaskStatus::ToDo).then(|| {
+                        SharedString::from(zeron_proto::mission::column_title(status))
+                    });
+                    let project = task
+                        .space_id
+                        .as_deref()
+                        .and_then(|id| state.spaces.iter().find(|space| space.id == id))
+                        .map_or_else(
+                            || SharedString::from("No project"),
+                            |space| SharedString::from(space.display_name().to_string()),
+                        );
+                    (icon, color, label, project)
+                })
+                .collect()
+        };
+        let mentioned = self.mentioned_task_ids(cx);
+        for (task_ix, (task, (icon, color, label, project))) in
+            self.mention.tasks.iter().zip(task_rows).enumerate()
+        {
+            let ix = thread_count + task_ix;
+            let added = mentioned.contains(&task.task_id);
+            rows.push(
+                crate::popover::menu_row(
+                    theme,
+                    self.mention.active == Some(ix),
+                    format!("task-mention-result-{ix}"),
+                )
+                .id(("task-mention-result", ix))
+                .debug_selector(|| format!("task-mention-result-{ix}"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.mention.active = Some(ix);
+                    this.accept_mention(cx);
+                }))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            crate::icons::icon(icon)
+                                .size(px(14.0))
+                                .flex_none()
+                                .text_color(color),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .overflow_hidden()
+                                .truncate()
+                                .text_size(px(13.0))
+                                .text_color(if added { theme.text_muted } else { theme.text })
+                                .child(SharedString::from(task.title.clone())),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .max_w(px(180.0))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(4.0))
+                                .overflow_hidden()
+                                .text_size(px(12.5))
+                                .text_color(theme.text_muted)
+                                .when(added, |meta| meta.child("added"))
+                                .when(!added, |meta| {
+                                    meta.child(div().min_w_0().truncate().child(project))
+                                        .children(label.map(|label| {
+                                            div()
+                                                .flex_none()
+                                                .text_color(color)
+                                                .child(SharedString::from(format!("· {label}")))
+                                        }))
+                                }),
+                        ),
+                )
+                .into_any_element(),
+            );
+        }
+        // The file half keeps its own states under the thread and task rows:
+        // a skeleton while the search is out, the error, or the empty note
+        // (only when no thread or task matched either).
         let mut status: Option<gpui::AnyElement> = None;
         if self.mention.loading && self.mention.results.is_empty() && attachment_rows.is_empty() {
             status = Some(crate::popover::skeleton_rows(
                 "file-mention-loading",
                 theme,
-                if thread_count > 0 { 1 } else { 3 },
+                if named_count > 0 { 1 } else { 3 },
                 cx.entity_id(),
                 cx,
             ));
@@ -10200,28 +10488,30 @@ impl Composer {
                     .into_any_element(),
             );
         } else if self.mention.results.is_empty() && attachment_rows.is_empty() {
-            if thread_count == 0 {
+            if named_count == 0 {
                 status = Some(
                     div()
                         .px(px(12.0))
                         .py(px(10.0))
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted)
-                        .child(if token.query.is_empty() {
+                        .child(if scoped {
+                            "No matching tasks"
+                        } else if token.query.is_empty() {
                             "No files available"
                         } else {
-                            "No matching files or threads"
+                            "No matching files, threads or tasks"
                         })
                         .into_any_element(),
                 );
             }
         } else {
-            if thread_count > 0 {
+            if named_count > 0 {
                 rows.push(crate::popover::menu_heading(theme, "Files").into_any_element());
             }
             // Staged attachments stay pinned above every file result.
             for (attachment_ix, row) in attachment_rows.iter().enumerate() {
-                let ix = thread_count + attachment_ix;
+                let ix = named_count + attachment_ix;
                 let selected = self.mention.active == Some(ix);
                 let (icon, detail) = match &row.image {
                     Some(image) => (
@@ -10264,7 +10554,7 @@ impl Composer {
             }
             let attachment_count = attachment_rows.len();
             for (file_ix, result) in self.mention.results.iter().enumerate() {
-                let ix = thread_count + attachment_count + file_ix;
+                let ix = named_count + attachment_count + file_ix;
                 let selected = self.mention.active == Some(ix);
                 let (directory, name) = match result.path.rsplit_once('/') {
                     Some((directory, name)) => (directory.to_string(), name.to_string()),
@@ -10299,6 +10589,29 @@ impl Composer {
                 );
             }
         }
+        if scoped {
+            card = card.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .px(px(8.0))
+                    .pt(px(4.0))
+                    .pb(px(6.0))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .child(task_scope_pill(theme))
+                    .child("Tasks only")
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(theme.text_faint)
+                            .child("Delete \"task \" to search everything"),
+                    ),
+            );
+        }
         if !rows.is_empty() {
             // Overflowing rows wheel-scroll inside a bounded viewport; the
             // floating rail mirrors the model-list scrollbar treatment.
@@ -10314,6 +10627,25 @@ impl Composer {
             );
         }
         card = card.children(status);
+        if !scoped && task_count > 0 {
+            card = card.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .mt(px(4.0))
+                    .px(px(8.0))
+                    .pt(px(6.0))
+                    .pb(px(2.0))
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_faint)
+                    .child(task_scope_pill(theme))
+                    .child("searches only tasks"),
+            );
+        }
         Some(crate::popover::full_width_menu_above(
             "file-mention-popup",
             card.into_any_element(),
@@ -18602,6 +18934,7 @@ mod tests {
             path: path.into(),
             attachment: None,
             annotation: None,
+            task: false,
         }
     }
 
@@ -18695,6 +19028,77 @@ mod tests {
             mention_token("See (@lib", 9).map(|token| token.range),
             Some(5..9)
         );
+    }
+
+    #[test]
+    fn at_task_scopes_the_token_to_tasks_across_spaces() {
+        let token = mention_token("Do @Task fix login", 18).unwrap();
+        assert_eq!(token.range, 3..18);
+        assert_eq!(task_scope_query(&token.query), Some("fix login"));
+        let token = mention_token("@task ", 6).unwrap();
+        assert_eq!(
+            (token.range, task_scope_query(&token.query)),
+            (0..6, Some(""))
+        );
+        assert_eq!(
+            mention_token("@task ab", 7).map(|token| token.range),
+            Some(0..8)
+        );
+        assert_eq!(
+            task_scope_query(&mention_token("@task", 5).unwrap().query),
+            None
+        );
+        assert_eq!(mention_token("@task x @src", 12).unwrap().query, "src");
+        assert!(mention_token("me@task x", 9).is_none());
+        assert!(mention_token("@task x\nmore", 12).is_none());
+        assert!(mention_token("`@task x`", 8).is_none());
+    }
+
+    #[test]
+    fn task_matches_list_open_tasks_first_and_few_without_a_query() {
+        let task = |id: &str, title: &str, space: Option<&str>, done: bool| {
+            serde_json::from_value::<zeron_proto::Task>(serde_json::json!({
+                "id": id, "title": title, "spaceId": space, "orderKey": id,
+                "completedAt": done.then(chrono::Utc::now),
+            }))
+            .unwrap()
+        };
+        let mut tasks: Vec<_> = (0..7)
+            .map(|ix| {
+                task(
+                    &format!("o{ix}"),
+                    &format!("Open {ix}"),
+                    Some("other"),
+                    false,
+                )
+            })
+            .collect();
+        tasks.push(task("o7", "Open here", Some("here"), false));
+        tasks.push(task("d0", "Done fix", Some("here"), true));
+        let ids = |matches: Vec<TaskMatch>| -> Vec<String> {
+            matches.into_iter().map(|row| row.task_id).collect()
+        };
+        assert_eq!(
+            ids(task_matches(&tasks, "", Some("here"), false)),
+            ["o7", "o0", "o1", "o2", "o3"]
+        );
+        assert_eq!(
+            task_matches(&tasks, "", Some("here"), true).len(),
+            TASK_MENTION_LIMIT
+        );
+        assert_eq!(ids(task_matches(&tasks, "FIX", None, false)), ["d0"]);
+        assert_eq!(ids(task_matches(&tasks, "open 6", None, true)), ["o6"]);
+    }
+
+    #[test]
+    fn mention_rows_skip_each_sections_heading() {
+        assert_eq!(mention_list_ix(1, 0, 0), 1);
+        assert_eq!(mention_list_ix(1, 2, 0), 2);
+        assert_eq!(mention_list_ix(2, 2, 0), 4);
+        assert_eq!(mention_list_ix(0, 0, 2), 1);
+        assert_eq!(mention_list_ix(2, 0, 2), 4);
+        assert_eq!(mention_list_ix(1, 1, 2), 3);
+        assert_eq!(mention_list_ix(3, 1, 2), 6);
     }
 
     #[gpui::test]
@@ -20397,6 +20801,30 @@ mod tests {
         assert!(thread_mention_links("[](zeron-thread:abc)").is_empty());
         assert!(thread_mention_links("[a]b](zeron-thread:abc)").is_empty());
         assert_eq!(sent_mention_display("what is a zeron-thread: link?"), None);
+    }
+
+    #[test]
+    fn task_mentions_project_to_a_title_chip_with_a_capped_label() {
+        let short = task_mention_link("t-1", "Fix login").unwrap();
+        let long = task_mention_link("t-2", &"Rewrite the onboarding flow ".repeat(3)).unwrap();
+        let raw = format!("1. {short}\n2. {long}");
+        let (display, spans) = sent_mention_display(&raw).unwrap();
+        assert!(!display.contains(TASK_MENTION_SCHEME));
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| (span.kind, span.path.as_ref()))
+                .collect::<Vec<_>>(),
+            [(ChipKind::Task, "t-1"), (ChipKind::Task, "t-2")]
+        );
+        assert_eq!(
+            &display[spans[0].range.clone()],
+            format!("\u{00A0}{CHIP_ICON_SLOT}Fix\u{00A0}login\u{00A0}")
+        );
+        let label = &display[spans[1].range.clone()];
+        assert!(label.ends_with("…\u{00A0}"));
+        assert_eq!(label.trim_matches('\u{00A0}').graphemes(true).count(), 32);
+        assert_eq!(sent_mention_display("a zeron-task: link"), None);
     }
 
     #[test]

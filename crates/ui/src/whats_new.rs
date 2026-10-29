@@ -3,7 +3,9 @@ use std::sync::{Arc, OnceLock};
 
 use gpui::{Image, ImageFormat};
 
-pub use zeron_docs::changelog::{Entry, Feature, Resolution, entries, entry_for, resolve};
+pub use zeron_docs::changelog::{
+    Entry, Feature, Improvement, Resolution, entries, entry_for, resolve,
+};
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 

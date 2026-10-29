@@ -148,6 +148,12 @@ fn whats_new(version: Option<&str>) -> Result<String, String> {
             }
             out.push('\n');
         }
+        if !entry.improvements.is_empty() {
+            out.push_str("Improvements and fixes:\n");
+            for improvement in &entry.improvements {
+                let _ = writeln!(out, "- {}", improvement.text);
+            }
+        }
     }
     Ok(out)
 }

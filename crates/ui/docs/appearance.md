@@ -28,7 +28,7 @@ Pick **System**, **Light**, or **Dark** at the top of the page. **System** follo
 With a background set, more rows appear:
 
 - **Background effect**: **None**, **Dither**, **ASCII**, **Halftone**, or **Scanlines**.
-- **Chat background**: show the artwork behind open conversations (off by default), with **Placement** (**Hero** or **Full**), **Opacity** (20% by default), **Blur** (24 px by default), and **Scrim** to keep text readable.
+- **Chat background**: show the artwork behind open conversations (off by default), with **Placement** (**Hero** or **Full**), **Opacity** (20% by default), **Blur** (24 px by default), and **Scrim** to keep text readable. The artwork also shows through the titlebar and the selected tab.
 - **Terminal background**: **Same as chat** (the default), **Custom**, or **Off**. **Custom** gives the terminal its own **Placement**, **Opacity**, **Blur**, and **Scrim**, starting from your chat settings.
 
 ## Motion

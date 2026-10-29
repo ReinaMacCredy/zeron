@@ -1,5 +1,6 @@
 /// One window frame as the window server holds it: tightly packed BGRA at
-/// nominal (1px per point) resolution — the byte order `RenderImage` consumes.
+/// nominal (1px per point) resolution, or the backing scale when `native` —
+/// the byte order `RenderImage` consumes.
 pub(crate) struct CapturedFrame {
     pub width: u32,
     pub height: u32,
@@ -7,7 +8,7 @@ pub(crate) struct CapturedFrame {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn capture_window_number(id: u32) -> Option<CapturedFrame> {
+pub(crate) fn capture_window_number(id: u32, native: bool) -> Option<CapturedFrame> {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
     use core_graphics::window::{
         create_image, kCGWindowImageBoundsIgnoreFraming, kCGWindowImageNominalResolution,
@@ -20,13 +21,16 @@ pub(crate) fn capture_window_number(id: u32) -> Option<CapturedFrame> {
     );
     // Opaque: the glass shell's translucent regions would otherwise carry
     // their alpha into the card and show the card's own fill through.
+    let resolution = if native {
+        0
+    } else {
+        kCGWindowImageNominalResolution
+    };
     let image = create_image(
         null_rect,
         kCGWindowListOptionIncludingWindow,
         id,
-        kCGWindowImageNominalResolution
-            | kCGWindowImageBoundsIgnoreFraming
-            | kCGWindowImageShouldBeOpaque,
+        resolution | kCGWindowImageBoundsIgnoreFraming | kCGWindowImageShouldBeOpaque,
     )?;
     let (width, height) = (image.width(), image.height());
     let stride = image.bytes_per_row();

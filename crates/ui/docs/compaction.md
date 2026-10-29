@@ -108,23 +108,26 @@ What leaves your Mac for each check: your last four messages, each with the agen
 
 ## What you see in the transcript
 
-While the classifier runs on an agent model, a row reads **Classifier** with the model and **checking if this is a new task**, or **checking the agent's note**. Then a row such as **Compacting 180K before the new task** or **Compacting 180K, carrying the last turns over** shows while the chat compacts.
+Each classifier check shows as one card in the transcript that follows the compaction through:
 
-![A classifier decision in the transcript](compaction-classifier.jpg)
+1. **Checking whether to compact**, or **Checking the agent's note**, with the classifier's model and the seconds so far.
+2. **Compacting** with the answer, such as **Carry over** or **New task**, the context size and the time taken so far. The classifier's reason and a progress bar sit under it.
+3. **Compacted** with the context before and after, such as "120.0k → 40.2k". The card then slims to one line.
 
-Afterwards a **Classifier** row stays in the transcript with its answer: **New task**, **Carry over**, **Same task**, or **No answer**. Click it to see the model, how it decided, the time taken, the context size, the tokens used, exactly what was sent, and the reply.
+When the classifier answers **Same task**, the card reads **Not compacted** and the context is kept; **No answer** reads **Not compacted** too. A compaction that runs without asking, such as after three **Same task** answers in a row or with the context near the window, says why in place of the reason.
 
-A divider marks every compaction, with the context before and after when the agent reports it:
+Click the card to open it. **What the agent kept** has the summary the agent wrote and what was carried over word for word. **Classifier** has the decision, the reason, the model and how long it took, the context size, and the tokens used. **What the classifier saw** shows exactly what was sent, and the reply.
+
+Other compactions are marked by a divider, with the context before and after when the agent reports it:
 
 | Divider | Cause |
 | --- | --- |
 | **Context compacted** | You compacted by hand. |
 | **Compacted while idle, before the prompt cache expired** | Idle compaction. |
 | **Agent compacted** | The agent's compact tool. |
-| **Agent compacted, last turns carried over** | The agent's compact tool, with its note checked. |
-| **Compacted before a new task** | The classifier answered **New task**. |
-| **Compacted, last turns carried over** | The classifier answered **Carry over**. |
-| **Fresh session before a new task** or **Fresh session, last turns carried over** | The same, for an agent that cannot compact. |
+| **Fresh session before a new task** or **Fresh session, last turns carried over** | A classifier answer, for an agent that cannot compact. |
+
+When the agent wrote a summary, click the divider to read it.
 
 ## Settings
 

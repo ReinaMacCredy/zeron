@@ -59,7 +59,7 @@ id = "commands-and-mentions"
 section = "basics"
 title = "Commands and mentions"
 icon = "command"
-blurb = "Use / commands, $ skills, and @ mentions of files and threads."
+blurb = "Use / commands, $ skills, and @ mentions of files, threads, and tasks."
 actions = ["settings/providers"]
 
 [[article]]

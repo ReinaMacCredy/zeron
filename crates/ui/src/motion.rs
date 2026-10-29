@@ -237,23 +237,26 @@ pub fn flow_dot(phase_offset: f32, cx: &mut App) -> Option<gpui::QuadAnimation> 
     })
 }
 
-pub fn update_halo(phase_offset: f32, peak: f32, cx: &mut App) -> Option<gpui::QuadAnimation> {
-    fn ripple(phase: f32) -> f32 {
-        let p = phase.rem_euclid(1.0);
-        if p < 0.12 {
-            p / 0.12
-        } else {
-            (1.0 - (p - 0.12) / 0.4).max(0.0)
-        }
+pub const UPDATE_HALO_PERIOD: Duration = Duration::from_millis(2600);
+
+pub fn update_halo_ripple(phase: f32) -> f32 {
+    let p = phase.rem_euclid(1.0);
+    if p < 0.12 {
+        p / 0.12
+    } else {
+        (1.0 - (p - 0.12) / 0.4).max(0.0)
     }
+}
+
+pub fn update_halo(phase_offset: f32, peak: f32, cx: &mut App) -> Option<gpui::QuadAnimation> {
     if cx.reduce_motion() {
         return None;
     }
     Some(gpui::QuadAnimation {
         epoch: cx.default_global::<PulseClock>().epoch,
-        period: Duration::from_millis(2600),
+        period: UPDATE_HALO_PERIOD,
         phase_offset,
-        curve: ripple,
+        curve: update_halo_ripple,
         from: 0.0,
         to: peak,
         interval: PULSE_TICK * 2,

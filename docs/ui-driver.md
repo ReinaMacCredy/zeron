@@ -239,7 +239,7 @@ action also takes `window` (a window id from `state`; the default is the frontmo
 |---|---|---|
 | `state` | none | `pid, build, input, windows[{id,title,kind,size{w,h},active,a11yForced}], route{kind,section,selectedChat}, frames{count,lastDrawAgoMs}, motionScale, theme{mode,appearance}, clock{paused,virtualMs}` |
 | `tree` | `query`, `root` (ref), `depth`, `full` (false), `json` (false) | text lines, or `{window,title,size,focus,total,nodes[...]}` |
-| `snapshot` | `rect {x,y,w,h}` in points, `path` (`zeron ui` only, so the read-only `ui_driver` tool never writes where the caller picks; absolute, ending in `.png`, not an existing link or folder; default `~/.zeron/run/shots/<pid>-<n>.png`) | `{path,width,height,stale?}` |
+| `snapshot` | `rect {x,y,w,h}` in points, `native` (false: 1 pixel per point; true: the display's backing scale, so a 1320x880 window on Retina comes out 2640x1760, with `rect` still in points), `path` (`zeron ui` only, so the read-only `ui_driver` tool never writes where the caller picks; absolute, ending in `.png`, not an existing link or folder; default `~/.zeron/run/shots/<pid>-<n>.png`) | `{path,width,height,stale?}` |
 | `wait` | `for`, plus the fields below | depends on `for` |
 | `frames` | `ms` (1000, max 10000), `during` | `{frames,fps,intervalsMs{p50,p95,max},longFrames[{atMs,gapMs}],firstFrameAtMs,lastFrameAtMs,drawMs?,during?}` |
 | `track` | `ref` or `select`+`nth`, `ms` (800, max 5000), `jumpPx` (40), `during` | `{samples[[tMs,x,y,w,h]],framesSampled,missingFrames,jumps[{atMs,from,to,delta}],settledAtMs,reresolved,ref,node,framesDrawn,readMs,during?}` |

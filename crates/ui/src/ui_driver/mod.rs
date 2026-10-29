@@ -128,6 +128,8 @@ enum Observe {
     Snapshot {
         rect: Option<tree::Bounds>,
         path: Option<PathBuf>,
+        #[serde(default)]
+        native: bool,
     },
     Wait(Until),
     Frames(frames::Frames),
@@ -291,11 +293,11 @@ async fn run(raw: Value, cancel: Cancel, cx: &mut AsyncApp) -> Result<Value, Str
                 .map_err(|error| format!("window is gone: {error}"))?;
             Ok(audit::audit(&tree, focus_held))
         }
-        Observe::Snapshot { rect, path } => {
+        Observe::Snapshot { rect, path, native } => {
             let handle = cx.update(|cx| target_window(window, cx))?;
             // The window server holds the frame before the last one drawn until another presents.
             let drawn = fresh_frame(handle, Duration::from_millis(500), cx).await?;
-            let mut reply = cx.update(|cx| capture::snapshot(handle, rect, path, cx))?;
+            let mut reply = cx.update(|cx| capture::snapshot(handle, rect, path, native, cx))?;
             if drawn.is_none() {
                 reply["stale"] = json!(true);
             }

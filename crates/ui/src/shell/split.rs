@@ -387,6 +387,7 @@ impl Shell {
             | ComposerEvent::PlanFirst
             | ComposerEvent::AnnotationsChanged(_)
             | ComposerEvent::AnnotationHovered(_) => {}
+            ComposerEvent::OpenTask(task_id) => self.defer_open_task(task_id.clone(), cx),
             ComposerEvent::OpenSubagent {
                 chat_id,
                 doc_id,

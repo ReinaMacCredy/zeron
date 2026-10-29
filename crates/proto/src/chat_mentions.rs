@@ -16,7 +16,7 @@ pub struct ChatMentionLink {
 }
 
 /// Chat ids are opaque but plain: never a path, query or markup.
-fn valid_chat_id(id: &str) -> bool {
+pub(crate) fn valid_chat_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
         && id
@@ -46,7 +46,24 @@ pub fn chat_mention_link(chat_id: &str, title: &str) -> Option<String> {
 
 /// Only decode canonical chip links, never escaped text or code examples.
 pub fn chat_mention_links(text: &str) -> Vec<ChatMentionLink> {
-    if !text.contains(CHAT_MENTION_SCHEME) {
+    canonical_links(text, CHAT_MENTION_SCHEME, chat_mention_link)
+        .into_iter()
+        .map(|(range, title, chat_id)| ChatMentionLink {
+            range,
+            title: clean_title(&title),
+            chat_id,
+        })
+        .collect()
+}
+
+/// `(range, label text, id)` for each `[label](<scheme><id>)` that `rebuild`
+/// reproduces byte for byte, outside images.
+pub(crate) fn canonical_links(
+    text: &str,
+    scheme: &str,
+    rebuild: impl Fn(&str, &str) -> Option<String>,
+) -> Vec<(Range<usize>, String, String)> {
+    if !text.contains(scheme) {
         return Vec::new();
     }
     let mut image_depth = 0;
@@ -64,7 +81,7 @@ pub fn chat_mention_links(text: &str) -> Vec<ChatMentionLink> {
         }
         match event {
             pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { dest_url, .. }) => {
-                if let Some(id) = dest_url.strip_prefix(CHAT_MENTION_SCHEME)
+                if let Some(id) = dest_url.strip_prefix(scheme)
                     && valid_chat_id(id)
                 {
                     open = Some((range, id.to_owned()));
@@ -77,14 +94,10 @@ pub fn chat_mention_links(text: &str) -> Vec<ChatMentionLink> {
                 title.push_str(&text);
             }
             pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Link) => {
-                if let Some((range, chat_id)) = open.take()
-                    && chat_mention_link(&chat_id, &title).as_deref() == Some(&text[range.clone()])
+                if let Some((range, id)) = open.take()
+                    && rebuild(&id, &title).as_deref() == Some(&text[range.clone()])
                 {
-                    links.push(ChatMentionLink {
-                        range,
-                        title: clean_title(&title),
-                        chat_id,
-                    });
+                    links.push((range, title.clone(), id));
                 }
             }
             _ => {}

@@ -6,17 +6,18 @@ use gpui::{Bounds, Hsla, PathBuilder, StyleRefinement, Transformation, canvas, p
 use super::*;
 use crate::app_update::Flow;
 
-const CIRCLE: f32 = 28.0;
-const ICON: f32 = 16.0;
-const DROP_PERIOD: Duration = Duration::from_millis(1100);
-const ARC_PERIOD: Duration = Duration::from_millis(1200);
-const ARC_SPAN: f32 = 0.26;
+pub(super) const CIRCLE: f32 = 28.0;
+pub(super) const ICON: f32 = 16.0;
+pub(super) const DROP_PERIOD: Duration = Duration::from_millis(1100);
+pub(super) const ARC_PERIOD: Duration = Duration::from_millis(1200);
+pub(super) const ARC_SPAN: f32 = 0.26;
 const ARC_RADIUS: f32 = 15.8;
 const ARC_STROKE: f32 = 2.0;
 const POP: f32 = 0.45;
-const CHECK_UNTIL: f32 = 0.9;
-const TURN: f32 = 0.5;
-const HALOS: [(f32, f32, f32); 2] = [(CIRCLE + 6.0, 0.0, 0.32), (CIRCLE + 14.0, -0.08, 0.16)];
+pub(super) const CHECK_UNTIL: f32 = 0.9;
+pub(super) const TURN: f32 = 0.5;
+pub(super) const HALOS: [(f32, f32, f32); 2] =
+    [(CIRCLE + 6.0, 0.0, 0.32), (CIRCLE + 14.0, -0.08, 0.16)];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum GlyphPhase {
@@ -87,10 +88,10 @@ struct UpdateGlyphView {
     ink: Hsla,
 }
 
-struct Layer {
-    path: &'static str,
-    opacity: f32,
-    transform: Transformation,
+pub(super) struct Layer {
+    pub(super) path: &'static str,
+    pub(super) opacity: f32,
+    pub(super) transform: Transformation,
 }
 
 impl Layer {
@@ -193,7 +194,7 @@ impl Render for UpdateGlyphView {
     }
 }
 
-fn falling_arrow(phase: f32) -> Layer {
+pub(super) fn falling_arrow(phase: f32) -> Layer {
     let unit = ICON / 24.0;
     let eased = |t: f32| t * t;
     let (y, opacity) = if phase < 0.7 {
@@ -210,7 +211,7 @@ fn falling_arrow(phase: f32) -> Layer {
     }
 }
 
-fn pop_scale(t: f32) -> f32 {
+pub(super) fn pop_scale(t: f32) -> f32 {
     let u = (t / POP).min(1.0);
     let bump = if u < 0.4 {
         motion::EASE_OUT.eval(u / 0.4)
@@ -220,7 +221,7 @@ fn pop_scale(t: f32) -> f32 {
     1.0 + 0.18 * bump
 }
 
-fn check_in(t: f32) -> Layer {
+pub(super) fn check_in(t: f32) -> Layer {
     let grow = motion::EASE_OUT.eval((t / 0.2).min(1.0));
     let fade = ((CHECK_UNTIL - t) / 0.1).clamp(0.0, 1.0);
     let scale = motion::lerp(0.6, 1.0, grow);
@@ -231,7 +232,7 @@ fn check_in(t: f32) -> Layer {
     }
 }
 
-fn restart_in(u: f32) -> Layer {
+pub(super) fn restart_in(u: f32) -> Layer {
     let e = motion::EASE_OUT.eval(u.clamp(0.0, 1.0));
     let scale = motion::lerp(0.4, 1.0, e);
     Layer {
@@ -263,7 +264,7 @@ fn paint_halo(bounds: Bounds<Pixels>, tint: Hsla, window: &mut Window, cx: &mut 
     }
 }
 
-fn paint_arc(bounds: Bounds<Pixels>, turn: f32, tint: Hsla, window: &mut Window) {
+pub(super) fn paint_arc(bounds: Bounds<Pixels>, turn: f32, tint: Hsla, window: &mut Window) {
     let center = bounds.center();
     let start = -FRAC_PI_2 + TAU * turn;
     let sweep = TAU * ARC_SPAN;

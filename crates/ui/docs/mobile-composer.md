@@ -9,9 +9,14 @@ The field reads "Message" followed by the agent's name. With a keyboard attached
 - **+** opens the attach card in place of the keyboard: **Camera**, **Photos**, **Files**, and **Paste image** when your clipboard holds an image. **Photos** shows your recent photos; select several and tap **Add**, or open **All Photos**. Tap **+** again, or the text, to get the keyboard back.
 - A long paste becomes a **Pasted text** tile instead of filling the field. After you send, tap its pill in the transcript to read the text.
 - Touch and hold text in the transcript and choose **Quote in reply** to stage it as a quote above the field.
-- Type `/` for commands such as `/compact`, `/btw` and `/sidechat`, and `$` for skills. Both lists open above the keyboard. See [Commands and mentions](zeron://docs/commands-and-mentions).
+- Type `/` for commands and `$` for skills. Both lists open above the keyboard and match the ones on your computer for every agent, Zeron's own commands included (their descriptions start with **Zeron:**); those run on the phone. Commands that only run in Claude Code's terminal sit at the bottom with a **Terminal** tag. See [Commands and mentions](zeron://docs/commands-and-mentions).
+- In a Claude Code chat, `/config` opens Claude Code's settings as a sheet, and `/context`, `/usage`, `/model` and `/mcp` answer with the same cards as on your computer, without starting a turn. See [Claude Code's commands](zeron://docs/commands-and-mentions).
 - Type `@` to mention a thread or a file. Threads come first, each with its status, then files from the project.
 - When Zeron predicts your next message, it shows in grey in an empty field with **Accept**. See [Composer predictions](zeron://docs/composer).
+
+![The / list on iPhone, and Claude Code's terminal-only commands at the bottom](ios-slash-popup.jpg)
+
+![Claude Code's settings sheet, the /context card and the summary row on iPhone](ios-claude-config.jpg)
 
 ## The chips
 
@@ -51,6 +56,10 @@ The session's **…** menu has:
 - **Agents**: the subagents and background shells this chat started, with their status. **Stop** ends one; a shell shows its live output. Session rows also name background work, for example "1 shell" in place of **Working**.
 - **New sidechat**: a [side chat](zeron://docs/side-chat) that reads this chat without changing it. Sidechats expire after 24 hours. `/btw` and `/sidechat` start one too.
 - **Hand off thread**: continue in this thread with another agent and model, in a new thread, or hand it to a project. See [Hand off a thread](zeron://docs/handoff).
+
+While a chat runs subagents or background shells, a pill above the composer counts them, such as "2 of 3 working · 1 shell". Tap it for a card with each run, its state and how long it has run. **Stop** ends one; tap a row to open its output, its review findings or its chat.
+
+![The subagents pill, and its roster card](ios-agents-pill.jpg)
 
 ## Missions from the composer
 
