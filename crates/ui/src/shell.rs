@@ -1393,6 +1393,11 @@ impl SettingsSection {
                     &["recheck", "grant"],
                     Some(Target::Setting(SettingId::AppshotPermissions)),
                 ),
+                (
+                    "Quick capture",
+                    &["task", "idea", "hotkey", "chord", "option"],
+                    Some(Target::Setting(SettingId::QuickCapture)),
+                ),
             ],
             SettingsSection::Computer => &[
                 ("Computer control", &["computer use", "desktop"], None),
