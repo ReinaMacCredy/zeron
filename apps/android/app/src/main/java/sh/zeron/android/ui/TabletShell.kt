@@ -73,8 +73,10 @@ class TabletShellState {
         private set
     val inspector = mutableStateListOf<InspectorPage>()
     val inspectorShown: Boolean get() = inspectorChat != null && inspector.isNotEmpty()
+    val pages = mutableStateListOf<String>()
 
     fun select(id: String?) {
+        pages.clear()
         selected = id
         // Another session came up: the open panel follows it.
         if (inspectorShown && inspectorChat != id) {
@@ -85,6 +87,20 @@ class TabletShellState {
     fun newSession() {
         select(null)
         draftToken++
+    }
+
+    fun openPage(root: String, then: String? = null) {
+        if (pages.firstOrNull() != root) {
+            pages.clear()
+            pages.add(root)
+        } else {
+            while (pages.size > 1) pages.removeAt(pages.lastIndex)
+        }
+        then?.let { pages.add(it) }
+    }
+
+    fun popPage() {
+        if (pages.isNotEmpty()) pages.removeAt(pages.lastIndex)
     }
 
     /** The companions panel beside the session, or put away when it's already showing it. */
@@ -132,11 +148,13 @@ fun TabletShell(
     session: @Composable (String) -> Unit,
     draft: @Composable () -> Unit,
     page: @Composable (chatId: String, page: InspectorPage) -> Unit,
+    detail: @Composable (route: String) -> Unit = {},
 ) {
     val sidebarShown = shell.sidebar && !(shell.inspectorShown && !roomy)
     // Back steps through the inspector's pages and the sidebar's search before leaving.
     androidx.activity.compose.BackHandler(shell.inspectorShown) { shell.pop() }
     androidx.activity.compose.BackHandler(!shell.inspectorShown && shell.searching) { shell.searching = false }
+    androidx.activity.compose.BackHandler(!shell.inspectorShown && !shell.searching && shell.pages.isNotEmpty()) { shell.popPage() }
     Row(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         AnimatedVisibility(sidebarShown, enter = expandHorizontally() + fadeIn(), exit = shrinkHorizontally() + fadeOut()) {
             Row(Modifier.fillMaxHeight()) {
@@ -147,7 +165,10 @@ fun TabletShell(
         }
         Box(Modifier.weight(1f).fillMaxHeight()) {
             val id = shell.selected
-            if (id != null) {
+            val top = shell.pages.lastOrNull()
+            if (top != null) {
+                key(shell.pages.size, top) { detail(top) }
+            } else if (id != null) {
                 key(id) { session(id) }
             } else {
                 key(shell.draftToken) { draft() }
