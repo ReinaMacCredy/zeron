@@ -4013,6 +4013,21 @@ impl DocHost {
         Ok(id)
     }
 
+    /// Like `queue_message_detached`, but a busy thread gets it after its turn instead of mid-turn.
+    pub fn queue_message_after_turn(
+        &self,
+        chat_id: &str,
+        text: &str,
+        attachments: Vec<String>,
+    ) -> Result<String, EngineError> {
+        let (handle, id) = self.push_thread_row(chat_id, None, text, Vec::new(), attachments)?;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let host = self.clone();
+            self.spawn_worker_on(&runtime, async move { host.drain_queue(&handle).await });
+        }
+        Ok(id)
+    }
+
     /// A row carrying `task_steps` is a step handback, held for its settle window.
     fn push_thread_row(
         &self,

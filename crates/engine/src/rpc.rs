@@ -1111,6 +1111,18 @@ enum MutateParams {
         attach_plan: bool,
     },
     #[serde(rename_all = "camelCase")]
+    StartTasks {
+        task_ids: Vec<String>,
+        chat_id: String,
+        #[serde(default)]
+        config: Option<ChatConfig>,
+    },
+    #[serde(rename_all = "camelCase")]
+    AddTasksToThread {
+        task_ids: Vec<String>,
+        chat_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
     PlanSteps {
         task_id: String,
         steps: Vec<PlannedStep>,
@@ -3006,6 +3018,14 @@ impl EngineRpc {
                 });
                 self.assign_task(&task_id, &chat_id, send, from_chat_id.as_deref(), lead)
                     .await
+            }
+            MutateParams::StartTasks {
+                task_ids,
+                chat_id,
+                config,
+            } => self.start_tasks(&task_ids, &chat_id, config).await,
+            MutateParams::AddTasksToThread { task_ids, chat_id } => {
+                self.add_tasks_to_thread(&task_ids, &chat_id)
             }
             MutateParams::PlanSteps {
                 task_id,
