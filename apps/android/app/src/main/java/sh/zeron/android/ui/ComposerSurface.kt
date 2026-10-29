@@ -66,7 +66,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
 /** What the composer's trailing button does right now. */
-enum class ComposerAction { Send, Queue, Stop }
+enum class ComposerAction { Send, Queue, Stop, Resume }
 
 /** Send / queue / stop: one control whose shape morphs on press. */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
@@ -97,7 +97,7 @@ internal fun ActionButton(action: ComposerAction, hasText: Boolean, onClick: () 
                     haptics.performHapticFeedback(HapticFeedbackType.Confirm)
                     onClick()
                 },
-                enabled = hasText,
+                enabled = hasText || action == ComposerAction.Resume,
                 shapes = IconButtonDefaults.shapes(),
                 colors = IconButtonDefaults.filledIconButtonColors(
                     // White on the accent in both appearances, like iOS (the
@@ -107,7 +107,13 @@ internal fun ActionButton(action: ComposerAction, hasText: Boolean, onClick: () 
                     disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                 ),
                 modifier = Modifier.size(40.dp),
-            ) { sh.zeron.android.design.ZIcon(sh.zeron.android.design.ZIcons.Send, if (action == ComposerAction.Queue) "Queue" else "Send", Modifier.size(22.dp)) }
+            ) {
+                if (action == ComposerAction.Resume && !hasText) {
+                    sh.zeron.android.design.ZIcon(sh.zeron.android.R.drawable.zi_play, "Resume", Modifier.size(20.dp))
+                } else {
+                    sh.zeron.android.design.ZIcon(sh.zeron.android.design.ZIcons.Send, if (action == ComposerAction.Queue) "Queue" else "Send", Modifier.size(22.dp))
+                }
+            }
         }
     }
 }

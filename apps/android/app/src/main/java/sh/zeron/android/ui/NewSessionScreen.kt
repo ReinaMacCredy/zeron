@@ -187,7 +187,7 @@ fun NewSessionScreen(
         starting = true
         scope.launch {
             try {
-                val id = model.createCloudSession(draft.copy(model = draft.model ?: choice?.model?.id), composer.encoded(), composer.images.map { it.outgoing })
+                val id = model.createCloudSession(draft.copy(model = draft.model ?: choice?.model?.id), composer.encoded(), composer.attachments)
                 created = true
                 model.newSessionText = ""
                 model.newSessionImages = emptyList()
@@ -200,10 +200,46 @@ fun NewSessionScreen(
         }
     }
 
+    val mission = remember { MissionDraft() }
+    val missionLabels = remember { uniffi.zeron_core.missionComposerLabels(false) }
+
+    fun startMission() {
+        val c = client ?: return
+        mission.error(composer.images.size)?.let {
+            scope.launch { snackbar.showSnackbar(it) }
+            return
+        }
+        if (deviceId.isEmpty()) {
+            scope.launch { snackbar.showSnackbar("Choose a project or a host that can run it.") }
+            return
+        }
+        val brief = uniffi.zeron_core.missionText(composer.encoded(), composer.pasted.map { it.text })
+        val pictures = composer.images.toList()
+        val config = uniffi.zeron_core.ChatConfig(draft.harness, draft.model ?: choice?.model?.id, draft.effort, emptyMap(), uniffi.zeron_core.SandboxLevel.WORKSPACE_WRITE)
+        scope.launch {
+            try {
+                val paths = pictures.map { c.uploadAttachment(deviceId, it.name, it.bytes, null) }
+                val taskId = c.startMission(deviceId, missionDraft(brief, project?.id, paths), config, mission.options())
+                created = true
+                composer.clear()
+                model.newSessionText = ""
+                model.newSessionImages = emptyList()
+                onOpenRoute("tasks:mission:$taskId")
+            } catch (e: Exception) {
+                snackbar.showSnackbar(e.message ?: "Couldn't start the mission")
+            }
+        }
+    }
+
     fun create() {
         model.lastDraft = draft
+        uniffi.zeron_core.draftCommandRefusal(composer.text, draft.harness == "claude-code")?.let {
+            scope.launch { snackbar.showSnackbar(it) }
+            return
+        }
+        if (mission.on) return startMission()
         if (runsOnCloud) return createOnCloud()
-        val id = model.createSession(draft.copy(model = draft.model ?: choice?.model?.id), composer.encoded(), composer.images.map { it.outgoing })
+        val id = model.createSession(draft.copy(model = draft.model ?: choice?.model?.id), composer.encoded(), composer.attachments)
         if (id != null) {
             created = true
             model.newSessionText = ""
@@ -258,17 +294,29 @@ fun NewSessionScreen(
                     }
                 }
             }
-            MentionSuggestions(
+            sh.zeron.android.ui.composer.ComposerSuggestions(
                 composer,
-                search = { q ->
+                files = { q ->
                     val c = client
                     if (c == null || project == null) emptyList() else c.searchFiles(project.deviceId, null, project.id, q)
+                },
+                threads = { q -> project?.let { p -> client?.threadMentions(p.deviceId, p.id, null, q) }.orEmpty() },
+                catalog = { skill ->
+                    client?.takeIf { deviceId.isNotEmpty() }?.let { sh.zeron.android.core.ComposerExtras.invocationCatalog(it, deviceId, draft.harness, null, project?.id, skill) }
+                },
+                onInvocation = { q, entry ->
+                    when (entry.workspaceCommand) {
+                        uniffi.zeron_core.WorkspaceCommand.RESUME -> onOpenRoute("search").also { composer.dropQuery(q) }
+                        uniffi.zeron_core.WorkspaceCommand.SETTINGS -> onOpenRoute("settings").also { composer.dropQuery(q) }
+                        null -> composer.insertInvocation(q, entry)
+                        else -> composer.dropQuery(q)
+                    }
                 },
                 modifier = Modifier.padding(horizontal = 12.dp).widthIn(max = 768.dp),
             )
             ComposerSurface(
                 model = composer,
-                placeholder = "Describe the task",
+                placeholder = if (mission.on) missionLabels.placeholder else "Describe the task",
                 action = ComposerAction.Send,
                 onAction = ::create,
                 alwaysCard = true,
@@ -279,6 +327,7 @@ fun NewSessionScreen(
                     .widthIn(max = 768.dp)
                     .onGloballyPositioned { composerBounds = it.boundsInRoot() },
             ) {
+                MissionChips(mission, missionLabels)
                 ProjectChip(draft, projects, onPick = { draft = it }, onNewProject = { newProject = true }, onNewCloudProject = if (model.cloudOffered) ({ cloudProject = true }) else null)
                 HostChip(draft, project, projects, hosts, runsOnCloud, cloudReach, cloud.credits) { draft = it }
                 if (runsOnCloud && project?.githubRepo != null) {
