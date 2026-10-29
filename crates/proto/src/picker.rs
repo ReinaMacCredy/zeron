@@ -34,8 +34,8 @@ impl AgentProfile {
         if let Some(level) = self.reasoning {
             config.reasoning = Some(level);
         }
-        if let Some(mode) = self.permission_mode {
-            config.permission_mode = mode;
+        if let Some(mode) = self.access {
+            config.access = mode;
         }
         if !self.model_options.is_empty() {
             config.model_options = self.model_options.clone();
@@ -51,7 +51,7 @@ impl AgentProfile {
             harness: self.harness,
             model: self.model.clone(),
             reasoning: self.reasoning,
-            permission_mode: self.permission_mode,
+            access: self.access,
             model_options: self.model_options.clone(),
             notes: self.notes.clone(),
             instructions: self.instructions.clone(),
@@ -63,7 +63,7 @@ impl AgentProfile {
         profile_line(
             self.harness.display_name(),
             model_label.or(self.model.as_deref()),
-            self.permission_mode,
+            self.access,
             self.reasoning,
             self.disabled_tools.len(),
         )
@@ -87,10 +87,7 @@ impl AgentProfile {
         {
             drift.push(ProfileDrift::Effort);
         }
-        if self
-            .permission_mode
-            .is_some_and(|mode| current.permission_mode != mode)
-        {
+        if self.access.is_some_and(|mode| current.access != mode) {
             drift.push(ProfileDrift::Mode);
         }
         let options: Vec<String> = self
@@ -123,8 +120,8 @@ impl AgentProfile {
         if self.reasoning.is_some() {
             draft.reasoning = current.reasoning;
         }
-        if self.permission_mode.is_some() {
-            draft.permission_mode = Some(current.permission_mode);
+        if self.access.is_some() {
+            draft.access = Some(current.access);
         }
         draft.model_options = if harness_moved {
             Default::default()
@@ -174,10 +171,8 @@ impl AgentProfile {
                 ),
                 ProfileDrift::Mode => format!(
                     "{} → {}",
-                    self.permission_mode
-                        .map(|m| m.short_label())
-                        .unwrap_or_default(),
-                    current.permission_mode.short_label()
+                    self.access.map(|m| m.label()).unwrap_or_default(),
+                    current.access.label()
                 ),
                 ProfileDrift::Options(keys) => {
                     let names = keys
@@ -222,7 +217,7 @@ pub fn catalog_error_text(message: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{HarnessId, PermissionMode, ReasoningLevel, SandboxLevel};
+    use crate::{AccessMode, HarnessId, ReasoningLevel, SandboxLevel};
 
     fn profile(name: &str) -> AgentProfile {
         AgentProfile {
@@ -231,7 +226,7 @@ mod tests {
             harness: HarnessId::Codex,
             model: None,
             reasoning: None,
-            permission_mode: None,
+            access: None,
             model_options: Default::default(),
             notes: String::new(),
             instructions: String::new(),
@@ -247,7 +242,6 @@ mod tests {
             reasoning: None,
             model_options: Default::default(),
             sandbox: SandboxLevel::WorkspaceWrite,
-            permission_mode: PermissionMode::Full,
             instructions: String::new(),
             profile_id: None,
             instance_id: None,
@@ -275,11 +269,11 @@ mod tests {
         };
         let mut same = profile("Same");
         same.harness = HarnessId::ClaudeCode;
-        same.permission_mode = Some(PermissionMode::Ask);
+        same.access = Some(AccessMode::Supervised);
         same.apply_to(&mut config);
         assert_eq!(config.model.as_deref(), Some("opus"));
         assert_eq!(config.reasoning, Some(ReasoningLevel::High));
-        assert_eq!(config.permission_mode, PermissionMode::Ask);
+        assert_eq!(config.access, AccessMode::Supervised);
         assert_eq!(config.model_options["context"], "1m");
 
         let mut codex = profile("Codex");
@@ -355,7 +349,7 @@ mod tests {
         let saved = planner.absorb(&current);
         assert_eq!(saved.reasoning, Some(ReasoningLevel::Max));
         assert!(saved.model.is_none());
-        assert!(saved.permission_mode.is_none());
+        assert!(saved.access.is_none());
         assert!(saved.model_options.is_empty());
 
         current.harness = HarnessId::Codex;

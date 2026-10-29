@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{AccessMode, HarnessId, PermissionMode, ReasoningLevel, SandboxLevel};
+use crate::{AccessMode, HarnessId, ReasoningLevel, SandboxLevel};
 
 /// Admission limit for new pins. Concurrent offline additions may exceed it;
 /// existing pins remain visible, reorderable and removable without truncation.
@@ -165,7 +165,7 @@ impl Space {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", remote = "Self")]
 pub struct ChatConfig {
     pub harness: HarnessId,
     pub model: Option<String>,
@@ -173,10 +173,6 @@ pub struct ChatConfig {
     #[serde(default)]
     pub model_options: serde_json::Map<String, serde_json::Value>,
     pub sandbox: SandboxLevel,
-    /// See [`PermissionMode`]. Serde-defaulted (Full) so rows written before
-    /// the field existed keep today's unattended behavior.
-    #[serde(default)]
-    pub permission_mode: PermissionMode,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub instructions: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -194,6 +190,20 @@ pub struct ChatConfig {
     pub access: AccessMode,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub plan: bool,
+}
+
+impl Serialize for ChatConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        ChatConfig::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ChatConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        crate::agent::legacy_access(&mut value);
+        ChatConfig::deserialize(value).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Immutable-at-run-start repository context owned by one conversation.
@@ -2420,8 +2430,12 @@ pub struct AgentProfile {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningLevel>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_mode: Option<PermissionMode>,
+    #[serde(
+        default,
+        alias = "permissionMode",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub access: Option<AccessMode>,
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub model_options: serde_json::Map<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -2443,8 +2457,8 @@ pub struct AgentProfileDraft {
     pub model: Option<String>,
     #[serde(default)]
     pub reasoning: Option<ReasoningLevel>,
-    #[serde(default)]
-    pub permission_mode: Option<PermissionMode>,
+    #[serde(default, alias = "permissionMode")]
+    pub access: Option<AccessMode>,
     #[serde(default)]
     pub model_options: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
@@ -2461,11 +2475,11 @@ pub struct AgentProfilesSnapshot {
     pub profiles: Vec<AgentProfile>,
 }
 
-/// "Claude Code · Opus 5.5 · Auto · High · 2 tools off" under a profile's name.
+/// "Claude Code · Opus 5.5 · Auto-accept edits · High · 2 tools off" under a profile's name.
 pub fn profile_line(
     harness_name: &str,
     model: Option<&str>,
-    mode: Option<PermissionMode>,
+    mode: Option<AccessMode>,
     reasoning: Option<ReasoningLevel>,
     tools_off: usize,
 ) -> String {
@@ -2474,7 +2488,7 @@ pub fn profile_line(
         parts.push(model.to_string());
     }
     if let Some(mode) = mode {
-        parts.push(mode.short_label().to_string());
+        parts.push(mode.label().to_string());
     }
     if let Some(level) = reasoning {
         parts.push(level.label().to_string());
@@ -2744,6 +2758,52 @@ pub struct ChatConnectivity {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn chat_configs_and_profiles_read_the_old_permission_mode_as_access() {
+        let config = |extra: &str| {
+            serde_json::from_str::<ChatConfig>(&format!(
+                r#"{{"harness":"codex","model":null,"reasoning":null,"sandbox":"workspace-write"{extra}}}"#
+            ))
+            .unwrap()
+            .access
+        };
+        assert_eq!(config(""), AccessMode::FullAccess);
+        assert_eq!(config(r#","permissionMode":"ask""#), AccessMode::Supervised);
+        assert_eq!(
+            config(r#","permissionMode":"auto","access":"auto-accept-edits""#),
+            AccessMode::AutoAcceptEdits
+        );
+        assert_eq!(config(r#","access":"supervised""#), AccessMode::Supervised);
+        let written = serde_json::to_value(ChatConfig {
+            access: AccessMode::Supervised,
+            ..serde_json::from_str(r#"{"harness":"codex","model":null,"reasoning":null,"sandbox":"workspace-write","permissionMode":"full"}"#).unwrap()
+        })
+        .unwrap();
+        assert_eq!(written["access"], "supervised");
+        assert!(written.get("permissionMode").is_none());
+
+        let profile = |extra: &str| {
+            serde_json::from_str::<AgentProfile>(&format!(
+                r#"{{"id":"p","name":"P","harness":"claude-code"{extra}}}"#
+            ))
+            .unwrap()
+            .access
+        };
+        assert_eq!(profile(""), None);
+        assert_eq!(
+            profile(r#","permissionMode":"auto""#),
+            Some(AccessMode::AutoAcceptEdits)
+        );
+        assert_eq!(
+            profile(r#","access":"full-access""#),
+            Some(AccessMode::FullAccess)
+        );
+        let draft: AgentProfileDraft =
+            serde_json::from_str(r#"{"name":"P","harness":"codex","permissionMode":"ask"}"#)
+                .unwrap();
+        assert_eq!(draft.access, Some(AccessMode::Supervised));
+    }
 
     #[test]
     fn the_terminal_cube_is_appearance_independent_and_the_grey_ramp_mirrors() {
