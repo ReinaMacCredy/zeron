@@ -533,6 +533,12 @@ pub(crate) mod skills;
 #[cfg(windows)]
 pub mod windows_process;
 
+pub fn installed_cli(exe: &str) -> Option<(std::path::PathBuf, Option<semver::Version>)> {
+    let path = executable::find_on_paths(exe, Vec::new())?;
+    let version = executable::binary_version(&path);
+    Some((path, version))
+}
+
 /// Add the login shell's PATH to a child process while preserving the PATH of
 /// the current process. This lets GUI/service launches find user-installed
 /// CLIs such as Homebrew's `gh` without changing the daemon's own environment.

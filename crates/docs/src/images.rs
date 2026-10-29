@@ -1,5 +1,9 @@
 pub const IMAGES: &[(&str, &[u8])] = &[
     (
+        "playbooks-triage.jpg",
+        include_bytes!("../../ui/assets/whats_new/playbooks-triage.jpg"),
+    ),
+    (
         "settings-updates.jpg",
         include_bytes!("../../ui/assets/whats_new/settings-updates.jpg"),
     ),

@@ -426,3 +426,11 @@ title = "Devices and computer use on iPhone"
 icon = "screen-capture"
 blurb = "Answer computer use requests, watch the still preview, stop computer use, and read terminals and run project actions from the phone."
 actions = ["settings/computer", "docs/computer-use"]
+
+[[article]]
+id = "playbooks"
+section = "work"
+title = "Playbooks and triage"
+icon = "lucide-book-open"
+blurb = "Start a chat from a saved recipe, or let your agent debug a Zeron problem."
+actions = ["settings/playbooks"]

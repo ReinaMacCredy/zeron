@@ -13,6 +13,7 @@ pub const BODIES: &[(&str, &str)] = &[
         include_str!("../../ui/docs/getting-around.md"),
     ),
     ("new-chat", include_str!("../../ui/docs/new-chat.md")),
+    ("playbooks", include_str!("../../ui/docs/playbooks.md")),
     ("composer", include_str!("../../ui/docs/composer.md")),
     (
         "conversation",

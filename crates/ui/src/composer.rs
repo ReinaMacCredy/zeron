@@ -102,6 +102,7 @@ const SIDECHAT_TAB_RADIUS: f32 = 10.0;
 const NEW_THREAD_SELECTOR_ROW_HEIGHT: f32 = 20.0;
 const HERO_HEADLINE_LINE: f32 = 38.0;
 const HERO_HEADLINE_GAP: f32 = 18.0;
+const HERO_SUBTITLE_LINE: f32 = 20.0;
 const RUNNING_TAB_FADE: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_OUT);
 const MISSION_BORDER: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE);
 const MISSION_PLACEHOLDER: motion::MotionSpec = motion::MotionSpec::new(220, motion::EASE);
@@ -785,6 +786,24 @@ fn link_notice(
 
 fn begin_interrupt(pending: &mut HashSet<String>, chat_id: &str) -> bool {
     pending.insert(chat_id.to_string())
+}
+
+fn code_spans(text: &str, theme: &Theme) -> Vec<gpui::AnyElement> {
+    text.split('`')
+        .enumerate()
+        .filter(|(_, part)| !part.is_empty())
+        .map(|(ix, part)| {
+            let span = div().child(SharedString::from(part.to_string()));
+            if ix % 2 == 1 {
+                span.mx(px(3.0))
+                    .font_family(theme.font_mono.clone())
+                    .text_color(theme.text)
+                    .into_any_element()
+            } else {
+                span.into_any_element()
+            }
+        })
+        .collect()
 }
 
 fn retain_live_interrupts(pending: &mut HashSet<String>, mut is_live: impl FnMut(&str) -> bool) {
@@ -7253,6 +7272,7 @@ pub struct Composer {
     /// The state observer consumes it to distinguish that handoff from normal
     /// session navigation, which must continue to snap.
     launching_new_chat: bool,
+    playbook_heroes: HashMap<String, (SharedString, Option<SharedString>)>,
     pub(crate) failure: Option<SharedString>,
     /// The chat key `failure` belongs to (`None` = global, e.g. "Engine not
     /// connected"). Chat-scoped failures survive navigation and render only
@@ -7914,6 +7934,7 @@ impl Composer {
             current_key,
             sending: false,
             launching_new_chat: false,
+            playbook_heroes: HashMap::new(),
             failure: None,
             wizard: None,
             wizard_focus: cx.focus_handle(),
@@ -8066,6 +8087,30 @@ impl Composer {
         self.input.update(cx, |input, cx| input.set_text(text, cx));
         self.sync_draft(cx);
         cx.notify();
+    }
+
+    pub(crate) fn seed_playbook(
+        &mut self,
+        key: &str,
+        playbook: &str,
+        hero: (SharedString, Option<SharedString>),
+        cx: &mut Context<Self>,
+    ) {
+        let prompt = zeron_engine::playbooks::prompt(std::path::Path::new(playbook));
+        self.playbook_heroes.insert(playbook.to_string(), hero);
+        if key == self.current_key {
+            self.seed_text(prompt, cx);
+        } else {
+            let mut entry = crate::draft_store::entry(key, cx);
+            entry.prompt = prompt;
+            crate::draft_store::set(key, entry, cx);
+        }
+    }
+
+    fn playbook_hero(&self, cx: &App) -> Option<(SharedString, Option<SharedString>)> {
+        let input = self.input.read(cx);
+        let path = zeron_engine::playbooks::linked_path(input.text())?;
+        self.playbook_heroes.get(path).cloned()
     }
 
     fn apply_draft_text(&mut self, cx: &mut Context<Self>) {
@@ -16124,11 +16169,23 @@ impl Render for Composer {
                 crate::home::running_agents(self.state.read(cx), chrono::Utc::now()).len();
             let tabs = (new_thread_chrome_opacity > 0.0)
                 .then(|| self.render_home_tabs(&theme, running, window, cx));
+            let playbook_hero = self.playbook_hero(cx);
+            let subtitle = playbook_hero
+                .as_ref()
+                .and_then(|(_, subtitle)| subtitle.clone());
+            let subtitle_line = if subtitle.is_some() {
+                HERO_SUBTITLE_LINE
+            } else {
+                0.0
+            };
             let headline = (new_thread_chrome_opacity > 0.0).then(|| {
                 div()
                     .id("new-chat-headline")
                     .absolute()
-                    .top(px(-28.0 - HERO_HEADLINE_GAP - HERO_HEADLINE_LINE))
+                    .top(px(-28.0
+                        - HERO_HEADLINE_GAP
+                        - HERO_HEADLINE_LINE
+                        - subtitle_line))
                     .left_0()
                     .right_0()
                     .h(px(HERO_HEADLINE_LINE))
@@ -16141,28 +16198,53 @@ impl Render for Composer {
                     .line_height(px(HERO_HEADLINE_LINE))
                     .text_color(theme.text)
                     .opacity(new_thread_chrome_opacity)
-                    .map(|el| match new_thread_project {
-                        Some(project) => el
+                    .map(|el| match (playbook_hero, new_thread_project) {
+                        (Some((question, _)), _) => el.child(question),
+                        (None, Some(project)) => el
                             .child("What should we build in")
                             .child(div().ml(px(4.0)).min_w_0().child(project))
                             .child("?"),
-                        None => el.child("What should we work on?"),
+                        (None, None) => el.child("What should we work on?"),
                     })
             });
+            let subtitle = subtitle
+                .filter(|_| new_thread_chrome_opacity > 0.0)
+                .map(|subtitle| {
+                    div()
+                        .id("new-chat-subtitle")
+                        .debug_selector(|| "new-chat-subtitle".into())
+                        .absolute()
+                        .top(px(-28.0 - HERO_HEADLINE_GAP - subtitle_line))
+                        .left_0()
+                        .right_0()
+                        .h(px(subtitle_line))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .whitespace_nowrap()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .opacity(new_thread_chrome_opacity)
+                        .children(code_spans(&subtitle, &theme))
+                });
             // Floating selectors share the surface's origin and never change its height.
-            container.relative().children(headline).child(
-                div()
-                    .id("dock-target-selectors")
-                    .absolute()
-                    .top(px(-28.0))
-                    .left(px(Theme::SPACE_LG + 4.0))
-                    .right(px(Theme::SPACE_LG + 10.0))
-                    .h(px(NEW_THREAD_SELECTOR_ROW_HEIGHT))
-                    .flex()
-                    .items_start()
-                    .opacity(new_thread_chrome_opacity)
-                    .children(tabs),
-            )
+            container
+                .relative()
+                .children(headline)
+                .children(subtitle)
+                .child(
+                    div()
+                        .id("dock-target-selectors")
+                        .absolute()
+                        .top(px(-28.0))
+                        .left(px(Theme::SPACE_LG + 4.0))
+                        .right(px(Theme::SPACE_LG + 10.0))
+                        .h(px(NEW_THREAD_SELECTOR_ROW_HEIGHT))
+                        .flex()
+                        .items_start()
+                        .opacity(new_thread_chrome_opacity)
+                        .children(tabs),
+                )
         } else if new_thread_chrome > 0.0 {
             container.child(
                 div()
