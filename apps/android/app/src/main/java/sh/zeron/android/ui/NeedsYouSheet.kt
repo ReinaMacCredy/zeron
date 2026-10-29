@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -104,7 +105,7 @@ fun NeedsYouPill(model: AppModel, chatId: String, onClick: () -> Unit) {
     ) {
         val first = shown.firstOrNull() ?: return@AnimatedVisibility
         val ask = askColor()
-        val title = model.row(first.chatId)?.title ?: first.asker
+        val title = model.row(first.chatId)?.takeIf { it.hasTitle }?.title ?: first.asker
         val more = shown.size - 1
         Surface(
             onClick = onClick,
@@ -207,14 +208,14 @@ fun NeedsYouSheet(model: AppModel, excluding: String?, onDismiss: () -> Unit, on
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
         val page = stack.last()
         AnimatedContent(page, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "needs-you") { current ->
-            Column(Modifier.fillMaxWidth()) {
+            Column(Modifier.fillMaxWidth().imePadding()) {
                 when (current) {
                     Page.Home -> HomePage(model, all, seen, ::open) { key, title -> push(Page.Group(key, title)) }
                     is Page.Question -> {
                         val entry = entries.firstOrNull { it.key == current.key }
                         LaunchedEffect(entry == null) { if (entry == null) pop() }
                         if (entry != null) {
-                            PageHeader(model.row(entry.chatId)?.title ?: entry.asker, ::pop)
+                            PageHeader(model.row(entry.chatId)?.takeIf { it.hasTitle }?.title ?: entry.asker, ::pop)
                             QuestionPage(entry, onOpenThread = { hideThen { onOpenChat(entry.chatId) } }) { answer(entry, it) }
                         }
                     }
