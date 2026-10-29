@@ -194,6 +194,26 @@ fn typing_on_a_rail_control_reaches_the_composer(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn typing_in_the_rail_capture_popover_stays_in_it(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_window(dir.path(), cx);
+    let plus = cx.debug_bounds("rail-quick-capture").expect("rail +");
+    cx.simulate_click(plus.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    cx.simulate_keystrokes("h");
+    cx.update(|_, cx| {
+        let shell = shell.read(cx);
+        let input = shell
+            .quick_capture
+            .rail_input
+            .clone()
+            .expect("popover input");
+        assert_eq!(input.read(cx).text(), "h");
+        assert_eq!(shell.composer.read(cx).input_text(cx), "");
+    });
+}
+
+#[gpui::test]
 fn typing_beside_an_expanded_side_chat_reaches_its_composer(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, cx) = shell_window(dir.path(), cx);

@@ -16250,7 +16250,8 @@ impl Shell {
         let on_sidebar_control = (self.sidebar_peek_focus.contains_focused(window, cx)
             || self.rail_focus.contains_focused(window, cx))
             && self.chat_rename.is_none()
-            && self.spaces_menu.get().is_none();
+            && self.spaces_menu.get().is_none()
+            && !self.rail_capture_open();
         if !in_right
             && !on_sidebar_control
             && !self.sidebar_view_trigger_focus.is_focused(window)

@@ -14,7 +14,7 @@ pub(super) struct Host {
     shell_window: Option<gpui::AnyWindowHandle>,
     toast: Option<CaptureToast>,
     rail: popover::Popup<()>,
-    rail_input: Option<Entity<ComposerInput>>,
+    pub(super) rail_input: Option<Entity<ComposerInput>>,
     rail_added: Vec<SharedString>,
     subscriptions: Vec<Subscription>,
 }
