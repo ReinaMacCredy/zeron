@@ -28,6 +28,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.first
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -139,13 +142,15 @@ fun DocsScreen(model: AppModel, onBack: () -> Unit, onOpenRoute: (String) -> Uni
 @Composable
 fun DocScreen(model: AppModel, id: String, onBack: () -> Unit, onOpenRoute: (String) -> Unit) {
     val title = remember(id) { docsSections().flatMap { it.articles }.firstOrNull { it.id == id }?.title ?: "Docs" }
-    val state = remember(id) {
-        TranscriptState().apply {
-            following = false
-            engine.setDebugEntries(listOf(DebugEntry(id, false, docsBody(id).orEmpty(), false)), false)
-        }
-    }
+    val state = remember(id) { TranscriptState().apply { following = false } }
     DisposableEffect(state) { onDispose { state.close() } }
+    LaunchedEffect(state) {
+        snapshotFlow { state.viewport }.first { it > 0f }
+        state.engine.setDebugEntries(listOf(DebugEntry(id, false, docsBody(id).orEmpty(), false)), false)
+        snapshotFlow { state.frame?.rowCount() ?: 0u }.first { it > 0u }
+        state.following = false
+        state.offset = 0f
+    }
     var viewing by remember { mutableStateOf<ImageBitmap?>(null) }
     val uri = LocalUriHandler.current
     val actions = remember(id) {
