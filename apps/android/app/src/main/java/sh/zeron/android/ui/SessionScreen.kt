@@ -603,7 +603,7 @@ fun SessionScreen(
             onOpenImage = { ref -> scope.launch { actions.loadImage(ref)?.let { viewing = it } ?: model.toast("Couldn't load ${ref.substringAfterLast('/')}. Try again.") } },
         ) { info = false }
     }
-    if (projectActions) sh.zeron.android.ui.session.ProjectActionsSheet(extras, onOpenTerminal = { onOpenTerminal(chatId, it) }) { projectActions = false }
+    if (projectActions) sh.zeron.android.ui.session.ProjectActionsSheet(extras) { projectActions = false }
     limitFor?.let { id -> sh.zeron.android.ui.session.LimitCardSheet(extras, id, onOpenChat = { if (it != chatId) onOpenChat(it) }) { limitFor = null } }
     sidechat?.let { r -> sh.zeron.android.ui.session.SidechatSheet(extras, r.prompt, onOpenChat = onOpenSideChat) { sidechat = null } }
     if (agentsSheet) {

@@ -18,6 +18,7 @@ import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SegmentedListItem
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -50,7 +51,7 @@ import uniffi.zeron_core.RunState
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ProjectActionsSheet(extras: SessionExtras, onOpenTerminal: (terminalId: String?) -> Unit, onDismiss: () -> Unit) {
+fun ProjectActionsSheet(extras: SessionExtras, onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
     var actions by remember { mutableStateOf<ProjectActions?>(null) }
     var loaded by remember { mutableStateOf(false) }
@@ -58,6 +59,7 @@ fun ProjectActionsSheet(extras: SessionExtras, onOpenTerminal: (terminalId: Stri
     val tabs = remember { mutableStateMapOf<String, AgentTerminalTab>() }
     val starting = remember { mutableStateMapOf<String, Boolean>() }
     var following by remember { mutableStateOf(false) }
+    var viewing by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         try {
@@ -99,7 +101,10 @@ fun ProjectActionsSheet(extras: SessionExtras, onOpenTerminal: (terminalId: Stri
     }
 
     val items = actions?.actions.orEmpty()
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true), containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+        viewing?.let { id ->
+            return@ModalBottomSheet AgentTerminalPane(extras.handle, id, onBack = { viewing = null }, onFailure = { extras.model.toast(it) })
+        }
         LazyColumn(Modifier.fillMaxWidth().padding(horizontal = 16.dp), contentPadding = PaddingValues(bottom = 32.dp)) {
             item("title") {
                 Text("Project actions", style = MaterialTheme.typography.headlineSmallEmphasized, modifier = Modifier.padding(start = 8.dp, bottom = 12.dp))
@@ -127,7 +132,7 @@ fun ProjectActionsSheet(extras: SessionExtras, onOpenTerminal: (terminalId: Stri
                         running = starting[item.id] == true || tabs[terminal]?.state == RunState.RUNNING,
                         tab = terminal?.let { tabs[it] },
                         onRun = { run(item) },
-                        onOpen = terminal?.let { id -> { onOpenTerminal(id) } },
+                        onOpen = terminal?.let { id -> { viewing = id } },
                     )
                 }
             }
