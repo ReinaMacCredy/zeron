@@ -68,11 +68,13 @@ private fun PullsAndGit(model: AppModel, git: Boolean, history: Boolean, onBack:
     var refresh by remember { mutableIntStateOf(0) }
     var reloadDevices by remember { mutableIntStateOf(0) }
     var commit by remember { mutableStateOf<CommitOpen?>(null) }
+    val probed = remember { HashMap<String, List<PrRepository>>() }
 
     LaunchedEffect(client, reloadDevices) {
         val c = client ?: return@LaunchedEffect
         devices = c.pullRequestDevices()
-        deviceId = prefs.pickDevice(devices) ?: workspace?.projects?.firstOrNull { it.gitDetected }?.deviceId
+        val found = prefs.pickBoardDevice(c, devices)?.also { (id, repos) -> probed[id] = repos }
+        deviceId = found?.first ?: prefs.pickDevice(devices) ?: workspace?.projects?.firstOrNull { it.gitDetected }?.deviceId
     }
     LaunchedEffect(client, deviceId) {
         repositories = null
@@ -80,7 +82,7 @@ private fun PullsAndGit(model: AppModel, git: Boolean, history: Boolean, onBack:
         val c = client ?: return@LaunchedEffect
         val id = deviceId ?: return@LaunchedEffect
         prefs.device = id
-        val repos = c.pullRequestRepositories(id)
+        val repos = probed.remove(id) ?: c.pullRequestRepositories(id)
         if (deviceId != id) return@LaunchedEffect
         repositories = repos
         repository = prefs.pickRepository(repos)

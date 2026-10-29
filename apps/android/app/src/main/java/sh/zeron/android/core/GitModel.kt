@@ -32,6 +32,14 @@ class GitModel(context: Context) {
         return (devices.firstOrNull { it.id == saved && it.online } ?: devices.firstOrNull { it.online } ?: devices.firstOrNull())?.id
     }
 
+    suspend fun pickBoardDevice(client: CoreClient, devices: List<PrDevice>): Pair<String, List<PrRepository>>? {
+        for (d in devices.filter { it.online }.sortedBy { it.id != device }) {
+            val repositories = client.pullRequestRepositories(d.id)
+            if (repositories.isNotEmpty()) return d.id to repositories
+        }
+        return null
+    }
+
     fun pickRepository(repositories: List<PrRepository>): String? =
         (repositories.firstOrNull { it.repository == repository } ?: repositories.firstOrNull())?.repository
 
