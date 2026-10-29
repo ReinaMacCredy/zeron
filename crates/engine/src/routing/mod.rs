@@ -244,12 +244,11 @@ pub(crate) mod tests {
             reasoning: Some(ReasoningLevel::High),
             model_options: Default::default(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-            permission_mode: zeron_proto::PermissionMode::Ask,
             instructions: String::new(),
             profile_id: None,
             instance_id: None,
             disabled_tools: Vec::new(),
-            access: zeron_proto::PermissionMode::Ask.access(),
+            access: zeron_proto::AccessMode::Supervised,
             plan: false,
         }
     }

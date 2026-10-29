@@ -34,7 +34,7 @@ use zeron_harness::{
 };
 use zeron_proto::tools::ToolGroup;
 use zeron_proto::{
-    AgentEvent, AnchorRole, Chat, Compaction, DoneStatus, HarnessId, PermissionMode, RunRequest,
+    AccessMode, AgentEvent, AnchorRole, Chat, Compaction, DoneStatus, HarnessId, RunRequest,
     Session, SessionBranch, SessionStatus, ToolCall, ToolDiff, UserInputAnswer, UserInputQuestion,
 };
 
@@ -201,7 +201,7 @@ impl RuntimeConfig {
     }
 
     fn same_launch(&self, request: &RunRequest) -> bool {
-        self.request.permission_mode == request.permission_mode
+        self.request.access == request.access
             && self.request.computer_control == request.computer_control
     }
 }
@@ -362,7 +362,7 @@ impl QueuedCompaction {
 pub struct ComputerRun {
     pub run_id: String,
     pub turn_id: Option<String>,
-    pub permission_mode: PermissionMode,
+    pub access: AccessMode,
     pub run_computer_control: bool,
     pub turn_computer_control: bool,
     pub turn_desktop_revoked: bool,
@@ -1689,7 +1689,6 @@ impl SessionsEngine {
         // run spawns, creating a new chat's scratch folder.
         request.cwd = crate::repos::resolve_chat_cwd(&request.cwd, &self.inner.scratch_root())
             .map_err(EngineError::Other)?;
-        request.access = request.permission_mode.access();
         self.inner
             .apply_native_policy(chat_id, harness_id, &mut request.disabled_tools);
         // Native-only catalog entries have no portable file fallback. Reject
@@ -3789,9 +3788,8 @@ impl SessionsEngine {
                     cwd: crate::repos::expand_home(&cwd)
                         .map_err(|error| EngineError::Other(error.to_string()))?,
                     sandbox: config.sandbox,
-                    permission_mode: config.permission_mode,
                     auto_approve: false,
-                    access: config.permission_mode.access(),
+                    access: config.access,
                     plan: config.plan,
                     resume: None,
                     attachments: Vec::new(),
@@ -3948,7 +3946,7 @@ impl SessionsEngine {
         Some(ComputerRun {
             run_id: run.run_id.clone(),
             turn_id: turn.as_ref().map(|turn| turn.id.clone()),
-            permission_mode: run.runtime_config.request.permission_mode,
+            access: run.runtime_config.request.access,
             run_computer_control: run.runtime_config.request.computer_control,
             turn_computer_control: turn.as_ref().is_some_and(|turn| turn.computer_control),
             turn_desktop_revoked: turn.as_ref().is_some_and(|turn| turn.desktop_revoked),
@@ -4004,7 +4002,7 @@ impl SessionsEngine {
         &self,
         chat_id: &str,
         turn_id: Option<&str>,
-    ) -> Result<Option<PermissionMode>, String> {
+    ) -> Result<Option<AccessMode>, String> {
         if let Some(workspace) = self.inner.workspace() {
             match workspace.chat(chat_id) {
                 Ok(Some(chat)) if !chat.archived => {}
@@ -4017,7 +4015,7 @@ impl SessionsEngine {
             .ok_or_else(|| "The turn that made this call has ended.".to_owned())?;
         match run.computer.turn() {
             Some(turn) if turn_id.is_none_or(|id| id == turn.id) => {
-                Ok(Some(run.runtime_config.request.permission_mode))
+                Ok(Some(run.runtime_config.request.access))
             }
             _ => Err("The turn that made this call has ended.".into()),
         }
@@ -4369,9 +4367,8 @@ impl SessionsEngine {
                     model_options: Default::default(),
                     cwd,
                     sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-                    permission_mode: zeron_proto::PermissionMode::Full,
                     auto_approve: false,
-                    access: zeron_proto::PermissionMode::Full.access(),
+                    access: zeron_proto::AccessMode::FullAccess,
                     plan: false,
                     attachments: Vec::new(),
                     resume: None,
@@ -9897,9 +9894,8 @@ mod tests {
             model_options: serde_json::Map::new(),
             cwd: "/tmp".into(),
             sandbox: SandboxLevel::WorkspaceWrite,
-            permission_mode: zeron_proto::PermissionMode::Full,
             auto_approve: true,
-            access: Default::default(),
+            access: zeron_proto::AccessMode::FullAccess,
             plan: false,
             resume: None,
             attachments: Vec::new(),
@@ -10192,9 +10188,9 @@ mod tests {
         assert!(config.can_route(HarnessId::Grok, None, &follow_up));
 
         let mut launch = follow_up.clone();
-        launch.permission_mode = PermissionMode::Ask;
+        launch.access = AccessMode::Supervised;
         assert_eq!(config.route(HarnessId::Grok, None, &launch, "", None), None);
-        launch.permission_mode = follow_up.permission_mode;
+        launch.access = follow_up.access;
         launch.computer_control = !follow_up.computer_control;
         assert_eq!(config.route(HarnessId::Grok, None, &launch, "", None), None);
 
@@ -10248,7 +10244,7 @@ mod tests {
             None,
             "a profile's instructions ride --append-system-prompt, read only at launch"
         );
-        effort.permission_mode = PermissionMode::Ask;
+        effort.access = AccessMode::Supervised;
         assert_eq!(
             config.route(HarnessId::ClaudeCode, None, &effort, "", None),
             None

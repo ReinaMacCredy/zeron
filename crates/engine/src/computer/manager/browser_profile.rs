@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use futures::FutureExt;
 use tokio_util::sync::CancellationToken;
-use zeron_proto::PermissionMode;
+use zeron_proto::AccessMode;
 use zeron_proto::computer::{ComputerAllowedApp, ComputerConsentApp};
 
 use super::{
@@ -69,7 +69,7 @@ impl ComputerManager {
         let request = ApprovalRequest {
             chat_id: caller.chat_id.clone(),
             turn_id: caller.turn_id.clone(),
-            mode: PermissionMode::Ask,
+            mode: AccessMode::Supervised,
             signal,
             publish,
             app: Some(AppGrant {

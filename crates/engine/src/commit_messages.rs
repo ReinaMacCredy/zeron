@@ -539,7 +539,7 @@ pub(crate) mod tests {
             "scratch directory is cleaned up"
         );
         assert_eq!(sent.sandbox, SandboxLevel::ReadOnly);
-        assert_eq!(sent.permission_mode, zeron_proto::PermissionMode::Ask);
+        assert_eq!(sent.access, zeron_proto::AccessMode::Supervised);
         assert!(!sent.auto_approve && sent.resume.is_none() && sent.mcp.is_none());
         assert_eq!(sent.harness, Some(HarnessId::ClaudeCode));
         assert_eq!(sent.model.as_deref(), Some("claude-opus"));

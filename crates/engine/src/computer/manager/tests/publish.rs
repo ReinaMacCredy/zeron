@@ -851,7 +851,7 @@ async fn settles_a_pending_approval_prompt_when_control_is_switched_off_mid_turn
                 .request(ApprovalRequest {
                     chat_id: "owner".into(),
                     turn_id: Some("turn-1".into()),
-                    mode: PermissionMode::Ask,
+                    mode: AccessMode::Supervised,
                     signal: CancellationToken::new(),
                     publish: Arc::new(|_, _| async { Ok(()) }.boxed()),
                     app: None,

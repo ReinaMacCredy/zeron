@@ -30,7 +30,7 @@ fn page(f: &Fixture, buttons: usize) {
 fn tools(f: &Fixture) -> (Arc<ComputerManager>, Arc<ComputerTools>) {
     let mut options = ComputerManagerOptions::new(f.backend.clone());
     options.seams = Arc::new(Approvals {
-        mode: std::sync::Mutex::new(Some(zeron_proto::PermissionMode::Full)),
+        mode: std::sync::Mutex::new(Some(zeron_proto::AccessMode::FullAccess)),
         decide: std::sync::Mutex::new(None),
         gate: options.approval_gate.clone(),
         cards: std::sync::Mutex::default(),

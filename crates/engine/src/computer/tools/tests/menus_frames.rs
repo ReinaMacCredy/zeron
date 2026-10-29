@@ -53,7 +53,7 @@ impl Unavailable {
         let backend = Arc::new(UnavailableComputerBackend::new(message, Default::default()));
         let mut options = ComputerManagerOptions::new(backend);
         options.seams = Arc::new(Approvals {
-            mode: Mutex::new(Some(PermissionMode::Full)),
+            mode: Mutex::new(Some(AccessMode::FullAccess)),
             decide: Mutex::new(None),
             gate: options.approval_gate.clone(),
             cards: Mutex::default(),

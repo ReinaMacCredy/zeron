@@ -39,7 +39,7 @@ impl Browser {
 
 fn build(
     browser: FakeComputerOptIn<FakeBrowserHandler>,
-    mode: Option<PermissionMode>,
+    mode: Option<AccessMode>,
     families: Option<Vec<Arc<dyn ComputerToolFamily>>>,
 ) -> Browser {
     build_with(
@@ -54,7 +54,7 @@ fn build(
 
 fn build_with(
     options: crate::computer::fake_backend::FakeComputerBackendOptions,
-    mode: Option<PermissionMode>,
+    mode: Option<AccessMode>,
     families: Option<Vec<Arc<dyn ComputerToolFamily>>>,
 ) -> Browser {
     let dir = tempfile::tempdir().unwrap();
@@ -88,13 +88,17 @@ fn build_with(
 }
 
 fn built_in() -> Browser {
-    build(FakeComputerOptIn::BuiltIn, Some(PermissionMode::Full), None)
+    build(
+        FakeComputerOptIn::BuiltIn,
+        Some(AccessMode::FullAccess),
+        None,
+    )
 }
 
 fn replying(
     reply: impl Fn(&ComputerBrowserCall) -> ComputerBrowserCallResult + Send + Sync + 'static,
 ) -> Browser {
-    build(handler(reply), Some(PermissionMode::Full), None)
+    build(handler(reply), Some(AccessMode::FullAccess), None)
 }
 
 fn handler(
@@ -441,7 +445,7 @@ async fn allows_an_explicitly_requested_visible_browser_and_checks_the_next_call
 #[tokio::test]
 async fn refuses_when_visible_use_authorization_changes_while_ordinary_approval_is_pending() {
     let Browser { h, .. } = built_in();
-    *h.approvals.mode.lock().unwrap() = Some(PermissionMode::Ask);
+    *h.approvals.mode.lock().unwrap() = Some(AccessMode::Supervised);
     let pending = h.call(
         "computer_browser_prepare",
         json!({ "allow_launch": true, "windowed": true, "profile": { "mode": "isolated_new" } }),
@@ -505,7 +509,7 @@ async fn refuses_a_visible_launch_when_its_authorization_changes_in_the_browser_
     });
     let Browser { h, .. } = build(
         FakeComputerOptIn::Handler(browser),
-        Some(PermissionMode::Full),
+        Some(AccessMode::FullAccess),
         None,
     );
     let first = h.call(
@@ -955,7 +959,7 @@ async fn bounds_the_download_destination_to_the_workspace() {
 async fn reports_no_browser_route_on_a_desktop_only_backend() {
     let Browser { h, .. } = build(
         FakeComputerOptIn::Off,
-        Some(PermissionMode::Full),
+        Some(AccessMode::FullAccess),
         Some(vec![Arc::new(ComputerBrowserTools::default())]),
     );
     assert!(!h.manager.supports_browser());
@@ -1417,7 +1421,7 @@ fn profile_driver(call: &ComputerBrowserCall) -> ComputerBrowserCallResult {
     }
 }
 
-fn profile_browsers(mode: PermissionMode) -> (Browser, Arc<Mutex<Vec<ComputerBrowserCall>>>) {
+fn profile_browsers(mode: AccessMode) -> (Browser, Arc<Mutex<Vec<ComputerBrowserCall>>>) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let sink = seen.clone();
     let browser = build_with(
@@ -1456,7 +1460,7 @@ fn closed_tabs(seen: &Arc<Mutex<Vec<ComputerBrowserCall>>>) -> Vec<String> {
 
 #[tokio::test]
 async fn asks_one_profile_card_per_browser_and_reuses_it_for_the_turn() {
-    let (Browser { h, .. }, seen) = profile_browsers(PermissionMode::Ask);
+    let (Browser { h, .. }, seen) = profile_browsers(AccessMode::Supervised);
     h.decide(ApprovalDecision::Accept);
     let prepared = h.call("computer_browser_prepare", attach(CHROME_PID)).await;
     assert!(!prepared.is_error, "{prepared:?}");
@@ -1531,7 +1535,7 @@ async fn asks_one_profile_card_per_browser_and_reuses_it_for_the_turn() {
 
 #[tokio::test]
 async fn a_denied_profile_card_attaches_nothing() {
-    let (Browser { h, .. }, seen) = profile_browsers(PermissionMode::Ask);
+    let (Browser { h, .. }, seen) = profile_browsers(AccessMode::Supervised);
     h.decide(ApprovalDecision::Decline);
     let result = h.call("computer_browser_prepare", attach(CHROME_PID)).await;
     assert!(result.is_error);
@@ -1543,7 +1547,7 @@ async fn a_denied_profile_card_attaches_nothing() {
 
 #[tokio::test]
 async fn always_allow_records_the_profile_apart_from_the_browser_app() {
-    let (Browser { h, .. }, _) = profile_browsers(PermissionMode::Ask);
+    let (Browser { h, .. }, _) = profile_browsers(AccessMode::Supervised);
     h.decide(ApprovalDecision::AcceptForSession);
     let result = h.call("computer_browser_prepare", attach(CHROME_PID)).await;
     assert!(!result.is_error, "{result:?}");
@@ -1560,7 +1564,7 @@ async fn always_allow_records_the_profile_apart_from_the_browser_app() {
 
 #[tokio::test]
 async fn the_profile_card_shows_in_auto_and_full_mode_too() {
-    for mode in [PermissionMode::Auto, PermissionMode::Full] {
+    for mode in [AccessMode::AutoAcceptEdits, AccessMode::FullAccess] {
         let (Browser { h, .. }, seen) = profile_browsers(mode);
         h.decide(ApprovalDecision::Accept);
         let result = h.call("computer_browser_prepare", attach(CHROME_PID)).await;
@@ -1586,7 +1590,7 @@ async fn never_launches_relaunches_or_guesses_the_users_browser() {
             "browser_strategy_unsupported",
         ),
     ] {
-        let (Browser { h, .. }, seen) = profile_browsers(PermissionMode::Full);
+        let (Browser { h, .. }, seen) = profile_browsers(AccessMode::FullAccess);
         let mut arguments = attach(CHROME_PID);
         for (key, value) in extra.as_object().unwrap() {
             if value.is_null() {
@@ -1611,7 +1615,7 @@ async fn never_launches_relaunches_or_guesses_the_users_browser() {
 
 #[tokio::test]
 async fn closes_only_unkept_agent_tabs_at_turn_end_and_never_a_user_tab() {
-    let (Browser { h, .. }, seen) = profile_browsers(PermissionMode::Full);
+    let (Browser { h, .. }, seen) = profile_browsers(AccessMode::FullAccess);
     h.decide(ApprovalDecision::Accept);
     h.call("computer_browser_prepare", attach(CHROME_PID)).await;
     h.call(
@@ -1688,7 +1692,7 @@ async fn closes_only_unkept_agent_tabs_at_turn_end_and_never_a_user_tab() {
 
 #[tokio::test]
 async fn an_opened_tab_makes_an_omitted_tab_id_ambiguous_instead_of_defaulting_to_the_users_tab() {
-    let (Browser { h, .. }, seen) = profile_browsers(PermissionMode::Full);
+    let (Browser { h, .. }, seen) = profile_browsers(AccessMode::FullAccess);
     h.decide(ApprovalDecision::Accept);
     h.call("computer_browser_prepare", attach(CHROME_PID)).await;
     h.call(
@@ -1719,7 +1723,7 @@ async fn an_opened_tab_makes_an_omitted_tab_id_ambiguous_instead_of_defaulting_t
 
 #[tokio::test]
 async fn rejects_keep_outside_a_new_tab_or_a_tab_snapshot() {
-    let (Browser { h, .. }, seen) = profile_browsers(PermissionMode::Full);
+    let (Browser { h, .. }, seen) = profile_browsers(AccessMode::FullAccess);
     h.decide(ApprovalDecision::Accept);
     let result = h
         .call(
@@ -1741,7 +1745,7 @@ async fn rejects_keep_outside_a_new_tab_or_a_tab_snapshot() {
 
 #[tokio::test]
 async fn the_agent_closes_a_tab_it_opened_but_never_the_users_tab() {
-    let (Browser { h, .. }, seen) = profile_browsers(PermissionMode::Full);
+    let (Browser { h, .. }, seen) = profile_browsers(AccessMode::FullAccess);
     h.decide(ApprovalDecision::Accept);
     h.call("computer_browser_prepare", attach(CHROME_PID)).await;
     h.call(

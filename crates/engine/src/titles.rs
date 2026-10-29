@@ -296,9 +296,8 @@ pub(crate) async fn run_one_shot(
             model_options: serde_json::Map::new(),
             cwd: scratch.path().to_string_lossy().into_owned(),
             sandbox: SandboxLevel::ReadOnly,
-            permission_mode: zeron_proto::PermissionMode::Ask,
             auto_approve: false,
-            access: zeron_proto::PermissionMode::Ask.access(),
+            access: zeron_proto::AccessMode::Supervised,
             plan: false,
             attachments: Vec::new(),
             resume: None,
@@ -550,9 +549,8 @@ mod tests {
             model_options: Default::default(),
             cwd: String::new(),
             sandbox: SandboxLevel::ReadOnly,
-            permission_mode: zeron_proto::PermissionMode::Ask,
             auto_approve: false,
-            access: Default::default(),
+            access: zeron_proto::AccessMode::Supervised,
             plan: false,
             resume: None,
             attachments: vec![],
@@ -666,7 +664,7 @@ mod tests {
             assert_eq!(request.model.as_deref(), Some("chosen-title-model"));
             assert_eq!(request.sandbox, SandboxLevel::ReadOnly);
             assert!(!request.auto_approve);
-            assert_eq!(request.permission_mode, zeron_proto::PermissionMode::Ask);
+            assert_eq!(request.access, zeron_proto::AccessMode::Supervised);
             assert!(request.resume.is_none());
             assert_ne!(std::path::Path::new(&request.cwd), dir.path());
             assert!(

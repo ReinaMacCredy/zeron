@@ -146,7 +146,7 @@ async fn a_started_task_opens_a_linked_chat_whose_first_turn_is_the_task() {
     assert_eq!(config.model.as_deref(), Some("rec-model"));
     assert_eq!(config.reasoning, Some(ReasoningLevel::Low));
     assert_eq!(config.model_options["fastMode"], "on");
-    assert_eq!(config.permission_mode, zeron_proto::PermissionMode::Auto);
+    assert_eq!(config.access, zeron_proto::AccessMode::AutoAcceptEdits);
 
     mutate(start).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;

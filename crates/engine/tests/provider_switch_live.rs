@@ -32,7 +32,6 @@ fn request(harness: HarnessId, prompt: &str, cwd: &str) -> RunRequest {
         attachments: vec![],
         worktree: None,
         env: Default::default(),
-        permission_mode: Default::default(),
         branch: None,
         forked_at: None,
         computer_control: false,

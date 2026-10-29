@@ -607,7 +607,7 @@ mod tests {
     use futures::FutureExt;
     use tokio::sync::oneshot;
     use tokio_util::sync::CancellationToken;
-    use zeron_proto::PermissionMode;
+    use zeron_proto::AccessMode;
     use zeron_proto::computer::{ComputerHostMethod, CuaReply};
 
     use super::*;
@@ -655,7 +655,7 @@ mod tests {
         ApprovalRequest {
             chat_id: "chat".into(),
             turn_id: Some("turn".into()),
-            mode: PermissionMode::Ask,
+            mode: AccessMode::Supervised,
             signal: CancellationToken::new(),
             publish: Arc::new(move |request_id, decision| {
                 if decision.is_none() {

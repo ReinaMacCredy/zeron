@@ -933,7 +933,7 @@ mod foreground_guard {
     use futures::FutureExt;
     use serde_json::json;
     use tokio_util::sync::CancellationToken;
-    use zeron_proto::PermissionMode;
+    use zeron_proto::AccessMode;
 
     use super::super::*;
     use crate::computer::approval_gate::{ApprovalDecision, ApprovalRequest, ComputerApprovalGate};
@@ -1078,7 +1078,7 @@ mod foreground_guard {
                 gate.request(ApprovalRequest {
                     chat_id: thread_id.to_owned(),
                     turn_id: None,
-                    mode: PermissionMode::Ask,
+                    mode: AccessMode::Supervised,
                     signal: CancellationToken::new(),
                     publish,
                     app: None,

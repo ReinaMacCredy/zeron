@@ -6,7 +6,7 @@ use zeron_proto::computer::{
     COMPUTER_MESSAGE_MAX_LENGTH, ComputerConsentApp, ComputerConsentScope, ComputerPendingKind,
     ComputerPendingRequest,
 };
-use zeron_proto::{PermissionMode, UserInputAnswer, UserInputKind, UserInputQuestion};
+use zeron_proto::{AccessMode, UserInputAnswer, UserInputKind, UserInputQuestion};
 
 use super::approval_gate::{ApprovalDecision, ComputerApprovalGate};
 use super::backend::ComputerError;
@@ -202,7 +202,7 @@ impl ComputerManagerSeams for EngineComputerSeams {
         &self,
         chat_id: &str,
         turn_id: Option<&str>,
-    ) -> Result<Option<PermissionMode>, ComputerError> {
+    ) -> Result<Option<AccessMode>, ComputerError> {
         let Some(sessions) = self.sessions() else {
             return Ok(None);
         };

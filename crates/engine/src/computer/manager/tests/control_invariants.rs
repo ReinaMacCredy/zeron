@@ -192,7 +192,7 @@ async fn rechecks_the_original_turn_after_waiting_for_the_desktop() {
         backend,
         seams,
     } = settled(Scripted::default_fake());
-    *seams.mode.lock().unwrap() = Some(PermissionMode::Full);
+    *seams.mode.lock().unwrap() = Some(AccessMode::FullAccess);
     let entered = deferred();
     let release = deferred();
     let first = {
