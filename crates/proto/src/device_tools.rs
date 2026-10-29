@@ -37,25 +37,36 @@ const DEVICE_TOOLS: [(&str, DeviceTool, [&str; 4]); 4] = [
 ];
 
 pub fn device_call(call: &ToolCall) -> Option<DeviceTool> {
-    let found = |matches: &dyn Fn(&str) -> bool| {
+    let named = |name: &str, input: &Option<serde_json::Value>| {
+        let label = match input.as_ref().and_then(|input| input["action"].as_str()) {
+            Some(action) if name == "device" => format!("device_{action}"),
+            _ => name.to_owned(),
+        };
         DEVICE_TOOLS
             .iter()
-            .find(|(name, _, _)| matches(name))
+            .find(|(known, _, _)| *known == label)
             .map(|(_, tool, _)| *tool)
     };
     match call {
-        ToolCall::Mcp { server, tool, .. } if server == "zeron" => found(&|name| tool == name),
-        ToolCall::Unknown { name: raw, .. } => {
+        ToolCall::Mcp {
+            server,
+            tool,
+            input,
+        } if server == "zeron" => named(tool, input),
+        ToolCall::Unknown { name: raw, input } => {
             let normalized = raw
                 .trim()
                 .to_lowercase()
                 .replace(|ch: char| !ch.is_ascii_alphanumeric(), "_");
-            found(&|name| {
-                normalized
-                    .strip_suffix(name)
-                    .map(|head| head.trim_end_matches('_'))
-                    .is_some_and(|head| head == "zeron" || head.ends_with("_zeron"))
-            })
+            std::iter::once("device")
+                .chain(DEVICE_TOOLS.iter().map(|(name, _, _)| *name))
+                .find(|name| {
+                    normalized
+                        .strip_suffix(name)
+                        .map(|head| head.trim_end_matches('_'))
+                        .is_some_and(|head| head == "zeron" || head.ends_with("_zeron"))
+                })
+                .and_then(|name| named(name, input))
         }
         _ => None,
     }
@@ -106,6 +117,23 @@ mod tests {
             input: None,
         };
         assert_eq!(device_call(&open), Some(DeviceTool::Open));
+        let action = |tool: &str, action: &str| ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: tool.into(),
+            input: Some(serde_json::json!({ "action": action })),
+        };
+        assert_eq!(
+            device_call(&action("device", "close")),
+            Some(DeviceTool::Close)
+        );
+        assert_eq!(device_call(&action("device", "boot")), None);
+        assert_eq!(
+            device_call(&ToolCall::Unknown {
+                name: "mcp__zeron__device".into(),
+                input: Some(serde_json::json!({ "action": "screenshot" })),
+            }),
+            Some(DeviceTool::Screenshot)
+        );
         assert_eq!(
             device_call_label(DeviceTool::Open, true, false),
             "Opened a device in the Device panel"

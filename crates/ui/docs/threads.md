@@ -52,9 +52,11 @@ In the transcript, the message is not one of your bubbles. It starts with a row 
 ## Stop, rename, archive and settle
 
 - `interrupt_thread` stops another chat's running turn, as its stop button does. An agent never stops its own chat this way.
-- `set_thread_title` renames a chat, the agent's own included.
-- `set_thread_archived` archives or unarchives one chat or several. A working chat cannot be archived, and archiving one never archives others.
-- `set_thread_settled` moves chats to the **Settled** shelf of the sidebar's Inbox view, as **Settle** does, or brings them back. A chat that is working or waiting on a question cannot be settled, and a settled chat comes back with its next message. See [Sessions in the sidebar](zeron://docs/sessions-sidebar).
+`set_thread` does one of three things per call, each with its own switch in Settings > Tools:
+
+- With a title (`set_thread_title`), it renames a chat, the agent's own included.
+- With archived (`set_thread_archived`), it archives or unarchives one chat or several. A working chat cannot be archived, and archiving one never archives others.
+- With settled (`set_thread_settled`), it moves chats to the **Settled** shelf of the sidebar's Inbox view, as **Settle** does, or brings them back. A chat that is working or waiting on a question cannot be settled, and a settled chat comes back with its next message. See [Sessions in the sidebar](zeron://docs/sessions-sidebar).
 
 ## Point an agent at a chat
 

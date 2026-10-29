@@ -148,16 +148,8 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
         tools: &[
             tool("list_projects", "List the projects on this device."),
             tool(
-                "list_harnesses",
-                "List the agent harnesses on this device and whether each is available.",
-            ),
-            tool(
-                "list_models",
-                "List the models a harness offers, with reasoning levels.",
-            ),
-            tool(
                 "orchestrator_capabilities",
-                "Harnesses and current models from the same catalog as the composer.",
+                "Harnesses, their models and availability, from the same catalog as the composer.",
             ),
             tool(
                 "delegate_task",
@@ -341,7 +333,9 @@ impl ToolSettings {
             .iter()
             .filter_map(|name| name.strip_prefix(ZERON_TOOL_PREFIX))
         {
-            settings.set_tool(name, false);
+            for label in action_labels(name).unwrap_or(&[]).iter().chain([&name]) {
+                settings.set_tool(label, false);
+            }
         }
         settings
     }
@@ -352,6 +346,51 @@ impl ToolSettings {
 }
 
 pub const ZERON_TOOL_PREFIX: &str = "mcp__zeron__";
+
+/// Tools that fold several former tools into actions keep a switch per action, under the former names.
+pub const ACTION_TOOLS: [(&str, &[&str]); 2] = [
+    (
+        "device",
+        &[
+            "device_list",
+            "device_open",
+            "device_screenshot",
+            "device_close",
+        ],
+    ),
+    (
+        "set_thread",
+        &[
+            "set_thread_title",
+            "set_thread_archived",
+            "set_thread_settled",
+        ],
+    ),
+];
+
+pub fn action_labels(tool: &str) -> Option<&'static [&'static str]> {
+    ACTION_TOOLS
+        .iter()
+        .find(|(name, _)| *name == tool)
+        .map(|(_, labels)| *labels)
+}
+
+pub fn action_label(tool: &str, args: &serde_json::Value) -> Option<&'static str> {
+    let wanted = match tool {
+        "device" => format!("device_{}", args["action"].as_str()?),
+        "set_thread" => format!(
+            "set_thread_{}",
+            ["title", "archived", "settled"]
+                .into_iter()
+                .find(|field| !args[*field].is_null())?
+        ),
+        _ => return None,
+    };
+    action_labels(tool)?
+        .iter()
+        .copied()
+        .find(|label| *label == wanted)
+}
 
 pub fn mcp_server_rule(server: &str) -> String {
     let name: String = server
@@ -440,9 +479,12 @@ pub fn unlisted_rules(disabled: &[String], inventory: &HarnessToolInventory) -> 
     disabled
         .iter()
         .filter(|rule| match rule.strip_prefix(ZERON_TOOL_PREFIX) {
-            Some(name) => !TOOL_GROUPS
-                .iter()
-                .any(|info| info.tools().iter().any(|tool| tool.name == name)),
+            Some(name) => {
+                action_labels(name).is_none()
+                    && !TOOL_GROUPS
+                        .iter()
+                        .any(|info| info.tools().iter().any(|tool| tool.name == name))
+            }
             None => {
                 !inventory.builtin.iter().any(|g| g.tools.contains(rule))
                     && !inventory.mcp_servers.iter().any(|s| &s.rule == *rule)
@@ -509,6 +551,7 @@ mod tests {
         disabled.push("mcp__gone".into());
         disabled.push("mcp__zeron__retired_tool".into());
         disabled.push("mcp__zeron__terminal".into());
+        disabled.push("mcp__zeron__device".into());
         let inventory = HarnessToolInventory {
             builtin: vec![web.clone()],
             mcp_servers: vec![xcode],
@@ -525,7 +568,8 @@ mod tests {
                 "mcp__xcode",
                 "mcp__gone",
                 "mcp__zeron__retired_tool",
-                "mcp__zeron__terminal"
+                "mcp__zeron__terminal",
+                "mcp__zeron__device"
             ])
         );
     }
@@ -585,6 +629,40 @@ mod tests {
         assert!(!group_live(ToolGroup::Computer, &disabled));
         assert!(group_live(ToolGroup::Threads, &disabled));
         assert_eq!(disabled.len(), 4 + ZERON_COMPUTER_TOOL_NAMES.len());
+    }
+
+    #[test]
+    fn an_action_tool_answers_to_its_actions_switches() {
+        let call = |tool: &str, args: serde_json::Value| action_label(tool, &args);
+        assert_eq!(
+            call("device", serde_json::json!({ "action": "close" })),
+            Some("device_close")
+        );
+        assert_eq!(
+            call("device", serde_json::json!({ "action": "boot" })),
+            None
+        );
+        assert_eq!(
+            call(
+                "set_thread",
+                serde_json::json!({ "threadIds": ["a"], "settled": true })
+            ),
+            Some("set_thread_settled")
+        );
+        assert_eq!(
+            call("terminal", serde_json::json!({ "action": "list" })),
+            None
+        );
+        for (_, labels) in ACTION_TOOLS {
+            for label in labels {
+                assert!(
+                    TOOL_GROUPS
+                        .iter()
+                        .any(|group| group.tools().iter().any(|tool| tool.name == *label)),
+                    "{label} keeps its Settings > Tools switch"
+                );
+            }
+        }
     }
 
     #[test]

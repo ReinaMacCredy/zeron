@@ -120,6 +120,9 @@ text = "A quieter look: neutral inline code, lighter icons, sidebar rows with br
 [[entry.improvements]]
 text = "New chat asks \"What should we build in\" your project, with the machine and permissions under the composer; a chat shows its permissions only when they are not Full access, and the model picker has a Permissions row."
 
+[[entry.improvements]]
+text = "Zeron's tools take about half the agent context they did: 31 tools instead of 38, shorter descriptions, and long references behind the docs tool, about 9K tokens of tool text instead of 17K."
+
 [[entry]]
 version = "0.2.120"
 date = "Oct 24"

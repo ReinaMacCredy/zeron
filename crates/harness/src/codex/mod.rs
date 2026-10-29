@@ -2759,7 +2759,7 @@ const COMPETING_BUNDLED_PLUGINS: [&str; 4] = [
 ];
 
 // Their destructiveHint makes Codex ask on every call, and Zeron refuses elicitations it does not route.
-const PREAPPROVED_ZERON_TOOLS: [&str; 1] = ["device_close"];
+const PREAPPROVED_ZERON_TOOLS: [&str; 1] = ["device"];
 // Driving a Dev bundle can click its Approve buttons, so only a Full chat skips the ask.
 const UI_DRIVE_TOOL: &str = "ui_driver_drive";
 
@@ -3879,7 +3879,7 @@ mod tests {
                 .clone()
         };
         for params in [&on, &off, &auto, &full] {
-            assert_eq!(approval(params, "device_close"), "approve");
+            assert_eq!(approval(params, "device"), "approve");
         }
         for params in [&on, &off, &auto] {
             assert!(approval(params, "ui_driver_drive").is_null());

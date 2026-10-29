@@ -11,14 +11,14 @@ const MAX_QUERY_CHARS: usize = 200;
 pub fn tool() -> Value {
     json!({
         "name": TOOL,
-        "description": "Read Zeron's own documentation: the in-app Docs shipped with this build. Use it whenever the person asks how something in Zeron itself works (a feature, a page, a setting, a keyboard shortcut, a zeron tool) and answer from the article instead of from memory. `search` with a few words returns the matching article ids, each with a short snippet; `read` with an `id` returns that article's markdown; `list` returns every article by section with its blurb; `whatsNew` returns the release notes newest first, or one release with `version`. Articles link with zeron://docs/<id> (another article) and zeron://settings/<slug> (a Settings page): quote those links so the person can open them, and read a linked article when the answer continues there.",
+        "description": "Read Zeron's own Docs and release notes, and answer how Zeron works from them, not from memory. `search` a few words for article ids with snippets; `read` an `id` for its markdown, including the tool references show_visual and ui_driver; `list` every article; `whatsNew` for release notes, or one release with `version`. Quote the zeron://docs/<id> and zeron://settings/<slug> links articles use.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "action": { "type": "string", "enum": ["list", "read", "search", "whatsNew"] },
                 "id": { "type": "string", "description": "Article id, for read." },
-                "query": { "type": "string", "maxLength": MAX_QUERY_CHARS, "description": "Words to look for, for search. An article matches when it contains every word." },
-                "version": { "type": "string", "description": "Release version such as 0.2.114, for whatsNew. Defaults to the newest releases." }
+                "query": { "type": "string", "maxLength": MAX_QUERY_CHARS, "description": "Words every matching article contains." },
+                "version": { "type": "string", "description": "Such as 0.2.114; default: the newest releases." }
             },
             "required": ["action"],
             "additionalProperties": false
@@ -44,6 +44,9 @@ fn run(args: &Value) -> Result<String, String> {
                 .as_str()
                 .ok_or("read needs an `id` from list or search")?;
             let id = id.trim().trim_start_matches("zeron://docs/");
+            if let Some(reference) = tool_reference(id) {
+                return Ok(reference);
+            }
             docs.article(id)
                 .map(|article| read(docs, article))
                 .ok_or_else(|| format!("No article `{id}`. Use search, or list for every id."))
@@ -65,10 +68,27 @@ fn run(args: &Value) -> Result<String, String> {
     }
 }
 
+const TOOL_REFERENCES: [&str; 2] = [crate::visual::TOOL, crate::ui_driver::TOOL];
+
+fn tool_reference(id: &str) -> Option<String> {
+    match id {
+        crate::visual::TOOL => Some(crate::visual::REFERENCE.to_owned()),
+        crate::ui_driver::TOOL | crate::ui_driver::DRIVE_TOOL => {
+            Some(crate::ui_driver::reference())
+        }
+        _ => None,
+    }
+}
+
 fn list(docs: &zeron_docs::Docs) -> String {
     let mut out = format!(
         "Zeron Docs, {} articles. Read one with action read and its id.\n",
         docs.articles.len()
+    );
+    let _ = writeln!(
+        out,
+        "Tool references, read by id: {}.",
+        TOOL_REFERENCES.join(", ")
     );
     for section in &docs.sections {
         let _ = write!(out, "\n## {}\n", section.title);
