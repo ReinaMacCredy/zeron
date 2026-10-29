@@ -159,9 +159,8 @@ private fun ActionRow(
 ) {
     SegmentedListItem(
         onClick = onOpen ?: {},
-        enabled = onOpen != null,
         shapes = segmentedShapes(index, count),
-        colors = ListItemDefaults.segmentedColors(containerColor = cardColor(), disabledContainerColor = cardColor()),
+        colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
         modifier = Modifier.padding(bottom = ListItemDefaults.SegmentedGap).semantics { contentDescription = item.name },
         leadingContent = { ZIcon(actionIcon(item.icon), null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) },
         supportingContent = {

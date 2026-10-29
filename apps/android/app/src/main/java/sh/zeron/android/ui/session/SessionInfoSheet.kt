@@ -84,7 +84,7 @@ fun SessionInfoSheet(
             if (sources.isNotEmpty()) {
                 header("Sources")
                 itemsIndexed(sources, key = { i, s -> "source/$i/${s.reference}" }) { i, s ->
-                    InfoRow(ZIcons.Image, s.name, i, sources.size, onClick = { onOpenImage(s.reference) })
+                    InfoRow(ZIcons.Text, s.name, i, sources.size, onClick = { onOpenImage(s.reference) })
                 }
             }
             header("Usage")
@@ -126,9 +126,8 @@ private fun InfoRow(
 ) {
     SegmentedListItem(
         onClick = onClick ?: {},
-        enabled = onClick != null,
         shapes = segmentedShapes(index, count),
-        colors = ListItemDefaults.segmentedColors(containerColor = cardColor(), disabledContainerColor = cardColor()),
+        colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
         modifier = Modifier.padding(bottom = ListItemDefaults.SegmentedGap),
         leadingContent = { ZIcon(icon, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) },
         trailingContent = trailing,
