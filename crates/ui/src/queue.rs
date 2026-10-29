@@ -639,6 +639,25 @@ impl Composer {
             .map(SharedString::from)
         };
 
+        let compaction_wait: Option<SharedString> = {
+            let state = self.state.read(cx);
+            state.chat_compacting(chat_id).then(|| {
+                match compaction_secs_left(&state.transcript, chrono::Utc::now().timestamp_millis())
+                {
+                    Some(left) => format!(
+                        "Sends after compaction · {}:{:02} left",
+                        left / 60,
+                        left % 60
+                    ),
+                    None => "Sends after compaction".to_string(),
+                }
+                .into()
+            })
+        };
+        if compaction_wait.is_some() {
+            motion::pulse_lease(cx.entity_id(), cx);
+        }
+
         let drag_chat = chat_id.to_string();
         let queue_marker = div()
             .id(SharedString::from(format!("{key}-drag")))
@@ -776,6 +795,15 @@ impl Composer {
                     )
                 })
                 .child(content)
+                .when_some(compaction_wait, |el, wait| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.0))
+                            .text_color(theme.text_muted)
+                            .child(wait),
+                    )
+                })
             })
             .when(being_edited, |el| {
                 el.child(
@@ -2097,9 +2125,89 @@ impl Composer {
     }
 }
 
+fn compaction_secs_left(transcript: &[zeron_doc::SessionMessageEntry], now_ms: i64) -> Option<i64> {
+    use zeron_doc::MessagePart;
+    let started = transcript
+        .iter()
+        .rev()
+        .find(|entry| entry.role != zeron_doc::MessageRole::User)
+        .filter(|entry| {
+            entry
+                .parts
+                .iter()
+                .any(|part| matches!(part, MessagePart::Classifier { .. }))
+        })?
+        .created_at;
+    let mut durations: Vec<u64> = transcript
+        .iter()
+        .flat_map(|entry| &entry.parts)
+        .filter_map(|part| match part {
+            MessagePart::Compaction { record, .. } => record.duration_ms,
+            _ => None,
+        })
+        .collect();
+    if durations.is_empty() {
+        return None;
+    }
+    durations.sort_unstable();
+    let usual = durations[durations.len() / 2] as i64;
+    let left = (usual - (now_ms - started)) / 1000;
+    (left > 0).then_some(left)
+}
+
 #[cfg(test)]
 mod tests {
     use zeron_rpc::methods;
+
+    #[test]
+    fn a_queued_send_counts_down_by_the_chats_usual_compaction() {
+        use zeron_doc::{CompactionRecord, MessagePart, MessageRole, SessionMessageEntry};
+        let entry = |role, created_at, part: MessagePart| SessionMessageEntry {
+            id: format!("e{created_at}"),
+            role,
+            parts: vec![part],
+            created_at,
+            device_id: "d".into(),
+            status: None,
+            continuation_of: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+            duration_ms: None,
+        };
+        let compaction = |ms| MessagePart::Compaction {
+            id: "c".into(),
+            record: CompactionRecord {
+                duration_ms: Some(ms),
+                ..Default::default()
+            },
+        };
+        let decision = MessagePart::Classifier {
+            id: "k".into(),
+            record: Default::default(),
+        };
+        let mut transcript = vec![
+            entry(MessageRole::System, 1, compaction(40_000)),
+            entry(MessageRole::System, 2, compaction(53_000)),
+            entry(MessageRole::System, 3, compaction(90_000)),
+            entry(MessageRole::System, 100_000, decision),
+        ];
+        assert_eq!(super::compaction_secs_left(&transcript, 130_000), Some(23));
+        assert_eq!(super::compaction_secs_left(&transcript, 160_000), None);
+        transcript.push(entry(
+            MessageRole::Assistant,
+            120_000,
+            MessagePart::Text {
+                id: "t".into(),
+                text: "hi".into(),
+            },
+        ));
+        assert_eq!(
+            super::compaction_secs_left(&transcript, 130_000),
+            None,
+            "no decision under way"
+        );
+    }
 
     use super::{
         PANEL_BORDER, PANEL_PAD_TOP, PANEL_PAD_X, PANEL_RADIUS, QueuePrimaryAction,

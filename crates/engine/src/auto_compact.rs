@@ -11,7 +11,7 @@ use crate::{
     doc_host::DocHost,
     now_ms,
     registry::HarnessRegistry,
-    sessions::{AgentCompactRun, SessionsEngine},
+    sessions::{AgentCompactRun, CopySwap, SessionsEngine},
 };
 
 // Claude Code's own idle defaults (CLI 2.1.299, `tengu_sunny_locket`): only a
@@ -24,6 +24,8 @@ const LATE_MS: i64 = 60_000;
 const AGENT_SETTLE_MS: i64 = 10_000;
 /// Monotonic sleeps stop while the Mac sleeps; re-read the wall clock often.
 const MAX_NAP: Duration = Duration::from_secs(60);
+/// A ready copy waits on background work the session row may not report ending.
+const COPY_RECHECK: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Armed {
@@ -58,7 +60,7 @@ fn turn_over(session: &Session) -> bool {
 }
 
 fn clear_idle_plan(sessions: &SessionsEngine, chat_id: &str) {
-    if !sessions.agent_compact_waiting(chat_id) {
+    if !sessions.agent_compact_waiting(chat_id) && !sessions.copy_pending(chat_id) {
         sessions.set_compact_plan(chat_id, None);
     }
 }
@@ -122,6 +124,28 @@ fn run_agent_compaction(
     });
 }
 
+fn run_once(
+    running: &Arc<Mutex<HashSet<String>>>,
+    chat_id: &str,
+    work: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    if !running
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(chat_id.to_string())
+    {
+        return;
+    }
+    let (running, chat_id) = (running.clone(), chat_id.to_string());
+    tokio::spawn(async move {
+        work.await;
+        running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&chat_id);
+    });
+}
+
 pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>, host: DocHost) {
     let min_tokens_override: Option<u64> = std::env::var("ZERON_IDLE_COMPACT_MIN_TOKENS")
         .ok()
@@ -134,6 +158,7 @@ pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>, ho
         let mut fired: HashMap<String, i64> = HashMap::new();
         let mut agent_due: HashMap<String, i64> = HashMap::new();
         let mut agent_seen: HashMap<String, DateTime<Utc>> = HashMap::new();
+        let mut ahead_seen: HashMap<String, DateTime<Utc>> = HashMap::new();
         let running = Arc::new(Mutex::new(HashSet::new()));
         let mut last_settings = registry.compaction_settings();
         loop {
@@ -172,6 +197,54 @@ pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>, ho
                 };
                 agent_due.insert(session.chat_id.clone(), now_ms() + settle);
             }
+            let over: Vec<Session> = statuses
+                .borrow()
+                .iter()
+                .filter(|session| turn_over(session))
+                .cloned()
+                .collect();
+            ahead_seen.retain(|chat, _| over.iter().any(|s| &s.chat_id == chat));
+            for session in &over {
+                if ahead_seen.get(&session.chat_id) == Some(&session.updated_at) {
+                    continue;
+                }
+                ahead_seen.insert(session.chat_id.clone(), session.updated_at);
+                if !settings.compact_ahead {
+                    continue;
+                }
+                let (sessions, chat_id) = (sessions.clone(), session.chat_id.clone());
+                run_once(&running, &session.chat_id, async move {
+                    match sessions.compact_ahead(&chat_id).await {
+                        Ok(true) => {
+                            tracing::info!(chat = %chat_id, "compacted ahead of the next message")
+                        }
+                        Ok(false) => {}
+                        Err(err) => {
+                            tracing::info!(chat = %chat_id, error = %err, "compaction ahead skipped")
+                        }
+                    }
+                });
+            }
+            let swaps: Vec<String> = statuses
+                .borrow()
+                .iter()
+                .filter(|session| {
+                    session.status == SessionStatus::Idle
+                        && !session.compacting
+                        && sessions.copy_ready(&session.chat_id)
+                })
+                .map(|session| session.chat_id.clone())
+                .collect();
+            for chat_id in &swaps {
+                let (sessions, chat) = (sessions.clone(), chat_id.clone());
+                run_once(&running, chat_id, async move {
+                    let swap = sessions.swap_copy(&chat).await;
+                    if swap != CopySwap::Waiting {
+                        tracing::info!(chat = %chat, ?swap, "background copy swap");
+                    }
+                });
+            }
+
             let gone: Vec<String> = armed
                 .keys()
                 .filter(|chat| !seen.contains_key(*chat))
@@ -262,7 +335,11 @@ pub(crate) fn spawn(sessions: SessionsEngine, registry: Arc<HarnessRegistry>, ho
                 .map(|at| Duration::from_millis((at - now).max(0) as u64))
                 .min()
                 .unwrap_or(MAX_NAP)
-                .min(MAX_NAP);
+                .min(if swaps.is_empty() {
+                    MAX_NAP
+                } else {
+                    COPY_RECHECK
+                });
             tokio::select! {
                 changed = statuses.changed() => if changed.is_err() { return },
                 _ = tokio::time::sleep(nap) => {}

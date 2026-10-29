@@ -167,6 +167,15 @@ fn bar_fill(elapsed: Duration, usual: Option<u64>) -> f32 {
     }
 }
 
+fn carried_turns(carried: Option<&str>) -> usize {
+    carried.map_or(0, |carried| {
+        carried_body(carried)
+            .split("\n\n")
+            .filter(|block| !block.starts_with("Still running when the chat compacted:"))
+            .count()
+    })
+}
+
 fn carried_body(carried: &str) -> &str {
     let inner = carried
         .trim()
@@ -195,7 +204,11 @@ struct Head {
 }
 
 fn verdict_tag(record: &ClassifierRecord, theme: &Theme) -> (SharedString, gpui::Hsla) {
-    let color = if !record.decided_by.asked() || record.verdict == ClassifierVerdict::Failed {
+    if record.decided_by == DecidedBy::BackgroundCopy {
+        return ("Swapped in".into(), theme.warning);
+    }
+    let routine = record.decided_by.asked() || record.decided_by == DecidedBy::TurnEnd;
+    let color = if !routine || record.verdict == ClassifierVerdict::Failed {
         theme.warning
     } else {
         match record.verdict {
@@ -623,12 +636,24 @@ impl Transcript {
                 if let Some(post) = post {
                     meta.push_str(&format!(" → {}", tokens(post)));
                 }
-                if let Some(ms) = kept.duration_ms {
+                let copy = record.decided_by == DecidedBy::BackgroundCopy;
+                if copy {
+                    meta.push_str(&match carried_turns(kept.carried.as_deref()) {
+                        0 => " · nothing carried".to_string(),
+                        1 => " · 1 turn as text".to_string(),
+                        turns => format!(" · {turns} turns as text"),
+                    });
+                } else if let Some(ms) = kept.duration_ms {
                     meta.push_str(&format!(" · {}", format_elapsed((ms / 1000) as i64)));
                 }
                 Head {
                     icon: Icon::Done,
-                    title: "Compacted".into(),
+                    title: if copy {
+                        "Compacted in the background"
+                    } else {
+                        "Compacted"
+                    }
+                    .into(),
                     chip: None,
                     tag,
                     meta: Some(meta.into()),
@@ -896,7 +921,7 @@ impl Transcript {
                 format!("{} tokens", tokens(record.context_tokens)),
             ))
             .children(usage.map(|usage| field("Tokens", usage)))
-            .child(link)
+            .when(!record.input.is_empty(), |section| section.child(link))
             .when(input_open, |section| {
                 section.child(self.classifier_io(row_id, record, theme))
             })
@@ -1095,6 +1120,24 @@ mod tests {
                 hint: None,
             },
         )
+    }
+
+    #[test]
+    fn a_swapped_copy_counts_the_turns_it_carried_as_text() {
+        let head = "<carried_over>\nThe last turns of this conversation.\n\n";
+        assert_eq!(carried_turns(None), 0);
+        assert_eq!(
+            carried_turns(Some(&format!(
+                "{head}person: refund\nagent: done\n</carried_over>"
+            ))),
+            1
+        );
+        assert_eq!(
+            carried_turns(Some(&format!(
+                "{head}person: a\nagent: b\n\nperson: c\nagent: d\n\nStill running when the chat compacted:\n- background shell x: y\n</carried_over>"
+            ))),
+            2
+        );
     }
 
     #[test]

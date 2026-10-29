@@ -15,6 +15,7 @@ use crate::theme::Theme;
 const IDLE_TITLE: &str = "Compact idle chats before the cache expires";
 const AGENT_TITLE: &str = "Let agents compact themselves";
 const MISSIONS_TITLE: &str = "In missions";
+const AHEAD_TITLE: &str = "Compact ahead of time";
 const COMPACT_TOOL: &str = "compact";
 
 pub struct CompactionCard {
@@ -208,6 +209,14 @@ fn row_text(theme: &Theme, title: &'static str, meta: &'static str) -> gpui::Div
         ))
 }
 
+pub(crate) fn experimental_tag(theme: &Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_faint)
+        .child("Experimental")
+}
+
 fn switch(
     theme: &Theme,
     on: bool,
@@ -348,6 +357,10 @@ impl Render for CompactionCard {
             missions: !settings.missions,
             ..settings.clone()
         };
+        let ahead_toggled = CompactionSettings {
+            compact_ahead: !settings.compact_ahead,
+            ..settings.clone()
+        };
         let rows: Vec<AnyElement> = vec![
             widgets::card_row(&theme, true)
                 .child(row_text(
@@ -405,6 +418,30 @@ impl Render for CompactionCard {
                     settings.mode,
                     pick_mode,
                 ))
+                .into_any_element(),
+            widgets::card_row(&theme, false)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(160.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(widgets::row_title(&theme, AHEAD_TITLE))
+                                .child(experimental_tag(&theme)),
+                        )
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![div().child("Claude compacts in place right after a turn. Codex summarizes a copy in the background and swaps it in at the next pause; turns after the copy come back as text.").into_any_element()],
+                        )),
+                )
+                .child(
+                    switch(&theme, settings.compact_ahead, "compact-ahead", AHEAD_TITLE).on_click(
+                        cx.listener(move |this, _, _, cx| this.save(ahead_toggled.clone(), cx)),
+                    ),
+                )
                 .into_any_element(),
             widgets::card_row(&theme, false)
                 .child(row_text(

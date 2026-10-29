@@ -721,6 +721,9 @@ impl Harness for CodexHarness {
     fn compaction(&self) -> Compaction {
         Compaction::Native
     }
+    fn compacts_a_copy(&self) -> bool {
+        true
+    }
     /// `turn/interrupt` ends the turn; the app-server and its thread — child
     /// agent threads included — stay up for the next `turn/start`.
     fn stops_turn_in_place(&self) -> bool {
@@ -2811,18 +2814,39 @@ async fn compact_session(session: CompactSession) {
             resume_params.insert("model".into(), Value::String(model.clone()));
         }
         resume_params.insert("threadId".into(), Value::String(thread_id.clone()));
-        // No fresh-thread fallback: compacting a thread the server could not
-        // resume would compact nothing AND hand the engine a new session id to
-        // remember, losing the chat's real thread.
-        claim = Some(writers.claim(&thread_id).await);
-        let thread = client
-            .request("thread/resume", Value::Object(resume_params))
-            .await?;
-        let resumed = thread["thread"]["id"]
-            .as_str()
-            .filter(|id| !id.is_empty())
-            .unwrap_or(&thread_id)
-            .to_owned();
+        let keep = request
+            .branch
+            .as_ref()
+            .and_then(|branch| branch.keep.clone());
+        let resumed = if let Some(keep) = keep {
+            // A copy: the live run keeps the source's writer, so only the fork is claimed.
+            let thread = client
+                .request(
+                    "thread/fork",
+                    Value::Object(fork_params(&serde_json::Map::new(), &thread_id, &keep)),
+                )
+                .await?;
+            let forked = thread["thread"]["id"]
+                .as_str()
+                .filter(|id| !id.is_empty() && *id != thread_id)
+                .ok_or_else(|| HarnessError::Protocol("thread/fork returned no new thread".into()))?
+                .to_owned();
+            claim = Some(writers.claim(&forked).await);
+            forked
+        } else {
+            // No fresh-thread fallback: compacting a thread the server could not
+            // resume would compact nothing AND hand the engine a new session id to
+            // remember, losing the chat's real thread.
+            claim = Some(writers.claim(&thread_id).await);
+            let thread = client
+                .request("thread/resume", Value::Object(resume_params))
+                .await?;
+            thread["thread"]["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .unwrap_or(&thread_id)
+                .to_owned()
+        };
         client
             .request("thread/compact/start", json!({ "threadId": resumed }))
             .await?;
