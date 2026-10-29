@@ -218,28 +218,28 @@ lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
 
-# ReinaMacCredy/zui = 361ff20 + paint-only quad animations + a11y debug hooks,
+# ReinaMacCredy/zui = b564a34 + paint-only quad animations + a11y debug hooks,
 # aria_disabled, a pausable motion clock and release a11y provenance
-# (branch ui-driver-disabled); a patch so gpui-base (which pins zeronsh/zui itself)
+# (branch ui-driver-disabled-b564a34); a patch so gpui-base (which pins zeronsh/zui itself)
 # builds against the same gpui.
 [patch."https://github.com/zeronsh/zui"]
-collections = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
-derive_refineable = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
-gpui = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
-gpui_linux = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
-gpui_macos = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
-gpui_macros = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
-gpui_platform = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
-gpui_shared_string = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
-gpui_tokio = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
-gpui_util = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
-gpui_web = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
-gpui_wgpu = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
-gpui_windows = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
-http_client = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
-media = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
-perf = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
-refineable = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
-scheduler = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
-sum_tree = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
-util_macros = { git = "https://github.com/ReinaMacCredy/zui", rev = "1d74f44ef48af2446a0b8fb25e6df819e960af01" }
+collections = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
+derive_refineable = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
+gpui = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
+gpui_linux = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
+gpui_macos = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
+gpui_macros = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
+gpui_platform = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
+gpui_shared_string = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
+gpui_tokio = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
+gpui_util = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
+gpui_web = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
+gpui_wgpu = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
+gpui_windows = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
+http_client = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
+media = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
+perf = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
+refineable = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
+scheduler = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
+sum_tree = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
+util_macros = { git = "https://github.com/ReinaMacCredy/zui", rev = "874a3e908676383f51dc74758c8f3192be5c9fff" }
