@@ -1,53 +1,49 @@
 package sh.zeron.android.ui
 
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.RowScope
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.ui.focus.focusRequester
-import sh.zeron.android.core.projectGroups
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenuGroup
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DropdownMenuPopup
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItemDefaults
+import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedListItem
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
@@ -58,8 +54,11 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -68,35 +67,53 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import sh.zeron.android.core.AppModel
-import sh.zeron.android.design.HarnessMark
+import sh.zeron.android.core.HomeModel
+import sh.zeron.android.design.HarnessMarks
 import sh.zeron.android.design.LocalDarkTheme
 import sh.zeron.android.design.ProjectColors
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
 import uniffi.zeron_core.ChatIndicator
 import uniffi.zeron_core.ConnectivityState
+import uniffi.zeron_core.NeedsYouKind
 import uniffi.zeron_core.PullRequestState
 import uniffi.zeron_core.SessionRow
+import uniffi.zeron_core.SidebarOrganization
+import uniffi.zeron_core.SidebarSort
+import uniffi.zeron_core.TodayPullRequests
+import uniffi.zeron_core.WhatsNewCard
 import uniffi.zeron_core.WorkspaceSnapshot
+import uniffi.zeron_core.shelfNext
+import uniffi.zeron_core.shelfVisible
 
 private val SEARCH_BAR_HEIGHT = 56.dp
 
 /**
  * The Material 3 search bar on top of the list, as Gmail has it: the list's
- * options behind the leading menu, "Search sessions" opening search, voice
- * when a host can take a call, and the account's avatar opening Settings.
+ * options behind the leading menu, "Search sessions" opening search, pull
+ * requests and voice, and the account's avatar opening Settings.
  */
 @Composable
 private fun SessionsSearchBar(
     onSearch: () -> Unit,
     onSettings: () -> Unit,
+    onPullRequests: () -> Unit,
     account: String,
     actions: @Composable RowScope.() -> Unit,
     menu: @Composable (open: Boolean, dismiss: () -> Unit) -> Unit,
@@ -126,6 +143,9 @@ private fun SessionsSearchBar(
                 maxLines = 1,
                 modifier = Modifier.weight(1f).padding(start = 4.dp),
             )
+            IconButton(onClick = onPullRequests, modifier = Modifier.size(40.dp)) {
+                ZIcon(ZIcons.PullRequest, "Pull requests", Modifier.size(22.dp))
+            }
             actions()
             // The account, Settings behind it (Google apps' avatar).
             Box(
@@ -162,13 +182,26 @@ fun liveSummary(ws: WorkspaceSnapshot): String? {
 
 private fun frontRows(ws: WorkspaceSnapshot): List<SessionRow> {
     val seen = HashSet<String>()
-    return (ws.front.pinned + ws.front.sections.flatMap { it.sessions } + ws.front.recent).filter { seen.add(it.id) }
+    val f = ws.front
+    return (f.pinned + f.sections.flatMap { it.sessions } + f.recent + f.groups.flatMap { it.sessions } + f.nested.values.flatten() + f.settled)
+        .filter { seen.add(it.id) }
 }
 
 private fun liveCounts(ws: WorkspaceSnapshot): Pair<Int, Int> {
     val rows = frontRows(ws)
     return rows.count { it.indicator == ChatIndicator.WORKING } to rows.count { it.indicator == ChatIndicator.AWAITING_INPUT }
 }
+
+/** A row as the list draws it: one level in under its lead, or a lead with its children folded or open. */
+class ListEntry(val row: SessionRow, val depth: Int = 0, val children: Int = 0, val open: Boolean = false)
+
+private fun withChildren(rows: List<SessionRow>, nested: Map<String, List<SessionRow>>, closed: Set<String>): List<ListEntry> =
+    rows.flatMap { row ->
+        val children = nested[row.id].orEmpty()
+        if (children.isEmpty()) return@flatMap listOf(ListEntry(row))
+        val open = row.id !in closed
+        listOf(ListEntry(row, children = children.size, open = open)) + if (open) children.map { ListEntry(it, depth = 1) } else emptyList()
+    }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -183,19 +216,38 @@ fun SessionsScreen(
     searchActions: @Composable RowScope.() -> Unit = {},
     onOpenRoute: (String) -> Unit = {},
 ) {
+    val home = HomeModel.of(LocalContext.current, model)
     val workspace by model.workspace.collectAsState()
+    val client by model.client.collectAsState()
     val connectivity by model.connectivity.collectAsState()
-    val groupByProject by model.groupByProject.collectAsState()
     val collapsedGroups by model.collapsed.collectAsState()
+    val organization by home.organization.collectAsState()
+    val sort by home.sort.collectAsState()
+    val activeFirst by home.activeFirst.collectAsState()
+    val closedLeads by home.closedLeads.collectAsState()
+    val settledOpen by home.settledOpen.collectAsState()
+    val icons by home.icons.collectAsState()
     var filter by rememberSaveable { mutableStateOf(Filter.All) }
     val scope = rememberCoroutineScope()
     var newSection by remember { mutableStateOf<String?>(null) }
     var renameSection by remember { mutableStateOf<uniffi.zeron_core.SectionView?>(null) }
     var reorder by remember { mutableStateOf(false) }
     var refreshing by remember { mutableStateOf(false) }
+    var todayOpen by rememberSaveable { mutableStateOf(false) }
+    var settledShown by rememberSaveable { mutableStateOf(0) }
+    var whatsNew by remember { mutableStateOf(home.whatsNew()) }
     val pull = rememberPullToRefreshState()
     val ws = workspace
     val counts = remember(ws) { ws?.let { liveCounts(it) } ?: (0 to 0) }
+    val today = remember(ws, client) { client?.todayPage() }
+    val asking = remember(ws, client) {
+        val c = client ?: return@remember emptyList()
+        val seen = HashSet<String>()
+        c.needsYou().filter { it.kind is NeedsYouKind.Input && seen.add(it.chatId) }.mapNotNull { model.row(it.chatId) }
+    }
+
+    LaunchedEffect(client, organization, sort, activeFirst) { home.apply(client) }
+    LaunchedEffect(client) { home.refreshToday() }
 
     val subtitle = when {
         connectivity?.state == ConnectivityState.OFFLINE -> "Offline"
@@ -208,7 +260,7 @@ fun SessionsScreen(
     // "New section…" from a row's Move menu files that row into it. Remembered: every row
     // takes `actions`, so a fresh instance per recomposition re-composes every visible row.
     val userSections = ws?.front?.sections
-    val actions = remember(model, onOpen, selected, userSections) {
+    val actions = remember(model, onOpen, selected, userSections, organization, icons, ws) {
         RowActions(
             model = model,
             onOpen = onOpen,
@@ -216,6 +268,10 @@ fun SessionsScreen(
             sections = userSections.orEmpty().map { it.id to it.name },
             newSection = { chatId -> newSection = chatId ?: "" },
             selected = selected,
+            inbox = organization == SidebarOrganization.INBOX,
+            icon = { row -> home.icon(row.deviceId, row.instanceId) },
+            onToggleChildren = home::toggleLead,
+            steps = { id -> ws?.front?.nested?.get(id)?.size ?: 0 },
         )
     }
 
@@ -249,6 +305,7 @@ fun SessionsScreen(
                 refreshing = true
                 scope.launch {
                     model.refresh()
+                    home.refreshToday()
                     refreshing = false
                 }
             },
@@ -310,50 +367,74 @@ fun SessionsScreen(
                 }
                 if (ws == null) return@LazyColumn
                 val front = ws.front
+                val nested = front.nested
+                fun entries(rows: List<SessionRow>) = withChildren(rows, nested, closedLeads)
+                fun local(id: String) = Fold(id in collapsedGroups) { model.setGroupCollapsed(id, id !in collapsedGroups) }
                 when (filter) {
                     Filter.All -> {
+                        if (today != null && today.greeting.isNotEmpty()) {
+                            item("today") {
+                                TodayCard(today, onOpen = { todayOpen = true }, modifier = Modifier.animateItem().padding(horizontal = 16.dp, vertical = 6.dp))
+                            }
+                        }
+                        val pulls = today?.pullRequests
+                        if (asking.isNotEmpty() || pulls != null) {
+                            group("needs-you", "Needs you", entries(asking), actions, local("needs-you"), extra = (pulls?.count ?: 0u).toInt()) {
+                                if (pulls != null) item("needs-you/prs") { PullRequestAttention(pulls) { onOpenRoute("prs") } }
+                            }
+                        }
                         if (front.pinned.isNotEmpty()) {
                             group(
-                                "pinned", "Pinned", front.pinned, actions,
-                                collapsed = "pinned" in collapsedGroups,
-                                onToggle = { model.setGroupCollapsed("pinned", "pinned" !in collapsedGroups) },
+                                "pinned", "Pinned", entries(front.pinned), actions, local("pinned"),
                                 menu = listOf(MenuAction("Reorder…", ZIcons.Sort) { reorder = true }),
                             )
                         }
-                        for (section in front.sections) {
+                        front.sections.forEachIndexed { at, section ->
                             group(
-                                section.id, section.name, section.sessions, actions,
-                                collapsed = section.collapsed,
-                                onToggle = { model.setSectionCollapsed(section.id, !section.collapsed) },
-                                menu = listOf(
+                                section.id, section.name, entries(section.sessions), actions,
+                                Fold(section.collapsed) { model.setSectionCollapsed(section.id, !section.collapsed) },
+                                menu = listOfNotNull(
+                                    if (at > 0) MenuAction("Move up", ZIcons.ArrowUp) { moveSection(model, front.sections.map { it.id }, section.id, -1) } else null,
+                                    if (at < front.sections.lastIndex) MenuAction("Move down", ZIcons.ArrowDown) { moveSection(model, front.sections.map { it.id }, section.id, 1) } else null,
                                     MenuAction("Rename section…", ZIcons.Rename) { renameSection = section },
                                     MenuAction("Delete section", ZIcons.Delete, destructive = true) { model.deleteSection(section.id) },
                                 ),
                             )
                         }
-                        if (groupByProject) {
-                            // Checkouts of one repository together; project-less sessions per device.
-                            for (g in projectGroups(front.recent, ws.projects)) {
-                                group(
-                                    g.id, g.name, g.sessions, actions,
-                                    collapsed = g.id in collapsedGroups,
-                                    onToggle = { model.setGroupCollapsed(g.id, g.id !in collapsedGroups) },
-                                )
+                        when (organization) {
+                            SidebarOrganization.BY_PROJECT, SidebarOrganization.BY_DEVICE -> for (g in front.groups) {
+                                group("group:${g.id}", g.name, entries(g.sessions), actions, local("group:${g.id}"))
                             }
-                        } else if (front.recent.isNotEmpty()) {
+                            SidebarOrganization.IN_ONE_LIST, SidebarOrganization.INBOX -> if (front.recent.isNotEmpty()) {
+                                val headed = front.pinned.isNotEmpty() || front.sections.isNotEmpty() || asking.isNotEmpty() || pulls != null
+                                group("recent", if (headed) "Recent" else null, entries(front.recent), actions, if (headed) local("recent") else null)
+                            }
+                        }
+                        if (front.settled.isNotEmpty()) {
+                            val total = front.settled.size
+                            val shown = shelfVisible(settledShown.toUInt(), total.toUInt()).toInt()
                             group(
-                                "recent", "Recent", front.recent, actions,
-                                collapsed = "recent" in collapsedGroups,
-                                onToggle = { model.setGroupCollapsed("recent", "recent" !in collapsedGroups) },
-                            )
+                                "settled", "Settled", entries(front.settled.take(shown)), actions,
+                                Fold(!settledOpen) { home.setSettledOpen(!settledOpen) },
+                                extra = total - shown,
+                            ) {
+                                if (shown < total) {
+                                    item("settled/more") {
+                                        TextButton(
+                                            onClick = { settledShown = shelfNext(settledShown.toUInt()).toInt() },
+                                            modifier = Modifier.fillMaxWidth().animateItem(),
+                                        ) { Text("Show more") }
+                                    }
+                                }
+                            }
                         }
                     }
-                    Filter.NeedsYou -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.AWAITING_INPUT }, actions)
-                    Filter.Working -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.WORKING }, actions)
-                    Filter.Pinned -> group("f", null, front.pinned, actions)
+                    Filter.NeedsYou -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.AWAITING_INPUT }.map { ListEntry(it) }, actions)
+                    Filter.Working -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.WORKING }.map { ListEntry(it) }, actions)
+                    Filter.Pinned -> group("f", null, entries(front.pinned), actions)
                 }
                 val empty = when (filter) {
-                    Filter.All -> front.pinned.isEmpty() && front.sections.isEmpty() && front.recent.isEmpty()
+                    Filter.All -> frontRows(ws).isEmpty()
                     Filter.NeedsYou -> counts.second == 0
                     Filter.Working -> counts.first == 0
                     Filter.Pinned -> front.pinned.isEmpty()
@@ -365,30 +446,44 @@ fun SessionsScreen(
         SessionsSearchBar(
             onSearch = onSearch,
             onSettings = onSettings,
+            onPullRequests = { onOpenRoute("prs") },
             account = model.accountName,
             actions = searchActions,
             menu = { open, dismiss ->
-                ActionMenu(
-                    open,
-                    dismiss,
-                    listOf(
-                        MenuAction("New section…", ZIcons.Folder) { newSection = "" },
-                        MenuAction("Collapse all", ZIcons.Collapse) {
-                            val front = ws?.front ?: return@MenuAction
-                            for (section in front.sections) if (!section.collapsed) model.setSectionCollapsed(section.id, true)
-                            val local = listOf("pinned", "recent") +
-                                if (groupByProject) projectGroups(front.recent, ws.projects).map { it.id } else emptyList()
-                            local.forEach { model.setGroupCollapsed(it, true) }
-                        },
-                        MenuAction("Group by project", ZIcons.Project, checked = groupByProject) { model.setGroupByProject(!groupByProject) },
-                        MenuAction("Archived", ZIcons.Archive, onClick = onArchived),
-                    ),
+                OptionsMenu(
+                    open, dismiss,
+                    organization = organization,
+                    sort = sort,
+                    activeFirst = activeFirst,
+                    home = home,
+                    onNewSection = { newSection = "" },
+                    onCollapseAll = {
+                        val front = ws?.front ?: return@OptionsMenu
+                        for (section in front.sections) if (!section.collapsed) model.setSectionCollapsed(section.id, true)
+                        (listOf("pinned", "recent", "needs-you") + front.groups.map { "group:${it.id}" }).forEach { model.setGroupCollapsed(it, true) }
+                    },
+                    onArchived = onArchived,
                 )
             },
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .graphicsLayer { translationY = -barHidden },
         )
+        whatsNew?.let { card ->
+            WhatsNewFloatingCard(
+                card,
+                onOpen = {
+                    home.dismissWhatsNew(card.version)
+                    whatsNew = null
+                    onOpenRoute("whatsnew")
+                },
+                onDismiss = {
+                    home.dismissWhatsNew(card.version)
+                    whatsNew = null
+                },
+                modifier = Modifier.align(Alignment.BottomCenter).padding(start = 16.dp, end = 16.dp, bottom = 88.dp),
+            )
+        }
     }
 
     newSection?.let { chatId ->
@@ -403,6 +498,93 @@ fun SessionsScreen(
         }
     }
     if (reorder && ws != null) ReorderPinsSheet(model, ws.front.pinned) { reorder = false }
+    if (todayOpen && today != null) {
+        LaunchedEffect(Unit) { home.refreshToday() }
+        TodaySheet(today, home, onAllTasks = { onOpenRoute("tasks") }, onDismiss = { todayOpen = false })
+    }
+}
+
+/** Move Up (-1) / Move Down (+1) among the user's sections (the synced order). */
+private fun moveSection(model: AppModel, ids: List<String>, id: String, step: Int) {
+    val at = ids.indexOf(id)
+    val neighbour = ids.getOrNull(at + step) ?: return
+    runCatching {
+        model.client.value?.moveSection(id, if (step > 0) neighbour else null, if (step < 0) neighbour else null)
+    }.onFailure { android.util.Log.w("Zeron", "move section failed: $it") }
+}
+
+/** The list's … menu: Organize and Sort (the desktop sidebar's), then New section, Collapse all, Archived. */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun OptionsMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    organization: SidebarOrganization,
+    sort: SidebarSort,
+    activeFirst: Boolean,
+    home: HomeModel,
+    onNewSection: () -> Unit,
+    onCollapseAll: () -> Unit,
+    onArchived: () -> Unit,
+) {
+    // Sort is inert under Inbox, as on the desktop.
+    val sortable = organization != SidebarOrganization.INBOX
+    val organize = listOf(
+        Triple("By device", ZIcons.Laptop, SidebarOrganization.BY_DEVICE),
+        Triple("By project", ZIcons.Project, SidebarOrganization.BY_PROJECT),
+        Triple("None", ZIcons.Text, SidebarOrganization.IN_ONE_LIST),
+        Triple("Inbox", ZIcons.Bell, SidebarOrganization.INBOX),
+    )
+    val sorts = listOf(
+        Triple("Last updated", ZIcons.Refresh, SidebarSort.LAST_UPDATED),
+        Triple("Created", ZIcons.File, SidebarSort.CREATED),
+    )
+    val colors = MenuDefaults.selectableItemColors(
+        selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
+        selectedTextColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        selectedLeadingIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        selectedTrailingIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
+    )
+    @Composable
+    fun Choice(label: String, icon: Int, selected: Boolean, index: Int, count: Int, enabled: Boolean = true, onClick: () -> Unit) {
+        DropdownMenuItem(
+            selected = selected,
+            onClick = { onClick(); onDismiss() },
+            text = { Text(label) },
+            shapes = MenuDefaults.itemShape(index, count),
+            enabled = enabled,
+            leadingIcon = { ZIcon(icon, null, Modifier.size(20.dp)) },
+            selectedLeadingIcon = { ZIcon(icon, null, Modifier.size(20.dp)) },
+            trailingIcon = if (selected) {
+                { ZIcon(ZIcons.Check, "On", Modifier.size(20.dp)) }
+            } else {
+                null
+            },
+            colors = colors,
+        )
+    }
+    DropdownMenuPopup(expanded = expanded, onDismissRequest = onDismiss) {
+        DropdownMenuGroup(shapes = MenuDefaults.groupShape(0, 3)) {
+            MenuDefaults.Label { Text("Organize", style = MaterialTheme.typography.labelMedium) }
+            organize.forEachIndexed { i, (label, icon, value) ->
+                Choice(label, icon, organization == value, i, organize.size) { home.setOrganization(value) }
+            }
+        }
+        Spacer(Modifier.size(MenuDefaults.GroupSpacing))
+        DropdownMenuGroup(shapes = MenuDefaults.groupShape(1, 3)) {
+            MenuDefaults.Label { Text("Sort", style = MaterialTheme.typography.labelMedium) }
+            sorts.forEachIndexed { i, (label, icon, value) ->
+                Choice(label, icon, sort == value, i, sorts.size + 1, enabled = sortable) { home.setSort(value) }
+            }
+            Choice("Active first", ZIcons.Effort, activeFirst, sorts.size, sorts.size + 1, enabled = sortable) { home.setActiveFirst(!activeFirst) }
+        }
+        Spacer(Modifier.size(MenuDefaults.GroupSpacing))
+        DropdownMenuGroup(shapes = MenuDefaults.groupShape(2, 3)) {
+            Choice("New section…", ZIcons.Folder, false, 0, 3, onClick = onNewSection)
+            Choice("Collapse all", ZIcons.Collapse, false, 1, 3, onClick = onCollapseAll)
+            Choice("Archived", ZIcons.Archive, false, 2, 3, onClick = onArchived)
+        }
+    }
 }
 
 /** What a session row can do, shared by every group on the page. */
@@ -416,18 +598,32 @@ class RowActions(
     val newSection: (String?) -> Unit,
     /** The chat open beside the list (large screens). */
     val selected: String? = null,
+    /** Organized as Inbox: rows settle and unsettle. */
+    val inbox: Boolean = false,
+    /** An ACP row's instance icon, once loaded. */
+    val icon: (SessionRow) -> ImageBitmap? = { null },
+    val onToggleChildren: (String) -> Unit = {},
+    /** How many step threads sit under a lead (the preview's count). */
+    val steps: (String) -> Int = { 0 },
 )
+
+private class Fold(val collapsed: Boolean, val toggle: () -> Unit)
 
 private fun LazyListScope.group(
     id: String,
     title: String?,
-    rows: List<SessionRow>,
+    rows: List<ListEntry>,
     actions: RowActions,
-    collapsed: Boolean = false,
-    onToggle: (() -> Unit)? = null,
+    fold: Fold? = null,
     menu: List<MenuAction> = emptyList(),
+    extra: Int = 0,
+    tail: LazyListScope.() -> Unit = {},
 ) {
+    val collapsed = fold?.collapsed == true
     if (title != null) {
+        val count = rows.count { it.depth == 0 } + extra
+        val working = rows.any { it.row.indicator == ChatIndicator.WORKING }
+        val asking = rows.any { it.row.indicator == ChatIndicator.AWAITING_INPUT }
         item("h-$id") {
             var open by remember { mutableStateOf(false) }
             Box(Modifier.animateItem()) {
@@ -435,24 +631,33 @@ private fun LazyListScope.group(
                     Modifier
                         .fillMaxWidth()
                         .combinedClickable(
-                            onClick = { onToggle?.invoke() },
+                            onClick = { fold?.toggle?.invoke() },
                             onLongClick = if (menu.isNotEmpty()) ({ open = true }) else null,
                         )
-                        .padding(start = 28.dp, end = 12.dp, top = 20.dp, bottom = 8.dp),
+                        .padding(start = 28.dp, end = 12.dp, top = 20.dp, bottom = 8.dp)
+                        .semantics { contentDescription = "$title, $count" },
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                         Text(title, style = MaterialTheme.typography.titleSmallEmphasized, color = MaterialTheme.colorScheme.primary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                         Spacer(Modifier.width(8.dp))
-                        Text("${rows.size}", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("$count", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (working || asking) {
+                            Spacer(Modifier.width(8.dp))
+                            if (working) {
+                                LoadingIndicator(Modifier.size(18.dp))
+                            } else {
+                                Box(Modifier.size(7.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary))
+                            }
+                        }
                     }
                     if (menu.isNotEmpty()) {
                         IconButton(onClick = { open = true }, modifier = Modifier.size(32.dp)) {
                             ZIcon(ZIcons.More, "$title options", Modifier.size(18.dp))
                         }
                     }
-                    if (onToggle != null) {
-                        IconButton(onClick = onToggle, modifier = Modifier.size(32.dp)) {
+                    if (fold != null) {
+                        IconButton(onClick = fold.toggle, modifier = Modifier.size(32.dp)) {
                             ZIcon(if (collapsed) ZIcons.ChevronDown else ZIcons.ChevronUp, if (collapsed) "Expand" else "Collapse", Modifier.size(18.dp))
                         }
                     }
@@ -464,9 +669,38 @@ private fun LazyListScope.group(
         item("h-$id") { Spacer(Modifier.height(8.dp)) }
     }
     if (collapsed) return
-    itemsIndexed(rows, key = { _, r -> "$id/${r.id}" }) { i, row ->
-        Box(Modifier.animateItem().padding(horizontal = 16.dp).padding(bottom = ListItemDefaults.SegmentedGap)) {
-            SwipeableSessionRow(row, i, rows.size, actions)
+    itemsIndexed(rows, key = { _, e -> "$id/${e.row.id}" }) { i, entry ->
+        Box(
+            Modifier
+                .animateItem()
+                .padding(start = 16.dp + 20.dp * entry.depth, end = 16.dp)
+                .padding(bottom = ListItemDefaults.SegmentedGap),
+        ) {
+            SwipeableSessionRow(entry, i, rows.size, actions)
+        }
+    }
+    tail()
+}
+
+/** The Needs-you section's pull request row: PRs waiting on a review or a merge. */
+@Composable
+private fun PullRequestAttention(pulls: TodayPullRequests, onOpen: () -> Unit) {
+    Surface(
+        onClick = onOpen,
+        shape = RoundedCornerShape(24.dp),
+        color = cardColor(),
+        modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = ListItemDefaults.SegmentedGap).fillMaxWidth(),
+    ) {
+        Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(48.dp).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) {
+                ZIcon(ZIcons.PullRequest, null, Modifier.size(24.dp), tint = MaterialTheme.colorScheme.primary)
+            }
+            Spacer(Modifier.width(16.dp))
+            Column(Modifier.weight(1f)) {
+                Text(pulls.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(pulls.meta, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            ZIcon(ZIcons.ChevronRight, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.outline)
         }
     }
 }
@@ -474,7 +708,8 @@ private fun LazyListScope.group(
 /** Swipe right to pin (or unpin), left to archive. */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun SwipeableSessionRow(row: SessionRow, index: Int, count: Int, actions: RowActions) {
+private fun SwipeableSessionRow(entry: ListEntry, index: Int, count: Int, actions: RowActions) {
+    val row = entry.row
     val state = rememberSwipeToDismissBoxState()
     val scope = rememberCoroutineScope()
     val shape = segmentedShapes(index, count).shape
@@ -510,7 +745,7 @@ private fun SwipeableSessionRow(row: SessionRow, index: Int, count: Int, actions
             }
         },
     ) {
-        SessionItem(row, index, count, actions)
+        SessionItem(row, index, count, actions, entry)
     }
 }
 
@@ -520,12 +755,14 @@ fun cardColor() = if (LocalDarkTheme.current) MaterialTheme.colorScheme.surfaceC
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun SessionItem(row: SessionRow, index: Int, count: Int, actions: RowActions) {
+fun SessionItem(row: SessionRow, index: Int, count: Int, actions: RowActions, entry: ListEntry = ListEntry(row)) {
     var menu by remember { mutableStateOf(false) }
     var moving by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
+    var deleting by remember { mutableStateOf(false) }
     val haptics = LocalHapticFeedback.current
     val model = actions.model
+    val icon = actions.icon(row)
     Box {
         SegmentedListItem(
             onClick = { actions.onOpen(row.id) },
@@ -537,30 +774,50 @@ fun SessionItem(row: SessionRow, index: Int, count: Int, actions: RowActions) {
             colors = ListItemDefaults.segmentedColors(
                 containerColor = if (row.id == actions.selected) MaterialTheme.colorScheme.secondaryContainer else cardColor(),
             ),
-            leadingContent = { HarnessTile(row) },
-            supportingContent = { Subline(row) },
+            leadingContent = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (entry.children > 0) {
+                        IconButton(onClick = { actions.onToggleChildren(row.id) }, modifier = Modifier.size(28.dp)) {
+                            ZIcon(
+                                if (entry.open) ZIcons.ChevronDown else ZIcons.ChevronRight,
+                                if (entry.open) "Hide ${entry.children} steps" else "Show ${entry.children} steps",
+                                Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    if (row.settled) HarnessMarks(marksOf(row), 20.dp, MaterialTheme.colorScheme.onSurfaceVariant, icon) else HarnessTile(row, icon)
+                }
+            },
+            supportingContent = if (row.settled) null else ({ Subline(row) }),
             trailingContent = {
                 Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    StatusLabel(row)
-                    row.pullRequest?.let { PrBadge(it.number, it.state) }
+                    RowStatus(row)
+                    if (!row.settled) row.pullRequest?.let { PrBadge(it.number, it.state) }
                 }
             },
         ) {
             Text(
                 row.title,
                 style = if (row.unseen) MaterialTheme.typography.titleMediumEmphasized else MaterialTheme.typography.titleMedium,
+                color = if (row.settled || row.sidechatExpired) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        ActionMenu(
+        SessionPreviewMenu(
             menu,
             { menu = false },
-            listOf(
+            row,
+            actions.steps(row.id),
+            listOfNotNull(
                 MenuAction(if (row.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(row.id, !row.pinned) },
+                if (actions.inbox) MenuAction(if (row.settled) "Unsettle" else "Settle", if (row.settled) ZIcons.Unarchive else ZIcons.Check) { setSettled(model, row.id, !row.settled) } else null,
                 MenuAction("Move to section…", ZIcons.Folder) { moving = true },
                 MenuAction("Rename…", ZIcons.Rename) { renaming = true },
-                MenuAction("Archive", ZIcons.Archive, destructive = true) { actions.archive(row) },
+                MenuAction("Archive", ZIcons.Archive) { actions.archive(row) },
+                MenuAction("Delete", ZIcons.Delete, destructive = true) { deleting = true },
             ),
         )
         ChoiceMenu(
@@ -577,16 +834,107 @@ fun SessionItem(row: SessionRow, index: Int, count: Int, actions: RowActions) {
         )
     }
     if (renaming) RenameDialog(row.title, onDismiss = { renaming = false }) { model.rename(row.id, it) }
+    if (deleting) {
+        AlertDialog(
+            onDismissRequest = { deleting = false },
+            icon = { ZIcon(ZIcons.Delete, null) },
+            title = { Text("Delete “${row.title}”?") },
+            text = { Text("It goes from every device.") },
+            confirmButton = {
+                TextButton(onClick = { deleting = false; model.delete(row.id) }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { deleting = false }) { Text("Cancel") } },
+        )
+    }
 }
 
-/** The harness mark on a tile toned by the session's project. */
+private fun setSettled(model: AppModel, id: String, settled: Boolean) {
+    runCatching { model.client.value?.setSessionSettled(id, settled) }
+        .onFailure { android.util.Log.w("Zeron", "settle failed: $it") }
+}
+
+private fun marksOf(row: SessionRow): List<String> = row.harnessMarks.ifEmpty { listOf(row.harness ?: "claude-code") }
+
+/** Long-press: a preview of the session (the desktop row's hover card) above its actions. */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun HarnessTile(row: SessionRow) {
+private fun SessionPreviewMenu(expanded: Boolean, onDismiss: () -> Unit, row: SessionRow, steps: Int, actions: List<MenuAction>) {
+    DropdownMenuPopup(expanded = expanded, onDismissRequest = onDismiss) {
+        DropdownMenuGroup(shapes = MenuDefaults.groupShape(0, 2)) {
+            Column(
+                Modifier.widthIn(max = 300.dp).padding(horizontal = 16.dp, vertical = 12.dp).semantics { contentDescription = "Session preview" },
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                val muted = MaterialTheme.colorScheme.onSurfaceVariant
+                Text(row.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                RowStatus(row)
+                row.preview?.takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = muted, maxLines = 4, overflow = TextOverflow.Ellipsis) }
+                listOfNotNull(row.project?.name, row.deviceName, row.branch).joinToString(" · ").takeIf { it.isNotEmpty() }?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                listOfNotNull(row.harnessLabel, row.modelLabel).joinToString(" · ").takeIf { it.isNotEmpty() }?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = muted, maxLines = 1)
+                }
+                if (steps > 0) Text("$steps step thread${if (steps == 1) "" else "s"}", style = MaterialTheme.typography.bodySmall, color = muted)
+            }
+        }
+        Spacer(Modifier.size(MenuDefaults.GroupSpacing))
+        DropdownMenuGroup(shapes = MenuDefaults.groupShape(1, 2)) {
+            actions.forEachIndexed { i, a ->
+                val tint = if (a.destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                DropdownMenuItem(
+                    onClick = { onDismiss(); a.onClick() },
+                    text = { Text(a.label, color = tint) },
+                    shape = MenuDefaults.itemShape(i, actions.size).shape,
+                    leadingIcon = { ZIcon(a.icon, null, Modifier.size(20.dp), tint = tint) },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The row's trailing status: an expired side chat, then background work (a ring, its label
+ * in place of Working, or its count beside the time), else the live state.
+ */
+@Composable
+private fun RowStatus(row: SessionRow) {
+    val ring = row.backgroundRing
+    @Composable
+    fun line(text: String, color: Color, glyph: @Composable () -> Unit) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            glyph()
+            Spacer(Modifier.width(5.dp))
+            Text(text, style = MaterialTheme.typography.labelLarge, color = color, maxLines = 1)
+        }
+    }
+    @Composable
+    fun ringGlyph() = Box(Modifier.size(11.dp).border(BorderStroke(2.dp, MaterialTheme.colorScheme.primary), CircleShape))
+    when {
+        row.sidechatExpired -> line("Expired", MaterialTheme.colorScheme.outline) {
+            Box(Modifier.size(7.dp).clip(CircleShape).background(MaterialTheme.colorScheme.outline))
+        }
+        row.sendState == uniffi.zeron_core.SendState.FAILED || ring == null -> StatusLabel(row)
+        row.indicator == ChatIndicator.WORKING -> line(row.backgroundLabel ?: "Working", MaterialTheme.colorScheme.onSurface) { ringGlyph() }
+        row.indicator == ChatIndicator.COMPLETED && row.unseen -> line("Done", successColor()) { ringGlyph() }
+        else -> line(if (ring > 0u) "$ring · ${row.timeLabel}" else row.timeLabel, MaterialTheme.colorScheme.outline) { ringGlyph() }
+    }
+}
+
+/** Every harness mark the session ran, on a tile toned by the session's project. */
+@Composable
+fun HarnessTile(row: SessionRow, icon: ImageBitmap? = null) {
     val tone = ProjectColors.color(row.colorIndex(), LocalDarkTheme.current)
     Box(
-        Modifier.size(48.dp).clip(RoundedCornerShape(16.dp)).background(tone.copy(alpha = if (LocalDarkTheme.current) 0.18f else 0.12f)),
+        Modifier
+            .heightIn(min = 48.dp)
+            .widthIn(min = 48.dp)
+            .height(48.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(tone.copy(alpha = if (LocalDarkTheme.current) 0.18f else 0.12f))
+            .padding(horizontal = 12.dp),
         contentAlignment = Alignment.Center,
-    ) { HarnessMark(row.harness, 24.dp, tint = MaterialTheme.colorScheme.onSurface) }
+    ) { HarnessMarks(marksOf(row), 24.dp, MaterialTheme.colorScheme.onSurface, icon) }
 }
 
 /** Project monogram + name, then the branch — the desktop sidebar subline. */
@@ -632,6 +980,50 @@ fun PrBadge(number: ULong, state: PullRequestState) {
     }
 }
 
+/** The post-update card, floating over the list until opened or dismissed (the desktop's). */
+@Composable
+private fun WhatsNewFloatingCard(card: WhatsNewCard, onOpen: () -> Unit, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
+    val entry = card.entry ?: return
+    val hero = remember(entry.hero) {
+        entry.hero?.let { uniffi.zeron_core.docsImage(it) }?.let { android.graphics.BitmapFactory.decodeByteArray(it, 0, it.size) }?.asImageBitmap()
+    }
+    Surface(
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = modifier
+            .widthIn(max = 560.dp)
+            .fillMaxWidth()
+            .shadow(16.dp, RoundedCornerShape(24.dp))
+            .semantics { contentDescription = "What's new" },
+    ) {
+        Box {
+            Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (hero != null) {
+                    androidx.compose.foundation.Image(
+                        hero,
+                        null,
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                        modifier = Modifier.fillMaxWidth().height(120.dp).clip(RoundedCornerShape(12.dp)),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+                Text("New · v${entry.version}", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                Text(
+                    entry.features.firstOrNull()?.title ?: "What's new in v${entry.version}",
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(end = 32.dp),
+                )
+                TextButton(onClick = onOpen, contentPadding = PaddingValues(0.dp)) { Text("See what's new →") }
+            }
+            IconButton(onClick = onDismiss, modifier = Modifier.align(Alignment.TopEnd).padding(4.dp)) {
+                ZIcon(ZIcons.Close, "Dismiss", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
 @Composable
 fun RenameDialog(current: String, onDismiss: () -> Unit, onRename: (String) -> Unit) =
     TextPromptDialog("Rename session", current, "Rename", ZIcons.Rename, onDismiss, onRename)
@@ -641,7 +1033,7 @@ fun RenameDialog(current: String, onDismiss: () -> Unit, onRename: (String) -> U
 fun TextPromptDialog(title: String, current: String, confirm: String, icon: Int, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
     var text by remember { mutableStateOf(current) }
     val focus = remember { androidx.compose.ui.focus.FocusRequester() }
-    androidx.compose.runtime.LaunchedEffect(Unit) { focus.requestFocus() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { ZIcon(icon, null) },
