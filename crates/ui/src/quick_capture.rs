@@ -335,6 +335,11 @@ impl QuickCaptureBar {
         cx.notify();
     }
 
+    fn refocus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.input.focus_handle(cx), cx);
+        cx.notify();
+    }
+
     fn enter(&mut self, cx: &mut Context<Self>) {
         if let Some(ix) = self.menu {
             self.pick_project(ix, None, cx);
@@ -513,18 +518,19 @@ impl QuickCaptureBar {
                                     .text_color(theme.text_muted),
                             )
                             .child(project)
-                            .on_click(
-                                cx.listener(|bar, _: &ClickEvent, _, cx| bar.toggle_menu(cx)),
-                            ),
+                            .on_click(cx.listener(|bar, _: &ClickEvent, window, cx| {
+                                bar.toggle_menu(cx);
+                                bar.refocus(window, cx);
+                            })),
                     )
                     .child(
                         chip("quick-capture-today", self.today)
                             .role(gpui::Role::Button)
                             .aria_label("Due today")
                             .child("Today")
-                            .on_click(cx.listener(|bar, _: &ClickEvent, _, cx| {
+                            .on_click(cx.listener(|bar, _: &ClickEvent, window, cx| {
                                 bar.today = !bar.today;
-                                cx.notify();
+                                bar.refocus(window, cx);
                             })),
                     )
                     .child(
@@ -539,9 +545,10 @@ impl QuickCaptureBar {
                                 },
                             ))
                             .when(image_count > 0, |el| el.child(image_count.to_string()))
-                            .on_click(
-                                cx.listener(|bar, _: &ClickEvent, _, cx| bar.pick_images(cx)),
-                            ),
+                            .on_click(cx.listener(|bar, _: &ClickEvent, window, cx| {
+                                bar.pick_images(cx);
+                                bar.refocus(window, cx);
+                            })),
                     )
                     .child(div().flex_1())
                     .child(
