@@ -103,6 +103,46 @@ description = "Press both Option keys in any app and a bar opens over it: type a
 details = "Change or turn off the chord in Settings > Appshots, under Quick capture to Tasks; it needs Input Monitoring, like the Appshot chord, and cannot share its chord. After a save, Undo removes the task and Open shows it. Captured tasks carry a New tag and the rail's Tasks icon counts them until you open Tasks. The hotkey is macOS only."
 image = "quick-capture.jpg"
 
+[[entry.features]]
+id = "upstream-0-2-121"
+title = "From upstream Zeron: a faster terminal"
+description = "The terminal adds no typing delay, and a terminal on another device connects directly, falling back to the relay without losing keys. On a slow link, typed keys echo before the host answers."
+details = "The terminal also handles IME input, mouse and focus reporting, cursor shapes and synchronized output."
+
+[[entry.features]]
+id = "upstream-0-2-122"
+title = "From upstream Zeron: iPhone terminals and subagents beside a session"
+description = "On iPhone, terminals, side chats and subagents show beside every session, a subagent card opens its transcript, and terminals connect straight to the Mac."
+
+[[entry.features]]
+id = "upstream-0-2-123"
+title = "From upstream Zeron: the Android app"
+description = "Zeron has an Android app with a Sessions page; the fork's iPhone features come to it in a later release. On the desktop, a new project can start from a typed folder path with Tab completion, and Previews lists only the ports Zeron started, beside the chat."
+details = "Pull request links offer an in-app browser among their options, Zeron Cloud shows subagent transcripts live, and each project keeps its own checkout pick."
+
+[[entry.features]]
+id = "upstream-0-2-124"
+title = "From upstream Zeron: Luau highlighting and a lighter rail"
+description = "Luau code is highlighted, and the transcript rail opens the prompt list on hover."
+
+[[entry.features]]
+id = "upstream-0-2-126"
+title = "From upstream Zeron: who sent a message"
+description = "A message from another agent, or one sent after a provider switch, carries a caption above it naming the sender."
+details = "The fork marker no longer paints over popovers, and the files editor drops stale highlights after an outside change. The transcript rail is back to one tick per prompt and scrolls in long chats."
+
+[[entry.features]]
+id = "upstream-0-2-127"
+title = "From upstream Zeron: images, answered questions and Cmd+F in Settings"
+description = "Agents can show local images in the chat, a message an agent sends to another chat shows as one line naming the recipient, and a question card shows what was answered and can be closed without answering. Cmd+F searches Settings."
+details = "Also: browser element annotations, smooth mouse-wheel scrolling, Markdown in your own messages, Codex's view_image in the chat, the Linux browser on WPE WebKit, and Cloud usage caps per account. Shortcuts work on non-US keyboard layouts, remote chats show syncing while catching up, provider sign-ins get past the device limit, and icon-only buttons have tooltips."
+
+[[entry.features]]
+id = "upstream-0-2-128"
+title = "From upstream Zeron: access modes and plan mode"
+description = "Permissions are Supervised, Auto-accept edits and Full access, with plan mode for agents that support it. Folded messages fade out and long chats scroll smoothly."
+details = "Muse answers every stage of a compound approval. In 0.2.129 Zeron also tells every Claude Code process it starts that it runs inside Zeron."
+
 [[entry.improvements]]
 text = "The update button in the rail moves: an arrow drops into the tray while the update downloads, then the button checks and turns into restart."
 visual = "rail-update"
