@@ -1,6 +1,7 @@
 package sh.zeron.android.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -191,7 +192,7 @@ fun TodaySheet(page: TodayPage, home: HomeModel, onAllTasks: () -> Unit, onDismi
                                 ZIcon(ZIcons.Check, "Done", Modifier.size(15.dp), tint = MaterialTheme.colorScheme.surface)
                             }
                         } else {
-                            Box(Modifier.size(22.dp).clip(CircleShape).background(MaterialTheme.colorScheme.outlineVariant).padding(2.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceContainerLowest))
+                            Box(Modifier.size(22.dp).border(2.dp, MaterialTheme.colorScheme.outline, CircleShape))
                         }
                         Spacer(Modifier.width(14.dp))
                         Column {
