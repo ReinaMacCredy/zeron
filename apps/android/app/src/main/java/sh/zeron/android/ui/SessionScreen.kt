@@ -598,7 +598,7 @@ fun SessionScreen(
             extras,
             sources = remember(transcript.frame) { transcript.frame?.sources().orEmpty() },
             onOpenChanges = { changes = it },
-            onOpenImage = { ref -> scope.launch { actions.loadImage(ref)?.let { viewing = it } } },
+            onOpenImage = { ref -> scope.launch { actions.loadImage(ref)?.let { viewing = it } ?: model.toast("Couldn't load ${ref.substringAfterLast('/')}. Try again.") } },
         ) { info = false }
     }
     if (projectActions) sh.zeron.android.ui.session.ProjectActionsSheet(extras, onOpenTerminal = { onOpenTerminal(chatId, it) }) { projectActions = false }
