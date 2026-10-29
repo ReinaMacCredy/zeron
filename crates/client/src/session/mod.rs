@@ -205,6 +205,8 @@ struct CoreState {
     session: Option<zeron_proto::Session>,
     shell_output: Option<(String, Vec<String>)>,
     review: review::ReviewState,
+    walks: HashMap<String, background::AgentWalk>,
+    widen: Option<bool>,
 }
 
 pub(crate) struct SessionCore {
@@ -290,6 +292,8 @@ impl SessionCore {
                 session: None,
                 shell_output: None,
                 review: review::ReviewState::default(),
+                walks: HashMap::new(),
+                widen: None,
             }),
             transcript_tx,
             composer: RwLock::new(composer),
@@ -2131,6 +2135,8 @@ mod setup_placeholder_tests {
             session: None,
             shell_output: None,
             review: review::ReviewState::default(),
+            walks: HashMap::new(),
+            widen: None,
         };
         let pending = PendingSend {
             message_id: "m1".into(),

@@ -6957,6 +6957,64 @@ fn parked_status(subagents: &std::collections::HashSet<String>) -> SessionStatus
     }
 }
 
+fn stamp_subagent_chip(
+    doc: &SessionDoc,
+    sinks: &mut std::collections::HashMap<String, SubagentSink>,
+    owners: &mut std::collections::HashMap<String, String>,
+    host: Option<&DocHost>,
+    id: &str,
+    subagent_ref: Option<&str>,
+    status: &str,
+) -> bool {
+    if let Ok(true) = doc.update_subagent_chip(id, subagent_ref, Some(status), None) {
+        return true;
+    }
+    let parsed =
+        serde_json::from_value::<zeron_doc::SubagentStatus>(serde_json::json!(status)).ok();
+    for sink in sinks.values_mut() {
+        let folded = sink.folded.iter_mut().find_map(|p| match p {
+            MessagePart::Tool {
+                id: part,
+                call,
+                subagent_ref,
+                subagent_status,
+                ..
+            } if part == id && call.is_subagent_spawn() => Some((subagent_ref, subagent_status)),
+            _ => None,
+        });
+        let found = match folded {
+            Some((chip_ref, chip_status)) => {
+                if let Some(r) = subagent_ref {
+                    *chip_ref = Some(r.to_owned());
+                }
+                *chip_status = parsed;
+                sink.dirty = true;
+                true
+            }
+            None => matches!(
+                sink.doc
+                    .update_subagent_chip(id, subagent_ref, Some(status), None),
+                Ok(true)
+            ),
+        };
+        if found {
+            owners.insert(id.to_owned(), sink.doc_id.clone());
+            return true;
+        }
+    }
+    owners
+        .get(id)
+        .and_then(|owner| host?.open(owner).ok())
+        .is_some_and(|handle| {
+            matches!(
+                handle
+                    .writer()
+                    .update_subagent_chip(id, subagent_ref, Some(status), None),
+                Ok(true)
+            )
+        })
+}
+
 /// The parent-chip refresh a tagged event implies, for the in-place (parked)
 /// path — LIFECYCLE ONLY, mirroring the fold (live tails were rejected:
 /// per-delta chip rewrites grew the parent doc for the whole run).
@@ -7778,6 +7836,9 @@ async fn drive_run(
     // Live subagent sinks, parent tool-use id → transcript doc state.
     let mut subagents: std::collections::HashMap<String, SubagentSink> =
         std::collections::HashMap::new();
+    let mut running_chips: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut chip_owners: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     // Spawns that have streamed and not yet settled, independent of whether
     // a sink could open (headless or open failure). They hold the parked
     // session: the idle reaper would kill the child they run in.
@@ -8121,6 +8182,21 @@ async fn drive_run(
                     }
                 }
                 zeron_doc::fold_event_into_parts(&mut folded, &event);
+                if folded.iter().any(|p| {
+                    matches!(
+                        p,
+                        MessagePart::Tool {
+                            id,
+                            subagent_ref: Some(_),
+                            subagent_status: Some(zeron_doc::SubagentStatus::Running),
+                            ..
+                        } if id == parent_tool_use_id
+                    )
+                }) {
+                    running_chips.insert(parent_tool_use_id.clone());
+                } else {
+                    running_chips.remove(parent_tool_use_id);
+                }
                 if !dirty {
                     dirty = true;
                     flush_at = tokio::time::Instant::now()
@@ -8150,14 +8226,18 @@ async fn drive_run(
                             dirty: false,
                         },
                     );
-                    inner.set_running_subagents(&chat_id, subagents.len());
-                    if !chip_streaming {
-                        let _ = doc_ref.update_subagent_chip(
+                    if !chip_streaming
+                        && stamp_subagent_chip(
+                            doc_ref,
+                            &mut subagents,
+                            &mut chip_owners,
+                            inner.doc_host().as_ref(),
                             parent_tool_use_id,
                             Some(&sub_id),
-                            Some("running"),
-                            None,
-                        );
+                            "running",
+                        )
+                    {
+                        running_chips.insert(parent_tool_use_id.clone());
                     }
                 }
             }
@@ -8176,12 +8256,18 @@ async fn drive_run(
                     // A resumed run can finish an older chip without ever
                     // opening a sink. The chip's lifecycle is independent of
                     // whether this run received transcript content.
-                    let _ = doc_ref.update_subagent_chip(
-                        parent_tool_use_id,
-                        None,
-                        subagent_chip_update(sub_event),
-                        None,
-                    );
+                    if let Some(status) = subagent_chip_update(sub_event) {
+                        stamp_subagent_chip(
+                            doc_ref,
+                            &mut subagents,
+                            &mut chip_owners,
+                            inner.doc_host().as_ref(),
+                            parent_tool_use_id,
+                            None,
+                            status,
+                        );
+                    }
+                    running_chips.remove(parent_tool_use_id);
                 }
             } else if !matches!(
                 sub_event.as_ref(),
@@ -8191,6 +8277,14 @@ async fn drive_run(
                 AgentEvent::ContextUsage { .. } | AgentEvent::UserMessage { .. }
             ) {
                 live_subagents.insert(parent_tool_use_id.clone());
+            }
+            inner.set_running_subagents(&chat_id, running_chips.len());
+            if !dirty
+                && flush_at <= tokio::time::Instant::now()
+                && subagents.values().any(|s| s.dirty)
+            {
+                flush_at = tokio::time::Instant::now()
+                    + std::time::Duration::from_millis(STREAM_COMMIT_MS);
             }
             if let Some(sink) = subagents.get_mut(parent_tool_use_id) {
                 if let AgentEvent::UserMessage { text } = sub_event.as_ref() {
@@ -8230,7 +8324,6 @@ async fn drive_run(
                         _ => MessageStatus::Complete,
                     };
                     let sink = subagents.remove(parent_tool_use_id).expect("checked");
-                    inner.set_running_subagents(&chat_id, subagents.len());
                     let doc_id = sink.doc_id.clone();
                     // FREEZE: the finished transcript uploads as a static R2
                     // blob (`blob/{chatId}/{subDocId}`) so viewers of
@@ -9043,7 +9136,23 @@ async fn drive_run(
 
     // Any subagent still streaming when the run ends freezes as-is: the
     // parent process is gone, so nothing more can arrive on this stream.
-    for (parent_id, mut sink) in subagents.drain() {
+    let ended = if interrupted { "stopped" } else { "failed" };
+    let cut_off: std::collections::HashSet<String> = running_chips
+        .drain()
+        .chain(subagents.keys().cloned())
+        .collect();
+    for id in &cut_off {
+        stamp_subagent_chip(
+            doc_ref,
+            &mut subagents,
+            &mut chip_owners,
+            inner.doc_host().as_ref(),
+            id,
+            None,
+            ended,
+        );
+    }
+    for (_, mut sink) in subagents.drain() {
         zeron_doc::fold_event_into_parts(
             &mut sink.folded,
             &AgentEvent::Error {
@@ -9052,8 +9161,6 @@ async fn drive_run(
             },
         );
         let doc_id = sink.doc_id.clone();
-        let ended = if interrupted { "stopped" } else { "failed" };
-        let _ = doc_ref.update_subagent_chip(&parent_id, None, Some(ended), None);
         if let Some(json) = sink.finish(&device_id, MessageStatus::Aborted)
             && let Some(host) = inner.doc_host()
         {

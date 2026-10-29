@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
-use zeron_doc::background::{agent_runs, latest_prompt};
+use zeron_doc::SessionMessageEntry;
+use zeron_doc::background::{agent_runs, agent_tree, latest_prompt, rows_missing, walked_docs};
 use zeron_proto::background::{AgentRun, delegate_runs, shell_tasks};
 use zeron_proto::{BackgroundTask, HarnessId, Session};
 use zeron_rpc::methods;
@@ -16,6 +17,12 @@ pub struct BackgroundRoster {
     /// The chat's own harness: names a run without a model, and only
     /// Claude Code stops its own subagents and shells.
     pub harness: Option<HarnessId>,
+}
+
+pub(super) struct AgentWalk {
+    entries: Vec<SessionMessageEntry>,
+    loaded: bool,
+    watch: Option<CancellationToken>,
 }
 
 #[derive(serde::Deserialize)]
@@ -52,6 +59,82 @@ impl SessionCore {
         }
     }
 
+    fn sync_walks(self: &Arc<Self>, docs: Vec<String>, agents: &[AgentRun]) -> bool {
+        let demo = self.client().ok().and_then(|client| client.demo().cloned());
+        let mut st = lock(&self.state);
+        st.walks.retain(|id, walk| {
+            let keep = docs.contains(id);
+            if !keep && let Some(watch) = &walk.watch {
+                watch.cancel();
+            }
+            keep
+        });
+        let mut read = false;
+        for id in docs {
+            if st.walks.contains_key(&id) {
+                continue;
+            }
+            read |= demo.is_some();
+            let walk = match &demo {
+                Some(demo) => AgentWalk {
+                    entries: demo.subagent_transcript(&id),
+                    loaded: true,
+                    watch: None,
+                },
+                None => AgentWalk {
+                    entries: Vec::new(),
+                    loaded: false,
+                    watch: Some(self.watch_walk(&id)),
+                },
+            };
+            st.walks.insert(id, walk);
+        }
+        if st.walks.values().all(|walk| walk.loaded) {
+            let counted =
+                zeron_proto::view::running_subagents(st.session.as_ref(), chrono::Utc::now());
+            let short = rows_missing(agents, counted);
+            match st.widen {
+                None => {
+                    st.widen = Some(short);
+                    if short {
+                        drop(st);
+                        self.schedule_refresh();
+                    }
+                }
+                Some(true) if !short => st.widen = Some(false),
+                _ => {}
+            }
+        }
+        read
+    }
+
+    fn watch_walk(self: &Arc<Self>, doc_id: &str) -> CancellationToken {
+        let id = doc_id.to_owned();
+        super::host_watch::spawn(
+            self,
+            methods::WATCH_DOC_MESSAGES,
+            serde_json::json!({ "chatId": doc_id }),
+            move |core, item| {
+                let Ok(update) = serde_json::from_value::<zeron_doc::TranscriptUpdate>(item) else {
+                    return;
+                };
+                let changed = {
+                    let mut st = lock(&core.state);
+                    let Some(walk) = st.walks.get_mut(&id) else {
+                        return;
+                    };
+                    let first = !std::mem::replace(&mut walk.loaded, true);
+                    let before = agent_runs(&walk.entries, 0);
+                    let _ = zeron_doc::apply_transcript_frame(&mut walk.entries, update.frame);
+                    first || before != agent_runs(&walk.entries, 0)
+                };
+                if changed {
+                    core.schedule_refresh();
+                }
+            },
+        )
+    }
+
     pub(crate) fn drop_background_task(&self, task_id: &str) {
         self.update_state(|st| {
             if let Some(session) = st.session.as_mut() {
@@ -67,7 +150,18 @@ impl SessionHandle {
         let transcript = snapshot.transcript();
         let entries = transcript.iter().map(|entry| entry.message.as_ref());
         let turn_start = latest_prompt(entries.clone());
-        let mut agents = agent_runs(entries, turn_start.unwrap_or(0));
+        let tree = || {
+            let st = lock(&self.core.state);
+            let agents = agent_tree(entries.clone(), turn_start.unwrap_or(0), &|id| {
+                st.walks.get(id).map(|walk| walk.entries.as_slice())
+            });
+            let walk = walked_docs(entries.clone(), &agents, st.widen == Some(true));
+            (agents, walk)
+        };
+        let (mut agents, walk) = tree();
+        if self.core.sync_walks(walk, &agents) {
+            agents = tree().0;
+        }
         let pending_review = super::review::pending_task(&lock(&self.core.state));
         let chat = self.core.client().ok().and_then(|client| {
             let (state, _) = client.workspace.state();
