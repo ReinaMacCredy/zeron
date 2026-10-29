@@ -256,6 +256,14 @@ pub const IMAGES: &[(&str, &[u8])] = &[
         include_bytes!("../../ui/assets/whats_new/tasks-list.jpg"),
     ),
     (
+        "quick-capture.jpg",
+        include_bytes!("../../ui/assets/whats_new/quick-capture.jpg"),
+    ),
+    (
+        "quick-capture-bar.jpg",
+        include_bytes!("../../ui/assets/whats_new/quick-capture-bar.jpg"),
+    ),
+    (
         "mission-control-tree.jpg",
         include_bytes!("../../ui/assets/whats_new/mission-control-tree.jpg"),
     ),
