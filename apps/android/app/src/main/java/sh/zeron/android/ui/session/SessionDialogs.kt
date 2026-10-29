@@ -6,7 +6,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import sh.zeron.android.core.SessionExtras
 
-/** "Switch model?" before a change that notes itself in the transcript (iOS `confirm(prompt)`). */
 @Composable
 fun SwitchPromptDialog(extras: SessionExtras) {
     val pending = extras.pendingSwitch ?: return

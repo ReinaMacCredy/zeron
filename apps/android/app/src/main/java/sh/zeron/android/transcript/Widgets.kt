@@ -219,7 +219,6 @@ private fun CopyButton(payload: String, palette: TranscriptPalette) {
     }
 }
 
-/** Tail-of-turn indicator: "Working…", elapsed, tok/s; a centered hairline row while compaction waits (`divider`). */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun WorkingIndicator(kind: WidgetKind.Working, palette: TranscriptPalette) {

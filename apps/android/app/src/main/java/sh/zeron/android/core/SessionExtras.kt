@@ -13,7 +13,6 @@ import uniffi.zeron_core.ModelSwitchPrompt
 import uniffi.zeron_core.SandboxLevel
 import uniffi.zeron_core.SessionHandle
 
-/** One open chat's session-page state and the writes its sheets share (iOS CoreSessionSource). */
 class SessionExtras(val model: AppModel, val core: CoreClient, val handle: SessionHandle, val chatId: String) {
     class PendingSwitch(val prompt: ModelSwitchPrompt, val apply: suspend () -> Unit)
 
@@ -83,7 +82,6 @@ class SessionExtras(val model: AppModel, val core: CoreClient, val handle: Sessi
     }
 
     companion object {
-        /** The host's own words when it gave any (iOS `hostFailure`). */
         fun failure(e: Throwable, fallback: String): String = when (e) {
             is CoreException.NotFound -> e.reason
             is CoreException.HostException -> e.reason

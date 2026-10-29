@@ -695,7 +695,6 @@ private val htmlPages = android.util.LruCache<String, String>(16)
 private fun usageRoute(handle: SessionHandle): String =
     runCatching { handle.composer().host.name }.getOrNull()?.let { "page:usage@$it" } ?: "page:usage"
 
-/** The chat as Markdown through the share sheet (iOS export). */
 private fun exportChat(context: android.content.Context, handle: SessionHandle, fail: (String) -> Unit) {
     val export = runCatching { handle.exportMarkdown() }.getOrNull() ?: return
     val uri = runCatching {
@@ -763,7 +762,6 @@ private fun Banner(
     c.resumeCompaction?.let { TapBanner(it.title, onClick = onOffer) }
 }
 
-/** The status pill's tappable states (a limit, a compaction offer or notice), iOS's pill with its spinner. */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun TapBanner(text: String, working: Boolean = false, onClick: (() -> Unit)? = null) {

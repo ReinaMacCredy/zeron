@@ -117,7 +117,6 @@ fun rememberCompanions(model: AppModel, chatId: String, includeSideChats: Boolea
     return value
 }
 
-/** Side chats and terminals above the composer; subagents and shells are the agents pill's. */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun CompanionStrip(c: Companions, onTap: (CompanionSection) -> Unit, modifier: Modifier = Modifier) {
@@ -251,7 +250,6 @@ fun CompanionsContent(
     val list = rememberLazyListState()
     LaunchedEffect(initialSection) {
         val section = initialSection ?: return@LaunchedEffect
-        // Items: title, [agents header + rows], [shells header + rows], side chats header + rows (or empty text + 2 actions), terminals…
         val first = if (showTitle) 1 else 0
         val sides = first + (if (runs.isNotEmpty()) runs.size + 1 else 0) + if (shells.isNotEmpty()) shells.size + 1 else 0
         val index = when (section) {

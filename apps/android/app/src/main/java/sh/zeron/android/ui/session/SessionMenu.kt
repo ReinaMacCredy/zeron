@@ -53,7 +53,6 @@ class SessionMenuItem(
     val onClick: () -> Unit,
 )
 
-/** The session's … menu: inline groups, rows that can say why they're off (iOS subtitles). */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun SessionMenu(expanded: Boolean, onDismiss: () -> Unit, groups: List<List<SessionMenuItem>>) {
@@ -94,7 +93,6 @@ fun SessionMenu(expanded: Boolean, onDismiss: () -> Unit, groups: List<List<Sess
     }
 }
 
-/** "Fork chat from here" / "Rewind to here", confirmed (iOS action sheet). */
 @Composable
 fun BranchDialog(offer: BranchOffer, onConfirm: () -> Unit, onDismiss: () -> Unit) {
     AlertDialog(
@@ -128,7 +126,6 @@ fun StopComputerDialog(host: String, onStop: () -> Unit, onDismiss: () -> Unit) 
     )
 }
 
-/** An idle large chat's offer: compact now or keep the full history. */
 @Composable
 fun CompactOfferDialog(title: String, body: String, onCompact: () -> Unit, onKeep: () -> Unit, onDismiss: () -> Unit) {
     AlertDialog(
@@ -150,7 +147,6 @@ fun CompactOfferDialog(title: String, body: String, onCompact: () -> Unit, onKee
     )
 }
 
-/** The limit pill's choices: switch now, toggle auto-resume (iOS `limitActions`). */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LimitActionsSheet(limit: LimitPill, onSwitch: () -> Unit, onToggleResume: () -> Unit, onDismiss: () -> Unit) {
@@ -174,7 +170,6 @@ private fun SheetRow(label: String, @androidx.annotation.DrawableRes icon: Int, 
     )
 }
 
-/** Hand off thread: another agent here, a new thread, or a project (iOS `handoffMenu`). */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun HandoffSheet(extras: SessionExtras, onOpenChat: (String) -> Unit, onDismiss: () -> Unit) {
@@ -235,7 +230,6 @@ private fun SectionLabel(text: String) {
     Text(text, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 12.dp, bottom = 4.dp))
 }
 
-/** "Lead · Mission title · 2/5" at the top of a thread in a mission; opens the Mission page. */
 @Composable
 fun MissionStripPill(strip: MissionStrip, onClick: () -> Unit, modifier: Modifier = Modifier) {
     Surface(
