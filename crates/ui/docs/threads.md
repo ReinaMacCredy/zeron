@@ -17,7 +17,7 @@ The agent does this through the tools in the **Threads** group of [Settings > To
 
 ## Start a new chat
 
-`create_thread` opens a new chat and gives it a first message. The new chat runs in this chat's project and folder, unless the agent names another project on this device or a folder. It gets this chat's agent, model, reasoning level, permission mode and tools, but never this chat's profile or instructions. The agent can pick another agent, model or reasoning level, or start it on an [agent profile](zeron://docs/agent-profiles); the profile's mode applies only when it is no higher than this chat's.
+`create_thread` opens a new chat and gives it a first message. The new chat runs in this chat's project and folder, unless the agent names another project on this device or a folder. It gets this chat's agent, model, reasoning level, access mode and tools, but never this chat's profile or instructions. The agent can pick another agent, model or reasoning level, or start it on an [agent profile](zeron://docs/agent-profiles); the profile's mode applies only when it is no higher than this chat's.
 
 In the chat that started it, a line reads **Started thread** with the new chat's name and **Open**. The agent can also wait for the new chat's first turn and read its replies.
 

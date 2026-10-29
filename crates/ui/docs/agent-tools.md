@@ -50,9 +50,9 @@ The Supervisor's own chat also gets `supervisor`, which acts on Mission Control 
 
 - Project actions only touch the project of the chat that calls them.
 - The UI driving tool only drives Zeron Dev builds, and never the app that serves the agent's own chat. Reading the UI works in every build and includes text typed into fields. The reading tool never records the app that serves the agent's own chat; to record there, run `zeron ui record` yourself. A recording writes text typed into key, API, token, secret or password fields as `<redacted>`. Starting and quitting builds never touches the Zeron app in Applications. Turning the reading tool off turns the driving tool off too.
-- In a Codex chat, the `device` tool runs without asking for approval. Driving the UI runs without asking only when the chat is at **Full access**; at Ask or Auto, you approve each call.
+- In a Codex chat, the `device` tool runs without asking for approval. Driving the UI runs without asking only when the chat is at **Full access**; at **Supervised** or **Auto-accept edits**, you approve each call.
 - An agent can answer another chat's permission request only when its own chat runs at **Full access**.
-- A child agent, or a profile an agent applies, never gets a higher permission mode than the chat that started it.
+- A child agent, or a profile an agent applies, never gets a higher access mode than the chat that started it.
 - A question from an agent waits up to 25 minutes for your answer.
 - An agent can keep up to 8 chats it started open at once. The chats a task's lead starts for its steps do not count; **Delegated tasks per chat** in Settings > Routing caps how many steps run at once instead.
 - Only a [Mission Control task](zeron://docs/mission-control)'s lead writes its plan and runs its steps, and while the plan waits for your approval, the lead cannot start a step.

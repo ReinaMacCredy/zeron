@@ -14,7 +14,7 @@ The agent looks up what it can use with Zeron's `orchestrator_capabilities` tool
 
 For work on its own agent and model, an agent such as Claude Code may still use its built-in subagents. It uses a Zeron child for another agent, for a model its own subagents cannot run, or when you ask for one.
 
-The child starts with only the task the agent writes for it, not this chat's history, and works in this chat's project and folder. It runs at this chat's permission mode or a lower one, never higher, and keeps off every tool this chat has off.
+The child starts with only the task the agent writes for it, not this chat's history, and works in this chat's project and folder. It runs at this chat's access mode or a lower one, never higher, and keeps off every tool this chat has off.
 
 ## Pick a profile
 
