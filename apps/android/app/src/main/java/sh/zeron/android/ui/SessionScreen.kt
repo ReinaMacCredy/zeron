@@ -89,6 +89,8 @@ import uniffi.zeron_core.SessionHandle
 
 private data class TextSheet(val title: String, val text: String, val mono: Boolean)
 
+private data class FindingsRequest(val taskId: String?)
+
 private data class ConfigRequest(val tab: uniffi.zeron_core.ConfigTab = uniffi.zeron_core.ConfigTab.CONFIG, val query: String = "")
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
@@ -166,6 +168,10 @@ fun SessionScreen(
     var sheet by remember { mutableStateOf<TextSheet?>(null) }
     var viewing by remember { mutableStateOf<ImageBitmap?>(null) }
     var claudeConfig by remember(chatId) { mutableStateOf<ConfigRequest?>(null) }
+    var reviewOptions by remember(chatId) { mutableStateOf(false) }
+    var findings by remember(chatId) { mutableStateOf<FindingsRequest?>(null) }
+    var changes by remember(chatId) { mutableStateOf<String?>(null) }
+    var agentsSheet by remember(chatId) { mutableStateOf(false) }
     val quotes = remember(chatId) { kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 4) }
     val actions = remember(chatId) {
         suspend fun load(ref: String): ImageBitmap? {
@@ -249,6 +255,11 @@ fun SessionScreen(
         when {
             which == "companions" -> onShowCompanions?.invoke(null) ?: run { showCompanions = true }
             which == "terminal" -> onOpenTerminal(chatId, null)
+            which == "config" -> claudeConfig = ConfigRequest()
+            which == "review" -> reviewOptions = true
+            which == "findings" -> findings = FindingsRequest(null)
+            which == "changes" -> changes = "Changes"
+            which == "agents-sheet" -> agentsSheet = true
             which.startsWith("side-chat:") -> onOpenSideChat(which.removePrefix("side-chat:"))
             which.startsWith("subagent:") -> {
                 val tool = which.removePrefix("subagent:")
@@ -383,6 +394,9 @@ fun SessionScreen(
                         onOpenChat = onOpenChat,
                         onOpenSubagent = { doc, title, running -> onOpenSubagent(chatId, doc, title, running) },
                         onOpenTerminal = { terminal -> onOpenTerminal(chatId, terminal) },
+                        extras = extras,
+                        openCard = openCompanion == "agents",
+                        onOpenFindings = { findings = FindingsRequest(it) },
                     )
                     NeedsYouPill(model, chatId, onClick = onNeedsYou)
                 }
@@ -418,6 +432,20 @@ fun SessionScreen(
 
     claudeConfig?.let { c -> sh.zeron.android.ui.session.ClaudeConfigSheet(model, chatId, extras, c.tab, c.query) { claudeConfig = null } }
     sh.zeron.android.ui.session.SwitchPromptDialog(extras)
+    if (reviewOptions) sh.zeron.android.ui.review.ReviewOptionsSheet(extras) { reviewOptions = false }
+    findings?.let { f -> sh.zeron.android.ui.review.ReviewFindingsSheet(extras, f.taskId) { findings = null } }
+    changes?.let { t -> sh.zeron.android.ui.review.ChangesSheet(extras, t) { changes = null } }
+    if (agentsSheet) {
+        sh.zeron.android.ui.session.AgentsSheet(
+            model,
+            chatId,
+            extras,
+            onOpenChat = onOpenChat,
+            onOpenSubagent = { doc, title, running -> onOpenSubagent(chatId, doc, title, running) },
+            onOpenTerminal = { terminal -> onOpenTerminal(chatId, terminal) },
+            onOpenFindings = { findings = FindingsRequest(it) },
+        ) { agentsSheet = false }
+    }
 
     if (showCompanions) {
         CompanionsSheet(
