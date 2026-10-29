@@ -74,6 +74,8 @@ import sh.zeron.android.design.GeistMono
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.zIndex
 import sh.zeron.android.R
@@ -87,6 +89,7 @@ import uniffi.zeron_core.quoteChipLabel
  * and, while focused or holding a draft, a card with staged photos and the
  * full-width prompt above a toolbar of context chips.
  */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun ComposerSurface(
     model: ComposerModel,
@@ -102,20 +105,40 @@ fun ComposerSurface(
     chips: @Composable RowScope.() -> Unit = {},
 ) {
     var focused by remember { mutableStateOf(false) }
-    val card = alwaysCard || focused || model.images.isNotEmpty() || model.pasted.isNotEmpty() || model.quotes.isNotEmpty()
+    var attachOpen by remember { mutableStateOf(false) }
+    var reopenKeyboard by remember { mutableStateOf(false) }
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+    val imeUp = WindowInsets.isImeVisible
+    sh.zeron.android.ui.composer.TrackKeyboardHeight()
+    fun closeAttach() {
+        attachOpen = false
+        if (reopenKeyboard) {
+            focusRequester.requestFocus()
+            keyboard?.show()
+        }
+    }
+    fun toggleAttach() {
+        if (attachOpen) return closeAttach()
+        reopenKeyboard = imeUp
+        focusManager.clearFocus()
+        attachOpen = true
+    }
+    val card = alwaysCard || focused || attachOpen || model.images.isNotEmpty() || model.pasted.isNotEmpty() || model.quotes.isNotEmpty()
     val ghost = predictionPlaceholder(prediction, model.text)
+    Column(modifier.fillMaxWidth()) {
     Surface(
         shape = RoundedCornerShape(28.dp),
         color = composerContainer(),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        modifier = modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.animateContentSize(MaterialTheme.motionScheme.defaultSpatialSpec())) {
             AnimatedVisibility(model.staged > 0 || model.quotes.isNotEmpty()) { StagedThumbnails(model) }
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.heightIn(min = 56.dp)) {
                 if (!card) {
                     Spacer(Modifier.width(4.dp))
-                    AttachButton(model, attach)
+                    AttachToggle(attachOpen, attach) { toggleAttach() }
                 } else {
                     Spacer(Modifier.width(20.dp))
                 }
@@ -156,6 +179,7 @@ fun ComposerSurface(
                             .focusRequester(focusRequester)
                             .onFocusChanged {
                                 focused = it.isFocused
+                                if (it.isFocused && attachOpen) attachOpen = false
                                 onFocusChange(it.isFocused)
                             }
                             // Hardware keyboards: Ctrl/⌘+Enter sends (plain Enter is a newline).
@@ -180,7 +204,7 @@ fun ComposerSurface(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.padding(start = 4.dp, end = 8.dp, bottom = 8.dp),
                 ) {
-                    AttachButton(model, attach)
+                    AttachToggle(attachOpen, attach) { toggleAttach() }
                     Row(
                         Modifier
                             .weight(1f)
@@ -205,6 +229,8 @@ fun ComposerSurface(
                 }
             }
         }
+    }
+    if (attachOpen) sh.zeron.android.ui.composer.AttachPanel(model, onClose = ::closeAttach)
     }
 }
 
@@ -235,9 +261,14 @@ private fun StagedThumbnails(model: ComposerModel) {
             }
             if (open) PastedTextSheet(info.title, text.text) { open = false }
         }
+        var previewing by remember { mutableStateOf<StagedImage?>(null) }
+        previewing?.let { img ->
+            val i = model.images.indexOf(img)
+            if (i >= 0) sh.zeron.android.ui.composer.AttachmentPreview(img, i, model.images.size, onRemove = { model.images.remove(img) }, onDismiss = { previewing = null })
+        }
         for (image in model.images) {
             Box(Modifier.size(72.dp)) {
-                Image(image.thumb, "Attached image", Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)), contentScale = ContentScale.Crop)
+                Image(image.thumb, "Attached image", Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)).clickable { previewing = image }.testTag("composer-image"), contentScale = ContentScale.Crop)
                 RemoveBadge("Remove image", Modifier.align(Alignment.TopEnd)) { model.images.remove(image) }
             }
         }
@@ -301,53 +332,15 @@ private fun PastedTextSheet(title: String, text: String, onDismiss: () -> Unit) 
     }
 }
 
-/** [+] → Photos / Take photo / Files / Paste image, staged into the composer. */
 @Composable
-private fun AttachButton(model: ComposerModel, enabled: Boolean) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var open by remember { mutableStateOf(false) }
-    fun add(uris: List<Uri>) {
-        scope.launch {
-            for (uri in uris.take(Staging.MAX_IMAGES - model.staged)) Staging.stage(context, uri)?.let { model.images.add(it) }
-        }
-    }
-    val photos = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(Staging.MAX_IMAGES)) { add(it) }
-    val files = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { add(it) }
-    // The camera writes into a cache file the FileProvider shares with it.
-    var capture by remember { mutableStateOf<Uri?>(null) }
-    val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
-        val uri = capture
-        if (saved && uri != null) add(listOf(uri))
-    }
-    val hasCamera = remember { context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_CAMERA_ANY) }
-    Box {
-        IconButton(onClick = { open = true }, enabled = enabled && model.staged < Staging.MAX_IMAGES) {
-            ZIcon(ZIcons.Plus, "Attach", Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        val clip = if (open) context.getSystemService(android.content.ClipboardManager::class.java)?.primaryClip else null
-        val pasted = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
-            ?.takeIf { context.contentResolver.getType(it)?.startsWith("image/") == true }
-        ActionMenu(
-            open,
-            { open = false },
-            listOfNotNull(
-                MenuAction("Photos", ZIcons.Gallery) { photos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
-                if (hasCamera) {
-                    MenuAction("Take photo", ZIcons.Camera) {
-                        val dir = java.io.File(context.cacheDir, "camera").apply { mkdirs() }
-                        val file = java.io.File(dir, "capture-${System.currentTimeMillis()}.jpg")
-                        val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.files", file)
-                        capture = uri
-                        camera.launch(uri)
-                    }
-                } else {
-                    null
-                },
-                MenuAction("Files", ZIcons.Folder) { files.launch(arrayOf("image/*")) },
-                pasted?.let { uri -> MenuAction("Paste image", ZIcons.Copy) { add(listOf(uri)) } },
-            ),
-        )
+private fun AttachToggle(open: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    val turn by androidx.compose.animation.core.animateFloatAsState(
+        if (open) 45f else 0f,
+        androidx.compose.animation.core.spring(dampingRatio = 0.72f, stiffness = androidx.compose.animation.core.Spring.StiffnessMediumLow),
+        label = "attach",
+    )
+    IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.testTag("composer-attach")) {
+        ZIcon(ZIcons.Plus, if (open) "Close attachments" else "Attach", Modifier.size(22.dp).graphicsLayer { rotationZ = turn }, tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
