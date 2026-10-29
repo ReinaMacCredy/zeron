@@ -1579,7 +1579,7 @@ fn gather_tasks_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
     let row = |n: usize| {
         let finished = TICK_AT.get(n).is_some_and(|at| t >= *at);
         div()
-            .h(px(18.0))
+            .h(px(17.0))
             .flex()
             .items_center()
             .gap(px(7.0))
@@ -1588,7 +1588,7 @@ fn gather_tasks_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
             } else {
                 running(theme, reduced)
             })
-            .child(text(11.0, theme.text_faint, format!("{}", n + 1)))
+            .child(text(11.0, theme.text_faint, format!("{}", n + 1)).w(px(8.0)))
             .child(
                 text(12.0, theme.accent, TITLES[PICKED[n]].0).font_weight(gpui::FontWeight::MEDIUM),
             )
@@ -1601,10 +1601,10 @@ fn gather_tasks_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
     };
     let pinned = card(theme)
         .px(px(9.0))
-        .py(px(7.0))
+        .py(px(6.0))
         .flex()
         .flex_col()
-        .gap(px(5.0))
+        .gap(px(4.0))
         .child(
             div()
                 .flex()
@@ -1641,7 +1641,7 @@ fn gather_tasks_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
     let message = div().flex().justify_end().child(
         div()
             .px(px(10.0))
-            .py(px(3.0))
+            .py(px(2.0))
             .rounded(px(10.0))
             .bg(crate::theme::ink(0.06))
             .child(text(
@@ -1651,7 +1651,7 @@ fn gather_tasks_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
             )),
     );
     let composer = div()
-        .h(px(22.0))
+        .h(px(20.0))
         .px(px(10.0))
         .flex()
         .items_center()
@@ -1663,7 +1663,7 @@ fn gather_tasks_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
         .w(px(390.0))
         .flex()
         .flex_col()
-        .gap(px(6.0))
+        .gap(px(5.0))
         .relative()
         .top(px((1.0 - enter) * 6.0))
         .opacity(enter)
@@ -1717,6 +1717,7 @@ fn task_drag_visual(theme: &Theme, t: f32) -> AnyElement {
         } else {
             theme.wash(0.06 * grips[ix])
         };
+        let shown = if ix == 2 { 1.0 - tuck } else { 1.0 };
         div()
             .absolute()
             .top(px(tops[ix]))
@@ -1730,7 +1731,14 @@ fn task_drag_visual(theme: &Theme, t: f32) -> AnyElement {
             .rounded(px(7.0))
             .border_1()
             .border_color(theme.border_strong.opacity(lift))
-            .bg(motion::mix(rest, theme.surface_raised, lift))
+            .bg(motion::mix(
+                rest,
+                gpui::Hsla {
+                    a: 1.0,
+                    ..theme.surface_raised
+                },
+                lift,
+            ))
             .when(lift > 0.0, |el| {
                 el.shadow(vec![gpui::BoxShadow {
                     color: gpui::black().opacity(0.25 * lift),
@@ -1745,8 +1753,8 @@ fn task_drag_visual(theme: &Theme, t: f32) -> AnyElement {
                 11.0,
                 theme.text_faint.opacity(grips[ix]),
             ))
-            .child(todo_circle(theme, 12.0))
-            .child(text(12.0, theme.text, TITLES[ix]))
+            .child(todo_circle(theme, 12.0).opacity(shown))
+            .child(text(12.0, theme.text, TITLES[ix]).opacity(shown))
             .child(div().flex_1())
             .when(ix == 0 && tuck > 0.0, |el| {
                 el.child(
