@@ -47,7 +47,7 @@ pub(crate) mod claude_config;
 pub(crate) use ask_pill::{AskInfo, pending_questions};
 pub(crate) mod background;
 mod chip;
-mod limit_pill;
+mod limit_notice;
 mod review_chip;
 mod staged_comments;
 pub use chip::ChipKind;
@@ -14712,7 +14712,7 @@ impl Render for Composer {
                 self.staged().len() + self.staged_appshots().len(),
                 self.staged_chip_count(cx),
             );
-        let corner = self.render_corner(cx);
+        self.sync_background_walks(cx);
         let card = self.render_config_panel(window, cx);
         let config_in_flow = card.is_some() && self.config_panel_on_hero(cx);
         // The checklist tray stacks above the queue (or directly above the
@@ -14744,13 +14744,11 @@ impl Render for Composer {
                     .flex()
                     .items_end()
                     .gap(px(Theme::SPACE_SM))
-                    .child(div().flex_1().min_w_0().children(corner))
+                    .child(div().flex_1().min_w_0())
                     .child(tab)
                     .children(card),
             ),
-            None if corner.is_some() || card.is_some() => {
-                container.child(div().relative().children(corner).children(card))
-            }
+            None if card.is_some() => container.child(div().relative().children(card)),
             None => container,
         };
         let container = container.when_some(todo, |el, panel| {
@@ -14829,7 +14827,8 @@ impl Render for Composer {
         let appshot_count = self.staged_appshots().len();
         let strip_h = attachment_strip_height(staged_count, strip_width_hint);
         let comment_strip_h = comment_strip_height(self.staged_chip_count(cx))
-            + pr_chip_strip_height(self.pr_chips.len());
+            + pr_chip_strip_height(self.pr_chips.len())
+            + self.limit_notice_height(cx);
         let base_height = if self.dock_frame.is_some() {
             dock_layout.height(dock_amount)
         } else if expanded {
@@ -15128,6 +15127,7 @@ impl Render for Composer {
         }
         let comments_chip = self.render_staged_chips(&theme, cx);
         let pr_chips = self.render_pr_chips(&theme, cx);
+        let limit_notice = self.render_limit_notice(&theme, cx);
 
         let pill_border = theme.composer_surface_border();
         let plan_border = self.plan_motion.border.value_at(plan_now);
@@ -15235,6 +15235,7 @@ impl Render for Composer {
                 .relative()
                 .flex()
                 .flex_col()
+                .children(limit_notice)
                 .children(pr_chips)
                 .children(comments_chip)
                 .children(appshot_strip)
@@ -15313,6 +15314,7 @@ impl Render for Composer {
                 .flex()
                 .flex_col()
                 .justify_end()
+                .children(limit_notice)
                 .children(pr_chips)
                 .children(comments_chip)
                 .children(appshot_strip)

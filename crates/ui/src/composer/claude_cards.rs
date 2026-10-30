@@ -119,6 +119,10 @@ impl Composer {
     }
 
     pub(super) fn run_claude_card(&mut self, command: ClaudeCardCommand, cx: &mut Context<Self>) {
+        if command == ClaudeCardCommand::Usage {
+            cx.emit(super::ComposerEvent::OpenUsage);
+            return;
+        }
         match self
             .bound_chat_id(cx)
             .and_then(|id| self.card_target(&id, cx))
@@ -142,7 +146,7 @@ impl Composer {
                 self.write_card(target, Some(headline), card, cx);
             }
             ClaudeCardCommand::Context => self.side_card(target, "context", None, cx),
-            ClaudeCardCommand::Usage => self.side_card(target, "usage", None, cx),
+            ClaudeCardCommand::Usage => cx.emit(super::ComposerEvent::OpenUsage),
             ClaudeCardCommand::Mcp => self.side_card(target, "mcp", None, cx),
         }
     }

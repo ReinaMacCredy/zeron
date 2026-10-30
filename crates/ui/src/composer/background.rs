@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, App, Context, Div, SharedString, Stateful, div, prelude::*, px};
+use gpui::{App, Context, Div, SharedString, div, prelude::*, px};
 use zeron_doc::SessionMessageEntry;
 use zeron_doc::background::{agent_runs, agent_tree, latest_prompt, rows_missing, walked_docs};
 use zeron_proto::background::{delegate_runs, shell_tasks};
@@ -12,7 +12,6 @@ use super::Composer;
 use crate::motion;
 use crate::theme::Theme;
 
-const PILL_HEIGHT: f32 = 28.0;
 const CARD_RISE: f32 = 10.0;
 const CARD_DROP: f32 = 4.0;
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -122,24 +121,7 @@ where
 }
 
 impl Composer {
-    pub(super) fn render_corner(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        self.sync_background_walks(cx);
-        let theme = Theme::of(cx).clone();
-        let limit = (!self.side_chat)
-            .then(|| self.render_limit_pill(&theme, cx))
-            .flatten();
-        limit.map(|limit| {
-            div()
-                .flex()
-                .flex_row()
-                .items_end()
-                .child(div().flex_1().min_w_0())
-                .child(limit)
-                .into_any_element()
-        })
-    }
-
-    fn sync_background_walks(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn sync_background_walks(&mut self, cx: &mut Context<Self>) {
         let Some(BackgroundRuns {
             chat_id,
             agents,
@@ -384,36 +366,6 @@ impl Composer {
         })
         .detach();
     }
-}
-
-pub(super) fn pill_frame(id: &'static str, theme: &Theme) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_none()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(4.0))
-        .h(px(PILL_HEIGHT))
-        .px(px(10.0))
-        .rounded_full()
-        .border_1()
-        .border_color(theme.composer_surface_border())
-        .bg(theme.composer_surface_bg())
-        .text_size(crate::typography::ui_rems(13.0))
-        .text_color(theme.text_muted)
-        .whitespace_nowrap()
-        .cursor_pointer()
-        .hover(|s| s.border_color(theme.border_strong).text_color(theme.text))
-        .active(|s| s.opacity(0.85))
-}
-
-pub(super) fn frosted_pill(pill: impl IntoElement, opacity: f32) -> crate::frost::Frosted {
-    crate::frost::frosted(PILL_HEIGHT / 2.0, crate::frost::MENU_BLUR * opacity, pill)
-}
-
-pub(super) fn pill_leading(glyph: AnyElement) -> Div {
-    div().flex().items_center().mr(px(4.0)).child(glyph)
 }
 
 #[cfg(test)]

@@ -34,6 +34,7 @@ const CHART_HEIGHT: f32 = 224.0;
 const PLOT_TOP: f32 = 8.0;
 const AXIS_WIDTH: f32 = 56.0;
 const SUMMARY_WIDTH: f32 = 288.0;
+const ACCOUNT_MENU_WIDTH: f32 = 400.0;
 
 pub struct UsagePage {
     state: Entity<AppState>,
@@ -46,11 +47,17 @@ pub struct UsagePage {
     hover: Option<usize>,
     plot: Rc<Cell<Option<Bounds<Pixels>>>>,
     details_open: std::collections::HashSet<String>,
+    accounts: Entity<crate::account_usage::DeviceAccounts>,
+    account_menu: crate::popover::Popup<HarnessId>,
     _accounts: gpui::Subscription,
 }
 
 impl UsagePage {
-    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        state: Entity<AppState>,
+        accounts: Entity<crate::account_usage::DeviceAccounts>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut page = Self {
             state,
             days: 30,
@@ -62,6 +69,8 @@ impl UsagePage {
             hover: None,
             plot: Rc::default(),
             details_open: Default::default(),
+            accounts,
+            account_menu: Default::default(),
             _accounts: cx.observe_global::<crate::settings::accounts::AccountsSnapshotCache>(
                 |_, cx| cx.notify(),
             ),
@@ -958,12 +967,10 @@ impl UsagePage {
 impl UsagePage {
     fn render_plan_limits(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let snapshot = crate::account_usage::local_snapshot(cx)?;
-        let accounts: Vec<zeron_proto::AgentAccount> =
-            crate::settings::accounts::sidebar_accounts(snapshot)
-                .into_iter()
-                .filter(|account| crate::settings::accounts::reports_usage(account.harness))
-                .cloned()
-                .collect();
+        let accounts: Vec<zeron_proto::AgentAccount> = crate::app_rail::usage_accounts(snapshot)
+            .into_iter()
+            .cloned()
+            .collect();
         if accounts.is_empty() {
             return None;
         }
@@ -1070,14 +1077,7 @@ impl UsagePage {
                             .text_color(theme.text_muted)
                             .child(SharedString::from(plan))
                     }))
-                    .children(account.email.clone().map(|email| {
-                        div()
-                            .ml_auto()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(email))
-                    })),
+                    .children(self.account_switch(ix, account, now, theme, cx)),
             )
             .children(account.usage_error.clone().map(|error| {
                 div()
@@ -1096,6 +1096,214 @@ impl UsagePage {
             ))
             .into_any_element()
     }
+}
+
+impl UsagePage {
+    fn close_account_menu(&mut self, cx: &mut Context<Self>) {
+        if self.account_menu.begin_close() {
+            crate::popover::reap_popup(cx, |page: &mut Self| &mut page.account_menu);
+            cx.notify();
+        }
+    }
+
+    fn account_switch(
+        &self,
+        ix: usize,
+        account: &zeron_proto::AgentAccount,
+        now: chrono::DateTime<chrono::Utc>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let who: SharedString = account
+            .email
+            .clone()
+            .or_else(|| account.display_name.clone())?
+            .into();
+        let harness = account.harness;
+        if !crate::settings::accounts::switches_accounts(harness) {
+            return Some(
+                div()
+                    .ml_auto()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.text_faint)
+                    .child(who)
+                    .into_any_element(),
+            );
+        }
+        let open = self.account_menu.as_open() == Some(&harness);
+        let selector = format!("usage-plan-account-{ix}");
+        let mut trigger = div()
+            .id(("usage-plan-account", ix))
+            .debug_selector(move || selector.clone())
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!("Switch account: {who}")))
+            .aria_expanded(open)
+            .ml_auto()
+            .min_w_0()
+            .relative()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .px(px(6.0))
+            .py(px(2.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .text_color(theme.text_muted)
+            .when(open, |el| el.bg(crate::theme::wash(0.06)))
+            .hover(|style| style.bg(crate::theme::wash(0.06)))
+            .child(div().min_w_0().truncate().child(who))
+            .child(
+                icon(icons::LUCIDE_CHEVRON_DOWN)
+                    .size(px(12.0))
+                    .text_color(theme.text_muted),
+            )
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, _| this.account_menu.note_trigger_press()),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.account_menu.take_press_was_open()
+                    || this.account_menu.as_open() == Some(&harness)
+                {
+                    this.close_account_menu(cx);
+                    return;
+                }
+                this.account_menu.open(harness);
+                cx.notify();
+            }));
+        if self.account_menu.get() == Some(&harness) {
+            let popup_theme = theme.for_popup();
+            let rows: Vec<AnyElement> = crate::account_usage::local_snapshot(cx)
+                .map(|snapshot| {
+                    crate::settings::accounts::provider_accounts(snapshot, harness)
+                        .into_iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+                .into_iter()
+                .enumerate()
+                .map(|(row_ix, row)| {
+                    let switch_to = row.clone();
+                    account_row(&row, row_ix, &popup_theme, now)
+                        .when(!row.active && row.switchable, |el| {
+                            el.on_click(cx.listener(move |this, _, _, cx| {
+                                this.accounts
+                                    .update(cx, |accounts, cx| accounts.switch(&switch_to, cx));
+                                this.close_account_menu(cx);
+                            }))
+                        })
+                        .into_any_element()
+                })
+                .collect();
+            let error = self.accounts.read(cx).error();
+            let title = format!(
+                "{} accounts",
+                crate::settings::accounts::provider_name(harness)
+            );
+            let card = crate::popover::popover_card(&popup_theme)
+                .w(px(ACCOUNT_MENU_WIDTH))
+                .flex()
+                .flex_col()
+                .child(crate::popover::menu_heading(&popup_theme, &title))
+                .children(rows)
+                .children(error.map(|error| {
+                    div()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .text_size(px(12.0))
+                        .text_color(popup_theme.danger)
+                        .child(error)
+                }))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_account_menu(cx)))
+                .into_any_element();
+            trigger = trigger.child(crate::popover::anchored_menu_below_end(
+                "usage-plan-account-menu",
+                card,
+                self.account_menu.closing_since(),
+            ));
+        }
+        Some(trigger.into_any_element())
+    }
+}
+
+fn account_row(
+    account: &zeron_proto::AgentAccount,
+    ix: usize,
+    theme: &Theme,
+    now: chrono::DateTime<chrono::Utc>,
+) -> gpui::Stateful<gpui::Div> {
+    let email: SharedString = account
+        .email
+        .clone()
+        .or_else(|| account.display_name.clone())
+        .unwrap_or_else(|| "Unknown account".into())
+        .into();
+    let mut meta: Vec<AnyElement> = account
+        .plan_label
+        .iter()
+        .map(|plan| {
+            div()
+                .child(SharedString::from(plan.clone()))
+                .into_any_element()
+        })
+        .collect();
+    if account.active {
+        meta.push(
+            div()
+                .text_color(theme.accent)
+                .child(SharedString::from("In use"))
+                .into_any_element(),
+        );
+    } else if let Some(reason) = account
+        .usage_error
+        .clone()
+        .filter(|_| account.usage_windows.is_empty())
+    {
+        meta.push(div().child(SharedString::from(reason)).into_any_element());
+    }
+    crate::popover::menu_row(theme, account.active, format!("usage-account-row-{ix}"))
+        .id(("usage-account-row", ix))
+        .debug_selector(move || format!("usage-account-row-{ix}"))
+        .when(account.active || !account.switchable, |row| {
+            row.cursor_default()
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(12.5))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(email),
+                )
+                .when(!meta.is_empty(), |el| {
+                    el.child(widgets::meta_line(theme, meta))
+                }),
+        )
+        .child(
+            div()
+                .id(("usage-account-meters", ix))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .when(!account.usage_windows.is_empty(), |meters| {
+                    meters.tooltip(widgets::text_tooltip(
+                        crate::settings::accounts::usage_resets(&account.usage_windows, now),
+                    ))
+                })
+                .children(
+                    account
+                        .usage_windows
+                        .iter()
+                        .take(2)
+                        .map(|window| crate::settings::accounts::render_usage_meter(window, theme)),
+                ),
+        )
 }
 
 impl Render for UsagePage {
