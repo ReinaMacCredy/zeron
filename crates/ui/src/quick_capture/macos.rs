@@ -78,3 +78,25 @@ pub(crate) fn resize_panel(window: &gpui::Window) -> Option<impl FnOnce(f64, f64
         panel.invalidateShadow();
     })
 }
+
+pub(crate) fn place_below(
+    anchor: &gpui::Window,
+    at: gpui::Point<gpui::Pixels>,
+) -> Option<impl FnOnce(&gpui::Window) + 'static> {
+    let bar = ns_window(anchor)?;
+    let (x, y) = (f64::from(f32::from(at.x)), f64::from(f32::from(at.y)));
+    Some(move |menu: &gpui::Window| {
+        let Some(panel) = ns_window(menu) else {
+            return;
+        };
+        let frame = bar.frame();
+        panel.setFrameTopLeftPoint(NSPoint::new(
+            frame.origin.x + x,
+            frame.origin.y + frame.size.height - y,
+        ));
+        // Otherwise a row click makes the menu key, the bar resigns and closes before the pick lands.
+        unsafe {
+            let _: () = objc2::msg_send![&*panel, setBecomesKeyOnlyIfNeeded: true];
+        }
+    })
+}

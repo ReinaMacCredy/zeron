@@ -1,8 +1,11 @@
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    KeyDownEvent, SharedString, Subscription, Task, Window, div, prelude::*, px,
+    AnyElement, App, Bounds, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    KeyDownEvent, Pixels, ScrollHandle, SharedString, Subscription, Task, Window, WindowHandle,
+    div, prelude::*, px,
 };
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
@@ -28,7 +31,9 @@ pub(crate) const FADE: Duration = Duration::from_millis(120);
 pub(crate) const TOAST_FOR: Duration = Duration::from_millis(2600);
 const OPEN: motion::MotionSpec = motion::MotionSpec::new(160, motion::EASE_OUT);
 const PLACEHOLDER: &str = "Jot down an idea…";
-const MENU_ROWS: usize = 6;
+const MENU_WIDTH: f32 = 220.0;
+const MENU_MAX_HEIGHT: f32 = 280.0;
+const MENU_GAP: f32 = 6.0;
 
 #[derive(Default)]
 pub struct Captured {
@@ -143,6 +148,10 @@ pub(crate) struct QuickCaptureBar {
     today: bool,
     menu: Option<usize>,
     menu_from_chip: bool,
+    menu_window: Option<WindowHandle<ProjectMenu>>,
+    menu_opening: bool,
+    menu_scroll: ScrollHandle,
+    chip_bounds: Rc<Cell<Bounds<Pixels>>>,
     saved: Option<Instant>,
     opens: u64,
     seen_active: bool,
@@ -180,6 +189,10 @@ impl QuickCaptureBar {
             today: false,
             menu: None,
             menu_from_chip: false,
+            menu_window: None,
+            menu_opening: false,
+            menu_scroll: ScrollHandle::new(),
+            chip_bounds: Rc::default(),
             saved: None,
             opens: 0,
             seen_active: false,
@@ -254,9 +267,7 @@ impl QuickCaptureBar {
         } else {
             hash_query(text).map_or("", |(_, query)| query)
         };
-        let mut rows = project_matches(self.state.read(cx), query);
-        rows.truncate(MENU_ROWS);
-        rows
+        project_matches(self.state.read(cx), query)
     }
 
     fn refresh_menu(&mut self, cx: &mut Context<Self>) {
@@ -296,6 +307,9 @@ impl QuickCaptureBar {
                     .position(|(id, _)| Some(id) == current.as_ref())
                     .unwrap_or(0)
             });
+            if let Some(active) = self.menu {
+                self.menu_scroll.scroll_to_item(active);
+            }
         }
         cx.notify();
     }
@@ -306,11 +320,90 @@ impl QuickCaptureBar {
         };
         let count = self.menu_rows(cx).len();
         self.menu = popover::menu_step(Some(active), count, delta);
+        if let Some(active) = self.menu {
+            self.menu_scroll.scroll_to_item(active);
+        }
         cx.notify();
         true
     }
 
-    fn pick_project(&mut self, ix: usize, window: Option<&mut Window>, cx: &mut Context<Self>) {
+    pub(crate) fn close_menu(&mut self, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.menu_from_chip = false;
+        if let Some(handle) = self.menu_window.take() {
+            cx.defer(move |cx| {
+                handle
+                    .update(cx, |_, window, _| window.remove_window())
+                    .ok();
+            });
+        }
+    }
+
+    fn menu_shown(&self) -> bool {
+        self.menu_window.is_some() || self.menu_opening
+    }
+
+    fn sync_menu_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match (self.menu.is_some(), self.menu_shown()) {
+            (true, false) => self.open_menu_window(window, cx),
+            (false, true) => self.close_menu(cx),
+            _ => {}
+        }
+    }
+
+    fn open_menu_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chip = self.chip_bounds.get();
+        let anchor = gpui::point(chip.left(), chip.bottom() + px(MENU_GAP));
+        let origin = window.bounds().origin + anchor;
+        let options = gpui::WindowOptions {
+            window_bounds: Some(gpui::WindowBounds::Windowed(Bounds::new(
+                origin,
+                gpui::size(px(MENU_WIDTH), px(MENU_MAX_HEIGHT)),
+            ))),
+            titlebar: None,
+            focus: false,
+            show: true,
+            kind: gpui::WindowKind::PopUp,
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
+            display_id: window.display(cx).map(|display| display.id()),
+            window_background: gpui::WindowBackgroundAppearance::Blurred,
+            ..Default::default()
+        };
+        #[cfg(target_os = "macos")]
+        let place = macos::place_below(window, anchor);
+        let bar = cx.entity();
+        self.menu_opening = true;
+        // Opening renders the menu at once, and its render reads this bar, so it cannot run inside the bar's update.
+        cx.defer(move |cx| {
+            let menu_bar = bar.clone();
+            let opened = cx.open_window(options, move |window, cx| {
+                #[cfg(target_os = "macos")]
+                {
+                    macos::style_panel(window, 10.0);
+                    if let Some(place) = place {
+                        place(window);
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                let _ = &window;
+                cx.new(|cx| ProjectMenu {
+                    _observe: cx.observe(&menu_bar, |_, _, cx| cx.notify()),
+                    bar: menu_bar,
+                })
+            });
+            bar.update(cx, |bar, cx| {
+                bar.menu_opening = false;
+                bar.menu_window = opened.ok();
+                if bar.menu.is_none() {
+                    bar.close_menu(cx);
+                }
+            });
+        });
+    }
+
+    fn pick_project(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some((space_id, _)) = self.menu_rows(cx).into_iter().nth(ix) else {
             return;
         };
@@ -322,11 +415,7 @@ impl QuickCaptureBar {
                 self.input.update(cx, |input, cx| input.set_text(kept, cx));
             }
         }
-        self.menu = None;
-        self.menu_from_chip = false;
-        if let Some(window) = window {
-            window.focus(&self.input.focus_handle(cx), cx);
-        }
+        self.close_menu(cx);
         cx.notify();
     }
 
@@ -337,7 +426,7 @@ impl QuickCaptureBar {
 
     fn enter(&mut self, cx: &mut Context<Self>) {
         if let Some(ix) = self.menu {
-            self.pick_project(ix, None, cx);
+            self.pick_project(ix, cx);
         } else {
             self.save(false, cx);
         }
@@ -395,12 +484,7 @@ impl QuickCaptureBar {
         let _ = window;
     }
 
-    fn render_card(
-        &mut self,
-        menu: Option<AnyElement>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_card(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let state = self.state.read(cx);
         let space_id = self.space_id(cx);
         let project = project_label(state, space_id.as_deref());
@@ -408,6 +492,7 @@ impl QuickCaptureBar {
             .saved
             .map(|saved| (motion::since(saved).as_secs_f32() / TICK.as_secs_f32()).clamp(0.0, 1.0));
         let image_count = self.images.len();
+        let chip_bounds = self.chip_bounds.clone();
         let chip = |id: &'static str, on: bool| {
             div()
                 .id(id)
@@ -511,6 +596,7 @@ impl QuickCaptureBar {
                     .text_color(theme.text_muted)
                     .child(
                         chip("quick-capture-project", false)
+                            .relative()
                             .role(gpui::Role::Button)
                             .aria_label(SharedString::from(format!("Project: {project}")))
                             .child(
@@ -519,6 +605,16 @@ impl QuickCaptureBar {
                                     .text_color(theme.text_muted),
                             )
                             .child(project)
+                            .child(
+                                gpui::canvas(
+                                    move |bounds, _, _| chip_bounds.set(bounds),
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full(),
+                            )
                             .on_click(cx.listener(|bar, _: &ClickEvent, window, cx| {
                                 bar.toggle_menu(cx);
                                 bar.refocus(window, cx);
@@ -563,40 +659,6 @@ impl QuickCaptureBar {
                             .child(hint("Esc", "")),
                     ),
             )
-            .children(menu)
-            .into_any_element()
-    }
-
-    fn render_menu(&mut self, active: usize, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let rows = self.menu_rows(cx);
-        div()
-            .id("quick-capture-projects")
-            .debug_selector(|| "quick-capture-projects".into())
-            .ml(px(36.0))
-            .mb(px(8.0))
-            .w(px(220.0))
-            .p(px(4.0))
-            .flex()
-            .flex_col()
-            .rounded(px(10.0))
-            .bg(theme.text.opacity(0.04))
-            .text_size(ui_rems(13.0))
-            .text_color(theme.text)
-            .children(rows.into_iter().enumerate().map(|(ix, (_, name))| {
-                div()
-                    .id(("quick-capture-project-row", ix))
-                    .px(px(9.0))
-                    .py(px(6.0))
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .truncate()
-                    .when(ix == active, |el| el.bg(theme.text.opacity(0.08)))
-                    .hover(|style| style.bg(theme.text.opacity(0.08)))
-                    .child(name)
-                    .on_click(cx.listener(move |bar, _: &ClickEvent, window, cx| {
-                        bar.pick_project(ix, Some(window), cx)
-                    }))
-            }))
             .into_any_element()
     }
 }
@@ -611,8 +673,10 @@ impl Render for QuickCaptureBar {
         if self.saved.is_some() && fade > 0.0 {
             window.request_animation_frame();
         }
-        let menu = self.menu.map(|active| self.render_menu(active, &theme, cx));
-        let card = self.render_card(menu, &theme, cx);
+        if self.menu.is_some() != self.menu_shown() {
+            cx.defer_in(window, Self::sync_menu_window);
+        }
+        let card = self.render_card(&theme, cx);
         let opens = self.opens;
         div()
             .id("quick-capture")
@@ -635,6 +699,65 @@ impl Render for QuickCaptureBar {
                 OPEN.animation(),
                 move |el, t| el.opacity(t * fade),
             ))
+    }
+}
+
+pub(crate) struct ProjectMenu {
+    bar: Entity<QuickCaptureBar>,
+    _observe: Subscription,
+}
+
+impl Render for ProjectMenu {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx).for_popup();
+        let bar = self.bar.read(cx);
+        let (rows, active, scroll) = (bar.menu_rows(cx), bar.menu, bar.menu_scroll.clone());
+        div()
+            .size_full()
+            .flex()
+            .items_start()
+            .font_family(theme.font_sans.clone())
+            .child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .w(px(MENU_WIDTH))
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(theme.text.opacity(0.12))
+                    .bg(panel_surface(&theme))
+                    .child(fit_panel())
+                    .child(
+                        div()
+                            .id("quick-capture-projects")
+                            .debug_selector(|| "quick-capture-projects".into())
+                            .max_h(px(MENU_MAX_HEIGHT))
+                            .overflow_y_scroll()
+                            .track_scroll(&scroll)
+                            .p(px(4.0))
+                            .flex()
+                            .flex_col()
+                            .text_size(ui_rems(13.0))
+                            .text_color(theme.text)
+                            .children(rows.into_iter().enumerate().map(|(ix, (_, name))| {
+                                let bar = self.bar.clone();
+                                div()
+                                    .id(("quick-capture-project-row", ix))
+                                    .flex_none()
+                                    .px(px(9.0))
+                                    .py(px(6.0))
+                                    .rounded(px(6.0))
+                                    .cursor_pointer()
+                                    .truncate()
+                                    .when(Some(ix) == active, |el| el.bg(theme.text.opacity(0.08)))
+                                    .hover(|style| style.bg(theme.text.opacity(0.08)))
+                                    .child(name)
+                                    .on_click(move |_: &ClickEvent, _, cx| {
+                                        bar.update(cx, |bar, cx| bar.pick_project(ix, cx))
+                                    })
+                            })),
+                    ),
+            )
     }
 }
 
@@ -674,7 +797,9 @@ fn fit_panel() -> impl IntoElement {
 }
 
 pub(crate) fn is_panel(window: gpui::AnyWindowHandle) -> bool {
-    window.downcast::<QuickCaptureBar>().is_some() || window.downcast::<ToastPanel>().is_some()
+    window.downcast::<QuickCaptureBar>().is_some()
+        || window.downcast::<ProjectMenu>().is_some()
+        || window.downcast::<ToastPanel>().is_some()
 }
 
 pub(crate) fn toast_card(
