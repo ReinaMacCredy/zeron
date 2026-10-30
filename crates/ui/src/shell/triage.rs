@@ -745,7 +745,7 @@ impl Shell {
             .map(|(_, tween)| tween.value_at(crate::motion::now()));
         let chat_id = row.chat_id.clone();
         let action: AnyElement = match &row.kind {
-            NeedKind::Failed => {
+            NeedKind::Failed | NeedKind::Asking(None) => {
                 let target = chat_id.clone();
                 popover::btn_primary(theme, "Open")
                     .id(SharedString::from(format!("triage-open-{chat_id}")))
