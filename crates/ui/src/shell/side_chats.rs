@@ -64,21 +64,40 @@ impl Shell {
             .update(cx, |composer, cx| composer.show_error(message, cx));
     }
 
-    /// The surface picker's "Side chat": fork the current conversation
-    /// through its latest completed response, as a child of it.
+    /// "Fork chat": fork the current conversation through its latest
+    /// completed response, as a child of it.
     pub(super) fn create_side_chat(&mut self, cx: &mut Context<Self>) {
         let Some(source) = self.state.read(cx).selected_chat_row().cloned() else {
             self.show_side_chat_error("Start a conversation before creating a side chat.", cx);
             return;
         };
         let parent = source.id.clone();
-        self.fork_chat(source, parent, cx);
+        self.fork_chat(source, parent, None, cx);
     }
 
-    /// Fork `source` through its latest completed response into a new chat
-    /// hanging under `parent_id`, and open it in the right pane. A side
-    /// chat's own fork button passes its parent so the copy lists as a
-    /// sibling; the picker passes the source itself.
+    /// A fork of a fork lists beside it, under the chat both came from.
+    pub(super) fn fork_at(&mut self, chat_id: &str, entry_id: String, cx: &mut Context<Self>) {
+        let Some(source) = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .cloned()
+        else {
+            return;
+        };
+        let parent = source
+            .forked_from_chat_id
+            .as_ref()
+            .and(source.created_by_chat_id.clone())
+            .unwrap_or_else(|| source.id.clone());
+        self.fork_chat(source, parent, Some(entry_id), cx);
+    }
+
+    /// Fork `source` through `entry_id`, else its latest completed response,
+    /// into a new chat hanging under `parent_id`, and open it in the right
+    /// pane.
     ///
     /// The tab opens at once: a remote host can take a while to answer, and
     /// the tab says what it waits on — or, failing, why, with a retry.
@@ -86,18 +105,23 @@ impl Shell {
         &mut self,
         source: zeron_proto::Chat,
         parent_id: String,
+        entry_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
         if self.state.read(cx).engine().is_none() {
             return;
         }
-        let chat = draft_child_row(&source, parent_id.clone());
-        let params = serde_json::json!({
+        let mut chat = draft_child_row(&source, parent_id.clone());
+        chat.forked_from_chat_id = Some(source.id.clone());
+        let mut params = serde_json::json!({
             "chatId": chat.id,
             "sourceChatId": source.id,
             "createdByChatId": parent_id,
             "targetDeviceId": source.device_id,
         });
+        if let Some(entry_id) = entry_id {
+            params["entryId"] = entry_id.into();
+        }
         let host = {
             let state = self.state.read(cx);
             (state.local_device_id.as_deref() != Some(source.device_id.as_str()))
@@ -204,22 +228,6 @@ impl Shell {
         let key = self.panel_key(cx);
         let chat = draft_child_row(&parent, parent.id.clone());
         self.open_side_chat_tab(chat, key, true, cx);
-    }
-
-    /// Open an existing side chat (a footer row) in the right pane.
-    pub(super) fn open_child_chat_tab(&mut self, chat_id: &str, cx: &mut Context<Self>) {
-        let Some(chat) = self
-            .state
-            .read(cx)
-            .chats
-            .iter()
-            .find(|c| c.id == chat_id)
-            .cloned()
-        else {
-            return;
-        };
-        let key = self.panel_key(cx);
-        self.open_side_chat(chat, key, cx);
     }
 
     /// Reveal the surface host of the pane keyed `key`: the live one through
@@ -337,13 +345,26 @@ impl Shell {
                         | ComposerEvent::WorktreeSetup { .. }
                         | ComposerEvent::OpenSidechat { .. }
                         | ComposerEvent::BackgroundStarted
-                        | ComposerEvent::OpenSubagent { .. }
                         | ComposerEvent::OpenChanges
                         | ComposerEvent::AnnotationsChanged(_)
                         | ComposerEvent::AnnotationHovered(_) => {}
                         ComposerEvent::OpenTask(task_id) => {
                             this.defer_open_task(task_id.clone(), cx)
                         }
+                        ComposerEvent::OpenSubagent {
+                            chat_id,
+                            doc_id,
+                            title,
+                            frozen,
+                        } => this.open_child(
+                            super::children::ChildRef::Subagent {
+                                chat_id: chat_id.clone(),
+                                doc_id: doc_id.clone(),
+                                title: title.clone(),
+                                frozen: *frozen,
+                            },
+                            cx,
+                        ),
                         ComposerEvent::UnsentChanged => cx.notify(),
                         ComposerEvent::ThreadMentionDropped => this.accept_command_palette_drop(),
                         ComposerEvent::OpenUsage => this.open_usage(cx),
@@ -1227,7 +1248,7 @@ mod tests {
                 }))
                 .unwrap();
                 shell.state.update(cx, |state, _| state.chats.push(row));
-                shell.open_child_chat_tab(&fork_id, cx);
+                shell.open_child(super::super::children::ChildRef::Chat(fork_id.clone()), cx);
                 assert_eq!(shell.side_chats.len(), 1);
                 let side = &shell.side_chats[&tab];
                 assert!(side.fork.is_none(), "the row opens the chat, not the wait");

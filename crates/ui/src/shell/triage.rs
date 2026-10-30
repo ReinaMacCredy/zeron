@@ -1008,8 +1008,28 @@ impl Shell {
             .agents
             .iter()
             .take(SHOWN_AGENTS)
-            .map(|(label, started)| {
+            .enumerate()
+            .map(|(ix, (label, started))| {
+                let (parent, agent) = (chat_id.clone(), label.clone());
                 div()
+                    .id(SharedString::from(format!("triage-agent-{chat_id}-{ix}")))
+                    .debug_selector({
+                        let chat_id = chat_id.clone();
+                        move || format!("triage-agent-{chat_id}-{ix}")
+                    })
+                    .role(gpui::Role::Button)
+                    .aria_label(SharedString::from(format!(
+                        "Open agent {}",
+                        crate::transcript::single_line(label)
+                    )))
+                    .cursor_pointer()
+                    .rounded(px(6.0))
+                    .hover(|s| s.bg(theme.wash(0.05)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.close_triage(cx);
+                        this.open_agent_of(parent.clone(), agent.clone(), cx);
+                    }))
                     .flex()
                     .items_center()
                     .gap(px(7.0))
@@ -1029,7 +1049,8 @@ impl Shell {
                     .children(
                         started.map(|at| div().flex_none().child(SharedString::from(elapsed(at)))),
                     )
-            });
+            })
+            .collect::<Vec<_>>();
         let target = chat_id.clone();
         let title = self.triage_title(&chat_id, cx);
         div()

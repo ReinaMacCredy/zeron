@@ -3934,8 +3934,8 @@ impl AppState {
             .map(|config| config.harness)
     }
 
-    /// The btw tabs of `chat_id`: its unarchived, unexpired sidechats, oldest
-    /// first by creation, not by activity.
+    /// The side chats `/btw` can reopen for `chat_id`: its unarchived,
+    /// unexpired sidechats, oldest first by creation, not by activity.
     pub fn live_sidechats_of(&self, chat_id: &str, now: DateTime<Utc>) -> Vec<&Chat> {
         let mut sidechats: Vec<&Chat> = self
             .chats
@@ -6405,7 +6405,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_or_archived_sidechats_are_not_btw_tabs() {
+    fn expired_or_archived_sidechats_are_not_reopened() {
         let mut state = AppState::new();
         let mut expired = chat("expired", 0, None);
         expired.sidechat_source_chat_id = Some("parent".into());

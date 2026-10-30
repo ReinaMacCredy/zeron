@@ -4458,6 +4458,7 @@ pub struct Transcript {
     /// boundary invalidates only the live tail per commit.
     render_cache: Rc<RefCell<RenderCache>>,
     workspace_link: Option<render::LinkUi>,
+    open_children: HashSet<String>,
     /// File-link roots per linking chat, valid for one
     /// `AppState::link_roots_revision`: every rendered row asks for them.
     file_link_roots: (
@@ -4702,14 +4703,15 @@ pub fn branch_blocked(
     branching: Option<bool>,
     turn_active: bool,
 ) -> Option<String> {
+    if kind == BranchKind::Fork {
+        return None;
+    }
     match (harness, branching) {
         (Some(h), Some(false)) => Some(format!(
-            "{} does not support fork or rewind",
+            "{} does not support rewind",
             crate::composer::harness_display_name(h)
         )),
-        _ if kind == BranchKind::Rewind && turn_active => {
-            Some("Stop the running turn before rewinding".into())
-        }
+        _ if turn_active => Some("Stop the running turn before rewinding".into()),
         _ => None,
     }
 }
@@ -4755,7 +4757,7 @@ pub enum TranscriptEvent {
     OpenChat {
         chat_id: String,
     },
-    OpenDelegate {
+    OpenChildChat {
         chat_id: String,
     },
     /// `path` is workspace-relative; the shell re-resolves it.
@@ -4841,6 +4843,7 @@ impl Transcript {
         delegate_chip(
             &view,
             badge,
+            false,
             row_id.clone(),
             None::<fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>,
             false,
@@ -5355,7 +5358,7 @@ impl Transcript {
                         .child(SharedString::from("Open subagent"))
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.stop_propagation();
-                            cx.emit(TranscriptEvent::OpenDelegate {
+                            cx.emit(TranscriptEvent::OpenChildChat {
                                 chat_id: child.clone(),
                             });
                         })),
@@ -5440,6 +5443,13 @@ impl Transcript {
 
     pub(crate) fn set_workspace_link_handler(&mut self, handler: render::LinkUi) {
         self.workspace_link = Some(handler);
+    }
+
+    pub(crate) fn set_open_children(&mut self, open: HashSet<String>, cx: &mut Context<Self>) {
+        if self.open_children != open {
+            self.open_children = open;
+            cx.notify();
+        }
     }
 
     pub(crate) fn link_ui(&mut self, cx: &mut Context<Self>) -> Option<render::LinkUi> {
@@ -5689,6 +5699,7 @@ impl Transcript {
             veil_attach_pending: true,
             render_cache: Rc::new(RefCell::new(RenderCache::default())),
             workspace_link: None,
+            open_children: HashSet::new(),
             file_link_roots: Default::default(),
             inline_code_links: Default::default(),
             rendered_rows: HashSet::new(),
@@ -12852,7 +12863,7 @@ impl Transcript {
                         badge,
                         row_height,
                         cx.listener(move |_, _, _, cx| {
-                            cx.emit(TranscriptEvent::OpenChat {
+                            cx.emit(TranscriptEvent::OpenChildChat {
                                 chat_id: thread.to_string(),
                             });
                         }),
@@ -12885,12 +12896,14 @@ impl Transcript {
                                 theme,
                             )
                         });
+                    let open = self.open_children.contains(child.as_ref());
                     return delegate_chip(
                         &view,
                         badge,
+                        open,
                         SharedString::from(format!("{row_id}#s{ix}")),
                         Some(cx.listener(move |_, _, _, cx| {
-                            cx.emit(TranscriptEvent::OpenDelegate {
+                            cx.emit(TranscriptEvent::OpenChildChat {
                                 chat_id: child.to_string(),
                             });
                         })),
@@ -12915,9 +12928,11 @@ impl Transcript {
                     let (glyph, tint) =
                         crate::pickers::agent_brand_icon(harness, tool.call.subagent_model());
                     let mark = (glyph, tint, spawn_tag(harness, &tool.call));
+                    let open = self.open_children.contains(doc_id.as_ref());
                     return subagent_chip(
                         tool,
                         mark,
+                        open,
                         SharedString::from(format!("{row_id}#s{ix}")),
                         cx.listener(move |_, _, _, cx| {
                             cx.emit(TranscriptEvent::OpenSubagent {
@@ -15630,6 +15645,7 @@ fn started_thread_line(
 fn delegate_chip(
     view: &DelegateView,
     badge: Option<AnyElement>,
+    open: bool,
     id: SharedString,
     on_open: Option<impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static>,
     rail: bool,
@@ -15768,7 +15784,8 @@ fn delegate_chip(
                     ),
             )
         });
-    agent_chip_card(id, a11y_label, Some("delegate-chip"), rail, on_open, header)
+    let open = open.then_some(theme.accent);
+    agent_chip_card(id, a11y_label, Some("delegate-chip"), rail, open, on_open, header)
 }
 
 pub(crate) use zeron_proto::transcript::{handback_quotes, step_handback_threads, wake_task_ids};
@@ -15787,6 +15804,7 @@ pub(crate) fn wake_summary(views: &[DelegateView]) -> String {
 fn subagent_chip(
     tool: &ToolItem,
     mark: (&'static str, Option<gpui::Hsla>, Option<SharedString>),
+    open: bool,
     id: SharedString,
     on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
     rail: bool,
@@ -15799,6 +15817,7 @@ fn subagent_chip(
         chip_a11y_label(tool),
         None,
         rail,
+        open.then_some(theme.accent),
         Some(on_open),
         chip_header_row(
             tool,
@@ -15817,6 +15836,7 @@ fn agent_chip_card(
     label: SharedString,
     debug_selector: Option<&'static str>,
     rail: bool,
+    open: Option<gpui::Hsla>,
     on_open: Option<impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static>,
     header: impl IntoElement,
 ) -> AnyElement {
@@ -15855,7 +15875,7 @@ fn agent_chip_card(
                 .overflow_hidden()
                 .rounded(px(9.0))
                 .border_1()
-                .border_color(crate::theme::hairline(0.07))
+                .border_color(open.unwrap_or(crate::theme::hairline(0.07)))
                 .bg(crate::theme::ink(0.03))
                 .when_some(on_open, |card, on_open| {
                     card.cursor_pointer()
@@ -19621,9 +19641,9 @@ mod tests {
                 Some(HarnessId::Cursor),
                 Some(false),
                 false
-            )
-            .as_deref(),
-            Some("Cursor does not support fork or rewind")
+            ),
+            None,
+            "a fork copies the transcript, so it needs no harness branching"
         );
         assert_eq!(
             branch_blocked(
@@ -19633,7 +19653,7 @@ mod tests {
                 true
             )
             .as_deref(),
-            Some("Cursor does not support fork or rewind")
+            Some("Cursor does not support rewind")
         );
         assert_eq!(
             branch_blocked(

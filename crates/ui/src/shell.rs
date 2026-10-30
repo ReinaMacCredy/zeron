@@ -88,6 +88,7 @@ mod chat_rename_tests;
 mod home_grid_tests;
 #[cfg(test)]
 mod type_to_focus_tests;
+mod children;
 mod command_palette;
 mod device_tabs;
 mod docs;
@@ -2095,6 +2096,63 @@ fn sidebar_drag_sample(
     )
 }
 
+const TOOL_TAB_W: f32 = 112.0;
+const CHILD_TAB_W: f32 = 168.0;
+const SLIM_TAB_W: f32 = 28.0;
+const MORE_TAB_W: f32 = 36.0;
+const PLUS_TAB_W: f32 = 24.0;
+const RIGHT_TAB_GAP: f32 = 4.0;
+
+fn right_tab_layout(
+    full: &[f32],
+    active: Option<usize>,
+    room: Option<f32>,
+) -> (Vec<bool>, Vec<usize>) {
+    let mut slim = vec![false; full.len()];
+    let Some(room) = room else {
+        return (slim, Vec::new());
+    };
+    let used = |slim: &[bool], hidden: &[usize]| -> f32 {
+        let tabs: f32 = (0..full.len())
+            .filter(|ix| !hidden.contains(ix))
+            .map(|ix| if slim[ix] { SLIM_TAB_W } else { full[ix] } + RIGHT_TAB_GAP)
+            .sum();
+        let more = if hidden.is_empty() {
+            0.0
+        } else {
+            MORE_TAB_W + RIGHT_TAB_GAP
+        };
+        tabs + more + PLUS_TAB_W
+    };
+    if used(&slim, &[]) <= room {
+        return (slim, Vec::new());
+    }
+    for (ix, slim) in slim.iter_mut().enumerate() {
+        *slim = Some(ix) != active;
+    }
+    let mut hidden = Vec::new();
+    for ix in (0..full.len()).rev() {
+        if used(&slim, &hidden) <= room {
+            break;
+        }
+        if Some(ix) != active {
+            hidden.push(ix);
+        }
+    }
+    (slim, hidden)
+}
+
+fn right_tab_drop(rel_x: f32, slots: &[(usize, f32)]) -> usize {
+    let mut end = 0.0;
+    for &(ix, width) in slots {
+        end += width;
+        if rel_x < end {
+            return ix;
+        }
+    }
+    slots.last().map_or(0, |(ix, _)| *ix)
+}
+
 /// The dragged surface-tab payload (strip reorder).
 struct RightTabDrag {
     panel_key: String,
@@ -2921,100 +2979,7 @@ struct SidechatTab {
     _composer_events: Subscription,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SidechatSurface {
-    RightPane,
-    Btw,
-}
-
-#[derive(Default)]
-struct BtwView {
-    phase: BtwPhase,
-    active: Option<String>,
-    slide: Option<BtwSlide>,
-    born: std::collections::HashMap<String, std::time::Instant>,
-}
-
-impl BtwView {
-    fn is_open(&self) -> bool {
-        matches!(self.phase, BtwPhase::Open { .. })
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-enum BtwPhase {
-    #[default]
-    Closed,
-    Open {
-        since: std::time::Instant,
-        from: Option<gpui::Bounds<Pixels>>,
-    },
-    Closing {
-        since: std::time::Instant,
-        from: gpui::Bounds<Pixels>,
-    },
-    Expanding {
-        since: std::time::Instant,
-        from: gpui::Bounds<Pixels>,
-        to: Option<gpui::Bounds<Pixels>>,
-    },
-}
-
-#[derive(Clone, Copy)]
-struct BtwSlide {
-    since: std::time::Instant,
-    from: Option<gpui::Bounds<Pixels>>,
-    dir: f32,
-}
-
-struct BtwTab {
-    transcript: Entity<Transcript>,
-    composer: Entity<Composer>,
-    _events: Subscription,
-    _composer_events: Subscription,
-}
-
-const BTW_THREAD_MAX_HEIGHT: f32 = 360.0;
-const BTW_PANEL_RADIUS: f32 = 14.0;
-const BTW_OPEN: MotionSpec = motion::SEGMENT_SLIDE;
-const BTW_CONTENT_IN: MotionSpec = MotionSpec::new(160, motion::EASE).with_delay(90);
-const BTW_SWAP: MotionSpec = MotionSpec::new(140, motion::EASE);
-const BTW_DRAFT_IN: MotionSpec = MotionSpec::new(160, motion::EASE_OUT_QUINT).with_delay(160);
-const BTW_TITLE_FADE: MotionSpec = MotionSpec::new(120, motion::EASE);
-const BTW_CHIP_GROW: MotionSpec = MotionSpec::new(180, motion::EASE_OUT_QUINT);
-const BTW_HIGHLIGHT: MotionSpec = MotionSpec::new(200, motion::EASE_OUT_QUINT);
-const BTW_THREAD_IN: MotionSpec = MotionSpec::new(160, motion::EASE_OUT_QUINT);
-const BTW_CONTENT_OUT: MotionSpec = MotionSpec::new(80, motion::EASE);
-const BTW_COLLAPSE: MotionSpec = MotionSpec::new(200, motion::EASE_IN).with_delay(60);
-const BTW_FLY: MotionSpec = MotionSpec::new(300, motion::EASE_OUT_QUINT);
-const BTW_THREAD_SHIFT: f32 = 8.0;
-const BTW_DRAFT_RISE: f32 = 3.0;
-
-fn lerp_bounds(
-    from: gpui::Bounds<Pixels>,
-    to: gpui::Bounds<Pixels>,
-    t: f32,
-) -> gpui::Bounds<Pixels> {
-    let mix = |a: Pixels, b: Pixels| px(motion::lerp(f32::from(a), f32::from(b), t));
-    gpui::Bounds {
-        origin: gpui::point(
-            mix(from.origin.x, to.origin.x),
-            mix(from.origin.y, to.origin.y),
-        ),
-        size: gpui::size(
-            mix(from.size.width, to.size.width),
-            mix(from.size.height, to.size.height),
-        ),
-    }
-}
-
-fn btw_surface(theme: &Theme, occlude: bool) -> gpui::Div {
-    crate::queue::queue_panel_surface(theme, !occlude)
-        .rounded(px(BTW_PANEL_RADIUS))
-        .border_color(theme.accent.opacity(0.55))
-}
-
-fn btw_tab_title(
+fn sidechat_title(
     state: &AppState,
     chat: &zeron_proto::Chat,
     now: chrono::DateTime<Utc>,
@@ -3030,12 +2995,11 @@ fn btw_tab_title(
 /// Sidebar render identity lets transcript/caret frames reuse its GPUI scene.
 /// State and event handlers stay on Shell. Explicit Shell notifications still
 /// invalidate the sidebar, including selection, menus, theme and navigation.
-/// A pending fork/rewind confirmation.
+/// A pending rewind confirmation.
 #[derive(Clone)]
 struct BranchModal {
     chat_id: String,
     entry_id: String,
-    kind: BranchKind,
     excerpt: SharedString,
     /// The RPC is out; the option row reads as in progress and clicks are
     /// ignored until it lands.
@@ -3232,13 +3196,7 @@ pub struct Shell {
     /// `CreateSidechat` in flight for this source chat. A second click while
     /// it is out would mint a second sidechat (the id is client-minted).
     sidechat_create: Option<(String, Task<()>)>,
-    btw: std::collections::HashMap<String, BtwView>,
-    btw_tabs: std::collections::HashMap<String, BtwTab>,
-    btw_panel_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
-    btw_strip_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
-    btw_chip_bounds:
-        std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, gpui::Bounds<Pixels>>>>,
-    btw_titles: std::collections::HashMap<String, (SharedString, SharedString, std::time::Instant)>,
+    pending_agent: Option<(String, String)>,
     side_chats: std::collections::HashMap<u64, SideChatTab>,
     side_chat_seq: u64,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
@@ -3259,7 +3217,8 @@ pub struct Shell {
     right_tab_drag: Option<RightTabDragState>,
     /// Surface-tab strip scroll (the strip overflows horizontally, t3
     /// ScrollArea-style; drag drop-math reads the offset back out).
-    right_tab_scroll: gpui::ScrollHandle,
+    right_tab_room: std::rc::Rc<std::cell::Cell<Option<f32>>>,
+    right_more: popover::Popup<()>,
     /// Session tab currently hovered (close button appears on hover).
     tab_hover: Option<String>,
     tab_group_hover: Option<String>,
@@ -3845,11 +3804,13 @@ impl Shell {
                     doc_id,
                     title,
                     frozen,
-                } => this.add_subagent_surface(
-                    chat_id.clone(),
-                    doc_id.clone(),
-                    title.clone(),
-                    *frozen,
+                } => this.open_child(
+                    children::ChildRef::Subagent {
+                        chat_id: chat_id.clone(),
+                        doc_id: doc_id.clone(),
+                        title: title.clone(),
+                        frozen: *frozen,
+                    },
                     cx,
                 ),
             }
@@ -4047,12 +4008,7 @@ impl Shell {
             sidechat_tabs: std::collections::HashMap::new(),
             sidechat_seq: 0,
             sidechat_create: None,
-            btw: std::collections::HashMap::new(),
-            btw_tabs: std::collections::HashMap::new(),
-            btw_panel_bounds: Default::default(),
-            btw_strip_bounds: Default::default(),
-            btw_chip_bounds: Default::default(),
-            btw_titles: std::collections::HashMap::new(),
+            pending_agent: None,
             side_chats: std::collections::HashMap::new(),
             side_chat_seq: 0,
             browsers: std::collections::HashMap::new(),
@@ -4065,7 +4021,8 @@ impl Shell {
             browser_profile: None,
             right_tabs: std::collections::HashMap::new(),
             right_tab_drag: None,
-            right_tab_scroll: gpui::ScrollHandle::new(),
+            right_tab_room: Default::default(),
+            right_more: popover::Popup::default(),
             tab_hover: None,
             tab_group_hover: None,
             tab_group_menu_hover: None,
@@ -4371,9 +4328,8 @@ impl Shell {
         // The canvas is always a draft with its own key (d20): a capture with
         // no session target belongs to that draft, never to the bare "" key
         // the composer only merges on its next key change.
-        let key = target
-            .unwrap_or_else(|| self.state.read(cx).focused_id().unwrap_or_default());
-        let (composer, stage_key) = self.capture_composer(&key, cx);
+        let key = target.unwrap_or_else(|| self.state.read(cx).focused_id().unwrap_or_default());
+        let (composer, stage_key) = (self.composer.clone(), key.clone());
         composer.update(cx, |composer, cx| {
             composer.stage_appshot_for(stage_key, appshot, cx)
         });
@@ -4404,7 +4360,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.set_route(Route::Chat, cx);
-        let composer = self.chat_composer(cx);
+        let composer = self.composer.clone();
         composer.update(cx, |composer, cx| composer.show_appshot_error(message, cx));
         window.focus(&composer.focus_handle(cx), cx);
         cx.notify();
@@ -4425,7 +4381,6 @@ impl Shell {
         }
         self.prune_file_explorers(cx);
         self.prune_canvas_browsers(cx);
-        self.reconcile_btw(cx);
         self.prune_device_shell(cx);
         self.prune_pr_chat_index(cx);
         self.refresh_harness_update_watch(cx);
@@ -5214,17 +5169,27 @@ impl Shell {
                         .read(cx)
                         .selected_chat_row()
                         .and_then(|c| c.title.clone())
-                        .unwrap_or_else(|| "Side chat".into());
+                        .unwrap_or_else(|| {
+                            self.child_kind(*surface, cx)
+                                .map_or("Side chat", |kind| kind.label())
+                                .into()
+                        });
                     (*surface, title.into(), false, None)
                 }),
                 RightSurface::Subagent(id) => self
                     .subagent_tabs
                     .get(id)
                     .map(|tab| (*surface, tab.title.clone(), false, None)),
-                RightSurface::Sidechat(id) => self
-                    .sidechat_tabs
-                    .get(id)
-                    .map(|_| (*surface, SharedString::from("Sidechat"), false, None)),
+                RightSurface::Sidechat(id) => self.sidechat_tabs.get(id).map(|tab| {
+                    let state = self.state.read(cx);
+                    let title = state
+                        .chats
+                        .iter()
+                        .find(|chat| chat.id == tab.chat_id)
+                        .map(|chat| sidechat_title(state, chat, Utc::now()))
+                        .unwrap_or_else(|| SharedString::from("Side chat"));
+                    (*surface, title, false, None)
+                }),
                 RightSurface::Browser(id) => self.browsers.get(id).map(|browser| {
                     let browser = browser.read(cx);
                     (
@@ -5729,7 +5694,7 @@ impl Shell {
                 }
                 crate::browser::BrowserEvent::AnnotationCapture(capture) => {
                     let capture = capture.clone();
-                    let (composer, stage_key) = this.capture_composer(&owner, cx);
+                    let (composer, stage_key) = (this.composer.clone(), owner.clone());
                     composer.update(cx, |composer, cx| {
                         composer.stage_annotation(stage_key, capture, cx)
                     });
@@ -6219,15 +6184,15 @@ impl Shell {
                 doc_id,
                 title,
                 frozen,
-            } => {
-                self.add_subagent_surface(
-                    chat_id.clone(),
-                    doc_id.clone(),
-                    title.clone(),
-                    *frozen,
-                    cx,
-                );
-            }
+            } => self.open_child(
+                children::ChildRef::Subagent {
+                    chat_id: chat_id.clone(),
+                    doc_id: doc_id.clone(),
+                    title: title.clone(),
+                    frozen: *frozen,
+                },
+                cx,
+            ),
             TranscriptEvent::Branch {
                 chat_id,
                 entry_id,
@@ -6239,10 +6204,13 @@ impl Shell {
                     self.note_composer_failure(reason.clone(), cx);
                     return;
                 }
+                if *kind == BranchKind::Fork {
+                    self.fork_at(chat_id, entry_id.clone(), cx);
+                    return;
+                }
                 self.branch_modal = Some(BranchModal {
                     chat_id: chat_id.clone(),
                     entry_id: entry_id.clone(),
-                    kind: *kind,
                     excerpt: transcript::single_line(excerpt).into(),
                     busy: false,
                 });
@@ -6251,7 +6219,9 @@ impl Shell {
             TranscriptEvent::OpenFile { chat_id, path } => self.open_tool_file(chat_id, path, cx),
             TranscriptEvent::OpenSkill { chat_id, name } => self.open_skill_file(chat_id, name, cx),
             TranscriptEvent::OpenChat { chat_id } => self.open_chat(chat_id.clone(), cx),
-            TranscriptEvent::OpenDelegate { chat_id } => self.open_child_chat_tab(chat_id, cx),
+            TranscriptEvent::OpenChildChat { chat_id } => {
+                self.open_child(children::ChildRef::Chat(chat_id.clone()), cx)
+            }
             #[cfg(target_os = "macos")]
             TranscriptEvent::OpenHtml { chat_id, path } => {
                 self.open_html_in_browser(chat_id, path, cx)
@@ -6373,12 +6343,6 @@ impl Shell {
             .values()
             .find(|tab| &tab.transcript == transcript)
             .map(|tab| tab.composer.clone())
-            .or_else(|| {
-                self.btw_tabs
-                    .values()
-                    .find(|tab| &tab.transcript == transcript)
-                    .map(|tab| tab.composer.clone())
-            })
             .or_else(|| {
                 self.split
                     .as_ref()
@@ -6626,8 +6590,8 @@ impl Shell {
         });
     }
 
-    /// Fire the confirmed fork or rewind at the chat's host. A fork opens the
-    /// new chat; a rewind hands the removed prompt back to the composer.
+    /// Fire the confirmed rewind at the chat's host; the removed prompt
+    /// comes back to the composer.
     fn confirm_branch(&mut self, cx: &mut Context<Self>) {
         let Some(modal) = self.branch_modal.as_mut().filter(|m| !m.busy) else {
             return;
@@ -6648,32 +6612,17 @@ impl Shell {
                 .map(|c| c.device_id.clone())
                 .filter(|id| state.local_device_id.as_deref() != Some(id.as_str()))
         };
-        let new_chat_id = uuid::Uuid::new_v4().to_string();
-        let (method, mut params) = match modal.kind {
-            BranchKind::Fork => (
-                methods::FORK_CHAT,
-                serde_json::json!({
-                    "sourceChatId": modal.chat_id,
-                    "entryId": modal.entry_id,
-                    "chatId": new_chat_id,
-                }),
-            ),
-            BranchKind::Rewind => (
-                methods::REWIND_CHAT,
-                serde_json::json!({ "chatId": modal.chat_id, "entryId": modal.entry_id }),
-            ),
-        };
+        let mut params = serde_json::json!({ "chatId": modal.chat_id, "entryId": modal.entry_id });
         if let (Some(target), Some(object)) = (target, params.as_object_mut()) {
             object.insert("targetDeviceId".into(), target.into());
         }
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let result = engine.client().call(method, params).await;
+            let result = engine.client().call(methods::REWIND_CHAT, params).await;
             this.update(cx, |shell, cx| {
                 shell.branch_modal = None;
-                match (result, modal.kind) {
-                    (Ok(_), BranchKind::Fork) => shell.open_chat(new_chat_id, cx),
-                    (Ok(value), BranchKind::Rewind) => {
+                match result {
+                    Ok(value) => {
                         let prompt = value
                             .get("prompt")
                             .and_then(|v| v.as_str())
@@ -6698,7 +6647,7 @@ impl Shell {
                             shell.focus_composer(cx);
                         }
                     }
-                    (Err(err), _) => shell.note_composer_failure(err.to_string(), cx),
+                    Err(err) => shell.note_composer_failure(err.to_string(), cx),
                 }
                 cx.notify();
             })
@@ -6800,10 +6749,10 @@ impl Shell {
             .then(|| chat.id.clone())
     }
 
-    /// The main composer's sidechat tab, `/btw` and `/sidechat` open the
-    /// source chat's btw mode. Bare reopens its last tab (else the newest,
-    /// else a fresh one); `prompt` always asks in a new tab. Explicit New
-    /// sidechat actions call `create_sidechat` directly.
+    /// The main composer's Side chat tab, its shortcut, `/btw` and
+    /// `/sidechat` open the source chat's side chat in the right pane. Bare
+    /// reopens the one already open, else the newest live one, else a fresh
+    /// one; `prompt` always asks in a new one.
     fn open_sidechat(
         &mut self,
         source_chat_id: String,
@@ -6811,437 +6760,28 @@ impl Shell {
         staged: SidechatStaged,
         cx: &mut Context<Self>,
     ) {
-        // A sidechat selected as the main chat has no btw slot of its own.
-        if self.sidechat_source_chat(cx).as_deref() != Some(source_chat_id.as_str()) {
-            self.create_sidechat(source_chat_id, prompt, staged, cx);
-            return;
-        }
         let reopen = prompt
             .is_none()
-            .then(|| self.btw_reopen_target(&source_chat_id, cx))
+            .then(|| {
+                let state = self.state.read(cx);
+                let live = state.live_sidechats_of(&source_chat_id, Utc::now());
+                live.iter()
+                    .rev()
+                    .find(|chat| state.open_sidechat_tabs.contains(&chat.id))
+                    .or(live.last())
+                    .map(|chat| (*chat).clone())
+            })
             .flatten();
         match reopen {
-            Some(chat_id) => {
-                if let Some(composer) = self.show_btw_tab(&source_chat_id, chat_id, cx) {
-                    Self::send_into_sidechat(composer, None, staged, cx);
-                }
-            }
-            None => {
-                self.create_sidechat_on(SidechatSurface::Btw, source_chat_id, prompt, staged, cx)
-            }
+            Some(chat) => self.open_sidechat_in_right_pane(&chat, None, staged, cx),
+            None => self.create_sidechat(source_chat_id, prompt, staged, cx),
         }
-    }
-
-    fn btw_reopen_target(&self, source: &str, cx: &App) -> Option<String> {
-        let live = self.btw_live(source, cx);
-        let active = self.btw.get(source).and_then(|view| view.active.as_ref());
-        live.iter()
-            .find(|id| Some(*id) == active)
-            .or(live.last())
-            .cloned()
-    }
-
-    // A sidechat expanded into the right pane has left the btw strip.
-    fn btw_live(&self, source: &str, cx: &App) -> Vec<String> {
-        self.state
-            .read(cx)
-            .live_sidechats_of(source, Utc::now())
-            .into_iter()
-            .filter(|chat| !self.btw_expanded(&chat.id))
-            .map(|chat| chat.id.clone())
-            .collect()
-    }
-
-    fn btw_expanded(&self, chat_id: &str) -> bool {
-        self.sidechat_tabs
-            .values()
-            .any(|tab| tab.chat_id == chat_id)
-    }
-
-    fn reconcile_btw(&mut self, cx: &mut Context<Self>) {
-        let live: std::collections::HashMap<String, Vec<String>> = self
-            .btw
-            .keys()
-            .map(|source| (source.clone(), self.btw_live(source, cx)))
-            .collect();
-        let dead: Vec<String> = self
-            .btw_tabs
-            .keys()
-            .filter(|id| !live.values().flatten().any(|live| live == *id))
-            .cloned()
-            .collect();
-        for id in dead {
-            self.btw_tabs.remove(&id);
-            self.release_doc(&id, cx);
-        }
-        for (source, live) in live {
-            let Some(view) = self.btw.get_mut(&source) else {
-                continue;
-            };
-            if view
-                .active
-                .as_ref()
-                .is_none_or(|active| live.contains(active))
-            {
-                continue;
-            }
-            view.active = None;
-            if !view.is_open() {
-                continue;
-            }
-            match live.last() {
-                Some(next) => {
-                    self.show_btw_tab(&source, next.clone(), cx);
-                }
-                None => {
-                    view.phase = BtwPhase::Closed;
-                    self.composer_dock.borrow_mut().jump();
-                    self.focus_composer(cx);
-                }
-            }
-        }
-    }
-
-    fn open_btw_source(&self, cx: &App) -> Option<String> {
-        let source = self.sidechat_source_chat(cx)?;
-        self.btw
-            .get(&source)
-            .is_some_and(BtwView::is_open)
-            .then_some(source)
-    }
-
-    fn active_btw_tab(&self, cx: &App) -> Option<(String, &BtwTab)> {
-        let source = self.open_btw_source(cx)?;
-        let active = self.btw.get(&source)?.active.as_deref()?;
-        let live = !self.btw_expanded(active)
-            && self
-                .state
-                .read(cx)
-                .live_sidechats_of(&source, Utc::now())
-                .iter()
-                .any(|chat| chat.id == active);
-        live.then(|| self.btw_tabs.get(active).map(|tab| (source, tab)))
-            .flatten()
-    }
-
-    fn capture_composer(&self, key: &str, cx: &App) -> (Entity<Composer>, String) {
-        match self.active_btw_tab(cx) {
-            Some((source, tab)) if source == key => (
-                tab.composer.clone(),
-                self.btw[&source].active.clone().unwrap_or_default(),
-            ),
-            _ => (self.composer.clone(), key.to_owned()),
-        }
-    }
-
-    fn active_btw_composer(&self, cx: &App) -> Option<Entity<Composer>> {
-        self.active_btw_tab(cx).map(|(_, tab)| tab.composer.clone())
-    }
-
-    fn chat_composer(&self, cx: &App) -> Entity<Composer> {
-        self.active_btw_composer(cx)
-            .unwrap_or_else(|| self.composer.clone())
-    }
-
-    fn toggle_btw(&mut self, cx: &mut Context<Self>) {
-        let Some(source) = self.sidechat_source_chat(cx) else {
-            return;
-        };
-        if self.open_btw_source(cx).is_some() {
-            self.close_btw(&source, cx);
-        } else {
-            self.open_sidechat(source, None, SidechatStaged::default(), cx);
-        }
-    }
-
-    fn show_btw_tab(
-        &mut self,
-        source: &str,
-        chat_id: String,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<Composer>> {
-        let live = self.btw_live(source, cx);
-        if !live.contains(&chat_id) {
-            return None;
-        }
-        let fresh: Vec<String> = live
-            .iter()
-            .filter(|id| !self.btw_tabs.contains_key(*id))
-            .cloned()
-            .collect();
-        for id in live.iter().cloned() {
-            self.ensure_btw_tab(id, cx);
-        }
-        let composer = self.btw_tabs.get(&chat_id)?.composer.clone();
-        let now = self.render_time.unwrap_or_else(|| self.motion_time());
-        let tab_rect = self.composer.read(cx).sidechat_tab_bounds();
-        let highlight = self
-            .btw
-            .get(source)
-            .and_then(|view| self.btw_highlight_rect(view.slide, view.active.as_deref()));
-        let view = self.btw.entry(source.to_string()).or_default();
-        if view.is_open() {
-            view.born.extend(fresh.into_iter().map(|id| (id, now)));
-            let position =
-                |id: Option<&str>| live.iter().position(|live| Some(live.as_str()) == id);
-            if view.active.as_deref() != Some(chat_id.as_str()) {
-                let dir = match (position(view.active.as_deref()), position(Some(&chat_id))) {
-                    (Some(from), Some(to)) if to < from => -1.0,
-                    _ => 1.0,
-                };
-                view.slide = Some(BtwSlide {
-                    since: now,
-                    from: highlight,
-                    dir,
-                });
-            }
-        } else {
-            view.phase = BtwPhase::Open {
-                since: now,
-                from: tab_rect,
-            };
-            view.slide = None;
-            // The btw panel grows from the edge tab; the dock's glide would slide the whole slot.
-            self.composer_dock.borrow_mut().jump();
-        }
-        view.active = Some(chat_id);
-        composer.update(cx, |composer, cx| {
-            composer.focus_pending = true;
-            cx.notify();
-        });
-        cx.notify();
-        Some(composer)
-    }
-
-    fn ensure_btw_tab(&mut self, chat_id: String, cx: &mut Context<Self>) {
-        if self.btw_tabs.contains_key(&chat_id) {
-            return;
-        }
-        let (transcript, composer, events, composer_events) =
-            self.sidechat_entities(chat_id.clone(), SidechatSurface::Btw, cx);
-        composer.update(cx, |composer, cx| composer.set_btw(cx));
-        self.btw_tabs.insert(
-            chat_id,
-            BtwTab {
-                transcript,
-                composer,
-                _events: events,
-                _composer_events: composer_events,
-            },
-        );
-    }
-
-    fn close_btw(&mut self, source: &str, cx: &mut Context<Self>) {
-        let Some(exit) = self
-            .btw
-            .get(source)
-            .map(|view| self.btw_exit_from(view.phase))
-        else {
-            return;
-        };
-        let Some(view) = self.btw.get_mut(source) else {
-            return;
-        };
-        view.phase = exit.map_or(BtwPhase::Closed, |(since, from)| BtwPhase::Closing {
-            since,
-            from,
-        });
-        self.composer_dock.borrow_mut().jump();
-        let blank = view
-            .active
-            .clone()
-            .filter(|active| self.blank_btw_tab(active, cx));
-        if let Some(active) = blank {
-            self.close_btw_tab(source, &active, cx);
-        }
-        self.focus_composer(cx);
-        cx.notify();
-    }
-
-    fn close_btw_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
-        if !matches!(self.route, Route::Chat) || self.overlay_owns_keyboard(cx) {
-            return false;
-        }
-        let (Some(source), Some(composer)) =
-            (self.open_btw_source(cx), self.active_btw_composer(cx))
-        else {
-            return false;
-        };
-        if !composer.update(cx, |composer, cx| composer.dismiss_corner_card(cx)) {
-            self.close_btw(&source, cx);
-        }
-        true
-    }
-
-    fn blank_btw_tab(&self, chat_id: &str, cx: &App) -> bool {
-        let state = self.state.read(cx);
-        state
-            .chats
-            .iter()
-            .find(|chat| chat.id == chat_id)
-            .is_some_and(|chat| state.unstarted_sidechat(chat, Utc::now()))
-            && self
-                .btw_tabs
-                .get(chat_id)
-                .is_none_or(|tab| !tab.composer.read(cx).has_draft(cx))
-    }
-
-    fn close_btw_tab(&mut self, source: &str, chat_id: &str, cx: &mut Context<Self>) {
-        let blank = self.blank_btw_tab(chat_id, cx);
-        let live = self.btw_live(source, cx);
-        let neighbour = live.iter().position(|id| id == chat_id).and_then(|ix| {
-            live.get(ix + 1)
-                .or_else(|| ix.checked_sub(1).and_then(|ix| live.get(ix)))
-                .cloned()
-        });
-        // The tab strip is derived from the rows; the archive frame lands later.
-        self.state.update(cx, |state, cx| {
-            if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == chat_id) {
-                chat.archived = true;
-            }
-            cx.notify();
-        });
-        if blank {
-            self.mutate(
-                serde_json::json!({ "op": "deleteChat", "chatId": chat_id }),
-                cx,
-            );
-        } else {
-            self.set_chat_archived(chat_id.to_string(), true, cx);
-        }
-        self.btw_tabs.remove(chat_id);
-        self.release_doc(chat_id, cx);
-        let view = self.btw.entry(source.to_string()).or_default();
-        if view.active.as_deref() != Some(chat_id) {
-            return;
-        }
-        view.active = neighbour.clone();
-        let (open, phase) = (view.is_open(), view.phase);
-        match neighbour {
-            Some(next) if open => {
-                self.show_btw_tab(source, next, cx);
-            }
-            None if open => {
-                let exit = self.btw_exit_from(phase);
-                if let Some(view) = self.btw.get_mut(source) {
-                    view.phase = exit.map_or(BtwPhase::Closed, |(since, from)| BtwPhase::Closing {
-                        since,
-                        from,
-                    });
-                }
-                self.composer_dock.borrow_mut().jump();
-                self.focus_composer(cx);
-            }
-            _ => {}
-        }
-    }
-
-    fn btw_exit_from(&self, phase: BtwPhase) -> Option<(std::time::Instant, gpui::Bounds<Pixels>)> {
-        let BtwPhase::Open { since, from } = phase else {
-            return None;
-        };
-        if self.reduced_motion {
-            return None;
-        }
-        let rect = self.btw_box_rect(since, from)?;
-        Some((self.render_time.unwrap_or_else(|| self.motion_time()), rect))
-    }
-
-    fn btw_raw(&self, since: std::time::Instant, spec: MotionSpec) -> f32 {
-        if self.reduced_motion {
-            return 1.0;
-        }
-        let total = spec.total().mul_f32(motion::speed_scale());
-        let raw = (self.tween_elapsed(since).as_secs_f32() / total.as_secs_f32()).min(1.0);
-        if raw < 1.0 {
-            self.motion_active.set(true);
-        }
-        raw
-    }
-
-    fn btw_t(&self, since: std::time::Instant, spec: MotionSpec) -> f32 {
-        spec.progress(self.btw_raw(since, spec))
-    }
-
-    fn btw_box_rect(
-        &self,
-        since: std::time::Instant,
-        from: Option<gpui::Bounds<Pixels>>,
-    ) -> Option<gpui::Bounds<Pixels>> {
-        let panel = self.btw_panel_bounds.get()?;
-        Some(from.map_or(panel, |from| {
-            lerp_bounds(from, panel, self.btw_t(since, BTW_OPEN))
-        }))
-    }
-
-    fn btw_highlight_rect(
-        &self,
-        slide: Option<BtwSlide>,
-        active: Option<&str>,
-    ) -> Option<gpui::Bounds<Pixels>> {
-        let target = self.btw_chip_bounds.borrow().get(active?).copied()?;
-        Some(
-            match slide.and_then(|slide| slide.from.map(|from| (slide.since, from))) {
-                Some((since, from)) => lerp_bounds(from, target, self.btw_t(since, BTW_HIGHLIGHT)),
-                None => target,
-            },
-        )
-    }
-
-    // The pane is not laid out yet on the frame that opens it.
-    fn btw_pane_rect(&self, cx: &App) -> Option<gpui::Bounds<Pixels>> {
-        let width = self.right_settled_target(cx);
-        (width > 0.0).then(|| {
-            let right = self.viewport_width - self.content_inset() - self.files_settled_width(cx);
-            let top = Theme::TITLEBAR_HEIGHT;
-            gpui::Bounds {
-                origin: gpui::point(px(right - width), px(top)),
-                size: gpui::size(
-                    px(width),
-                    px((self.viewport_height - top - self.content_inset()).max(0.0)),
-                ),
-            }
-        })
-    }
-
-    fn expand_btw(&mut self, source: &str, cx: &mut Context<Self>) {
-        let leaving = self.btw.get(source).map(|view| view.phase);
-        let Some(view) = self.btw.get_mut(source) else {
-            return;
-        };
-        view.phase = BtwPhase::Closed;
-        self.composer_dock.borrow_mut().jump();
-        let Some(active) = view.active.clone() else {
-            return;
-        };
-        let Some(chat) = self
-            .state
-            .read(cx)
-            .chats
-            .iter()
-            .find(|chat| chat.id == active)
-            .cloned()
-        else {
-            return;
-        };
-        self.open_sidechat_in_right_pane(&chat, None, SidechatStaged::default(), cx);
-        if let Some((since, from)) = leaving.and_then(|phase| self.btw_exit_from(phase)) {
-            let to = self.btw_pane_rect(cx);
-            if let Some(view) = self.btw.get_mut(source) {
-                view.phase = BtwPhase::Expanding { since, from, to };
-            }
-        }
-        self.btw_tabs.remove(&active);
-        self.release_doc(&active, cx);
-        cx.notify();
     }
 
     fn doc_held(&self, chat_id: &str) -> bool {
-        self.btw_tabs.contains_key(chat_id)
-            || self
-                .sidechat_tabs
-                .values()
-                .any(|tab| tab.chat_id == chat_id)
+        self.sidechat_tabs
+            .values()
+            .any(|tab| tab.chat_id == chat_id)
             || self.subagent_tabs.values().any(|tab| tab.doc_id == chat_id)
             || self.split_chat_id() == Some(chat_id)
             || self.task_center_holds(chat_id)
@@ -7347,23 +6887,6 @@ impl Shell {
         staged: SidechatStaged,
         cx: &mut Context<Self>,
     ) {
-        self.create_sidechat_on(
-            SidechatSurface::RightPane,
-            source_chat_id,
-            prompt,
-            staged,
-            cx,
-        );
-    }
-
-    fn create_sidechat_on(
-        &mut self,
-        surface: SidechatSurface,
-        source_chat_id: String,
-        prompt: Option<String>,
-        staged: SidechatStaged,
-        cx: &mut Context<Self>,
-    ) {
         if self
             .sidechat_create
             .as_ref()
@@ -7412,18 +6935,7 @@ impl Shell {
                                 cx.notify();
                             }
                         });
-                        match surface {
-                            SidechatSurface::RightPane => {
-                                shell.open_sidechat_in_right_pane(&chat, prompt, staged, cx)
-                            }
-                            SidechatSurface::Btw => {
-                                if let Some(composer) =
-                                    shell.show_btw_tab(&source_chat_id, chat.id.clone(), cx)
-                                {
-                                    Self::send_into_sidechat(composer, prompt, staged, cx);
-                                }
-                            }
-                        }
+                        shell.open_sidechat_in_right_pane(&chat, prompt, staged, cx)
                     }
                     Err(err) => tracing::warn!(%err, "CreateSidechat failed"),
                 }
@@ -7453,7 +6965,7 @@ impl Shell {
         let id = self.sidechat_seq;
         let chat_id = chat.id.clone();
         let (transcript, composer, events, composer_events) =
-            self.sidechat_entities(chat_id.clone(), SidechatSurface::RightPane, cx);
+            self.sidechat_entities(chat_id.clone(), cx);
         let source_title = chat
             .sidechat_source_chat_id
             .as_deref()
@@ -7491,513 +7003,9 @@ impl Shell {
         id
     }
 
-    fn render_btw(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (source, tab) = self.active_btw_tab(cx)?;
-        let (transcript, composer) = (tab.transcript.clone(), tab.composer.clone());
-        let view = self.btw.get(&source)?;
-        let active = view.active.clone()?;
-        let BtwPhase::Open { since, from } = view.phase else {
-            return None;
-        };
-        let slide = view.slide;
-        let open_t = self.btw_t(since, BTW_OPEN);
-        let content_t = self.btw_t(since, BTW_CONTENT_IN);
-        let swap_t = self.btw_t(since, BTW_SWAP);
-        let draft_t = self.btw_t(since, BTW_DRAFT_IN);
-        let (thread_t, dir) = slide.map_or((1.0, 0.0), |slide| {
-            (self.btw_t(slide.since, BTW_THREAD_IN), slide.dir)
-        });
-        let header = self.render_btw_header(&source, Some(&active), true, draft_t, cx);
-        let theme = Theme::of(cx).clone();
-        let occlude = !cx.has_active_drag();
-        let thread_height = (self.viewport_height * 0.4).min(BTW_THREAD_MAX_HEIGHT);
-        let growing = from.filter(|_| open_t < 1.0);
-        let box_opacity = match (growing, self.btw_panel_bounds.get()) {
-            (Some(_), None) => 0.0,
-            _ => motion::lerp(0.7, 1.0, open_t),
-        };
-        let chrome = match growing.zip(self.btw_panel_bounds.get()) {
-            Some((from, panel)) => {
-                let rect = lerp_bounds(from, panel, open_t);
-                div()
-                    .absolute()
-                    .left(rect.left() - panel.left())
-                    .top(rect.top() - panel.top())
-                    .w(rect.size.width)
-                    .h(rect.size.height)
-            }
-            None => div().absolute().inset_0(),
-        }
-        .opacity(box_opacity)
-        .child(crate::frost::frosted(
-            BTW_PANEL_RADIUS,
-            crate::frost::MENU_BLUR * box_opacity,
-            btw_surface(&theme, occlude).size_full(),
-        ));
-        let content = btw_surface(&theme, occlude)
-            .bg(gpui::transparent_black())
-            .border_color(gpui::transparent_black())
-            .shadow_none()
-            .pb(px(8.0))
-            .gap(px(6.0))
-            .opacity(content_t)
-            .child(header)
-            .child(
-                div()
-                    .h(px(thread_height))
-                    .overflow_hidden()
-                    .relative()
-                    .left(px(BTW_THREAD_SHIFT * dir * (1.0 - thread_t)))
-                    .opacity(thread_t)
-                    .child(transcript),
-            );
-        let measured = self.btw_panel_bounds.clone();
-        let panel = div()
-            .mx(px(Theme::SPACE_LG))
-            .relative()
-            .child(chrome)
-            .child(content)
-            .child(
-                gpui::canvas(
-                    move |bounds, _, _| measured.set(Some(bounds)),
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .inset_0(),
-            );
-        let main = self.composer.clone();
-        Some(
-            div()
-                .id("btw")
-                .debug_selector(|| "btw".into())
-                .relative()
-                .w_full()
-                .flex()
-                .flex_col()
-                .gap(px(Theme::SPACE_SM))
-                .when(swap_t < 1.0, |el| {
-                    el.child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .right_0()
-                            .bottom_0()
-                            .opacity(1.0 - swap_t)
-                            .child(main),
-                    )
-                })
-                .child(panel)
-                .child(div().opacity(swap_t).child(composer))
-                .into_any_element(),
-        )
-    }
-
-    fn render_btw_header(
-        &mut self,
-        source: &str,
-        active: Option<&str>,
-        live: bool,
-        draft_t: f32,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let now = Utc::now();
-        let tabs: Vec<(String, SharedString)> = {
-            let state = self.state.read(cx);
-            state
-                .live_sidechats_of(source, now)
-                .into_iter()
-                .filter(|chat| !self.btw_expanded(&chat.id))
-                .map(|chat| (chat.id.clone(), btw_tab_title(state, chat, now)))
-                .collect()
-        };
-        let theme = Theme::of(cx).clone();
-        let frame = self.render_time.unwrap_or_else(|| self.motion_time());
-        let titles: Vec<(String, SharedString, Option<(SharedString, f32)>)> = tabs
-            .into_iter()
-            .map(|(id, title)| {
-                if !live {
-                    return (id, title, None);
-                }
-                let (old, since) = {
-                    let entry = self
-                        .btw_titles
-                        .entry(id.clone())
-                        .or_insert_with(|| (title.clone(), title.clone(), frame));
-                    if entry.1 != title {
-                        *entry = (entry.1.clone(), title.clone(), frame);
-                    }
-                    (entry.0.clone(), entry.2)
-                };
-                let t = if old == title {
-                    1.0
-                } else {
-                    self.btw_t(since, BTW_TITLE_FADE)
-                };
-                (id, title, (t < 1.0).then_some((old, t)))
-            })
-            .collect();
-        if live {
-            self.btw_titles
-                .retain(|id, _| self.btw_tabs.contains_key(id));
-            self.btw_chip_bounds
-                .borrow_mut()
-                .retain(|id, _| self.btw_tabs.contains_key(id));
-        }
-        let view = self.btw.get(source);
-        let slide = view.and_then(|view| view.slide).filter(|_| live);
-        let born = view
-            .map(|view| view.born.clone())
-            .filter(|_| live)
-            .unwrap_or_default();
-        let highlight = slide
-            .filter(|slide| self.btw_raw(slide.since, BTW_HIGHLIGHT) < 1.0)
-            .and_then(|slide| self.btw_highlight_rect(Some(slide), active))
-            .zip(self.btw_strip_bounds.get())
-            .map(|(rect, strip)| (rect.left() - strip.left(), rect.size.width));
-        let grown: Vec<String> = born
-            .iter()
-            .filter(|(_, since)| self.btw_raw(**since, BTW_CHIP_GROW) >= 1.0)
-            .map(|(id, _)| id.clone())
-            .collect();
-        if let Some(view) = self.btw.get_mut(source) {
-            for id in grown {
-                view.born.remove(&id);
-            }
-        }
-        let draft = self
-            .composer
-            .read(cx)
-            .input
-            .read(cx)
-            .text()
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .map(|line| SharedString::from(format!("Draft: {line}")));
-        let icon_button = |id: &'static str, glyph: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .flex_none()
-                .size(px(22.0))
-                .rounded(px(6.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .when(live, |el| el.cursor_pointer())
-                .role(gpui::Role::Button)
-                .aria_label(label)
-                .when(live, |el| {
-                    el.tooltip(crate::settings::widgets::text_tooltip(label))
-                        .hover(|s| s.bg(theme.element_hover))
-                })
-                .child(icon(glyph).size(px(13.0)).text_color(theme.text_faint))
-        };
-        let tab_chips: Vec<_> = titles
-            .into_iter()
-            .enumerate()
-            .map(|(ix, (id, title, fade))| {
-                let group: SharedString = format!("btw-tab-{ix}").into();
-                let selected = Some(id.as_str()) == active;
-                let grow = born
-                    .get(&id)
-                    .map(|since| self.btw_t(*since, BTW_CHIP_GROW))
-                    .filter(|t| *t < 1.0)
-                    .map(|t| {
-                        self.btw_chip_bounds
-                            .borrow()
-                            .get(&id)
-                            .map_or(0.0, |bounds| f32::from(bounds.size.width))
-                            * t
-                    });
-                let measured = live.then(|| (self.btw_chip_bounds.clone(), id.clone()));
-                let (open_source, close_source, close_id) =
-                    (source.to_string(), source.to_string(), id.clone());
-                let label = match fade {
-                    Some((old, t)) => div()
-                        .relative()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .child(div().truncate().opacity(t).child(title))
-                        .child(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .top_0()
-                                .whitespace_nowrap()
-                                .opacity(1.0 - t)
-                                .child(old),
-                        ),
-                    None => div().min_w_0().truncate().child(title),
-                };
-                div()
-                    .id(("btw-tab", ix))
-                    .debug_selector(move || format!("btw-tab-{ix}"))
-                    .group(group.clone())
-                    .flex_none()
-                    .flex()
-                    .h(px(22.0))
-                    .rounded(px(7.0))
-                    .when_some(grow, |el, width| el.w(px(width)).overflow_hidden())
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(if selected {
-                        theme.text
-                    } else {
-                        theme.text_muted
-                    })
-                    .when(selected && highlight.is_none(), |el| {
-                        el.bg(theme.element_active)
-                    })
-                    .when(live && !selected, |el| {
-                        el.hover(|s| s.bg(theme.element_hover))
-                    })
-                    .when(live, |el| {
-                        el.cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.show_btw_tab(&open_source, id.clone(), cx);
-                            }))
-                    })
-                    .child(
-                        div()
-                            .flex_none()
-                            .relative()
-                            .min_w_0()
-                            .max_w(px(160.0))
-                            .h_full()
-                            .pl(px(8.0))
-                            .pr(px(2.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(2.0))
-                            .child(label)
-                            .child(
-                                div()
-                                    .id(("btw-tab-close", ix))
-                                    .debug_selector(move || format!("btw-tab-close-{ix}"))
-                                    .flex_none()
-                                    .size(px(16.0))
-                                    .rounded(px(4.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .role(gpui::Role::Button)
-                                    .aria_label("Archive sidechat")
-                                    .opacity(0.0)
-                                    .when(live, |el| {
-                                        el.group_hover(group, |s| s.opacity(1.0))
-                                            .hover(|s| s.bg(crate::theme::wash(0.12)))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                cx.stop_propagation();
-                                                this.close_btw_tab(&close_source, &close_id, cx);
-                                            }))
-                                    })
-                                    .child(
-                                        icon(icons::CLOSE)
-                                            .size(px(10.0))
-                                            .text_color(theme.text_muted),
-                                    ),
-                            )
-                            .when_some(measured, |el, (measured, id)| {
-                                el.child(
-                                    gpui::canvas(
-                                        move |bounds, _, _| {
-                                            measured.borrow_mut().insert(id.clone(), bounds);
-                                        },
-                                        |_, _, _, _| {},
-                                    )
-                                    .absolute()
-                                    .inset_0(),
-                                )
-                            }),
-                    )
-            })
-            .collect();
-        let (new_source, expand_source, close_source) =
-            (source.to_string(), source.to_string(), source.to_string());
-        let strip_bounds = live.then(|| self.btw_strip_bounds.clone());
-        div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .child(
-                div()
-                    .flex_none()
-                    .px(px(7.0))
-                    .rounded_full()
-                    .bg(theme.accent_wash)
-                    .text_color(theme.accent)
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("btw"),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .when_some(highlight, |el, (left, width)| {
-                        el.child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .left(left)
-                                .w(width)
-                                .h(px(22.0))
-                                .rounded(px(7.0))
-                                .bg(theme.element_active),
-                        )
-                    })
-                    .children(tab_chips)
-                    .child(icon_button("btw-new-tab", icons::PLUS, "New btw tab").when(
-                        live,
-                        |el| {
-                            el.on_click(cx.listener(move |this, _, _, cx| {
-                                this.create_sidechat_on(
-                                    SidechatSurface::Btw,
-                                    new_source.clone(),
-                                    None,
-                                    SidechatStaged::default(),
-                                    cx,
-                                )
-                            }))
-                        },
-                    ))
-                    .when_some(strip_bounds, |el, measured| {
-                        el.child(
-                            gpui::canvas(
-                                move |bounds, _, _| measured.set(Some(bounds)),
-                                |_, _, _, _| {},
-                            )
-                            .absolute()
-                            .inset_0(),
-                        )
-                    }),
-            )
-            .children(draft.map(|draft| {
-                div()
-                    .flex_none()
-                    .min_w_0()
-                    .max_w(px(180.0))
-                    .truncate()
-                    .px(px(7.0))
-                    .rounded(px(7.0))
-                    .border_1()
-                    .border_dashed()
-                    .border_color(theme.border_strong)
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text_muted)
-                    .relative()
-                    .top(px(BTW_DRAFT_RISE * (1.0 - draft_t)))
-                    .opacity(draft_t)
-                    .child(draft)
-            }))
-            .child(
-                icon_button("btw-expand", icons::LUCIDE_MAXIMIZE_2, "Open in side pane").when(
-                    live,
-                    |el| {
-                        el.on_click(
-                            cx.listener(move |this, _, _, cx| this.expand_btw(&expand_source, cx)),
-                        )
-                    },
-                ),
-            )
-            .child(
-                div()
-                    .id("btw-close")
-                    .debug_selector(|| "btw-close".into())
-                    .flex_none()
-                    .when(live, |el| {
-                        el.cursor_pointer().on_click(
-                            cx.listener(move |this, _, _, cx| this.close_btw(&close_source, cx)),
-                        )
-                    })
-                    .child(popover::kbd_hint(&theme, "Esc")),
-            )
-    }
-
-    fn render_btw_ghost(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let source = self.sidechat_source_chat(cx)?;
-        let view = self.btw.get(&source)?;
-        let active = view.active.clone();
-        let (since, from, target, expand) = match view.phase {
-            BtwPhase::Closing { since, from } => (
-                since,
-                from,
-                self.composer.read(cx).sidechat_tab_bounds(),
-                false,
-            ),
-            BtwPhase::Expanding { since, from, to } => (since, from, to, true),
-            _ => return None,
-        };
-        let spec = match (expand, target) {
-            (false, _) => BTW_COLLAPSE,
-            (true, Some(_)) => BTW_FLY,
-            (true, None) => motion::FADE_QUICK,
-        };
-        let raw = self.btw_raw(since, spec);
-        if raw >= 1.0 {
-            if let Some(view) = self.btw.get_mut(&source) {
-                view.phase = BtwPhase::Closed;
-            }
-            return None;
-        }
-        let t = spec.progress(raw);
-        let (rect, opacity) = match (expand, target) {
-            (false, target) => (target.map_or(from, |to| lerp_bounds(from, to, t)), 1.0 - t),
-            (true, Some(to)) => (lerp_bounds(from, to, t), ((1.0 - raw) / 0.3).min(1.0)),
-            (true, None) => (from, 1.0 - t),
-        };
-        let theme = Theme::of(cx).clone();
-        let content_t = self.btw_t(since, BTW_CONTENT_OUT);
-        let content = (content_t < 1.0).then(|| {
-            let header = self.render_btw_header(&source, active.as_deref(), false, 1.0, cx);
-            gpui::anchored().position(from.origin).child(
-                btw_surface(&theme, false)
-                    .bg(gpui::transparent_black())
-                    .border_color(gpui::transparent_black())
-                    .shadow_none()
-                    .w(from.size.width)
-                    .h(from.size.height)
-                    .opacity(1.0 - content_t)
-                    .child(header),
-            )
-        });
-        let layer = div()
-            .absolute()
-            .size_0()
-            .child(
-                gpui::anchored().position(rect.origin).child(
-                    div()
-                        .w(rect.size.width)
-                        .h(rect.size.height)
-                        .opacity(opacity)
-                        .child(crate::frost::frosted(
-                            BTW_PANEL_RADIUS,
-                            crate::frost::MENU_BLUR * opacity,
-                            btw_surface(&theme, false).size_full(),
-                        )),
-                ),
-            )
-            .children(content);
-        Some(if expand {
-            div()
-                .absolute()
-                .size_0()
-                .child(gpui::deferred(layer))
-                .into_any_element()
-        } else {
-            layer.into_any_element()
-        })
-    }
-
     fn sidechat_entities(
         &mut self,
         chat_id: String,
-        surface: SidechatSurface,
         cx: &mut Context<Self>,
     ) -> (
         Entity<Transcript>,
@@ -8018,7 +7026,7 @@ impl Shell {
         let composer_events = cx.subscribe(&composer, {
             let transcript = transcript.clone();
             move |this: &mut Shell, _, event: &ComposerEvent, cx| {
-                this.on_sidechat_composer_event(&transcript, surface, event, cx)
+                this.on_sidechat_composer_event(&transcript, event, cx)
             }
         });
         (transcript, composer, events, composer_events)
@@ -8027,7 +7035,6 @@ impl Shell {
     fn on_sidechat_composer_event(
         &mut self,
         transcript: &Entity<Transcript>,
-        surface: SidechatSurface,
         event: &ComposerEvent,
         cx: &mut Context<Self>,
     ) {
@@ -8048,13 +7055,7 @@ impl Shell {
                 source_chat_id,
                 prompt,
                 staged,
-            } => self.create_sidechat_on(
-                surface,
-                source_chat_id.clone(),
-                prompt.clone(),
-                staged.clone(),
-                cx,
-            ),
+            } => self.create_sidechat(source_chat_id.clone(), prompt.clone(), staged.clone(), cx),
             // A sidechat has no new-thread route. Workspace commands act on
             // the main composer's chat, not this one, so a sidechat's are
             // dropped.
@@ -8072,11 +7073,13 @@ impl Shell {
                 doc_id,
                 title,
                 frozen,
-            } => self.add_subagent_surface(
-                chat_id.clone(),
-                doc_id.clone(),
-                title.clone(),
-                *frozen,
+            } => self.open_child(
+                children::ChildRef::Subagent {
+                    chat_id: chat_id.clone(),
+                    doc_id: doc_id.clone(),
+                    title: title.clone(),
+                    frozen: *frozen,
+                },
                 cx,
             ),
             ComposerEvent::UnsentChanged => cx.notify(),
@@ -8295,7 +7298,7 @@ impl Shell {
                             .is_some_and(|chat| s.unstarted_sidechat(chat, Utc::now()))
                     });
                     self.release_doc(&tab.chat_id, cx);
-                    if unstarted && !self.btw_tabs.contains_key(&tab.chat_id) {
+                    if unstarted {
                         self.set_chat_archived(tab.chat_id, true, cx);
                     }
                 }
@@ -10622,7 +9625,7 @@ impl Shell {
         if !matches!(self.route, Route::Chat) || self.overlay_owns_keyboard(cx) {
             return;
         }
-        let pickers = self.chat_composer(cx).read(cx).pickers().clone();
+        let pickers = self.composer.clone().read(cx).pickers().clone();
         pickers.update(cx, |pickers, cx| pickers.step_effort(delta, cx));
     }
 
@@ -10651,7 +9654,7 @@ impl Shell {
             || self.section_dialog.is_some()
             || self.section_menu.is_some()
             || self.add_space.is_some()
-            || self.chat_composer(cx).read(cx).pickers().read(cx).is_open()
+            || self.composer.clone().read(cx).pickers().read(cx).is_open()
             || self.open_side_chat_pickers(cx).is_some()
     }
 
@@ -17167,10 +16170,6 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
-        if event.keystroke.key == "escape" && self.close_btw_on_escape(cx) {
-            cx.stop_propagation();
-            return;
-        }
         if event.keystroke.key == "escape" && self.pr_chat_expanded(cx) {
             self.fold_pr_chat(cx);
             cx.stop_propagation();
@@ -17301,7 +16300,7 @@ impl Shell {
             }
             _ => None,
         };
-        let composer = side_chat.unwrap_or_else(|| self.chat_composer(cx));
+        let composer = side_chat.unwrap_or_else(|| self.composer.clone());
         self.shortcut_focus
             .contains(&composer.focus_handle(cx), window)
             .then_some(composer)
@@ -17798,29 +16797,19 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let rewind = matches!(modal.kind, BranchKind::Rewind);
         let zeron_proto::transcript::BranchCopy {
             title,
             context,
             option,
             detail,
-        } = zeron_proto::transcript::branch_copy(rewind, &modal.excerpt);
-        let (glyph, danger) = if rewind {
-            (icons::RESTART, true)
-        } else {
-            (icons::GIT_BRANCH, false)
-        };
+        } = zeron_proto::transcript::branch_copy(true, &modal.excerpt);
         let option_row = popover::menu_row(theme, false, "branch-modal-option")
             .id("branch-modal-option")
             .px(px(12.0))
             .py(px(10.0))
             .when(modal.busy, |el| el.opacity(0.6))
             .on_click(cx.listener(|this, _, _, cx| this.confirm_branch(cx)))
-            .child(icon(glyph).size(px(18.0)).text_color(if danger {
-                theme.danger
-            } else {
-                theme.text_muted
-            }))
+            .child(icon(icons::RESTART).size(px(18.0)).text_color(theme.danger))
             .child(
                 div()
                     .flex_1()
@@ -17831,7 +16820,7 @@ impl Shell {
                     .child(
                         div()
                             .text_size(crate::typography::ui_rems(14.0))
-                            .text_color(if danger { theme.danger } else { theme.text })
+                            .text_color(theme.danger)
                             .child(SharedString::from(if modal.busy {
                                 format!("{option}\u{2026}")
                             } else {
@@ -18164,11 +17153,6 @@ impl Shell {
         self.composer.update(cx, |composer, cx| {
             composer.set_available_width(composer_width, cx)
         });
-        if let Some(composer) = self.active_btw_composer(cx) {
-            composer.update(cx, |composer, cx| {
-                composer.set_available_width(composer_width, cx)
-            });
-        }
         let terminal_geometry =
             std::rc::Rc::new(std::cell::Cell::new(crate::terminal::dock::Geometry::new(
                 self.eval_tween(self.terminal_tween, self.terminal_target(cx)),
@@ -18349,7 +17333,7 @@ impl Shell {
             Some((strip, band)) => (Some(strip), band),
             None => (None, 0.0),
         };
-        self.chat_dropzone("chat-dropzone", self.chat_composer(cx), cx)
+        self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
             .debug_selector(|| "chat-dropzone".into())
             .track_focus(&self.navigation_focus.main)
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
@@ -18536,12 +17520,7 @@ impl Shell {
                                 .w(px(composer_width))
                                 .opacity(composer_opacity)
                                 .mx_auto()
-                                .children(self.render_btw_ghost(cx))
-                                .child(
-                                    self.render_btw(cx).unwrap_or_else(|| {
-                                        self.composer.clone().into_any_element()
-                                    }),
-                                )
+                                .child(self.composer.clone())
                                 .children(if has_selection {
                                     self.render_jump_to_bottom(cx)
                                 } else {
@@ -19225,20 +18204,6 @@ impl Shell {
                             }),
                         ),
                     })
-                    .when(self.sidechat_source_chat(cx).is_some(), |el| {
-                        el.child(
-                            row(
-                                "surface-card-sidechat",
-                                icons::CHAT_ROUND_LINE,
-                                zeron_proto::sidechat::NEW_SIDECHAT,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(source) = this.sidechat_source_chat(cx) {
-                                    this.create_sidechat(source, None, Default::default(), cx);
-                                }
-                            })),
-                        )
-                    })
                     // Git surfaces only where there IS git — the pane itself
                     // no longer gates on it (terminals work anywhere).
                     .when(git_surfaces, |el| {
@@ -19353,37 +18318,43 @@ impl Shell {
     /// (icon · title · ✕) plus the `+` menu — the t3code RightPanelTabs bar,
     /// living in the top row; the diff options moved into the pane below.
     pub(crate) fn render_right_tab_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        /// Fixed chip slot — the terminal drawer's drag mechanics (drop-index
-        /// quantisation + slide offsets) assume uniform widths.
-        const CHIP_W: f32 = 112.0;
-        const CHIP_SLOT: f32 = CHIP_W + 4.0; // + the strip's own gap
-
         let theme = Theme::of(cx).clone();
         // Heal drag state if the pointer was released outside the strip.
         if self.right_tab_drag.is_some() && !cx.has_active_drag() {
             self.right_tab_drag = None;
         }
         let rows = self.right_surface_rows(cx);
-        let count = rows.len();
         let active = self.resolved_right_active(cx);
+        let kinds: Vec<Option<children::ChildKind>> = rows
+            .iter()
+            .map(|(surface, ..)| self.child_kind(*surface, cx))
+            .collect();
+        let full: Vec<f32> = kinds
+            .iter()
+            .map(|kind| {
+                if kind.is_some() {
+                    CHILD_TAB_W
+                } else {
+                    TOOL_TAB_W
+                }
+            })
+            .collect();
+        let active_ix = rows.iter().position(|(surface, ..)| *surface == active);
+        let (slim, hidden) = right_tab_layout(&full, active_ix, self.right_tab_room.get());
+        let visible: Vec<usize> = (0..rows.len()).filter(|ix| !hidden.contains(ix)).collect();
+        let width_of = |ix: usize| if slim[ix] { SLIM_TAB_W } else { full[ix] };
+        let slots: Vec<(usize, f32)> = visible
+            .iter()
+            .map(|&ix| (ix, width_of(ix) + RIGHT_TAB_GAP))
+            .collect();
         let drag = self
             .right_tab_drag
             .as_ref()
             .map(|d| (d.from, d.over, d.epoch, d.prev_over));
-
-        // Fade flags from the LAST frame's scroll state (invisible lag).
-        // The EdgeFade scope below fades per-pixel on x for glyphs AND
-        // quads/images (fork 5d1f83d) — washes dissolve across the band.
-        const FADE_WIDTH: f32 = 36.0;
-        let scrolled = -f32::from(self.right_tab_scroll.offset().x);
-        let max_scroll = f32::from(self.right_tab_scroll.max_offset().x);
-        let fade_left = scrolled > 1.0;
-        let fade_right = scrolled < max_scroll - 1.0;
-        // The old session-tab strip's proven scroll shape: the flex row IS
-        // the scroller (id + overflow_x_scroll + track_scroll), wrapped in a
-        // relative min_w_0 region below; drop math runs in CONTENT
-        // coordinates (viewport-relative x plus the scrolled-off width).
-        let scroll_for_drag = self.right_tab_scroll.clone();
+        let dragged_slot = drag
+            .and_then(|(from, ..)| slots.iter().find(|(ix, _)| *ix == from))
+            .map_or(0.0, |(_, w)| *w);
+        let drop_slots = slots.clone();
         let mut strip = div()
             .id("right-surface-strip")
             .track_focus(&self.navigation_focus.tabs)
@@ -19393,14 +18364,9 @@ impl Shell {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(4.0))
+            .gap(px(RIGHT_TAB_GAP))
             .min_w_0()
-            .overflow_x_scroll()
-            .track_scroll(&self.right_tab_scroll)
-            .on_scroll_wheel(crate::swipe::claim_scrollable(&self.right_tab_scroll))
-            // Windows caption hit-testing includes the scroll-only hitboxes
-            // behind each chip. Stop at the scroller so the titlebar cannot
-            // claim tab clicks, while wheel events still reach this scroller.
+            .overflow_hidden()
             .when(cfg!(target_os = "windows"), |strip| strip.occlude())
             .on_drag_move::<RightTabDrag>(cx.listener(
                 move |this, event: &gpui::DragMoveEvent<RightTabDrag>, _, cx| {
@@ -19409,10 +18375,8 @@ impl Shell {
                         return;
                     }
                     let from = payload.from;
-                    let rel_x = f32::from(event.event.position.x)
-                        - f32::from(event.bounds.left())
-                        - f32::from(scroll_for_drag.offset().x);
-                    let over = crate::terminal::panel::drop_index(rel_x, CHIP_SLOT, count);
+                    let rel_x = f32::from(event.event.position.x) - f32::from(event.bounds.left());
+                    let over = right_tab_drop(rel_x, &drop_slots);
                     this.update_right_tab_drag_over(from, over, cx);
                 },
             ))
@@ -19430,11 +18394,10 @@ impl Shell {
                 this.right_tab_drag = None;
                 this.reorder_right_tabs(payload.from, to, cx);
             }));
+        let mut overflow = Vec::new();
         for (ix, (surface, title, dirty, detail)) in rows.into_iter().enumerate() {
             let is_active = surface == active;
-            let file_identity_path = detail.as_ref().cloned().unwrap_or_else(|| title.clone());
-            let mut icon_tint = None;
-            let mut instance_icon = None;
+            let kind = kinds[ix];
             let icon_path = match surface {
                 RightSurface::File(_) => icons::DOCUMENT,
                 RightSurface::Diff(id) => self
@@ -19448,39 +18411,20 @@ impl Shell {
                         }
                     })
                     .unwrap_or(icons::LIST),
-                RightSurface::SideChat(id) => {
-                    let branded = self.side_chats.get(&id).and_then(|tab| {
-                        let state = tab.state.read(cx);
-                        let chat = state.selected_chat_row()?;
-                        let config = chat.config.as_ref()?;
-                        instance_icon = crate::provider_instances::chat_icon(chat, cx);
-                        Some(crate::pickers::agent_brand_icon(
-                            Some(config.harness),
-                            config.model.as_deref(),
-                        ))
-                    });
-                    match branded {
-                        Some((mark, tint)) => {
-                            icon_tint = tint;
-                            mark
-                        }
-                        None => icons::CHAT_ROUND_LINE,
-                    }
-                }
-                RightSurface::Subagent(id) => {
-                    let (mark, tint) = crate::pickers::agent_brand_icon(
-                        self.subagent_tabs.get(&id).and_then(|tab| tab.harness),
-                        None,
-                    );
-                    icon_tint = tint;
-                    mark
-                }
-                RightSurface::Sidechat(_) => icons::CHAT_ROUND_LINE,
+                RightSurface::SideChat(_)
+                | RightSurface::Subagent(_)
+                | RightSurface::Sidechat(_) => kind.map_or(icons::CHAT_ROUND_LINE, |k| k.icon()),
                 RightSurface::Terminal(_) => icons::TERMINAL,
                 RightSurface::Browser(_) => icons::GLOBE,
                 RightSurface::Device(id) => self.device_tab_icon(id, cx),
                 RightSurface::Picker => icons::PLUS,
             };
+            if hidden.contains(&ix) {
+                overflow.push((surface, title, icon_path));
+                continue;
+            }
+            let slim = slim[ix];
+            let file_identity_path = detail.as_ref().cloned().unwrap_or_else(|| title.clone());
             // Working chats and subagents swap their harness icon for the
             // mini spinner; subagent liveness follows the doc's streaming tail.
             let browser_favicon = match surface {
@@ -19518,18 +18462,28 @@ impl Shell {
             let ghost_title = title.clone();
             let workspace_path = self.workspace_path_for_surface(surface, cx);
             let accessible_name = detail.as_ref().unwrap_or(&title);
-            let accessible_label = if dirty {
-                format!("{accessible_name}, unsaved changes")
-            } else {
-                accessible_name.to_string()
+            let accessible_label = match (kind, dirty) {
+                (Some(kind), _) if accessible_name.as_ref() != kind.label() => {
+                    format!("{} {accessible_name}", kind.label())
+                }
+                (None, true) => format!("{accessible_name}, unsaved changes"),
+                _ => accessible_name.to_string(),
             };
+            let tip = detail.clone().or_else(|| {
+                slim.then(|| match kind {
+                    Some(kind) => format!("{title} · {}", kind.label()).into(),
+                    None => title.clone(),
+                })
+            });
+            let width = width_of(ix);
             let chip = crate::surface_chrome::tab(("right-surface-tab", ix), is_active, &theme)
                 .debug_selector(|| format!("right-surface-tab-{ix}"))
                 .group(group.clone())
                 .h(px(24.0))
-                .w(px(CHIP_W))
+                .w(px(width))
                 .flex_none()
-                .px(px(4.0))
+                .px(px(if slim { 2.0 } else { 4.0 }))
+                .when(slim, |chip| chip.justify_center())
                 .rounded(px(6.0))
                 .flex()
                 .flex_row()
@@ -19538,7 +18492,7 @@ impl Shell {
                 .cursor_pointer()
                 .role(gpui::Role::Button)
                 .aria_label(accessible_label)
-                .when_some(detail, |chip, detail| {
+                .when_some(tip, |chip, detail| {
                     chip.tooltip(move |_, cx| {
                         cx.new(|_| SurfaceTabTooltip {
                             text: detail.clone(),
@@ -19631,8 +18585,36 @@ impl Shell {
                     this.right_tab_drag = None;
                     this.reorder_right_tabs(payload.from, to, cx);
                 }))
-                .child(
-                    // Leading slot: the surface's icon.
+                .child(if kind.is_some() {
+                    div()
+                        .debug_selector(|| format!("right-surface-kind-{ix}"))
+                        .flex_none()
+                        .size(px(20.0))
+                        .rounded(px(5.0))
+                        .bg(crate::theme::wash(0.08))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(if subagent_running {
+                            loaders::mini_glyph_spinner(
+                                format!("subagent-tab-{ix}"),
+                                2.0,
+                                theme.glyph,
+                                cx.entity_id(),
+                                cx,
+                            )
+                            .into_any_element()
+                        } else {
+                            icon(icon_path)
+                                .size(px(12.0))
+                                .text_color(if is_active {
+                                    theme.text
+                                } else {
+                                    theme.text_muted
+                                })
+                                .into_any_element()
+                        })
+                } else {
                     div()
                         .flex_none()
                         .size(px(18.0))
@@ -19660,96 +18642,95 @@ impl Shell {
                             .size(px(14.0))
                             .when(!is_active, |icon| icon.opacity(0.78))
                             .into_any_element()
-                        } else if let Some(instance_icon) = &instance_icon {
-                            let color = theme.text_muted;
-                            instance_icon
-                                .svg(if is_active { color } else { color.opacity(0.7) })
-                                .size(px(12.0))
-                                .into_any_element()
                         } else {
-                            let color = icon_tint.unwrap_or(theme.text_muted);
+                            let color = theme.text_muted;
                             icon(icon_path)
                                 .size(px(12.0))
                                 .text_color(if is_active { color } else { color.opacity(0.7) })
                                 .into_any_element()
-                        }),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .text_color(if is_active {
-                            theme.text
-                        } else {
-                            theme.text_muted
                         })
-                        .child(self.device_tab_label(surface, title, cx)),
-                )
-                .child(
-                    // Trailing slot: the unsaved dot normally, ✕ on tab
-                    // hover — two stacked layers opacity-swapped by the
-                    // group hover.
-                    div()
-                        .id(("right-surface-close", ix))
-                        .debug_selector(|| format!("right-surface-close-{ix}"))
-                        .flex_none()
-                        .size(px(18.0))
-                        .rounded(px(4.0))
-                        .relative()
-                        .role(gpui::Role::Button)
-                        .aria_label("Close tab")
-                        .tooltip(crate::settings::widgets::text_tooltip("Close tab"))
-                        .hover(|s| s.bg(crate::theme::wash(0.12)))
-                        // The tab owns a drag payload. Claim the close press
-                        // before it reaches that parent or GPUI starts a tab
-                        // drag instead of delivering the close click.
-                        .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
-                            window.prevent_default();
-                            cx.stop_propagation();
-                        })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.close_right_surface(surface, window, cx);
-                        }))
-                        .when(dirty, |slot| {
-                            slot.child(
+                })
+                .when(!slim, |chip| {
+                    chip.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(crate::typography::ui_rems(11.5))
+                            .text_color(if is_active {
+                                theme.text
+                            } else {
+                                theme.text_muted
+                            })
+                            .child(self.device_tab_label(surface, title, cx)),
+                    )
+                    .child(
+                        // Trailing slot: the unsaved dot normally, ✕ on tab
+                        // hover — two stacked layers opacity-swapped by the
+                        // group hover.
+                        div()
+                            .id(("right-surface-close", ix))
+                            .debug_selector(|| format!("right-surface-close-{ix}"))
+                            .flex_none()
+                            .size(px(18.0))
+                            .rounded(px(4.0))
+                            .relative()
+                            .role(gpui::Role::Button)
+                            .aria_label("Close tab")
+                            .tooltip(crate::settings::widgets::text_tooltip("Close tab"))
+                            .hover(|s| s.bg(crate::theme::wash(0.12)))
+                            // The tab owns a drag payload. Claim the close press
+                            // before it reaches that parent or GPUI starts a tab
+                            // drag instead of delivering the close click.
+                            .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_right_surface(surface, window, cx);
+                            }))
+                            .when(dirty, |slot| {
+                                slot.child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .group_hover(group.clone(), |s| s.opacity(0.0))
+                                        .child(
+                                            div().size(px(6.0)).rounded_full().bg(theme.text_muted),
+                                        ),
+                                )
+                            })
+                            .child(
                                 div()
                                     .absolute()
                                     .inset_0()
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .group_hover(group.clone(), |s| s.opacity(0.0))
-                                    .child(div().size(px(6.0)).rounded_full().bg(theme.text_muted)),
-                            )
-                        })
-                        .child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .opacity(0.0)
-                                .group_hover(group.clone(), |s| s.opacity(1.0))
-                                .child(
-                                    icon(icons::CLOSE)
-                                        .size(px(12.0))
-                                        .text_color(theme.text_muted),
-                                ),
-                        ),
-                );
+                                    .opacity(0.0)
+                                    .group_hover(group.clone(), |s| s.opacity(1.0))
+                                    .child(
+                                        icon(icons::CLOSE)
+                                            .size(px(12.0))
+                                            .text_color(theme.text_muted),
+                                    ),
+                            ),
+                    )
+                });
             // Sliding transform while a sibling drags over (the terminal
             // drawer's exact recipe): animate 150ms between committed
             // offsets; the dragged tab leaves an invisible spacer — the
             // ghost carries it.
             let wrapped: AnyElement = match drag {
                 Some((from, over, epoch, prev_over)) if ix != from => {
-                    let target = crate::terminal::panel::slide_offset(ix, from, over) * CHIP_SLOT;
+                    let target =
+                        crate::terminal::panel::slide_offset(ix, from, over) * dragged_slot;
                     let start =
-                        crate::terminal::panel::slide_offset(ix, from, prev_over) * CHIP_SLOT;
+                        crate::terminal::panel::slide_offset(ix, from, prev_over) * dragged_slot;
                     div()
                         .relative()
                         .child(chip.with_animation(
@@ -19760,7 +18741,7 @@ impl Shell {
                         .into_any_element()
                 }
                 Some((from, ..)) if ix == from => div()
-                    .w(px(CHIP_W))
+                    .w(px(width))
                     .h(px(24.0))
                     .flex_none()
                     .into_any_element(),
@@ -19886,31 +18867,6 @@ impl Shell {
                                 })),
                             }
                         })
-                        .when(self.sidechat_source_chat(cx).is_some(), |menu| {
-                            menu.child(
-                                popover::menu_row(&theme, false, "right-plus-sidechat")
-                                    .id("right-plus-sidechat-row")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some(source) = this.sidechat_source_chat(cx) {
-                                            this.create_sidechat(
-                                                source,
-                                                None,
-                                                Default::default(),
-                                                cx,
-                                            );
-                                        }
-                                        this.close_right_plus(cx);
-                                    }))
-                                    .child(
-                                        icon(icons::CHAT_ROUND_LINE)
-                                            .size(px(13.0))
-                                            .text_color(theme.text_muted),
-                                    )
-                                    .child(SharedString::from(
-                                        zeron_proto::sidechat::NEW_SIDECHAT,
-                                    )),
-                            )
-                        })
                         .when(git_surfaces, |menu| {
                             menu.child(
                                 popover::menu_row(&theme, false, "right-plus-diff")
@@ -19950,59 +18906,114 @@ impl Shell {
                 10.0,
             ));
         }
+        if !overflow.is_empty() {
+            strip = strip.child(self.render_right_tab_more(overflow, &theme, cx));
+        }
         // The empty-state picker already offers every surface. Show a single
         // Chrome-style add-tab affordance only after at least one tab exists.
-        strip = strip.when(count > 0, |strip| strip.child(plus));
-        // Edge fades on whichever side hides tabs (flags computed above).
-        // Glass: per-glyph EdgeFade scope over the chips' own opacity ramps;
-        // opaque: painted gradients in the shell surface tone.
-        let glass = theme.is_glass();
-        let bar_bg = theme.surface;
-        let region = div()
+        strip = strip.when(!full.is_empty(), |strip| strip.child(plus));
+        let room = self.right_tab_room.clone();
+        let view = cx.entity_id();
+        div()
             .relative()
             .min_w_0()
             .size_full()
             .flex()
             .items_center()
             .child(strip)
-            .when(fade_left && !glass, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top_0()
-                        .bottom_0()
-                        .w(px(FADE_WIDTH))
-                        .bg(gpui::linear_gradient(
-                            90.0,
-                            gpui::linear_color_stop(bar_bg, 0.0),
-                            gpui::linear_color_stop(bar_bg.opacity(0.0), 1.0),
-                        )),
+            .child(
+                gpui::canvas(
+                    move |bounds, window, _| {
+                        let width = Some(f32::from(bounds.size.width));
+                        if room.replace(width) != width {
+                            window.on_next_frame(move |_, cx| cx.notify(view));
+                        }
+                    },
+                    |_, _, _, _| {},
                 )
-            })
-            .when(fade_right && !glass, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .right_0()
-                        .top_0()
-                        .bottom_0()
-                        .w(px(FADE_WIDTH))
-                        .bg(gpui::linear_gradient(
-                            270.0,
-                            gpui::linear_color_stop(bar_bg, 0.0),
-                            gpui::linear_color_stop(bar_bg.opacity(0.0), 1.0),
-                        )),
-                )
-            });
-        if glass {
-            crate::edge_fade::edge_faded(FADE_WIDTH, false, false, region)
-                .fade_left(fade_left)
-                .fade_right(fade_right)
-                .into_any_element()
-        } else {
-            region.into_any_element()
+                .absolute()
+                .inset_0(),
+            )
+            .into_any_element()
+    }
+
+    fn render_right_tab_more(
+        &mut self,
+        hidden: Vec<(RightSurface, SharedString, &'static str)>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let count = hidden.len();
+        let mut more = div()
+            .id("right-surface-more")
+            .debug_selector(|| "right-surface-more".into())
+            .h(px(24.0))
+            .w(px(MORE_TAB_W))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(crate::theme::wash(0.11)))
+            .block_mouse_except_scroll()
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!("{count} more tabs")))
+            .text_size(crate::typography::ui_rems(11.5))
+            .text_color(theme.text_muted)
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, _| {
+                    window.prevent_default();
+                    this.right_more.note_trigger_press();
+                }),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                if this.right_more.take_press_was_open() {
+                    this.close_right_more(cx);
+                } else {
+                    this.right_more.open(());
+                    cx.notify();
+                }
+            }))
+            .child(SharedString::from(format!("⋯ {count}")));
+        if self.right_more.get().is_some() {
+            let closing = self.right_more.closing_since();
+            let rows = hidden
+                .into_iter()
+                .enumerate()
+                .map(|(ix, (surface, title, icon_path))| {
+                    popover::menu_row(theme, false, format!("right-more-{ix}"))
+                        .id(("right-more-row", ix))
+                        .debug_selector(move || format!("right-more-row-{ix}"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.close_right_more(cx);
+                            this.activate_right_surface(surface, window, cx);
+                        }))
+                        .child(icon(icon_path).size(px(13.0)).text_color(theme.text_muted))
+                        .child(div().min_w_0().truncate().child(title))
+                });
+            let menu = popover::popover_card(theme)
+                .w(px(220.0))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_right_more(cx)))
+                .child(div().flex().flex_col().gap(px(2.0)).children(rows))
+                .into_any_element();
+            more = more.relative().child(popover::anchored_menu_below_gap(
+                "right-more-menu",
+                menu,
+                closing,
+                10.0,
+            ));
         }
+        more.into_any_element()
+    }
+
+    fn close_right_more(&mut self, cx: &mut Context<Self>) {
+        if self.right_more.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.right_more);
+        }
+        cx.notify();
     }
 
     /// Toggle the changes-panel takeover (the header's expand button, t3code
@@ -20573,6 +19584,8 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.chat_backdrop = None;
         self.refresh_triage_frame(cx);
+        self.resolve_pending_agent(cx);
+        self.sync_open_children(cx);
         if self.active_chat.is_empty() && self.right_pane_open(cx) {
             self.adopt_canvas_terminals(cx);
         }
@@ -21121,13 +20134,16 @@ impl Render for Shell {
             }))
             .on_action(cx.listener(|this, _: &OpenModelPicker, window, cx| {
                 if matches!(this.route, Route::Chat) && !this.overlay_owns_keyboard(cx) {
-                    let pickers = this.chat_composer(cx).read(cx).pickers().clone();
+                    let pickers = this.composer.read(cx).pickers().clone();
                     pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleBtw, _, cx| {
-                if matches!(this.route, Route::Chat) && !this.overlay_owns_keyboard(cx) {
-                    this.toggle_btw(cx);
+                if matches!(this.route, Route::Chat)
+                    && !this.overlay_owns_keyboard(cx)
+                    && let Some(source) = this.sidechat_source_chat(cx)
+                {
+                    this.open_sidechat(source, None, SidechatStaged::default(), cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &IncreaseReasoning, _, cx| {
@@ -21378,59 +20394,31 @@ impl Render for Shell {
                     })
                     .detach();
                 }
-                // `=btw|btw-closed|btw-expand` (capture knobs): seed a main draft,
-                // ask two side questions in two btw tabs, then optionally Esc
-                // out or expand the active tab into the right pane.
-                if matches!(
-                    self.debug_dialog.as_deref(),
-                    Some("btw" | "btw-closed" | "btw-expand")
-                ) && self.sidechat_source_chat(cx).is_some()
+                // `=btw` (capture knob): ask two side questions, each opening
+                // a Side chat tab in the right pane.
+                if self.debug_dialog.as_deref() == Some("btw")
+                    && self.sidechat_source_chat(cx).is_some()
                 {
-                    let which = self.debug_dialog.take().unwrap_or_default();
+                    self.debug_dialog = None;
                     cx.spawn(async move |this, cx| {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(3000))
-                            .await;
-                        let _ = this.update(cx, |shell, cx| {
-                            shell
-                                .composer
-                                .update(cx, |c, cx| c.seed_text("Okay + các".into(), cx));
-                            if let Some(source) = shell.sidechat_source_chat(cx) {
-                                shell.open_sidechat(
-                                    source,
-                                    Some("chat_status_tone nằm ở file nào?".into()),
-                                    SidechatStaged::default(),
-                                    cx,
-                                );
-                            }
-                        });
-                        cx.background_executor()
-                            .timer(Duration::from_millis(5000))
-                            .await;
-                        let _ = this.update(cx, |shell, cx| {
-                            if let Some(source) = shell.sidechat_source_chat(cx) {
-                                shell.create_sidechat_on(
-                                    SidechatSurface::Btw,
-                                    source,
-                                    Some("agent còn mấy bước nữa?".into()),
-                                    SidechatStaged::default(),
-                                    cx,
-                                );
-                            }
-                        });
-                        cx.background_executor()
-                            .timer(Duration::from_millis(6000))
-                            .await;
-                        let _ = this.update(cx, |shell, cx| {
-                            let Some(source) = shell.sidechat_source_chat(cx) else {
-                                return;
-                            };
-                            match which.as_str() {
-                                "btw-closed" => shell.close_btw(&source, cx),
-                                "btw-expand" => shell.expand_btw(&source, cx),
-                                _ => {}
-                            }
-                        });
+                        for (wait, prompt) in [
+                            (3000, "chat_status_tone nằm ở file nào?"),
+                            (5000, "agent còn mấy bước nữa?"),
+                        ] {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(wait))
+                                .await;
+                            let _ = this.update(cx, |shell, cx| {
+                                if let Some(source) = shell.sidechat_source_chat(cx) {
+                                    shell.create_sidechat(
+                                        source,
+                                        Some(prompt.into()),
+                                        SidechatStaged::default(),
+                                        cx,
+                                    );
+                                }
+                            });
+                        }
                     })
                     .detach();
                 }
@@ -26278,9 +25266,7 @@ mod right_tab_mouse_regressions {
     }
 
     #[gpui::test]
-    fn an_existing_sidechat_opens_as_a_btw_tab_and_expands_into_one_right_pane_tab(
-        cx: &mut TestAppContext,
-    ) {
+    fn every_sidechat_door_lands_in_one_right_pane_tab(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
@@ -26324,62 +25310,25 @@ mod right_tab_mouse_regressions {
                 composer.seed_text("keep my draft".into(), cx)
             });
             shell.open_sidechat("parent".into(), None, Default::default(), cx);
-            assert_eq!(shell.open_btw_source(cx).as_deref(), Some("parent"));
-            assert_eq!(shell.btw["parent"].active.as_deref(), Some("side"));
-            assert_eq!(shell.btw_tabs.len(), 1);
-            let composer = shell.btw_tabs["side"].composer.clone();
-            assert_eq!(shell.chat_composer(cx), composer);
-            assert!(composer.read(cx).focus_pending);
-            assert_eq!(composer.read(cx).bound_chat_id(cx).as_deref(), Some("side"));
-            assert!(shell.sidechat_tabs.is_empty());
-            assert!(!shell.state.read(cx).open_sidechat_tabs.contains("side"));
-            assert!(shell.render_btw(cx).is_some());
-            // Archived elsewhere: the main composer is the one shown and typed into.
-            shell
-                .state
-                .update(cx, |state, _| state.chats[1].archived = true);
-            assert!(shell.render_btw(cx).is_none());
-            assert_eq!(shell.chat_composer(cx), shell.composer);
-            shell
-                .state
-                .update(cx, |state, _| state.chats[1].archived = false);
-            let closed_at = std::time::Instant::now();
-            shell.test_time = Some(closed_at);
-            shell.btw_panel_bounds.set(Some(gpui::Bounds {
-                origin: gpui::point(px(40.0), px(300.0)),
-                size: gpui::size(px(600.0), px(200.0)),
-            }));
-            assert!(shell.close_btw_on_escape(cx));
-            assert!(shell.open_btw_source(cx).is_none());
-            assert!(shell.render_btw(cx).is_none());
-            assert!(matches!(
-                shell.btw["parent"].phase,
-                BtwPhase::Closing { .. }
-            ));
-            assert!(shell.render_btw_ghost(cx).is_some());
-            shell.test_time = Some(closed_at + BTW_COLLAPSE.total().mul_f32(motion::speed_scale()));
-            assert!(shell.render_btw_ghost(cx).is_none());
-            assert!(matches!(shell.btw["parent"].phase, BtwPhase::Closed));
-            shell.test_time = None;
-            assert_eq!(
-                shell.composer.read(cx).input.read(cx).text(),
-                "keep my draft"
-            );
-            assert_eq!(shell.chat_composer(cx), shell.composer);
-            // Reopening returns to the same tab instead of minting another.
-            shell.open_sidechat("parent".into(), None, Default::default(), cx);
-            assert_eq!(shell.btw["parent"].active.as_deref(), Some("side"));
-            assert_eq!(shell.btw_tabs.len(), 1);
-            shell.expand_btw("parent", cx);
-            assert!(shell.open_btw_source(cx).is_none());
-            assert!(shell.btw_tabs.is_empty());
             assert_eq!(shell.resolved_right_active(cx), RightSurface::Sidechat(1));
             assert_eq!(shell.sidechat_tabs.len(), 1);
             assert!(shell.state.read(cx).open_sidechat_tabs.contains("side"));
             assert!(shell.sidechat_tabs[&1].composer.read(cx).focus_pending);
-            // A second expand reuses the right-pane tab, and a prompt handed
-            // to it is sent by the TAB's composer (which, with no engine here,
-            // fails on its own chat rather than building a Run).
+            assert_eq!(
+                shell.composer.read(cx).input.read(cx).text(),
+                "keep my draft"
+            );
+            shell.open_child(children::ChildRef::Chat("side".into()), cx);
+            shell.open_sidechat("parent".into(), None, Default::default(), cx);
+            assert_eq!(shell.sidechat_tabs.len(), 1);
+            assert_eq!(shell.resolved_right_active(cx), RightSurface::Sidechat(1));
+            assert_eq!(
+                shell.child_kind(RightSurface::Sidechat(1), cx),
+                Some(children::ChildKind::SideChat)
+            );
+            // A prompt handed to the open tab is sent by the TAB's composer
+            // (which, with no engine here, fails on its own chat rather than
+            // building a Run).
             let staged = SidechatStaged {
                 attachments: vec![crate::attachments::StagedAttachment {
                     id: "shot".into(),
@@ -26415,93 +25364,6 @@ mod right_tab_mouse_regressions {
             assert!(!shell.state.read(cx).open_sidechat_tabs.contains("side"));
             // Falls back to the remaining tabs, never a dead surface.
             assert_ne!(shell.resolved_right_active(cx), RightSurface::Sidechat(1));
-        });
-    }
-
-    #[gpui::test]
-    fn btw_follows_tabs_archived_elsewhere_and_keeps_an_unsent_typed_tab(cx: &mut TestAppContext) {
-        let (shell, cx) = setup(cx);
-        shell.update(cx, |shell, cx| {
-            let source = zeron_proto::Chat {
-                id: "parent".into(),
-                device_id: "dev".into(),
-                title: Some("Parent".into()),
-                archived: false,
-                cwd: None,
-                branch: None,
-                checkout_id: None,
-                source_context: None,
-                config: None,
-                last_message_preview: None,
-                last_message_at: None,
-                created_at: chrono::Utc::now() - chrono::Duration::minutes(10),
-                harness_session_id: None,
-                harness_session_cwd: None,
-                harness_session_harness: None,
-                space_id: None,
-                last_seen_at: None,
-                room_gen: None,
-                sidechat_source_chat_id: None,
-                created_by_chat_id: None,
-                forked_from_chat_id: None,
-                previous_harnesses: Vec::new(),
-                delegation: None,
-                settle: None,
-                unsettled_at: None,
-            };
-            let sidechat = |id: &str, minute: i64, started: bool| {
-                let mut side = source.clone();
-                side.id = id.into();
-                side.sidechat_source_chat_id = Some("parent".into());
-                side.created_at = source.created_at + chrono::Duration::minutes(minute);
-                side.last_message_at = started.then(chrono::Utc::now);
-                side
-            };
-            let (a, b, c) = (
-                sidechat("a", 1, true),
-                sidechat("b", 2, true),
-                sidechat("c", 3, false),
-            );
-            shell.state.update(cx, |state, _| {
-                state.chats = vec![source.clone(), a, b];
-                state.selected_chat = Some("parent".into());
-            });
-            let archive = |shell: &mut Shell, ix: usize, cx: &mut Context<Shell>| {
-                shell
-                    .state
-                    .update(cx, |state, _| state.chats[ix].archived = true);
-                shell.on_state_changed(&shell.state.clone(), cx);
-            };
-            shell.open_sidechat("parent".into(), None, Default::default(), cx);
-            assert_eq!(shell.btw["parent"].active.as_deref(), Some("b"));
-            archive(shell, 2, cx);
-            assert_eq!(shell.btw["parent"].active.as_deref(), Some("a"));
-            assert_eq!(shell.open_btw_source(cx).as_deref(), Some("parent"));
-            assert!(!shell.btw_tabs.contains_key("b"));
-            archive(shell, 1, cx);
-            assert!(shell.open_btw_source(cx).is_none());
-            assert!(matches!(shell.btw["parent"].phase, BtwPhase::Closed));
-            assert!(shell.btw_tabs.is_empty());
-
-            shell.state.update(cx, |state, _| state.chats.push(c));
-            shell.open_sidechat("parent".into(), None, Default::default(), cx);
-            assert_eq!(shell.btw["parent"].active.as_deref(), Some("c"));
-            shell.btw_tabs["c"]
-                .composer
-                .clone()
-                .update(cx, |composer, cx| {
-                    composer.seed_text("half a question".into(), cx)
-                });
-            shell.close_btw("parent", cx);
-            assert!(!shell.state.read(cx).chats[3].archived);
-            shell.open_sidechat("parent".into(), None, Default::default(), cx);
-            assert_eq!(shell.btw["parent"].active.as_deref(), Some("c"));
-            let composer = shell.btw_tabs["c"].composer.clone();
-            assert_eq!(composer.read(cx).input_text(cx), "half a question");
-            composer.update(cx, |composer, cx| composer.seed_text(String::new(), cx));
-            shell.close_btw("parent", cx);
-            assert!(shell.state.read(cx).chats[3].archived);
-            assert!(!shell.btw_tabs.contains_key("c"));
         });
     }
 
@@ -26600,32 +25462,50 @@ mod right_tab_mouse_regressions {
     }
 
     #[gpui::test]
-    fn tab_strip_scrolls_over_chips_inside_titlebar(cx: &mut TestAppContext) {
+    fn crowded_tabs_collapse_to_badges_then_overflow_but_keep_the_active_tab(
+        cx: &mut TestAppContext,
+    ) {
         let (shell, cx) = setup(cx);
         shell.update(cx, |shell, cx| {
-            for id in ["third", "fourth", "fifth", "sixth"] {
+            for id in ["third", "fourth", "fifth", "sixth", "seventh", "eighth"] {
                 shell.add_subagent_surface("parent".into(), id.into(), id.into(), false, cx);
             }
+            shell.add_subagent_surface("parent".into(), "first".into(), "first".into(), false, cx);
         });
+        for _ in 0..2 {
+            cx.update(|window, cx| window.draw(cx).clear());
+        }
+        assert!(cx.debug_bounds("right-surface-more").is_some());
+        assert!(cx.debug_bounds("right-surface-close-0").is_some());
+        assert!(cx.debug_bounds("right-surface-close-1").is_none());
+        assert_eq!(
+            cx.debug_bounds("right-surface-tab-1").unwrap().size.width,
+            px(SLIM_TAB_W)
+        );
+        assert!(cx.debug_bounds("right-surface-tab-7").is_none());
+        let hidden = (0..8)
+            .filter(|ix| {
+                cx.debug_bounds(format!("right-surface-tab-{ix}").leak())
+                    .is_none()
+            })
+            .collect::<Vec<_>>();
+        assert!(!hidden.is_empty());
+        let more = cx.debug_bounds("right-surface-more").unwrap().center();
+        cx.simulate_click(more, gpui::Modifiers::default());
         cx.update(|window, cx| window.draw(cx).clear());
-        let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
-        cx.update(|window, cx| {
-            window.dispatch_event(
-                gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
-                    position: start,
-                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(-100.), px(0.))),
-                    modifiers: gpui::Modifiers::default(),
-                    touch_phase: gpui::TouchPhase::Moved,
-                }),
-                cx,
+        let row = cx.debug_bounds("right-more-row-0").unwrap().center();
+        cx.simulate_click(row, gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.resolved_right_active(cx),
+                RightSurface::Subagent(hidden[0] as u64 + 1)
             );
         });
-        shell.read_with(cx, |shell, _| {
-            assert!(
-                shell.right_tab_scroll.offset().x < px(0.),
-                "tab strip did not scroll"
-            );
-        });
+        assert!(
+            cx.debug_bounds(format!("right-surface-close-{}", hidden[0]).leak())
+                .is_some()
+        );
     }
 
     #[gpui::test]
@@ -26920,7 +25800,7 @@ impl Shell {
     }
     /// A side chat's row under its parent.
     pub fn fixture_open_side_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
-        self.open_child_chat_tab(chat_id, cx);
+        self.open_child(children::ChildRef::Chat(chat_id.to_owned()), cx);
     }
     /// The session card's "Fork chat".
     pub fn fixture_fork_chat(&mut self, cx: &mut Context<Self>) {

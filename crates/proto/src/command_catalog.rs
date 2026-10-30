@@ -56,18 +56,16 @@ pub fn with_computer_use_entry(
     commands
 }
 
-/// Same ride as `/compact`: zeron's `/btw` and `/sidechat` join every
-/// harness's list unless the harness already advertises that name.
+/// Same ride as `/compact`: zeron's `/btw` joins every harness's list
+/// unless the harness already advertises it. `/sidechat` still runs when
+/// typed, but is not listed.
 pub fn with_sidechat_entry(mut commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
-    for name in [SIDECHAT_COMMAND, BTW_COMMAND] {
-        if commands.iter().any(|c| c.name == name) {
-            continue;
-        }
+    if !commands.iter().any(|c| c.name == BTW_COMMAND) {
         commands.insert(
             0,
             SlashCommand {
-                name: name.into(),
-                description: "Ask about this chat on the side, without touching it".into(),
+                name: BTW_COMMAND.into(),
+                description: "Side chat: ask about this chat without touching it".into(),
                 input_hint: Some("prompt".into()),
                 kind: SlashCommandKind::BuiltIn,
             },
@@ -593,17 +591,11 @@ mod tests {
         .map(|command| command.name)
         .collect();
         assert_eq!(
-            names[..5],
-            [
-                BTW_COMMAND,
-                SIDECHAT_COMMAND,
-                COMPACT_COMMAND,
-                COMPUTER_USE_COMMAND,
-                "model"
-            ]
+            names[..4],
+            [BTW_COMMAND, COMPACT_COMMAND, COMPUTER_USE_COMMAND, "model"]
         );
         assert_eq!(
-            names[5..],
+            names[4..],
             crate::app_commands::TERMINAL_ONLY_COMMANDS
                 .iter()
                 .filter(|name| **name != "resume")
@@ -719,17 +711,15 @@ mod tests {
         assert_eq!(names(&merged), vec!["btw", "sidechat", "clear"]);
         assert_eq!(merged[1].description, "harness copy");
         let merged = with_sidechat_entry(vec![advertised("btw")]);
-        assert_eq!(names(&merged), vec!["sidechat", "btw"]);
-        assert_eq!(merged[1].description, "harness copy");
-        // The popup's real list: every zeron command rides, each exactly once.
+        assert_eq!(names(&merged), vec!["btw"]);
+        assert_eq!(merged[0].description, "harness copy");
+        // The popup's real list: `/sidechat` is a silent alias of `/btw`.
         let merged = with_sidechat_entry(with_compact_entry(Vec::new()));
-        assert_eq!(names(&merged), vec!["btw", "sidechat", "compact"]);
-        for entry in &merged[..2] {
-            assert_eq!(
-                entry.description,
-                "Ask about this chat on the side, without touching it"
-            );
-        }
+        assert_eq!(names(&merged), vec!["btw", "compact"]);
+        assert_eq!(
+            merged[0].description,
+            "Side chat: ask about this chat without touching it"
+        );
     }
 
     #[test]
@@ -761,7 +751,7 @@ mod tests {
             Vec::new(),
         )));
         let names: Vec<&str> = all.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["btw", "sidechat", "compact", "computer-use"]);
+        assert_eq!(names, vec!["btw", "compact", "computer-use"]);
     }
 
     #[test]

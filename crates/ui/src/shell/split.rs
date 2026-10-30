@@ -389,11 +389,13 @@ impl Shell {
                 doc_id,
                 title,
                 frozen,
-            } => self.add_subagent_surface(
-                chat_id.clone(),
-                doc_id.clone(),
-                title.clone(),
-                *frozen,
+            } => self.open_child(
+                super::children::ChildRef::Subagent {
+                    chat_id: chat_id.clone(),
+                    doc_id: doc_id.clone(),
+                    title: title.clone(),
+                    frozen: *frozen,
+                },
                 cx,
             ),
             ComposerEvent::UnsentChanged => cx.notify(),

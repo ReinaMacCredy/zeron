@@ -6729,7 +6729,6 @@ use zeron_proto::command_catalog::{
 use zeron_proto::compaction::{
     RESUME_COMPACTION_TITLE, ResumeCompaction, compact_outcome_notice, resume_compaction_due,
 };
-use zeron_proto::sidechat::{SIDECHAT_TAB_PREFIX, sidechat_tab_label};
 
 /// Remote hosts own their grants, so only a macOS UI on the chat's host checks them.
 fn computer_preflight_applies(
@@ -6761,9 +6760,6 @@ fn zeron_owned_command_range(raw: &str) -> Option<Range<usize>> {
     let end = name.as_ptr() as usize - raw.as_ptr() as usize + name.len();
     zeron_owned_command(name).then(|| end - name.len() - 1..end)
 }
-
-const SIDECHAT_COUNT_ROLL: motion::MotionSpec =
-    motion::MotionSpec::new(180, motion::EASE_OUT_QUINT);
 
 /// The catalog's names live on the engine's harness descriptors, which the
 /// composer never holds; this is the same list, for one sentence of copy.
@@ -7308,8 +7304,6 @@ pub struct Composer {
     dock_height_changed: bool,
     dock_clearance_correction: f32,
     surface_bounds: crate::new_thread_background_mask::SurfaceBounds,
-    sidechat_tab_bounds: crate::new_thread_background_mask::SurfaceBounds,
-    sidechat_count: Option<(String, usize, usize, Instant)>,
     last_target_height: f32,
     height_morph: Option<FlipMorph>,
     /// Monotonic clock anchor for the morph timeline.
@@ -7324,7 +7318,6 @@ pub struct Composer {
     /// A side chat's composer: its footer keeps only the context ring.
     side_chat: bool,
     pr_chat: bool,
-    btw: bool,
     full_chat: bool,
     pr_context: Option<String>,
     pr_chips: Vec<(crate::pull_request_detail::ContextChip, SharedString)>,
@@ -7372,12 +7365,8 @@ impl Composer {
         self.surface_bounds.clone()
     }
 
-    pub(crate) fn sidechat_tab_bounds(&self) -> Option<Bounds<Pixels>> {
-        self.sidechat_tab_bounds.get()
-    }
-
     fn main_composer(&self) -> bool {
-        self.chat_override.is_none() && !self.side_chat && !self.btw && !self.pr_chat
+        self.chat_override.is_none() && !self.side_chat && !self.pr_chat
     }
 
     fn plan_available(&self, cx: &App) -> bool {
@@ -7655,8 +7644,6 @@ impl Composer {
             dock_height_changed: false,
             dock_clearance_correction: 0.0,
             surface_bounds: Default::default(),
-            sidechat_tab_bounds: Default::default(),
-            sidechat_count: None,
             last_target_height: 0.0,
             height_morph: None,
             morph_clock: motion::now(),
@@ -7666,7 +7653,6 @@ impl Composer {
             context_ring,
             side_chat: false,
             pr_chat: false,
-            btw: false,
             full_chat: false,
             pr_context: None,
             pr_chips: Vec::new(),
@@ -8138,17 +8124,6 @@ impl Composer {
                 self.full_chat && self.state.read(cx).selected_chat.as_deref() == Some(chat_id)
             }
         }
-    }
-
-    pub(crate) fn set_btw(&mut self, cx: &mut Context<Self>) {
-        const PLACEHOLDER: &str = "Ask a side question \u{b7} /btw opens a new tab";
-        self.btw = true;
-        self.idle_placeholder = PLACEHOLDER.into();
-        if self.wizard.is_none() {
-            self.input
-                .update(cx, |input, cx| input.set_placeholder(PLACEHOLDER, cx));
-        }
-        cx.notify();
     }
 
     pub(crate) fn set_idle_placeholder(
@@ -10947,15 +10922,12 @@ impl Composer {
         }
     }
 
-    /// Expired sidechats are left to the sidecar, so they are not counted here.
     fn render_sidechat_tab(
         &mut self,
         trays: usize,
         theme: &Theme,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        self.sidechat_tab_bounds.set(None);
         if (self.chat_override.is_some() && !self.full_chat) || self.side_chat || self.pr_chat {
             return None;
         }
@@ -10965,31 +10937,11 @@ impl Composer {
         }
         let state = self.state.read(cx);
         let sidechats = state.live_sidechats_of(&chat.id, chrono::Utc::now());
-        let count = sidechats.len();
-        let now = motion::now();
-        let roll = match &self.sidechat_count {
-            Some((id, _, to, _)) if *id == chat.id && *to == count => self.sidechat_count.clone(),
-            Some((id, _, to, _))
-                if *id == chat.id && *to > 0 && count > 0 && !motion::reduced_motion(cx) =>
-            {
-                Some((chat.id.clone(), *to, count, now))
-            }
-            _ => Some((chat.id.clone(), count, count, now)),
-        };
-        self.sidechat_count = roll.clone();
-        let roll = roll.and_then(|(_, from, _, since)| {
-            let total = SIDECHAT_COUNT_ROLL.total().mul_f32(motion::speed_scale());
-            let raw = now.saturating_duration_since(since).as_secs_f32() / total.as_secs_f32();
-            (from != count && raw < 1.0).then(|| (from, SIDECHAT_COUNT_ROLL.progress(raw)))
-        });
-        if roll.is_some() {
-            window.request_animation_frame();
-        }
-        let sidechat = sidechats.last().copied();
         let open = sidechats
             .iter()
             .any(|s| state.open_sidechat_tabs.contains(&s.id));
-        let dot = sidechat
+        let dot = sidechats
+            .last()
             .and_then(|s| state.session_for(&s.id))
             .and_then(|session| match session.status {
                 zeron_proto::SessionStatus::Working => Some(theme.busy),
@@ -10997,52 +10949,20 @@ impl Composer {
                 zeron_proto::SessionStatus::Errored => Some(theme.danger),
                 zeron_proto::SessionStatus::Idle => None,
             });
-        let label: SharedString = sidechat_tab_label(count).into();
-        let icon = if sidechat.is_some() {
-            crate::icons::CHAT_ROUND_LINE
-        } else {
-            crate::icons::ASTRA_PLUS
-        };
+        let combo = crate::settings::badge_combo(
+            crate::settings::current(cx)
+                .keymap
+                .get(crate::settings::ShortcutId::ToggleBtw),
+        );
         let text = if open { theme.text } else { theme.text_muted };
-        let label = match roll {
-            Some((from, t)) => {
-                let number = |value: usize| {
-                    div()
-                        .h(px(SIDECHAT_TAB_HEIGHT))
-                        .flex()
-                        .items_center()
-                        .child(value.to_string())
-                };
-                div()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .child(div().min_w_0().truncate().child(SIDECHAT_TAB_PREFIX))
-                    .child(
-                        div()
-                            .flex_none()
-                            .relative()
-                            .h(px(SIDECHAT_TAB_HEIGHT))
-                            .overflow_hidden()
-                            .child(
-                                number(from)
-                                    .absolute()
-                                    .left_0()
-                                    .top(px(-SIDECHAT_TAB_HEIGHT * t)),
-                            )
-                            .child(
-                                number(count)
-                                    .relative()
-                                    .top(px(SIDECHAT_TAB_HEIGHT * (1.0 - t))),
-                            ),
-                    )
-            }
-            None => div().min_w_0().truncate().child(label),
-        };
-        let measured = self.sidechat_tab_bounds.clone();
         let surface = crate::queue::queue_panel_surface(theme, cx.has_active_drag())
             .id("composer-sidechat-tab")
             .debug_selector(|| "composer-sidechat-tab".into())
+            .role(gpui::Role::Button)
+            .aria_label("Side chat")
+            .tooltip(crate::settings::widgets::text_tooltip(
+                "Side chat (/btw): ask on the side, opens in the right pane",
+            ))
             .cursor_pointer()
             .hover(|s| s.opacity(0.85))
             .on_click(cx.listener(|this, _, _, cx| this.request_sidechat(None, false, cx)))
@@ -11061,7 +10981,7 @@ impl Composer {
                     .text_size(px(11.0))
                     .text_color(text)
                     .child(
-                        crate::icons::icon(icon)
+                        crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
                             .flex_none()
                             .size(px(12.0))
                             .text_color(text),
@@ -11069,15 +10989,8 @@ impl Composer {
                     .children(
                         dot.map(|color| div().flex_none().size(px(6.0)).rounded_full().bg(color)),
                     )
-                    .child(label),
-            )
-            .child(
-                gpui::canvas(
-                    move |bounds, _, _| measured.set(Some(bounds)),
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .inset_0(),
+                    .child(div().min_w_0().truncate().child("Side chat"))
+                    .child(crate::popover::kbd_hint(theme, &combo)),
             );
         Some(
             div()
@@ -14809,7 +14722,7 @@ impl Render for Composer {
         let todo = self.render_todo_panel(has_queue, window, cx);
         let queue = self.render_queue_panel(show_queue_latest_shortcut, window, cx);
         let trays = usize::from(todo.is_some()) + usize::from(queue.is_some());
-        let tab = self.render_sidechat_tab(trays, &Theme::of(cx).clone(), window, cx);
+        let tab = self.render_sidechat_tab(trays, &Theme::of(cx).clone(), cx);
         // Out of flow: the shell measures this stack for transcript clearance.
         // The New chat page has no transcript above, so there it takes space instead.
         let card = card.map(|card| {
@@ -15242,16 +15155,12 @@ impl Render for Composer {
                 el.border_color(gpui::transparent_black())
             })
             .when(!self.pr_chat, |el| {
-                el.border_color(if self.btw {
-                    theme.accent
-                } else {
-                    motion::mix(pill_border, theme.accent, plan_border)
-                })
-                .bg(theme.composer_surface_bg())
-                .when(!theme.is_frost() && plan_border <= 0.0, |el| el.shadow_lg())
-                .when(plan_border > 0.0, |el| {
-                    el.shadow(plan_glow(theme.accent, plan_border))
-                })
+                el.border_color(motion::mix(pill_border, theme.accent, plan_border))
+                    .bg(theme.composer_surface_bg())
+                    .when(!theme.is_frost() && plan_border <= 0.0, |el| el.shadow_lg())
+                    .when(plan_border > 0.0, |el| {
+                        el.shadow(plan_glow(theme.accent, plan_border))
+                    })
             });
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the

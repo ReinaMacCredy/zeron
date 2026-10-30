@@ -4908,6 +4908,8 @@ impl RpcService for EngineRpc {
                     /// side chat's parent so the copy lists as a sibling.
                     #[serde(default)]
                     created_by_chat_id: Option<String>,
+                    #[serde(default)]
+                    entry_id: Option<String>,
                 }
                 let p: ForkParams = parse_params(params)?;
                 let created_by_chat_id = p
@@ -4937,17 +4939,29 @@ impl RpcService for EngineRpc {
                     .doc()
                     .read_entries()
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                let boundary = entries
-                    .iter()
-                    .rposition(|entry| {
-                        entry.role == zeron_doc::MessageRole::Assistant
-                            && entry.status == Some(zeron_doc::MessageStatus::Complete)
-                    })
-                    .ok_or_else(|| {
+                let complete = |entry: &zeron_doc::SessionMessageEntry| {
+                    entry.role == zeron_doc::MessageRole::Assistant
+                        && entry.status == Some(zeron_doc::MessageStatus::Complete)
+                };
+                let boundary = match p.entry_id.as_deref() {
+                    Some(entry_id) => {
+                        let ix = entries
+                            .iter()
+                            .position(|entry| entry.id == entry_id)
+                            .ok_or_else(|| {
+                                RpcError::Failed("That reply is no longer in the chat.".into())
+                            })?;
+                        if !complete(&entries[ix]) {
+                            return Err(RpcError::Failed("Wait for the reply to finish.".into()));
+                        }
+                        ix
+                    }
+                    None => entries.iter().rposition(complete).ok_or_else(|| {
                         RpcError::Failed(
                             "Wait for a completed response before starting a side chat".into(),
                         )
-                    })?;
+                    })?,
+                };
                 let mut chat = source.clone();
                 chat.id = p.chat_id;
                 chat.created_by_chat_id = Some(created_by_chat_id);

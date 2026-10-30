@@ -322,6 +322,64 @@ async fn cannot_fork_an_empty_chat_or_overwrite_a_main_chat() {
 }
 
 #[tokio::test]
+async fn a_fork_from_a_reply_copies_through_that_reply_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(
+        dir.path(),
+        Arc::new(HarnessRegistry::new()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    core.workspace
+        .create_chat("main", None, Some(&core.device_id), None, None)
+        .unwrap();
+    let main = core.doc_host.open("main").unwrap();
+    for (id, role, status) in [
+        ("u1", MessageRole::User, MessageStatus::Complete),
+        ("a1", MessageRole::Assistant, MessageStatus::Complete),
+        ("u2", MessageRole::User, MessageStatus::Complete),
+        ("a2", MessageRole::Assistant, MessageStatus::Complete),
+        ("u3", MessageRole::User, MessageStatus::Complete),
+        ("a3", MessageRole::Assistant, MessageStatus::Streaming),
+    ] {
+        main.doc()
+            .push_message(&message(id, role, id, status))
+            .unwrap();
+    }
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let fork = |chat: &str, entry: &str| serde_json::json!({ "chatId": chat, "sourceChatId": "main", "entryId": entry });
+    client
+        .call_as::<zeron_proto::Chat>(methods::FORK_SIDE_CHAT, fork("at-a1", "a1"))
+        .await
+        .unwrap();
+    let ids: Vec<String> = core
+        .doc_host
+        .open("at-a1")
+        .unwrap()
+        .doc()
+        .read_entries()
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect();
+    assert_eq!(ids, ["u1", "a1", "fork:at-a1"]);
+    assert!(
+        client
+            .call(methods::FORK_SIDE_CHAT, fork("at-a3", "a3"))
+            .await
+            .is_err(),
+        "a reply still streaming is not a fork point"
+    );
+    assert!(
+        client
+            .call(methods::FORK_SIDE_CHAT, fork("gone", "missing"))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn forking_a_side_chat_can_land_as_a_sibling_under_the_main_chat() {
     let dir = tempfile::tempdir().unwrap();
     let core = EngineCore::assemble(

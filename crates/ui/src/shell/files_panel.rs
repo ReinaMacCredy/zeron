@@ -338,14 +338,18 @@ impl Shell {
                         doc_id,
                         title,
                         frozen,
-                    } => this.add_subagent_surface(
-                        this.active_chat.clone(),
-                        doc_id.clone(),
-                        title.clone(),
-                        *frozen,
+                    } => this.open_child(
+                        super::children::ChildRef::Subagent {
+                            chat_id: this.active_chat.clone(),
+                            doc_id: doc_id.clone(),
+                            title: title.clone(),
+                            frozen: *frozen,
+                        },
                         cx,
                     ),
-                    FilesEvent::OpenChildChat(chat_id) => this.open_child_chat_tab(chat_id, cx),
+                    FilesEvent::OpenChildChat(chat_id) => {
+                        this.open_child(super::children::ChildRef::Chat(chat_id.clone()), cx)
+                    }
                     FilesEvent::RenameChildChat(chat_id) => {
                         this.open_rename_chat(chat_id.clone(), cx)
                     }

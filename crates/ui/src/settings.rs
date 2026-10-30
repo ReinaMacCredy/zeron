@@ -2150,7 +2150,7 @@ impl ShortcutId {
             ShortcutId::NewSession => "New session",
             ShortcutId::NewProject => "New project",
             ShortcutId::OpenModelPicker => "Open model picker",
-            ShortcutId::ToggleBtw => "Toggle sidechat (btw)",
+            ShortcutId::ToggleBtw => "Side chat",
             ShortcutId::ToggleTray => "Needs you and running",
             ShortcutId::NextSession => "Next session or right pane tab",
             ShortcutId::PrevSession => "Previous session or right pane tab",

@@ -827,7 +827,7 @@ impl Shell {
                     SidecarEntry::new("sidechat", ix, icons::ASTRA_CHAT_BUBBLE, title)
                         .value(status)
                         .action(move |this, _, cx| {
-                            this.add_sidechat_surface(&chat, cx);
+                            this.open_child(super::children::ChildRef::Chat(chat.id.clone()), cx)
                         })
                 })
                 .collect();
@@ -884,7 +884,6 @@ impl Shell {
                 }));
             }
             let entry = |key: &'static str, ix: usize, (agent, suffix): LabeledSubagent| {
-                let running = agent.status == Some(zeron_doc::SubagentStatus::Running);
                 let badge = match agent.status {
                     Some(zeron_doc::SubagentStatus::Running) => Some(theme.busy),
                     Some(zeron_doc::SubagentStatus::Failed) => Some(theme.danger),
@@ -913,17 +912,7 @@ impl Shell {
                     .badge(badge)
                     .value(status)
                     .action(move |this, _, cx| {
-                        if agent.delegated {
-                            this.open_child_chat_tab(&agent.doc_id, cx);
-                            return;
-                        }
-                        this.add_subagent_surface(
-                            agent.chat_id.clone(),
-                            agent.doc_id.clone(),
-                            agent.title.to_string(),
-                            !running,
-                            cx,
-                        )
+                        this.open_child(super::children::ChildRef::of_summary(&agent), cx)
                     })
             };
             let heading = match running.len() {

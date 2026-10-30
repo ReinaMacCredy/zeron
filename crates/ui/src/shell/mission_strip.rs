@@ -510,7 +510,15 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.open_chat(parent_chat_id.clone(), cx);
-        self.add_subagent_surface(parent_chat_id, doc_id, title, frozen, cx);
+        self.open_child(
+            super::children::ChildRef::Subagent {
+                chat_id: parent_chat_id,
+                doc_id,
+                title,
+                frozen,
+            },
+            cx,
+        );
     }
 
     fn strip_reveal(&mut self, chat_id: String, shown: bool) -> f32 {
