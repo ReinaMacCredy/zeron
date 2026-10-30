@@ -478,6 +478,8 @@ pub const EASE_IN_OUT: CubicBezier = CubicBezier::new(0.42, 0.0, 0.58, 1.0);
 pub const EASE_IN: CubicBezier = CubicBezier::new(0.42, 0.0, 1.0, 1.0);
 pub const EASE_IN_SHARP: CubicBezier = CubicBezier::new(0.4, 0.0, 1.0, 1.0);
 pub const EASE_DRAWER: CubicBezier = CubicBezier::new(0.32, 0.72, 0.0, 1.0);
+pub const EASE_EMPHASIZED: CubicBezier = CubicBezier::new(0.2, 0.0, 0.0, 1.0);
+pub const EASE_EXIT: CubicBezier = CubicBezier::new(0.3, 0.0, 0.8, 0.15);
 pub const LINEAR: CubicBezier = CubicBezier::new(0.0, 0.0, 1.0, 1.0);
 
 // ---------------------------------------------------------------------------
@@ -562,6 +564,10 @@ pub const MENU_IN: MotionSpec = MotionSpec::new(140, EASE);
 pub const MENU_OUT: MotionSpec = MotionSpec::new(100, EASE);
 /// Dialog-in: 0.18s (scale 0.96→1 approximated).
 pub const DIALOG_IN: MotionSpec = MotionSpec::new(180, EASE);
+pub const SETTINGS_IN: MotionSpec = MotionSpec::new(180, EASE_EMPHASIZED);
+pub const SETTINGS_OUT: MotionSpec = MotionSpec::new(150, EASE_EXIT);
+pub const SETTINGS_BACKDROP_OUT: MotionSpec = MotionSpec::new(170, EASE_EXIT);
+pub const SETTINGS_REDUCED: MotionSpec = MotionSpec::new(120, LINEAR);
 /// Boot splash exit: 0.5s fade + 6px lift after a 0.15s hold.
 pub const SPLASH_OUT: MotionSpec = MotionSpec::new(500, EASE).with_delay(150);
 /// Sidebar / pane width+height transitions: 200ms ease-out.
