@@ -3,7 +3,7 @@ import UIKit
 /// Root: native tab bar (Liquid Glass comes from the system, so tab switches,
 /// minimize-on-scroll and the search morph are render-server animations), with
 /// the "Ask anything" composer as the tab bar's bottom accessory.
-final class MainTabController: UITabBarController, UITabBarControllerDelegate, AppRouter {
+final class MainTabController: UITabBarController, UITabBarControllerDelegate, UIGestureRecognizerDelegate, AppRouter {
     private let app: AppModel
 
     init(app: AppModel) {
@@ -37,6 +37,12 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
         tabs = [sessions, tasks, more, search]
         updateTasksBadge()
         selectedTab = sessions
+        if let settings = more.viewController {
+            let edge = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(swipeBackFromSettings(_:)))
+            edge.edges = .left
+            edge.delegate = self
+            settings.view.addGestureRecognizer(edge)
+        }
 
         bottomAccessory = accessory
         delegate = self
@@ -86,6 +92,47 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
         UIView.animate(withDuration: 0.25, delay: 0.12, options: [.curveEaseOut, .allowUserInteraction]) {
             self.accessoryContent.alpha = 1
         }
+    }
+
+    private var settingsBack: UIPercentDrivenInteractiveTransition?
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer is UIScreenEdgePanGestureRecognizer else { return true }
+        let nav = selectedTab?.viewController as? UINavigationController
+        return selectedTab?.identifier == "more" && nav?.viewControllers.count == 1 && presentedViewController == nil
+    }
+
+    @objc private func swipeBackFromSettings(_ pan: UIScreenEdgePanGestureRecognizer) {
+        let progress = min(max(pan.translation(in: view).x / max(view.bounds.width, 1), 0), 1)
+        switch pan.state {
+        case .began:
+            let back = UIPercentDrivenInteractiveTransition()
+            back.timingCurve = UICubicTimingParameters(controlPoint1: CGPoint(x: 0.2, y: 0.8), controlPoint2: CGPoint(x: 0.2, y: 1))
+            settingsBack = back
+            selectedTab = tabs.first { $0.identifier == "sessions" }
+        case .changed:
+            settingsBack?.update(progress)
+        case .ended, .cancelled, .failed:
+            guard let back = settingsBack else { return }
+            settingsBack = nil
+            if pan.state == .ended, progress > 0.5 || pan.velocity(in: view).x > 600 {
+                back.completionSpeed = 1
+                back.finish()
+            } else {
+                back.completionSpeed = max(progress * 0.3 / 0.22, 0.3)
+                back.cancel()
+            }
+        default:
+            break
+        }
+    }
+
+    func tabBarController(_ tabBarController: UITabBarController, animationControllerForTransitionFrom fromVC: UIViewController, to toVC: UIViewController) -> UIViewControllerAnimatedTransitioning? {
+        settingsBack == nil ? nil : TabSwipeBack()
+    }
+
+    func tabBarController(_ tabBarController: UITabBarController, interactionControllerFor animationController: UIViewControllerAnimatedTransitioning) -> UIViewControllerInteractiveTransitioning? {
+        settingsBack
     }
 
     private func updateTasksBadge() {
@@ -514,6 +561,56 @@ final class AskAnythingAccessory: UIView {
         } else {
             UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0, options: [.beginFromCurrentState, .allowUserInteraction], animations: apply)
         }
+    }
+}
+
+private final class TabSwipeBack: NSObject, UIViewControllerAnimatedTransitioning {
+    private var animator: UIViewPropertyAnimator?
+
+    func transitionDuration(using transitionContext: UIViewControllerContextTransitioning?) -> TimeInterval { 0.3 }
+
+    func animateTransition(using transitionContext: UIViewControllerContextTransitioning) {
+        interruptibleAnimator(using: transitionContext).startAnimation()
+    }
+
+    func interruptibleAnimator(using ctx: UIViewControllerContextTransitioning) -> UIViewImplicitlyAnimating {
+        if let animator { return animator }
+        let container = ctx.containerView
+        let width = container.bounds.width
+        let from = ctx.view(forKey: .from)
+        let to = ctx.view(forKey: .to)
+        if let to, let vc = ctx.viewController(forKey: .to) {
+            to.frame = ctx.finalFrame(for: vc)
+            if let from { container.insertSubview(to, belowSubview: from) } else { container.addSubview(to) }
+        }
+        let dim = UIView(frame: container.bounds)
+        dim.backgroundColor = .black
+        dim.alpha = 0.25
+        dim.isUserInteractionEnabled = false
+        if let from { container.insertSubview(dim, belowSubview: from) } else { container.addSubview(dim) }
+        to?.transform = CGAffineTransform(translationX: -0.3 * width, y: 0)
+        from?.layer.shadowColor = UIColor.black.cgColor
+        from?.layer.shadowOpacity = 0.18
+        from?.layer.shadowRadius = 12
+        from?.layer.shadowOffset = .zero
+        let animator = UIViewPropertyAnimator(duration: transitionDuration(using: ctx), controlPoint1: CGPoint(x: 0.2, y: 0.8), controlPoint2: CGPoint(x: 0.2, y: 1)) {
+            from?.transform = CGAffineTransform(translationX: width, y: 0)
+            to?.transform = .identity
+            dim.alpha = 0
+        }
+        animator.addCompletion { _ in
+            from?.transform = .identity
+            from?.layer.shadowOpacity = 0
+            to?.transform = .identity
+            dim.removeFromSuperview()
+            ctx.completeTransition(!ctx.transitionWasCancelled)
+        }
+        self.animator = animator
+        return animator
+    }
+
+    func animationEnded(_ transitionCompleted: Bool) {
+        animator = nil
     }
 }
 
