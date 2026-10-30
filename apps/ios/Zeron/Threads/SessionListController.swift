@@ -615,6 +615,7 @@ class SessionsViewController: SessionListController {
         let backdrop = UIView()
         backdrop.addSubview(wallpaper)
         collectionView.backgroundView = backdrop
+        collectionView.topEdgeEffect.style = .soft
         title = "Sessions"
         navigationItem.largeTitleDisplayMode = .always
         let pulls = UIBarButtonItem(image: UIImage(systemName: "arrow.triangle.pull"), primaryAction: UIAction { [weak self] _ in
