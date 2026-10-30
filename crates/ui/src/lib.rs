@@ -288,7 +288,6 @@ pub fn run_app(config: UiConfig) {
                 );
                 composer::init(cx, ui_settings.composer_send_behavior);
                 appshots::set_enabled(ui_settings.appshots_enabled);
-                appshots::set_welcome_pending(!ui_settings.appshot_welcome_acknowledged);
                 terminal::panel::init(cx);
                 app_menus::init(cx);
                 app_update::AppUpdate::init(

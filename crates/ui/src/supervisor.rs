@@ -172,7 +172,6 @@ pub enum SupervisorEvent {
     OpenChat(String),
     WatchDoc(Option<String>),
     Discuss(String),
-    ConversationOpened,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1908,9 +1907,6 @@ impl SupervisorPage {
 
     fn toggle_conversation(&mut self, cx: &mut Context<Self>) {
         self.conversation_open = !self.conversation_open;
-        if self.conversation_open {
-            cx.emit(SupervisorEvent::ConversationOpened);
-        }
         self.conversation.retarget(
             if self.conversation_open { 1.0 } else { 0.0 },
             FOLD,

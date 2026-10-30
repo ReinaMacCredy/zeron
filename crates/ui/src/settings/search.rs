@@ -5,7 +5,7 @@
 
 mod reveal;
 
-pub use reveal::{PageReveal, SearchAnchor, clear_reveal, page_reveal, reveal};
+pub use reveal::{PageReveal, SearchAnchor, clear_reveal, page_reveal, pending, reveal};
 #[cfg(test)]
 pub(crate) use reveal::{lit, take_anchored};
 
@@ -101,6 +101,25 @@ impl SettingId {
         }
     }
 
+    pub fn in_advanced_look(self) -> bool {
+        matches!(
+            self,
+            SettingId::WallpaperColors
+                | SettingId::Glass
+                | SettingId::InsetCard
+                | SettingId::SidebarHoverReveal
+                | SettingId::NewThreadBackground
+                | SettingId::WallpaperFolder
+                | SettingId::BackgroundEffect
+                | SettingId::PauseAnimations
+                | SettingId::SmoothScrolling
+                | SettingId::ThemeLibrary
+                | SettingId::RenderMath
+                | SettingId::MathFont
+                | SettingId::MathSize
+        )
+    }
+
     /// A row each provider shows in its expanded details on Providers.
     pub fn per_provider(self) -> bool {
         matches!(self, SettingId::SkillDollar | SettingId::SkillSlash)
@@ -129,6 +148,12 @@ impl Target {
             Target::Setting(id) => id.parent().map(Target::Setting),
             Target::Shortcut(_) | Target::Page(_) => None,
         }
+    }
+}
+
+impl Target {
+    pub fn in_advanced_look(self) -> bool {
+        matches!(self, Target::Setting(id) if id.in_advanced_look())
     }
 }
 

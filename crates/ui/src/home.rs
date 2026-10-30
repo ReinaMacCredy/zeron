@@ -34,7 +34,6 @@ const FAILING_CHECK_LOOKUPS: usize = 3;
 
 pub enum HomeEvent {
     OpenPullRequest(String),
-    OpenSettings,
 }
 
 #[derive(Default)]
@@ -364,7 +363,7 @@ impl HomeView {
         let all_ports = toggles.services_all_ports;
         let rows = crate::settings::home::WIDGETS
             .into_iter()
-            .map(|(id, title, _, field)| {
+            .map(|(id, title, field)| {
                 let on = *field(&mut toggles);
                 let row_id: SharedString = format!("{id}-quick").into();
                 popover::menu_row(theme, false, row_id.clone())
@@ -411,21 +410,6 @@ impl HomeView {
                     .gap(px(6.0))
                     .child(mode("home-quick-by-zeron", "By Zeron", false))
                     .child(mode("home-quick-all-ports", "All ports", true)),
-            )
-            .child(popover::menu_separator())
-            .child(
-                popover::menu_row(theme, false, "home-quick-settings")
-                    .id("home-quick-settings")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.close_customize(cx);
-                        cx.emit(HomeEvent::OpenSettings);
-                    }))
-                    .child(
-                        icon(icons::SETTINGS_MINIMALISTIC)
-                            .size(px(14.0))
-                            .text_color(theme.text_muted),
-                    )
-                    .child("All Home settings"),
             )
             .into_any_element()
     }

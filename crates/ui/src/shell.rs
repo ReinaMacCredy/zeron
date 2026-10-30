@@ -45,7 +45,7 @@ use crate::motion::{
 use crate::popover::{self, Loadable};
 use crate::pull_requests::PullRequestsPage;
 use crate::rail;
-use crate::settings::accounts::{self as accounts, AccountsPage};
+use crate::settings::accounts as accounts;
 use crate::settings::appearance::{AppearancePage, AppearanceSettingsEvent};
 use crate::settings::archived::ArchivedPage;
 use crate::settings::billing::BillingPage;
@@ -55,7 +55,6 @@ use crate::settings::device_hub::DeviceHubPage;
 use crate::settings::devices::DevicesPage;
 use crate::settings::files::{FilesSettingsEvent, FilesSettingsPage};
 use crate::settings::harnesses::{HarnessesEvent, HarnessesPage};
-use crate::settings::home::HomeSettingsPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::search::{SettingId, Target};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage, Shown as ShortcutsShown};
@@ -125,6 +124,7 @@ mod task_actions;
 mod thread_search;
 use side_chats::SideChatTab;
 mod playbooks;
+mod settings_account;
 mod settings_updates;
 mod tabs;
 mod terminal_tabs;
@@ -745,7 +745,8 @@ fn localize_binding(
     }
 }
 
-/// The settings sections (feature-inventory §1.5 routes).
+/// The settings pages. Each belongs to one [`SettingsGroup`], the sections
+/// the nav lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsSection {
     Devices,
@@ -760,8 +761,6 @@ pub enum SettingsSection {
     AgentProfiles,
     Routing,
     CodeReview,
-    /// Per-provider CLI accounts (login, usage) — labeled "Accounts".
-    Agents,
     Appearance,
     Files,
     Notifications,
@@ -774,53 +773,131 @@ pub enum SettingsSection {
     Computer,
     DeviceHub,
     SourceControl,
-    Home,
     Archived,
     Chat,
     Updates,
     Playbooks,
+    Account,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsGroup {
+    General,
+    Appearance,
+    Notifications,
+    Providers,
+    Agents,
+    ContextTools,
+    ThisMac,
+    DevicesUpdates,
+    Account,
+}
+
+impl SettingsGroup {
+    pub const ALL: [SettingsGroup; 9] = [
+        SettingsGroup::General,
+        SettingsGroup::Appearance,
+        SettingsGroup::Notifications,
+        SettingsGroup::Providers,
+        SettingsGroup::Agents,
+        SettingsGroup::ContextTools,
+        SettingsGroup::ThisMac,
+        SettingsGroup::DevicesUpdates,
+        SettingsGroup::Account,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsGroup::General => "General",
+            SettingsGroup::Appearance => "Appearance",
+            SettingsGroup::Notifications => "Notifications",
+            SettingsGroup::Providers => "Providers",
+            SettingsGroup::Agents => "Agents",
+            SettingsGroup::ContextTools => "Context & tools",
+            SettingsGroup::ThisMac => {
+                if cfg!(target_os = "macos") {
+                    "This Mac"
+                } else {
+                    "This computer"
+                }
+            }
+            SettingsGroup::DevicesUpdates => "Devices & updates",
+            SettingsGroup::Account => "Account",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            SettingsGroup::General => icons::SETTINGS,
+            SettingsGroup::Appearance => icons::TUNING,
+            SettingsGroup::Notifications => icons::BELL,
+            SettingsGroup::Providers => icons::WIDGET,
+            SettingsGroup::Agents => icons::BOT,
+            SettingsGroup::ContextTools => icons::LUCIDE_HAMMER,
+            SettingsGroup::ThisMac => icons::LAPTOP,
+            SettingsGroup::DevicesUpdates => icons::SMARTPHONE,
+            SettingsGroup::Account => icons::LUCIDE_USER_ROUND,
+        }
+    }
+
+    fn pages(self, cloud_offered: bool) -> Vec<SettingsSection> {
+        SettingsSection::ALL
+            .into_iter()
+            .filter(|page| page.group() == self && page.shown_in_nav(cloud_offered))
+            .collect()
+    }
 }
 
 impl SettingsSection {
-    /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
+    /// Every page, grouped in nav order.
     pub const ALL: [SettingsSection; 23] = [
         SettingsSection::General,
         SettingsSection::Chat,
-        SettingsSection::Home,
+        SettingsSection::Shortcuts,
+        SettingsSection::Files,
+        SettingsSection::Archived,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
-        SettingsSection::Voice,
-        SettingsSection::Shortcuts,
         SettingsSection::Harnesses,
-        SettingsSection::Tools,
         SettingsSection::AgentProfiles,
         SettingsSection::Routing,
         SettingsSection::CodeReview,
+        SettingsSection::SourceControl,
+        SettingsSection::Tools,
         SettingsSection::Playbooks,
         SettingsSection::Computer,
-        SettingsSection::SourceControl,
-        SettingsSection::Files,
+        SettingsSection::Appshots,
+        SettingsSection::Voice,
+        SettingsSection::Updates,
         SettingsSection::Devices,
         SettingsSection::DeviceHub,
         SettingsSection::Cloud,
         SettingsSection::Billing,
-        SettingsSection::Updates,
-        SettingsSection::Appshots,
-        SettingsSection::Archived,
+        SettingsSection::Account,
     ];
 
-    /// The former Accounts page is folded into Providers. Keep its route alias
-    /// for old navigation entries and dev links without showing a hidden tab.
-    fn canonical(self) -> Self {
-        if self == Self::Agents {
-            Self::Harnesses
-        } else {
-            self
+    pub fn group(self) -> SettingsGroup {
+        match self {
+            Self::General | Self::Chat | Self::Shortcuts | Self::Files | Self::Archived => {
+                SettingsGroup::General
+            }
+            Self::Appearance => SettingsGroup::Appearance,
+            Self::Notifications => SettingsGroup::Notifications,
+            Self::Harnesses => SettingsGroup::Providers,
+            Self::AgentProfiles | Self::Routing | Self::CodeReview | Self::SourceControl => {
+                SettingsGroup::Agents
+            }
+            Self::Tools | Self::Playbooks => SettingsGroup::ContextTools,
+            Self::Computer | Self::Appshots | Self::Voice => SettingsGroup::ThisMac,
+            Self::Updates | Self::Devices | Self::DeviceHub | Self::Cloud | Self::Billing => {
+                SettingsGroup::DevicesUpdates
+            }
+            Self::Account => SettingsGroup::Account,
         }
     }
 
     fn visible_in_nav(self) -> bool {
-        self != Self::Agents && (self != Self::Appshots || crate::appshots::is_desktop())
+        self != Self::Appshots || crate::appshots::is_desktop()
     }
 
     /// [`Self::visible_in_nav`], plus what depends on the account: Cloud
@@ -834,13 +911,12 @@ impl SettingsSection {
         matches!(self, Self::Cloud | Self::Billing)
     }
 
-    /// Where a generic "open Settings" lands for a remembered section: legacy
-    /// aliases resolve to their page, and a section this build does not show
-    /// (Appshots off macOS/Linux) falls back to General.
+    /// Where a generic "open Settings" lands for a remembered section: a
+    /// section this build does not show (Appshots off macOS/Linux) falls back
+    /// to General.
     pub(crate) fn reopenable(self) -> Self {
-        let section = self.canonical();
-        if section.visible_in_nav() {
-            section
+        if self.visible_in_nav() {
+            self
         } else {
             Self::General
         }
@@ -857,7 +933,6 @@ impl SettingsSection {
             SettingsSection::AgentProfiles => "agent-profiles",
             SettingsSection::Routing => "routing",
             SettingsSection::CodeReview => "code-review",
-            SettingsSection::Agents => "agents",
             SettingsSection::Appearance => "appearance",
             SettingsSection::Files => "files",
             SettingsSection::Notifications => "notifications",
@@ -868,11 +943,11 @@ impl SettingsSection {
             SettingsSection::Computer => "computer",
             SettingsSection::DeviceHub => "device-hub",
             SettingsSection::SourceControl => "source-control",
-            SettingsSection::Home => "home",
             SettingsSection::Archived => "archived",
             SettingsSection::Chat => "chat",
             SettingsSection::Updates => "updates",
             SettingsSection::Playbooks => "playbooks",
+            SettingsSection::Account => "account",
         }
     }
 
@@ -882,8 +957,7 @@ impl SettingsSection {
             "devices" => SettingsSection::Devices,
             "cloud" => SettingsSection::Cloud,
             "billing" => SettingsSection::Billing,
-            "providers" | "harnesses" => SettingsSection::Harnesses,
-            "agents" => SettingsSection::Agents,
+            "providers" | "harnesses" | "agents" => SettingsSection::Harnesses,
             "tools" => SettingsSection::Tools,
             "agent-profiles" | "profiles" => SettingsSection::AgentProfiles,
             "routing" => SettingsSection::Routing,
@@ -898,33 +972,16 @@ impl SettingsSection {
             "computer" => SettingsSection::Computer,
             "device-hub" => SettingsSection::DeviceHub,
             "source-control" => SettingsSection::SourceControl,
-            "home" => SettingsSection::Home,
             "archived" => SettingsSection::Archived,
             "chat" => SettingsSection::Chat,
             "updates" => SettingsSection::Updates,
             "playbooks" | "triage" => SettingsSection::Playbooks,
+            "account" => SettingsSection::Account,
             _ => return None,
         })
     }
 
-    fn starts_nav_group(self) -> bool {
-        matches!(
-            self,
-            Self::Harnesses | Self::SourceControl | Self::Devices | Self::Updates
-        )
-    }
-
-    fn nav_heading(self) -> Option<&'static str> {
-        match self {
-            Self::Harnesses => Some("Agents"),
-            Self::SourceControl => Some("Code"),
-            Self::Devices => Some("Connections"),
-            _ => None,
-        }
-    }
-
-    /// Sidebar + header label (zeron settings-sidebar.tsx SECTIONS / __root.tsx
-    /// `settingsTitle` — the same strings in both places).
+    /// The page's tab label inside its group, and its search path segment.
     pub fn label(self) -> &'static str {
         match self {
             SettingsSection::Devices => "Devices",
@@ -932,10 +989,9 @@ impl SettingsSection {
             SettingsSection::Billing => "Billing",
             SettingsSection::Harnesses => "Providers",
             SettingsSection::Tools => "Tools",
-            SettingsSection::AgentProfiles => "Agent profiles",
+            SettingsSection::AgentProfiles => "Profiles",
             SettingsSection::Routing => "Routing",
             SettingsSection::CodeReview => "Code review",
-            SettingsSection::Agents => "Accounts",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Files => "Files",
             SettingsSection::Notifications => "Notifications",
@@ -943,44 +999,25 @@ impl SettingsSection {
             SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::General => "General",
             SettingsSection::Appshots => "Appshots",
-            SettingsSection::Computer => "Computer",
+            SettingsSection::Computer => "Computer use",
             SettingsSection::DeviceHub => "Device hub",
-            SettingsSection::SourceControl => "Source Control",
-            SettingsSection::Home => "Home",
-            SettingsSection::Archived => "Archived sessions",
+            SettingsSection::SourceControl => "Source control",
+            SettingsSection::Archived => "Archived",
             SettingsSection::Chat => "Chat",
             SettingsSection::Updates => "Updates",
             SettingsSection::Playbooks => "Playbooks",
+            SettingsSection::Account => "Account",
         }
     }
 
-    /// The section's glyph, in the nav and on its settings-search hits.
-    fn icon(self) -> &'static str {
-        match self {
-            SettingsSection::Devices => icons::MONITOR,
-            SettingsSection::Cloud => icons::CLOUD,
-            SettingsSection::Billing => icons::WALLET,
-            SettingsSection::Harnesses => icons::WIDGET,
-            SettingsSection::Tools => icons::LUCIDE_HAMMER,
-            SettingsSection::AgentProfiles => icons::BOT,
-            SettingsSection::Routing => icons::FORK,
-            SettingsSection::CodeReview => icons::CHECKLIST,
-            SettingsSection::Agents => icons::KEY_MINIMALISTIC,
-            SettingsSection::Appearance => icons::TUNING,
-            SettingsSection::Files => icons::FOLDER,
-            SettingsSection::Notifications => icons::BELL,
-            SettingsSection::Voice => icons::MICROPHONE,
-            SettingsSection::Shortcuts => icons::KEYBOARD,
-            SettingsSection::General => icons::SETTINGS,
-            SettingsSection::Appshots => icons::SCREEN_CAPTURE,
-            SettingsSection::Computer => icons::COMPUTER_CURSOR,
-            SettingsSection::DeviceHub => icons::SMARTPHONE,
-            SettingsSection::SourceControl => icons::GIT_BRANCH,
-            SettingsSection::Home => icons::HOME,
-            SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
-            SettingsSection::Chat => icons::CHAT_ROUND_LINE,
-            SettingsSection::Updates => icons::REFRESH,
-            SettingsSection::Playbooks => icons::LUCIDE_BOOK_OPEN,
+    /// Where a search hit on this page sits: the group, then the page when
+    /// the group holds more than one.
+    fn search_path(self, cloud_offered: bool) -> String {
+        let group = self.group();
+        if group.pages(cloud_offered).len() > 1 {
+            format!("{} › {}", group.label(), self.label())
+        } else {
+            group.label().to_owned()
         }
     }
 
@@ -992,7 +1029,6 @@ impl SettingsSection {
             SettingsSection::Harnesses => &[
                 "agent", "harness", "account", "usage", "claude", "codex", "cursor", "opencode",
             ],
-            SettingsSection::Agents => &["account", "login", "usage", "provider"],
             SettingsSection::Tools => &["mcp", "zeron tools", "delegate", "thread tools"],
             SettingsSection::AgentProfiles => &["profile", "preset", "delegate", "model"],
             SettingsSection::Routing => &[
@@ -1009,10 +1045,10 @@ impl SettingsSection {
             SettingsSection::Computer => &["computer use", "desktop", "cursor", "permission"],
             SettingsSection::DeviceHub => &["simulator", "emulator", "ios", "android"],
             SettingsSection::SourceControl => &["git", "commit", "pull request"],
-            SettingsSection::Home => &["widget", "dashboard", "new thread", "customize"],
             SettingsSection::Archived => &["archive", "old sessions"],
             SettingsSection::Updates => &["update", "version", "upgrade"],
             SettingsSection::Playbooks => &["playbook", "recipe", "triage", "debug", "bug"],
+            SettingsSection::Account => &["sign in", "sign out", "sync", "email", "login"],
             _ => &[],
         }
     }
@@ -1244,12 +1280,12 @@ impl SettingsSection {
                 ),
                 (
                     "Pause animations in background",
-                    &["unfocused", "inactive window", "battery"],
+                    &["motion", "unfocused", "inactive window", "battery"],
                     Some(Target::Setting(SettingId::PauseAnimations)),
                 ),
                 (
                     "Smooth scrolling",
-                    &["mouse wheel", "glide", "ease"],
+                    &["motion", "mouse wheel", "glide", "ease"],
                     Some(Target::Setting(SettingId::SmoothScrolling)),
                 ),
             ],
@@ -1450,16 +1486,6 @@ impl SettingsSection {
                 ("New chat when idle", &["pr chat", "idle", "expiry"], None),
                 ("While an agent is running", &["git", "agent", "busy"], None),
             ],
-            SettingsSection::Home => &[
-                ("Working now", &["running", "agents"], None),
-                ("Pull requests", &["review"], None),
-                ("Git activity", &["commits"], None),
-                ("This Mac", &["cpu", "memory", "disk"], None),
-                ("Running services", &["ports", "server"], None),
-                ("Recent areas", &["worktree", "project"], None),
-                ("CI failures", &["checks"], None),
-                ("Show ports", &["by zeron", "all ports"], None),
-            ],
             _ => &[],
         }
     }
@@ -1505,12 +1531,54 @@ impl SettingsSection {
         let query = query.trim().to_lowercase();
         query.is_empty()
             || self.label().to_lowercase().contains(&query)
+            || self.group().label().to_lowercase().contains(&query)
             || self.keywords().iter().any(|word| word.contains(&query))
             || self
                 .search_rows()
                 .iter()
                 .any(|(title, keywords, _)| search_row_matches(title, keywords, &query))
     }
+}
+
+struct SettingsHit {
+    page: SettingsSection,
+    title: &'static str,
+    path: String,
+    target: Option<Target>,
+}
+
+fn settings_hits(query: &str, cloud_offered: bool) -> Vec<SettingsHit> {
+    if query.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    for page in SettingsSection::ALL
+        .into_iter()
+        .filter(|page| page.shown_in_nav(cloud_offered) && page.matches(query))
+    {
+        let path = page.search_path(cloud_offered);
+        let rows = page.matching_rows(query);
+        if rows.is_empty() {
+            hits.push(SettingsHit {
+                page,
+                title: page.label(),
+                path,
+                target: Some(Target::Page(page)),
+            });
+            continue;
+        }
+        hits.extend(rows.into_iter().map(|(title, target)| SettingsHit {
+            page,
+            title,
+            path: if target.is_some_and(Target::in_advanced_look) {
+                format!("{path} › Advanced look")
+            } else {
+                path.clone()
+            },
+            target,
+        }));
+    }
+    hits
 }
 
 /// A titled settings row, the extra words that find it, and the row a pick
@@ -1548,10 +1616,10 @@ fn settings_open_route(route: &str, remembered: SettingsSection) -> Option<Setti
     route
         .strip_prefix("settings/")
         .and_then(SettingsSection::from_slug)
-        .map(SettingsSection::canonical)
 }
 
 const SETTINGS_NAV_WIDTH: f32 = 238.0;
+const SETTINGS_SUBTABS_HEIGHT: f32 = 48.0;
 const SETTINGS_PANEL_RADIUS: f32 = 14.0;
 const SETTINGS_PANEL_MAX_WIDTH: f32 = 1280.0;
 const SETTINGS_PANEL_MIN_SIDE: f32 = 24.0;
@@ -1981,7 +2049,6 @@ const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
 /// default-size pixels; scaled with the UI font via `ui_rems`.
 const COMPACT_JUMP_HINT_WIDTH: f32 = 42.0;
 const SIDEBAR_ACTIVE_HARNESS_TITLE_GAP: f32 = Theme::SPACE_SM;
-const USER_MENU_WIDTH: f32 = 284.0;
 
 /// Keep the fade short so only the last few glyphs recede. Tracking clipped
 /// content lets the shared paint-time overflow gate leave fitting labels intact.
@@ -3292,7 +3359,6 @@ pub struct Shell {
     code_review_page: Option<Entity<crate::settings::code_review::CodeReviewPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
     source_control_page: Option<Entity<SourceControlPage>>,
-    home_settings_page: Option<Entity<HomeSettingsPage>>,
     home_view: Option<Entity<crate::home::HomeView>>,
     new_work_scroll: gpui::ScrollHandle,
     _home_events: Option<Subscription>,
@@ -3304,7 +3370,6 @@ pub struct Shell {
     device_hub_page: Option<Entity<DeviceHubPage>>,
     tools_page: Option<(Entity<ToolsPage>, Subscription)>,
     pending_computer_guide: Option<Vec<zeron_proto::computer::ComputerPermission>>,
-    accounts_page: Option<Entity<AccountsPage>>,
     device_accounts: Entity<crate::account_usage::DeviceAccounts>,
     _device_accounts: Subscription,
     _accounts_cache: Subscription,
@@ -3332,11 +3397,6 @@ pub struct Shell {
     chat_rename: Option<ChatRename>,
     /// Chat id awaiting delete confirmation.
     delete_confirm: Option<String>,
-    /// Synara's one-time AppSnap introduction: shown on desktop until the
-    /// user dismisses it or follows it into Settings → Appshots.
-    appshot_welcome: bool,
-    intro: intros::Intro,
-    since_pending: bool,
     whats_new_card: Option<whats_new::WhatsNewCard>,
     whats_new_dialog: Option<whats_new::WhatsNewDialog>,
     /// The fork/rewind confirmation, centered like the delete dialog.
@@ -3429,10 +3489,6 @@ pub struct Shell {
     harness_update_banner_task: Option<Task<()>>,
     /// Independent watches retain device identity across selection changes.
     harness_update_devices: std::collections::BTreeMap<String, harness_updates::DeviceUpdates>,
-    harness_update_expanded: bool,
-    harness_update_transition: Option<WidthTween>,
-    harness_update_geometry: [Option<WidthTween>; 2],
-    harness_update_scroll: settings::widgets::PageScroll,
     /// Open Update-all dialog; the value is its "continue threads" box.
     update_all_dialog: Option<harness_updates::UpdateAllDialog>,
     updates_scroll: settings::widgets::PageScroll,
@@ -3443,7 +3499,6 @@ pub struct Shell {
     /// An Update all that restarts the app: the local agents it waits on and
     /// whether its engine calls have returned.
     update_all_restart: Option<(Vec<zeron_proto::HarnessId>, bool)>,
-    user_menu: popover::Popup<()>,
     help_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
@@ -3810,9 +3865,6 @@ impl Shell {
         });
         crate::appshots::set_enabled(settings.appshots_enabled);
         crate::appshots::set_capture_sound_enabled(settings.appshot_sound_enabled);
-        let appshot_welcome = crate::appshots::welcome_pending()
-            || (crate::appshots::is_desktop()
-                && std::env::var("ZERON_OPEN_DIALOG").as_deref() == Ok("appshot-welcome"));
         let whats_new_card = whats_new::boot_card(&mut settings, cx);
         // Bind the customizable shortcuts from the persisted keymap.
         apply_keymap(
@@ -3872,7 +3924,7 @@ impl Shell {
         // ring) — display-only; a real upload can't be paused for a capture.
         let debug_upload = std::env::var("ZERON_DEMO_UPLOAD").ok();
         // `ZERON_ONBOARDING=<step>` opens first-run setup at that step
-        // (welcome, appearance, sync, providers, done) even when finished.
+        // (welcome, agents, done) even when finished.
         let onboarding_pending = std::env::var("ZERON_ONBOARDING")
             .ok()
             .map(|step| crate::onboarding::Step::parse(&step))
@@ -4024,7 +4076,7 @@ impl Shell {
             route,
             settings_focus: cx.focus_handle(),
             settings_end_focus: cx.focus_handle(),
-            settings_nav_focus: SettingsSection::ALL
+            settings_nav_focus: SettingsGroup::ALL
                 .iter()
                 .map(|_| cx.focus_handle())
                 .collect(),
@@ -4068,7 +4120,6 @@ impl Shell {
             code_review_page: None,
             archived_page: None,
             source_control_page: None,
-            home_settings_page: None,
             home_view: None,
             new_work_scroll: gpui::ScrollHandle::new(),
             _home_events: None,
@@ -4080,7 +4131,6 @@ impl Shell {
             device_hub_page: None,
             tools_page: None,
             pending_computer_guide: None,
-            accounts_page: None,
             device_accounts,
             _device_accounts: device_accounts_observation,
             _accounts_cache: accounts_cache_observation,
@@ -4102,9 +4152,6 @@ impl Shell {
             chat_copy_left: false,
             chat_rename: None,
             delete_confirm: None,
-            appshot_welcome,
-            intro: intros::Intro::at_boot(),
-            since_pending: !intros::since_pages(&settings.onboarding_seen).is_empty(),
             whats_new_card,
             whats_new_dialog: None,
             branch_modal: None,
@@ -4157,17 +4204,12 @@ impl Shell {
             harness_update_seen: std::collections::HashSet::new(),
             harness_update_banner_task: None,
             harness_update_devices: Default::default(),
-            harness_update_expanded: false,
-            harness_update_transition: None,
-            harness_update_geometry: [None; 2],
-            harness_update_scroll: settings::widgets::PageScroll::default(),
             update_all_dialog: None,
             updates_scroll: Default::default(),
             playbooks_scroll: Default::default(),
             playbook_delete_armed: None,
             updates_policy_selects: Default::default(),
             update_all_restart: None,
-            user_menu: popover::Popup::default(),
             help_menu: popover::Popup::default(),
             sidebar_notice: None,
             _app_update_observation: crate::app_update::AppUpdate::global(cx).map(|update| {
@@ -4366,7 +4408,6 @@ impl Shell {
         self.refresh_harness_update_watch(cx);
         self.advance_update_all(cx);
         self.sync_search_warm(cx);
-        self.resolve_intros(cx);
         if state.read(cx).engine().is_none() {
             self.side_chats.clear();
         }
@@ -7669,22 +7710,11 @@ impl Shell {
                 page.update(cx, |page, cx| page.on_hidden(cx));
             }
         }
-        if route == Route::Tasks {
-            self.mark_onboarded(intros::TASKS_HOME, cx);
-        }
         self.route = route;
         if !was_pull_requests && will_show_pull_requests {
             if let Some(page) = self.pull_requests_page.as_ref().cloned() {
                 page.update(cx, |page, cx| page.on_visible(cx));
             }
-        }
-    }
-
-    /// Close the user menu through the exit animation (no-op when closed).
-    fn close_user_menu(&mut self, cx: &mut Context<Self>) {
-        if self.user_menu.begin_close() {
-            popover::reap_popup(cx, |shell: &mut Self| &mut shell.user_menu);
-            cx.notify();
         }
     }
 
@@ -7996,14 +8026,6 @@ impl Shell {
         cx.notify();
     }
 
-    fn acknowledge_appshot_welcome(&mut self, cx: &mut Context<Self>) {
-        self.appshot_welcome = false;
-        crate::appshots::set_welcome_pending(false);
-        self.settings.appshot_welcome_acknowledged = true;
-        self.schedule_save(cx);
-        cx.notify();
-    }
-
     fn copy_chat_path(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         let path = self
             .state
@@ -8078,7 +8100,7 @@ impl Shell {
     }
 
     pub(crate) fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
-        let mut section = section.canonical();
+        let mut section = section;
         // Signed out, or not offered Cloud: no Cloud or billing to manage.
         if section.needs_account() && !self.state.read(cx).cloud_offered() {
             section = SettingsSection::General;
@@ -8133,7 +8155,6 @@ impl Shell {
         }
         self.set_route(Route::Settings(section), cx);
         self.remember_settings_section(section, cx);
-        self.close_user_menu(cx);
         self.close_chat_menu(cx);
         cx.notify();
     }
@@ -8149,7 +8170,6 @@ impl Shell {
     /// own settings copy: [`Self::schedule_save`] replaces the whole file
     /// from it, so a write that bypassed it would be undone by the next save.
     fn remember_settings_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
-        let section = section.canonical();
         if self.settings.settings_section != section {
             self.settings.settings_section = section;
             self.schedule_save(cx);
@@ -8159,7 +8179,7 @@ impl Shell {
     /// Whether a dialog or menu that Escape would close is open over Settings:
     /// [`Self::dismiss_settings_escape_surface`] without the dismissing.
     fn settings_escape_surface_open(&self, cx: &App) -> bool {
-        if self.sync_flow.has_visible_overlay() || self.user_menu.is_open() {
+        if self.sync_flow.has_visible_overlay() {
             return true;
         }
         let Route::Settings(section) = self.route else {
@@ -8168,7 +8188,7 @@ impl Shell {
         if self.update_all_dialog.is_some() {
             return true;
         }
-        match section.canonical() {
+        match section {
             SettingsSection::Devices => self
                 .devices_page
                 .as_ref()
@@ -8198,13 +8218,6 @@ impl Shell {
         if self.sync_flow.has_visible_overlay() {
             return true;
         }
-        if self.user_menu.is_open() {
-            self.close_user_menu(cx);
-            return true;
-        }
-        if self.user_menu.get().is_some() {
-            return true;
-        }
         if self.rail_capture_open() {
             self.close_rail_capture(cx);
             return true;
@@ -8216,7 +8229,7 @@ impl Shell {
             cx.notify();
             return true;
         }
-        match section.canonical() {
+        match section {
             SettingsSection::Devices => self
                 .devices_page
                 .as_ref()
@@ -8260,7 +8273,6 @@ impl Shell {
 
     fn enter_usage_route(&mut self, cx: &mut Context<Self>) {
         self.set_route(Route::Usage, cx);
-        self.close_user_menu(cx);
         self.close_chat_menu(cx);
         if let Some(page) = &self.usage_page {
             page.update(cx, |page, cx| page.load(cx));
@@ -8279,7 +8291,6 @@ impl Shell {
 
     fn enter_inbox_route(&mut self, cx: &mut Context<Self>) {
         self.set_route(Route::Inbox, cx);
-        self.close_user_menu(cx);
         self.close_chat_menu(cx);
         cx.notify();
     }
@@ -8350,7 +8361,6 @@ impl Shell {
     fn enter_tasks_route(&mut self, cx: &mut Context<Self>) {
         self.set_route(Route::Tasks, cx);
         self.quick_capture_tasks_opened(cx);
-        self.close_user_menu(cx);
         self.close_chat_menu(cx);
         cx.notify();
     }
@@ -8361,7 +8371,6 @@ impl Shell {
             return;
         }
         self.set_route(Route::PullRequests, cx);
-        self.close_user_menu(cx);
         self.close_chat_menu(cx);
         // Through `close_add_space`, so the host's home index is released.
         self.close_add_space(cx);
@@ -8662,11 +8671,10 @@ impl Shell {
                 if !matches!(self.route, Route::Settings(_)) {
                     self.settings_return_route = self.route;
                 }
-                self.set_route(Route::Settings(section.canonical()), cx);
+                self.set_route(Route::Settings(section), cx);
                 self.remember_settings_section(section, cx);
             }
         }
-        self.close_user_menu(cx);
         self.close_chat_menu(cx);
         cx.notify();
     }
@@ -8754,16 +8762,6 @@ impl Shell {
                     self.harnesses_page = Some(page);
                 }
                 match &self.harnesses_page {
-                    Some(page) => page.clone().into_any_element(),
-                    None => Empty.into_any_element(),
-                }
-            }
-            SettingsSection::Agents => {
-                if self.accounts_page.is_none() {
-                    let state = self.state.clone();
-                    self.accounts_page = Some(cx.new(|cx| AccountsPage::new(state, cx)));
-                }
-                match &self.accounts_page {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
@@ -9056,11 +9054,7 @@ impl Shell {
                     .clone()
                     .into_any_element()
             }
-            SettingsSection::Home => self
-                .home_settings_page
-                .get_or_insert_with(|| cx.new(|_| HomeSettingsPage::default()))
-                .clone()
-                .into_any_element(),
+            SettingsSection::Account => self.render_account_page(cx),
             SettingsSection::Updates => self.render_updates_page(window, cx),
             SettingsSection::Playbooks => self.render_playbooks_page(window, cx),
             SettingsSection::Archived => {
@@ -9683,7 +9677,6 @@ impl Shell {
     }
 
     fn request_sign_out(&mut self, cx: &mut Context<Self>) {
-        self.close_user_menu(cx);
         if self.state.read(cx).workspace_scope != Some(WorkspaceScope::Synced) {
             return;
         }
@@ -9819,7 +9812,6 @@ impl Shell {
     }
 
     fn reopen_sync_notice(&mut self, cx: &mut Context<Self>) {
-        self.close_user_menu(cx);
         match self.sync_flow {
             SyncFlow::RestartPending { .. } => {
                 self.sync_flow = SyncFlow::RestartPending { notice_open: true };
@@ -10099,7 +10091,6 @@ impl Shell {
         if scope == Some(WorkspaceScope::Development) {
             return;
         }
-        self.close_user_menu(cx);
         if scope == Some(WorkspaceScope::Local) {
             self.sync_flow = SyncFlow::Enabling;
         } else {
@@ -10161,6 +10152,10 @@ impl Shell {
         self._onboarding_subscriptions = vec![
             cx.subscribe(&onboarding, |this, _, event, cx| match *event {
                 OnboardingEvent::SignIn => this.start_sign_in(cx),
+                OnboardingEvent::OpenDocs => {
+                    this.finish_onboarding(false, cx);
+                    this.open_docs(Some("tasks"), cx);
+                }
                 OnboardingEvent::Finish { add_project } => this.finish_onboarding(add_project, cx),
             }),
             // Setup renders inside this view, so its changes repaint here.
@@ -10171,7 +10166,7 @@ impl Shell {
 
     /// The full-window page that stands in for the Ready shell: first-run
     /// setup, the sign-in flow on its own, or the sign-in flow inside setup's
-    /// sync step (same progress, same frame).
+    /// welcome step (same pills, same frame).
     fn render_setup_page(
         &mut self,
         window: &mut Window,
@@ -10181,12 +10176,42 @@ impl Shell {
         let slot = self.sign_in_slot(cx);
         let parts = match (self.onboarding.clone(), slot) {
             (Some(onboarding), slot) => {
-                onboarding.update(cx, |onboarding, cx| onboarding.page_parts(slot, window, cx))
+                let updates = self.onboarding_updates_row(cx);
+                onboarding.update(cx, |onboarding, cx| onboarding.page_parts(slot, updates, cx))
             }
             (None, Some(slot)) => slot.into_page(),
             (None, None) => return None,
         };
         Some(crate::onboarding::render_page(parts, window))
+    }
+
+    fn onboarding_updates_row(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let count = self.update_all_plan(false, cx).agent_updates();
+        if count == 0 {
+            return None;
+        }
+        let theme = Theme::of(cx).for_settings_surface();
+        Some(
+            settings::widgets::section_card(&theme)
+                .mt_0()
+                .child(
+                    settings::widgets::card_row(&theme, true)
+                        .min_h(px(44.0))
+                        .py(px(8.0))
+                        .flex_nowrap()
+                        .justify_between()
+                        .child(settings::widgets::row_title(
+                            &theme,
+                            format!(
+                                "{count} agent CLI{} {} updates",
+                                if count == 1 { "" } else { "s" },
+                                if count == 1 { "has" } else { "have" }
+                            ),
+                        ))
+                        .child(harness_updates::render_update_all_button(&theme, cx)),
+                )
+                .into_any_element(),
+        )
     }
 
     fn finish_onboarding(&mut self, add_project: bool, cx: &mut Context<Self>) {
@@ -11604,7 +11629,6 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let section = section.canonical();
         let theme = Theme::of(cx).for_settings_surface();
         if self.settings_focus_pending {
             self.settings_focus_pending = false;
@@ -11624,19 +11648,36 @@ impl Shell {
         let viewport = window.viewport_size();
         let panel = settings_panel_bounds(viewport);
         let header = settings::widgets::SETTINGS_HEADER_HEIGHT;
+        let query = self.settings_search.read(cx).text().to_string();
+        let searching = !query.trim().is_empty();
+        let subtabs = (!searching)
+            .then(|| self.render_settings_subtabs(section, &theme, cx))
+            .flatten();
+        let page_top = header + if subtabs.is_some() { SETTINGS_SUBTABS_HEIGHT } else { 0.0 };
         settings::widgets::set_page_pane(
             gpui::Bounds::new(
-                panel.origin + gpui::point(px(SETTINGS_NAV_WIDTH + 1.0), px(header)),
+                panel.origin + gpui::point(px(SETTINGS_NAV_WIDTH + 1.0), px(page_top)),
                 gpui::size(
                     (panel.size.width - px(SETTINGS_NAV_WIDTH + 1.0)).max(px(0.0)),
-                    (panel.size.height - px(header)).max(px(0.0)),
+                    (panel.size.height - px(page_top)).max(px(0.0)),
                 ),
             ),
             cx,
         );
         let nav = self.render_settings_nav(section, &theme, window, cx);
-        let outlet = self.settings_outlet(section, window, cx);
-        let action = self.settings_header_action(section, &theme, window, cx);
+        let outlet = if searching {
+            self.render_settings_results(&query, &theme, cx)
+        } else {
+            self.settings_outlet(section, window, cx)
+        };
+        let action = (!searching)
+            .then(|| self.settings_header_action(section, &theme, window, cx))
+            .flatten();
+        let crumb = if searching {
+            "Search"
+        } else {
+            section.group().label()
+        };
         let header_row = div()
             .id("settings-header")
             .h(px(header))
@@ -11667,7 +11708,7 @@ impl Shell {
                         div()
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child(SharedString::from(section.label())),
+                            .child(SharedString::from(crumb)),
                     ),
             )
             .child(
@@ -11716,7 +11757,12 @@ impl Shell {
                 let modifiers = event.keystroke.modifiers;
                 if key == "escape" {
                     if !this.dismiss_settings_escape_surface(cx) {
-                        this.close_settings(cx);
+                        if this.settings_search.read(cx).text().is_empty() {
+                            this.close_settings(cx);
+                        } else {
+                            this.clear_settings_search(cx);
+                            cx.notify();
+                        }
                     }
                     cx.stop_propagation();
                 } else if key == "f"
@@ -11769,6 +11815,7 @@ impl Shell {
                     .flex_col()
                     .opacity(self.voice_stage_underlay_opacity(cx))
                     .child(header_row)
+                    .children(subtabs)
                     .child(div().flex_1().min_h_0().child(outlet)),
             )
             .child(
@@ -11916,7 +11963,7 @@ impl Shell {
             .child(trailing)
     }
 
-    /// Roving section tabs in their headed groups.
+    /// Roving group tabs; picking one opens its first page.
     fn render_settings_nav(
         &mut self,
         section: SettingsSection,
@@ -11924,9 +11971,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let cloud_offered = self.state.read(cx).cloud_offered();
         let query = self.settings_search.read(cx).text().to_string();
-        let grouped = query.trim().is_empty();
+        let searching = !query.trim().is_empty();
+        let current = (!searching).then(|| section.group());
         settings::widgets::scroll_faded(
             "settings-nav-scroll",
             div()
@@ -11948,140 +11995,183 @@ impl Shell {
                         .flex_col()
                         .gap(px(2.0))
                         .child(self.render_settings_search(theme, &query, cx))
-                        .children(
-                            SettingsSection::ALL
-                                .into_iter()
-                                .filter(|item| item.shown_in_nav(cloud_offered))
-                                .filter(|item| item.matches(&query))
-                                .map(|item| {
-                                    let index = SettingsSection::ALL
-                                        .iter()
-                                        .position(|s| *s == item)
-                                        .unwrap();
-                                    let selected = item == section;
-                                    let key = format!("settings-nav-{}", item.label());
-                                    let hover_key = format!("{key}-hover");
-                                    let selection_t = settings::widgets::tab_selection_t(
-                                        window,
-                                        format!("{key}-selection"),
-                                        selected,
-                                        motion::reduced_motion(cx),
-                                    );
-                                    let tab_text = motion::hover_blend(
-                                        &hover_key,
-                                        motion::mix(theme.text_muted, theme.text, selection_t),
-                                        theme.text,
-                                    );
-                                    let section_tab = settings::widgets::section_tab(
-                                        theme,
-                                        selected,
-                                        selection_t,
-                                        key.clone(),
-                                        hover_key,
-                                    )
-                                    .role(gpui::Role::Tab)
-                                    .aria_label(item.label())
-                                    .aria_selected(selected)
-                                    .track_focus(
-                                        &self.settings_nav_focus[index].clone().tab_stop(selected),
-                                    )
-                                    .tab_index(0)
-                                    .tab_stop(selected)
-                                    .on_key_down(cx.listener(
-                                        move |this, event: &gpui::KeyDownEvent, window, cx| {
-                                            let query =
-                                                this.settings_search.read(cx).text().to_string();
-                                            let items: Vec<_> = SettingsSection::ALL
-                                                .into_iter()
-                                                .filter(|s| s.shown_in_nav(cloud_offered) && s.matches(&query))
-                                                .collect();
-                                            let current =
-                                                items.iter().position(|s| *s == item).unwrap_or(0);
-                                            let next = match event.keystroke.key.as_str() {
-                                                "up" | "left" => {
-                                                    (current + items.len() - 1) % items.len()
-                                                }
-                                                "down" | "right" => (current + 1) % items.len(),
-                                                "home" => 0,
-                                                "end" => items.len() - 1,
-                                                _ => return,
-                                            };
-                                            let target = items[next];
-                                            this.open_settings(target, cx);
-                                            let index = SettingsSection::ALL
-                                                .iter()
-                                                .position(|s| *s == target)
-                                                .unwrap();
-                                            window.focus(&this.settings_nav_focus[index], cx);
-                                            cx.stop_propagation();
-                                        },
-                                    ))
-                                    .focus_visible(|s| s.border_2().border_color(theme.accent))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.open_settings(item, cx)
-                                    }))
-                                    .child(icon(item.icon()).size(px(16.0)).text_color(tab_text))
-                                    .child(SharedString::from(item.label()));
-                                    // While searching, the rows the query found sit
-                                    // under their section, indented past its icon.
-                                    let hits = item.matching_rows(&query);
-                                    let heading =
-                                        item.nav_heading().filter(|_| grouped).map(|heading| {
-                                            div()
-                                                .h(px(22.0))
-                                                .px(px(Theme::SPACE_SM))
-                                                .flex()
-                                                .items_center()
-                                                .text_size(crate::typography::ui_rems(11.5))
-                                                .font_weight(gpui::FontWeight::MEDIUM)
-                                                .text_color(theme.text_faint)
-                                                .child(SharedString::from(heading))
-                                        });
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .when(grouped && item.starts_nav_group(), |el| {
-                                            el.mt(px(14.0))
-                                        })
-                                        .children(heading)
-                                        .child(section_tab)
-                                        .children(hits.into_iter().map(|(title, target)| {
-                                            div()
-                                                .id(SharedString::from(format!(
-                                                    "settings-nav-{}-{title}",
-                                                    item.label()
-                                                )))
-                                                .debug_selector(move || {
-                                                    format!("settings-hit-{title}")
-                                                })
-                                                .role(gpui::Role::Button)
-                                                .aria_label(SharedString::from(title))
-                                                .rounded(px(8.0))
-                                                .pl(px(Theme::SPACE_SM + 24.0))
-                                                .pr(px(Theme::SPACE_SM))
-                                                .py(px(4.0))
-                                                .text_size(crate::typography::ui_rems(13.0))
-                                                .text_color(theme.text)
-                                                .cursor_pointer()
-                                                .hover(|s| s.bg(theme.glass_hover()))
-                                                .on_click(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        this.open_settings(item, cx);
-                                                        if let Some(target) = target {
-                                                            settings::search::reveal(
-                                                                target, window,
-                                                            );
-                                                        }
-                                                    },
-                                                ))
-                                                .child(SharedString::from(title))
-                                        }))
-                                }),
-                        ),
+                        .children(SettingsGroup::ALL.into_iter().enumerate().map(
+                            |(index, group)| {
+                                let selected = current == Some(group);
+                                let tab_stop = selected || (current.is_none() && index == 0);
+                                let key = format!("settings-nav-{}", group.label());
+                                let hover_key = format!("{key}-hover");
+                                let selection_t = settings::widgets::tab_selection_t(
+                                    window,
+                                    format!("{key}-selection"),
+                                    selected,
+                                    motion::reduced_motion(cx),
+                                );
+                                let tab_text = motion::hover_blend(
+                                    &hover_key,
+                                    motion::mix(theme.text_muted, theme.text, selection_t),
+                                    theme.text,
+                                );
+                                settings::widgets::section_tab(
+                                    theme,
+                                    selected,
+                                    selection_t,
+                                    key.clone(),
+                                    hover_key,
+                                )
+                                .role(gpui::Role::Tab)
+                                .aria_label(group.label())
+                                .aria_selected(selected)
+                                .track_focus(
+                                    &self.settings_nav_focus[index].clone().tab_stop(tab_stop),
+                                )
+                                .tab_index(0)
+                                .tab_stop(tab_stop)
+                                .on_key_down(cx.listener(
+                                    move |this, event: &gpui::KeyDownEvent, window, cx| {
+                                        let count = SettingsGroup::ALL.len();
+                                        let next = match event.keystroke.key.as_str() {
+                                            "up" | "left" => (index + count - 1) % count,
+                                            "down" | "right" => (index + 1) % count,
+                                            "home" => 0,
+                                            "end" => count - 1,
+                                            _ => return,
+                                        };
+                                        this.open_settings_group(SettingsGroup::ALL[next], cx);
+                                        window.focus(&this.settings_nav_focus[next], cx);
+                                        cx.stop_propagation();
+                                    },
+                                ))
+                                .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open_settings_group(group, cx)
+                                }))
+                                .child(icon(group.icon()).size(px(16.0)).text_color(tab_text))
+                                .child(SharedString::from(group.label()))
+                            },
+                        )),
                 ),
         )
         .into_any_element()
+    }
+
+    fn open_settings_group(&mut self, group: SettingsGroup, cx: &mut Context<Self>) {
+        let cloud_offered = self.state.read(cx).cloud_offered();
+        let Some(page) = group.pages(cloud_offered).first().copied() else {
+            return;
+        };
+        self.clear_settings_search(cx);
+        let page = match self.route {
+            Route::Settings(current) if current.group() == group => current,
+            _ => page,
+        };
+        self.open_settings(page, cx);
+    }
+
+    fn clear_settings_search(&mut self, cx: &mut Context<Self>) {
+        if !self.settings_search.read(cx).text().is_empty() {
+            self.settings_search
+                .update(cx, |input, cx| input.set_text("", cx));
+        }
+    }
+
+    fn render_settings_subtabs(
+        &self,
+        section: SettingsSection,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
+        let pages = section.group().pages(self.state.read(cx).cloud_offered());
+        if pages.len() < 2 {
+            return None;
+        }
+        let options: Vec<(SettingsSection, &'static str)> =
+            pages.into_iter().map(|page| (page, page.label())).collect();
+        let shell = cx.entity().downgrade();
+        Some(
+            div()
+                .flex_none()
+                .h(px(SETTINGS_SUBTABS_HEIGHT))
+                .px(px(20.0))
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(theme.border)
+                .child(settings::widgets::segmented(
+                    theme,
+                    "settings-subtabs",
+                    &options,
+                    section,
+                    move |page, _, cx| {
+                        shell
+                            .update(cx, |shell, cx| shell.open_settings(page, cx))
+                            .ok();
+                    },
+                )),
+        )
+    }
+
+    fn render_settings_results(
+        &self,
+        query: &str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let hits = settings_hits(query, self.state.read(cx).cloud_offered());
+        let title = if hits.is_empty() {
+            format!("No settings match “{}”", query.trim())
+        } else {
+            format!(
+                "{} result{} for “{}”",
+                hits.len(),
+                if hits.len() == 1 { "" } else { "s" },
+                query.trim()
+            )
+        };
+        let rows = hits.into_iter().enumerate().map(|(ix, hit)| {
+            let SettingsHit {
+                page,
+                title,
+                path,
+                target,
+            } = hit;
+            settings::widgets::card_row(theme, ix == 0)
+                .id(("settings-hit", ix))
+                .debug_selector(move || format!("settings-hit-{title}"))
+                .role(gpui::Role::Button)
+                .aria_label(SharedString::from(format!("{title}, {path}")))
+                .tab_index(0)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.glass_hover()))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.clear_settings_search(cx);
+                    this.open_settings(page, cx);
+                    if let Some(target) = target {
+                        settings::search::reveal(target, window);
+                    }
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(settings::widgets::row_title(theme, title))
+                        .child(settings::widgets::meta_line(
+                            theme,
+                            vec![div().child(path).into_any_element()],
+                        )),
+                )
+        });
+        div()
+            .id("settings-search-results")
+            .size_full()
+            .overflow_y_scroll()
+            .child(
+                settings::widgets::settings_page()
+                    .child(settings::widgets::page_header(theme, &title, None))
+                    .child(settings::widgets::section_card(theme).children(rows)),
+            )
+            .into_any_element()
     }
 
     /// One session row: context + status on line one, harness + title on line
@@ -13000,9 +13090,6 @@ impl Shell {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
-                if crate::tasks::tab_members(this.state.read(cx)).contains_key(&lead_id) {
-                    this.mark_onboarded(intros::SIDEBAR_MISSION, cx);
-                }
                 this.toggle_sidebar_lead(&lead_id, cx);
             }))
             .tooltip(crate::settings::widgets::text_tooltip_above(label))
@@ -14672,7 +14759,6 @@ impl Shell {
         .fade_overflow_y(&self.sidebar_scroll);
 
         let whats_new_card = self.render_whats_new_card(theme, cx);
-        let github_star_banner = self.render_github_star_banner(theme, cx);
 
         div()
             .w(px(self.sidebar_content_width()))
@@ -14690,88 +14776,7 @@ impl Shell {
                 el.child(pill)
             })
             .when_some(whats_new_card, |el, card| el.child(card))
-            .when_some(github_star_banner, |el, banner| el.child(banner))
             .into_any_element()
-    }
-
-    /// "Star on GitHub" banner. Clicking it
-    /// opens the repository; either that or the close button dismisses it for
-    /// good — the choice is persisted so it never returns on the next launch.
-    fn render_github_star_banner(
-        &self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if self.settings.github_star_banner_dismissed {
-            return None;
-        }
-        let tone = theme.accent;
-        let chip_bg_hover = theme.accent.opacity(0.16);
-        let close_bg_hover = theme.accent.opacity(0.22);
-        Some(
-            div()
-                .id("github-star-banner")
-                .role(gpui::Role::Link)
-                .aria_label("Star on GitHub")
-                .mx(px(Theme::SPACE_SM))
-                .mb(px(Theme::SPACE_SM))
-                .pl(px(Theme::SPACE_SM))
-                .pr(px(Theme::SPACE_XS))
-                .py(px(4.0))
-                .rounded(px(Theme::CONTROL_RADIUS))
-                .bg(theme.accent_wash)
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(crate::typography::ui_rems(11.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(tone)
-                .cursor_pointer()
-                .hover(move |s| s.bg(chip_bg_hover))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    cx.open_url(GITHUB_REPO_URL);
-                    this.dismiss_github_star_banner(cx);
-                }))
-                // Glyphs sit below the line box's optical center: nudge the
-                // star half a pixel down so it centers on the cap height.
-                .child(
-                    icon(icons::STAR_BOLD)
-                        .flex_none()
-                        .relative()
-                        .top(px(0.5))
-                        .size(px(12.0))
-                        .text_color(tone),
-                )
-                .child(div().flex_1().min_w_0().truncate().child("Star on GitHub"))
-                .child(
-                    div()
-                        .id("github-star-banner-dismiss")
-                        .role(gpui::Role::Button)
-                        .aria_label("Dismiss Star on GitHub")
-                        .flex_none()
-                        .size(px(18.0))
-                        .rounded(px(4.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(close_bg_hover))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.dismiss_github_star_banner(cx);
-                        }))
-                        .tooltip(crate::settings::widgets::text_tooltip("Dismiss"))
-                        .child(icon(icons::CLOSE).size(px(10.0)).text_color(tone)),
-                )
-                .into_any_element(),
-        )
-    }
-
-    fn dismiss_github_star_banner(&mut self, cx: &mut Context<Self>) {
-        self.settings.github_star_banner_dismissed = true;
-        self.schedule_save(cx);
-        cx.notify();
     }
 
     fn render_update_rail_button(
@@ -15087,7 +15092,6 @@ impl Shell {
         self.set_route(Route::Chat, cx);
         let entry = self.focus_nav_entry(cx);
         self.record_nav_focus(entry, cx);
-        self.close_user_menu(cx);
         self.close_chat_menu(cx);
         if !from_settings {
             self.focus_composer(cx);
@@ -15173,7 +15177,6 @@ impl Shell {
         }
         let ring = self.render_rail_ring(&theme, cx);
         let voice = self.render_voice_trigger(&theme, cx);
-        let account = self.render_user_menu(&theme, cx);
         let help = self.render_help_menu(&theme, cx);
         let update = self.render_update_rail_button(&theme, cx);
         let bottom: Vec<AnyElement> = app_rail::BOTTOM
@@ -15198,7 +15201,6 @@ impl Shell {
             .child(div().flex_1())
             .child(ring)
             .children(voice)
-            .child(account)
             .child(help)
             .children(update)
             .children(bottom)
@@ -15409,172 +15411,6 @@ impl Shell {
         })
     }
 
-    fn render_user_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let (user_line, menu_identity) = {
-            let state = self.state.read(cx);
-            sidebar_account_identity(state.workspace_scope, self.sync_flow, state.auth_user())
-        };
-        let theme = &theme.for_popup();
-        let open = self.user_menu.is_open();
-        let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow);
-        // The profile pill hugs avatar + name (shrinking so long names fade
-        // out); the gap between it and the settings button is not interactive.
-        let initial: SharedString = user_line
-            .trim()
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_else(|| "?".into())
-            .into();
-        let mut trigger = div()
-            .id("user-menu")
-            .debug_selector(|| "user-menu".into())
-            .role(gpui::Role::Button)
-            .aria_label(format!("Account menu: {user_line}"))
-            .aria_expanded(open)
-            .tab_index(0)
-            .focus_visible(|s| s.border_2().border_color(theme.accent))
-            .relative()
-            .size(px(app_rail::BUTTON))
-            .flex_none()
-            .rounded_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_size(crate::typography::ui_rems(12.0))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(theme.text)
-            .cursor_pointer()
-            .bg(if open {
-                theme.glass_hover().opacity(1.6)
-            } else {
-                motion::hover_blend(
-                    "user-menu-trigger",
-                    theme.glass_hover(),
-                    theme.glass_hover().opacity(1.6),
-                )
-            })
-            .on_hover(motion::hover_listener("user-menu-trigger"))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| this.user_menu.note_trigger_press()),
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                // A press that found the menu open closes it (the card's
-                // mouse-down-out already began the close) — never reopen.
-                if this.user_menu.take_press_was_open() {
-                    this.close_user_menu(cx);
-                } else {
-                    this.user_menu.open(());
-                }
-                cx.notify();
-            }))
-            .when(!open, |el| {
-                el.tooltip(crate::settings::widgets::text_tooltip(user_line.clone()))
-            })
-            .child(initial);
-        if self.user_menu.get().is_some() {
-            let closing = self.user_menu.closing_since();
-
-            let menu = popover::popover_card(theme)
-                .w(px(USER_MENU_WIDTH))
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.close_user_menu(cx);
-                }))
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .px(px(8.0))
-                        .pt(px(6.0))
-                        .pb(px(4.0))
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_muted)
-                        .truncate()
-                        .child(menu_identity),
-                )
-                .when_some(action, |menu, action| {
-                    let row = match action {
-                        AccountMenuAction::EnableSync => {
-                            popover::menu_row(theme, false, "user-menu-enable-sync")
-                                .id("user-menu-enable-sync")
-                                .on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx)))
-                                .child(
-                                    icon(icons::GLOBAL)
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Enable sync"))
-                                .into_any_element()
-                        }
-                        AccountMenuAction::SyncInProgress => {
-                            popover::menu_row(theme, false, "user-menu-sync-progress")
-                                .id("user-menu-sync-progress")
-                                .opacity(0.6)
-                                .child(
-                                    icon(icons::GLOBAL)
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Sync setup in progress"))
-                                .into_any_element()
-                        }
-                        AccountMenuAction::RestartPending => {
-                            popover::menu_row(theme, false, "user-menu-sync-restart")
-                                .id("user-menu-sync-restart")
-                                .on_click(cx.listener(|this, _, _, cx| this.reopen_sync_notice(cx)))
-                                .child(
-                                    icon(icons::RESTART)
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Finish sync setup"))
-                                .into_any_element()
-                        }
-                        AccountMenuAction::SignOut => {
-                            popover::menu_row(theme, false, "user-menu-signout")
-                                .id("user-menu-signout")
-                                .on_click(cx.listener(|this, _, _, cx| this.request_sign_out(cx)))
-                                .child(
-                                    icon(icons::LOGOUT_2)
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Sign out"))
-                                .into_any_element()
-                        }
-                    };
-                    menu.child(row)
-                })
-                // macOS keeps "Check for Updates…" in the app menu under
-                // About; elsewhere there is no app menu, so it lives here.
-                .when(!cfg!(target_os = "macos"), |menu| {
-                    menu.child(
-                        popover::menu_row(theme, false, "user-menu-check-updates")
-                            .id("user-menu-check-updates")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.close_user_menu(cx);
-                                crate::app_update::check_for_updates(cx);
-                            }))
-                            .child(
-                                icon(icons::REFRESH)
-                                    .size(px(16.0))
-                                    .text_color(theme.text_muted),
-                            )
-                            .child(SharedString::from("Check for updates")),
-                    )
-                })
-                .into_any_element();
-            trigger = trigger.child(popover::anchored_menu_right(
-                "user-menu-popover",
-                menu,
-                closing,
-            ));
-        }
-        trigger.into_any_element()
-    }
-
     /// Signing out, as a dialog over the app. Every step of signing in is a
     /// page instead ([`Self::sign_in_slot`]).
     fn render_sync_overlay(
@@ -15655,14 +15491,6 @@ impl Shell {
             self.close_help_menu(cx);
             return true;
         }
-        if self.appshot_welcome && !self.sync_flow.has_visible_overlay() {
-            self.acknowledge_appshot_welcome(cx);
-            return true;
-        }
-        if self.intro_visible() {
-            self.close_intro(cx);
-            return true;
-        }
         if self.cancel_device_rename(cx) {
             return true;
         }
@@ -15671,12 +15499,7 @@ impl Shell {
             || self.delete_space_confirm.is_some()
             || self.chat_menu.get().is_some()
             || self.space_menu.get().is_some()
-            || self.user_menu.get().is_some()
         {
-            return true;
-        }
-        if self.harness_update_expanded {
-            self.set_harness_updates_expanded(false, cx);
             return true;
         }
         if self.chat_rename.is_some() {
@@ -15756,18 +15579,6 @@ impl Shell {
         }
         if event.keystroke.key == "escape" && self.switcher.is_some() {
             self.switcher_close(cx);
-            cx.stop_propagation();
-            return;
-        }
-        if self.intro_visible()
-            && !event.keystroke.modifiers.modified()
-            && let Some(delta) = match event.keystroke.key.as_str() {
-                "left" => Some(-1),
-                "right" => Some(1),
-                _ => None,
-            }
-        {
-            self.page_intro(delta, cx);
             cx.stop_propagation();
             return;
         }
@@ -16289,80 +16100,6 @@ impl Shell {
             overlays.push(self.render_branch_modal(modal, viewport, &theme, cx));
         }
 
-        // Synara's AnnouncementSheet geometry: 420 wide, 20px padding, 64px
-        // hero, fixed 19px title, 32px buttons. It waits behind the sync gate
-        // so a fresh install never stacks it on the sign-in flow.
-        if self.appshot_welcome && !self.sync_flow.has_visible_overlay() {
-            let card =
-                popover::welcome_sheet(&theme, "appshot-welcome-card", "Zeron Appshots are live!")
-                    .child(
-                        div().mb(px(32.0)).h(px(64.0)).flex().items_center().child(
-                            div()
-                                .size(px(64.0))
-                                .rounded(px(16.0))
-                                .border_1()
-                                .border_color(theme.border)
-                                .bg(crate::theme::ink(0.04))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(
-                                    icons::icon(icons::SCREEN_CAPTURE)
-                                        .size(px(32.0))
-                                        .text_color(theme.text),
-                                ),
-                        ),
-                    )
-                    .child(popover::welcome_title(&theme, "Zeron Appshots are live!"))
-                    .child(popover::welcome_body(
-                        &theme,
-                        format!(
-                            "Press both {glyph} keys ({glyph}\u{2009}{glyph}) to snap any app\u{2019}s window into the session you\u{2019}re working in.",
-                            glyph = crate::appshots::ChordModifier::Command.glyph()
-                        ),
-                    ))
-                    .child(
-                        div()
-                            .mt(px(12.0))
-                            .flex()
-                            .flex_row()
-                            .justify_end()
-                            .gap(px(8.0))
-                            .child(
-                                popover::welcome_action(
-                                    &theme,
-                                    "appshot-welcome-dismiss",
-                                    "Not now",
-                                    false,
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.acknowledge_appshot_welcome(cx);
-                                })),
-                            )
-                            .child(
-                                popover::welcome_action(
-                                    &theme,
-                                    "appshot-welcome-confirm",
-                                    "Set up Appshots",
-                                    true,
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.acknowledge_appshot_welcome(cx);
-                                    this.open_settings(SettingsSection::Appshots, cx);
-                                })),
-                            ),
-                    )
-                    .into_any_element();
-            overlays.push(popover::modal_glass(
-                "appshot-welcome-sheet",
-                viewport,
-                card,
-                20.0,
-            ));
-        }
-        if self.intro_visible() {
-            overlays.push(self.render_intro(viewport, &theme, window, cx));
-        }
         if let Some(dialog) = self.render_whats_new_dialog(viewport, &theme, window, cx) {
             overlays.push(dialog);
         }
@@ -16962,19 +16699,10 @@ impl Shell {
         } else {
             dock_frame.selectors()
         } * self.composer_dock.borrow().opacity();
-        if has_selection {
-            self.set_harness_updates_expanded(false, cx);
-        }
-        let harness_update_card = if chip_opacity > 0.001 && (!has_selection || dock_frame.active) {
-            self.render_harness_update_card(window, main_content_width, cx)
-        } else {
-            None
-        };
         let home_grid = self.render_home_grid(
             has_selection && !dock_frame.active,
             has_selection,
             chip_opacity,
-            harness_update_card.is_some(),
             main_content_width,
             window,
             cx,
@@ -17102,36 +16830,6 @@ impl Shell {
                     crate::terminal::dock::above_terminal(grid, terminal_geometry.clone()),
                 ))
             })
-            .when_some(harness_update_card, |column, chip| {
-                // Home notices stay anchored to the window bottom, behind the
-                // dock. Clip paint and hitboxes at the same measured terminal
-                // edge as the transcript, including during open/close motion;
-                // draw order alone would show them through the terminal glass.
-                column.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .child(crate::terminal::dock::above_terminal(
-                            div().size_full().overflow_hidden().child(
-                                div().relative().w_full().h(px(self.viewport_height)).child(
-                                    div()
-                                        .absolute()
-                                        .left_0()
-                                        .right_0()
-                                        .bottom(px(24.0 - 8.0 * (1.0 - chip_opacity)))
-                                        .opacity(chip_opacity)
-                                        .flex()
-                                        .justify_center()
-                                        .child(chip)
-                                        .when(has_selection, |el| {
-                                            el.child(div().absolute().inset_0().occlude())
-                                        }),
-                                ),
-                            ),
-                            terminal_geometry.clone(),
-                        )),
-                )
-            })
             // The glass chrome stack, floating over the transcript's bottom:
             // reserved status strip (h-6, the WorkingIndicator — the composer
             // below never shifts), composer, terminal dock. A paint-time
@@ -17209,7 +16907,6 @@ impl Shell {
         settled_in_chat: bool,
         has_selection: bool,
         opacity: f32,
-        notice_below: bool,
         column_width: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -17227,12 +16924,9 @@ impl Shell {
                     self._home_events = Some(cx.subscribe_in(
                         &home,
                         window,
-                        |this, _, event: &crate::home::HomeEvent, window, cx| match event {
+                        |_, _, event: &crate::home::HomeEvent, window, cx| match event {
                             crate::home::HomeEvent::OpenPullRequest(url) => {
                                 crate::pull_request_detail::open_on_device(url, None, window, cx)
-                            }
-                            crate::home::HomeEvent::OpenSettings => {
-                                this.open_settings(SettingsSection::Home, cx)
                             }
                         },
                     ));
@@ -17252,7 +16946,7 @@ impl Shell {
                 .left_0()
                 .right_0()
                 .top(px(top))
-                .bottom(px(if notice_below { 72.0 } else { 0.0 }))
+                .bottom_0()
                 .opacity(opacity)
                 .child(
                     crate::edge_fade::edge_faded(
@@ -18603,8 +18297,6 @@ impl Shell {
                 body,
                 footer: None,
                 fixed: false,
-                backdrop: None,
-                measure: None,
             },
             window,
         )
@@ -19669,10 +19361,6 @@ impl Render for Shell {
                 {
                     self.debug_dialog = None;
                     self.rail_usage_hover.trigger = true;
-                }
-                if self.debug_dialog.as_deref() == Some("user-menu") {
-                    self.debug_dialog = None;
-                    self.user_menu.open(());
                 }
                 match self.debug_dialog.as_deref() {
                     Some("whats-new") => {
@@ -22559,7 +22247,7 @@ mod exit_regressions {
         );
         assert_eq!(
             after.settings_section,
-            SettingsSection::Notifications.canonical()
+            SettingsSection::Notifications
         );
         assert_eq!(after.sidebar_width, before.sidebar_width + 10.0);
     }
@@ -25341,7 +25029,7 @@ mod settings_modal_regressions {
                 let selected = shell.state.read(cx).selected_chat.clone();
                 for section in SettingsSection::ALL {
                     shell.open_settings(section, cx);
-                    assert_eq!(shell.route, Route::Settings(section.canonical()));
+                    assert_eq!(shell.route, Route::Settings(section));
                     assert_eq!(shell.nav.current().clone(), history);
                     assert_eq!(shell.state.read(cx).selected_chat, selected);
                     shell.toggle_settings(cx);
@@ -25350,8 +25038,6 @@ mod settings_modal_regressions {
                     shell.toggle_settings(cx);
                     assert_eq!(shell.route, Route::Settings(section.reopenable()));
                 }
-                shell.open_settings(SettingsSection::Agents, cx);
-                assert_eq!(shell.route, Route::Settings(SettingsSection::Harnesses));
                 shell.close_settings(cx);
                 assert_eq!(shell.route, Route::Chat);
                 assert_eq!(shell.nav.current().clone(), history);
@@ -25444,11 +25130,6 @@ mod settings_modal_regressions {
             SettingsSection::Shortcuts.reopenable(),
             SettingsSection::Shortcuts
         );
-        // The legacy Accounts alias lands on the page that absorbed it.
-        assert_eq!(
-            SettingsSection::Agents.reopenable(),
-            SettingsSection::Harnesses
-        );
         // Appshots is hidden off-desktop, so it cannot be reopened there.
         assert_eq!(
             SettingsSection::Appshots.reopenable(),
@@ -25491,10 +25172,6 @@ mod settings_modal_regressions {
             settings_open_route("settings", remembered),
             Some(SettingsSection::Notifications)
         );
-        assert_eq!(
-            settings_open_route("settings", SettingsSection::Agents),
-            Some(SettingsSection::Harnesses)
-        );
         for (route, section) in [
             ("settings/devices", SettingsSection::Devices),
             ("settings/cloud", SettingsSection::Cloud),
@@ -25511,7 +25188,7 @@ mod settings_modal_regressions {
             ("settings/device-hub", SettingsSection::DeviceHub),
             ("settings/tools", SettingsSection::Tools),
             ("settings/source-control", SettingsSection::SourceControl),
-            ("settings/home", SettingsSection::Home),
+            ("settings/account", SettingsSection::Account),
             ("settings/archived", SettingsSection::Archived),
         ] {
             assert_eq!(
@@ -25743,6 +25420,11 @@ mod settings_modal_regressions {
         for section in sections {
             take_anchored();
             shell.update(cx, |shell, cx| shell.open_settings(section, cx));
+            if section == SettingsSection::Appearance {
+                cx.update(|window, _| {
+                    settings::search::reveal(SettingId::SmoothScrolling.into(), window)
+                });
+            }
             draw(cx);
             let anchored = take_anchored();
             let unanchored: Vec<_> = section
@@ -25822,9 +25504,7 @@ mod settings_modal_regressions {
                 assert_eq!(shell.route, Route::Settings(SettingsSection::Appearance));
                 shell.close_settings(cx);
 
-                // Legacy aliases are remembered as the page they resolve to.
-                shell.open_settings(SettingsSection::Agents, cx);
-                assert_eq!(shell.settings.settings_section, SettingsSection::Harnesses);
+                shell.open_settings(SettingsSection::Harnesses, cx);
                 shell.close_settings(cx);
                 shell.toggle_settings(cx);
                 assert_eq!(shell.route, Route::Settings(SettingsSection::Harnesses));
@@ -26085,25 +25765,6 @@ mod settings_modal_regressions {
         shell.read_with(cx, |shell, _| {
             assert_eq!(shell.route, Route::Settings(SettingsSection::Devices));
         });
-
-        // So does the account menu opened from the settings footer.
-        shell.update(cx, |shell, cx| {
-            shell.user_menu.open(());
-            cx.notify();
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
-        cx.simulate_keystrokes("escape");
-        shell.read_with(cx, |shell, _| {
-            assert!(!shell.user_menu.is_open());
-            assert_eq!(shell.route, Route::Settings(SettingsSection::Devices));
-        });
-        // The exit animation's reap runs on wall-clock time; stand in for it.
-        shell.update(cx, |shell, cx| {
-            shell.user_menu = popover::Popup::default();
-            cx.notify();
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
 
         // With nothing left open, Escape leaves Settings.
         cx.simulate_keystrokes("escape");

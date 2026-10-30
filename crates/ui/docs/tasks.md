@@ -93,7 +93,7 @@ Once a task has a chat, clicking it opens the task's page. The header shows the 
 
 A mission is a task with a plan: a lead agent plans the work into steps, runs each step on its own thread, checks the results and reports back, and the [Supervisor](zeron://docs/supervisor) can watch it from above. Start one with **Plan first** on the card, or click **Add plan** on a task's page to make its chat the lead in place: the same task becomes the mission, and threads the chat already started show under **Outside the plan**. Until the lead writes its steps, the mission reads **Planning**.
 
-In the list a mission has a progress ring in place of its circle, and its tabs gather into one group in the titlebar. Its page, the plan, the views and the tab group are described in [Mission Control](zeron://docs/mission-control).
+In the list a mission has a progress ring in place of its circle, and its tabs gather into one group in the titlebar. How a plan runs, from the goal to the Supervisor, and its page, views and tab group are described in [Mission Control](zeron://docs/mission-control).
 
 ## Images
 

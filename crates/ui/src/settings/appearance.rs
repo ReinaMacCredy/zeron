@@ -338,6 +338,7 @@ pub struct AppearancePage {
     surface_select: widgets::SelectState,
     background_effect_select: widgets::SelectState,
     reduce_motion_select: widgets::SelectState,
+    advanced_open: bool,
     import_dialog: Option<ImportDialog>,
     background_adjustment_dialog: Option<BackgroundAdjustmentDialog>,
     review_entry: Option<String>,
@@ -400,6 +401,54 @@ impl AppearancePage {
 
     /// "Render math", "Math font" and "Math size": how Markdown sets LaTeX
     /// formulas.
+    fn render_advanced_toggle(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let open = self.advanced_open;
+        let accent = theme.accent;
+        widgets::section_card(theme)
+            .mt(px(32.0))
+            .child(
+                widgets::card_row(theme, true)
+                    .id("appearance-advanced-look")
+                    .debug_selector(|| "appearance-advanced-look".into())
+                    .role(gpui::Role::Button)
+                    .aria_label("Advanced look")
+                    .aria_expanded(open)
+                    .tab_index(0)
+                    .focus_visible(move |s| s.border_2().border_color(accent))
+                    .cursor_pointer()
+                    .flex_nowrap()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.advanced_open = !this.advanced_open;
+                        cx.notify();
+                    }))
+                    .child(
+                        crate::icons::icon(if open {
+                            crate::icons::ALT_ARROW_DOWN
+                        } else {
+                            crate::icons::ALT_ARROW_RIGHT
+                        })
+                        .size(px(14.0))
+                        .flex_none()
+                        .text_color(theme.text_muted),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(widgets::row_title(theme, "Advanced look"))
+                            .child(widgets::meta_line(
+                                theme,
+                                vec![
+                                    div()
+                                        .child("Glass, backgrounds, motion, theme library and math")
+                                        .into_any_element(),
+                                ],
+                            )),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_math_rows(&self, theme: &Theme, cx: &mut Context<Self>) -> [AnyElement; 3] {
         use crate::settings::{MATH_SIZE_DEFAULT, MathFont};
         let settings = crate::settings::current(cx);
@@ -729,6 +778,7 @@ impl AppearancePage {
             surface_select: widgets::SelectState::default(),
             background_effect_select: widgets::SelectState::default(),
             reduce_motion_select: widgets::SelectState::default(),
+            advanced_open: false,
             import_dialog: None,
             background_adjustment_dialog: None,
             review_entry: None,
@@ -4388,7 +4438,7 @@ impl Render for AppearancePage {
                 .into_any_element(),
         );
         let match_wallpaper = crate::settings::current(cx).wallpaper_theme_colors;
-        settings_rows.push(
+        let wallpaper_row = Some(
             widgets::card_row(&theme, false)
                 .child(div().flex_1().min_w_0()
                     .child(widgets::row_title(&theme, "Match wallpaper colors"))
@@ -4761,29 +4811,29 @@ impl Render for AppearancePage {
         .render(&self.reduce_motion_select, cx);
         let pause_in_background = crate::motion::pause_in_background(cx);
         let smooth_scrolling = crate::settings::smooth_scrolling(cx);
+        let reduce_motion_row = widgets::card_row(&theme, false)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(160.0))
+                    .child(widgets::row_title(&theme, "Reduce motion"))
+                    .child(widgets::meta_line(
+                        &theme,
+                        vec![
+                            div()
+                                .child(reduce_motion_helper(
+                                    current_reduce_motion,
+                                    crate::motion::system_reduces_motion(cx),
+                                ))
+                                .into_any_element(),
+                        ],
+                    )),
+            )
+            .child(reduce_motion_control)
+            .search_anchor(SettingId::ReduceMotion)
+            .into_any_element();
         let motion_rows = vec![
             widgets::card_row(&theme, true)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(160.0))
-                        .child(widgets::row_title(&theme, "Reduce motion"))
-                        .child(widgets::meta_line(
-                            &theme,
-                            vec![
-                                div()
-                                    .child(reduce_motion_helper(
-                                        current_reduce_motion,
-                                        crate::motion::system_reduces_motion(cx),
-                                    ))
-                                    .into_any_element(),
-                            ],
-                        )),
-                )
-                .child(reduce_motion_control)
-                .search_anchor(SettingId::ReduceMotion)
-                .into_any_element(),
-            widgets::card_row(&theme, false)
                 .child(
                     div()
                         .flex_1()
@@ -4940,9 +4990,7 @@ impl Render for AppearancePage {
                     .search_anchor(kind.setting()),
             );
         }
-        font_rows = font_rows
-            .child(self.render_transcript_width(&theme, window, cx))
-            .children(self.render_math_rows(&theme, cx));
+        font_rows = font_rows.child(self.render_transcript_width(&theme, window, cx));
         let mut font_section = widgets::section(&theme, "Fonts and layout", font_rows);
         for kind in FontKind::ALL {
             let (requested, effective) = (kind.requested(cx), kind.effective(cx));
@@ -4963,6 +5011,14 @@ impl Render for AppearancePage {
             }
         }
 
+        if !self.advanced_open
+            && crate::settings::search::pending(window)
+                .is_some_and(|target| target.in_advanced_look())
+        {
+            self.advanced_open = true;
+        }
+        let advanced_open = self.advanced_open;
+        let math_rows = advanced_open.then(|| self.render_math_rows(&theme, cx));
         let scrollbar = popover::rail(self, "appearance-page-scrollbar", &theme, cx);
         div()
             .id("appearance-page-host")
@@ -5033,31 +5089,44 @@ impl Render for AppearancePage {
                                 .child(
                                     widgets::section_card(&theme)
                                         .children(color_rows)
+                                        .child(reduce_motion_row)
                                         .mt(px(16.0)),
                                 )
-                                .child(widgets::section(
-                                    &theme,
-                                    "Material and background",
-                                    widgets::section_card(&theme).mt_0().children(settings_rows),
-                                ))
-                                .child(widgets::section(
-                                    &theme,
-                                    "Motion",
-                                    widgets::section_card(&theme).mt_0().children(motion_rows),
-                                ))
-                                .child(
-                                    widgets::section_card(&theme)
-                                        .mt(px(32.0))
-                                        .children(library_rows),
-                                )
                                 .child(font_section)
-                                .when_some(library_warning, |page, warning| {
-                                    page.child(
-                                        div()
-                                            .mt(px(8.0))
-                                            .text_size(crate::typography::ui_rems(11.5))
-                                            .text_color(theme.warning)
-                                            .child(warning),
+                                .child(self.render_advanced_toggle(&theme, cx))
+                                .when(advanced_open, |page| {
+                                    page.child(widgets::section(
+                                        &theme,
+                                        "Material and background",
+                                        widgets::section_card(&theme)
+                                            .mt_0()
+                                            .children(settings_rows)
+                                            .children(wallpaper_row),
+                                    ))
+                                    .child(widgets::section(
+                                        &theme,
+                                        "Motion",
+                                        widgets::section_card(&theme).mt_0().children(motion_rows),
+                                    ))
+                                    .child(widgets::section(
+                                        &theme,
+                                        "Themes and math",
+                                        widgets::section_card(&theme)
+                                            .mt_0()
+                                            .children(library_rows)
+                                            .children(math_rows.into_iter().flatten()),
+                                    ))
+                                    .when_some(
+                                        library_warning,
+                                        |page, warning| {
+                                            page.child(
+                                                div()
+                                                    .mt(px(8.0))
+                                                    .text_size(crate::typography::ui_rems(11.5))
+                                                    .text_color(theme.warning)
+                                                    .child(warning),
+                                            )
+                                        },
                                     )
                                 }),
                         ),
@@ -5534,7 +5603,8 @@ mod tests {
                 cx,
             );
         });
-        let (_page, cx) = cx.add_window_view(|_, cx| AppearancePage::new(cx));
+        let (page, cx) = cx.add_window_view(|_, cx| AppearancePage::new(cx));
+        page.update(cx, |page, _| page.advanced_open = true);
         cx.update(|window, cx| window.draw(cx).clear());
         let trigger = cx
             .debug_bounds("appearance-surface")

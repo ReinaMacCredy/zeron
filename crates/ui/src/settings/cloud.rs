@@ -74,9 +74,6 @@ pub struct CloudPage {
     vault_action_task: Option<Task<()>>,
     github_task: Option<Task<()>>,
     copy_task: Option<Task<()>>,
-    /// Only the GitHub block, for a host with its own heading: first-run
-    /// setup's GitHub step.
-    github_only: bool,
     /// The engine the reads came from. Sign-in's switch replaces it with
     /// the synced runtime, whose answers belong to a different account.
     engine: Option<crate::state::EngineHandle>,
@@ -122,7 +119,6 @@ impl CloudPage {
             vault_action_task: None,
             github_task: None,
             copy_task: None,
-            github_only: false,
             engine: None,
             _observe: observe,
         };
@@ -132,25 +128,6 @@ impl CloudPage {
         }
         page.load_usage(cx);
         page
-    }
-
-    /// Just the GitHub connection (and whatever stops Cloud working),
-    /// where setup asks for it.
-    pub fn new_github_only(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let mut page = Self::new(state, cx);
-        page.github_only = true;
-        page
-    }
-
-    /// GitHub is connected for Cloud: its sessions can clone and push.
-    pub(crate) fn github_connected(&self) -> bool {
-        let (Some(cloud_id), Some(vault)) = (self.cloud_id(), self.vault.ready()) else {
-            return false;
-        };
-        matches!(
-            cloud::provider_link(vault, VaultProvider::Github, &cloud_id),
-            ProviderLink::Connected { .. }
-        )
     }
 
     fn cloud_status(&self) -> Option<&CloudStatus> {
@@ -1002,9 +979,6 @@ impl CloudPage {
             )
             .children(code)
             .children(repositories);
-        if self.github_only {
-            return Some(block.into_any_element());
-        }
         Some(
             widgets::section(
                 theme,
@@ -1338,17 +1312,6 @@ impl Render for CloudPage {
             .filter(|s| s.available)
             .and_then(|_| self.cloud_id());
         let github = self.render_github(cloud_id.as_deref(), &theme, cx);
-        if self.github_only {
-            return div()
-                .flex()
-                .flex_col()
-                .children(status)
-                .children(github)
-                .when_some(self.error.clone(), |el, message| {
-                    el.child(widgets::error_strip(&theme, message))
-                })
-                .into_any_element();
-        }
         let scrollbar = popover::rail(self, "cloud-page-scrollbar", &theme, cx);
         div()
             .id("cloud-page-host")

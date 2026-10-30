@@ -2,7 +2,7 @@ An Appshot is a screenshot of another app's window that goes straight into a Zer
 
 ## Turn it on
 
-Open [Settings > Appshots](zeron://settings/appshots) and switch on **Enable Appshots**. The row's status line tells you what is still missing, and reads "Listening" with your hotkey once everything is ready. At launch Zeron shows a **Zeron Appshots are live!** card until you answer it once: **Set up Appshots** opens this page, **Not now** dismisses it.
+Open [Settings > Appshots](zeron://settings/appshots) and switch on **Enable Appshots**. The row's status line tells you what is still missing, and reads "Listening" with your hotkey once everything is ready.
 
 ![Settings > Appshots](appshots-settings.jpg)
 

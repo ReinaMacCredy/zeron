@@ -641,7 +641,6 @@ impl Shell {
                 cx,
             ),
             TaskCardEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
-            TaskCardEvent::PlanFirst => self.on_plan_first(cx),
             TaskCardEvent::Refused(message) => {
                 self.show_notice(crate::toast::ToastKind::Error, message.clone(), cx);
                 cx.notify();
@@ -664,7 +663,6 @@ impl Shell {
         let key = tree_key(self.state.read(cx), &id);
         self.set_route(Route::TaskCenter, cx);
         self.task_center_task = Some(key);
-        self.close_user_menu(cx);
         self.close_chat_menu(cx);
         cx.notify();
     }

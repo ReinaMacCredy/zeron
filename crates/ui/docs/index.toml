@@ -108,7 +108,6 @@ section = "basics"
 title = "Home widgets"
 icon = "home"
 blurb = "Cards under the new chat composer: running agents, PRs, Git, ports."
-actions = ["settings/home"]
 
 [[article]]
 id = "updates"

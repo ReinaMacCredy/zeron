@@ -33,7 +33,7 @@ Running `zeron` with no command opens the desktop app. One engine serves each ma
 
 `zeron login` needs an interactive terminal. It prints `Sign in to Zeron:` with a link; open it, sign in, then paste the code the browser shows and press Enter. If your account has no workspace yet, it asks you to name one; with several, it lists them and asks you to pick (`Pick a workspace [1-N]:`). When it finishes, it prints `Signed in as <email>` and `Sync is ready.` Start or restart Zeron to open the synced workspace; sessions you already had stay in the local workspace.
 
-`zeron login` and `zeron logout` refuse while an engine is running, because the running engine owns the sign-in. Stop it first (`zeron daemon stop`, or quit the Zeron app), or use the account menu in the app instead. If you are already signed in, `zeron login` says so; run `zeron logout` first to switch accounts.
+`zeron login` and `zeron logout` refuse while an engine is running, because the running engine owns the sign-in. Stop it first (`zeron daemon stop`, or quit the Zeron app), or use Settings > Account in the app instead. If you are already signed in, `zeron login` says so; run `zeron logout` first to switch accounts.
 
 ### Status
 

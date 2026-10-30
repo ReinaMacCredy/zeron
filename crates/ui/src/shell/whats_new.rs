@@ -19,12 +19,12 @@ const FEATURE_IN: MotionSpec = MotionSpec::new(360, motion::EASE_OUT_QUINT);
 const FEATURE_STAGGER_MS: u64 = 80;
 const DIALOG_WIDTH: f32 = 480.0;
 const DIALOG_BODY_MAX: f32 = 520.0;
-const HELP_RELEASES: usize = 3;
 const HELP_MENU_WIDTH: f32 = 264.0;
 const IMPROVEMENT_VISUAL_HEIGHT: f32 = 104.0;
 
 pub(super) struct WhatsNewCard {
     entry: &'static Entry,
+    since: Vec<&'static str>,
     gradient_hero: bool,
     shown: Instant,
 }
@@ -55,10 +55,11 @@ fn anchor_entry() -> Option<&'static Entry> {
 
 pub(super) fn boot_card(settings: &mut UiSettings, cx: &mut App) -> Option<WhatsNewCard> {
     let entries = whats_new::entries();
-    let seen = settings.whats_new_seen_version.as_deref();
+    let seen = settings.whats_new_seen_version.clone();
+    let seen = seen.as_deref();
     let shown = match whats_new::resolve(entries, CURRENT_VERSION, seen) {
-        Resolution::Show(entry) => Some(entry),
-        Resolution::Advance => {
+        Resolution::Show(entry) if settings.onboarding_completed => Some(entry),
+        Resolution::Show(_) | Resolution::Advance => {
             settings.whats_new_seen_version = Some(CURRENT_VERSION.into());
             settings::update(SavePolicy::Debounced, cx, |s| {
                 s.whats_new_seen_version = Some(CURRENT_VERSION.into());
@@ -71,8 +72,17 @@ pub(super) fn boot_card(settings: &mut UiSettings, cx: &mut App) -> Option<Whats
     let gradient_hero = knob.as_deref() == Some("whats-new-card-gradient");
     let forced = gradient_hero || knob.as_deref() == Some("whats-new-card");
     let entry = shown.or_else(|| forced.then(anchor_entry).flatten())?;
+    let since = entries
+        .iter()
+        .filter(|release| {
+            seen.is_none_or(|seen| zeron_update::version_newer(&release.version, seen))
+                && !zeron_update::version_newer(&release.version, CURRENT_VERSION)
+        })
+        .map(|release| release.version.as_str())
+        .collect();
     Some(WhatsNewCard {
         entry,
+        since,
         gradient_hero,
         shown: motion::now(),
     })
@@ -323,6 +333,25 @@ impl Shell {
         cx.notify();
     }
 
+    fn open_whats_new_since(&mut self, cx: &mut Context<Self>) {
+        let Some(card) = self.whats_new_card.as_ref() else {
+            return;
+        };
+        let entry = card.entry;
+        if card.since.len() < 2 {
+            self.open_whats_new(entry, WhatsNewView::Highlights, cx);
+            return;
+        }
+        let expanded = card.since.iter().copied().collect();
+        self.whats_new_dialog = Some(WhatsNewDialog {
+            view: WhatsNewView::Changelog,
+            entry,
+            expanded,
+            shown: motion::now(),
+        });
+        cx.notify();
+    }
+
     pub(super) fn open_whats_new_changelog(&mut self, cx: &mut Context<Self>) {
         if let Some(entry) = whats_new::entries().first() {
             self.open_whats_new(entry, WhatsNewView::Changelog, cx);
@@ -387,77 +416,13 @@ impl Shell {
             return trigger.into_any_element();
         }
         let theme = &theme.for_popup();
-        let releases: Vec<AnyElement> = whats_new::entries()
-            .iter()
-            .take(HELP_RELEASES)
-            .map(|entry| {
-                let id = SharedString::from(format!("help-release-{}", entry.version));
-                let title = entry.features.first().map_or_else(
-                    || format!("Version {}", entry.version),
-                    |feature| feature.title.clone(),
-                );
-                popover::menu_row(theme, false, id.clone())
-                    .id(id)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.close_help_menu(cx);
-                        this.open_whats_new(entry, WhatsNewView::Changelog, cx);
-                    }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(SharedString::from(title)),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(entry.date.as_str())),
-                    )
-                    .into_any_element()
-            })
-            .collect();
+        let agent_updates = self.update_all_plan(false, cx).agent_updates();
         let menu = popover::popover_card(theme)
             .w(px(HELP_MENU_WIDTH))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_help_menu(cx)))
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .child(
-                div()
-                    .px(px(8.0))
-                    .pt(px(6.0))
-                    .pb(px(4.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from("What\u{2019}s new")),
-            )
-            .children(releases)
-            .child(
-                help_row(
-                    theme,
-                    "help-changelog",
-                    icons::LUCIDE_GIFT,
-                    "Full changelog",
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.close_help_menu(cx);
-                    this.open_whats_new_changelog(cx);
-                })),
-            )
-            .child(popover::menu_separator())
-            .child(
-                help_row(
-                    theme,
-                    "help-keybindings",
-                    icons::LUCIDE_KEYBOARD,
-                    "Keybindings",
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.close_help_menu(cx);
-                    this.open_settings(SettingsSection::Shortcuts, cx);
-                })),
-            )
             .child(
                 help_row(theme, "help-docs", icons::LUCIDE_BOOK_OPEN, "Docs").on_click(
                     cx.listener(|this, _, _, cx| {
@@ -467,13 +432,52 @@ impl Shell {
                 ),
             )
             .child(
-                help_row(theme, "help-new-since", icons::TASKS, "New since 0.2.114").on_click(
+                help_row(
+                    theme,
+                    "help-whats-new",
+                    icons::LUCIDE_GIFT,
+                    "What\u{2019}s New",
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.close_help_menu(cx);
+                    this.open_whats_new_highlights(cx);
+                })),
+            )
+            .child(
+                help_row(
+                    theme,
+                    "help-keybindings",
+                    icons::LUCIDE_KEYBOARD,
+                    "Keyboard shortcuts",
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.close_help_menu(cx);
+                    this.open_settings(SettingsSection::Shortcuts, cx);
+                })),
+            )
+            .child(
+                help_row(theme, "help-star", icons::STAR_BOLD, "Star Zeron on GitHub").on_click(
                     cx.listener(|this, _, _, cx| {
                         this.close_help_menu(cx);
-                        this.reopen_intro(super::intros::Deck::Since, cx);
+                        cx.open_url(GITHUB_REPO_URL);
                     }),
                 ),
             )
+            .when(agent_updates > 0, |menu| {
+                menu.child(popover::menu_separator()).child(
+                    help_row(theme, "help-agent-updates", icons::REFRESH, "Agent updates")
+                        .child(
+                            div()
+                                .ml_auto()
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(agent_updates.to_string())),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.close_help_menu(cx);
+                            this.open_settings(SettingsSection::Updates, cx);
+                        })),
+                )
+            })
             .into_any_element();
         trigger
             .child(popover::anchored_menu_right(
@@ -683,9 +687,7 @@ impl Shell {
                 .when(!theme.is_frost(), |el| el.shadow_md())
                 .cursor_pointer()
                 .on_hover(motion::hover_listener("whats-new-card"))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.open_whats_new(entry, WhatsNewView::Highlights, cx);
-                }))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_whats_new_since(cx)))
                 .child(crate::rounded_clip::rounded_clip(
                     CARD_RADIUS - 1.0,
                     div().flex().flex_col().child(hero).child(body),

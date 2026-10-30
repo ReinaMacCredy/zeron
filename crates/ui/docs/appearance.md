@@ -1,8 +1,10 @@
 [Settings > Appearance](zeron://settings/appearance) controls how Zeron looks: light or dark, themes, fonts, glass, and background art.
 
+The page opens on the basics: light or dark, themes, accent, fonts and **Reduce motion**. The look-only controls (**Match wallpaper colors**, glass, inset card, sidebar reveal, background art, animations and scrolling, the theme library, and math) sit under **Advanced look**, folded until you click it. Searching Settings for one of them opens the fold.
+
 ## Color scheme and themes
 
-Pick **System**, **Light**, or **Dark** at the top of the page. **System** follows macOS. The same choice is in the menu bar under **View** (**Appearance: System**, **Appearance: Light**, **Appearance: Dark**), and in the command palette.
+Pick **System**, **Light**, or **Dark** at the top of the page. **System** follows macOS. This is the only place light and dark are set.
 
 ![Theme and accent settings](appearance-themes.jpg)
 

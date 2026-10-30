@@ -3,7 +3,6 @@
 //! sections; tabs narrow them to one kind.
 use super::terminal_tabs::TerminalLaunch;
 use super::*;
-use crate::appearance::AppearanceMode;
 use crate::files::client::{FilesClientError, FilesRequestContext, WorkspaceFilesClient};
 use crate::project_actions::{ProjectActionsStatus, action_icon};
 use zeron_engine::playbooks::Playbook;
@@ -264,7 +263,6 @@ enum Command {
     Supervisor,
     Usage,
     Tasks,
-    Theme(AppearanceMode),
     ArchiveThread,
 }
 
@@ -279,9 +277,6 @@ impl Command {
             Self::Supervisor => "Open Supervisor",
             Self::Usage => "Open usage",
             Self::Tasks => "Tasks",
-            Self::Theme(AppearanceMode::System) => "Switch to system theme",
-            Self::Theme(AppearanceMode::Light) => "Switch to light theme",
-            Self::Theme(AppearanceMode::Dark) => "Switch to dark theme",
             Self::ArchiveThread => "Archive thread",
         }
     }
@@ -296,7 +291,6 @@ impl Command {
             Self::Supervisor => icons::LUCIDE_SHIELD,
             Self::Usage => icons::USAGE_CHART,
             Self::Tasks => icons::TASKS,
-            Self::Theme(mode) => mode.icon(),
             Self::ArchiveThread => icons::ARCHIVE_MINIMALISTIC,
         }
     }
@@ -403,7 +397,7 @@ fn matches_query(query: &str, text: &str) -> bool {
 }
 
 /// `can_archive`: a focused, unarchived chat exists for Archive thread.
-fn commands_for(query: &str, is_dark: bool, can_archive: bool) -> Vec<Command> {
+fn commands_for(query: &str, can_archive: bool) -> Vec<Command> {
     [Command::NewChat]
         .into_iter()
         .chain(TerminalLaunch::ALL.map(Command::NewTerminal))
@@ -414,11 +408,6 @@ fn commands_for(query: &str, is_dark: bool, can_archive: bool) -> Vec<Command> {
             Command::Supervisor,
             Command::Usage,
             Command::Tasks,
-            Command::Theme(if is_dark {
-                AppearanceMode::Light
-            } else {
-                AppearanceMode::Dark
-            }),
         ])
         .chain(can_archive.then_some(Command::ArchiveThread))
         .filter(|command| matches_query(query, command.label()))
@@ -755,7 +744,7 @@ impl Shell {
         let commands = |section| {
             PaletteSection::new(
                 section,
-                commands_for(&query, Theme::of(cx).appearance.is_dark(), can_archive)
+                commands_for(&query, can_archive)
                     .into_iter()
                     .map(RowKind::Command)
                     .chain(
@@ -1038,12 +1027,6 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let RowKind::Command(Command::Theme(mode)) = row.kind {
-            // Keep the palette open so this ordinary action updates to its next state.
-            crate::appearance::set_mode(mode, cx);
-            cx.notify();
-            return;
-        }
         self.close_command_palette(window, cx);
         match row.kind {
             RowKind::Command(Command::NewChat) => self.open_new_session(None, cx),
@@ -1054,7 +1037,6 @@ impl Shell {
             RowKind::Command(Command::Supervisor) => self.open_supervisor(cx),
             RowKind::Command(Command::Usage) => self.open_usage(cx),
             RowKind::Command(Command::Tasks) => self.open_tasks(cx),
-            RowKind::Command(Command::Theme(_)) => unreachable!(),
             RowKind::Command(Command::ArchiveThread) => self.archive_selected_chat(cx),
             RowKind::Chat(id) => self.open_chat(id, cx),
             RowKind::ImportAction { draft, .. } => {
@@ -1110,8 +1092,7 @@ impl Shell {
             Command::NewProject => ShortcutId::NewProject,
             Command::Settings => return Some(crate::settings::badge_combo("mod-,")),
             Command::ArchiveThread => ShortcutId::ArchiveSession,
-            Command::Theme(_)
-            | Command::NewTerminal(_)
+            Command::NewTerminal(_)
             | Command::Inbox
             | Command::Supervisor
             | Command::Usage
@@ -1766,8 +1747,7 @@ pub(super) fn command_key_hint(theme: &Theme, keys: &str, label: &'static str) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::appearance::AppearanceMode;
-    use gpui::{AppContext, TestAppContext};
+        use gpui::{AppContext, TestAppContext};
 
     fn palette_window(cx: &mut TestAppContext) -> (gpui::WindowHandle<Shell>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -2041,9 +2021,9 @@ mod tests {
 
     #[test]
     fn archive_is_offered_only_with_a_focused_chat() {
-        assert!(!commands_for("archive", true, false).contains(&Command::ArchiveThread));
+        assert!(!commands_for("archive", false).contains(&Command::ArchiveThread));
         assert_eq!(
-            commands_for("archive", true, true),
+            commands_for("archive", true),
             vec![Command::ArchiveThread]
         );
     }
@@ -3057,7 +3037,7 @@ mod tests {
     #[test]
     fn action_search_hides_empty_section_and_preserves_order() {
         assert_eq!(
-            commands_for("", true, false),
+            commands_for("", false),
             vec![
                 Command::NewChat,
                 Command::NewTerminal(TerminalLaunch::Shell),
@@ -3068,12 +3048,11 @@ mod tests {
                 Command::Inbox,
                 Command::Supervisor,
                 Command::Usage,
-                Command::Tasks,
-                Command::Theme(AppearanceMode::Light)
+                Command::Tasks
             ]
         );
         assert_eq!(
-            commands_for("new", true, false),
+            commands_for("new", false),
             vec![
                 Command::NewChat,
                 Command::NewTerminal(TerminalLaunch::Shell),
@@ -3083,38 +3062,15 @@ mod tests {
             ]
         );
         assert_eq!(
-            commands_for("codex", true, false),
+            commands_for("codex", false),
             vec![Command::NewTerminal(TerminalLaunch::Codex)]
         );
         assert_eq!(
-            commands_for("settings", true, false),
+            commands_for("settings", false),
             vec![Command::Settings]
         );
-        assert_eq!(
-            commands_for("theme", true, false),
-            vec![Command::Theme(AppearanceMode::Light)]
-        );
-        assert!(commands_for("deployment", true, false).is_empty());
-    }
-
-    #[test]
-    fn theme_action_targets_the_opposite_resolved_appearance() {
-        assert_eq!(
-            commands_for("theme", true, false),
-            vec![Command::Theme(AppearanceMode::Light)]
-        );
-        assert_eq!(
-            commands_for("theme", false, false),
-            vec![Command::Theme(AppearanceMode::Dark)]
-        );
-        assert_eq!(
-            commands_for("light", true, false),
-            vec![Command::Theme(AppearanceMode::Light)]
-        );
-        assert_eq!(
-            commands_for("dark", false, false),
-            vec![Command::Theme(AppearanceMode::Dark)]
-        );
+        assert!(commands_for("theme", false).is_empty());
+        assert!(commands_for("deployment", false).is_empty());
     }
 
     #[test]

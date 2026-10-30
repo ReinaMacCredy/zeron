@@ -348,7 +348,7 @@ impl ApprovalState {
                 secs % 60
             ),
             Self::Sent => "Approved by the Supervisor · no step has started yet".into(),
-            Self::Started => "Approved by the Supervisor · steps already started. To change course, edit the plan on the mission page or message the lead.".into(),
+            Self::Started => "Approved by the Supervisor · steps already started. To change course, edit the plan on the task page or message the lead.".into(),
             Self::TakenBack => "You took this approval back · the plan went back to review".into(),
         }
     }
@@ -360,9 +360,9 @@ impl ApprovalState {
 
 pub const HELD_APPROVAL: &str = "Plan approved · can take back";
 
-pub const START_MISSION: &str = "Start mission";
-pub const MISSION_PAGE: &str = "Mission page";
-pub const OPEN_MISSION_PAGE: &str = "Open mission page";
+pub const START_MISSION: &str = "Start plan";
+pub const MISSION_PAGE: &str = "Task page";
+pub const OPEN_MISSION_PAGE: &str = "Open in Tasks";
 pub const PLAN_FIRST: &str = "Plan first";
 pub const REVIEW_PLAN: &str = "Let me review the plan before it runs";
 pub const REVIEW_PLAN_FIRST: &str = "Review plan first";
@@ -371,17 +371,17 @@ pub const STEPS_ONLY: &str = "Steps only";
 
 pub fn mission_placeholder(from_chat: bool) -> &'static str {
     if from_chat {
-        "Turn this chat into a mission: what should the team build?"
+        "Turn this chat into a plan: what should the team build?"
     } else {
-        "Describe the mission. A lead plans it and runs each step on its own thread."
+        "Describe the goal. A lead plans it and runs each step on its own thread."
     }
 }
 
-pub const CHAT_MISSION_TITLE: &str = "In a chat, Mission Control";
+pub const CHAT_MISSION_TITLE: &str = "In a chat, Plan";
 pub const CHAT_MISSION_DETAIL: &str =
-    "Start mission in an open chat makes it the lead, or starts a new lead that reads it.";
+    "Start plan in an open chat makes it the lead, or starts a new lead that reads it.";
 pub const CHAT_MISSION_LEAD: &str = "This chat leads";
-pub const CHAT_MISSION_NEW: &str = "New mission reads this chat";
+pub const CHAT_MISSION_NEW: &str = "New plan reads this chat";
 
 pub struct IntroPage {
     pub title: &'static str,
@@ -399,18 +399,18 @@ pub const INTRO_PAGES: [IntroPage; 4] = [
     },
     IntroPage {
         title: "Watch every step",
-        body: "Each step runs on its own thread, side by side when steps don\u{2019}t depend on each other. The tree on the lead\u{2019}s thread follows them live, and the mission page adds each step\u{2019}s token count.",
+        body: "Each step runs on its own thread, side by side when steps don\u{2019}t depend on each other. The tree on the lead\u{2019}s thread follows them live, and the task page adds each step\u{2019}s token count.",
     },
     IntroPage {
         title: "A lead and a Supervisor watch",
-        body: "The lead reviews each step\u{2019}s work when it finishes and sends it back if something is missing. The Supervisor gathers what needs you into one sheet per mission, and one Send answers it all.",
+        body: "The lead reviews each step\u{2019}s work when it finishes and sends it back if something is missing. The Supervisor gathers what needs you into one sheet per plan, and one Send answers it all.",
     },
 ];
 
-pub const INTRO_START_TOUCH: &str = "Tap Start mission in the composer, or Plan first on a task\u{2019}s sheet, and describe what you want done. Add up to five chats for the lead to read before it plans.";
+pub const INTRO_START_TOUCH: &str = "Tap Start plan in the composer, or Plan first on a task\u{2019}s sheet, and describe what you want done. Add up to five chats for the lead to read before it plans.";
 pub const INTRO_NEXT: &str = "Next";
 pub const INTRO_DISMISS: &str = "Not now";
-pub const INTRO_TRY: &str = "Try Mission Control";
+pub const INTRO_TRY: &str = "Try a plan";
 
 pub fn intro_due(tasks: &[Task]) -> bool {
     !tasks
@@ -464,16 +464,16 @@ pub fn mission_reads(
 }
 
 pub fn mission_context_capped(max: usize) -> String {
-    format!("A mission reads at most {max} chats, so the later ones were left out")
+    format!("A plan reads at most {max} chats, so the later ones were left out")
 }
 
 pub fn mission_staged_error(images: usize, max: usize, other_file: Option<&str>) -> Option<String> {
     if let Some(name) = other_file {
         return Some(format!(
-            "A mission takes images and pasted text; remove {name}."
+            "A plan takes images and pasted text; remove {name}."
         ));
     }
-    (images > max).then(|| format!("A mission holds up to {max} images."))
+    (images > max).then(|| format!("A plan holds up to {max} images."))
 }
 
 /// Phone pastes are staged files with no mention, and a mission carries only images.
@@ -645,11 +645,11 @@ mod tests {
         assert_eq!(mission_staged_error(12, 12, None), None);
         assert_eq!(
             mission_staged_error(13, 12, None).as_deref(),
-            Some("A mission holds up to 12 images.")
+            Some("A plan holds up to 12 images.")
         );
         assert_eq!(
             mission_staged_error(13, 12, Some("log.zip")).as_deref(),
-            Some("A mission takes images and pasted text; remove log.zip.")
+            Some("A plan takes images and pasted text; remove log.zip.")
         );
     }
 

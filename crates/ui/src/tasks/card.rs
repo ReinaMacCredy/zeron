@@ -64,7 +64,6 @@ pub enum TaskCardEvent {
     },
     OpenChat(String),
     Refused(String),
-    PlanFirst,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -999,9 +998,6 @@ impl TaskCard {
     fn set_plan_first(&mut self, plan_first: bool, cx: &mut Context<Self>) {
         if let Some(open) = self.open.as_mut() {
             open.plan_first = plan_first;
-        }
-        if plan_first {
-            cx.emit(TaskCardEvent::PlanFirst);
         }
         cx.notify();
     }

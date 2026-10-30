@@ -106,7 +106,6 @@ fn main() -> anyhow::Result<()> {
             gpui_base::init(cx);
             let mut settings = settings::UiSettings::default();
             settings.surface = zeron_theme::SurfacePreference::Opaque;
-            settings.github_star_banner_dismissed = true;
             settings::init(settings.clone(), data.clone(), cx);
             let fonts = typography::register_fonts(cx);
             typography::init(

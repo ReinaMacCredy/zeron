@@ -639,7 +639,6 @@ impl Shell {
             || self.discard_working_tree.is_some()
             || self.chat_menu.get().is_some()
             || self.space_menu.get().is_some()
-            || self.user_menu.get().is_some()
             || self.spaces_menu.get().is_some()
             || self.new_tab_menu.get().is_some()
             || !self.pending_file_closes.is_empty()
@@ -1754,7 +1753,6 @@ impl Shell {
             }
             None => groups.push(task_id.to_owned()),
         }
-        self.mark_onboarded(super::intros::MISSION_TABS, cx);
         self.schedule_save(cx);
         cx.notify();
     }

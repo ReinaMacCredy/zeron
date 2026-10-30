@@ -30,7 +30,7 @@ Click **Customize** at the right of the grid header to switch widgets on or off,
 - **By Zeron** (the default) lists servers running inside your Zeron projects and worktrees.
 - **All ports** adds every other listening process on this Mac.
 
-**All Home settings** at the bottom opens [Settings > Home](zeron://settings/home), which has the same switches under **Widgets** and the same port choice under **Running services** (**Show ports**). Changes save right away.
+Changes save right away.
 
 All eight widgets are on by default. Their order is fixed. You can hide a widget, but you cannot move it.
 

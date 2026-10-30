@@ -1650,9 +1650,6 @@ pub struct UiSettings {
     /// Reveal the collapsed sidebar when hovering over the left window edge.
     pub sidebar_hover_enabled: bool,
     pub inset_shell: bool,
-    /// Legacy: the grouped-by-project toggle predates spaces (which group by
-    /// folder inherently). Kept for file compatibility; no longer read.
-    pub sidebar_grouped: bool,
     /// How active sessions are partitioned in the sidebar.
     pub sidebar_organization: SidebarOrganization,
     /// Timestamp used to order active sessions (newest first).
@@ -1672,9 +1669,6 @@ pub struct UiSettings {
     /// The Archived accordion below the active session list.
     pub sidebar_show_archived: bool,
     pub sidebar_collapsed_leads: Vec<String>,
-    /// The sidebar's "Star on GitHub" banner was dismissed (its close button
-    /// or following the link). Device-local; never shown again once set.
-    pub github_star_banner_dismissed: bool,
     #[serde(default = "whats_new_seen_before_tracking")]
     pub whats_new_seen_version: Option<String>,
     /// The last selected space — restored on boot when the row still exists;
@@ -1706,14 +1700,6 @@ pub struct UiSettings {
     /// Device-local pins for local profiles; synced profiles use registry pins.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sidebar_pinned_session_ids_by_profile: HashMap<String, Vec<String>>,
-    /// Legacy: per-space tab order, from when tabs were the selected space's
-    /// non-archived sessions. Kept for file compatibility; no longer read.
-    #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub tab_order: std::collections::HashMap<String, Vec<String>>,
-    /// Legacy: manual sidebar space order, from when spaces were a sidebar
-    /// list. Kept for file compatibility; no longer read.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub space_order: Vec<String>,
     /// Master switch for session notification chimes. `ZERON_DISABLE_SOUND`
     /// overrides every per-event preference below.
     pub sound_enabled: bool,
@@ -1736,13 +1722,7 @@ pub struct UiSettings {
     pub right_pane_width: f32,
     /// Split view: the LEFT pane's share of the conversation column.
     pub split_ratio: f32,
-    /// Legacy: panel *open* flags are session-scoped in-memory state now
-    /// (`shell::SessionPanels`, zeron `sessionPanels` parity). Kept for file
-    /// compatibility; no longer read or written by the shell.
-    pub right_pane_open: bool,
     pub terminal_height: f32,
-    /// Legacy — see [`Self::right_pane_open`].
-    pub terminal_open: bool,
     /// Customizable shortcut combos (feature-inventory §1.4).
     pub keymap: KeymapConfig,
     /// macOS viewer-side Appshot capture. Device-local because the shortcut
@@ -1753,14 +1733,6 @@ pub struct UiSettings {
     pub appshot_sound_enabled: bool,
     #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), serde(skip))]
     pub appshot_destination: crate::appshots::AppshotDestination,
-    /// The one-time Appshots introduction sheet was dismissed or followed.
-    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), serde(skip))]
-    pub appshot_welcome_acknowledged: bool,
-    pub mission_intro_acknowledged: bool,
-    /// Older files load this empty so upgraders see what is new; a fresh
-    /// install starts with every release intro marked.
-    #[serde(default)]
-    pub onboarding_seen: Vec<String>,
     pub computer_getting_started_acknowledged: bool,
     pub computer_effort_hint_dismissed: bool,
     /// Whether bare Escape stops the active agent after contextual consumers
@@ -1902,8 +1874,6 @@ pub struct UiSettings {
 }
 
 // A file written before the field existed is an upgrade, not a fresh install.
-pub const SINCE_INTRO_ID: &str = "since-0.2.114";
-
 fn whats_new_seen_before_tracking() -> Option<String> {
     Some("0.0.0".into())
 }
@@ -1918,7 +1888,6 @@ impl Default for UiSettings {
             sidebar_collapsed: false,
             sidebar_hover_enabled: true,
             inset_shell: true,
-            sidebar_grouped: false,
             sidebar_organization: SidebarOrganization::InOneList,
             sidebar_sort: SidebarSort::LastUpdated,
             sidebar_active_first: false,
@@ -1933,7 +1902,6 @@ impl Default for UiSettings {
             sidebar_show_project_filter: true,
             sidebar_show_archived: true,
             sidebar_collapsed_leads: Vec::new(),
-            github_star_banner_dismissed: false,
             whats_new_seen_version: None,
             last_space_id: None,
             last_project_action_by_space_id: std::collections::HashMap::new(),
@@ -1943,8 +1911,6 @@ impl Default for UiSettings {
             space_filter: None,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
             sidebar_sections_by_profile: HashMap::new(),
-            tab_order: std::collections::HashMap::new(),
-            space_order: Vec::new(),
             sound_enabled: true,
             sound_completion_enabled: true,
             sound_input_enabled: true,
@@ -1955,9 +1921,7 @@ impl Default for UiSettings {
             auto_update: false,
             right_pane_width: RIGHT_PANE_DEFAULT,
             split_ratio: SPLIT_RATIO_DEFAULT,
-            right_pane_open: false,
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
-            terminal_open: false,
             keymap: KeymapConfig::default(),
             escape_stops_active_agent: false,
             settings_section: crate::shell::SettingsSection::default(),
@@ -1977,9 +1941,6 @@ impl Default for UiSettings {
             appshots_enabled: false,
             appshot_sound_enabled: true,
             appshot_destination: crate::appshots::AppshotDestination::Automatic,
-            appshot_welcome_acknowledged: false,
-            mission_intro_acknowledged: false,
-            onboarding_seen: vec![SINCE_INTRO_ID.into()],
             computer_getting_started_acknowledged: false,
             computer_effort_hint_dismissed: false,
             appearance: crate::appearance::AppearanceMode::default(),
@@ -2837,7 +2798,6 @@ impl UiSettings {
             sidebar_collapsed,
             sidebar_hover_enabled,
             inset_shell,
-            sidebar_grouped,
             sidebar_organization,
             sidebar_sort,
             sidebar_active_first,
@@ -2851,7 +2811,6 @@ impl UiSettings {
             sidebar_show_project_filter,
             sidebar_show_archived,
             sidebar_collapsed_leads,
-            github_star_banner_dismissed,
             whats_new_seen_version,
             last_space_id,
             last_project_action_by_space_id,
@@ -2859,8 +2818,6 @@ impl UiSettings {
             space_filter,
             sidebar_sections_by_profile,
             sidebar_pinned_session_ids_by_profile,
-            tab_order,
-            space_order,
             sound_enabled,
             sound_completion_enabled,
             sound_input_enabled,
@@ -2870,9 +2827,7 @@ impl UiSettings {
             agent_update_notifications,
             auto_update,
             right_pane_width,
-            right_pane_open,
             terminal_height,
-            terminal_open,
             keymap,
             appshots_enabled,
             appshot_sound_enabled,
@@ -2933,9 +2888,6 @@ impl UiSettings {
             open_tabs_stable,
             collapsed_tab_groups,
             split_ratio,
-            appshot_welcome_acknowledged,
-            mission_intro_acknowledged,
-            onboarding_seen,
             computer_getting_started_acknowledged,
             computer_effort_hint_dismissed,
             html_open_app,
@@ -3431,7 +3383,6 @@ mod tests {
             legacy,
             UiSettings {
                 whats_new_seen_version: Some("0.0.0".into()),
-                onboarding_seen: Vec::new(),
                 ..UiSettings::default()
             }
         );
@@ -3811,13 +3762,8 @@ mod tests {
             assert_eq!(loaded.settings_section, SettingsSection::General, "{raw}");
             assert_eq!(loaded.sidebar_width, 300.0, "{raw}");
         }
-        // The legacy Accounts alias still reads, and reopens as Providers.
         let alias: UiSettings = serde_json::from_str(r#"{"settingsSection":"agents"}"#).unwrap();
-        assert_eq!(alias.settings_section, SettingsSection::Agents);
-        assert_eq!(
-            alias.settings_section.reopenable(),
-            SettingsSection::Harnesses
-        );
+        assert_eq!(alias.settings_section, SettingsSection::Harnesses);
     }
 
     #[test]
@@ -4395,13 +4341,8 @@ mod tests {
                 .as_deref(),
             Some("0.0.0")
         );
-        assert!(UiSettings::load(dir.path()).onboarding_seen.is_empty());
         UiSettings::default().save(dir.path()).unwrap();
         assert_eq!(UiSettings::load(dir.path()).whats_new_seen_version, None);
-        assert_eq!(
-            UiSettings::load(dir.path()).onboarding_seen,
-            vec![SINCE_INTRO_ID.to_owned()]
-        );
     }
 
     #[test]
@@ -4433,7 +4374,6 @@ mod tests {
             sidebar_collapsed: true,
             sidebar_hover_enabled: false,
             inset_shell: false,
-            sidebar_grouped: true,
             sidebar_organization: SidebarOrganization::ByDevice,
             sidebar_sort: SidebarSort::Created,
             sidebar_active_first: true,
@@ -4447,7 +4387,6 @@ mod tests {
             sidebar_show_project_filter: false,
             sidebar_show_archived: false,
             sidebar_collapsed_leads: vec!["lead-1".into()],
-            github_star_banner_dismissed: true,
             whats_new_seen_version: Some("0.2.112".into()),
             last_space_id: Some("space-1".into()),
             last_project_action_by_space_id: std::collections::HashMap::from([(
@@ -4469,11 +4408,6 @@ mod tests {
                     vec!["synced-1".to_string()],
                 ),
             ]),
-            tab_order: std::collections::HashMap::from([(
-                "space-1".to_string(),
-                vec!["b".to_string(), "a".to_string()],
-            )]),
-            space_order: vec!["space-2".to_string(), "space-1".to_string()],
             sound_enabled: false,
             sound_completion_enabled: false,
             sound_input_enabled: true,
@@ -4484,9 +4418,7 @@ mod tests {
             auto_update: true,
             right_pane_width: 700.0,
             split_ratio: 0.35,
-            right_pane_open: true,
             terminal_height: 320.0,
-            terminal_open: true,
             keymap: KeymapConfig {
                 toggle_sidebar: "mod-shift-s".into(),
                 ..KeymapConfig::default()
@@ -4516,9 +4448,6 @@ mod tests {
             } else {
                 crate::appshots::AppshotDestination::Automatic
             },
-            appshot_welcome_acknowledged: cfg!(any(target_os = "macos", target_os = "linux")),
-            mission_intro_acknowledged: true,
-            onboarding_seen: vec!["tasks-home".into()],
             computer_getting_started_acknowledged: true,
             computer_effort_hint_dismissed: true,
             appearance: crate::appearance::AppearanceMode::Light,
@@ -5426,7 +5355,7 @@ mod tests {
         assert_eq!(d.sidebar_width, 256.0);
         assert_eq!(d.right_pane_width, 520.0);
         assert_eq!(d.terminal_height, 280.0);
-        assert!(!d.sidebar_collapsed && !d.right_pane_open && !d.terminal_open);
+        assert!(!d.sidebar_collapsed);
         assert!(!d.escape_stops_active_agent);
     }
 
@@ -5687,10 +5616,14 @@ mod tests {
     fn keymap_survives_old_settings_files() {
         // Files written before the keymap existed load with defaults.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(UiSettings::path(dir.path()), r#"{"sidebarWidth": 300}"#).unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"sidebarWidth": 300, "sidebarGrouped": true, "tabOrder": {"s": ["a"]}, "spaceOrder": ["s"], "rightPaneOpen": true, "terminalOpen": true, "githubStarBannerDismissed": true, "appshotWelcomeAcknowledged": true, "missionIntroAcknowledged": true, "onboardingSeen": ["tasks-home"]}"#,
+        )
+        .unwrap();
         let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.sidebar_width, 300.0);
         assert_eq!(loaded.keymap, KeymapConfig::default());
-        assert!(!loaded.sidebar_grouped);
         assert!(!loaded.escape_stops_active_agent);
     }
 

@@ -2,7 +2,7 @@ Zeron can run your chats on more than one machine. Each project belongs to one d
 
 ## Connect your devices
 
-Out of the box Zeron uses a local workspace on this device only. To see your other machines, click your account button in the lower part of the left rail and choose **Enable sync**. Your browser opens to sign in, and an **Enable sync** dialog waits for you; **Open browser again** reopens the page, and **Cancel** drops the half-finished sign-in and keeps you in the local workspace.
+Out of the box Zeron uses a local workspace on this device only. To see your other machines, open [Settings > Account](zeron://settings/account) and click **Enable sync**. Your browser opens to sign in, and an **Enable sync** dialog waits for you; **Open browser again** reopens the page, and **Cancel** drops the half-finished sign-in and keeps you in the local workspace.
 
 If your account has no workspace yet, Zeron asks you to **Create your workspace**: type a name and click **Create**. If you already belong to workspaces, pick one under **Or continue in a workspace you belong to**.
 
@@ -11,9 +11,9 @@ Once you are signed in, a **Sync is ready** dialog offers the switch:
 - **Bring my work** moves this device's sessions and projects into the synced workspace.
 - **Start fresh** opens the synced workspace without them. They stay on this device.
 - **Switch now** appears instead of those two when this device has nothing to bring.
-- **Later** closes the dialog. Choose **Finish sync setup** in the account menu to come back to it.
+- **Later** closes the dialog. Click **Finish sync setup** in Settings > Account to come back to it.
 
-Zeron switches in place, without a restart. With **Bring my work**, **Bringing your work over** shows each session as it is copied, then **You're all set** says how many moved; click **Continue**. If the copy stops, **Import didn't finish** keeps what was already copied: **Retry import** copies only what is missing, and **Later** leaves it for **Finish sync setup** in the account menu.
+Zeron switches in place, without a restart. With **Bring my work**, **Bringing your work over** shows each session as it is copied, then **You're all set** says how many moved; click **Continue**. If the copy stops, **Import didn't finish** keeps what was already copied: **Retry import** copies only what is missing, and **Later** leaves it for **Finish sync setup** in Settings > Account.
 
 If the switch cannot finish in place, **Sync needs a restart** asks you to quit and reopen Zeron (**Quit Zeron**). When the app is connected to a background service, the button reads **Stop daemon and quit**. Sessions that stayed local remain on this device and are not uploaded.
 
@@ -21,7 +21,7 @@ Sign in the same way on each machine you want to connect. On a server without a 
 
 ### Signing out
 
-With sync on, the account menu shows **Sign out**. **Sign out?** explains that Zeron removes your credentials, closes the synced workspace, and continues in local mode. Click **Sign out** to confirm.
+With sync on, Settings > Account shows **Sign out**. **Sign out?** explains that Zeron removes your credentials, closes the synced workspace, and continues in local mode. Click **Sign out** to confirm.
 
 ### Connection status
 

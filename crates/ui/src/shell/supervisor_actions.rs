@@ -37,7 +37,6 @@ impl Shell {
 
     pub(super) fn enter_supervisor_route(&mut self, cx: &mut Context<Self>) {
         self.set_route(Route::Supervisor, cx);
-        self.close_user_menu(cx);
         self.close_chat_menu(cx);
         if let Some((page, _)) = &self.supervisor.page {
             page.update(cx, |page, cx| page.entered(cx));
@@ -142,9 +141,6 @@ impl Shell {
             SupervisorEvent::OpenChat(chat_id) => self.open_chat(chat_id.clone(), cx),
             SupervisorEvent::WatchDoc(doc) => self.set_supervisor_doc(doc.clone(), cx),
             SupervisorEvent::Discuss(text) => self.discuss_with_supervisor(text.clone(), cx),
-            SupervisorEvent::ConversationOpened => {
-                self.mark_onboarded(super::intros::SUPERVISOR_CONVERSATION, cx)
-            }
         }
     }
 

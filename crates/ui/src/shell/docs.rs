@@ -37,7 +37,6 @@ impl Shell {
     ) {
         self.set_route(Route::Docs, cx);
         self.docs_article = article;
-        self.close_user_menu(cx);
         self.close_chat_menu(cx);
         cx.notify();
     }

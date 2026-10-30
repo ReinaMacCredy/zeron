@@ -160,14 +160,6 @@ pub const IMAGES: &[(&str, &[u8])] = &[
         include_bytes!("../../ui/assets/whats_new/updates-whats-new-card.jpg"),
     ),
     (
-        "updates-agent-card.jpg",
-        include_bytes!("../../ui/assets/whats_new/updates-agent-card.jpg"),
-    ),
-    (
-        "updates-new-since.jpg",
-        include_bytes!("../../ui/assets/whats_new/updates-new-since.jpg"),
-    ),
-    (
         "providers-add.jpg",
         include_bytes!("../../ui/assets/whats_new/providers-add.jpg"),
     ),

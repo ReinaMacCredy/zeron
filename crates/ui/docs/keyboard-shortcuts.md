@@ -73,13 +73,12 @@ On Windows and Linux, Home and End move to the line's start or end, and Ctrl tak
 
 ## The menu bar
 
-On macOS the menu bar has four menus:
+On macOS the menu bar has three menus:
 
 | Menu | Items |
 | --- | --- |
 | **Zeron** | **About Zeron**, **Check for Updates…**, **What’s New…**, **Settings** (Cmd+,), **Services**, **Hide Zeron** (Cmd+H), **Hide Others** (Option+Cmd+H), **Show All**, **Quit Zeron** (Cmd+Q) |
 | **Edit** | **Undo**, **Redo**, **Cut**, **Copy**, **Paste**, **Select All** |
-| **View** | **Appearance: System**, **Appearance: Light**, **Appearance: Dark** |
 | **Window** | **Minimize** (Cmd+M), **Zoom**, **Close Window** (Cmd+W), then your open windows |
 
-On Windows and Linux there is no **Window** menu, and **Check for updates** is in the account menu in the app rail. See [Updates and what's new](zeron://docs/updates).
+On Windows and Linux there is no **Window** menu, and **Check for updates** is in [Settings > Devices & updates > Updates](zeron://settings/updates). See [Updates and what's new](zeron://docs/updates).

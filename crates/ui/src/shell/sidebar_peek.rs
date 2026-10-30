@@ -79,7 +79,6 @@ impl Shell {
     fn sidebar_peek_menu_open(&self) -> bool {
         self.spaces_menu.get().is_some()
             || self.sidebar_view_menu.get().is_some()
-            || self.user_menu.get().is_some()
             || self.chat_menu.get().is_some()
             || self.space_menu.get().is_some()
     }
@@ -492,13 +491,17 @@ mod tests {
         );
         advance(cx, CLOSE_DELAY * 2);
         shell.read_with(cx, |shell, _| assert!(shell.sidebar_peek.open));
-        shell.update(cx, |shell, _| shell.user_menu.open(()));
+        shell.update(cx, |shell, _| {
+            shell
+                .space_menu
+                .open(("space".into(), gpui::point(px(40.0), px(150.0))))
+        });
         cx.simulate_mouse_move(chat, None, gpui::Modifiers::default());
         advance(cx, CLOSE_DELAY * 2);
         shell.read_with(cx, |shell, _| assert!(shell.sidebar_peek.open));
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.user_menu = Default::default();
+                shell.space_menu = Default::default();
                 shell.reconcile_sidebar_peek(window, cx);
             })
         });

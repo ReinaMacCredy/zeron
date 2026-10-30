@@ -6683,7 +6683,6 @@ impl Shell {
             .text_color(theme.text_muted.opacity(0.6))
             .whitespace_nowrap()
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.mark_onboarded(super::intros::SIDEBAR_MISSION, cx);
                 this.open_task_center(task_id.clone(), cx);
             }))
             .child(label)

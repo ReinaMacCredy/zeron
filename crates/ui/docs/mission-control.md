@@ -1,6 +1,11 @@
 Mission Control follows every chat that started other agents, and every mission. A chat that hands work to other threads becomes the root of a tree: its children, their children, and the sub-agents they run. A mission is the same tree with a plan: a lead agent plans the work into steps, runs each step on its own thread, checks the results and reports back. You can add a plan to any chat at any time, read and change it, approve it before anything runs, and watch every thread live. A mission is a task on your [Tasks](zeron://docs/tasks) list, so it shows there with the rest of your work.
 
-Mission Control introduces itself once, in a four-page sheet that appears the first time you turn on **Plan first** (or press Shift+Tab in the composer), unless you have already started a mission: **Start with a goal**, **Approve the plan**, **Watch every step**, and **A lead and a Supervisor watch**. **Try Mission Control** on its last page opens New chat in Mission Control mode.
+## How plans work
+
+1. **Start with a goal.** Press Shift+Tab in the composer, or turn on **Plan first** on a task's card, and describe what you want done. Add up to five chats for the lead to read before it plans.
+2. **Approve the plan.** A lead agent turns your goal into steps you can edit, reorder and add images to. By default nothing runs until you approve it.
+3. **Watch every step.** Each step runs on its own thread, side by side when steps don't depend on each other. The tree on the lead's thread follows them live, and the task page adds each step's token count.
+4. **A lead and a Supervisor watch.** The lead reviews each step's work when it finishes and sends it back if something is missing. The Supervisor gathers what needs you into one sheet per plan, and one Send answers it all.
 
 ## Find missions and trees
 
