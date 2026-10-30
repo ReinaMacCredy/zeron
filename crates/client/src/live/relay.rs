@@ -44,6 +44,58 @@ pub(crate) fn deadline(method: &str) -> Duration {
     }
 }
 
+/// Waits before asking a failed chunk again. A host whose relay socket stalls
+/// is only replaced after its 45 s write lease, past one 30 s call deadline.
+const READ_RETRY_BACKOFF: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
+
+async fn read_chunks<F, Fut>(mut call: F) -> Result<Vec<u8>>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: std::future::Future<Output = Result<Value>>,
+{
+    let mut out = Vec::new();
+    let mut offset: u64 = 0;
+    let mut failures = 0;
+    for _ in 0..1000 {
+        let reply = match call(offset).await {
+            Ok(reply) => reply,
+            Err(ClientError::HostUnavailable(_)) if failures < READ_RETRY_BACKOFF.len() => {
+                tokio::time::sleep(READ_RETRY_BACKOFF[failures]).await;
+                failures += 1;
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
+        failures = 0;
+        let data = reply
+            .get("data")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        out.extend(
+            b64::decode(data)
+                .ok_or_else(|| ClientError::HostError("bad attachment chunk".into()))?,
+        );
+        if reply.get("done").and_then(Value::as_bool).unwrap_or(true) {
+            return Ok(out);
+        }
+        let next = reply
+            .get("nextOffset")
+            .and_then(Value::as_u64)
+            .unwrap_or(offset);
+        if next <= offset {
+            return Err(ClientError::HostError(
+                "attachment read made no progress".into(),
+            ));
+        }
+        offset = next;
+    }
+    Err(ClientError::HostError("attachment too large".into()))
+}
+
 fn map_rpc(device_id: &str, method: &str, err: RpcError) -> ClientError {
     match err {
         RpcError::UnknownMethod(m) => ClientError::Unsupported(format!("{m} on {device_id}")),
@@ -309,39 +361,14 @@ impl Relay {
 
     /// `ReadAttachmentChunk` until done.
     pub(crate) async fn read_attachment(&self, device_id: &str, path: &str) -> Result<Vec<u8>> {
-        let mut out = Vec::new();
-        let mut offset: u64 = 0;
-        for _ in 0..1000 {
-            let reply = self
-                .call(
-                    device_id,
-                    methods::READ_ATTACHMENT_CHUNK,
-                    json!({ "path": path, "offset": offset }),
-                )
-                .await?;
-            let data = reply
-                .get("data")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            out.extend(
-                b64::decode(data)
-                    .ok_or_else(|| ClientError::HostError("bad attachment chunk".into()))?,
-            );
-            if reply.get("done").and_then(Value::as_bool).unwrap_or(true) {
-                return Ok(out);
-            }
-            let next = reply
-                .get("nextOffset")
-                .and_then(Value::as_u64)
-                .unwrap_or(offset);
-            if next <= offset {
-                return Err(ClientError::HostError(
-                    "attachment read made no progress".into(),
-                ));
-            }
-            offset = next;
-        }
-        Err(ClientError::HostError("attachment too large".into()))
+        read_chunks(|offset| {
+            self.call(
+                device_id,
+                methods::READ_ATTACHMENT_CHUNK,
+                json!({ "path": path, "offset": offset }),
+            )
+        })
+        .await
     }
 
     pub(crate) fn clear_unsupported(&self) {
@@ -678,4 +705,40 @@ fn follow(
             backoff = (backoff * 2).min(Duration::from_secs(5));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_chunk_resumes_at_its_offset() {
+        let page: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
+        let mut drops = 3;
+        let mut asked = Vec::new();
+        let read = read_chunks(|offset| {
+            asked.push(offset);
+            let reply = if offset == 100 && drops > 0 {
+                drops -= 1;
+                Err(ClientError::HostUnavailable("timed out".into()))
+            } else {
+                let start = offset as usize;
+                let end = (start + 100).min(page.len());
+                Ok(json!({ "data": b64::encode(&page[start..end]), "nextOffset": end, "done": end == page.len() }))
+            };
+            std::future::ready(reply)
+        })
+        .await;
+        assert_eq!(read.unwrap(), page);
+        assert_eq!(asked, [0, 100, 100, 100, 100, 200]);
+
+        let mut calls = 0;
+        let read = read_chunks(|_| {
+            calls += 1;
+            std::future::ready(Err(ClientError::HostUnavailable("asleep".into())))
+        })
+        .await;
+        assert!(matches!(read, Err(ClientError::HostUnavailable(_))));
+        assert_eq!(calls, 1 + READ_RETRY_BACKOFF.len());
+    }
 }
