@@ -1985,7 +1985,7 @@ impl Shell {
                     .child(
                         div()
                             .text_color(theme.text_muted)
-                            .child(zeron_proto::mission::MISSION_PAGE),
+                            .child(crate::tasks::TASK_PAGE),
                     ),
             );
         for id in ids {

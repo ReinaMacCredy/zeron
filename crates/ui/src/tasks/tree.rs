@@ -534,7 +534,7 @@ pub(crate) fn kind_badge(mission: bool, theme: &Theme) -> AnyElement {
     let (mark, label, fg, bg) = if mission {
         (
             icons::MISSION_CONTROL,
-            "Mission",
+            "Plan",
             motion::mix(theme.accent, theme.text, 0.2),
             theme.accent.opacity(0.14),
         )

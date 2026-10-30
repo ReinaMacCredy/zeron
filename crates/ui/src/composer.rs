@@ -100,28 +100,27 @@ const SIDECHAT_TAB_RADIUS: f32 = 10.0;
 const HERO_HEADLINE_LINE: f32 = 38.0;
 const HERO_HEADLINE_GAP: f32 = 18.0;
 const HERO_SUBTITLE_LINE: f32 = 20.0;
-const MISSION_BORDER: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE);
-const MISSION_PLACEHOLDER: motion::MotionSpec = motion::MotionSpec::new(220, motion::EASE);
-const MISSION_EXTRAS: motion::MotionSpec =
-    motion::MotionSpec::new(280, motion::EASE).with_delay(60);
-const MISSION_SEND: motion::MotionSpec = motion::MotionSpec::new(280, motion::EASE_BOUNCE);
-const START_MISSION_LABEL: &str = zeron_proto::mission::START_MISSION;
+const PLAN_BORDER: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE);
+const PLAN_PLACEHOLDER: motion::MotionSpec = motion::MotionSpec::new(220, motion::EASE);
+const PLAN_SEND: motion::MotionSpec = motion::MotionSpec::new(280, motion::EASE_BOUNCE);
+const START_PLAN_LABEL: &str = "Start plan";
+const CHIP_LABEL_MIN_WIDTH: f32 = 720.0;
+const PLAN_PLACEHOLDER_TEXT: &str =
+    "Describe the goal. The agent writes a plan and waits for your OK.";
 
-struct MissionMotion {
+struct PlanMotion {
     border: motion::Tween,
     placeholder: motion::Tween,
-    extras: motion::Tween,
     send: motion::Tween,
     placeholder_from: SharedString,
 }
 
-impl MissionMotion {
+impl PlanMotion {
     fn at(on: bool, now: Instant) -> Self {
         let value = if on { 1.0 } else { 0.0 };
         Self {
             border: motion::Tween::at(value, now),
             placeholder: motion::Tween::at(value, now),
-            extras: motion::Tween::at(value, now),
             send: motion::Tween::at(value, now),
             placeholder_from: SharedString::default(),
         }
@@ -131,25 +130,17 @@ impl MissionMotion {
         self.placeholder.target() > 0.5
     }
 
-    fn light(&mut self, lit: bool, reduced: bool, now: Instant) {
-        let to = if lit { 1.0 } else { 0.0 };
-        if self.border.target() != to {
-            self.border.retarget(to, MISSION_BORDER, reduced, now);
-        }
-    }
-
     fn retarget(&mut self, on: bool, placeholder_from: SharedString, reduced: bool, now: Instant) {
         let to = if on { 1.0 } else { 0.0 };
-        self.border.retarget(to, MISSION_BORDER, reduced, now);
+        self.border.retarget(to, PLAN_BORDER, reduced, now);
         self.placeholder
-            .retarget(to, MISSION_PLACEHOLDER, reduced, now);
-        self.extras.retarget(to, MISSION_EXTRAS, reduced, now);
-        self.send.retarget(to, MISSION_SEND, reduced, now);
+            .retarget(to, PLAN_PLACEHOLDER, reduced, now);
+        self.send.retarget(to, PLAN_SEND, reduced, now);
         self.placeholder_from = placeholder_from;
     }
 
     fn settled_at(&self, now: Instant) -> bool {
-        [self.border, self.placeholder, self.extras, self.send]
+        [self.border, self.placeholder, self.send]
             .iter()
             .all(|tween| tween.settled_at(now))
     }
@@ -6474,70 +6465,8 @@ pub enum ComposerEvent {
         frozen: bool,
     },
     OpenChanges,
-    StartMission(MissionStart),
-    OpenTaskCenter(String),
     OpenTask(String),
-    PlanFirst,
     OpenUsage,
-}
-
-#[derive(Debug, Clone)]
-pub struct MissionStart {
-    pub key: String,
-    pub text: String,
-    pub chat_id: Option<String>,
-    pub space_id: Option<String>,
-    pub config: Option<zeron_proto::ChatConfig>,
-    pub orchestrate: crate::tasks::Orchestrate,
-    pub staged: SidechatStaged,
-    pub quotes: Vec<crate::quotes::Quote>,
-    pub comments: Vec<crate::comments::ReviewComment>,
-}
-
-impl MissionStart {
-    pub fn title_notes(&self) -> (String, String) {
-        let mut text = String::new();
-        let mut at = 0;
-        for mention in zeron_proto::attachment_mentions::attachment_mentions(&self.text) {
-            let Some(pasted) = self
-                .staged
-                .attachments
-                .iter()
-                .find(|att| att.mention == Some(mention.index) && att.image().is_none())
-            else {
-                continue;
-            };
-            text.push_str(&self.text[at..mention.range.start]);
-            text.push_str(&String::from_utf8_lossy(pasted.bytes()));
-            at = mention.range.end;
-        }
-        text.push_str(&self.text[at..]);
-        let text = zeron_proto::attachment_mentions::attachment_mention_prompt(&text);
-        let text = crate::quotes::with_quotes(&text, &self.quotes);
-        let text = crate::comments::with_comments(&text, &self.comments);
-        let text = text.trim();
-        let (title, notes) = text.split_once('\n').unwrap_or((text, ""));
-        let title = title.trim();
-        if title.chars().count() > zeron_doc::TASK_TITLE_MAX_CHARS {
-            let cut: String = title
-                .chars()
-                .take(zeron_doc::TASK_TITLE_MAX_CHARS)
-                .collect();
-            return (cut.trim_end().to_string(), text.to_string());
-        }
-        (title.to_string(), notes.trim().to_string())
-    }
-
-    pub fn images(&self) -> Vec<StagedAttachment> {
-        let staged = &self.staged;
-        staged
-            .attachments
-            .iter()
-            .filter(|att| att.image().is_some())
-            .chain(staged.appshots.iter().map(|appshot| &appshot.screenshot))
-            .cloned()
-            .collect()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7371,12 +7300,9 @@ pub struct Composer {
     #[cfg(test)]
     model_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     dock_frame: Option<crate::composer_dock::DockFrame>,
-    mission: bool,
-    pub(crate) mission_pending: bool,
-    mission_plan_doc: bool,
-    mission_review: bool,
-    started_missions: HashMap<String, (String, SharedString)>,
-    mission_motion: MissionMotion,
+    pub(crate) plan_pending: bool,
+    plan_snap: bool,
+    plan_motion: PlanMotion,
     dock_reflow: crate::composer_dock::DockReflow,
     /// The shared clock owns this frame's height, including its final step.
     dock_height_changed: bool,
@@ -7450,29 +7376,24 @@ impl Composer {
         self.sidechat_tab_bounds.get()
     }
 
-    fn mission_available(&self) -> bool {
+    fn main_composer(&self) -> bool {
         self.chat_override.is_none() && !self.side_chat && !self.btw && !self.pr_chat
     }
 
-    fn leads_open_mission(&self, cx: &App) -> bool {
-        let state = self.state.read(cx);
-        self.mission_available()
-            && state
-                .selected_chat
-                .as_deref()
-                .is_some_and(|chat_id| zeron_proto::plan_of_chat(&state.tasks, chat_id).is_some())
+    fn plan_available(&self, cx: &App) -> bool {
+        self.main_composer() && self.pickers.read(cx).offers_plan(cx)
     }
 
-    fn set_mission(&mut self, on: bool, cx: &mut Context<Self>) {
-        let on = on && self.mission_available();
-        if self.mission == on {
-            return;
+    fn plan(&self, cx: &App) -> bool {
+        self.plan_available(cx) && self.pickers.read(cx).effective_plan(cx)
+    }
+
+    fn set_plan(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.plan(cx) != on && self.plan_available(cx) {
+            self.pickers
+                .update(cx, |pickers, cx| pickers.toggle_plan(cx));
+            cx.notify();
         }
-        self.mission = on;
-        if on {
-            cx.emit(ComposerEvent::PlanFirst);
-        }
-        cx.notify();
     }
 
     /// The picker entity, for the shell's canvas target selectors.
@@ -7727,12 +7648,9 @@ impl Composer {
             #[cfg(test)]
             model_bounds: Default::default(),
             dock_frame: None,
-            mission: false,
-            mission_pending: false,
-            mission_plan_doc: true,
-            mission_review: true,
-            started_missions: HashMap::new(),
-            mission_motion: MissionMotion::at(false, motion::now()),
+            plan_pending: false,
+            plan_snap: true,
+            plan_motion: PlanMotion::at(false, motion::now()),
             dock_reflow: Default::default(),
             dock_height_changed: false,
             dock_clearance_correction: 0.0,
@@ -7930,7 +7848,7 @@ impl Composer {
 
     fn active_prediction(&self, cx: &App) -> Option<SharedString> {
         if self.side_chat
-            || self.mission
+            || self.plan(cx)
             || (self.chat_override.is_some() && !self.full_chat)
             || self.wizard.is_some()
             || self.editing_queued.is_some()
@@ -7952,8 +7870,8 @@ impl Composer {
             return;
         }
         let prediction = self.active_prediction(cx);
-        let idle = if self.mission {
-            zeron_proto::mission::mission_placeholder(self.bound_chat_id(cx).is_some()).into()
+        let idle = if self.plan(cx) {
+            PLAN_PLACEHOLDER_TEXT.into()
         } else if !self.side_chat
             && self.bound_chat_id(cx).is_none()
             && self.state.read(cx).no_project
@@ -11377,7 +11295,10 @@ impl Composer {
                 (self.chat_override.is_none() || self.full_chat)
                     .then(|| pending_input_request(self.bound_transcript(s)))
                     .flatten()
-                    .filter(|(_, questions)| !questions.iter().any(UserInputQuestion::is_secret)),
+                    .filter(|(_, questions)| {
+                        !questions.iter().any(UserInputQuestion::is_secret)
+                            && !crate::plan_proposal::is_plan_question(questions)
+                    }),
                 editing_id
                     .as_ref()
                     .is_none_or(|id| s.queue.iter().any(|item| item.id == *id)),
@@ -11484,8 +11405,7 @@ impl Composer {
                 }
             };
             self.current_key = key;
-            self.mission = false;
-            self.mission_motion = MissionMotion::at(false, motion::now());
+            self.plan_snap = true;
             self.prompt_history = None;
             // `failure` deliberately survives navigation: chat-scoped
             // failures render only under their own chat (see `failure_key`),
@@ -11800,12 +11720,6 @@ impl Composer {
             self.execute_workspace_command(action, 0..self.input.read(cx).text().len(), cx);
             return;
         }
-        if self.mission {
-            if !text.trim().is_empty() && !self.send_blocked(cx) {
-                self.start_mission(text, cx);
-            }
-            return;
-        }
         let no_content = !composer_has_content(
             &text,
             self.staged().len() + self.staged_appshots().len(),
@@ -11839,111 +11753,6 @@ impl Composer {
         }
     }
 
-    fn start_mission(&mut self, text: String, cx: &mut Context<Self>) {
-        let chat_id = self.bound_chat_id(cx);
-        let space_id = match &chat_id {
-            Some(_) => self
-                .bound_chat_row(cx)
-                .and_then(|chat| chat.space_id.clone()),
-            None => self
-                .state
-                .read(cx)
-                .selected_space_row()
-                .map(|space| space.id.clone()),
-        };
-        let file = self.staged().iter().find(|att| {
-            att.image().is_none()
-                && zeron_proto::attachment_mentions::pasted_text_index_from_name(&att.name)
-                    .is_none()
-        });
-        let images = self
-            .staged()
-            .iter()
-            .filter(|att| att.image().is_some())
-            .count()
-            + self.staged_appshots().len();
-        if let Some(message) = zeron_proto::mission::mission_staged_error(
-            images,
-            zeron_doc::TASK_IMAGES_MAX,
-            file.map(|att| att.name.as_str()),
-        ) {
-            crate::toast::error(cx, message);
-            return;
-        }
-        let key = self.current_key.clone();
-        let attachments = self.attachments.remove(&key).unwrap_or_default();
-        self.attachment_drafts.remove(&key);
-        let appshots = self.appshots.remove(&key).unwrap_or_default();
-        let (quotes, comments) = self.state.update(cx, |state, cx| {
-            cx.notify();
-            (state.take_quotes(&key), state.take_review_comments(&key))
-        });
-        let start = MissionStart {
-            key,
-            text,
-            chat_id,
-            space_id,
-            config: self.pickers.read(cx).resolved(cx).chat_config(),
-            orchestrate: crate::tasks::Orchestrate {
-                approve_plan: self.mission_review,
-                same_agents: false,
-                plan_doc: self.mission_plan_doc,
-            },
-            staged: SidechatStaged {
-                attachments,
-                appshots,
-            },
-            quotes,
-            comments,
-        };
-        self.input.update(cx, |input, cx| input.set_text("", cx));
-        self.sync_draft(cx);
-        self.mission = false;
-        cx.emit(ComposerEvent::StartMission(start));
-        cx.notify();
-    }
-
-    pub(crate) fn mission_failed(&mut self, start: &MissionStart, cx: &mut Context<Self>) {
-        if self.current_key != start.key || !self.input.read(cx).text().is_empty() {
-            return;
-        }
-        let mut attachments = start.staged.attachments.clone();
-        for att in self.attachments.remove(&start.key).unwrap_or_default() {
-            if !attachments.iter().any(|staged| staged.id == att.id) {
-                attachments.push(att);
-            }
-        }
-        if !attachments.is_empty() {
-            self.attachments.insert(start.key.clone(), attachments);
-        }
-        self.restore_failed_appshots(&start.staged.appshots, &start.key, &start.key);
-        self.state.update(cx, |state, cx| {
-            for quote in &start.quotes {
-                state.add_quote(&start.key, quote.clone());
-            }
-            for comment in &start.comments {
-                state.add_review_comment(&start.key, comment.clone());
-            }
-            cx.notify();
-        });
-        self.input
-            .update(cx, |input, cx| input.set_text(start.text.clone(), cx));
-        self.sync_draft(cx);
-        self.set_mission(true, cx);
-    }
-
-    pub(crate) fn mission_started(
-        &mut self,
-        chat_id: String,
-        task_id: String,
-        title: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.started_missions
-            .insert(chat_id, (task_id, title.into()));
-        cx.notify();
-    }
-
     /// Send `prompt` as this composer's turn without it ever being typed —
     /// the sidechat tab's first turn, handed over by `/sidechat <prompt>`.
     /// Queues instead when the bound chat is already busy, like a submit.
@@ -11973,9 +11782,6 @@ impl Composer {
         }
         if self.commit_queue_edit(cx) {
             return;
-        }
-        if self.mission {
-            return self.submit(false, cx);
         }
         let text = self.input.read(cx).text().to_string();
         let has_content = composer_has_content(
@@ -14221,73 +14027,14 @@ impl Composer {
             .into_any_element()
     }
 
-    fn render_mission_controls(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let composer = cx.entity().downgrade();
-        let plan = crate::settings::widgets::segmented(
-            theme,
-            "composer-mission-plan",
-            &[
-                (true, zeron_proto::mission::PLAN_DOC),
-                (false, zeron_proto::mission::STEPS_ONLY),
-            ],
-            self.mission_plan_doc,
-            move |plan_doc, _, cx| {
-                composer
-                    .update(cx, |composer, cx| {
-                        composer.mission_plan_doc = plan_doc;
-                        cx.notify();
-                    })
-                    .ok();
-            },
-        )
-        .debug_selector(|| "composer-mission-plan".into());
-        let review = self.mission_review;
-        let switch = div()
-            .id("composer-mission-review")
-            .debug_selector(|| "composer-mission-review".into())
-            .role(Role::Switch)
-            .aria_label(zeron_proto::mission::REVIEW_PLAN_FIRST)
-            .aria_toggled(if review {
-                gpui::Toggled::True
-            } else {
-                gpui::Toggled::False
-            })
-            .flex_none()
-            .h(px(28.0))
-            .pl(px(5.0))
-            .pr(px(10.0))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .rounded_full()
-            .border_1()
-            .border_color(theme.border)
-            .text_size(crate::typography::ui_rems(11.5))
-            .text_color(theme.text_muted)
-            .cursor_pointer()
-            .hover(|style| style.text_color(theme.text))
-            .child(crate::settings::widgets::toggle_switch(
-                theme,
-                review,
-                "composer-mission-review-switch",
-            ))
-            .child(zeron_proto::mission::REVIEW_PLAN_FIRST)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.mission_review = !review;
-                cx.notify();
-            }));
-        div()
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .child(plan)
-            .child(switch)
-            .into_any_element()
-    }
-
-    fn render_plan_switch(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let on = self.mission;
-        let t = self.mission_motion.border.value_at(motion::now());
+    fn render_plan_switch(
+        &self,
+        labelled: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let on = self.plan(cx);
+        let t = self.plan_motion.border.value_at(motion::now());
         let tone = motion::mix(theme.text_muted, theme.accent, t);
         let track = div()
             .relative()
@@ -14332,68 +14079,15 @@ impl Composer {
                 "Plan first: the agent plans and waits for your OK (⇧Tab)",
             ))
             .child(track)
-            .child("Plan")
+            .when(labelled, |el| el.child("Plan"))
             .on_click(cx.listener(move |this, _, window, cx| {
-                this.set_mission(!on, cx);
+                this.set_plan(!on, cx);
                 window.focus(&this.input.focus_handle(cx), cx);
             }))
             .into_any_element()
     }
 
-    fn render_mission_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
-        let on = self.mission;
-        let t = self.mission_motion.border.value_at(motion::now());
-        let tone = motion::mix(theme.text_muted, theme.text, t);
-        div()
-            .flex_none()
-            .pl(px(10.0))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .child(
-                div()
-                    .id("composer-mission-chip")
-                    .debug_selector(|| "composer-mission-chip".into())
-                    .role(Role::Switch)
-                    .aria_label("Mission Control")
-                    .aria_toggled(if on {
-                        gpui::Toggled::True
-                    } else {
-                        gpui::Toggled::False
-                    })
-                    .h(px(22.0))
-                    .px(px(8.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .rounded_full()
-                    .border_1()
-                    .border_color(motion::mix(theme.border, theme.accent.opacity(0.5), t))
-                    .bg(theme.accent.opacity(0.16 * t))
-                    .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(tone)
-                    .cursor_pointer()
-                    .hover(|style| style.text_color(theme.text))
-                    .child(
-                        crate::icons::icon(crate::icons::MISSION_CONTROL)
-                            .size(px(12.0))
-                            .text_color(tone),
-                    )
-                    .child("Mission Control")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.set_mission(!on, cx);
-                        window.focus(&this.input.focus_handle(cx), cx);
-                    })),
-            )
-            .child(
-                div()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_faint)
-                    .child(if on { "⇧Tab: back to chat" } else { "⇧Tab" }),
-            )
-    }
-
-    fn render_start_mission(
+    fn render_start_plan(
         &mut self,
         morph: Option<f32>,
         window: &mut Window,
@@ -14401,8 +14095,8 @@ impl Composer {
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let blocked = self.send_blocked(cx);
-        let (id, label) = if self.mission {
-            ("composer-start-mission", START_MISSION_LABEL)
+        let (id, label) = if self.plan(cx) {
+            ("composer-start-plan", START_PLAN_LABEL)
         } else {
             ("composer-send", "Send message")
         };
@@ -14436,7 +14130,7 @@ impl Composer {
             return button
                 .px(px(12.0))
                 .gap(px(6.0))
-                .child(START_MISSION_LABEL)
+                .child(START_PLAN_LABEL)
                 .into_any_element();
         };
         let shown = t.clamp(0.0, 1.0);
@@ -14444,7 +14138,7 @@ impl Composer {
             let mut font = gpui::font(theme.font_sans.clone());
             font.weight = gpui::FontWeight::MEDIUM;
             let run = TextRun {
-                len: START_MISSION_LABEL.len(),
+                len: START_PLAN_LABEL.len(),
                 font,
                 color: theme.bg,
                 background_color: None,
@@ -14455,7 +14149,7 @@ impl Composer {
             f32::from(
                 window
                     .text_system()
-                    .shape_line(START_MISSION_LABEL.into(), size, &[run], None)
+                    .shape_line(START_PLAN_LABEL.into(), size, &[run], None)
                     .width,
             )
         };
@@ -14470,7 +14164,7 @@ impl Composer {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .opacity(shown)
-                    .child(START_MISSION_LABEL),
+                    .child(START_PLAN_LABEL),
             )
             .into_any_element()
     }
@@ -14550,7 +14244,7 @@ impl Composer {
     }
 }
 
-fn mission_glow(accent: gpui::Hsla, amount: f32) -> Vec<gpui::BoxShadow> {
+fn plan_glow(accent: gpui::Hsla, amount: f32) -> Vec<gpui::BoxShadow> {
     vec![
         gpui::BoxShadow {
             color: accent.opacity(0.14 * amount),
@@ -14671,35 +14365,31 @@ impl Render for Composer {
             let focus = self.input.focus_handle(cx);
             window.focus(&focus, cx);
         }
-        if std::mem::take(&mut self.mission_pending) {
-            self.set_mission(true, cx);
+        if std::mem::take(&mut self.plan_pending) {
+            self.set_plan(true, cx);
         }
-        let mission_flipped = self.mission != self.mission_motion.on();
-        if mission_flipped {
+        let plan = self.plan(cx);
+        if std::mem::take(&mut self.plan_snap) {
+            self.plan_motion = PlanMotion::at(plan, motion::now());
+        }
+        let plan_flipped = plan != self.plan_motion.on();
+        if plan_flipped {
             let from = self.input.read(cx).placeholder.clone();
-            self.mission_motion.retarget(
-                self.mission,
-                from,
-                motion::reduced_motion(cx),
-                motion::now(),
-            );
+            self.plan_motion
+                .retarget(plan, from, motion::reduced_motion(cx), motion::now());
         }
-        let lit = self.mission || self.leads_open_mission(cx);
-        self.mission_motion
-            .light(lit, motion::reduced_motion(cx), motion::now());
         self.sync_prediction(cx);
-        let mission_now = motion::now();
-        if !self.mission_motion.settled_at(mission_now) {
+        let plan_now = motion::now();
+        if !self.plan_motion.settled_at(plan_now) {
             window.request_animation_frame();
         }
-        let placeholder_fade =
-            (!self.mission_motion.placeholder.settled_at(mission_now)).then(|| {
-                let t = self.mission_motion.placeholder.value_at(mission_now);
-                (
-                    self.mission_motion.placeholder_from.clone(),
-                    if self.mission { t } else { 1.0 - t },
-                )
-            });
+        let placeholder_fade = (!self.plan_motion.placeholder.settled_at(plan_now)).then(|| {
+            let t = self.plan_motion.placeholder.value_at(plan_now);
+            (
+                self.plan_motion.placeholder_from.clone(),
+                if plan { t } else { 1.0 - t },
+            )
+        });
         self.input.update(cx, |input, cx| {
             if input.placeholder_fade != placeholder_fade {
                 input.placeholder_fade = placeholder_fade;
@@ -14862,14 +14552,14 @@ impl Render for Composer {
         } else {
             flip_morph_step(
                 self.flip_morph,
-                (committed_flip || (mission_flipped && !self.expanded_mode)) && !new_chat,
+                (committed_flip || (plan_flipped && !self.expanded_mode)) && !new_chat,
                 self.last_rendered_height,
                 now_ms,
                 motion::reduced_motion(cx),
                 route_snap,
             )
         };
-        let expanded = self.expanded_mode || self.mission;
+        let expanded = self.expanded_mode || plan;
 
         let failure = self.visible_failure();
         let queue_notice = self.current_link_notice(cx);
@@ -14894,20 +14584,6 @@ impl Render for Composer {
         });
         let effort_hint = self.computer_effort_hint(cx);
         let resume_compaction = self.resume_compaction(cx);
-        let started_mission = self
-            .bound_chat_id(cx)
-            .filter(|_| self.mission_available())
-            .and_then(|chat_id| {
-                let started = self.started_missions.get(&chat_id).cloned()?;
-                self.state
-                    .read(cx)
-                    .tasks
-                    .iter()
-                    .any(|task| {
-                        task.id == started.0 && !task.deleted && task.completed_at.is_none()
-                    })
-                    .then_some((chat_id, started))
-            });
         // The shell owns the width and its route animation. A route-dependent
         // cap here would cut a wide composer before its return glide finishes.
         let container = div()
@@ -14964,50 +14640,6 @@ impl Render for Composer {
                             cx,
                         ))
                         .child("Compacting context…"),
-                )
-            })
-            .when_some(started_mission, |el, (chat_id, (task_id, title))| {
-                let open = cx.entity().downgrade();
-                let dismiss = open.clone();
-                el.child(
-                    div()
-                        .mx(px(4.0))
-                        .debug_selector(|| "composer-started-mission".into())
-                        .child(crate::computer::cards::computer_card(
-                            crate::computer::cards::CardTone::Info,
-                            crate::icons::MISSION_CONTROL,
-                            format!("Started mission {title}").into(),
-                            vec!["Its lead reads this chat".into()],
-                            vec![
-                                crate::computer::cards::CardAction {
-                                    id: "composer-started-mission-open".into(),
-                                    label: "Open".into(),
-                                    primary: true,
-                                    on_click: Box::new(move |_, _, cx| {
-                                        let task_id = task_id.clone();
-                                        open.update(cx, |_, cx| {
-                                            cx.emit(ComposerEvent::OpenTaskCenter(task_id))
-                                        })
-                                        .ok();
-                                    }),
-                                },
-                                crate::computer::cards::CardAction {
-                                    id: "composer-started-mission-dismiss".into(),
-                                    label: "Dismiss".into(),
-                                    primary: false,
-                                    on_click: Box::new(move |_, _, cx| {
-                                        dismiss
-                                            .update(cx, |composer, cx| {
-                                                composer.started_missions.remove(&chat_id);
-                                                cx.notify();
-                                            })
-                                            .ok();
-                                    }),
-                                },
-                            ],
-                            None,
-                            &theme,
-                        )),
                 )
             })
             .when_some(resume_compaction, |el, offer| {
@@ -15225,13 +14857,14 @@ impl Render for Composer {
             }
         }));
         let container = container.on_action(cx.listener(|this, _: &OutdentList, _, cx| {
-            if !this.mission_available()
+            if !this.plan_available(cx)
                 || this.mention.token.is_some()
                 || this.slash.token.is_some()
             {
                 return cx.propagate();
             }
-            this.set_mission(!this.mission, cx);
+            let on = this.plan(cx);
+            this.set_plan(!on, cx);
         }));
         // Escape backs out of a queue-row edit (the row keeps its old text).
         // Bound here rather than in the input: the input's own Escape belongs
@@ -15418,11 +15051,13 @@ impl Render for Composer {
             }
         });
 
-        let send_button = if !self.mission_motion.send.settled_at(mission_now) {
-            let t = self.mission_motion.send.value_unclamped_at(mission_now);
-            self.render_start_mission(Some(t), window, cx)
-        } else if self.mission {
-            self.render_start_mission(None, window, cx)
+        let send_button = if mode != SendButtonMode::Send {
+            self.render_send_button(mode, cx)
+        } else if !self.plan_motion.send.settled_at(plan_now) {
+            let t = self.plan_motion.send.value_unclamped_at(plan_now);
+            self.render_start_plan(Some(t), window, cx)
+        } else if plan {
+            self.render_start_plan(None, window, cx)
         } else {
             self.render_send_button(mode, cx)
         };
@@ -15540,62 +15175,34 @@ impl Render for Composer {
                         ),
                 )
             });
-        let extras = self.mission_motion.extras.value_at(mission_now);
-        let clip = self.mission_motion.placeholder.value_at(mission_now);
-        let mission_in_strip = new_thread_chrome_opacity > 0.0 && self.mission_available();
-        let leading = if !self.mission_motion.extras.settled_at(mission_now)
-            || !self.mission_motion.placeholder.settled_at(mission_now)
-        {
-            div()
-                .flex()
-                .items_center()
-                .when(clip < 1.0, |row| {
-                    row.child(
-                        div()
-                            .flex_none()
-                            .w(px(28.0 * (1.0 - clip)))
-                            .mr(px(ACTION_UTILITY_GAP * (1.0 - clip)))
-                            .overflow_hidden()
-                            .opacity(1.0 - clip)
-                            .child(attach),
-                    )
-                })
-                .when(expanded && extras > 0.0 && !mission_in_strip, |row| {
-                    row.child(
-                        div()
-                            .relative()
-                            .left(px(-8.0 * (1.0 - extras)))
-                            .opacity(extras)
-                            .child(self.render_mission_controls(&theme, cx)),
-                    )
-                })
-                .into_any_element()
-        } else if self.mission && mission_in_strip {
-            div().into_any_element()
-        } else if self.mission {
-            self.render_mission_controls(&theme, cx)
-        } else {
-            attach.into_any_element()
-        };
-        let leading = if mission_in_strip {
-            let project = self
-                .pickers
-                .update(cx, |pickers, cx| pickers.render_new_thread_project(cx));
-            div()
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .child(leading)
-                .child(div().opacity(new_thread_chrome_opacity).child(project))
-                .child(
-                    div()
-                        .opacity(new_thread_chrome_opacity)
-                        .child(self.render_plan_switch(&theme, cx)),
-                )
-                .into_any_element()
-        } else {
-            leading
-        };
+        let surface_width = self.last_available_width.map_or_else(
+            || {
+                self.surface_bounds
+                    .get()
+                    .map_or(strip_width_hint + PILL_BORDER_V, |bounds| {
+                        f32::from(bounds.size.width)
+                    })
+            },
+            |width| (width - 2.0 * Theme::SPACE_LG).max(0.0),
+        );
+        let chips_labelled = expanded || surface_width >= CHIP_LABEL_MIN_WIDTH;
+        let plan_switch = self
+            .plan_available(cx)
+            .then(|| self.render_plan_switch(chips_labelled, &theme, cx));
+        let project = (new_thread_chrome_opacity > 0.0 && self.main_composer()).then(|| {
+            self.pickers
+                .update(cx, |pickers, cx| pickers.render_new_thread_project(cx))
+        });
+        let leading = div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .child(attach)
+            .children(
+                project.map(|project| div().opacity(new_thread_chrome_opacity).child(project)),
+            )
+            .children(plan_switch)
+            .into_any_element();
         // Staged-thumbnail strip (attachment-ui.tsx AttachmentStrip), above
         // the input inside the pill in both modes.
         let strip = self.render_attachment_strip(&theme, cx);
@@ -15607,7 +15214,7 @@ impl Render for Composer {
         let pr_chips = self.render_pr_chips(&theme, cx);
 
         let pill_border = theme.composer_surface_border();
-        let mission_border = self.mission_motion.border.value_at(mission_now);
+        let plan_border = self.plan_motion.border.value_at(plan_now);
         // Compensate for the transcript canvas beneath the frosted surface.
         // Keep the opaque fallback when frost is disabled or unsupported.
         let pill = div()
@@ -15634,14 +15241,12 @@ impl Render for Composer {
                 el.border_color(if self.btw {
                     theme.accent
                 } else {
-                    motion::mix(pill_border, theme.accent, mission_border)
+                    motion::mix(pill_border, theme.accent, plan_border)
                 })
                 .bg(theme.composer_surface_bg())
-                .when(!theme.is_frost() && mission_border <= 0.0, |el| {
-                    el.shadow_lg()
-                })
-                .when(mission_border > 0.0, |el| {
-                    el.shadow(mission_glow(theme.accent, mission_border))
+                .when(!theme.is_frost() && plan_border <= 0.0, |el| el.shadow_lg())
+                .when(plan_border > 0.0, |el| {
+                    el.shadow(plan_glow(theme.accent, plan_border))
                 })
             });
         // The pill's bottom edge is stationary on screen (the composer sits at
@@ -15650,16 +15255,11 @@ impl Render for Composer {
         // while the model selector stays in the right action group.
         let cluster_dy = morph_cluster_dy(layout_morph_t);
         let action_inset = morph_cluster_inset(expanded, layout_morph_t);
-        let surface_width = self.last_available_width.map_or_else(
-            || {
-                self.surface_bounds
-                    .get()
-                    .map_or(strip_width_hint + PILL_BORDER_V, |bounds| {
-                        f32::from(bounds.size.width)
-                    })
-            },
-            |width| (width - 2.0 * Theme::SPACE_LG).max(0.0),
-        );
+        let access_chip = (!self.pr_chat).then(|| {
+            self.pickers.update(cx, |pickers, cx| {
+                pickers.render_permission_chip(chips_labelled, cx)
+            })
+        });
         let model_picker = div()
             .min_w_0()
             .max_w(px(surface_width * 0.45))
@@ -15762,6 +15362,12 @@ impl Render for Composer {
                                 .gap(px(ACTION_UTILITY_GAP))
                                 .child(leading),
                         )
+                        .child(
+                            div()
+                                .flex_none()
+                                .opacity(beneath_voice)
+                                .children(access_chip),
+                        )
                         .child(model_picker)
                         .child(
                             div()
@@ -15828,6 +15434,14 @@ impl Render for Composer {
                                 // fades back as the transcript lands in it.
                                 .opacity(beneath_voice)
                                 .child(self.render_input_with_completion()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .relative()
+                                .top(px(-cluster_dy))
+                                .opacity(beneath_voice)
+                                .children(access_chip),
                         )
                         .child(
                             div()
@@ -16004,27 +15618,11 @@ impl Render for Composer {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
-            let permission_chip = (session_chrome_opacity > 0.0
-                && self.pickers.read(cx).names_permission(cx))
-            .then(|| {
+            let new_thread_device = (new_thread_chrome_opacity > 0.0).then(|| {
                 self.pickers
-                    .update(cx, |pickers, cx| pickers.render_permission_chip(cx))
+                    .update(cx, |pickers, cx| pickers.render_new_thread_device_chip(cx))
             });
-            let new_thread_strip = (new_thread_chrome_opacity > 0.0 && !self.mission).then(|| {
-                self.pickers.update(cx, |pickers, cx| {
-                    (
-                        pickers.render_new_thread_device_chip(cx),
-                        pickers.render_permission_chip(cx),
-                    )
-                })
-            });
-            let strip_mission_controls = (mission_in_strip && self.mission)
-                .then(|| self.render_mission_controls(&theme, cx));
             let terminal_button = self.pickers.read(cx).render_terminal_button(cx);
-            let mission_chip = (session_chrome_opacity > 0.0
-                && self.mission_available()
-                && self.bound_chat_id(cx).is_some())
-            .then(|| self.render_mission_chip(&theme, cx));
             if session_chrome_opacity > 0.0 {
                 let chat = self.bound_chat_id(cx);
                 self.context_ring.update(cx, |ring, _| ring.track(chat));
@@ -16045,18 +15643,10 @@ impl Render for Composer {
                                 .items_center()
                                 .opacity(new_thread_chrome_opacity)
                                 .gap(px(4.0))
-                                .when_some(new_thread_strip, |row, (device, permission)| {
-                                    row.child(div().flex_none().child(device))
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .children(new_thread_git_selectors),
-                                        )
-                                        .child(div().flex_none().child(permission))
-                                })
-                                .when_some(strip_mission_controls, |row, controls| {
-                                    row.child(div().opacity(extras).child(controls))
+                                .when_some(new_thread_device, |row, device| {
+                                    row.child(div().flex_none().child(device)).child(
+                                        div().flex_1().min_w_0().children(new_thread_git_selectors),
+                                    )
                                 }),
                         )
                     })
@@ -16070,7 +15660,6 @@ impl Render for Composer {
                                 .flex()
                                 .items_center()
                                 .opacity(session_chrome_opacity)
-                                .children(mission_chip)
                                 .child(div().flex_1().min_w_0().children(footer.flatten()))
                                 .child(
                                     // The footer row's own 4px gap: the PR badge
@@ -16083,7 +15672,6 @@ impl Render for Composer {
                                         .flex()
                                         .items_center()
                                         .gap(px(4.0))
-                                        .children(permission_chip)
                                         .child(self.context_ring.clone())
                                         .children(terminal_button),
                                 ),
@@ -16208,9 +15796,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn tab_takes_the_prediction_and_shift_tab_toggles_mission_control(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn tab_takes_the_prediction_and_shift_tab_toggles_plan(cx: &mut gpui::TestAppContext) {
         let (_dir, handle) = composer_focus_window(cx);
         cx.update(|cx| init(cx, ComposerSendBehavior::default()));
         handle
@@ -16275,6 +15861,10 @@ mod tests {
 
         handle
             .update(cx, |composer, _, cx| {
+                composer
+                    .state
+                    .update(cx, |state, _| state.selected_chat = None);
+                composer.on_state_changed(cx);
                 composer.input.update(cx, |input, cx| {
                     input.set_text("- shop\n  - cart", cx);
                     input.move_to(input.text().len(), cx);
@@ -16285,15 +15875,14 @@ mod tests {
         handle
             .update(cx, |composer, _, cx| {
                 assert_eq!(composer.input_text(cx), "- shop\n- cart");
-                assert!(!composer.mission, "a list line still outdents");
+                assert!(!composer.plan(cx), "a list line still outdents");
             })
             .unwrap();
         cx.simulate_keystrokes(handle.into(), "shift-tab");
         handle
             .update(cx, |composer, _, cx| {
                 assert_eq!(composer.input_text(cx), "- shop\n- cart");
-                assert!(composer.mission, "a top-level list line toggles");
-                composer.set_mission(false, cx);
+                assert!(composer.plan(cx), "a top-level list line toggles");
                 composer.input.update(cx, |input, cx| {
                     input.set_text("Shop frontend\nNext.js and Tailwind", cx)
                 });
@@ -16301,41 +15890,12 @@ mod tests {
             .unwrap();
         cx.simulate_keystrokes(handle.into(), "shift-tab");
         handle
-            .read_with(cx, |composer, _| assert!(composer.mission))
+            .read_with(cx, |composer, cx| assert!(!composer.plan(cx)))
             .unwrap();
         cx.simulate_keystrokes(handle.into(), "shift-tab");
         handle
-            .read_with(cx, |composer, _| assert!(!composer.mission))
+            .read_with(cx, |composer, cx| assert!(composer.plan(cx)))
             .unwrap();
-        cx.simulate_keystrokes(handle.into(), "shift-tab");
-        let started = Rc::new(std::cell::RefCell::new(Vec::new()));
-        handle
-            .update(cx, |composer, _, cx| {
-                assert!(composer.mission);
-                let sink = started.clone();
-                let composer_entity = cx.entity();
-                cx.subscribe(&composer_entity, move |_, _, event: &ComposerEvent, _| {
-                    if let ComposerEvent::StartMission(start) = event {
-                        sink.borrow_mut().push(start.clone());
-                    }
-                })
-                .detach();
-                composer.on_submit(cx);
-                assert!(!composer.mission, "Send returns the chat to chat mode");
-                assert_eq!(composer.input_text(cx), "");
-            })
-            .unwrap();
-        let started = started.borrow();
-        assert_eq!(started.len(), 1);
-        assert_eq!(started[0].chat_id.as_deref(), Some("chat-a"));
-        assert_eq!(
-            started[0].title_notes(),
-            (
-                "Shop frontend".to_string(),
-                "Next.js and Tailwind".to_string()
-            )
-        );
-        assert!(started[0].orchestrate.plan_doc && started[0].orchestrate.approve_plan);
     }
 
     #[gpui::test]
@@ -16458,7 +16018,7 @@ mod tests {
                     settings.compact_model_picker = compact_picker;
                 });
             });
-            for thread_width in [436.0, 592.0, 768.0, 1232.0] {
+            for thread_width in [592.0, 768.0, 1232.0] {
                 for docked in [true, false] {
                     let amounts = if docked {
                         [0.0, 0.2, 0.6, 0.98, 1.0]

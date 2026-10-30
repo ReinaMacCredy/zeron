@@ -1099,11 +1099,6 @@ impl SettingsSection {
                 ),
             ],
             SettingsSection::Routing => &[
-                (
-                    zeron_proto::mission::CHAT_MISSION_TITLE,
-                    &["mission", "lead"],
-                    Some(Target::Setting(SettingId::ChatMission)),
-                ),
                 ("Delegation depth", &["delegate", "subagent", "nest"], None),
                 (
                     "Delegated tasks per chat",
@@ -3839,12 +3834,7 @@ impl Shell {
                 ComposerEvent::OpenComputerSetup { missing } => {
                     this.open_computer_permission_guide(missing.clone(), cx)
                 }
-                ComposerEvent::StartMission(start) => this.start_mission(start.clone(), cx),
-                ComposerEvent::PlanFirst => this.on_plan_first(cx),
                 ComposerEvent::OpenUsage => this.open_usage(cx),
-                ComposerEvent::OpenTaskCenter(task_id) => {
-                    this.open_task_center(task_id.clone(), cx)
-                }
                 ComposerEvent::OpenTask(task_id) => this.defer_open_task(task_id.clone(), cx),
                 ComposerEvent::OpenChanges => this
                     .defer_in_active_window(cx, |shell, window, cx| {
@@ -6286,9 +6276,21 @@ impl Shell {
                 }
                 crate::route_badge::RouteLink::Usage => self.open_usage(cx),
             },
-            TranscriptEvent::ApprovePlan { task_id } => {
-                self.mutate(
-                    serde_json::json!({ "op": "approvePlan", "taskId": task_id }),
+            TranscriptEvent::ApprovePlan {
+                chat_id,
+                as_task,
+                answer,
+            } => self.approve_plan(chat_id, *as_task, answer.clone(), cx),
+            TranscriptEvent::EditPlan { chat_id, answer } => {
+                self.composer.update(cx, |composer, cx| {
+                    composer.answer_plan(chat_id, answer.clone(), false, cx)
+                });
+                if self.composer_for_transcript(&emitter) == self.composer {
+                    self.focus_composer(cx);
+                }
+                self.show_notice(
+                    crate::toast::ToastKind::Info,
+                    "Tell the agent what to change in the composer",
                     cx,
                 );
             }
@@ -8061,9 +8063,6 @@ impl Shell {
             | ComposerEvent::WorkspaceCommand(_)
             | ComposerEvent::WorktreeSetup { .. }
             | ComposerEvent::OpenChanges
-            | ComposerEvent::StartMission(_)
-            | ComposerEvent::OpenTaskCenter(_)
-            | ComposerEvent::PlanFirst
             | ComposerEvent::AnnotationsChanged(_)
             | ComposerEvent::AnnotationHovered(_) => {}
             ComposerEvent::OpenTask(task_id) => self.defer_open_task(task_id.clone(), cx),
@@ -8738,7 +8737,7 @@ impl Shell {
 
     fn set_route(&mut self, route: Route, cx: &mut Context<Self>) {
         self.command_palette = None;
-        self.route_task_slide(route, cx);
+        self.route_task_slide(route);
         if self.route == Route::Supervisor && route != Route::Supervisor {
             self.leave_supervisor(cx);
         }
@@ -17410,7 +17409,7 @@ impl Shell {
                             .debug_selector(|| "chat-menu-plan".into())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.close_chat_menu(cx);
-                                this.add_plan(&plan_id, cx);
+                                this.add_plan(&plan_id, crate::tasks::Orchestrate::default(), cx);
                             }))
                             .child(
                                 icon(icons::MISSION_CONTROL)
@@ -18025,10 +18024,7 @@ impl Shell {
             return self.render_tasks_page(window, cx);
         }
 
-        if matches!(self.route, Route::TaskCenter)
-            && self.task_handoff_t().is_none()
-            && self.task_chat_slide_t().is_none()
-        {
+        if matches!(self.route, Route::TaskCenter) && self.task_chat_slide_t().is_none() {
             return self.render_task_center_page(window, cx);
         }
 
@@ -18533,15 +18529,12 @@ impl Shell {
                     .child(status)
                     .child({
                         let composer_opacity = self.composer_dock.borrow().opacity();
-                        let lift = self
-                            .task_handoff_t()
-                            .map_or(0.0, task_actions::handoff_lift);
                         crate::composer_dock::docked_composer(
                             div()
                                 .id("persistent-composer")
                                 .relative()
                                 .w(px(composer_width))
-                                .opacity(composer_opacity * (1.0 - lift))
+                                .opacity(composer_opacity)
                                 .mx_auto()
                                 .children(self.render_btw_ghost(cx))
                                 .child(
@@ -18560,7 +18553,6 @@ impl Shell {
                             frame_time,
                         )
                         .reserve_terminal(terminal_geometry.clone())
-                        .lift(task_actions::HANDOFF_RISE * lift)
                     })
                     .child(self.render_terminal_container(
                         terminal_geometry,
@@ -21635,17 +21627,13 @@ impl Render for Shell {
                 let main = if matches!(self.route, Route::Terminal) {
                     self.render_terminal_column(column, window, cx)
                 } else {
-                    let main = self.render_main(
+                    self.render_main(
                         window,
                         main_content_width,
                         transcript_width,
                         sidecar_width,
                         cx,
-                    );
-                    match self.task_handoff_t() {
-                        Some(t) => self.render_task_handoff(main, t, window, cx),
-                        None => main,
-                    }
+                    )
                 };
                 // The Changes pane is chat-scoped chrome: the Settings route
                 // never renders it (zeron __root.tsx `!isSettings && activeChat`

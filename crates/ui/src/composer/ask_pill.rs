@@ -28,6 +28,7 @@ pub(super) fn placeholder(picked: bool) -> &'static str {
 struct AskEntry {
     chat_id: String,
     wizard: Wizard,
+    steps: Vec<String>,
 }
 
 #[derive(Default)]
@@ -48,6 +49,7 @@ pub(crate) struct AskInfo {
     pub total: usize,
     pub question: String,
     pub plan: bool,
+    pub steps: Vec<String>,
 }
 
 impl Composer {
@@ -111,8 +113,13 @@ impl Composer {
                         return true;
                     }
                     match pending {
-                        Some((request_id, questions)) => {
-                            composer.land_ask(id.clone(), Wizard::new(request_id, questions), cx);
+                        Some((request_id, questions, steps)) => {
+                            composer.land_ask(
+                                id.clone(),
+                                Wizard::new(request_id, questions),
+                                steps,
+                                cx,
+                            );
                             true
                         }
                         None => false,
@@ -129,14 +136,24 @@ impl Composer {
         self.ask.fetches.insert(chat_id, task);
     }
 
-    fn land_ask(&mut self, chat_id: String, wizard: Wizard, cx: &mut Context<Self>) {
+    fn land_ask(
+        &mut self,
+        chat_id: String,
+        wizard: Wizard,
+        steps: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
         if !self.ask.awaiting.contains(&chat_id)
             || self.ask.answered.contains_key(&wizard.request_id)
         {
             return;
         }
         self.ask.entries.retain(|entry| entry.chat_id != chat_id);
-        self.ask.entries.push(AskEntry { chat_id, wizard });
+        self.ask.entries.push(AskEntry {
+            chat_id,
+            wizard,
+            steps,
+        });
         cx.notify();
     }
 
@@ -149,7 +166,8 @@ impl Composer {
     }
 
     pub(crate) fn ask_info(&self, chat_id: &str) -> Option<AskInfo> {
-        let wizard = &self.live_entry(chat_id)?.wizard;
+        let entry = self.live_entry(chat_id)?;
+        let wizard = &entry.wizard;
         Some(AskInfo {
             page: wizard.page,
             total: wizard.questions.len(),
@@ -157,11 +175,33 @@ impl Composer {
                 .current()
                 .map(|question| question.question.clone())
                 .unwrap_or_default(),
-            plan: wizard
-                .questions
-                .iter()
-                .any(|question| question.approval && question.header == "Approve plan"),
+            plan: crate::plan_proposal::is_plan_question(&wizard.questions),
+            steps: entry.steps.clone(),
         })
+    }
+
+    pub(crate) fn plan_answer(&self, chat_id: &str) -> Option<crate::plan_proposal::PlanAnswer> {
+        let wizard = &self.live_entry(chat_id)?.wizard;
+        let question = crate::plan_proposal::plan_question(&wizard.questions)?;
+        Some(crate::plan_proposal::PlanAnswer {
+            request_id: wizard.request_id.clone(),
+            question_id: question.id.clone(),
+        })
+    }
+
+    pub(crate) fn answer_plan(
+        &mut self,
+        chat_id: &str,
+        answer: crate::plan_proposal::PlanAnswer,
+        allow: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.ask.open.as_deref() == Some(chat_id) {
+            self.ask.open = None;
+            self.ask.advance_task = None;
+        }
+        let answers = crate::plan_proposal::plan_answers(&answer.question_id, allow);
+        self.submit_ask(chat_id.to_owned(), answer.request_id, answers, cx);
     }
 
     pub(crate) fn ask_answered(&self, chat_id: &str) -> bool {
@@ -299,12 +339,25 @@ impl Composer {
             return;
         };
         self.ask.advance_task = None;
-        self.ask
-            .answered
-            .insert(request_id.clone(), chat_id.clone());
         self.ask.open = None;
         self.ask_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
+        self.submit_ask(chat_id, request_id, answers, cx);
+    }
+
+    fn submit_ask(
+        &mut self,
+        chat_id: String,
+        request_id: String,
+        answers: Vec<UserInputAnswer>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.ask.answered.contains_key(&request_id) {
+            return;
+        }
+        self.ask
+            .answered
+            .insert(request_id.clone(), chat_id.clone());
         cx.notify();
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
@@ -406,7 +459,7 @@ async fn pending_ask(
     engine: &crate::state::EngineHandle,
     chat_id: &str,
     executor: &gpui::BackgroundExecutor,
-) -> Option<(String, Vec<zeron_proto::UserInputQuestion>)> {
+) -> Option<(String, Vec<zeron_proto::UserInputQuestion>, Vec<String>)> {
     match fetch_pending(engine, chat_id).await {
         Ok(Some(raw)) => executor.spawn(async move { decode_pending(raw) }).await,
         Ok(None) => None,
@@ -423,7 +476,7 @@ pub(crate) async fn pending_questions(
     executor: &gpui::BackgroundExecutor,
 ) -> Option<Vec<zeron_proto::UserInputQuestion>> {
     for _ in 0..FETCH_ATTEMPTS {
-        if let Some((_, questions)) = pending_ask(engine, chat_id, executor).await {
+        if let Some((_, questions, _)) = pending_ask(engine, chat_id, executor).await {
             return Some(questions);
         }
         executor.timer(FETCH_RETRY).await;
@@ -445,11 +498,23 @@ async fn fetch_pending(
     Ok(subscription.recv().await)
 }
 
-fn decode_pending(raw: serde_json::Value) -> Option<(String, Vec<zeron_proto::UserInputQuestion>)> {
+fn decode_pending(
+    raw: serde_json::Value,
+) -> Option<(String, Vec<zeron_proto::UserInputQuestion>, Vec<String>)> {
     let update: zeron_doc::TranscriptUpdate = serde_json::from_value(raw).ok()?;
     let mut rows = Vec::new();
     zeron_doc::apply_transcript_frame(&mut rows, update.frame).ok()?;
-    pending_input_request(&rows)
+    let (request_id, questions) = pending_input_request(&rows)?;
+    let steps = if crate::plan_proposal::is_plan_question(&questions) {
+        rows.iter()
+            .rev()
+            .find(|entry| entry.role == zeron_doc::MessageRole::Assistant)
+            .map(|entry| crate::plan_proposal::entry_steps(&entry.parts))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    Some((request_id, questions, steps))
 }
 
 #[cfg(test)]
@@ -510,7 +575,12 @@ mod tests {
         let (request_id, questions) =
             pending_input_request(&asking(request_id)).expect("pending question");
         composer.update(cx, |composer, cx| {
-            composer.land_ask(chat_id.into(), Wizard::new(request_id, questions), cx)
+            composer.land_ask(
+                chat_id.into(),
+                Wizard::new(request_id, questions),
+                Vec::new(),
+                cx,
+            )
         });
         cx.run_until_parked();
     }

@@ -1204,6 +1204,12 @@ enum HtmlFileState {
 
 #[derive(Clone)]
 pub enum RowKind {
+    PlanProposal {
+        request_id: SharedString,
+        question_id: SharedString,
+        steps: Arc<Vec<SharedString>>,
+        outcome: crate::plan_proposal::PlanOutcome,
+    },
     PlanEstimate {
         task_id: SharedString,
         tool: Arc<ToolItem>,
@@ -2067,6 +2073,14 @@ pub fn rows_for_entry(
                 delegate_route,
                 ..
             } => {
+                if crate::plan_proposal::proposed_plan(call).is_some()
+                    && entry.parts.iter().any(|part| {
+                        matches!(part, MessagePart::Input { questions, .. }
+                            if crate::plan_proposal::is_plan_question(questions))
+                    })
+                {
+                    continue;
+                }
                 // A message to another chat reads as one line naming the
                 // recipient, one per recipient, out of the tool fold (compact
                 // mode folds it with the rest of the work).
@@ -2565,6 +2579,46 @@ pub fn rows_for_entry(
                                 scope: consent_scope(question),
                                 app: consent_app(question),
                                 detail: consent_detail(question).into(),
+                                outcome,
+                            },
+                            entry_id: entry_id.clone(),
+                            timestamp: None,
+                            copy_text: None,
+                            compact_fold: None,
+                        });
+                    }
+                    MessagePart::Input {
+                        id: part_id,
+                        request_id,
+                        questions,
+                        resolved,
+                        answers,
+                        ..
+                    } if crate::plan_proposal::is_plan_question(questions) => {
+                        let question =
+                            crate::plan_proposal::plan_question(questions).expect("guarded");
+                        let outcome = crate::plan_proposal::plan_outcome(
+                            &question.id,
+                            *resolved,
+                            answers.as_deref(),
+                            streaming,
+                        );
+                        let steps: Vec<SharedString> =
+                            crate::plan_proposal::entry_steps(&entry.parts)
+                                .into_iter()
+                                .map(SharedString::from)
+                                .collect();
+                        rows.push(Row {
+                            id: format!("{}#{}", entry.id, part_id).into(),
+                            version: fnv1a(
+                                format!("plan\0{request_id}\0{outcome:?}\0{}", steps.join("\0"))
+                                    .as_bytes(),
+                            ),
+                            turn_start: false,
+                            kind: RowKind::PlanProposal {
+                                request_id: request_id.clone().into(),
+                                question_id: question.id.clone().into(),
+                                steps: Arc::new(steps),
                                 outcome,
                             },
                             entry_id: entry_id.clone(),
@@ -4554,6 +4608,8 @@ pub struct Transcript {
     copied_message: Option<SharedString>,
     copied_message_clear: Option<Task<()>>,
     consent_sent: HashMap<SharedString, ConsentOutcome>,
+    plan_sent: HashMap<SharedString, bool>,
+    plan_views: HashMap<SharedString, (u8, usize)>,
     consent_failures: HashMap<SharedString, SharedString>,
     foreground_sent: HashSet<SharedString>,
     secrets: secret_card::SecretCards,
@@ -4715,7 +4771,13 @@ pub enum TranscriptEvent {
         link: route_badge::RouteLink,
     },
     ApprovePlan {
-        task_id: String,
+        chat_id: String,
+        as_task: bool,
+        answer: Option<crate::plan_proposal::PlanAnswer>,
+    },
+    EditPlan {
+        chat_id: String,
+        answer: crate::plan_proposal::PlanAnswer,
     },
     OpenTask {
         task_id: String,
@@ -4863,7 +4925,7 @@ impl Transcript {
             .detach();
         }
         let transcript = cx.weak_entity();
-        let approve = task.id.clone();
+        let approve = self.chat_id.clone();
         plan::plan_card(
             plan::PlanCard {
                 id: row_id.clone(),
@@ -4872,16 +4934,186 @@ impl Transcript {
                 lead,
                 on_link: self.route_links(cx),
                 on_start: Rc::new(move |_, cx| {
+                    let Some(chat_id) = approve.clone() else {
+                        return;
+                    };
                     transcript
                         .update(cx, |_, cx| {
                             cx.emit(TranscriptEvent::ApprovePlan {
-                                task_id: approve.clone(),
+                                chat_id,
+                                as_task: false,
+                                answer: None,
                             })
                         })
                         .ok();
                 }),
             },
             theme,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_plan_proposal(
+        &mut self,
+        row_id: &SharedString,
+        request_id: &SharedString,
+        question_id: &SharedString,
+        steps: &Arc<Vec<SharedString>>,
+        outcome: crate::plan_proposal::PlanOutcome,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use crate::plan_proposal::{self as proposal, CardView, PlanOutcome, StepMark};
+        let sent = self.plan_sent.get(request_id).copied();
+        let latest = self.rows.iter().rev().find_map(|row| match &row.kind {
+            RowKind::PlanProposal { .. } => Some(&row.id),
+            _ => None,
+        }) == Some(row_id);
+        let chat_id = self.chat_id.clone().unwrap_or_default();
+        let state = self.state.read(cx);
+        let task = latest
+            .then(|| zeron_proto::plan_of_chat(&state.tasks, &chat_id))
+            .flatten();
+        let as_task = sent == Some(true) || (outcome == PlanOutcome::Declined && task.is_some());
+        let first_current = |steps: &[SharedString]| -> Vec<(SharedString, StepMark)> {
+            steps
+                .iter()
+                .enumerate()
+                .map(|(ix, step)| {
+                    let mark = if ix == 0 {
+                        StepMark::Current
+                    } else {
+                        StepMark::Number
+                    };
+                    (step.clone(), mark)
+                })
+                .collect()
+        };
+        let view = if outcome == PlanOutcome::Approved || sent == Some(false) {
+            CardView::Here
+        } else if as_task {
+            let title = state
+                .chats
+                .iter()
+                .find(|chat| chat.id == chat_id)
+                .map(crate::home::chat_title)
+                .unwrap_or_default();
+            let rows = task
+                .map(|task| crate::tasks::rollup(state, task, chrono::Utc::now()).steps)
+                .unwrap_or_default();
+            let mut current = false;
+            let marked: Vec<(SharedString, StepMark)> = rows
+                .iter()
+                .map(|row| {
+                    let done = matches!(
+                        row.status,
+                        zeron_proto::StepStatus::Done | zeron_proto::StepStatus::Skipped
+                    );
+                    let mark = match (done, current) {
+                        (true, _) => StepMark::Done,
+                        (false, false) => {
+                            current = true;
+                            StepMark::Current
+                        }
+                        (false, true) => StepMark::Number,
+                    };
+                    (SharedString::from(row.step.title.clone()), mark)
+                })
+                .collect();
+            CardView::Task {
+                title: task
+                    .map(|task| task.title.clone())
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or(title)
+                    .into(),
+                steps: if marked.is_empty() {
+                    first_current(steps)
+                } else {
+                    marked
+                },
+            }
+        } else if outcome == PlanOutcome::Declined {
+            CardView::NotApproved
+        } else {
+            CardView::Waiting
+        };
+        let layout = match &view {
+            CardView::Waiting => (0, steps.len()),
+            CardView::Here => (1, steps.len()),
+            CardView::NotApproved => (2, steps.len()),
+            CardView::Task { steps, .. } => (3, steps.len()),
+        };
+        if self.plan_views.insert(row_id.clone(), layout) != Some(layout) {
+            let row = row_id.clone();
+            cx.spawn(async move |this, cx| {
+                this.update(cx, |this, cx| this.diagram_layout_changed(&[row], cx))
+                    .ok();
+            })
+            .detach();
+        }
+        let task_id = task.map(|task| task.id.clone());
+        let weak = cx.weak_entity();
+        let answer = proposal::PlanAnswer {
+            request_id: request_id.to_string(),
+            question_id: question_id.to_string(),
+        };
+        let on_approve = {
+            let weak = weak.clone();
+            let chat_id = chat_id.clone();
+            let request = request_id.clone();
+            let answer = answer.clone();
+            Rc::new(move |as_task: bool, _: &mut Window, cx: &mut gpui::App| {
+                weak.update(cx, |transcript, cx| {
+                    if transcript.plan_sent.contains_key(&request) {
+                        return;
+                    }
+                    transcript.plan_sent.insert(request.clone(), as_task);
+                    cx.emit(TranscriptEvent::ApprovePlan {
+                        chat_id: chat_id.clone(),
+                        as_task,
+                        answer: Some(answer.clone()),
+                    });
+                    cx.notify();
+                })
+                .ok();
+            })
+        };
+        let on_edit = {
+            let weak = weak.clone();
+            let chat_id = chat_id.clone();
+            let request = request_id.clone();
+            Rc::new(move |_: &mut Window, cx: &mut gpui::App| {
+                weak.update(cx, |transcript, cx| {
+                    if transcript.plan_sent.contains_key(&request) {
+                        return;
+                    }
+                    cx.emit(TranscriptEvent::EditPlan {
+                        chat_id: chat_id.clone(),
+                        answer: answer.clone(),
+                    })
+                })
+                .ok();
+            })
+        };
+        let on_open_task = Rc::new(move |_: &mut Window, cx: &mut gpui::App| {
+            let Some(task_id) = task_id.clone() else {
+                return;
+            };
+            weak.update(cx, |_, cx| cx.emit(TranscriptEvent::OpenTask { task_id }))
+                .ok();
+        });
+        proposal::proposal_card(
+            proposal::ProposalCard {
+                id: row_id.clone(),
+                steps: steps.clone(),
+                view,
+                on_approve,
+                on_edit,
+                on_open_task,
+            },
+            theme,
+            cx.entity_id(),
             cx,
         )
     }
@@ -5513,6 +5745,8 @@ impl Transcript {
             copied_message: None,
             copied_message_clear: None,
             consent_sent: HashMap::new(),
+            plan_sent: HashMap::new(),
+            plan_views: HashMap::new(),
             consent_failures: HashMap::new(),
             foreground_sent: HashSet::new(),
             secrets: Default::default(),
@@ -11313,6 +11547,20 @@ impl Transcript {
             RowKind::PlanEstimate { task_id, tool } => {
                 self.render_plan_estimate(&row.id, task_id, tool, &theme, cx)
             }
+            RowKind::PlanProposal {
+                request_id,
+                question_id,
+                steps,
+                outcome,
+            } => self.render_plan_proposal(
+                &row.id,
+                request_id,
+                question_id,
+                steps,
+                *outcome,
+                &theme,
+                cx,
+            ),
             RowKind::ComputerConsent {
                 request_id,
                 question_id,

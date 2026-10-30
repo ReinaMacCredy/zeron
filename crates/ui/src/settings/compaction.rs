@@ -14,7 +14,7 @@ use crate::theme::Theme;
 
 const IDLE_TITLE: &str = "Compact idle chats before the cache expires";
 const AGENT_TITLE: &str = "Let agents compact themselves";
-const MISSIONS_TITLE: &str = "In missions";
+const MISSIONS_TITLE: &str = "In tasks";
 const AHEAD_TITLE: &str = "Compact ahead of time";
 const COMPACT_TOOL: &str = "compact";
 
@@ -447,7 +447,7 @@ impl Render for CompactionCard {
                 .child(row_text(
                     &theme,
                     MISSIONS_TITLE,
-                    "Lead and step threads compact by the same rule. Off leaves missions alone.",
+                    "Lead and step threads compact by the same rule. Off leaves tasks alone.",
                 ))
                 .child(
                     switch(

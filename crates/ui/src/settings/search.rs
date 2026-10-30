@@ -29,7 +29,6 @@ pub enum SettingId {
     PullRequestDestination,
     ThreadNaming,
     ShowPredictions,
-    ChatMission,
     WorktreeLocation,
     CommitCredit,
     ColorScheme,

@@ -11,24 +11,14 @@ pub(super) const CENTER_FADE: motion::MotionSpec = motion::MotionSpec::new(150, 
 const UNDER_SHIFT: f32 = 0.24;
 const UNDER_DIM: f32 = 0.45;
 const CENTER_SHADOW: f32 = 0.55;
-const HANDOFF_LIFT: motion::MotionSpec = motion::MotionSpec::new(220, motion::EASE_IN);
-const HANDOFF_ARRIVE: motion::MotionSpec =
-    motion::MotionSpec::new(320, motion::EASE_OUT_QUINT).with_delay(140);
-const HANDOFF: motion::MotionSpec = motion::MotionSpec::new(
-    HANDOFF_ARRIVE.delay_ms + HANDOFF_ARRIVE.duration_ms,
-    motion::LINEAR,
-);
-const HANDOFF_SHIFT: f32 = 40.0;
 const CHAT_SLIDE_IN: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE_OUT_QUINT);
 const CHAT_SLIDE_OUT: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE_TAILWIND);
 const CHAT_PARALLAX: f32 = 30.0;
-pub(super) const HANDOFF_RISE: f32 = 30.0;
 
 pub(super) struct TaskSlide {
     tween: motion::Tween,
     under: Route,
     chat: bool,
-    handoff: bool,
     pub(super) strip: (Option<String>, motion::Tween),
     pub(super) folded: std::collections::HashMap<String, motion::Tween>,
 }
@@ -40,7 +30,6 @@ impl TaskSlide {
             tween: motion::Tween::at(Self::rest(route), now),
             under: Route::Tasks,
             chat: false,
-            handoff: false,
             strip: (None, motion::Tween::at(0.0, now)),
             folded: Default::default(),
         }
@@ -49,10 +38,6 @@ impl TaskSlide {
     fn rest(route: Route) -> f32 {
         if route == Route::TaskCenter { 1.0 } else { 0.0 }
     }
-}
-
-pub(super) fn handoff_lift(t: f32) -> f32 {
-    HANDOFF_LIFT.progress(t * HANDOFF.duration_ms as f32 / HANDOFF_LIFT.duration_ms as f32)
 }
 
 fn slides_under_center(route: Route) -> bool {
@@ -78,10 +63,6 @@ enum TaskOrigin {
         card: Entity<crate::tasks::TaskCard>,
         patch: Option<TaskPatch>,
     },
-    Mission {
-        start: crate::composer::MissionStart,
-        create: serde_json::Value,
-    },
     Plan {
         create: Option<serde_json::Value>,
     },
@@ -93,7 +74,6 @@ impl TaskOrigin {
             Self::Card { patch, .. } => patch.as_ref().map(
                 |patch| serde_json::json!({ "op": "updateTask", "taskId": task_id, "patch": patch }),
             ),
-            Self::Mission { create, .. } => Some(create.clone()),
             Self::Plan { create } => create.clone(),
         }
     }
@@ -167,92 +147,12 @@ impl Shell {
         self.mutate_task_row(params, cx);
     }
 
-    pub(super) fn start_mission(
+    pub(super) fn add_plan(
         &mut self,
-        start: crate::composer::MissionStart,
+        chat_id: &str,
+        lead: crate::tasks::Orchestrate,
         cx: &mut Context<Self>,
     ) {
-        let staged = start.images();
-        if staged.is_empty() {
-            self.start_mission_with(start, Vec::new(), cx);
-            return;
-        }
-        let upload = crate::tasks::images::upload(&self.state, staged, cx);
-        cx.spawn(async move |this, cx| {
-            let images = upload.await;
-            this.update(cx, |shell, cx| shell.start_mission_with(start, images, cx))
-                .ok();
-        })
-        .detach();
-    }
-
-    fn start_mission_with(
-        &mut self,
-        start: crate::composer::MissionStart,
-        images: Vec<String>,
-        cx: &mut Context<Self>,
-    ) {
-        let task_id = uuid::Uuid::new_v4().to_string();
-        let (title, notes) = start.title_notes();
-        let lead = start
-            .chat_id
-            .clone()
-            .filter(|_| settings::current(cx).chat_mission == settings::ChatMission::Lead);
-        let source = start.chat_id.as_deref().filter(|_| lead.is_none());
-        let state = self.state.read(cx);
-        let local = state.local_device_id.as_deref();
-        let zeron_proto::mission::MissionReads {
-            context,
-            capped,
-            notes,
-        } = zeron_proto::mission::mission_reads(
-            source,
-            lead.as_deref(),
-            &start.text,
-            notes,
-            zeron_doc::TASK_CONTEXT_MAX,
-            |id| {
-                state
-                    .chats
-                    .iter()
-                    .any(|chat| chat.id == id && Some(chat.device_id.as_str()) == local)
-                    && !state.is_draft(id)
-            },
-        );
-        if capped {
-            self.show_notice(
-                crate::toast::ToastKind::Info,
-                zeron_proto::mission::mission_context_capped(zeron_doc::TASK_CONTEXT_MAX),
-                cx,
-            );
-        }
-        let mut create =
-            Self::create_task_params(&task_id, &title, &notes, start.space_id.clone(), None);
-        if !context.is_empty() {
-            create["context"] = context.into();
-        }
-        if !images.is_empty() {
-            create["images"] = images.into();
-        }
-        let orchestrate = start.orchestrate;
-        let (space_id, config) = (start.space_id.clone(), start.config.clone());
-        let origin = TaskOrigin::Mission { start, create };
-        match lead {
-            Some(chat_id) => {
-                self.assign_task(origin, &task_id, &chat_id, true, Some(orchestrate), cx)
-            }
-            None => self.start_task(
-                origin,
-                &task_id,
-                Some(space_id),
-                config,
-                Some(orchestrate),
-                cx,
-            ),
-        }
-    }
-
-    pub(super) fn add_plan(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         let Some(chat) = state
             .chats
@@ -273,7 +173,6 @@ impl Shell {
                 (task_id, Some(create))
             }
         };
-        let lead = crate::tasks::Orchestrate::default();
         self.assign_task(
             TaskOrigin::Plan { create },
             &task_id,
@@ -282,6 +181,75 @@ impl Shell {
             Some(lead),
             cx,
         );
+    }
+
+    pub(crate) fn approve_plan(
+        &mut self,
+        chat_id: &str,
+        as_task: bool,
+        answer: Option<crate::plan_proposal::PlanAnswer>,
+        cx: &mut Context<Self>,
+    ) {
+        let pending = zeron_proto::plan_of_chat(&self.state.read(cx).tasks, chat_id)
+            .filter(|task| task.plan_pending)
+            .map(|task| task.id.clone());
+        if let Some(task_id) = pending {
+            self.mutate(
+                serde_json::json!({ "op": "approvePlan", "taskId": task_id }),
+                cx,
+            );
+            return;
+        }
+        let Some(answer) = answer.or_else(|| self.composer.read(cx).plan_answer(chat_id)) else {
+            return;
+        };
+        self.composer.update(cx, |composer, cx| {
+            composer.answer_plan(chat_id, answer, !as_task, cx)
+        });
+        self.leave_plan_mode(chat_id, as_task, cx);
+    }
+
+    fn leave_plan_mode(&mut self, chat_id: &str, then_task: bool, cx: &mut Context<Self>) {
+        let lead = crate::tasks::Orchestrate {
+            approve_plan: false,
+            ..Default::default()
+        };
+        let config = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.config.clone())
+            .filter(|config| config.plan);
+        let Some(mut config) = config else {
+            if then_task {
+                self.add_plan(chat_id, lead, cx);
+            }
+            return;
+        };
+        config.plan = false;
+        let chat_id = chat_id.to_owned();
+        self.state.update(cx, |state, cx| {
+            state.apply_chat_config(&chat_id, config.clone());
+            cx.notify();
+        });
+        let Some(engine) = self.task_engine(cx) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let params = serde_json::json!({
+                "op": "setChatConfig", "chatId": chat_id, "config": config,
+            });
+            if let Err(err) = engine.client().call(methods::MUTATE, params).await {
+                tracing::warn!(error = %err, "leaving plan mode failed");
+            }
+            if then_task {
+                this.update(cx, |shell, cx| shell.add_plan(&chat_id, lead, cx))
+                    .ok();
+            }
+        })
+        .detach();
     }
 
     fn task_origin_failed(
@@ -301,13 +269,6 @@ impl Shell {
                     card.start_failed(task_id, cx);
                 }
             }),
-            TaskOrigin::Mission { start, .. } => {
-                if !save_failed {
-                    self.delete_task(task_id, cx);
-                }
-                self.composer
-                    .update(cx, |composer, cx| composer.mission_failed(start, cx));
-            }
             TaskOrigin::Plan { create } => {
                 if create.is_some() && !save_failed {
                     self.delete_task(task_id, cx);
@@ -405,18 +366,6 @@ impl Shell {
                         }
                         shell.open_task_center(task_id.clone(), cx);
                     }
-                    TaskOrigin::Mission { start, .. } => match start.chat_id.clone() {
-                        Some(chat_id) => {
-                            let title = start.title_notes().0;
-                            shell.composer.update(cx, |composer, cx| {
-                                composer.mission_started(chat_id, task_id.clone(), title, cx)
-                            });
-                        }
-                        None => {
-                            shell.task_slide.handoff = true;
-                            shell.open_task_center(task_id.clone(), cx)
-                        }
-                    },
                     TaskOrigin::Plan { .. } => {}
                 })
                 .ok();
@@ -728,25 +677,9 @@ impl Shell {
         }
     }
 
-    pub(super) fn route_task_slide(&mut self, to: Route, cx: &mut Context<Self>) {
+    pub(super) fn route_task_slide(&mut self, to: Route) {
         let from = self.route;
-        let handoff = std::mem::take(&mut self.task_slide.handoff);
         if from == to {
-            return;
-        }
-        if handoff
-            && (from, to) == (Route::Chat, Route::TaskCenter)
-            && !self.reduced_motion
-            && self.state.read(cx).selected_chat.is_none()
-        {
-            self.task_slide = TaskSlide {
-                handoff: true,
-                ..TaskSlide::resting(from)
-            };
-            self.task_slide
-                .tween
-                .retarget(1.0, HANDOFF, false, self.motion_time());
-            self.swipe.yield_to_slide();
             return;
         }
         if matches!(
@@ -790,22 +723,9 @@ impl Shell {
     }
 
     fn task_slide_t(&self) -> Option<f32> {
-        if self.task_slide.handoff
-            || self.task_slide.chat
+        if self.task_slide.chat
             || !matches!(self.route, Route::Tasks | Route::TaskCenter | Route::Inbox)
         {
-            return None;
-        }
-        let now = self.render_time.unwrap_or_else(|| self.motion_time());
-        if self.task_slide.tween.settled_at(now) {
-            return None;
-        }
-        self.motion_active.set(true);
-        Some(self.task_slide.tween.value_at(now))
-    }
-
-    pub(super) fn task_handoff_t(&self) -> Option<f32> {
-        if !self.task_slide.handoff || self.route != Route::TaskCenter {
             return None;
         }
         let now = self.render_time.unwrap_or_else(|| self.motion_time());
@@ -898,56 +818,6 @@ impl Shell {
                     }),
             )
             .child(center)
-            .into_any_element()
-    }
-
-    pub(super) fn render_task_handoff(
-        &mut self,
-        home: AnyElement,
-        t: f32,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let arrive = HANDOFF_ARRIVE.progress(t);
-        let center = self.render_task_center_page(window, cx);
-        let inset = self.settings.inset_shell;
-        let backdrop = inset.then(|| {
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .bottom_0()
-                .top(px(Theme::TITLEBAR_HEIGHT))
-                .rounded(px(CARD_RADIUS))
-                .bg(Theme::of(cx).inset_tones().body)
-        });
-        div()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .relative()
-            .overflow_hidden()
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .opacity(if inset { 1.0 } else { 1.0 - arrive })
-                    .child(home)
-                    .child(div().absolute().inset_0().occlude()),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .w_full()
-                    .left(px(HANDOFF_SHIFT * (1.0 - arrive)))
-                    .flex()
-                    .opacity(arrive)
-                    .children(backdrop)
-                    .child(center),
-            )
             .into_any_element()
     }
 
@@ -1329,7 +1199,9 @@ impl Shell {
                     cx,
                 );
             }
-            TaskCenterEvent::AddPlan(chat_id) => return self.add_plan(chat_id, cx),
+            TaskCenterEvent::AddPlan(chat_id) => {
+                return self.add_plan(chat_id, crate::tasks::Orchestrate::default(), cx);
+            }
             TaskCenterEvent::Watch {
                 task_id: Some(task_id),
                 on,

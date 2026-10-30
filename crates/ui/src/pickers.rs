@@ -67,14 +67,6 @@ fn permission_icon(mode: AccessMode) -> &'static str {
     }
 }
 
-fn access_id(mode: AccessMode) -> &'static str {
-    match mode {
-        AccessMode::Supervised => "supervised",
-        AccessMode::AutoAcceptEdits => "auto-accept-edits",
-        AccessMode::FullAccess => "full-access",
-    }
-}
-
 const FOOTER_CHIP_RADIUS: f32 = 6.0;
 
 /// Both sides of the composer handoff share one leading-aligned workspace
@@ -1123,7 +1115,6 @@ const EFFORT_THUMB_SIZE: f32 = 28.0;
 const EFFORT_MARK_SIZE: f32 = 4.0;
 /// Card height beyond a plain trait row (header + track + insets − 32).
 const EFFORT_CARD_EXTRA_HEIGHT: f32 = 30.0;
-const PERMISSIONS_SECTION_HEIGHT: f32 = 80.0;
 
 /// A manual-drive tween (the shell `WidthTween` pattern) for the effort
 /// card: the thumb's glide between stops and the pressed disc's scale.
@@ -1288,7 +1279,6 @@ pub struct Pickers {
     /// fraction of the rail), the pressed disc's scale, whether a drag is
     /// live, and the track's last painted bounds (pointer → stop math).
     effort_snap: Option<EffortTween>,
-    permission_preview: Option<AccessMode>,
     effort_press: Option<EffortTween>,
     effort_dragging: bool,
     effort_track: Option<gpui::Bounds<gpui::Pixels>>,
@@ -1736,7 +1726,6 @@ impl Pickers {
             model_tabs_scroll: gpui::ScrollHandle::new(),
             revealed_model_tab: None,
             effort_snap: None,
-            permission_preview: None,
             effort_press: None,
             effort_dragging: false,
             effort_track: None,
@@ -2567,10 +2556,6 @@ impl Pickers {
         }
     }
 
-    pub fn names_permission(&self, cx: &App) -> bool {
-        !self.effective_access(cx).is_full_access() || self.effective_plan(cx)
-    }
-
     fn pick_permission(&mut self, mode: AccessMode, cx: &mut Context<Self>) {
         self.set_permission(mode, cx);
         self.animate_close(cx);
@@ -2583,149 +2568,6 @@ impl Pickers {
             self.config.access = mode;
         }
         cx.notify();
-    }
-
-    fn render_permissions_section(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::of(cx).for_popup();
-        let current = self.effective_access(cx);
-        let shown = self.permission_preview.unwrap_or(current);
-        let plan = self.plan_offered(cx).then(|| self.effective_plan(cx));
-        let segments = self.offered_access(cx).into_iter().map(|mode| {
-            let selected = mode == current;
-            div()
-                .id(SharedString::from(format!(
-                    "permission-segment-{}",
-                    access_id(mode)
-                )))
-                .debug_selector(move || format!("permission-segment-{}", access_id(mode)))
-                .role(gpui::Role::RadioButton)
-                .aria_label(SharedString::from(mode.label()))
-                .aria_selected(selected)
-                .h(px(24.0))
-                .w(px(32.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.0))
-                .cursor_pointer()
-                .when(selected, |el| el.bg(crate::theme::card_selected_bg()))
-                .when(!selected, |el| el.hover(|s| s.bg(crate::theme::ink(0.05))))
-                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                    let next = hovered
-                        .then_some(mode)
-                        .or(this.permission_preview.filter(|preview| *preview != mode));
-                    if this.permission_preview != next {
-                        this.permission_preview = next;
-                        cx.notify();
-                    }
-                }))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.set_permission(mode, cx);
-                    cx.stop_propagation();
-                }))
-                .child(
-                    crate::icons::icon(permission_icon(mode))
-                        .size(px(14.0))
-                        .text_color(if selected {
-                            theme.text
-                        } else {
-                            theme.text_muted
-                        }),
-                )
-        });
-        div()
-            .id("model-permissions")
-            .flex_none()
-            .h(px(PERMISSIONS_SECTION_HEIGHT))
-            .px(px(8.0))
-            .pt(px(6.0))
-            .pb(px(8.0))
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text_muted)
-                            .child("Permissions"),
-                    )
-                    .child(
-                        div()
-                            .id("permission-segments")
-                            .role(gpui::Role::RadioGroup)
-                            .aria_label("Permissions")
-                            .flex()
-                            .gap(px(2.0))
-                            .p(px(2.0))
-                            .rounded(px(8.0))
-                            .bg(crate::theme::ink(0.04))
-                            .children(segments),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .h(px(18.0))
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .text_color(theme.text)
-                    .child(SharedString::from(shown.label()))
-                    .when(shown.is_full_access(), |el| {
-                        el.child(
-                            div()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.text_muted)
-                                .child("default"),
-                        )
-                    })
-                    .when_some(plan, |el, on| {
-                        el.child(div().flex_1()).child(
-                            div()
-                                .id("permission-plan")
-                                .debug_selector(|| "permission-plan".into())
-                                .role(gpui::Role::Switch)
-                                .aria_label("Plan mode")
-                                .aria_toggled(if on {
-                                    gpui::Toggled::True
-                                } else {
-                                    gpui::Toggled::False
-                                })
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .cursor_pointer()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.text_muted)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.toggle_plan(cx);
-                                    cx.stop_propagation();
-                                }))
-                                .child("Plan mode")
-                                .child(crate::settings::widgets::toggle_switch(
-                                    &theme,
-                                    on,
-                                    "permission-plan-switch",
-                                )),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .mt(px(-4.0))
-                    .h(px(16.0))
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(shown.description())),
-            )
-            .into_any_element()
     }
 
     pub(crate) fn chip_choices(&self, cx: &App) -> zeron_proto::claude_panel::ChipChoices {
@@ -2764,20 +2606,21 @@ impl Pickers {
         self.pick_permission(mode, cx);
     }
 
-    fn plan_offered(&self, cx: &App) -> bool {
-        self.effective_descriptor(cx).is_some_and(|d| d.supports_plan)
+    pub(crate) fn offers_plan(&self, cx: &App) -> bool {
+        self.effective_descriptor(cx)
+            .is_none_or(|d| d.supports_plan)
     }
 
     /// The chat's plan switch, else the draft's; off on a harness without one.
-    fn effective_plan(&self, cx: &App) -> bool {
+    pub(crate) fn effective_plan(&self, cx: &App) -> bool {
         let wanted = match self.chat_row(cx) {
             Some(chat) => chat.config.as_ref().is_some_and(|c| c.plan),
             None => self.config.plan,
         };
-        wanted && (self.effective_descriptor(cx).is_none() || self.plan_offered(cx))
+        wanted && self.offers_plan(cx)
     }
 
-    fn toggle_plan(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_plan(&mut self, cx: &mut Context<Self>) {
         let plan = !self.effective_plan(cx);
         if self.chat_id(cx).is_some() {
             self.update_chat_config(cx, None, move |config| config.plan = plan);
@@ -2900,7 +2743,6 @@ impl Pickers {
         }
         if kind == PickerKind::HarnessModel {
             self.profiles_only = false;
-            self.permission_preview = None;
             let groups = self.setting_groups(cx);
             self.open_model_height = model_menu_height(groups.len(), tray_card_extra(&groups));
             self.compact_model_list = false;
@@ -5601,9 +5443,7 @@ impl Pickers {
                     }
                     Some(PickerKind::Space) => self.filtered_project_rows(cx).len() + 1,
                     Some(PickerKind::Device) => self.filtered_device_rows(cx).len(),
-                    Some(PickerKind::Permission) => {
-                        self.offered_access(cx).len() + usize::from(self.plan_offered(cx))
-                    }
+                    Some(PickerKind::Permission) => self.offered_access(cx).len(),
                     None => 0,
                 };
                 let current = (self.active != NO_ACTIVE_ROW).then_some(self.active);
@@ -5631,10 +5471,8 @@ impl Pickers {
                         .map_or(CheckoutKind::Local, |(kind, _, _)| *kind);
                     self.pick_checkout(kind, cx);
                 } else if self.open_kind() == Some(PickerKind::Permission) {
-                    match self.offered_access(cx).get(self.active) {
-                        Some(mode) => self.pick_permission(*mode, cx),
-                        None if self.plan_offered(cx) => self.toggle_plan(cx),
-                        None => {}
+                    if let Some(mode) = self.offered_access(cx).get(self.active) {
+                        self.pick_permission(*mode, cx);
                     }
                 } else {
                     self.on_search_submit(cx);
@@ -6605,21 +6443,8 @@ impl Pickers {
     /// [`Self::popover_frame`] without the p-1 inset — the harness/model
     /// picker's rail + list panes bleed to the card edge (zeron
     /// harness-model-picker.tsx `className="w-80 p-0"`).
-    fn permissions_reserved(&self, cx: &App) -> f32 {
-        if !self.compact_model_picker(cx)
-            && self.title.is_none()
-            && self.model_rail != ModelRail::Profiles
-        {
-            PERMISSIONS_SECTION_HEIGHT
-        } else {
-            0.0
-        }
-    }
-
-    fn model_frame_height(&self, cx: &App) -> f32 {
-        self.menu_geometry()
-            .height
-            .min(self.open_model_height + self.permissions_reserved(cx))
+    fn model_frame_height(&self) -> f32 {
+        self.menu_geometry().height.min(self.open_model_height)
     }
 
     fn popover_frame_flush(
@@ -6629,7 +6454,7 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
-        let height = self.model_frame_height(cx);
+        let height = self.model_frame_height();
         let fits_content = self.model_rail == ModelRail::Profiles && self.profile_edit.is_none();
         popover::popover_card_flush(&theme)
             .id("picker-popover")
@@ -6909,7 +6734,7 @@ impl Pickers {
     /// The approval-mode chip the composer places beside the context ring,
     /// with its dropdown attached while open. Full access wears the warning
     /// tone so an unattended chat reads as such without opening anything.
-    pub fn render_permission_chip(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub fn render_permission_chip(&mut self, labelled: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let mode = self.effective_access(cx);
         let closing = (self.open.closing_since(), self.menu_geometry().below);
@@ -6960,11 +6785,18 @@ impl Pickers {
             .child(
                 crate::icons::icon(permission_icon(mode))
                     .size(px(12.0))
-                    .text_color(tone),
+                    .text_color(if mode.is_full_access() {
+                        theme.warning
+                    } else {
+                        tone
+                    }),
             )
-            .child(SharedString::from(mode.label()))
-            .when(self.effective_plan(cx), |el| {
-                el.child(div().text_color(theme.accent).child("Plan"))
+            .map(|chip| {
+                if labelled {
+                    chip.child(SharedString::from(mode.label()))
+                } else {
+                    chip.tooltip(crate::settings::widgets::text_tooltip(mode.label()))
+                }
             });
         attach_overlay_end(
             chip,
@@ -6979,7 +6811,6 @@ impl Pickers {
     fn render_permission_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
         let current = self.effective_access(cx);
-        let plan = self.plan_offered(cx).then(|| self.effective_plan(cx));
         let modes = self.offered_access(cx);
         let only = (modes.len() == 1)
             .then(|| self.effective_descriptor(cx).map(|d| d.name.clone()))
@@ -6995,7 +6826,6 @@ impl Pickers {
                         modes[0].label().to_lowercase()
                     )))
             });
-        let plan_ix = modes.len();
         let active = self.active;
         div()
             .flex()
@@ -7058,23 +6888,6 @@ impl Pickers {
                 })
             }))
             .when_some(only, |menu, note| menu.child(note))
-            .when_some(plan, |menu, on| {
-                menu.child(popover::menu_separator()).child(
-                    popover::menu_row_nav(&theme, false, plan_ix == active, "permission-row-plan")
-                        .id("permission-row-plan")
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_plan(cx)))
-                        .child(access_row_text(
-                            "Plan mode",
-                            "Explore and propose a plan before changing anything.",
-                            &theme,
-                        ))
-                        .child(crate::settings::widgets::toggle_switch(
-                            &theme,
-                            on,
-                            "permission-plan-switch",
-                        )),
-                )
-            })
             .into_any_element()
     }
 
@@ -7131,9 +6944,7 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let compact = self.compact_model_picker(cx);
-        let reserved = self.permissions_reserved(cx);
-        let permissions = reserved > 0.0;
-        let height = (self.model_frame_height(cx) - reserved).max(0.0);
+        let height = self.model_frame_height();
         let groups = self.setting_groups(cx);
         let (list_height, tray_height) =
             model_menu_budgets(height, groups.len(), tray_card_extra(&groups));
@@ -7613,13 +7424,6 @@ impl Pickers {
                 .into_any_element()
         });
 
-        let permissions_section = permissions.then(|| {
-            div()
-                .border_t_1()
-                .border_color(crate::theme::hairline(0.08))
-                .px(px(popover::CARD_INSET))
-                .child(self.render_permissions_section(cx))
-        });
         div()
             .flex()
             .flex_col()
@@ -7628,7 +7432,6 @@ impl Pickers {
             .children(refresh_error)
             .child(list_host)
             .children(tray)
-            .children(permissions_section)
             .into_any_element()
     }
 
@@ -10591,22 +10394,6 @@ impl Pickers {
     }
 }
 
-/// A row's name over what it does, in the permission menu.
-fn access_row_text(label: &'static str, description: &'static str, theme: &Theme) -> gpui::Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .child(div().truncate().child(SharedString::from(label)))
-        .child(
-            div()
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(theme.text_muted)
-                .child(SharedString::from(description)),
-        )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11517,7 +11304,7 @@ mod tests {
                     .unwrap();
                 assert!(
                     (f32::from(bounds.get().size.height)
-                        - available.min(model_menu_height(2, 0.0) + PERMISSIONS_SECTION_HEIGHT))
+                        - available.min(model_menu_height(2, 0.0)))
                     .abs()
                         < 0.1,
                     "settings={settings}, available={available}, bounds={:?}",
@@ -13066,13 +12853,7 @@ mod tests {
             let parent = measured.get();
             let trigger = gpui::point(
                 parent.center().x,
-                parent.bottom()
-                    - px(PERMISSIONS_SECTION_HEIGHT
-                        + 1.0
-                        + popover::CARD_INSET
-                        + 30.0
-                        + popover::MENU_GAP
-                        + 15.0),
+                parent.bottom() - px(1.0 + popover::CARD_INSET + 30.0 + popover::MENU_GAP + 15.0),
             );
             let click = |window: &mut Window, cx: &mut App, position| {
                 window.dispatch_event(

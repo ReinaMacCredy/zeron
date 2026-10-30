@@ -339,9 +339,6 @@ impl Shell {
                         | ComposerEvent::BackgroundStarted
                         | ComposerEvent::OpenSubagent { .. }
                         | ComposerEvent::OpenChanges
-                        | ComposerEvent::StartMission(_)
-                        | ComposerEvent::OpenTaskCenter(_)
-                        | ComposerEvent::PlanFirst
                         | ComposerEvent::AnnotationsChanged(_)
                         | ComposerEvent::AnnotationHovered(_) => {}
                         ComposerEvent::OpenTask(task_id) => {

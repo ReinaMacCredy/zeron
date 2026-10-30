@@ -3349,7 +3349,7 @@ impl TaskCenter {
                     .text_size(ui_rems(12.0))
                     .text_color(theme.text_muted)
                     .child(
-                        "Agents start from the chat as it goes. A plan turns this tree into a mission in place.",
+                        "Agents start from the chat as it goes. A plan turns this tree into a Task in place.",
                     ),
             );
         let (tokens, time) = {

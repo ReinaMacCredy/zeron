@@ -71,6 +71,7 @@ pub mod overscroll;
 mod pasted_text;
 pub mod pickers;
 mod plan_estimate;
+mod plan_proposal;
 pub mod popover;
 pub mod project_actions;
 pub mod provider_instances;

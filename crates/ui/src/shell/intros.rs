@@ -2,7 +2,7 @@ use super::*;
 use crate::settings::SINCE_INTRO_ID;
 use crate::tasks::{SampleRow, StatusTone, StripTree, TaskCenter, TreeStatus, tree_glyph};
 use std::time::Instant;
-use zeron_proto::mission::{INTRO_DISMISS, INTRO_NEXT, INTRO_PAGES, INTRO_TRY};
+use zeron_proto::mission::{INTRO_DISMISS, INTRO_NEXT, INTRO_PAGES};
 
 mod release;
 
@@ -41,18 +41,18 @@ const fn mission_page(ix: usize) -> Page {
 const SINCE_PAGES: [Page; 4] = [
     Page {
         id: TASKS_HOME,
-        title: "Tasks is home for missions",
-        body: "Mission Control moved into Tasks. Missions, agent trees and tasks sit in one list, and the Missions and Trees chips narrow it.",
+        title: "Tasks is home for plans",
+        body: "Plans, agent trees and tasks sit in one list in Tasks, and the Plans and Trees chips narrow it.",
     },
     Page {
         id: MISSION_TABS,
-        title: "A mission\u{2019}s tabs travel together",
-        body: "Steps you open join the mission\u{2019}s group in the titlebar. Click its title to fold the group to the Lead; hover lists the rest.",
+        title: "A plan\u{2019}s tabs travel together",
+        body: "Steps you open join the plan\u{2019}s group in the titlebar. Click its title to fold the group to the Lead; hover lists the rest.",
     },
     Page {
         id: SIDEBAR_MISSION,
-        title: "Missions on the sidebar",
-        body: "A mission is one row with a progress ring. Its live steps sit under it and the rest fold into N more steps.",
+        title: "Plans on the sidebar",
+        body: "A plan is one row with a progress ring. Its live steps sit under it and the rest fold into N more steps.",
     },
     Page {
         id: SUPERVISOR_CONVERSATION,
@@ -77,7 +77,7 @@ impl Deck {
 
     fn cta(self) -> &'static str {
         match self {
-            Self::Mission => INTRO_TRY,
+            Self::Mission => "Try a plan",
             Self::Since => "Open Tasks",
         }
     }
@@ -252,15 +252,15 @@ impl Shell {
     fn finish_intro(&mut self, deck: Deck, cx: &mut Context<Self>) {
         self.close_intro(cx);
         match deck {
-            Deck::Mission => self.new_mission(cx),
+            Deck::Mission => self.new_plan(cx),
             Deck::Since => self.open_tasks(cx),
         }
     }
 
-    pub(super) fn new_mission(&mut self, cx: &mut Context<Self>) {
+    fn new_plan(&mut self, cx: &mut Context<Self>) {
         self.open_new_session(None, cx);
         self.composer.update(cx, |composer, cx| {
-            composer.mission_pending = true;
+            composer.plan_pending = true;
             composer.focus_pending = true;
             cx.notify();
         });
@@ -711,7 +711,7 @@ fn supervisor_visual(theme: &Theme) -> AnyElement {
                 .text_color(watching)
                 .child("Watching"),
         )
-        .child("1 mission \u{b7} 2 of 12 wakes this hour");
+        .child("1 plan \u{b7} 2 of 12 wakes this hour");
     let header = div()
         .h(px(30.0))
         .pl(px(10.0))
@@ -804,11 +804,7 @@ fn mission_visual(page: usize, theme: &Theme) -> AnyElement {
                     .flex()
                     .items_center()
                     .gap(px(10.0))
-                    .child(intro_chip(
-                        theme,
-                        "Mission Control",
-                        Some(icons::MISSION_CONTROL),
-                    ))
+                    .child(intro_chip(theme, "Plan", Some(icons::MISSION_CONTROL)))
                     .child(
                         div()
                             .text_size(crate::typography::ui_rems(10.5))
@@ -909,7 +905,7 @@ fn filter_chip(theme: &Theme, label: &'static str, count: &'static str, on: bool
 }
 
 fn tasks_visual(theme: &Theme, t: f32, reduced: bool) -> AnyElement {
-    const CHIPS: [(&str, &str); 3] = [("All", "3"), ("Missions", "1"), ("Trees", "1")];
+    const CHIPS: [(&str, &str); 3] = [("All", "3"), ("Plans", "1"), ("Trees", "1")];
     const STARTS: [f32; 3] = [0.0, 2.0, 3.4];
     let filter = STARTS.iter().rposition(|start| t >= *start).unwrap_or(0);
     let start = STARTS[filter];
