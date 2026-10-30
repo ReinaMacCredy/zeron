@@ -94,9 +94,9 @@ final class CoreSessionSource: SessionSource {
             chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: r), symbol: fast ? "bolt.fill" : "gauge.with.dots.needle.67percent"))
         }
         let offered = c.host.capabilities.accessModes
-        let mode = resolveAccess(wanted: config?.access ?? .fullAccess, offered: offered)
-        if let info = accessModes(offered: nil).first(where: { $0.mode == mode }) {
-            chips.append(ComposerChip(id: "permission", title: info.label, symbol: Self.accessSymbol(mode), tint: mode == .fullAccess ? Palette.warning : nil))
+        let plan = c.host.capabilities.supportsPlan == true ? config?.plan ?? false : nil
+        if let chip = Self.accessChip(resolveAccess(wanted: config?.access ?? .fullAccess, offered: offered), plan: plan) {
+            chips.append(chip)
         }
         if let pr = row?.pullRequest {
             let state: SessionRowVM.PR = switch pr.state { case .open: .open; case .merged: .merged; case .closed: .closed }
@@ -405,12 +405,14 @@ final class CoreSessionSource: SessionSource {
                 }
             }])
         case "permission":
-            let offered = handle.composer().host.capabilities.accessModes
-            let current = resolveAccess(wanted: client.sessionConfig(chatId: chatId)?.access ?? .fullAccess, offered: offered)
-            return UIMenu(title: "Access", children: accessModes(offered: offered).map { m in
-                UIAction(title: m.label, subtitle: m.description, image: UIImage(systemName: Self.accessSymbol(m.mode)), state: m.mode == current ? .on : .off) { [weak self] _ in
-                    self?.setConfig { $0.access = m.mode }
-                }
+            let capabilities = handle.composer().host.capabilities
+            let config = client.sessionConfig(chatId: chatId)
+            let current = resolveAccess(wanted: config?.access ?? .fullAccess, offered: capabilities.accessModes)
+            let plan = capabilities.supportsPlan == true ? config?.plan ?? false : nil
+            return Self.accessMenu(current: current, offered: capabilities.accessModes, plan: plan, onPlan: { [weak self] on in
+                self?.setConfig { $0.plan = on }
+            }, onPick: { [weak self] mode in
+                self?.setConfig { $0.access = mode }
             })
         case "pr":
             guard let url = row.pullRequest.flatMap({ URL(string: $0.url) }) else { return nil }
@@ -464,6 +466,23 @@ final class CoreSessionSource: SessionSource {
         return defaultModels[key]
     }
 
+    static func accessChip(_ mode: AccessMode, plan: Bool?) -> ComposerChip? {
+        guard let info = accessModes(offered: nil).first(where: { $0.mode == mode }) else { return nil }
+        return ComposerChip(id: "permission", title: plan == true ? "\(info.label) · Plan" : info.label, symbol: accessSymbol(mode), tint: mode == .fullAccess ? Palette.warning : nil)
+    }
+
+    static func accessMenu(current: AccessMode, offered: [AccessMode]?, plan: Bool?, onPlan: @escaping (Bool) -> Void, onPick: @escaping (AccessMode) -> Void) -> UIMenu {
+        var items: [UIMenuElement] = accessModes(offered: offered).map { m in
+            UIAction(title: m.label, subtitle: m.description, image: UIImage(systemName: accessSymbol(m.mode)), state: m.mode == current ? .on : .off) { _ in onPick(m.mode) }
+        }
+        if let plan {
+            items.append(UIMenu(options: .displayInline, children: [
+                UIAction(title: "Plan mode", subtitle: "Explore and propose a plan before changing anything.", state: plan ? .on : .off) { _ in onPlan(!plan) },
+            ]))
+        }
+        return UIMenu(title: "Access", children: items)
+    }
+
     static func accessSymbol(_ mode: AccessMode) -> String {
         switch mode {
         case .supervised: "checklist"
@@ -474,6 +493,8 @@ final class CoreSessionSource: SessionSource {
 
     private func setConfig(_ change: (inout ChatConfig) -> Void) {
         try? client.setSessionConfig(chatId: chatId, config: changedConfig(change))
+        // Access and plan are not in the row's revision, so no workspace event repaints the chip.
+        refresh()
     }
 
     private func changedConfig(_ change: (inout ChatConfig) -> Void) -> ChatConfig {
