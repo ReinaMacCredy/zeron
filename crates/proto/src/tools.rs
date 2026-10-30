@@ -379,6 +379,59 @@ pub fn action_labels(tool: &str) -> Option<&'static [&'static str]> {
         .map(|(_, labels)| *labels)
 }
 
+pub fn folding_tool(label: &str) -> Option<&'static str> {
+    ACTION_TOOLS
+        .iter()
+        .find(|(_, labels)| labels.contains(&label))
+        .map(|(name, _)| *name)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReceivedCount {
+    pub tools: usize,
+    pub live_tools: usize,
+    pub actions: usize,
+    pub live_actions: usize,
+}
+
+impl ReceivedCount {
+    pub fn all_live(&self) -> bool {
+        self.live_tools == self.tools && self.live_actions == self.actions
+    }
+}
+
+impl ToolGroupInfo {
+    pub fn received(&self, disabled: &BTreeSet<&str>) -> ReceivedCount {
+        let tools = match self.group {
+            // The engine advertises the single JS `computer` tool on macOS, the full catalog elsewhere.
+            ToolGroup::Computer if cfg!(target_os = "macos") => vec![tool("computer", "")],
+            _ => self.tools(),
+        };
+        let mut count = ReceivedCount::default();
+        let mut folds: Vec<(&str, bool)> = Vec::new();
+        for tool in tools {
+            let live = !disabled.contains(tool.name);
+            match folding_tool(tool.name) {
+                Some(name) => {
+                    count.actions += 1;
+                    count.live_actions += usize::from(live);
+                    match folds.iter_mut().find(|(folded, _)| *folded == name) {
+                        Some((_, any)) => *any |= live,
+                        None => folds.push((name, live)),
+                    }
+                }
+                None => {
+                    count.tools += 1;
+                    count.live_tools += usize::from(live);
+                }
+            }
+        }
+        count.tools += folds.len();
+        count.live_tools += folds.iter().filter(|(_, live)| *live).count();
+        count
+    }
+}
+
 pub fn action_label(tool: &str, args: &serde_json::Value) -> Option<&'static str> {
     let wanted = match tool {
         "device" => format!("device_{}", args["action"].as_str()?),
@@ -633,6 +686,33 @@ mod tests {
         assert!(!group_live(ToolGroup::Computer, &disabled));
         assert!(group_live(ToolGroup::Threads, &disabled));
         assert_eq!(disabled.len(), 4 + ZERON_COMPUTER_TOOL_NAMES.len());
+    }
+
+    #[test]
+    fn received_counts_fold_actions_into_their_tool() {
+        let count = |group, disabled: &BTreeSet<&str>| tool_group(group).received(disabled);
+        let none = BTreeSet::new();
+        let threads = count(ToolGroup::Threads, &none);
+        assert_eq!((threads.tools, threads.actions), (9, 3));
+        let devices = count(ToolGroup::Devices, &none);
+        assert_eq!((devices.tools, devices.actions), (1, 4));
+        let computer = count(ToolGroup::Computer, &none).tools;
+        if cfg!(target_os = "macos") {
+            assert_eq!(computer, 1);
+        } else {
+            assert_eq!(computer, ZERON_COMPUTER_TOOL_NAMES.len());
+        }
+
+        let mut settings = ToolSettings::default();
+        settings.set_tool("device_close", false);
+        let devices = count(ToolGroup::Devices, &settings.disabled(&[]));
+        assert_eq!((devices.live_tools, devices.live_actions), (1, 3));
+        assert!(!devices.all_live());
+        settings.set_tool("device_list", false);
+        assert_eq!(
+            count(ToolGroup::Devices, &settings.disabled(&[])).live_tools,
+            0
+        );
     }
 
     #[test]
