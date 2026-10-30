@@ -1495,6 +1495,14 @@ impl HarnessesPage {
                             .into_any_element(),
                     );
                 }
+                if installed && harness == HarnessId::Fx {
+                    meta.push(
+                        div()
+                            .text_color(theme.text_muted)
+                            .child("Configure your model provider with fx login or fx setup.")
+                            .into_any_element(),
+                    );
+                }
                 // Not installed: the hint above says all there is.
                 if let Some(status) = update.filter(|_| installed) {
                     let (text, color) = harness_update_label(status, &theme);
