@@ -616,6 +616,7 @@ impl Shell {
                 .id(id)
                 .debug_selector(move || id.into())
                 .role(gpui::Role::Button)
+                .aria_label(label)
                 .flex()
                 .items_center()
                 .gap(px(6.0))
@@ -753,6 +754,7 @@ impl Shell {
                         move || format!("triage-open-{id}")
                     })
                     .role(gpui::Role::Button)
+                    .aria_label(format!("Open {}", row.title))
                     .flex_none()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
@@ -772,6 +774,7 @@ impl Shell {
                         move || format!("triage-expand-{id}")
                     })
                     .role(gpui::Role::Button)
+                    .aria_label(format!("{label} {}", row.title))
                     .aria_expanded(open)
                     .flex_none()
                     .flex()
@@ -820,6 +823,8 @@ impl Shell {
                 let id = chat_id.clone();
                 move || format!("triage-need-{id}")
             })
+            .role(gpui::Role::Button)
+            .aria_label(row.title.clone())
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.close_triage(cx);
@@ -927,6 +932,7 @@ impl Shell {
                             .id(SharedString::from(format!("triage-approve-{id}")))
                             .debug_selector(move || format!("triage-approve-{id}"))
                             .role(gpui::Role::Button)
+                            .aria_label("Approve")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.mutate(
@@ -975,9 +981,12 @@ impl Shell {
                     )
             });
         let target = chat_id.clone();
+        let title = self.triage_title(&chat_id, cx);
         div()
             .id(SharedString::from(format!("triage-run-{chat_id}")))
             .debug_selector(move || format!("triage-run-{chat_id}"))
+            .role(gpui::Role::Button)
+            .aria_label(title.clone())
             .rounded(px(9.0))
             .cursor_pointer()
             .hover(|s| s.bg(theme.wash(0.05)))
@@ -997,11 +1006,7 @@ impl Shell {
                         working.opacity(0.13),
                         working,
                     ))
-                    .child(row_text(
-                        theme,
-                        self.triage_title(&row.chat_id, cx),
-                        self.running_meta(row, cx),
-                    )),
+                    .child(row_text(theme, title, self.running_meta(row, cx), None)),
             )
             .when(!row.agents.is_empty(), |el| {
                 el.child(
@@ -1053,7 +1058,19 @@ fn status_box(glyph: &'static str, bg: gpui::Hsla, fg: gpui::Hsla) -> gpui::Div 
         .child(icon(glyph).size(px(14.0)).text_color(fg))
 }
 
-fn row_text(theme: &Theme, title: String, meta: String) -> gpui::Div {
+fn row_text(
+    theme: &Theme,
+    title: String,
+    meta: String,
+    word: Option<(String, gpui::Hsla)>,
+) -> gpui::Div {
+    let highlights: Vec<_> = word
+        .and_then(|(word, color)| {
+            let start = meta.find(&word)?;
+            Some((start..start + word.len(), color.into()))
+        })
+        .into_iter()
+        .collect();
     div()
         .flex_1()
         .min_w_0()
@@ -1069,7 +1086,7 @@ fn row_text(theme: &Theme, title: String, meta: String) -> gpui::Div {
                 .truncate()
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted)
-                .child(SharedString::from(meta)),
+                .child(gpui::StyledText::new(meta).with_highlights(highlights)),
         )
 }
 
@@ -1087,7 +1104,12 @@ fn need_row_shell(row: &ShownRow, theme: &Theme) -> gpui::Div {
         .px(px(10.0))
         .rounded(px(9.0))
         .child(status_box(glyph, tint.opacity(0.13), tint))
-        .child(row_text(theme, row.title.clone(), row.meta.clone()))
+        .child(row_text(
+            theme,
+            row.title.clone(),
+            row.meta.clone(),
+            Some((row.kind.label(), tint)),
+        ))
 }
 
 fn section_heading(theme: &Theme, label: &str, count: usize, tint: gpui::Hsla) -> AnyElement {

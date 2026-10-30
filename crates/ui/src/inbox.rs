@@ -409,8 +409,22 @@ impl InboxPage {
         let mut items: Vec<(i64, &'static str, gpui::Hsla, String, &'static str, String)> =
             Vec::new();
         if let Some(runs) = &self.runs {
+            let latest = |run: &TodayRun| {
+                !runs.runs.iter().any(|other| {
+                    other.chat_id == run.chat_id && other.started_at_ms > run.started_at_ms
+                })
+            };
+            let errored = |chat_id: &str| {
+                state
+                    .session_for(chat_id)
+                    .and_then(|session| session.last_turn_outcome)
+                    .is_some_and(|outcome| outcome.status == zeron_proto::DoneStatus::Errored)
+            };
             for run in &runs.runs {
                 let (glyph, tint, what) = match run.status {
+                    TodayRunStatus::Complete if latest(run) && errored(&run.chat_id) => {
+                        (icons::LUCIDE_CIRCLE_ALERT, theme.danger, "Failed")
+                    }
                     TodayRunStatus::Complete => (icons::CHECK, theme.text_muted, "Finished"),
                     TodayRunStatus::Aborted => {
                         (icons::LUCIDE_CIRCLE_ALERT, theme.danger, "Stopped")
