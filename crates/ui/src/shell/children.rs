@@ -124,17 +124,20 @@ impl Shell {
         }
     }
 
+    pub(super) fn open_children(&self, cx: &App) -> HashSet<String> {
+        if !self.right_pane_open(cx) {
+            return HashSet::new();
+        }
+        self.right_tabs
+            .get(&self.panel_key(cx))
+            .into_iter()
+            .flatten()
+            .filter_map(|surface| self.surface_child(*surface, cx))
+            .collect()
+    }
+
     pub(super) fn sync_open_children(&mut self, cx: &mut Context<Self>) {
-        let open: HashSet<String> = if self.right_pane_open(cx) {
-            self.right_tabs
-                .get(&self.panel_key(cx))
-                .into_iter()
-                .flatten()
-                .filter_map(|surface| self.surface_child(*surface, cx))
-                .collect()
-        } else {
-            HashSet::new()
-        };
+        let open = self.open_children(cx);
         self.transcript
             .update(cx, |transcript, cx| transcript.set_open_children(open, cx));
     }

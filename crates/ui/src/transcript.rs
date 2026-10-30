@@ -7033,43 +7033,6 @@ impl Transcript {
             .collect()
     }
 
-    /// Every image the user attached to a prompt, in transcript order.
-    pub(crate) fn user_attachments(&self) -> Vec<crate::attachments::UserImageAttachment> {
-        self.rows
-            .iter()
-            .filter_map(|row| match &row.kind {
-                RowKind::User { attachments, .. } => Some(attachments.iter().cloned()),
-                _ => None,
-            })
-            .flatten()
-            .collect()
-    }
-
-    /// Open the image viewer on one user attachment — the same path a click on
-    /// its bubble thumbnail takes. A thumbnail that has not loaded yet only
-    /// starts its load; the caller's click is then a no-op.
-    pub(crate) fn preview_attachment(
-        &mut self,
-        attachment: &crate::attachments::UserImageAttachment,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let device_ids = self.attachment_device_ids(cx);
-        let crate::attachments::AttachmentSnapshot::Loaded(image) =
-            self.attachment_state(&device_ids, &attachment.path, None, cx)
-        else {
-            return false;
-        };
-        let preview =
-            crate::attachments::PreviewImage::new(attachment.name.clone(), image.image.clone());
-        self.attachment_preview_return_focus = window.focused(cx);
-        preview.viewer.reset();
-        self.attachment_preview = Some(preview);
-        window.focus(&self.attachment_preview_focus, cx);
-        cx.notify();
-        true
-    }
-
     /// The scroll-to-bottom pill's click: glide back to the end and re-pin.
     pub fn jump_to_bottom(&mut self, cx: &mut Context<Self>) {
         self.user_collapse_scroll = None;

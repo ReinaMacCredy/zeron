@@ -3151,13 +3151,11 @@ pub struct Shell {
     sidecar_popover: Option<summary::PopoverFade>,
     sidecar_previous_agents_open: bool,
     sidecar_clock: Option<Task<()>>,
-    sidecar_press_found_popover: bool,
+    sidecar_press_found_popover: Option<summary::SidecarPart>,
     computer_thumbnail: Option<Entity<crate::computer::thumbnail::ComputerThumbnail>>,
-    /// Per chat: the instructions file found at the checkout root (`AGENTS.md`
-    /// / `CLAUDE.md`), `None` once checked and absent. Probed once per chat;
-    /// the in-flight probe is keyed the same way.
-    summary_instructions: std::collections::HashMap<String, Option<String>>,
-    summary_instruction_probes: std::collections::HashMap<String, Task<()>>,
+    summary_git:
+        std::collections::HashMap<String, (String, Option<zeron_proto::GitHistoryComparison>)>,
+    summary_git_probes: std::collections::HashMap<String, Task<()>>,
     /// Host-owned project Actions cached per (device, space).
     project_actions: crate::project_actions::ProjectActionsController,
     /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
@@ -3983,12 +3981,12 @@ impl Shell {
             sidecar_popover: None,
             sidecar_previous_agents_open: false,
             sidecar_clock: None,
-            sidecar_press_found_popover: false,
+            sidecar_press_found_popover: None,
             computer_thumbnail: crate::computer::preview::store(cx).map(|store| {
                 cx.new(|cx| crate::computer::thumbnail::ComputerThumbnail::new(store, cx))
             }),
-            summary_instructions: std::collections::HashMap::new(),
-            summary_instruction_probes: std::collections::HashMap::new(),
+            summary_git: std::collections::HashMap::new(),
+            summary_git_probes: std::collections::HashMap::new(),
             project_actions: crate::project_actions::ProjectActionsController::default(),
             diffs: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
@@ -5764,6 +5762,34 @@ impl Shell {
                 });
             }
         });
+    }
+
+    /// Focus the working-tree diff tab, else the first diff tab, else open one.
+    pub(super) fn focus_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let diffs: Vec<u64> = self
+            .right_surface_rows(cx)
+            .iter()
+            .filter_map(|(surface, ..)| match surface {
+                RightSurface::Diff(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        let target = diffs
+            .iter()
+            .copied()
+            .find(|id| {
+                self.diffs
+                    .get(id)
+                    .is_some_and(|changes| changes.read(cx).is_working_tree())
+            })
+            .or(diffs.first().copied());
+        if !self.right_pane_open(cx) {
+            self.toggle_right_pane(cx);
+        }
+        match target {
+            Some(id) => self.set_right_active(RightSurface::Diff(id), cx),
+            None => self.add_diff_surface(window, cx),
+        }
     }
 
     /// The picker's Diffs card / the `+` menu's Diff row: every click opens a
@@ -16065,7 +16091,7 @@ impl Shell {
             return true;
         }
         if self.sidecar_popover_open() {
-            self.set_sidecar_popover(false, cx);
+            self.set_sidecar_popover(None, cx);
             return true;
         }
         self.active_changes(cx)
@@ -20314,7 +20340,7 @@ impl Render for Shell {
                         self.toggle_right_pane(cx);
                     }
                     if popover {
-                        self.set_sidecar_popover(true, cx);
+                        self.set_sidecar_popover(Some(summary::SidecarPart::Beside), cx);
                     }
                     if terminal && !self.terminal_open(cx) {
                         self.toggle_terminal(window, cx);

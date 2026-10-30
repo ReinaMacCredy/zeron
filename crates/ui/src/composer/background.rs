@@ -3,13 +3,13 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, Entity, Hsla, MouseButton, MouseDownEvent,
-    SharedString, Stateful, Window, div, point, prelude::*, px,
+    SharedString, Stateful, Window, div, prelude::*, px,
 };
 use zeron_doc::background::{agent_runs, agent_tree, latest_prompt, rows_missing, walked_docs};
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::background::{
-    AgentRun, RunState, aggregate, agents_label, delegate_runs, elapsed_label, latest_line,
-    roster_heading, run_depths, shell_tasks, shells_label,
+    AgentRun, RunState, aggregate, delegate_runs, elapsed_label, roster_heading, run_depths,
+    shell_tasks,
 };
 use zeron_proto::{BackgroundTask, HarnessId, ReasoningLevel};
 use zeron_rpc::methods;
@@ -29,16 +29,10 @@ const DOT_GAP: f32 = 1.75;
 const DOT_BOX: f32 = DOT_SIZE * 3.0 + DOT_GAP * 2.0;
 const GLYPH_SIZE: f32 = 12.0;
 const PILL_HEIGHT: f32 = 28.0;
-const SETTLE_FADE: Duration = Duration::from_millis(160);
 const CARD_RISE: f32 = 10.0;
 const CARD_DROP: f32 = 4.0;
-const PILL_RISE: f32 = 4.0;
-const AGENTS_PILL_FLOOR: f32 = 140.0;
-const AGENTS_PILL_SHRINK: f32 = 100.0;
 const ELAPSED_TICK: Duration = Duration::from_secs(1);
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
-const SHELLS_MENU_WIDTH: f32 = 420.0;
-const DETAIL_MENU_WIDTH: f32 = 600.0;
 const DETAIL_LOG_HEIGHT: f32 = 300.0;
 const RAW_BLOCK_LIMIT: usize = 300;
 const RAW_BLOCK_CHARS: usize = 4_000;
@@ -197,21 +191,21 @@ pub(crate) fn sidebar_ring_mark(count: usize, theme: &Theme) -> Div {
 pub(crate) struct BackgroundUi {
     chat: Option<String>,
     roster: Popup<Instant>,
-    agents_pill_since: Option<Instant>,
-    shells_pill_since: Option<Instant>,
-    shells: Popup<()>,
-    agents_glyph: Option<(RunState, Option<Instant>)>,
     tick: Option<gpui::Task<()>>,
-    outputs: HashMap<String, ShellOutput>,
     tokens: HashMap<String, AgentTokens>,
     walks: HashMap<String, AgentWalk>,
     widen: Option<bool>,
     detail: Option<TrayDetail>,
 }
 
-struct ShellOutput {
-    lines: Vec<String>,
-    _watch: Option<gpui::Task<()>>,
+struct BackgroundRuns {
+    chat_id: String,
+    harness: Option<HarnessId>,
+    chat_reasoning: Option<ReasoningLevel>,
+    agents: Vec<AgentRun>,
+    shells: Vec<BackgroundTask>,
+    walk: Vec<String>,
+    counted: u32,
 }
 
 struct AgentWalk {
@@ -225,14 +219,8 @@ struct AgentTokens {
     _watch: Option<gpui::Task<()>>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-enum DetailTarget {
-    Shell(String),
-    Agent(String),
-}
-
 struct TrayDetail {
-    target: DetailTarget,
+    part_id: String,
     scroll: gpui::ScrollHandle,
     hide_thinking: bool,
     feed: Option<AgentFeed>,
@@ -286,22 +274,6 @@ pub(super) fn card_motion(
     }
 }
 
-pub(super) fn presence(since: &mut Option<Instant>, shown: bool, now: Instant) -> Option<Instant> {
-    if !shown {
-        *since = None;
-        return None;
-    }
-    Some(*since.get_or_insert(now))
-}
-
-pub(super) fn pill_enter(since: Option<Instant>, reduced: bool, now: Instant) -> f32 {
-    eased(&motion::FADE_QUICK, since, reduced, now)
-}
-
-pub(super) fn entering(pill: Stateful<Div>, t: f32) -> Stateful<Div> {
-    pill.relative().top(px(PILL_RISE * (1.0 - t))).opacity(t)
-}
-
 pub(super) fn card_frame<E>(card: E, motion: CardMotion) -> crate::frost::Frosted
 where
     E: Styled + ParentElement + IntoElement,
@@ -322,22 +294,18 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (Option<AnyElement>, Option<AnyElement>) {
-        let (pills, roster) = self
-            .render_background_corner(window, cx)
-            .unwrap_or_default();
+        let roster = self.render_background_corner(window, cx);
         let theme = Theme::of(cx).clone();
         let limit = (!self.side_chat)
             .then(|| self.render_limit_pill(&theme, cx))
             .flatten();
-        let row = (!pills.is_empty() || limit.is_some()).then(|| {
+        let row = limit.map(|limit| {
             div()
                 .flex()
                 .flex_row()
                 .items_end()
-                .gap(px(6.0))
-                .children(pills)
                 .child(div().flex_1().min_w_0())
-                .children(limit)
+                .child(limit)
                 .into_any_element()
         });
         (roster, row)
@@ -347,46 +315,16 @@ impl Composer {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<(Vec<AnyElement>, Option<AnyElement>)> {
-        let (chat_id, harness, chat_reasoning) = self.bound_chat_row(cx).map(|chat| {
-            let config = chat.config.as_ref();
-            (
-                chat.id.clone(),
-                config.map(|c| c.harness),
-                config.and_then(|c| c.reasoning),
-            )
-        })?;
-        let chat_reasoning =
-            chat_reasoning.or_else(|| self.pickers.read(cx).resolved(cx).reasoning);
-        let (agents, shells, walk, counted) = {
-            let state = self.state.read(cx);
-            let transcript = self.bound_transcript(state);
-            let turn_start = latest_prompt(transcript);
-            let walks = &self.background.walks;
-            let mut agents = agent_tree(transcript, turn_start.unwrap_or(0), &|id| {
-                walks.get(id).map(|walk| walk.entries.as_slice())
-            });
-            let pending_review = state
-                .reviews
-                .get(&chat_id)
-                .and_then(|review| review.run.as_ref())
-                .filter(|run| !run.findings.is_empty())
-                .and_then(|run| run.task_id.as_deref());
-            agents.extend(delegate_runs(
-                &state.chats,
-                &chat_id,
-                turn_start.map_or(0, |ix| transcript[ix].created_at),
-                pending_review,
-            ));
-            let walk = walked_docs(transcript, &agents, self.background.widen == Some(true));
-            let counted = state.running_subagents_for(&chat_id, chrono::Utc::now());
-            (
-                agents,
-                shell_tasks(state.session_for(&chat_id)),
-                walk,
-                counted,
-            )
-        };
+    ) -> Option<AnyElement> {
+        let BackgroundRuns {
+            chat_id,
+            harness,
+            chat_reasoning,
+            agents,
+            walk,
+            counted,
+            ..
+        } = self.background_runs(cx)?;
         if self.background.chat.as_deref() != Some(chat_id.as_str()) {
             self.background = BackgroundUi {
                 chat: Some(chat_id.clone()),
@@ -409,16 +347,9 @@ impl Composer {
         }
         if agents.is_empty() {
             self.background.roster = Popup::default();
-            self.background.agents_glyph = None;
         }
-        if shells.is_empty() {
-            self.background.shells = Popup::default();
-        }
-        let stale = match self.background.detail.as_ref().map(|d| &d.target) {
-            Some(DetailTarget::Shell(id)) => {
-                self.background.shells.get().is_none() || !shells.iter().any(|t| &t.id == id)
-            }
-            Some(DetailTarget::Agent(part)) => {
+        let stale = match self.background.detail.as_ref().map(|d| &d.part_id) {
+            Some(part) => {
                 self.background.roster.get().is_none()
                     || !agents.iter().any(|run| &run.part_id == part)
             }
@@ -427,7 +358,7 @@ impl Composer {
         if stale {
             self.background.detail = None;
         }
-        if agents.is_empty() && shells.is_empty() {
+        if agents.is_empty() {
             return None;
         }
 
@@ -438,18 +369,6 @@ impl Composer {
         let reduced = motion::reduced_motion(cx);
 
         let overall = aggregate(&agents);
-        let settled_since = match self.background.agents_glyph {
-            Some((state, since)) if state == overall => since,
-            Some(_) => {
-                self.background.agents_glyph = Some((overall, Some(now)));
-                Some(now)
-            }
-            None => {
-                self.background.agents_glyph = Some((overall, None));
-                None
-            }
-        };
-        let fade = tween_progress(settled_since, SETTLE_FADE, reduced, now);
         let roster_motion = self.background.roster.get().map(|opened| {
             card_motion(
                 *opened,
@@ -458,34 +377,15 @@ impl Composer {
                 now,
             )
         });
-        let roster_open = self.background.roster.is_open();
-        let agents_since = presence(
-            &mut self.background.agents_pill_since,
-            !agents.is_empty(),
-            now,
-        );
-        let shells_since = presence(
-            &mut self.background.shells_pill_since,
-            !shells.is_empty(),
-            now,
-        );
-        let agents_in = pill_enter(agents_since, reduced, now);
-        let shells_in = pill_enter(shells_since, reduced, now);
-        if fade < 1.0
-            || roster_motion.is_some_and(|motion| motion.animating)
-            || agents_in < 1.0
-            || shells_in < 1.0
-        {
+        if roster_motion.is_some_and(|motion| motion.animating) {
             window.request_animation_frame();
         }
-        let shells_mounted = self.background.shells.get().is_some();
-        self.sync_output_watches(if shells_mounted { &shells } else { &[] }, cx);
         let token_docs: Vec<&str> = match roster_motion {
             Some(_) => agents.iter().map(|run| run.doc_id.as_str()).collect(),
             None => Vec::new(),
         };
         self.sync_token_watches(&token_docs, cx);
-        let ticking = (roster_motion.is_some() && overall == RunState::Working) || shells_mounted;
+        let ticking = roster_motion.is_some() && overall == RunState::Working;
         if ticking && self.background.tick.is_none() {
             self.background.tick = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(ELAPSED_TICK).await;
@@ -497,7 +397,7 @@ impl Composer {
             }));
         }
 
-        let roster = roster_motion.map(|motion| {
+        roster_motion.map(|motion| {
             self.render_roster(
                 &agents,
                 harness,
@@ -508,46 +408,91 @@ impl Composer {
                 &theme,
                 cx,
             )
+        })
+    }
+
+    fn background_runs(&self, cx: &App) -> Option<BackgroundRuns> {
+        let (chat_id, harness, chat_reasoning) = self.bound_chat_row(cx).map(|chat| {
+            let config = chat.config.as_ref();
+            (
+                chat.id.clone(),
+                config.map(|c| c.harness),
+                config.and_then(|c| c.reasoning),
+            )
+        })?;
+        let chat_reasoning =
+            chat_reasoning.or_else(|| self.pickers.read(cx).resolved(cx).reasoning);
+        let state = self.state.read(cx);
+        let transcript = self.bound_transcript(state);
+        let turn_start = latest_prompt(transcript);
+        let walks = &self.background.walks;
+        let mut agents = agent_tree(transcript, turn_start.unwrap_or(0), &|id| {
+            walks.get(id).map(|walk| walk.entries.as_slice())
         });
-        let (agents_title, agents_tail) = match agents.as_slice() {
-            [one] => match self.review_pill_suffix(&one.doc_id, cx) {
-                Some(suffix) => (Some(one.title.clone()), format!("· {suffix}")),
-                None => agents_label(&agents),
-            },
-            _ => agents_label(&agents),
+        let pending_review = state
+            .reviews
+            .get(&chat_id)
+            .and_then(|review| review.run.as_ref())
+            .filter(|run| !run.findings.is_empty())
+            .and_then(|run| run.task_id.as_deref());
+        agents.extend(delegate_runs(
+            &state.chats,
+            &chat_id,
+            turn_start.map_or(0, |ix| transcript[ix].created_at),
+            pending_review,
+        ));
+        let walk = walked_docs(transcript, &agents, self.background.widen == Some(true));
+        let counted = state.running_subagents_for(&chat_id, chrono::Utc::now());
+        let shells = shell_tasks(state.session_for(&chat_id));
+        Some(BackgroundRuns {
+            chat_id,
+            harness,
+            chat_reasoning,
+            agents,
+            shells,
+            walk,
+            counted,
+        })
+    }
+
+    fn stoppable_runs(&self, cx: &App) -> (Vec<(String, bool)>, Vec<String>) {
+        let Some(runs) = self.background_runs(cx) else {
+            return Default::default();
         };
-        let agents_pill = (!agents.is_empty()).then(|| {
-            let pill = pill_frame("background-agents-pill", &theme)
-                .debug_selector(|| "background-agents-pill".into())
-                .when(roster_open, |el| {
-                    el.border_color(theme.border_strong).text_color(theme.text)
-                })
-                .child(pill_leading(glyph(
-                    "background-agents-glyph",
-                    overall,
-                    fade,
-                    &theme,
-                )))
-                .when_some(agents_title, |el, title| {
-                    el.flex_shrink(AGENTS_PILL_SHRINK)
-                        .min_w(px(AGENTS_PILL_FLOOR))
-                        .child(div().min_w_0().truncate().child(title))
-                })
-                .child(div().flex_none().child(SharedString::from(agents_tail)))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, _| this.background.roster.note_trigger_press()),
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if !this.background.roster.take_press_was_open() {
-                        this.open_roster(cx);
-                    }
-                }));
-            frosted_pill(entering(pill, agents_in), agents_in).into_any_element()
-        });
-        let shell_pill = (!shells.is_empty())
-            .then(|| self.render_shell_pill(&shells, stoppable, now_ms, shells_in, &theme, cx));
-        Some((agents_pill.into_iter().chain(shell_pill).collect(), roster))
+        let stoppable = runs.harness == Some(HarnessId::ClaudeCode);
+        let agents = runs
+            .agents
+            .iter()
+            .filter(|run| run.can_stop(stoppable))
+            .map(|run| (run.part_id.clone(), run.delegated))
+            .collect();
+        let shells = if stoppable {
+            runs.shells.into_iter().map(|task| task.id).collect()
+        } else {
+            Vec::new()
+        };
+        (agents, shells)
+    }
+
+    pub(crate) fn can_stop_background(&self, cx: &App) -> bool {
+        let (agents, shells) = self.stoppable_runs(cx);
+        !agents.is_empty() || !shells.is_empty()
+    }
+
+    pub(crate) fn can_stop_shells(&self, cx: &App) -> bool {
+        self.bound_chat_row(cx)
+            .and_then(|chat| chat.config.as_ref())
+            .is_some_and(|config| config.harness == HarnessId::ClaudeCode)
+    }
+
+    pub(crate) fn stop_all_background(&mut self, cx: &mut Context<Self>) {
+        let (agents, shells) = self.stoppable_runs(cx);
+        for (task_id, delegated) in agents {
+            self.stop_agent_run(task_id, delegated, cx);
+        }
+        for task_id in shells {
+            self.stop_background_task(task_id, cx);
+        }
     }
 
     pub(super) fn roster_open(&self) -> bool {
@@ -563,9 +508,6 @@ impl Composer {
 
     pub(super) fn open_roster(&mut self, cx: &mut Context<Self>) {
         self.background.roster.open(motion::now());
-        if self.background.shells.begin_close() {
-            popover::reap_popup(cx, |this: &mut Composer| &mut this.background.shells);
-        }
         cx.notify();
     }
 
@@ -581,11 +523,6 @@ impl Composer {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let running: Vec<(String, bool)> = agents
-            .iter()
-            .filter(|run| run.can_stop(stoppable))
-            .map(|run| (run.part_id.clone(), run.delegated))
-            .collect();
         let header = div()
             .h(px(36.0))
             .flex()
@@ -603,22 +540,6 @@ impl Composer {
                     .truncate()
                     .child(SharedString::from(roster_heading(agents))),
             )
-            .when(!running.is_empty(), |el| {
-                el.child(
-                    div()
-                        .id("background-roster-stop-all")
-                        .debug_selector(|| "background-roster-stop-all".into())
-                        .cursor_pointer()
-                        .text_color(theme.text_muted)
-                        .hover(|s| s.text_color(theme.text))
-                        .child("Stop all")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            for (task_id, delegated) in &running {
-                                this.stop_agent_run(task_id.clone(), *delegated, cx);
-                            }
-                        })),
-                )
-            })
             .child(
                 div()
                     .id("background-roster-close")
@@ -724,10 +645,11 @@ impl Composer {
                 .on_click(open);
             div().flex().flex_col().child(row).children(findings)
         });
-        let opened = match self.background.detail.as_ref().map(|d| &d.target) {
-            Some(DetailTarget::Agent(part)) => agents.iter().find(|run| &run.part_id == part),
-            _ => None,
-        };
+        let opened = self
+            .background
+            .detail
+            .as_ref()
+            .and_then(|detail| agents.iter().find(|run| run.part_id == detail.part_id));
         let card = div()
             .when_some(dismiss, |el, dismiss| {
                 el.debug_selector(|| "background-roster".into())
@@ -755,248 +677,6 @@ impl Composer {
             None => card.child(header).children(rows),
         };
         card_frame(card, motion).into_any_element()
-    }
-
-    fn render_shell_pill(
-        &self,
-        shells: &[BackgroundTask],
-        stoppable: bool,
-        now_ms: i64,
-        enter: f32,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let pill = pill_frame("background-shells-pill", theme)
-            .debug_selector(|| "background-shells-pill".into())
-            .child(pill_leading(glyph(
-                "background-shells-glyph",
-                RunState::Working,
-                1.0,
-                theme,
-            )))
-            .child(
-                div()
-                    .font_family(theme.font_mono.clone())
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(theme.text_muted)
-                    .child(">_"),
-            )
-            .child(div().child(SharedString::from(shells_label(shells.len()))))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| this.background.shells.note_trigger_press()),
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                if this.background.shells.take_press_was_open() {
-                    return;
-                }
-                this.background.shells.open(());
-                cx.notify();
-            }));
-        let opened = match self.background.detail.as_ref().map(|d| &d.target) {
-            Some(DetailTarget::Shell(id)) => shells.iter().find(|task| &task.id == id),
-            _ => None,
-        };
-        let menu = self.background.shells.get().map(|_| {
-            let rows = shells.iter().enumerate().map(|(ix, task)| {
-                let elapsed = task
-                    .started_at
-                    .map(|at| elapsed_label((now_ms - at.timestamp_millis()) / 1000));
-                let stop = stoppable.then(|| {
-                    let task_id = task.id.clone();
-                    stop_button(format!("background-shell-stop-{ix}"), theme).on_click(cx.listener(
-                        move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.stop_background_task(task_id.clone(), cx);
-                        },
-                    ))
-                });
-                let lines = self
-                    .background
-                    .outputs
-                    .get(&task.id)
-                    .map(|output| output.lines.as_slice())
-                    .unwrap_or_default();
-                let latest = latest_line(lines).map(|line| {
-                    div()
-                        .debug_selector(move || format!("background-shell-line-{ix}"))
-                        .pl(px(GLYPH_SIZE + 8.0))
-                        .truncate()
-                        .font_family(theme.font_mono.clone())
-                        .text_size(crate::typography::ui_rems(10.5))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(line.to_owned()))
-                });
-                let open = {
-                    let task_id = task.id.clone();
-                    cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.background.detail = Some(TrayDetail {
-                            target: DetailTarget::Shell(task_id.clone()),
-                            scroll: gpui::ScrollHandle::new(),
-                            hide_thinking: false,
-                            feed: None,
-                        });
-                        cx.notify();
-                    })
-                };
-                let head = div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(glyph(
-                        SharedString::from(format!("background-shell-glyph-{ix}")),
-                        RunState::Working,
-                        1.0,
-                        theme,
-                    ))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .font_family(theme.font_mono.clone())
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .text_color(theme.text)
-                            .child(SharedString::from(task.label.clone())),
-                    )
-                    .children(elapsed.map(|elapsed| {
-                        div()
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(11.5))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(elapsed))
-                    }))
-                    .child(div().size(px(20.0)).flex_none().children(stop));
-                div()
-                    .id(("background-shell-row", ix))
-                    .debug_selector(move || format!("background-shell-row-{ix}"))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .px(px(8.0))
-                    .py(px(7.0))
-                    .rounded(px(popover::MENU_ITEM_RADIUS))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.glass_hover()))
-                    .child(head)
-                    .children(latest)
-                    .on_click(open)
-            });
-            let rows: Vec<_> = rows.collect();
-            let card = popover::popover_card(theme)
-                .debug_selector(|| "background-shells-menu".into())
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    if this.background.shells.begin_close() {
-                        popover::reap_popup(cx, |this: &mut Composer| &mut this.background.shells);
-                        cx.notify();
-                    }
-                }));
-            let content = match opened {
-                Some(task) => card
-                    .w(px(DETAIL_MENU_WIDTH))
-                    .child(self.render_shell_detail(task, stoppable, now_ms, theme, cx))
-                    .into_any_element(),
-                None => card
-                    .w(px(SHELLS_MENU_WIDTH))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .px(px(8.0))
-                            .pt(px(6.0))
-                            .pb(px(4.0))
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted)
-                            .child(div().flex_1().child("Background shells"))
-                            .child(SharedString::from(format!("{} running", shells.len()))),
-                    )
-                    .children(rows)
-                    .into_any_element(),
-            };
-            popover::anchored_menu_above_at(
-                "background-shells-menu",
-                point(px(0.0), px(0.0)),
-                content,
-                self.background.shells.closing_since(),
-            )
-        });
-        div()
-            .relative()
-            .child(frosted_pill(entering(pill, enter), enter))
-            .children(menu)
-            .into_any_element()
-    }
-
-    fn sync_output_watches(&mut self, shells: &[BackgroundTask], cx: &mut Context<Self>) {
-        let watched: Vec<&str> = shells
-            .iter()
-            .filter(|task| task.output_path.is_some())
-            .map(|task| task.id.as_str())
-            .collect();
-        self.background
-            .outputs
-            .retain(|id, _| watched.contains(&id.as_str()));
-        for id in watched {
-            if !self.background.outputs.contains_key(id) {
-                let watch = self.watch_shell_output(id.to_owned(), cx);
-                self.background.outputs.insert(
-                    id.to_owned(),
-                    ShellOutput {
-                        lines: Vec::new(),
-                        _watch: watch,
-                    },
-                );
-            }
-        }
-    }
-
-    fn watch_shell_output(
-        &self,
-        task_id: String,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::Task<()>> {
-        #[derive(serde::Deserialize)]
-        struct OutputFrame {
-            #[serde(default)]
-            lines: Vec<String>,
-        }
-        let engine = self.state.read(cx).engine().cloned()?;
-        let (chat_id, device_id) = self
-            .bound_chat_row(cx)
-            .map(|chat| (chat.id.clone(), chat.device_id.clone()))?;
-        let params = serde_json::json!({
-            "chatId": chat_id,
-            "taskId": task_id,
-            "targetDeviceId": device_id,
-        });
-        Some(cx.spawn(async move |this, cx| {
-            let mut rx = match engine
-                .client()
-                .subscribe_checked(methods::WATCH_BACKGROUND_OUTPUT, params)
-                .await
-            {
-                Ok(rx) => rx,
-                Err(error) => {
-                    tracing::debug!(%error, task_id, "background output watch failed");
-                    return;
-                }
-            };
-            while let Some(value) = rx.recv().await {
-                let Ok(frame) = serde_json::from_value::<OutputFrame>(value) else {
-                    continue;
-                };
-                let alive = this.update(cx, |this, cx| {
-                    if let Some(output) = this.background.outputs.get_mut(&task_id) {
-                        output.lines = frame.lines;
-                        cx.notify();
-                    }
-                });
-                if alive.is_err() {
-                    return;
-                }
-            }
-        }))
     }
 
     fn sync_agent_walks(&mut self, docs: Vec<String>, cx: &mut Context<Self>) {
@@ -1086,7 +766,7 @@ impl Composer {
     fn open_agent_detail(&mut self, part_id: String, doc_id: String, cx: &mut Context<Self>) {
         let watch = self.watch_doc_entries(doc_id.clone(), false, cx);
         self.background.detail = Some(TrayDetail {
-            target: DetailTarget::Agent(part_id),
+            part_id,
             scroll: gpui::ScrollHandle::new(),
             hide_thinking: false,
             feed: Some(AgentFeed {
@@ -1326,78 +1006,6 @@ impl Composer {
             .into_any_element()
     }
 
-    fn render_shell_detail(
-        &self,
-        task: &BackgroundTask,
-        stoppable: bool,
-        now_ms: i64,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let lines = self
-            .background
-            .outputs
-            .get(&task.id)
-            .map(|output| output.lines.as_slice())
-            .unwrap_or_default();
-        let text = lines.join("\n");
-        let stop = stoppable.then(|| {
-            let task_id = task.id.clone();
-            stop_button("background-detail-stop".into(), theme).on_click(cx.listener(
-                move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.stop_background_task(task_id.clone(), cx);
-                },
-            ))
-        });
-        let elapsed = task
-            .started_at
-            .map(|at| elapsed_label((now_ms - at.timestamp_millis()) / 1000))
-            .unwrap_or_default();
-        let head = detail_head(
-            glyph("background-detail-glyph", RunState::Working, 1.0, theme),
-            SharedString::from(task.label.clone()),
-            elapsed,
-            stop,
-            theme,
-            cx,
-        );
-        let body = (!text.trim().is_empty())
-            .then(|| {
-                div()
-                    .text_color(theme.text.opacity(0.8))
-                    .child(SharedString::from(text.clone()))
-                    .into_any_element()
-            })
-            .into_iter()
-            .collect();
-        let footer = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .px(px(8.0))
-            .pt(px(8.0))
-            .pb(px(2.0))
-            .text_size(crate::typography::ui_rems(12.0))
-            .child(div().flex_1())
-            .child(
-                detail_link("background-detail-copy", "Copy", theme.accent).on_click(
-                    move |_, _, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
-                    },
-                ),
-            );
-        div()
-            .debug_selector(|| "background-detail".into())
-            .flex()
-            .flex_col()
-            .p(px(2.0))
-            .child(head.pb(px(8.0)))
-            .child(self.detail_log(body, theme, cx))
-            .child(footer)
-            .into_any_element()
-    }
-
     fn detail_log(&self, rows: Vec<AnyElement>, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let scroll = self
             .background
@@ -1491,7 +1099,7 @@ impl Composer {
         );
     }
 
-    fn stop_background_task(&mut self, task_id: String, cx: &mut Context<Self>) {
+    pub(crate) fn stop_background_task(&mut self, task_id: String, cx: &mut Context<Self>) {
         self.send_stop(
             methods::STOP_BACKGROUND_TASK,
             "stop background task",
@@ -1950,7 +1558,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn pills_render_above_the_composer_and_the_roster_opens(cx: &mut gpui::TestAppContext) {
+    fn the_roster_has_no_pill_and_stop_all_reaches_agents_and_shells(
+        cx: &mut gpui::TestAppContext,
+    ) {
         use std::{cell::RefCell, rc::Rc};
 
         let dir = tempfile::tempdir().unwrap();
@@ -2025,20 +1635,20 @@ mod tests {
         let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(composer.clone()));
         cx.run_until_parked();
 
-        let agents_pill = cx
-            .debug_bounds("background-agents-pill")
-            .expect("agents pill painted");
-        let shells_pill = cx
-            .debug_bounds("background-shells-pill")
-            .expect("shells pill painted");
-        assert!(shells_pill.left() > agents_pill.right());
+        assert!(cx.debug_bounds("background-agents-pill").is_none());
+        assert!(cx.debug_bounds("background-shells-pill").is_none());
         assert!(cx.debug_bounds("background-roster").is_none());
+        composer.read_with(cx, |composer, cx| {
+            let (agents, shells) = composer.stoppable_runs(cx);
+            assert_eq!(agents, [("p1".to_string(), false)]);
+            assert_eq!(shells, ["shell-1"]);
+            assert!(composer.can_stop_background(cx));
+        });
 
-        cx.simulate_click(agents_pill.center(), gpui::Modifiers::default());
+        composer.update(cx, |composer, cx| composer.open_roster(cx));
         cx.run_until_parked();
         assert!(cx.debug_bounds("background-roster").is_some());
-        assert!(cx.debug_bounds("background-agents-pill").is_some());
-        assert!(cx.debug_bounds("background-roster-stop-all").is_some());
+        assert!(cx.debug_bounds("background-roster-stop-all").is_none());
         assert!(cx.debug_bounds("background-roster-stop-0").is_some());
         assert!(cx.debug_bounds("background-roster-tokens-0").is_none());
         composer.update(cx, |composer, cx| {
@@ -2139,13 +1749,12 @@ mod tests {
         cx.simulate_click(close.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("background-roster").is_none());
-        assert!(cx.debug_bounds("background-agents-pill").is_some());
         finish_exit(cx, &composer);
         composer.read_with(cx, |composer, _| {
             assert!(composer.background.tokens.is_empty())
         });
 
-        cx.simulate_click(agents_pill.center(), gpui::Modifiers::default());
+        composer.update(cx, |composer, cx| composer.open_roster(cx));
         cx.run_until_parked();
         assert!(cx.debug_bounds("background-roster").is_some());
         cx.simulate_click(gpui::point(px(4.0), px(4.0)), gpui::Modifiers::default());
@@ -2155,7 +1764,7 @@ mod tests {
             "a click outside the roster closes it"
         );
         finish_exit(cx, &composer);
-        cx.simulate_click(agents_pill.center(), gpui::Modifiers::default());
+        composer.update(cx, |composer, cx| composer.open_roster(cx));
         cx.run_until_parked();
         assert!(composer.update(cx, |composer, cx| composer.dismiss_corner_card(cx)));
         cx.run_until_parked();
@@ -2164,63 +1773,6 @@ mod tests {
             "escape closes it"
         );
         assert!(!composer.update(cx, |composer, cx| composer.dismiss_corner_card(cx)));
-        finish_exit(cx, &composer);
-
-        let shells_pill = cx
-            .debug_bounds("background-shells-pill")
-            .expect("shells pill painted");
-        cx.simulate_click(shells_pill.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("background-shells-menu").is_some());
-        assert!(cx.debug_bounds("background-shell-row-0").is_some());
-        assert!(cx.debug_bounds("background-shell-stop-0").is_some());
-        assert!(cx.debug_bounds("background-shell-line-0").is_none());
-
-        composer.update(cx, |composer, cx| {
-            composer
-                .background
-                .outputs
-                .get_mut("shell-1")
-                .unwrap()
-                .lines = vec![
-                "Compiling zeron".into(),
-                "   Finished dev".into(),
-                "".into(),
-            ];
-            cx.notify();
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("background-shell-line-0").is_some());
-
-        let row = cx
-            .debug_bounds("background-shell-row-0")
-            .expect("shell row painted");
-        cx.simulate_click(row.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("background-shells-menu").is_some());
-        assert!(cx.debug_bounds("background-detail-log").is_some());
-        assert!(cx.debug_bounds("background-shell-row-0").is_none());
-        assert!(cx.debug_bounds("background-detail-stop").is_some());
-        assert!(cx.debug_bounds("background-detail-empty").is_none());
-        composer.update(cx, |composer, cx| {
-            composer
-                .background
-                .outputs
-                .get_mut("shell-1")
-                .unwrap()
-                .lines
-                .clear();
-            cx.notify();
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("background-detail-empty").is_some());
-        let back = cx
-            .debug_bounds("background-detail-back")
-            .expect("back painted");
-        cx.simulate_click(back.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("background-detail").is_none());
-        assert!(cx.debug_bounds("background-shell-row-0").is_some());
     }
 
     fn finish_exit(cx: &mut gpui::VisualTestContext, composer: &Entity<Composer>) {
@@ -2232,7 +1784,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_chat_bound_composer_shows_its_own_chats_pills(cx: &mut gpui::TestAppContext) {
+    fn a_chat_bound_composer_stops_its_own_chats_runs(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -2283,8 +1835,13 @@ mod tests {
         }
         let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(composer.clone()));
         cx.run_until_parked();
-        assert!(cx.debug_bounds("background-shells-pill").is_some());
-        assert!(cx.debug_bounds("background-agents-pill").is_none());
+        let counts = |cx: &mut gpui::VisualTestContext| {
+            composer.read_with(cx, |composer, cx| {
+                let (agents, shells) = composer.stoppable_runs(cx);
+                (agents.len(), shells.len())
+            })
+        };
+        assert_eq!(counts(cx), (0, 1));
 
         state.update(cx, |state, _| {
             state.set_subagent_snapshot(
@@ -2302,7 +1859,7 @@ mod tests {
         });
         composer.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
-        assert!(cx.debug_bounds("background-agents-pill").is_some());
+        assert_eq!(counts(cx), (1, 1));
     }
 
     #[test]

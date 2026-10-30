@@ -3652,8 +3652,18 @@ impl AppState {
         let in_filter = self.project_filter(space_filter);
         self.overview_chats(now)
             .into_iter()
-            .filter(|(_, chat)| in_filter(chat))
+            .filter(|(_, chat)| in_filter(chat) && !self.lives_in_parent(chat))
             .collect()
+    }
+
+    /// Orphans keep their row; task step threads stay for the lead's nested step rows.
+    fn lives_in_parent(&self, chat: &Chat) -> bool {
+        chat.opened_from()
+            .is_some_and(|parent| self.chats.iter().any(|row| row.id == parent))
+            && !self
+                .task_steps
+                .iter()
+                .any(|step| !step.deleted && step.chat_id.as_deref() == Some(chat.id.as_str()))
     }
 
     /// The sidebar's project filter matches by repository: it stores one
@@ -8812,6 +8822,43 @@ mod tests {
             .map(|(_, c)| c.id.as_str())
             .collect();
         assert_eq!(filtered, ["b"]);
+    }
+
+    #[test]
+    fn child_threads_leave_the_sidebar_while_their_parent_exists() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        let mut side = chat("side", 1, Some(1));
+        side.sidechat_source_chat_id = Some("main".into());
+        let mut fork = chat("fork", 2, Some(2));
+        fork.forked_from_chat_id = Some("main".into());
+        let mut started = chat("started", 3, Some(3));
+        started.created_by_chat_id = Some("main".into());
+        let mut step = chat("step", 4, Some(4));
+        step.created_by_chat_id = Some("main".into());
+        let mut orphan = chat("orphan", 5, Some(5));
+        orphan.forked_from_chat_id = Some("deleted".into());
+        state.apply_chats(vec![
+            chat("main", 0, Some(0)),
+            side,
+            fork,
+            started,
+            step,
+            orphan,
+        ]);
+        state.task_steps = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "s", "taskId": "t", "chatId": "step",
+            }))
+            .unwrap(),
+        ];
+        let mut rows: Vec<&str> = state
+            .sidebar_chats(now, None)
+            .iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        rows.sort();
+        assert_eq!(rows, ["main", "orphan", "step"]);
     }
 
     #[test]

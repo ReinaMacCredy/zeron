@@ -1624,10 +1624,6 @@ impl Composer {
             .filter(|run| run.task_id.as_deref() == Some(doc_id))
     }
 
-    pub(super) fn review_pill_suffix(&self, doc_id: &str, cx: &App) -> Option<String> {
-        self.review_run_for(doc_id, cx)?.pill_suffix()
-    }
-
     pub(super) fn render_review_findings(
         &self,
         doc_id: &str,

@@ -521,6 +521,13 @@ impl Chat {
             .map(|d| d.delegated_by_chat_id.as_str())
     }
 
+    pub fn opened_from(&self) -> Option<&str> {
+        self.sidechat_source_chat_id
+            .as_deref()
+            .or(self.forked_from_chat_id.as_deref())
+            .or(self.created_by_chat_id.as_deref())
+    }
+
     pub fn is_person_opened(&self) -> bool {
         self.created_by_chat_id.is_none() && self.delegation.is_none() && !self.is_system()
     }
