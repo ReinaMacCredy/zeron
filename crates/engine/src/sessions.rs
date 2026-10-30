@@ -8338,6 +8338,9 @@ async fn drive_run(
     // into Streaming. Only a steer (UserMessage) legitimately REOPENS a
     // settled subagent: it announces more work is coming.
     let mut settled_subagents: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Only these reopen on a UserMessage: a typed fork's replay echoes its
+    // agents' prompts after their Done.
+    let mut opened_subagents: std::collections::HashSet<String> = std::collections::HashSet::new();
     // The harness has background shells running: the process that owns them
     // must outlive the idle window, or they die unfinished.
     let mut background_busy = false;
@@ -8638,7 +8641,7 @@ async fn drive_run(
                 sub_event.as_ref(),
                 AgentEvent::UserMessage { .. } | AgentEvent::Steered { .. }
             );
-            if is_steer {
+            if is_steer && opened_subagents.contains(parent_tool_use_id) {
                 settled_subagents.remove(parent_tool_use_id);
             } else if settled_subagents.contains(parent_tool_use_id)
                 && !subagents.contains_key(parent_tool_use_id)
@@ -8724,6 +8727,7 @@ async fn drive_run(
                     }
                 });
                 if let Some(sub_doc) = opened {
+                    opened_subagents.insert(parent_tool_use_id.clone());
                     subagents.insert(
                         parent_tool_use_id.clone(),
                         SubagentSink {
