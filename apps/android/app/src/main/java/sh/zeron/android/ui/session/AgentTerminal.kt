@@ -58,6 +58,7 @@ fun AgentTerminalPane(handle: SessionHandle, terminalId: String?, onBack: () -> 
     var tabs by remember { mutableStateOf<List<AgentTerminalTab>?>(null) }
     var screen by remember { mutableStateOf<AgentTerminalScreen?>(null) }
     val scroll = rememberScrollState()
+    val host = remember(handle) { handle.composer().host.name }
 
     LaunchedEffect(selected, dark) {
         while (true) {
@@ -126,7 +127,7 @@ fun AgentTerminalPane(handle: SessionHandle, terminalId: String?, onBack: () -> 
         }
         Spacer(Modifier.height(8.dp))
         Text(
-            "Output only. Type into this terminal on the Mac.",
+            "Output only. Type into this terminal on ${host ?: "its host"}.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
