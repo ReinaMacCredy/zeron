@@ -618,9 +618,8 @@ impl Shell {
                 None,
             )
         });
-        let resize_suspended = self.tween_active(self.right_tween)
-            || self.tween_active(self.files_tween)
-            || self.tween_active(self.sidebar_tween);
+        let resize_suspended =
+            self.tween_active(self.right_tween) || self.tween_active(self.sidebar_tween);
         let panel = self.main_terminal_panel(cx);
         let key = self
             .active_terminal_tab

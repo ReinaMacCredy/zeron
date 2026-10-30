@@ -488,7 +488,7 @@ impl Shell {
             .get(&id)
             .filter(|tab| tab.state.read(cx).selected_chat.is_some())
         else {
-            return self.render_surface_picker(cx);
+            return Empty.into_any_element();
         };
         if let Some(fork) = &tab.fork {
             let (host, error) = (fork.host.clone(), fork.error.clone());

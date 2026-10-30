@@ -58,9 +58,6 @@ pub const SIDEBAR_MAX: f32 = 400.0;
 pub const SIDEBAR_DEFAULT: f32 = 256.0;
 
 /// Independent file explorer width preference and drag bounds (px).
-pub const FILES_PANEL_DEFAULT: f32 = 286.0;
-pub const FILES_PANEL_MIN: f32 = 220.0;
-pub const FILES_PANEL_MAX: f32 = 440.0;
 
 pub const GIT_COMMIT_PANEL_DEFAULT: f32 = 360.0;
 pub const GIT_COMMIT_PANEL_MIN: f32 = 300.0;
@@ -1732,7 +1729,6 @@ pub struct UiSettings {
     /// Suppress the banner while a Zeron window is focused (the chime covers
     /// the foreground case).
     pub notifications_background_only: bool,
-    pub files_panel_width: f32,
     /// Desktop banners for newly discovered agent CLI releases. In-app chips
     /// remain enabled independently of this preference.
     pub agent_update_notifications: bool,
@@ -1955,7 +1951,6 @@ impl Default for UiSettings {
             sound_attention_enabled: true,
             notifications_enabled: true,
             notifications_background_only: true,
-            files_panel_width: FILES_PANEL_DEFAULT,
             agent_update_notifications: true,
             auto_update: false,
             right_pane_width: RIGHT_PANE_DEFAULT,
@@ -2872,7 +2867,6 @@ impl UiSettings {
             sound_attention_enabled,
             notifications_enabled,
             notifications_background_only,
-            files_panel_width,
             agent_update_notifications,
             auto_update,
             right_pane_width,
@@ -3049,12 +3043,6 @@ impl UiSettings {
         );
         // The right pane has no persisted upper bound: its live drag clamps
         // against the current window, which is unavailable while loading.
-        self.files_panel_width = clamp_or(
-            self.files_panel_width,
-            FILES_PANEL_MIN,
-            FILES_PANEL_MAX,
-            FILES_PANEL_DEFAULT,
-        );
         self.right_pane_width = min_or(self.right_pane_width, RIGHT_PANE_MIN, RIGHT_PANE_DEFAULT);
         self.split_ratio = clamp_or(
             self.split_ratio,
@@ -4492,7 +4480,6 @@ mod tests {
             sound_attention_enabled: false,
             notifications_enabled: false,
             notifications_background_only: false,
-            files_panel_width: 310.0,
             agent_update_notifications: false,
             auto_update: true,
             right_pane_width: 700.0,
@@ -5289,32 +5276,6 @@ mod tests {
         assert_eq!(settings.sidebar_pins("synced:org-a:user-a"), ["a-1"]);
         assert_eq!(settings.sidebar_pins("synced:org-b:user-b"), ["b-1"]);
         assert_eq!(settings.sidebar_pins("synced:org-a:user-a"), ["a-1"]);
-    }
-
-    #[test]
-    fn files_panel_width_defaults_roundtrips_and_clamps() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(UiSettings::path(dir.path()), r#"{"sidebarWidth":256}"#).unwrap();
-        assert_eq!(
-            UiSettings::load(dir.path()).files_panel_width,
-            FILES_PANEL_DEFAULT
-        );
-        for (value, expected) in [
-            (310.0, 310.0),
-            (1.0, FILES_PANEL_MIN),
-            (900.0, FILES_PANEL_MAX),
-            (f32::NAN, FILES_PANEL_DEFAULT),
-        ] {
-            let settings = UiSettings {
-                files_panel_width: value,
-                ..Default::default()
-            }
-            .clamped();
-            assert_eq!(settings.files_panel_width, expected);
-            let encoded = serde_json::to_string(&settings).unwrap();
-            let decoded: UiSettings = serde_json::from_str(&encoded).unwrap();
-            assert_eq!(decoded.files_panel_width, expected);
-        }
     }
 
     #[test]

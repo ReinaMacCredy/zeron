@@ -823,7 +823,21 @@ impl Composer {
     }
 
     fn open_review_findings(&mut self, cx: &mut Context<Self>) {
-        self.open_roster(cx);
+        cx.emit(ComposerEvent::OpenChanges);
+    }
+
+    pub(crate) fn review_change_counts(&self, cx: &App) -> Option<(u32, u32)> {
+        if !self.hosts_review() {
+            return None;
+        }
+        let target = self.review_target(cx)?;
+        let scope = self.review_scope(&target, cx);
+        self.state
+            .read(cx)
+            .reviews
+            .get(&target.chat_id)?
+            .changes(scope)
+            .filter(|(add, del)| add + del > 0)
     }
 
     fn render_review_menu(
@@ -1611,26 +1625,21 @@ impl Composer {
         self.review.menu.is_open()
     }
 
-    fn review_run_for(&self, doc_id: &str, cx: &App) -> Option<ReviewRun> {
+    pub(crate) fn render_review_findings(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if !self.hosts_review() {
             return None;
         }
-        self.state
+        let run = self
+            .state
             .read(cx)
             .reviews
             .get(&self.current_key)?
             .run
-            .clone()
-            .filter(|run| run.task_id.as_deref() == Some(doc_id))
-    }
-
-    pub(super) fn render_review_findings(
-        &self,
-        doc_id: &str,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let run = self.review_run_for(doc_id, cx)?;
+            .clone()?;
         let listed = run.findings_listed();
         if !listed && run.note.is_none() {
             return None;
@@ -1744,33 +1753,13 @@ impl Composer {
                     )
                 })
         });
-        let button = |id: &'static str, label: SharedString, primary: bool| {
-            div()
-                .id(id)
-                .debug_selector(move || id.to_string())
-                .px(px(9.0))
-                .py(px(3.0))
-                .rounded(px(6.0))
-                .cursor_pointer()
-                .role(gpui::Role::Button)
-                .aria_label(label.clone())
-                .text_size(crate::typography::ui_rems(12.0))
-                .when(primary, |el| el.bg(theme.solid).text_color(theme.on_solid))
-                .when(!primary, |el| {
-                    el.border_1()
-                        .border_color(theme.border)
-                        .text_color(theme.text)
-                        .hover(|s| s.bg(theme.glass_hover()))
-                })
-                .child(label)
-        };
+        let fix_label: SharedString = review::fix_remaining(run.fixable().count()).into();
         let fixable = run.fixable().count();
         Some(
             div()
                 .debug_selector(|| "review-findings".into())
-                .pl(px(36.0))
-                .pr(px(12.0))
-                .pb(px(8.0))
+                .px(px(12.0))
+                .py(px(8.0))
                 .flex()
                 .flex_col()
                 .text_size(crate::typography::ui_rems(12.0))
@@ -1778,35 +1767,30 @@ impl Composer {
                 .children(retry_error)
                 .when(listed, |el| el.children(rows))
                 .when(listed, |el| {
-                    el.child(
-                        div()
-                            .pt(px(6.0))
-                            .flex()
-                            .flex_row()
-                            .gap(px(6.0))
-                            .when(fixable > 0, |el| {
-                                el.child(
-                                    button(
-                                        "review-fix-all",
-                                        review::fix_remaining(fixable).into(),
-                                        true,
-                                    )
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            this.stage_findings(cx);
-                                        },
-                                    )),
-                                )
-                            })
-                            .child(
-                                button("review-open-changes", review::OPEN_CHANGES.into(), false)
-                                    .on_click(cx.listener(|_, _, _, cx| {
+                    el.child(div().pt(px(6.0)).flex().flex_row().gap(px(6.0)).when(
+                        fixable > 0,
+                        |el| {
+                            el.child(
+                                div()
+                                    .id("review-fix-all")
+                                    .debug_selector(|| "review-fix-all".into())
+                                    .px(px(9.0))
+                                    .py(px(3.0))
+                                    .rounded(px(6.0))
+                                    .cursor_pointer()
+                                    .role(gpui::Role::Button)
+                                    .aria_label(fix_label.clone())
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .bg(theme.solid)
+                                    .text_color(theme.on_solid)
+                                    .child(fix_label)
+                                    .on_click(cx.listener(|this, _, _, cx| {
                                         cx.stop_propagation();
-                                        cx.emit(ComposerEvent::OpenChanges);
+                                        this.stage_findings(cx);
                                     })),
-                            ),
-                    )
+                            )
+                        },
+                    ))
                 })
                 .into_any_element(),
         )
@@ -1818,7 +1802,6 @@ impl Composer {
             state.stage_review_findings(&key, None);
             cx.notify();
         });
-        self.close_roster(cx);
         cx.notify();
     }
 

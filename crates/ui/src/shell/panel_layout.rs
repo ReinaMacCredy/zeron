@@ -27,16 +27,13 @@ pub(super) fn content_split(available: f32) -> f32 {
         .min((available - CHAT_PANEL_MIN).max(RIGHT_PANE_MIN))
 }
 
-/// What the Files and surface host columns paint, read before an action
-/// changes anything so the panels that stay open can ease from there.
+/// What the surface host column paints, read before an action changes
+/// anything so the panels that stay open can ease from there.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PaintedPanels {
-    pub(super) files: f32,
     pub(super) right: f32,
     /// The width the surface host's content lays out at.
     pub(super) right_content: f32,
-    /// The width Files' content lays out at.
-    pub(super) files_content: f32,
     /// The width the conversation's content lays out at.
     pub(super) conversation_content: f32,
 }
@@ -46,7 +43,6 @@ pub(super) struct PaintedPanels {
 pub(super) enum AuxiliaryPanel {
     Sidebar,
     Right,
-    Files,
 }
 
 /// Responsive visibility is separate from each panel's open flag. A hidden
@@ -55,25 +51,22 @@ pub(super) enum AuxiliaryPanel {
 pub(super) struct HorizontalPanelFit {
     pub(super) sidebar: bool,
     pub(super) right: bool,
-    pub(super) files: bool,
     pub(super) sidebar_limit: f32,
 }
 
 /// Everything [`horizontal_panel_fit`] reads, in its argument order.
-pub(super) type FitInputs = (f32, f32, (bool, u64), (bool, u64), (bool, u64), bool);
+pub(super) type FitInputs = (f32, f32, (bool, u64), (bool, u64), bool);
 
 pub(super) fn horizontal_panel_fit(
     viewport: f32,
     sidebar_width: f32,
     sidebar: (bool, u64),
     right: (bool, u64),
-    files: (bool, u64),
     expanded: bool,
 ) -> HorizontalPanelFit {
     let mut visible = [
         (AuxiliaryPanel::Sidebar, sidebar.0, sidebar.1),
         (AuxiliaryPanel::Right, right.0, right.1),
-        (AuxiliaryPanel::Files, files.0, files.1),
     ];
     let viewport = viewport.max(0.0);
     // Takeover only spends the conversation's width on the right pane. Keep
@@ -83,12 +76,10 @@ pub(super) fn horizontal_panel_fit(
     let narrow_takeover = expanded && right.0 && viewport < CHAT_PANEL_MIN + RIGHT_PANE_MIN;
     if narrow_takeover {
         visible[0].1 = false;
-        visible[2].1 = false;
     }
     loop {
         let sidebar_open = visible[0].1;
         let right_open = visible[1].1;
-        let files_open = visible[2].1;
         let chat_floor = if right_open && narrow_takeover {
             0.0
         } else {
@@ -96,19 +87,14 @@ pub(super) fn horizontal_panel_fit(
         };
         let minimum = chat_floor
             + if sidebar_open { SIDEBAR_MIN } else { 0.0 }
-            + if right_open { RIGHT_PANE_MIN } else { 0.0 }
-            + if files_open { FILES_PANEL_MIN } else { 0.0 };
+            + if right_open { RIGHT_PANE_MIN } else { 0.0 };
         if minimum <= viewport {
             return HorizontalPanelFit {
                 sidebar: sidebar_open,
                 right: right_open,
-                files: files_open,
                 sidebar_limit: if sidebar_open {
-                    (viewport
-                        - chat_floor
-                        - if right_open { RIGHT_PANE_MIN } else { 0.0 }
-                        - if files_open { FILES_PANEL_MIN } else { 0.0 })
-                    .min(sidebar_width)
+                    (viewport - chat_floor - if right_open { RIGHT_PANE_MIN } else { 0.0 })
+                        .min(sidebar_width)
                 } else {
                     0.0
                 },
@@ -128,7 +114,6 @@ pub(super) fn horizontal_panel_fit(
             return HorizontalPanelFit {
                 sidebar: false,
                 right: false,
-                files: false,
                 sidebar_limit: 0.0,
             };
         };
@@ -139,8 +124,6 @@ pub(super) fn horizontal_panel_fit(
 impl Shell {
     /// Navigation and direct window resizing discard the departing allocation.
     pub(super) fn clear_panel_transitions(&mut self) {
-        self.files_tween = None;
-        self.files_content_tween = None;
         self.right_tween = None;
         self.right_content_tween = None;
         self.main_takeover_tween = None;
@@ -187,12 +170,10 @@ impl Shell {
             return HorizontalPanelFit {
                 sidebar: self.sidebar_pinned_open(),
                 right: false,
-                files: false,
                 sidebar_limit: self.settings.sidebar_width,
             };
         }
         let panels = self.panels.get(self.fit_panel_key());
-        let on_chat = !self.active_chat.is_empty();
         let chat_route = matches!(self.route, Route::Chat);
         // A closing column keeps its slot while it still paints: one the fit
         // had already hidden closes from zero and claims nothing.
@@ -211,10 +192,6 @@ impl Shell {
                 chat_route && present(panels.changes_open, self.right_tween),
                 panels.changes_opened_at,
             ),
-            (
-                on_chat && present(panels.files_open, self.files_tween),
-                panels.files_opened_at,
-            ),
             self.right_pane_expanded,
         );
         let memo = &self.fit_memo[usize::from(closing)];
@@ -223,8 +200,8 @@ impl Shell {
         {
             return fit;
         }
-        let (viewport, sidebar_width, sidebar, right, files, expanded) = inputs;
-        let fit = horizontal_panel_fit(viewport, sidebar_width, sidebar, right, files, expanded);
+        let (viewport, sidebar_width, sidebar, right, expanded) = inputs;
+        let fit = horizontal_panel_fit(viewport, sidebar_width, sidebar, right, expanded);
         memo.set(Some((inputs, fit)));
         fit
     }
@@ -252,7 +229,7 @@ impl Shell {
         // behind it.
         let direct = self.viewport_resized || self.pane_resize_dragging.is_some();
         if direct {
-            self.fit_exits = [None; 3];
+            self.fit_exits = [None; 2];
             if self
                 .sidebar_tween
                 .is_some_and(|tween| tween.from > 0.5 && tween.to > 0.5)
@@ -266,11 +243,10 @@ impl Shell {
             let open = [
                 !self.settings.sidebar_collapsed || self.tween_active(self.sidebar_tween),
                 panels.changes_open || self.tween_active(self.right_tween),
-                panels.files_open || self.tween_active(self.files_tween),
             ];
-            let was = [previous.sidebar, previous.right, previous.files];
-            let now = [fit.sidebar, fit.right, fit.files];
-            for column in 0..3 {
+            let was = [previous.sidebar, previous.right];
+            let now = [fit.sidebar, fit.right];
+            for column in 0..2 {
                 if now[column] {
                     self.fit_exits[column] = None;
                 } else if was[column] && open[column] && painted[column].0 > 0.5 {
@@ -282,7 +258,7 @@ impl Shell {
             // frame, toward its live target: its own tween, if any, was
             // heading for a target the fit had just zeroed. One the user just
             // opened already runs its own open tween; keep it.
-            let opening = [self.sidebar_tween, self.right_tween, self.files_tween].map(|tween| {
+            let opening = [self.sidebar_tween, self.right_tween].map(|tween| {
                 tween.is_some_and(|tween| self.tween_active(Some(tween)) && tween.to > 0.5)
             });
             if fit.sidebar && !previous.sidebar && !self.settings.sidebar_collapsed && !opening[0] {
@@ -311,10 +287,6 @@ impl Shell {
                 self.right_tween = Some(tween);
                 self.right_content_tween = Some(WidthTween { from, to, ..tween });
             }
-            if fit.files && !previous.files && panels.files_open && !opening[2] {
-                let (width, content) = painted[2];
-                self.transition_files(width, content, self.files_settled_width(cx));
-            }
         }
         // Measuring is not drawing: leave frame scheduling to the columns
         // that actually paint this frame.
@@ -328,7 +300,6 @@ impl Shell {
                 self.right_visible_width(cx),
                 self.right_content_width(self.right_target(cx)),
             ),
-            (self.files_visible_width(cx), self.files_content_width(cx)),
         ];
         self.motion_active.set(animating);
         match &mut self.painted_columns {
@@ -369,19 +340,17 @@ impl Shell {
     pub(super) fn painted_panels(&self, cx: &App) -> PaintedPanels {
         let right = self.right_visible_width(cx);
         PaintedPanels {
-            files: self.files_visible_width(cx),
-            files_content: self.files_content_width(cx),
             right,
             right_content: self.right_content_width(self.right_target(cx)),
-            conversation_content: self.main_content_width(self.main_target_width(right, cx), cx),
+            conversation_content: self.main_content_width(self.main_target_width(right), cx),
         }
     }
 
-    /// Split the space the sidebar and Files leave equally between the
-    /// conversation and the surface host. The sidebar and Files are tools:
-    /// they keep their own widths, like a navigator and an inspector, and the
-    /// content columns absorb every change. The share persists with the next
-    /// settings save, like a drag. Returns whether the surface host took one.
+    /// Split the space the sidebar leaves equally between the conversation
+    /// and the surface host. The sidebar keeps its own width, like a
+    /// navigator, and the content columns absorb every change. The share
+    /// persists with the next settings save, like a drag. Returns whether the
+    /// surface host took one.
     fn split_panel_widths(&mut self, cx: &App) -> bool {
         if !matches!(self.route, Route::Chat) || self.active_chat.is_empty() {
             return false;
@@ -394,9 +363,7 @@ impl Shell {
         if !right_open {
             return false;
         }
-        let files = self.files_width_for(fit, sidebar, cx);
-        self.settings.right_pane_width =
-            content_split((self.content_width() - sidebar - files).max(0.0));
+        self.settings.right_pane_width = content_split((self.content_width() - sidebar).max(0.0));
         true
     }
 
@@ -412,21 +379,6 @@ impl Shell {
     ) {
         let right_open = self.split_panel_widths(cx);
         let takeover_running = self.tween_active(self.main_takeover_tween);
-        // Files keeps its own width, but a window too narrow for it beside the
-        // conversation and the surface host squeezes it; ease that change too.
-        // A resting column resizes, so its content follows. One already
-        // opening, closing or returning keeps its reveal.
-        let files_to = self.files_settled_width(cx);
-        if self.files_panel_open(cx)
-            && skip != Some(AuxiliaryPanel::Files)
-            && (files_to - before.files).abs() > 0.5
-        {
-            let resting = !self.tween_active(self.files_tween);
-            self.transition_files(before.files, before.files_content, files_to);
-            if resting {
-                self.files_content_tween = None;
-            }
-        }
         let right_to = self.right_settled_target(cx);
         if right_open
             && skip != Some(AuxiliaryPanel::Right)
@@ -455,8 +407,8 @@ impl Shell {
     }
 
     /// Double-clicking a seam restores the default layout, easing from what
-    /// is on screen: the sidebar's or Files' seam brings that tool back to
-    /// its default width, and the content columns split equally again.
+    /// is on screen: the sidebar's seam brings it back to its default width,
+    /// and the content columns split equally again.
     pub(super) fn reset_panel_widths(&mut self, seam: PaneResizeKind, cx: &mut Context<Self>) {
         let before = self.painted_panels(cx);
         match seam {
@@ -465,11 +417,6 @@ impl Shell {
                 self.settings.sidebar_width = SIDEBAR_DEFAULT;
                 self.sidebar_edge_bounce = None;
                 self.sidebar_tween = Some(self.panel_tween(from, self.sidebar_target()));
-            }
-            PaneResizeKind::Files => {
-                self.settings.files_panel_width = settings::FILES_PANEL_DEFAULT;
-                let to = self.files_settled_width(cx);
-                self.transition_files(before.files, before.files_content, to);
             }
             PaneResizeKind::Right | PaneResizeKind::Terminal | PaneResizeKind::Split => {}
         }
@@ -489,7 +436,6 @@ impl Shell {
         let shown = |fit: HorizontalPanelFit| match panel {
             AuxiliaryPanel::Sidebar => fit.sidebar,
             AuxiliaryPanel::Right => fit.right,
-            AuxiliaryPanel::Files => fit.files,
         };
         if shown(self.horizontal_fit()) {
             return false;
@@ -519,7 +465,6 @@ impl Shell {
         match panel {
             AuxiliaryPanel::Sidebar => self.sidebar_opened_at,
             AuxiliaryPanel::Right => panels.changes_opened_at,
-            AuxiliaryPanel::Files => panels.files_opened_at,
         }
     }
 
@@ -529,9 +474,6 @@ impl Shell {
             AuxiliaryPanel::Right => self
                 .panels
                 .update(key, |panels| panels.changes_opened_at = opened_at),
-            AuxiliaryPanel::Files => self
-                .panels
-                .update(key, |panels| panels.files_opened_at = opened_at),
         }
     }
 
@@ -545,15 +487,11 @@ impl Shell {
             })
     }
 
-    pub(super) fn main_target_width(&self, right_width: f32, cx: &App) -> f32 {
+    pub(super) fn main_target_width(&self, right_width: f32) -> f32 {
         // The flex column follows the visible sidebar, not its destination.
         // Sizing the composer from sidebar_target() made it overflow that
         // column while the sidebar closed beside an open right pane.
-        conversation_width(
-            self.content_width() - self.files_reserved_width(cx),
-            self.sidebar_now(),
-            right_width,
-        )
+        conversation_width(self.content_width(), self.sidebar_now(), right_width)
     }
 
     pub(super) fn main_takeover_active(&self) -> bool {
@@ -565,9 +503,7 @@ impl Shell {
     /// the mask, including after expansion settles and during reversals.
     pub(super) fn main_content_width(&self, target: f32, cx: &App) -> f32 {
         if self.main_takeover_active() {
-            let available =
-                (self.content_width() - self.files_reserved_width(cx) - self.sidebar_now())
-                    .max(0.0);
+            let available = (self.content_width() - self.sidebar_now()).max(0.0);
             let retained = self
                 .main_takeover_tween
                 .map(|tween| {
@@ -578,7 +514,7 @@ impl Shell {
                         // conversation will rest, which a panel opening or
                         // closing meanwhile may have moved.
                         let settled = conversation_width(
-                            self.content_width() - self.files_settled_width(cx),
+                            self.content_width(),
                             self.sidebar_target(),
                             self.right_settled_target(cx),
                         );
@@ -611,8 +547,7 @@ impl Shell {
 
     /// The width a column lays its content out at while its mask eases
     /// toward `target`. `column` is its fit slot and whether the fit shows
-    /// it. Shared by the surface host and Files, so a reversal behaves the
-    /// same in both.
+    /// it.
     pub(super) fn column_content_width(
         &self,
         (column, shown): (usize, bool),

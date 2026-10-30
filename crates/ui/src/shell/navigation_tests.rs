@@ -380,23 +380,8 @@ fn hiding_reopening_and_expanding_preserve_navigation_boundaries(cx: &mut TestAp
 }
 
 #[gpui::test]
-fn embedded_terminal_and_browser_focus_route_to_right_tabs(cx: &mut TestAppContext) {
+fn embedded_browser_focus_routes_to_right_tabs(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
-    shell.update(cx, |shell, cx| {
-        // No engine in this harness: reserve a real emulator tab without
-        // starting a PTY, then use the normal surface activation path.
-        shell.right_terminal_panel(cx).update(cx, |panel, cx| {
-            panel.reserve_tab_for_chat("parent".into(), "Test terminal", cx);
-        });
-        shell.add_terminal_surface(cx);
-    });
-    cx.update(|window, cx| window.draw(cx).clear());
-    cx.update(|window, cx| {
-        let terminal = shell.read(cx).right_terminal.as_ref().unwrap().read(cx);
-        assert!(terminal.focus_handle().is_focused(window));
-    });
-    press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Subagent(1));
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
             shell.add_browser_surface(None, window, cx);
@@ -590,26 +575,6 @@ fn the_footer_terminal_button_toggles_the_drawer(cx: &mut TestAppContext) {
             open
         );
     }
-}
-
-#[gpui::test]
-fn the_task_center_terminal_opens_the_panes_chat_not_the_selection(cx: &mut TestAppContext) {
-    let (shell, cx) = setup(cx);
-    cx.update(|_, cx| {
-        shell.update(cx, |shell, cx| {
-            let center =
-                cx.new(|cx| crate::tasks::TaskCenter::new(shell.state.clone(), "task".into(), cx));
-            shell.route = Route::TaskCenter;
-            shell.open_task_center_pane(&center, "other".into(), cx);
-            shell.open_task_center_terminal(cx);
-        })
-    });
-    cx.update(|window, cx| window.draw(cx).clear());
-    shell.read_with(cx, |shell, cx| {
-        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("other"));
-        assert!(shell.panels.get("other").terminal_open);
-        assert!(!shell.panels.get("parent").terminal_open);
-    });
 }
 
 #[gpui::test]

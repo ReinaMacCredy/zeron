@@ -555,10 +555,10 @@ impl Shell {
             .map(|(panel, _)| panel.read(cx).title(cx))
     }
 
-    pub(super) fn render_device_surface(&mut self, id: u64, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_device_surface(&self, id: u64) -> AnyElement {
         match self.device_panels.get(&id) {
             Some((panel, _)) => panel.clone().into_any_element(),
-            None => self.render_surface_picker(cx),
+            None => Empty.into_any_element(),
         }
     }
 }
@@ -1475,42 +1475,35 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_plus_menu_device_row_opens_a_picker_tab_and_is_disabled_for_a_remote_chat(
+    fn the_device_tool_opens_a_picker_tab_then_steps_aside_and_hides_for_a_remote_chat(
         cx: &mut gpui::TestAppContext,
     ) {
         let (window, _dir) = device_shell(cx);
         let shell = window.root(cx).unwrap();
-        let sim = window
-            .update(cx, |shell, window, cx| {
-                let sim = shell.open_device_tab("chat", target("SIM"), false, window, cx);
-                shell.right_plus.open(());
-                sim.unwrap()
-            })
-            .unwrap();
         let (_, cx) = cx.add_window_view(|_, _| StripHost(shell.clone()));
         cx.run_until_parked();
-        let row = cx
-            .debug_bounds("right-plus-device-row")
-            .expect("+ lists Device");
-        cx.simulate_click(row.center(), gpui::Modifiers::default());
+        let tool = cx
+            .debug_bounds("pane-tool-device")
+            .expect("the strip lists the Device tool");
+        cx.simulate_click(tool.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         shell.read_with(cx, |shell, cx| {
             let tabs = device_tabs(shell);
-            assert_eq!(tabs.len(), 2, "a picker tab opens beside the bound tab");
-            assert_eq!(shell.device_tab_target(tabs[1], cx), None);
+            assert_eq!(tabs.len(), 1, "the tool opens one picker tab");
+            assert_eq!(shell.device_tab_target(tabs[0], cx), None);
             assert_eq!(
                 shell.resolved_right_active(cx),
-                RightSurface::Device(tabs[1])
-            );
-            assert_ne!(tabs[1], sim);
-            assert!(
-                shell.right_plus.as_open().is_none(),
-                "choosing Device closes the menu"
+                RightSurface::Device(tabs[0])
             );
         });
+        assert!(
+            cx.debug_bounds("pane-tool-device").is_none(),
+            "the device tab replaces the tool"
+        );
 
         cx.update(|_, cx| {
             shell.update(cx, |shell, cx| {
+                shell.right_tabs.clear();
                 shell.state.update(cx, |state, _| {
                     state.chats = vec![
                         serde_json::from_value(serde_json::json!({
@@ -1523,24 +1516,14 @@ mod tests {
                     ];
                     state.local_device_id = Some("this-mac".into());
                 });
-                shell.right_plus.open(());
                 cx.notify();
             })
         });
         cx.run_until_parked();
-        let row = cx
-            .debug_bounds("right-plus-device-row")
-            .expect("the row stays listed for a remote chat");
-        cx.simulate_click(row.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        shell.read_with(cx, |shell, _| {
-            assert_eq!(
-                device_tabs(shell).len(),
-                2,
-                "a disabled Device row opens nothing"
-            );
-            assert!(shell.right_plus.as_open().is_some());
-        });
+        assert!(
+            cx.debug_bounds("pane-tool-device").is_none(),
+            "a remote chat has no Device tool"
+        );
     }
 
     #[gpui::test]

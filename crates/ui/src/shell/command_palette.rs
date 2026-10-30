@@ -5,10 +5,10 @@ use super::terminal_tabs::TerminalLaunch;
 use super::*;
 use crate::appearance::AppearanceMode;
 use crate::files::client::{FilesClientError, FilesRequestContext, WorkspaceFilesClient};
-use crate::project_actions::{ProjectActionsKey, ProjectActionsStatus, action_icon, action_label};
+use crate::project_actions::{ProjectActionsStatus, action_icon};
 use zeron_engine::playbooks::Playbook;
 use zeron_proto::{
-    ProjectAction, ProjectActionDraft, SearchWorkspaceContentRequest, SearchWorkspaceFilesRequest,
+    ProjectActionDraft, SearchWorkspaceContentRequest, SearchWorkspaceFilesRequest,
     WorkspaceContentMatch, WorkspaceEntryKind, WorkspaceFileSearchMatch, WorkspaceSearchIndexState,
     WorkspaceTarget,
 };
@@ -313,11 +313,6 @@ enum RowKind {
     },
     /// A line of a file in the focused chat's workspace.
     Content(WorkspaceContentMatch),
-    RunAction {
-        key: ProjectActionsKey,
-        action: ProjectAction,
-        label: String,
-    },
     ImportAction {
         draft: ProjectActionDraft,
         label: String,
@@ -331,9 +326,6 @@ enum RowKind {
 impl RowKind {
     fn project_action(&self) -> Option<(&'static str, &str, &'static str)> {
         match self {
-            Self::RunAction { action, label, .. } => {
-                Some((action_icon(action.icon), label, "run action"))
-            }
             Self::ImportAction { draft, label } => {
                 Some((action_icon(draft.icon), label, "import action"))
             }
@@ -366,7 +358,6 @@ impl PaletteRow {
             RowKind::Content(found) => {
                 format!("content:{}:{}:{}", found.path, found.line, found.column)
             }
-            RowKind::RunAction { action, .. } => format!("action:{}", action.id),
             RowKind::ImportAction { draft, .. } => format!("import-action:{}", draft.name),
             RowKind::AddAction { .. } => "add-action".into(),
             RowKind::Playbook(playbook) => format!("playbook:{}", playbook.id),
@@ -889,14 +880,14 @@ impl Shell {
         else {
             return Vec::new();
         };
-        let Some(status) = self.project_actions.active_status().filter(|status| {
+        if !self.project_actions.active_status().is_some_and(|status| {
             !matches!(
                 status,
                 ProjectActionsStatus::Idle | ProjectActionsStatus::Loading
             )
-        }) else {
+        }) {
             return Vec::new();
-        };
+        }
         let Some(snapshot) = self.project_actions.visible_snapshot() else {
             return Vec::new();
         };
@@ -906,16 +897,6 @@ impl Shell {
             .space_row(&key.space_id)
             .map(|space| space.display_name().to_owned())
             .unwrap_or_default();
-        let runs = status
-            .can_run()
-            .then_some(snapshot.actions)
-            .into_iter()
-            .flatten()
-            .map(|action| RowKind::RunAction {
-                label: format!("{} · {project}", action_label(&action)),
-                key: key.clone(),
-                action,
-            });
         let imports = snapshot
             .importable_actions
             .into_iter()
@@ -926,7 +907,7 @@ impl Shell {
         let add = RowKind::AddAction {
             label: format!("Add action… · {project}"),
         };
-        runs.chain(imports)
+        imports
             .chain([add])
             .filter(|row| {
                 row.project_action().is_some_and(|(_, label, verbs)| {
@@ -1076,7 +1057,6 @@ impl Shell {
             RowKind::Command(Command::Theme(_)) => unreachable!(),
             RowKind::Command(Command::ArchiveThread) => self.archive_selected_chat(cx),
             RowKind::Chat(id) => self.open_chat(id, cx),
-            RowKind::RunAction { key, action, .. } => self.run_project_action(&key, action, cx),
             RowKind::ImportAction { draft, .. } => {
                 self.open_project_action_editor(None, Some(draft), cx)
             }
@@ -1179,9 +1159,7 @@ impl Shell {
                 })
                 .into_any_element()
             }
-            RowKind::RunAction { .. }
-            | RowKind::ImportAction { .. }
-            | RowKind::AddAction { .. } => {
+            RowKind::ImportAction { .. } | RowKind::AddAction { .. } => {
                 let (glyph, label, _) = row.kind.project_action()?;
                 let import = matches!(row.kind, RowKind::ImportAction { .. });
                 let target = row.clone();
@@ -3382,7 +3360,7 @@ mod tests {
         assert_eq!(action_labels(window, cx), expected);
     }
 
-    const ALPHA: [&str; 3] = ["Dev · alpha", "Lint · alpha", "Add action… · alpha"];
+    const ALPHA: [&str; 2] = ["Lint · alpha", "Add action… · alpha"];
 
     #[gpui::test]
     fn palette_lists_the_current_projects_actions_and_none_without_one(cx: &mut TestAppContext) {
@@ -3397,12 +3375,7 @@ mod tests {
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0]["spaceId"], "s1");
         let rows = action_rows(window, cx);
-        assert!(matches!(&rows[0], RowKind::RunAction { action, .. } if action.id == "dev"));
-        assert!(matches!(&rows[1], RowKind::ImportAction { draft, .. } if draft.name == "Lint"));
-        assert_eq!(
-            rows[0].project_action().unwrap().0,
-            action_icon(zeron_proto::ProjectActionIcon::Play)
-        );
+        assert!(matches!(&rows[0], RowKind::ImportAction { draft, .. } if draft.name == "Lint"));
         window
             .update(cx, |shell, _, cx| {
                 let quick = sections(shell, cx)
@@ -3482,17 +3455,13 @@ mod tests {
             })
             .unwrap();
         open_palette(window, cx);
-        wait_for_labels(
-            window,
-            cx,
-            &["Dev · beta", "Lint · beta", "Add action… · beta"],
-        );
+        wait_for_labels(window, cx, &["Lint · beta", "Add action… · beta"]);
         let loads = crate::device_panel::tests::calls_of(&calls, methods::LIST_PROJECT_ACTIONS);
         assert_eq!(loads.last().unwrap()["spaceId"], "s2");
     }
 
     #[gpui::test]
-    fn palette_action_rows_run_import_and_add_through_the_sidecar_handlers(
+    fn palette_action_rows_import_and_add_through_the_sidecar_handlers_and_never_run(
         cx: &mut TestAppContext,
     ) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -3518,7 +3487,7 @@ mod tests {
                 .unwrap();
         };
 
-        activate(2, cx);
+        activate(1, cx);
         window
             .update(cx, |shell, _, cx| {
                 let editor = shell
@@ -3530,7 +3499,7 @@ mod tests {
                 assert_eq!(editor.name.read(cx).text(), "");
             })
             .unwrap();
-        activate(1, cx);
+        activate(0, cx);
         window
             .update(cx, |shell, _, cx| {
                 let editor = shell
@@ -3544,24 +3513,15 @@ mod tests {
             })
             .unwrap();
 
-        activate(0, cx);
-        for _ in 0..400 {
-            cx.run_until_parked();
-            if !crate::device_panel::tests::calls_of(&calls, methods::RUN_PROJECT_ACTION).is_empty()
-            {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let runs = crate::device_panel::tests::calls_of(&calls, methods::RUN_PROJECT_ACTION);
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0]["actionId"], "dev");
-        assert_eq!(runs[0]["spaceId"], "s1");
-        assert_eq!(runs[0]["chatId"], "a");
+        cx.run_until_parked();
+        assert!(
+            crate::device_panel::tests::calls_of(&calls, methods::RUN_PROJECT_ACTION).is_empty(),
+            "runs start only from the Sidecar's Actions"
+        );
     }
 
     #[gpui::test]
-    fn palette_search_finds_actions_by_name_and_run(cx: &mut TestAppContext) {
+    fn palette_search_finds_action_imports_and_add_by_name(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
         let dir = tempfile::tempdir().unwrap();
@@ -3569,8 +3529,8 @@ mod tests {
         open_palette(window, cx);
         wait_for_labels(window, cx, &ALPHA);
         for (query, expected) in [
-            ("run", &["Dev · alpha"][..]),
-            ("dev", &["Dev · alpha"]),
+            ("run", &[][..]),
+            ("dev", &[]),
             ("lint", &["Lint · alpha"]),
             ("add action", &["Add action… · alpha"]),
             ("alpha", &ALPHA),

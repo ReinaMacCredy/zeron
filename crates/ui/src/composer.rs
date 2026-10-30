@@ -14712,10 +14712,9 @@ impl Render for Composer {
                 self.staged().len() + self.staged_appshots().len(),
                 self.staged_chip_count(cx),
             );
-        let (card, corner) = self.render_corner(window, cx);
-        let config_card = self.render_config_panel(window, cx);
-        let config_in_flow = config_card.is_some() && self.config_panel_on_hero(cx);
-        let card = config_card.or(card);
+        let corner = self.render_corner(cx);
+        let card = self.render_config_panel(window, cx);
+        let config_in_flow = card.is_some() && self.config_panel_on_hero(cx);
         // The checklist tray stacks above the queue (or directly above the
         // composer), one step narrower than what follows it.
         let has_queue = self.reads_selection(cx) && !self.state.read(cx).queue.is_empty();

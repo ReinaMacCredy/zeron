@@ -221,8 +221,6 @@ pub struct BrowserSurface {
     annotation: Option<AnnotationSession>,
     #[cfg(target_os = "macos")]
     resize_inset: gpui::Pixels,
-    #[cfg(any(target_os = "macos", windows))]
-    right_occlusion: gpui::Pixels,
     #[cfg(target_os = "macos")]
     file_root: Option<std::path::PathBuf>,
     _input_sub: Subscription,
@@ -317,7 +315,6 @@ impl BrowserSurface {
             #[cfg(target_os = "macos")]
             resize_inset: gpui::px(0.0),
             #[cfg(any(target_os = "macos", windows))]
-            right_occlusion: gpui::px(0.0),
             #[cfg(target_os = "macos")]
             file_root: None,
             _input_sub: input_sub,
@@ -379,13 +376,6 @@ impl BrowserSurface {
 
     /// Crop a GPUI overlay out of both native painting and native hit testing.
     #[cfg(any(target_os = "macos", windows))]
-    pub fn set_right_occlusion(&mut self, width: gpui::Pixels, cx: &mut Context<Self>) {
-        if self.right_occlusion != width {
-            self.right_occlusion = width;
-            cx.notify();
-        }
-    }
-
     pub fn set_presentation(&mut self, presentation: Presentation, cx: &mut Context<Self>) {
         if self.presentation == presentation {
             return;

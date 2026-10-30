@@ -29,7 +29,6 @@ fn setup(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Shell>, &mut Vis
         );
         let mut config = UiSettings::default();
         config.sidebar_width = 300.0;
-        config.files_panel_width = 377.0;
         settings::init(config, dir.path(), cx);
     });
     let (shell, cx) = cx.add_window_view(|_, cx| {
@@ -89,15 +88,13 @@ fn change(
 
 enum Panel {
     Sidebar,
-    Files,
     Right,
 }
 
 impl Panel {
-    fn toggle(self, shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    fn toggle(self, shell: &mut Shell, cx: &mut Context<Shell>) {
         match self {
             Self::Sidebar => shell.toggle_sidebar(cx),
-            Self::Files => shell.toggle_files_panel(window, cx),
             Self::Right => shell.toggle_right_pane(cx),
         }
     }
@@ -105,8 +102,8 @@ impl Panel {
 
 #[derive(Debug, Clone, Copy)]
 struct Frame {
-    // Sidebar, Files, surface host, visible conversation.
-    widths: [f32; 4],
+    // Sidebar, surface host, visible conversation.
+    widths: [f32; 3],
     sidecar: f32,
     composer: Bounds<Pixels>,
     strip: Option<Bounds<Pixels>>,
@@ -123,7 +120,6 @@ fn draw(shell: &Entity<Shell>, cx: &mut VisualTestContext, millis: u64) -> Frame
     Frame {
         widths: [
             width("sidebar-column"),
-            width("files-panel"),
             width("right-panel"),
             width("conversation-column"),
         ],
@@ -144,7 +140,7 @@ fn near(actual: f32, expected: f32) {
 }
 
 #[track_caller]
-fn expect(frame: Frame, widths: [f32; 4]) {
+fn expect(frame: Frame, widths: [f32; 3]) {
     for (actual, expected) in frame.widths.into_iter().zip(widths) {
         near(actual, expected);
     }
@@ -182,17 +178,13 @@ fn select(shell: &mut Shell, chat: Option<&str>, cx: &mut Context<Shell>) {
 fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mut TestAppContext) {
     let (_dir, shell, cx) = setup(cx);
     let initial = settled(&shell, cx);
-    expect(initial, [300.0, 0.0, 0.0, 1300.0]);
+    expect(initial, [300.0, 0.0, 1300.0]);
 
     // Each column responds gently, with no click jump or overshoot. Measure
     // the rendered widths, not a second implementation of the easing curve.
-    for (panel, column, target) in [
-        (Panel::Right, 2, 650.0),
-        (Panel::Files, 1, 377.0),
-        (Panel::Sidebar, 0, 0.0),
-    ] {
+    for (panel, column, target) in [(Panel::Right, 1, 650.0), (Panel::Sidebar, 0, 0.0)] {
         let before = draw(&shell, cx, 0);
-        change(&shell, cx, |s, window, cx| panel.toggle(s, window, cx));
+        change(&shell, cx, |s, _, cx| panel.toggle(s, cx));
         continuous(before, draw(&shell, cx, 0));
         let source = before.widths[column];
         let first = draw(&shell, cx, 16);
@@ -209,7 +201,7 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
             assert!((width - previous) * (target - source) >= -0.5);
             // The visible composer follows its column throughout panel motion.
             let composer_width = f32::from(frame.composer.size.width);
-            let main = frame.widths[3] - frame.sidecar;
+            let main = frame.widths[2] - frame.sidecar;
             near(
                 composer_width,
                 (main - 2.0 * Theme::SPACE_LG).min(f32::from(initial.composer.size.width)),
@@ -218,10 +210,10 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
                 f32::from(frame.composer.left()),
                 origin() + frame.widths[0] + (main - composer_width) / 2.0,
             );
-            if frame.widths[2] > 128.0 {
+            if frame.widths[1] > 128.0 {
                 near(
                     f32::from(frame.strip.unwrap().left()),
-                    origin() + frame.widths[0] + frame.widths[3],
+                    origin() + frame.widths[0] + frame.widths[2],
                 );
             }
             previous = width;
@@ -229,8 +221,8 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
         near(previous, target);
     }
     let wide = settled(&shell, cx);
-    expect(wide, [0.0, 377.0, 611.5, 611.5]);
-    near(f32::from(wide.strip.unwrap().left()), origin() + 611.5);
+    expect(wide, [0.0, 800.0, 800.0]);
+    near(f32::from(wide.strip.unwrap().left()), origin() + 800.0);
     // A collapsed sidebar leaves the left edge to the window's own resize.
     let edge = |x| gpui::point(px(x), px(400.0));
     cx.simulate_mouse_down(edge(3.0), MouseButton::Left, Default::default());
@@ -248,52 +240,40 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
     let reopening = draw(&shell, cx, 40);
     change(&shell, cx, |s, _, cx| s.toggle_sidebar(cx));
     continuous(reopening, draw(&shell, cx, 0));
-    expect(settled(&shell, cx), [300.0, 377.0, 461.5, 461.5]);
+    expect(settled(&shell, cx), [300.0, 650.0, 650.0]);
 
     // A drag holds until a toggle; a seam reset restores the allocation.
-    let seam = gpui::point(px(origin() + 761.5), px(400.0));
-    let dragged = gpui::point(px(origin() + 723.0), px(400.0));
+    let seam = gpui::point(px(origin() + 950.0), px(400.0));
+    let dragged = gpui::point(px(origin() + 900.0), px(400.0));
     cx.simulate_mouse_down(seam, MouseButton::Left, Default::default());
     for _ in 0..2 {
         cx.simulate_mouse_move(dragged, Some(MouseButton::Left), Default::default());
     }
     cx.simulate_mouse_up(dragged, MouseButton::Left, Default::default());
-    expect(draw(&shell, cx, 0), [300.0, 377.0, 500.0, 423.0]);
-    expect(draw(&shell, cx, 300), [300.0, 377.0, 500.0, 423.0]);
+    expect(draw(&shell, cx, 0), [300.0, 700.0, 600.0]);
+    expect(draw(&shell, cx, 300), [300.0, 700.0, 600.0]);
     // Visiting a chat with other panels open is not a toggle.
     change(&shell, cx, |s, _, cx| {
         s.panels.update("b", |p| p.changes_open = true);
         select(s, Some("b"), cx);
     });
-    expect(settled(&shell, cx), [300.0, 0.0, 500.0, 800.0]);
+    expect(settled(&shell, cx), [300.0, 700.0, 600.0]);
     change(&shell, cx, |s, _, cx| {
         s.panels.update("b", |p| p.changes_open = false);
         select(s, Some("a"), cx);
     });
-    expect(settled(&shell, cx), [300.0, 377.0, 500.0, 423.0]);
+    expect(settled(&shell, cx), [300.0, 700.0, 600.0]);
     change(&shell, cx, |s, _, cx| {
         s.reset_panel_widths(PaneResizeKind::Right, cx)
     });
-    expect(settled(&shell, cx), [300.0, 377.0, 461.5, 461.5]);
-    change(&shell, cx, |s, _, cx| {
-        s.reset_panel_widths(PaneResizeKind::Files, cx)
-    });
-    expect(settled(&shell, cx), [300.0, 286.0, 507.0, 507.0]);
+    expect(settled(&shell, cx), [300.0, 650.0, 650.0]);
 
-    // Narrowing hides the oldest open column without closing it. Asking
-    // for it promotes it; closing a neighbour makes room for its return.
     resize(cx, 1000.0);
     let narrow = draw(&shell, cx, 0);
-    expect(narrow, [300.0, 0.0, 360.0, 340.0]);
-    assert!(shell.read_with(cx, |s, cx| s.files_panel_open(cx)));
-    change(&shell, cx, |s, window, cx| s.toggle_files_panel(window, cx));
-    expect(settled(&shell, cx), [300.0, 286.0, 0.0, 414.0]);
-    change(&shell, cx, |s, window, cx| s.toggle_files_panel(window, cx));
-    expect(settled(&shell, cx), [300.0, 0.0, 360.0, 340.0]);
+    expect(narrow, [300.0, 360.0, 340.0]);
     resize(cx, 1600.0);
-    change(&shell, cx, |s, window, cx| s.toggle_files_panel(window, cx));
     let ordinary = settled(&shell, cx);
-    expect(ordinary, [300.0, 286.0, 507.0, 507.0]);
+    expect(ordinary, [300.0, 650.0, 650.0]);
     // The sidebar's seam follows the pointer, not a tween behind it.
     let sidebar_seam = |x| gpui::point(px(origin() + x), px(400.0));
     cx.simulate_mouse_down(sidebar_seam(300.0), MouseButton::Left, Default::default());
@@ -312,9 +292,9 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
     );
     cx.simulate_mouse_up(sidebar_seam(300.0), MouseButton::Left, Default::default());
     // A squeezed sidebar lays its rows and menus out within its column.
-    resize(cx, 1130.0);
-    near(draw(&shell, cx, 0).widths[0], 250.0);
-    near(shell.read_with(cx, |s, _| s.sidebar_content_width()), 250.0);
+    resize(cx, 950.0);
+    near(draw(&shell, cx, 0).widths[0], 290.0);
+    near(shell.read_with(cx, |s, _| s.sidebar_content_width()), 290.0);
     resize(cx, 1600.0);
     expect(settled(&shell, cx), ordinary.widths);
 
@@ -327,12 +307,12 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
             f32::from(ordinary.composer.size.width),
         );
     }
-    expect(draw(&shell, cx, 0), [300.0, 286.0, 1014.0, 0.0]);
+    expect(draw(&shell, cx, 0), [300.0, 1300.0, 0.0]);
     change(&shell, cx, |s, _, cx| select(s, Some("b"), cx));
-    expect(settled(&shell, cx), [300.0, 0.0, 0.0, 1300.0]);
+    expect(settled(&shell, cx), [300.0, 0.0, 1300.0]);
     assert!(!shell.read_with(cx, |s, _| s.right_pane_expanded));
     change(&shell, cx, |s, _, cx| select(s, Some("a"), cx));
-    expect(draw(&shell, cx, 0), [300.0, 286.0, 1014.0, 0.0]);
+    expect(draw(&shell, cx, 0), [300.0, 1300.0, 0.0]);
     change(&shell, cx, |s, _, cx| s.toggle_right_pane_expand(cx));
     expect(settled(&shell, cx), ordinary.widths);
 
@@ -340,17 +320,17 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
     change(&shell, cx, |s, _, cx| s.toggle_right_pane(cx));
     draw(&shell, cx, 75);
     change(&shell, cx, |s, _, cx| select(s, None, cx));
-    expect(draw(&shell, cx, 0), [300.0, 0.0, 0.0, 1300.0]);
-    expect(settled(&shell, cx), [300.0, 0.0, 0.0, 1300.0]);
+    expect(draw(&shell, cx, 0), [300.0, 0.0, 1300.0]);
+    expect(settled(&shell, cx), [300.0, 0.0, 1300.0]);
     change(&shell, cx, |s, _, cx| select(s, Some("a"), cx));
-    expect(settled(&shell, cx), [300.0, 286.0, 0.0, 1014.0]);
+    expect(settled(&shell, cx), [300.0, 0.0, 1300.0]);
     change(&shell, cx, |s, _, cx| {
         s.open_settings(SettingsSection::Appearance, cx)
     });
-    expect(draw(&shell, cx, 0), [300.0, 286.0, 0.0, 1014.0]);
+    expect(draw(&shell, cx, 0), [300.0, 0.0, 1300.0]);
     assert!(cx.debug_bounds("settings-panel").is_some());
     change(&shell, cx, |s, _, cx| s.close_settings(cx));
-    expect(draw(&shell, cx, 0), [300.0, 286.0, 0.0, 1014.0]);
+    expect(draw(&shell, cx, 0), [300.0, 0.0, 1300.0]);
 
     // Window resizing and reduced motion apply directly, without a lagging tween.
     for width in [1024.0, 800.0, 600.0, 800.0, 1600.0] {
@@ -390,15 +370,8 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
     change(&shell, cx, |s, _, cx| s.toggle_right_pane(cx));
     settled(&shell, cx);
     cx.update(|_, cx| motion::set_reduced_motion(cx, true));
-    for panel in [
-        Panel::Sidebar,
-        Panel::Right,
-        Panel::Files,
-        Panel::Files,
-        Panel::Right,
-        Panel::Sidebar,
-    ] {
-        change(&shell, cx, |s, window, cx| panel.toggle(s, window, cx));
+    for panel in [Panel::Sidebar, Panel::Right, Panel::Right, Panel::Sidebar] {
+        change(&shell, cx, |s, _, cx| panel.toggle(s, cx));
         let landed = draw(&shell, cx, 0);
         near(landed.widths.iter().sum(), 1600.0);
         expect(settled(&shell, cx), landed.widths);

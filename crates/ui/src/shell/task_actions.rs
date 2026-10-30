@@ -1084,25 +1084,6 @@ impl Shell {
         }
     }
 
-    pub(super) fn open_task_center_terminal(&mut self, cx: &mut Context<Self>) {
-        let Some(chat_id) = self
-            .task_center_pane
-            .as_ref()
-            .map(|pane| pane.chat_id.clone())
-        else {
-            return;
-        };
-        self.panels
-            .update(&chat_id, |panels| panels.terminal_open = true);
-        if self.active_chat == chat_id {
-            self.terminal_tween = None;
-            self.terminal_tween_task = None;
-            let panel = self.terminal_panel(cx);
-            panel.update(cx, |panel, cx| panel.set_open(true, cx));
-        }
-        self.open_chat(chat_id, cx);
-    }
-
     pub(super) fn render_task_center_page(
         &mut self,
         _window: &mut Window,
