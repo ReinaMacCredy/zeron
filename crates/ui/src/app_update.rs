@@ -382,7 +382,7 @@ impl AppUpdate {
                 Ok(Err(err)) => {
                     tracing::warn!(error = %format!("{err:#}"), "update check failed");
                     // The dialog shows the cause; the log keeps the chain.
-                    Err(err.root_cause().to_string())
+                    Err(zeron_update::check_error_message(&err))
                 }
                 Err(join) => Err(join.to_string()),
             };

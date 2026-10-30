@@ -699,11 +699,7 @@ fn mac_state(
                 Some(status) if status.error.is_some() => (
                     format!(
                         "Couldn't check for updates: {}",
-                        status
-                            .error
-                            .as_deref()
-                            .and_then(|error| error.rsplit(": ").next())
-                            .unwrap_or_default()
+                        status.error.as_deref().unwrap_or_default()
                     )
                     .into(),
                     Tone::Danger,
