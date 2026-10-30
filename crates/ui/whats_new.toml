@@ -34,6 +34,9 @@ text = "Settings closes the way it opens: the panel and its blurred backdrop fad
 visual = "settings-close"
 
 [[entry.improvements]]
+text = "With a wallpaper on New session or in the terminal, the active tab and the title bar show it the way a chat's tab does, instead of a dark band."
+
+[[entry.improvements]]
 text = "Settings > Tools counts the tools an agent receives: Computer is one tool on this Mac, and Device hub and set_thread count once with their actions beside them, so the total reads 33 instead of 82."
 
 [[entry.improvements]]
