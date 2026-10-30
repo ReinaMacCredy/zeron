@@ -44,7 +44,7 @@ How often agents ask is set by the **Permissions** row in the model picker, unde
 | **Auto-accept edits** | Apply edits, ask before other actions. |
 | **Full access** | Run commands and edits without asking. |
 
-**Full access** is the default. The mode applies to the selected chat, or to the next new chat. Only the modes the chat's agent supports are listed: Grok, Devin, Hermes and other ACP agents can't ask before acting, so they always run with **Full access**.
+**Full access** is the default. The mode applies to the selected chat, or to the next new chat. Only the modes the chat's agent supports are listed: Grok, Devin, Hermes and other ACP agents can't ask before acting, so they always run with **Full access**. fx is the exception: it offers **Supervised** and **Full access**.
 
 **Auto-accept edits** applies file changes on its own and still asks before commands. Chats set to **Ask for approval**, **Approve for me** or **Full** in earlier versions open as **Supervised**, **Auto-accept edits** and **Full access**.
 
