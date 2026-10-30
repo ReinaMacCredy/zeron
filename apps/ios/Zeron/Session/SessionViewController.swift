@@ -16,7 +16,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private let needsYou = NeedsYouPill()
     private var needsYouRow: UIStackView!
     private let agentsPill = AgentsPill()
-    private var agentsRow: UIStackView!
+    private var pillRow: UIStackView!
+    private var bannerRow: UIStackView!
     private var agentsShown = false
     private var agentsCard: AgentsCard?
     private let agentsScrim = UIControl()
@@ -283,15 +284,16 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         bottom.alignment = .fill
         bottom.translatesAutoresizingMaskIntoConstraints = false
         strip.onTap = { [weak self] section in self?.showCompanions(section: section) }
-        let pillRow = UIStackView(arrangedSubviews: [pill, UIView(), strip])
+        pillRow = UIStackView(arrangedSubviews: [pill, agentsPill, UIView(), strip])
         pillRow.axis = .horizontal
+        bannerRow = UIStackView(arrangedSubviews: [UIView()])
+        bannerRow.axis = .horizontal
+        bannerRow.isHidden = true
         needsYouRow = UIStackView(arrangedSubviews: [needsYou, UIView()])
         needsYouRow.axis = .horizontal
         needsYouRow.isHidden = true
         needsYou.addAction(UIAction { [weak self] _ in self?.openNeedsYou() }, for: .touchUpInside)
-        agentsRow = UIStackView(arrangedSubviews: [agentsPill, UIView()])
-        agentsRow.axis = .horizontal
-        agentsRow.isHidden = true
+        agentsPill.isHidden = true
         agentsPill.addAction(UIAction { [weak self] _ in self?.toggleAgentsCard() }, for: .touchUpInside)
         agentsScrim.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         agentsScrim.accessibilityIdentifier = "agents-card-scrim"
@@ -303,7 +305,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             CloudRoutes.openBilling(app: self.app, from: self)
         }
         creditsNotice.isHidden = true
-        for v in [creditsNotice, needsYouRow!, agentsRow!, pillRow, queue, questions, composer] { bottom.addArrangedSubview(v) }
+        for v in [creditsNotice, needsYouRow!, bannerRow!, pillRow!, queue, questions, composer] { bottom.addArrangedSubview(v) }
         questions.isHidden = true
         queue.isHidden = true
         // Hidden panels start dematerialized so their first appearance grows in.
@@ -1117,6 +1119,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             composer.placeholder = "Edit queued message"
             composer.prediction = nil
             pill.banner = .editing
+            placeBanner(.editing)
             pill.superview?.isHidden = false
             composer.becomeFirstResponder()
         }
@@ -1226,6 +1229,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         // One banner for both the row's animation and its contents (the
         // Cloud reading may turn a "not delivered" into nothing).
         let banner: SessionChrome.Banner = editingQueueId != nil ? .editing : cloudBanner(c.banner)
+        syncAgents(c.agents, animated: animated)
+        let bannerUp = placeBanner(banner)
+        let bannerShown = !bannerRow.isHidden
+        let rowShown = !pillRow.isHidden
+        let rowWanted = (banner != .none && !bannerUp) || !strip.state.isEmpty || agentsShown
         let changes = {
             let asking = c.questions != nil
             self.questions.isHidden = !asking
@@ -1234,15 +1242,14 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             self.queue.isHidden = c.queue.isEmpty || asking
             self.queue.configure(c.queue)
             self.pill.isHidden = banner == .none
-            self.pill.superview?.isHidden = banner == .none && self.strip.state.isEmpty
+            self.bannerRow.isHidden = !bannerUp
+            self.pillRow.isHidden = !rowWanted
             self.pill.banner = banner
             self.creditsNotice.isHidden = !self.cloudOutOfCredits
             self.bottom.layoutIfNeeded()
             self.view.layoutIfNeeded()
         }
-        let stripShown = !(pill.superview?.isHidden ?? true)
-        let stripWanted = banner != .none || !strip.state.isEmpty
-        let structural = (old.questions == nil) != (c.questions == nil) || old.queue.count != c.queue.count || (old.banner == .none) != (c.banner == .none) || stripShown != stripWanted
+        let structural = (old.questions == nil) != (c.questions == nil) || old.queue.count != c.queue.count || (old.banner == .none) != (c.banner == .none) || rowShown != rowWanted || bannerShown != bannerUp
         // Panels materialize when their content appears; a first render (the
         // session reopened with a queue or an open question) shows them at
         // once — they used to stay dematerialized, so the queue "vanished"
@@ -1258,7 +1265,15 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         } else {
             changes()
         }
-        syncAgents(c.agents, animated: animated)
+    }
+
+    // A banner beside the agents pill crushes it to its glyph, so the banner takes the row above.
+    @discardableResult
+    private func placeBanner(_ banner: SessionChrome.Banner) -> Bool {
+        let up = banner != .none && agentsShown
+        let row: UIStackView = up ? bannerRow : pillRow
+        if pill.superview !== row { row.insertArrangedSubview(pill, at: 0) }
+        return up
     }
 
     private func syncAgents(_ agents: SessionChrome.Agents?, animated: Bool) {
@@ -1268,7 +1283,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         agentsShown = show
         let motion = animated && view.window != nil
         if show {
-            agentsRow.isHidden = false
+            agentsPill.isHidden = false
             guard motion else {
                 agentsPill.alpha = 1
                 agentsPill.transform = .identity
@@ -1281,11 +1296,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 self.agentsPill.transform = .identity
             }
         } else {
-            guard motion else { return agentsRow.isHidden = true }
+            guard motion else { return agentsPill.isHidden = true }
             UIView.animate(withDuration: 0.1, delay: 0, options: [.curveEaseIn, .beginFromCurrentState], animations: {
                 self.agentsPill.alpha = 0
             }, completion: { _ in
-                if !self.agentsShown { self.agentsRow.isHidden = true }
+                if !self.agentsShown { self.agentsPill.isHidden = true }
             })
         }
     }
@@ -1301,7 +1316,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         card.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(card)
         NSLayoutConstraint.activate([
-            card.bottomAnchor.constraint(equalTo: agentsRow.topAnchor, constant: -8),
+            card.bottomAnchor.constraint(equalTo: pillRow.topAnchor, constant: -8),
             card.leadingAnchor.constraint(equalTo: bottom.leadingAnchor),
             card.trailingAnchor.constraint(equalTo: bottom.trailingAnchor),
             card.topAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
