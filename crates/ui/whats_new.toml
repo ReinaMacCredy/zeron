@@ -34,6 +34,9 @@ text = "Settings closes the way it opens: the panel and its blurred backdrop fad
 visual = "settings-close"
 
 [[entry.improvements]]
+text = "Settings > Tools counts the tools an agent receives: Computer is one tool on this Mac, and Device hub and set_thread count once with their actions beside them, so the total reads 33 instead of 82."
+
+[[entry.improvements]]
 text = "The sidebar's subagent count returns to 0 when a forked chat's turn ends, instead of staying on its finished subagents."
 
 [[entry.improvements]]

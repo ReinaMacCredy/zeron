@@ -16,7 +16,7 @@ The tools come in seven groups, the same ones you see in Settings > Tools:
 
 ## Every tool
 
-Each tool has its own switch in Settings > Tools, under its group. The names are what agents call them. `set_thread` and `device` keep one switch per action, under the names they had before they became one tool, so you can still turn off archiving or closing a device alone.
+Each tool has its own switch in Settings > Tools, under its group. The names are what agents call them. `set_thread` and `device` keep one switch per action, under the names they had before they became one tool, so you can still turn off archiving or closing a device alone. The counts on each group and at the bottom of the page are the tools an agent receives, with actions counted beside their tool: on this Mac, Computer is one tool.
 
 | Group | Tool | What it does |
 | --- | --- | --- |
