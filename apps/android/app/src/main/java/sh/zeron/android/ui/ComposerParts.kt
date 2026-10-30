@@ -220,14 +220,15 @@ fun ComposerSurface(
                             .drawWithContent {
                                 drawContent()
                                 // Chips scrolling under the send button fade out.
-                                val fade = 24.dp.toPx()
+                                val fade = ChipFade.toPx()
                                 drawRect(
                                     Brush.horizontalGradient(listOf(Color.Black, Color.Transparent), startX = size.width - fade, endX = size.width),
                                     topLeft = Offset(size.width - fade, 0f),
                                     blendMode = BlendMode.DstIn,
                                 )
                             }
-                            .horizontalScroll(rememberScrollState()),
+                            .horizontalScroll(rememberScrollState())
+                            .padding(end = ChipFade),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         content = chips,
@@ -241,6 +242,8 @@ fun ComposerSurface(
     if (attachOpen) sh.zeron.android.ui.composer.AttachPanel(model, onClose = ::closeAttach)
     }
 }
+
+val ChipFade = 24.dp
 
 private class MentionTint(private val model: ComposerModel, private val accent: Color) : VisualTransformation {
     override fun filter(text: AnnotatedString): TransformedText {

@@ -125,9 +125,10 @@ fun ContextChip(
     leading: @Composable () -> Unit,
     onClick: () -> Unit,
     tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    modifier: Modifier = Modifier,
     menu: @Composable () -> Unit = {},
 ) {
-    Box {
+    Box(modifier) {
         Surface(
             onClick = onClick,
             shape = RoundedCornerShape(50),

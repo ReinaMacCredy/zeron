@@ -66,6 +66,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
@@ -633,11 +635,19 @@ fun accessIcon(mode: AccessMode): Int = when (mode) {
 fun AccessChip(current: AccessMode, offered: List<AccessMode>?, plan: Boolean?, onPlan: (Boolean) -> Unit, onPick: (AccessMode) -> Unit) {
     var open by remember { mutableStateOf(false) }
     val info = accessModes(null).firstOrNull { it.mode == current } ?: return
+    val label = if (plan == true) "${info.label} · Plan" else info.label
+    val reveal = remember { androidx.compose.foundation.relocation.BringIntoViewRequester() }
+    var size by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+    val fade = with(androidx.compose.ui.platform.LocalDensity.current) { ChipFade.toPx() }
+    LaunchedEffect(label, size) {
+        if (plan == true && size.width > 0) reveal.bringIntoView(androidx.compose.ui.geometry.Rect(0f, 0f, size.width + fade, size.height.toFloat()))
+    }
     ContextChip(
-        if (plan == true) "${info.label} · Plan" else info.label,
+        label,
         leading = { ZIcon(accessIcon(current), null, Modifier.size(16.dp)) },
         onClick = { open = true },
         tint = if (current == AccessMode.FULL_ACCESS) warningTint() else MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.bringIntoViewRequester(reveal).onSizeChanged { size = it },
     ) {
         ChoiceMenu(open, { open = false }, listOfNotNull(
             MenuSection("Access", accessModes(offered).map { m ->
