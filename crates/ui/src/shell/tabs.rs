@@ -339,7 +339,7 @@ fn folder_tab_backdrop(
             .size_full(),
         )
         .when_some(backdrop, |el, backdrop| {
-            let (shade, alpha) = (backdrop.scrim_color, backdrop.settings.tab_shade);
+            let (shade, alpha) = (backdrop.scrim_color, backdrop.tab_shade);
             el.child(crate::chat_background::surface(
                 backdrop,
                 move |own, layer, window| {
@@ -1493,7 +1493,7 @@ impl Shell {
                             selected.as_deref(),
                             hovered.as_deref(),
                             tones,
-                            self.chat_backdrop.clone(),
+                            self.page_backdrop.clone(),
                             &theme,
                             cx,
                         );
@@ -1549,7 +1549,7 @@ impl Shell {
                     .when(is_selected, |el| match tones {
                         Some(tones) => el
                             .relative()
-                            .child(folder_tab_backdrop(tones, self.chat_backdrop.clone())),
+                            .child(folder_tab_backdrop(tones, self.page_backdrop.clone())),
                         None => el.shadow(crate::theme::glass_selected_shadows()),
                     })
                     .cursor_pointer()
@@ -1894,7 +1894,7 @@ impl Shell {
             .text_color(if on_page { theme.text } else { tone })
             .cursor_pointer()
             .when(on_page, |el| match tones {
-                Some(tones) => el.child(folder_tab_backdrop(tones, self.chat_backdrop.clone())),
+                Some(tones) => el.child(folder_tab_backdrop(tones, self.page_backdrop.clone())),
                 None => el
                     .bg(crate::theme::glass_selected_bg())
                     .shadow(crate::theme::glass_selected_shadows()),
