@@ -12297,6 +12297,10 @@ impl Composer {
         if is_new && !background {
             cx.emit(ComposerEvent::NewThreadTransitionStarted);
         }
+        if is_new {
+            self.pickers
+                .update(cx, |pickers, cx| pickers.clear_draft_plan(cx));
+        }
         // A queued message is not in the transcript yet — the queue panel is
         // its echo, and it gets a real bubble when the host sends it.
         let creates_chat = is_new || create_side_chat.is_some();
@@ -16833,6 +16837,41 @@ mod tests {
             .expect("the send creates the chat");
         assert_eq!(create.params["deviceId"], "remote");
         assert!(create.params.get("spaceId").is_none());
+    }
+
+    #[gpui::test]
+    fn a_plan_sent_from_new_chat_leaves_the_next_draft_without_plan(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, _requests) = tokio::sync::mpsc::channel::<String>(64);
+        let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::RpcClient::new(out, inbound),
+            ));
+            state.local_device_id = Some("local".into());
+            state.select_space(None, cx);
+            state.select_device("local".into(), cx);
+        });
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        composer.update(cx, |composer, cx| {
+            composer.set_plan(true, cx);
+            assert!(composer.plan(cx));
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("Ship Apple Pay", cx));
+            composer.on_submit(cx);
+        });
+        cx.run_until_parked();
+        state.update(cx, |state, _| state.selected_chat = None);
+        composer.update(cx, |composer, cx| {
+            composer.on_state_changed(cx);
+            assert!(!composer.plan(cx));
+        });
     }
 
     /// Out of credits, a send that would run on Cloud is held at the button:

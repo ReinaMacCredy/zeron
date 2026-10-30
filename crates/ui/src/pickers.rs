@@ -2620,6 +2620,13 @@ impl Pickers {
         wanted && self.offers_plan(cx)
     }
 
+    pub(crate) fn clear_draft_plan(&mut self, cx: &mut Context<Self>) {
+        if self.config.plan {
+            self.config.plan = false;
+            cx.notify();
+        }
+    }
+
     pub(crate) fn toggle_plan(&mut self, cx: &mut Context<Self>) {
         let plan = !self.effective_plan(cx);
         if self.chat_id(cx).is_some() {
