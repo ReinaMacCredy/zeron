@@ -604,6 +604,15 @@ impl Shell {
             if artwork.is_some() && artwork_opacity < 1.0 {
                 window.request_animation_frame();
             }
+            self.page_backdrop = self.settings.inset_shell.then(|| {
+                crate::chat_background::Backdrop::chat(
+                    artwork.clone(),
+                    background,
+                    artwork_opacity,
+                    theme.bg,
+                    theme.inset_tones().body,
+                )
+            });
             crate::chat_background::layer(
                 artwork,
                 background,
@@ -615,7 +624,7 @@ impl Shell {
                 ),
                 theme.bg,
                 artwork_opacity,
-                None,
+                self.page_backdrop.as_ref(),
             )
         });
         let resize_suspended = self.tween_active(self.right_tween)

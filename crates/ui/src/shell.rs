@@ -2394,7 +2394,24 @@ pub(crate) fn new_thread_background(
         .opacity((1.0 - dissolve) * opacity)
         // Alpha resolves into the real canvas, including translucent themes;
         // no theme-colored overlay bleaches or darkens the source pixels.
-        .children([false, true].into_iter().map(|cutout| {
+        .children(new_thread_background_passes(
+            artwork,
+            adjustment,
+            composer_bounds,
+            None,
+        ))
+        .into_any_element()
+}
+
+fn new_thread_background_passes(
+    artwork: std::sync::Arc<gpui::RenderImage>,
+    adjustment: settings::NewThreadBackgroundAdjustment,
+    composer_bounds: crate::new_thread_background_mask::SurfaceBounds,
+    painted: Option<&crate::chat_background::Painted>,
+) -> Vec<gpui::Div> {
+    [false, true]
+        .into_iter()
+        .map(|cutout| {
             let artwork = artwork.clone();
             let composer_bounds = composer_bounds.clone();
             div()
@@ -2405,27 +2422,69 @@ pub(crate) fn new_thread_background(
                 } else {
                     crate::new_thread_background_mask::CUTOUT_REVEAL_OPACITY
                 })
-                .child(
-                    gpui::canvas(
-                        |_, _, _| {},
-                        move |bounds, _, window, _cx| {
-                            if let Some(composer) = composer_bounds.get() {
-                                crate::new_thread_background_mask::paint(
-                                    artwork.clone(),
-                                    bounds,
-                                    composer,
-                                    adjustment,
-                                    cutout,
-                                    window,
-                                );
-                            }
-                        },
-                    )
-                    .absolute()
-                    .inset_0(),
-                )
-        }))
-        .into_any_element()
+                .child(crate::chat_background::clipped(
+                    painted,
+                    move |_, layer, window| {
+                        if let Some(composer) = composer_bounds.get() {
+                            crate::new_thread_background_mask::paint(
+                                artwork.clone(),
+                                layer,
+                                composer,
+                                adjustment,
+                                cutout,
+                                window,
+                            );
+                        }
+                    },
+                ))
+        })
+        .collect()
+}
+
+fn new_thread_backdrop(
+    frames: [(
+        Option<std::sync::Arc<gpui::RenderImage>>,
+        settings::NewThreadBackgroundAdjustment,
+        f32,
+    ); 2],
+    opacity: f32,
+    dissolve: f32,
+    composer_bounds: crate::new_thread_background_mask::SurfaceBounds,
+    tab_shade: f32,
+    theme: &Theme,
+) -> Option<crate::chat_background::Backdrop> {
+    let shown: f32 = frames
+        .iter()
+        .filter(|(artwork, ..)| artwork.is_some())
+        .map(|(.., share)| share)
+        .sum();
+    (shown > 0.0).then(|| crate::chat_background::Backdrop {
+        art: std::rc::Rc::new(move |painted| {
+            div()
+                .absolute()
+                .inset_0()
+                .children(frames.iter().filter_map(|(artwork, adjustment, share)| {
+                    artwork.clone().map(|artwork| {
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .opacity(opacity * share / shown)
+                            .children(new_thread_background_passes(
+                                artwork,
+                                *adjustment,
+                                composer_bounds.clone(),
+                                painted,
+                            ))
+                    })
+                }))
+                .into_any_element()
+        }),
+        tab_shade,
+        fade: (1.0 - dissolve.clamp(0.0, 1.0)) * shown,
+        scrim_color: theme.bg,
+        body: theme.inset_tones().body,
+        painted: Default::default(),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3103,7 +3162,7 @@ pub struct Shell {
     /// The chat layer alternates with the hero by route and carries its own
     /// blurred image, so sharing one tracker would restart the hero's fade.
     chat_artwork_ready: crate::new_thread_background_effects::FadeIn,
-    chat_backdrop: Option<crate::chat_background::Backdrop>,
+    page_backdrop: Option<crate::chat_background::Backdrop>,
     /// Session-transient disclosure state, matching the Archived shelf.
     pub(super) pinned_open: bool,
     pub(super) sessions_open: bool,
@@ -3962,7 +4021,7 @@ impl Shell {
             composer_dock: Default::default(),
             new_thread_artwork_ready: Default::default(),
             chat_artwork_ready: Default::default(),
-            chat_backdrop: None,
+            page_backdrop: None,
             archived_open: true,
             pinned_open: true,
             sessions_open: true,
@@ -16522,8 +16581,8 @@ impl Shell {
                         .child(content),
                 ),
             )
-            .when_some(self.chat_backdrop.clone(), |frame, backdrop| {
-                let (shade, alpha) = (backdrop.scrim_color, backdrop.settings.tab_shade);
+            .when_some(self.page_backdrop.clone(), |frame, backdrop| {
+                let (shade, alpha) = (backdrop.scrim_color, backdrop.tab_shade);
                 frame.child(
                     div()
                         .absolute()
@@ -18153,6 +18212,39 @@ impl Shell {
                 ),
                 None => full_height,
             };
+            let backdrop = if self.settings.inset_shell && !has_selection {
+                new_thread_backdrop(
+                    [
+                        (
+                            artwork_frame.previous.clone(),
+                            artwork_frame.previous_adjustment,
+                            1.0 - artwork_frame.mix,
+                        ),
+                        (
+                            artwork_frame.current.clone(),
+                            artwork_frame.current_adjustment,
+                            artwork_frame.mix,
+                        ),
+                    ],
+                    opacity,
+                    dock_frame.dissolve(),
+                    bounds.clone(),
+                    chat_background.tab_shade,
+                    theme,
+                )
+            } else {
+                None
+            };
+            let strip = backdrop.as_ref().map(|backdrop| {
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w(px(width))
+                    .h(px(hero_height))
+                    .child(backdrop.strip())
+            });
+            self.page_backdrop = backdrop;
             div()
                 .absolute()
                 .inset_0()
@@ -18174,6 +18266,7 @@ impl Shell {
                     dock_frame.dissolve(),
                     artwork_frame.mix * opacity,
                 ))
+                .children(strip)
                 .into_any_element()
         });
 
@@ -18199,17 +18292,15 @@ impl Shell {
                     new_thread_background_height(self.viewport_height),
                 );
                 let fade = chat_artwork_opacity * dock_frame.transcript();
-                self.chat_backdrop =
-                    self.settings
-                        .inset_shell
-                        .then(|| crate::chat_background::Backdrop {
-                            artwork: chat_artwork.clone(),
-                            settings: chat_background,
-                            fade,
-                            scrim_color: theme.bg,
-                            body: theme.inset_tones().body,
-                            painted: Default::default(),
-                        });
+                let backdrop = (self.settings.inset_shell && has_selection).then(|| {
+                    crate::chat_background::Backdrop::chat(
+                        chat_artwork.clone(),
+                        chat_background,
+                        fade,
+                        theme.bg,
+                        theme.inset_tones().body,
+                    )
+                });
                 let layer = crate::chat_background::layer(
                     chat_artwork,
                     chat_background,
@@ -18217,10 +18308,11 @@ impl Shell {
                     height,
                     theme.bg,
                     fade,
-                    self.chat_backdrop
-                        .as_ref()
-                        .map(|backdrop| backdrop.painted.clone()),
+                    backdrop.as_ref(),
                 );
+                if backdrop.is_some() {
+                    self.page_backdrop = backdrop;
+                }
                 // The artwork spans the whole conversation column. With the
                 // split's secondary pane on the LEFT this column starts mid-
                 // way, so slide the layer back under that pane (the card clips
@@ -20547,7 +20639,7 @@ fn header_icon_button_with(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.chat_backdrop = None;
+        self.page_backdrop = None;
         if self.active_chat.is_empty() && self.right_pane_open(cx) {
             self.adopt_canvas_terminals(cx);
         }
