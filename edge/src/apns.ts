@@ -54,20 +54,21 @@ export const sendApns = async (
   environment: ApnsEnvironment,
   deviceToken: string,
   payload: unknown,
-  collapseId: string
+  collapseId: string | undefined,
+  kind: { pushType: "alert" | "liveactivity"; priority: 5 | 10 } = { pushType: "alert", priority: 10 }
 ): Promise<ApnsResult> => {
   const jwt = await providerToken(cfg);
   const response = await fetch(`${HOSTS[environment]}/3/device/${deviceToken}`, {
     method: "POST",
     headers: {
       authorization: `bearer ${jwt}`,
-      "apns-topic": cfg.topic,
-      "apns-push-type": "alert",
-      "apns-priority": "10",
+      "apns-topic": kind.pushType === "liveactivity" ? `${cfg.topic}.push-type.liveactivity` : cfg.topic,
+      "apns-push-type": kind.pushType,
+      "apns-priority": String(kind.priority),
       // Deliver within a day if the phone is off; older than that is noise.
       "apns-expiration": String(Math.floor(Date.now() / 1000) + 24 * 60 * 60),
       // APNs caps collapse ids at 64 bytes.
-      "apns-collapse-id": collapseId.slice(0, 64),
+      ...(collapseId !== undefined ? { "apns-collapse-id": collapseId.slice(0, 64) } : {}),
       "content-type": "application/json"
     },
     body: JSON.stringify(payload)

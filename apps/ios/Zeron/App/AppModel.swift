@@ -83,6 +83,7 @@ final class AppModel {
     /// Cloud for this account (status, GitHub, agent logins, billing).
     @MainActor lazy var cloud = CloudStore(app: self)
     private(set) var client: CoreClient?
+    private var credentials: Credentials?
     private(set) var frontPage = FrontPage()
     private(set) var archived: [SessionRowVM] = []
     private(set) var connectivity: Connectivity?
@@ -228,6 +229,7 @@ final class AppModel {
         )
         do {
             client = try CoreClient(config: config, credentials: credentials, listener: bridge)
+            self.credentials = credentials
             applySidebarView()
             // Only real accounts persist; dev bearers come from launch args
             // (and would be rejected by the production edge next launch).
@@ -296,6 +298,7 @@ final class AppModel {
         lastDeliveryActivity = .distantPast
         client?.shutdown()
         client = nil
+        credentials = nil
         Credentials.clearStored()
         AccountProfile.clear()
         clock?.invalidate()
@@ -567,6 +570,23 @@ final class AppModel {
 
     func row(_ id: String) -> SessionRow? {
         rows[id] ?? client?.sessionRow(chatId: id)
+    }
+
+    var sessionRows: Dictionary<String, SessionRow>.Values { rows.values }
+
+    func interrupt(_ chatId: String) {
+        guard let client else { return }
+        try? (client.session(chatId: chatId) ?? (try? client.openSession(chatId: chatId)))?.interrupt()
+    }
+
+    var edgeAccess: (url: String, org: String, bearer: String)? {
+        switch credentials {
+        case let .dev(userId, orgId)?: return (Self.edgeURL, orgId, "\(userId)@\(orgId)")
+        case .workOs?:
+            guard case let .workOs(_, orgId, tokens)? = Credentials.stored() else { return nil }
+            return (Self.edgeURL, orgId, tokens.accessToken)
+        default: return nil
+        }
     }
 
     func sessions(inFolder id: String) -> [SessionRowVM] {

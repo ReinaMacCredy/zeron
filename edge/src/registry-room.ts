@@ -35,6 +35,16 @@ import {
   type Category,
   type PushPrefs
 } from "./push-notify";
+import {
+  contentFor,
+  finalState,
+  liveActivityPayload,
+  liveRows,
+  newlyAsking,
+  parseTarget,
+  type ContentState,
+  type LiveActivityTarget
+} from "./live-activity";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Tombstones older than this are purged; cursors from before the purge
@@ -99,6 +109,7 @@ interface PushLogEntry {
 
 const TOKEN_RE = /^[0-9a-fA-F]{32,512}$/;
 const PUSH_LOG_MAX = 30;
+const LIVE_ACTIVITIES_PER_DEVICE = 6;
 
 export class RegistryRoom implements DurableObject {
   private readonly ctx: DurableObjectState;
@@ -120,6 +131,9 @@ export class RegistryRoom implements DurableObject {
     // every socket, sync to every device and back up to R2).
     ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS push_targets (device TEXT PRIMARY KEY, token TEXT NOT NULL, environment TEXT NOT NULL, prefs TEXT NOT NULL, updated_at INTEGER NOT NULL)"
+    );
+    ctx.storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS live_activities (id TEXT PRIMARY KEY, device TEXT NOT NULL, token TEXT NOT NULL, environment TEXT NOT NULL, target TEXT NOT NULL, last TEXT, stamp INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL)"
     );
     // Same protocol-level keepalive as SessionRoom — and the same caveat: a
     // pong is runtime-answered and proves nothing about this DO's health.
@@ -307,6 +321,7 @@ export class RegistryRoom implements DurableObject {
         lastGcAt: Number(this.getMeta("lastGcAt") ?? "0"),
         pushTargets: this.pushTargets().map((t) => ({ device: t.device, environment: t.environment, prefs: t.prefs })),
         pushConfigured: apnsConfig(this.env) !== undefined,
+        liveActivities: this.liveActivityTargets().map((t) => ({ device: t.device, chatId: t.chatId ?? null, which: t.which, stamp: t.stamp })),
         pushLog: JSON.parse(this.getMeta("pushLog") ?? "[]") as PushLogEntry[]
       });
     }
@@ -339,6 +354,47 @@ export class RegistryRoom implements DurableObject {
           environment,
           JSON.stringify(parsePrefs(body.prefs)),
           Date.now()
+        );
+        return json({ ok: true });
+      }
+    }
+
+    if (url.pathname === "/live-activity") {
+      const device = url.searchParams.get("device") ?? "";
+      const id = url.searchParams.get("id") ?? "";
+      if (device === "" || id === "" || id.length > 128) {
+        return json({ error: "bad_request", message: "device and id required" }, 400);
+      }
+      if (request.method === "DELETE") {
+        this.ctx.storage.sql.exec("DELETE FROM live_activities WHERE id = ? AND device = ?", id, device);
+        return json({ ok: true });
+      }
+      if (request.method === "POST") {
+        let body: Record<string, unknown>;
+        try {
+          body = (await request.json()) as Record<string, unknown>;
+        } catch {
+          return json({ error: "bad_request", message: "malformed body" }, 400);
+        }
+        const token = typeof body.token === "string" ? body.token : "";
+        const environment = body.environment === "sandbox" ? "sandbox" : body.environment === "production" ? "production" : undefined;
+        if (!TOKEN_RE.test(token) || environment === undefined) {
+          return json({ error: "bad_request", message: "token and environment required" }, 400);
+        }
+        this.ctx.storage.sql.exec(
+          "INSERT INTO live_activities (id, device, token, environment, target, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET device = excluded.device, token = excluded.token, environment = excluded.environment, target = excluded.target, updated_at = excluded.updated_at",
+          id,
+          device,
+          token,
+          environment,
+          JSON.stringify(parseTarget(id, device, body)),
+          Date.now()
+        );
+        this.ctx.storage.sql.exec(
+          "DELETE FROM live_activities WHERE device = ? AND id NOT IN (SELECT id FROM live_activities WHERE device = ? ORDER BY updated_at DESC LIMIT ?)",
+          device,
+          device,
+          LIVE_ACTIVITIES_PER_DEVICE
         );
         return json({ ok: true });
       }
@@ -623,6 +679,7 @@ export class RegistryRoom implements DurableObject {
         send(socket, { t: "rows", seq, rows: this.visible(rows, socketState.runner, socketState.runnerAccount) });
       }
       this.notifySessions(sessionsBefore, touched);
+      this.updateLiveActivities(touched);
     }
     return { ok: true, batch, seq, applied, rejected };
   }
@@ -690,6 +747,65 @@ export class RegistryRoom implements DurableObject {
         Promise.all(sends.map((send) => send())).then(() => this.appendPushLog([], log))
       );
     }
+  }
+
+  private liveActivityTargets(): Array<LiveActivityTarget & { last: ContentState | null; stamp: number }> {
+    return [...this.ctx.storage.sql.exec("SELECT token, environment, target, last, stamp FROM live_activities")].map((raw) => ({
+      ...(JSON.parse(raw.target as string) as Omit<LiveActivityTarget, "token" | "environment">),
+      token: raw.token as string,
+      environment: (raw.environment as string) === "sandbox" ? "sandbox" : "production",
+      last: raw.last ? (JSON.parse(raw.last as string) as ContentState) : null,
+      stamp: raw.stamp as number
+    }));
+  }
+
+  private updateLiveActivities(touched: Map<string, Row>): void {
+    if (![...touched.keys()].some((key) => key.startsWith("sessions ") || key.startsWith("chats "))) return;
+    const targets = this.liveActivityTargets();
+    if (targets.length === 0) return;
+    const now = Date.now();
+    const sessions = [
+      ...this.ctx.storage.sql.exec(
+        "SELECT id FROM rows WHERE kind = 'sessions' AND deleted = 0 AND json_extract(fields, '$.status') IN ('working', 'awaitingInput')"
+      )
+    ].flatMap((raw) => this.loadRow("sessions", raw.id as string) ?? []);
+    const rows = liveRows(
+      sessions,
+      (id) => this.loadRow("chats", id),
+      (id) => this.loadRow("spaces", id),
+      (id) => this.loadRow("devices", id),
+      now
+    );
+    const config = apnsConfig(this.env);
+    const sends: Array<() => Promise<void>> = [];
+    for (const target of targets) {
+      const next = contentFor(target, rows);
+      if (next !== null && JSON.stringify(next) === JSON.stringify(target.last)) continue;
+      const stamp = Math.max(Math.floor(now / 1000), target.stamp + 1);
+      let payload: ReturnType<typeof liveActivityPayload>;
+      let priority: 5 | 10;
+      if (next === null) {
+        payload = liveActivityPayload("end", finalState(target.last), stamp, { dismissalDate: stamp + target.endAfter });
+        priority = 10;
+        this.ctx.storage.sql.exec("DELETE FROM live_activities WHERE id = ?", target.id);
+      } else {
+        const asks = target.alert ? newlyAsking(target.last, next) : [];
+        const alert = asks[0] ? { alert: { title: "Needs you", body: asks[0].title } } : {};
+        payload = liveActivityPayload("update", next, stamp, alert);
+        priority = asks[0] ? 10 : 5;
+        this.ctx.storage.sql.exec("UPDATE live_activities SET last = ?, stamp = ? WHERE id = ?", JSON.stringify(next), stamp, target.id);
+      }
+      if (config === undefined) continue;
+      sends.push(async () => {
+        try {
+          const r = await sendApns(config, target.environment, target.token, payload, undefined, { pushType: "liveactivity", priority });
+          if (isDeadToken(r)) this.ctx.storage.sql.exec("DELETE FROM live_activities WHERE id = ?", target.id);
+        } catch (err) {
+          console.warn(`live activity push failed: ${(err as Error).message}`);
+        }
+      });
+    }
+    if (sends.length > 0) this.ctx.waitUntil(Promise.all(sends.map((send) => send())));
   }
 
   /** Keep the last few deliveries; `updated` entries (same objects, results

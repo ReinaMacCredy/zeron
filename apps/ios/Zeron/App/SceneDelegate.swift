@@ -3,6 +3,7 @@ import UIKit
 final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
     private let app = AppModel()
+    private lazy var sessionActivity = SessionActivityController(app: app)
 
     func scene(
         _ scene: UIScene,
@@ -54,6 +55,10 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         window.makeKeyAndVisible()
         if !args.contains("-lab") { shellShown() }
+        sessionActivity.attach()
+        if let url = connectionOptions.urlContexts.first?.url {
+            DispatchQueue.main.async { [weak self] in self?.open(url) }
+        }
 
         #if DEBUG
         if args.contains("-voice-preview") {
@@ -95,11 +100,12 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                 if route.hasPrefix("tasks"), let tabs {
                     tabs.showTasks(String(route.dropFirst(6)))
                 }
-                if route.hasPrefix("page:") || route.hasPrefix("doc:") || route == "whatsnew" {
+                if route.hasPrefix("page:") || route.hasPrefix("doc:") || route == "whatsnew" || route == "live-activity" {
                     router.showSettings()
                     DispatchQueue.main.async { [app = self.app] in
                         guard let nav = tabs?.selectedViewController as? UINavigationController else { return }
                         if route == "whatsnew" { return WhatsNewViewController.present(from: nav) }
+                        if route == "live-activity" { return nav.pushViewController(LiveActivitySettingsViewController(), animated: false) }
                         if route.hasPrefix("doc:") {
                             return nav.pushViewController(DocArticleViewController(id: String(route.dropFirst(4)), title: "Docs"), animated: false)
                         }
@@ -214,10 +220,16 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     /// `zeron://voice` (the call's Live Activity) returns to the stage.
     func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
-        guard URLContexts.contains(where: { $0.url.scheme == "zeron" && $0.url.host == "voice" }),
-              app.voice.live, let root = window?.rootViewController
-        else { return }
-        root.presentVoiceStage(app: app, source: nil)
+        URLContexts.forEach { open($0.url) }
+    }
+
+    private func open(_ url: URL) {
+        guard url.scheme == "zeron", let root = window?.rootViewController else { return }
+        if url.host == "voice", app.voice.live {
+            root.presentVoiceStage(app: app, source: nil)
+        } else if url.host == "session", let chatId = url.pathComponents.dropFirst().first, let router = root as? AppRouter {
+            router.openSession(chatId)
+        }
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {

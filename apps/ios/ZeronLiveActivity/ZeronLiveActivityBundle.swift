@@ -5,5 +5,6 @@ import WidgetKit
 struct ZeronLiveActivityBundle: WidgetBundle {
     var body: some Widget {
         VoiceLiveActivity()
+        SessionLiveActivity()
     }
 }
