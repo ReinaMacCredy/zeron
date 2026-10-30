@@ -697,46 +697,182 @@ fn segmented_with<T: Copy + PartialEq + 'static>(
     pick: impl Fn(T, &mut Window, &mut gpui::App) + Clone + 'static,
     fill: bool,
 ) -> gpui::Stateful<gpui::Div> {
+    let cells = options
+        .iter()
+        .map(|&(value, label)| {
+            let pick = pick.clone();
+            let on_pick: Option<Rc<dyn Fn(&mut Window, &mut gpui::App)>> = (value != selected)
+                .then(|| {
+                    Rc::new(move |window: &mut Window, cx: &mut gpui::App| pick(value, window, cx))
+                        as _
+                });
+            (label, on_pick)
+        })
+        .collect();
     div()
         .id(id)
         .flex_none()
         .when(fill, |el| el.w_full())
         .flex()
-        .flex_row()
         .rounded(px(9.0))
         .p(px(2.0))
         .bg(crate::theme::ink(0.04))
-        .children(options.iter().enumerate().map(|(ix, &(value, label))| {
-            let chosen = value == selected;
-            let pick = pick.clone();
-            div()
-                .id((id, ix))
-                .debug_selector(move || format!("{id}-{ix}"))
-                .role(gpui::Role::Button)
-                .aria_label(label)
-                .aria_selected(chosen)
-                .when(fill, |el| el.flex_1())
-                .min_w(px(72.0))
-                .px(px(if fill { 4.0 } else { 12.0 }))
-                .py(px(6.0))
-                .rounded(px(7.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(12.0))
-                .text_color(if chosen { theme.text } else { theme.text_muted })
-                .when(chosen, |el| {
-                    el.bg(theme.bg)
-                        .border_1()
-                        .border_color(theme.border.opacity(0.8))
+        .child(SegmentTrack {
+            id,
+            theme: theme.clone(),
+            cells,
+            selected: options.iter().position(|&(value, _)| value == selected),
+            fill,
+        })
+}
+
+const SEGMENT_TRAVEL: crate::motion::MotionSpec =
+    crate::motion::MotionSpec::new(260, crate::motion::EASE_BOUNCE);
+
+#[derive(IntoElement)]
+struct SegmentTrack {
+    id: &'static str,
+    theme: Theme,
+    cells: Vec<(
+        &'static str,
+        Option<Rc<dyn Fn(&mut Window, &mut gpui::App)>>,
+    )>,
+    selected: Option<usize>,
+    fill: bool,
+}
+
+impl RenderOnce for SegmentTrack {
+    fn render(self, window: &mut Window, cx: &mut gpui::App) -> impl IntoElement {
+        let Self {
+            id,
+            theme,
+            cells,
+            selected,
+            fill,
+        } = self;
+        let now = crate::motion::now();
+        let reduced = crate::motion::reduced_motion(cx);
+        let position = selected.map(|ix| {
+            let target = ix as f32;
+            let key = SharedString::from(format!("{id}-pill"));
+            let (value, settled) = window.with_global_id(key.into(), |global, window| {
+                window.with_element_state(global, |previous: Option<crate::motion::Tween>, _| {
+                    let mut tween =
+                        previous.unwrap_or_else(|| crate::motion::Tween::at(target, now));
+                    if tween.target() != target {
+                        tween.retarget(target, SEGMENT_TRAVEL, reduced, now);
+                    }
+                    (
+                        (tween.value_unclamped_at(now), tween.settled_at(now)),
+                        tween,
+                    )
                 })
-                .when(!chosen, |el| {
-                    el.cursor_pointer()
-                        .hover(|s| s.text_color(theme.text))
-                        .on_click(move |_, window, cx| pick(value, window, cx))
-                })
-                .child(SharedString::from(label))
-        }))
+            });
+            if !settled {
+                window.request_animation_frame();
+            }
+            value
+        });
+        let slots: Rc<Vec<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>> =
+            Rc::new(vec![std::cell::Cell::new(None); cells.len()]);
+        let fill_color = theme.bg;
+        let border_color = theme.border.opacity(0.8);
+        let measured = slots.clone();
+        let pill = gpui::canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                let slots: Vec<_> = measured.iter().map(std::cell::Cell::get).collect();
+                if let Some(bounds) =
+                    position.and_then(|position| slide_indicator(&slots, position))
+                {
+                    window.paint_quad(
+                        gpui::fill(bounds, fill_color)
+                            .corner_radii(px(7.0))
+                            .border_widths(px(1.0))
+                            .border_color(border_color),
+                    );
+                }
+            },
+        )
+        .absolute()
+        .inset_0();
+        div()
+            .relative()
+            .when(fill, |el| el.w_full())
+            .flex()
+            .flex_row()
+            .child(pill)
+            .children(cells.into_iter().enumerate().map(|(ix, (label, on_pick))| {
+                let amount = position.map_or(0.0, |position| {
+                    (1.0 - (position - ix as f32).abs()).clamp(0.0, 1.0)
+                });
+                let measured = slots.clone();
+                div()
+                    .id((id, ix))
+                    .debug_selector(move || format!("{id}-{ix}"))
+                    .role(gpui::Role::Button)
+                    .aria_label(label)
+                    .aria_selected(selected == Some(ix))
+                    .relative()
+                    .when(fill, |el| el.flex_1())
+                    .min_w(px(72.0))
+                    .px(px(if fill { 4.0 } else { 12.0 }))
+                    .py(px(6.0))
+                    .rounded(px(7.0))
+                    .border_1()
+                    .border_color(gpui::transparent_black())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted.blend(theme.text.opacity(amount)))
+                    .child(
+                        gpui::canvas(
+                            move |bounds, _, _| measured[ix].set(Some(bounds)),
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                    .when_some(on_pick, |el, on_pick| {
+                        el.cursor_pointer()
+                            .hover(|s| s.text_color(theme.text))
+                            .on_click(move |_, window, cx| on_pick(window, cx))
+                    })
+                    .child(SharedString::from(label))
+            }))
+    }
+}
+
+// Past either end the pill keeps travelling, so a bouncy ease overshoots.
+fn slide_indicator(
+    slots: &[Option<gpui::Bounds<Pixels>>],
+    position: f32,
+) -> Option<gpui::Bounds<Pixels>> {
+    if slots.len() < 2 {
+        return slots.first().copied().flatten();
+    }
+    let from = (position.floor() as i32).clamp(0, slots.len() as i32 - 2) as usize;
+    let (a, b) = (slots[from]?, slots[from + 1]?);
+    let t = position - from as f32;
+    Some(gpui::Bounds::new(
+        gpui::point(
+            px(crate::motion::lerp(
+                f32::from(a.left()),
+                f32::from(b.left()),
+                t,
+            )),
+            a.top(),
+        ),
+        gpui::size(
+            px(crate::motion::lerp(
+                f32::from(a.size.width),
+                f32::from(b.size.width),
+                t,
+            )),
+            a.size.height,
+        ),
+    ))
 }
 
 /// A pill switch with the on/off marks nested beneath a sliding thumb.

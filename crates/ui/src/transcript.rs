@@ -11403,9 +11403,14 @@ impl Transcript {
                 &theme,
                 cx,
             ),
-            RowKind::Compaction { text, record } => {
-                self.render_compaction_divider(&row.id, text.clone(), record.clone(), &theme, cx)
-            }
+            RowKind::Compaction { text, record } => self.render_compaction_divider(
+                ix,
+                &row.id,
+                text.clone(),
+                record.clone(),
+                &theme,
+                cx,
+            ),
             RowKind::ForkMarker {
                 source_chat_id,
                 source_title,
